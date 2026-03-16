@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db-postgres</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/adapters/postgresql">PostgreSQL Adapter</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/adapters/postgresql">PostgreSQL Adapter</a>
 </p>
 
 ---
@@ -51,8 +51,8 @@ await users.insertOne({ name: "Alice", email: "alice@example.com" });
 
 ## Documentation
 
-- [PostgreSQL Adapter Guide](https://atscript.moost.org/db/adapters/postgresql)
-- [Full Documentation](https://atscript.moost.org)
+- [PostgreSQL Adapter Guide](https://db.atscript.dev/adapters/postgresql)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 

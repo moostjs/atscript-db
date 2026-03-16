@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db-mysql</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/adapters/mysql">MySQL Adapter</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/adapters/mysql">MySQL Adapter</a>
 </p>
 
 ---
@@ -50,8 +50,8 @@ await users.insertOne({ name: "Alice", email: "alice@example.com" });
 
 ## Documentation
 
-- [MySQL Adapter Guide](https://atscript.moost.org/db/adapters/mysql)
-- [Full Documentation](https://atscript.moost.org)
+- [MySQL Adapter Guide](https://db.atscript.dev/adapters/mysql)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 

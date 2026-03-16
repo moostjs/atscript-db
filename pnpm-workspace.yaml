@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - docs
 
 catalogMode: prefer
 
@@ -19,3 +20,6 @@ peerDependencyRules:
   allowedVersions:
     vite: "*"
     vitest: "*"
+  ignoreMissing:
+    - "@prostojs/logger"
+    - "@prostojs/router"

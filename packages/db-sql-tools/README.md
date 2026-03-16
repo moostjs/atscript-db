@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db-sql-tools</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/adapters/">DB Adapters</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/adapters/">DB Adapters</a>
 </p>
 
 ---
@@ -35,8 +35,8 @@ pnpm add @atscript/db-sql-tools
 
 ## Documentation
 
-- [DB Adapters Guide](https://atscript.moost.org/db/adapters/)
-- [Full Documentation](https://atscript.moost.org)
+- [DB Adapters Guide](https://db.atscript.dev/adapters/)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 

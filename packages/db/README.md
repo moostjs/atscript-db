@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/guide/">Database Guide</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/guide/">Database Guide</a>
 </p>
 
 ---
@@ -73,9 +73,9 @@ const all = await users.findMany({ filter: { name: { $eq: "John" } } });
 
 ## Documentation
 
-- [Database Guide](https://atscript.moost.org/db/guide/)
-- [API & Annotations](https://atscript.moost.org/db/api/tables)
-- [Full Documentation](https://atscript.moost.org)
+- [Database Guide](https://db.atscript.dev/guide/)
+- [API & Annotations](https://db.atscript.dev/api/tables)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 

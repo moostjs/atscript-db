@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db-mongo</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/adapters/mongodb">MongoDB Adapter</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/adapters/mongodb">MongoDB Adapter</a>
 </p>
 
 ---
@@ -52,8 +52,8 @@ await todos.insertOne({ title: "Hello", done: false });
 
 ## Documentation
 
-- [MongoDB Adapter Guide](https://atscript.moost.org/db/adapters/mongodb)
-- [Full Documentation](https://atscript.moost.org)
+- [MongoDB Adapter Guide](https://db.atscript.dev/adapters/mongodb)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 

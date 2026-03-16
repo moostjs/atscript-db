@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://db.atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">Atscript DB</h1>
@@ -34,7 +34,7 @@
 
 ## Documentation
 
-See the full documentation at [atscript.moost.org/db](https://atscript.moost.org/db/guide/quick-start).
+See the full documentation at [atscript.dev/db](https://atscript.dev/db/guide/quick-start).
 
 ## Development
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.moost.org/logo.svg" alt="Atscript" width="120" />
+  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/moost-db</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://atscript.moost.org">Documentation</a> · <a href="https://atscript.moost.org/db/http/">HTTP API Guide</a>
+  <a href="https://db.atscript.dev">Documentation</a> · <a href="https://db.atscript.dev/http/">HTTP API Guide</a>
 </p>
 
 ---
@@ -49,8 +49,8 @@ This gives you: `GET /query`, `GET /pages`, `GET /one/:id`, `POST /`, `PUT /`, `
 
 ## Documentation
 
-- [HTTP API Guide](https://atscript.moost.org/db/http/)
-- [Full Documentation](https://atscript.moost.org)
+- [HTTP API Guide](https://db.atscript.dev/http/)
+- [Full Documentation](https://db.atscript.dev)
 
 ## License
 
