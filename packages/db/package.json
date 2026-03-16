@@ -1,0 +1,77 @@
+{
+  "name": "@atscript/db",
+  "version": "0.1.39",
+  "description": "Database adapter utilities for atscript.",
+  "keywords": [
+    "atscript",
+    "database",
+    "utils"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./sync": {
+      "types": "./dist/sync.d.mts",
+      "import": "./dist/sync.mjs",
+      "require": "./dist/sync.cjs"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.mts",
+      "import": "./dist/plugin.mjs"
+    },
+    "./rel": {
+      "types": "./dist/rel.d.mts",
+      "import": "./dist/rel.mjs"
+    },
+    "./agg": {
+      "types": "./dist/agg.d.mts",
+      "import": "./dist/agg.mjs"
+    },
+    "./shared": {
+      "types": "./dist/shared.d.mts",
+      "import": "./dist/shared.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "asc -f dts",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "devDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "@uniqu/core": "^0.1.2",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "@uniqu/core": "^0.1.2"
+  }
+}

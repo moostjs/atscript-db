@@ -1,0 +1,73 @@
+{
+  "name": "@atscript/db-postgres",
+  "version": "0.1.39",
+  "description": "PostgreSQL adapter for @atscript/db with pg (node-postgres) driver support.",
+  "keywords": [
+    "atscript",
+    "database",
+    "pgvector",
+    "postgres",
+    "postgresql"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-postgres#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db-postgres"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.mts",
+      "import": "./dist/plugin.mjs",
+      "require": "./dist/plugin.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "asc -f dts",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "devDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "@types/pg": "^8.11.0",
+    "@uniqu/core": "^0.1.2",
+    "pg": "^8.13.0",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/db": "workspace:^",
+    "@atscript/db-sql-tools": "workspace:^",
+    "@atscript/typescript": "^0.1.39",
+    "@uniqu/core": "^0.1.2",
+    "pg": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
+  }
+}

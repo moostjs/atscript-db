@@ -1,0 +1,53 @@
+{
+  "name": "@atscript/db-sql-tools",
+  "version": "0.1.39",
+  "description": "Shared SQL builder utilities for @atscript database adapters.",
+  "keywords": [
+    "atscript",
+    "database",
+    "sql"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-sql-tools#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db-sql-tools"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "devDependencies": {
+    "@uniqu/core": "^0.1.2",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/db": "workspace:^",
+    "@uniqu/core": "^0.1.2"
+  }
+}

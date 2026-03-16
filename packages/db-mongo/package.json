@@ -1,0 +1,73 @@
+{
+  "name": "@atscript/db-mongo",
+  "version": "0.1.39",
+  "description": "Mongodb plugin for atscript.",
+  "keywords": [
+    "atscript",
+    "mongodb",
+    "plugin"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-mongo#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db-mongo"
+  },
+  "bin": {
+    "atscript-db-mongo-skill": "./scripts/setup-skills.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "scripts/setup-skills.js"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.mts",
+      "import": "./dist/plugin.mjs",
+      "require": "./dist/plugin.cjs"
+    },
+    "./agg": {
+      "types": "./dist/agg.d.mts",
+      "import": "./dist/agg.mjs",
+      "require": "./dist/agg.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "asc -f dts",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check",
+    "setup-skills": "node ./scripts/setup-skills.js"
+  },
+  "devDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "mongodb": "^6.17.0",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/db": "workspace:^",
+    "@atscript/typescript": "^0.1.39",
+    "mongodb": "^6.17.0"
+  }
+}

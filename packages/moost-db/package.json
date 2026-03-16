@@ -1,0 +1,65 @@
+{
+  "name": "@atscript/moost-db",
+  "version": "0.1.39",
+  "description": "Generic database controller for Moost with Atscript.",
+  "keywords": [
+    "annotations",
+    "atscript",
+    "database",
+    "moost",
+    "typescript"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/moost-db#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/moost-db"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "asc -f dts",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "dependencies": {
+    "@uniqu/url": "^0.1.2"
+  },
+  "devDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "@moostjs/event-http": "^0.6.2",
+    "@uniqu/core": "^0.1.2",
+    "moost": "^0.6.2",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/db": "workspace:^",
+    "@atscript/typescript": "^0.1.39",
+    "@moostjs/event-http": "^0.6.2",
+    "@uniqu/core": "^0.1.2",
+    "moost": "^0.6.2"
+  }
+}

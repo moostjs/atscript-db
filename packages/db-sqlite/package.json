@@ -1,0 +1,66 @@
+{
+  "name": "@atscript/db-sqlite",
+  "version": "0.1.39",
+  "description": "SQLite adapter for @atscript/db with swappable driver support.",
+  "keywords": [
+    "atscript",
+    "database",
+    "sqlite"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-sqlite#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db-sqlite"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "postinstall": "asc -f dts",
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "devDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/typescript": "^0.1.39",
+    "@types/better-sqlite3": "^7.6.13",
+    "@uniqu/core": "^0.1.2",
+    "better-sqlite3": "^12.6.2",
+    "unplugin-atscript": "^0.1.39"
+  },
+  "peerDependencies": {
+    "@atscript/core": "^0.1.39",
+    "@atscript/db": "workspace:^",
+    "@atscript/db-sql-tools": "workspace:^",
+    "@atscript/typescript": "^0.1.39",
+    "@uniqu/core": "^0.1.2",
+    "better-sqlite3": ">=11.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  }
+}
