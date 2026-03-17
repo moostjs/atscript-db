@@ -297,6 +297,7 @@ export default defineConfig({
           "Database adapters and query layer for Atscript — define your models once, get type-safe CRUD for any database",
       },
     ],
+    ["script", { async: "", src: "https://scripts.simpleanalyticscdn.com/latest.js" }],
   ],
 
   markdown: {
