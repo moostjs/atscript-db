@@ -23,6 +23,7 @@ function withRel(name: string, opts?: { filter?: any; controls?: any }): any {
 let UsersTable: any;
 let NoTableAnnotation: any;
 let ProfileTable: any;
+let ProductTable: any;
 
 // ── Mock adapter ────────────────────────────────────────────────────────────
 
@@ -48,8 +49,12 @@ class MockAdapter extends BaseDbAdapter {
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    this.record("updateOne", filter, data);
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: any,
+  ): Promise<TDbUpdateResult> {
+    this.record("updateOne", filter, data, ops);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -73,8 +78,12 @@ class MockAdapter extends BaseDbAdapter {
     return 42;
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    this.record("updateMany", filter, data);
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: any,
+  ): Promise<TDbUpdateResult> {
+    this.record("updateMany", filter, data, ops);
     return { matchedCount: 5, modifiedCount: 5 };
   }
 
@@ -109,6 +118,7 @@ describe("AtscriptDbTable", () => {
     UsersTable = fixtures.UsersTable;
     NoTableAnnotation = fixtures.NoTableAnnotation;
     ProfileTable = fixtures.ProfileTable;
+    ProductTable = fixtures.ProductTable;
   });
 
   beforeEach(() => {
@@ -1214,6 +1224,150 @@ describe("AtscriptDbTable — embedded objects", () => {
   });
 
   // ── Nested-objects adapter (bug #14) ────────────────────────────────────
+
+  // ── Field ops ($inc/$dec/$mul) ────────────────────────────────────────────
+
+  describe("field ops via updateOne (bulkUpdate)", () => {
+    let productTable: AtscriptDbTable;
+
+    beforeEach(() => {
+      productTable = new AtscriptDbTable(ProductTable, adapter);
+    });
+
+    it("should separate top-level $inc and pass ops to adapter", async () => {
+      await productTable.updateOne({ id: 1, price: { $inc: 5 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      // data should NOT contain the $inc field — it was separated
+      expect(call!.args[1]).not.toHaveProperty("price");
+      // ops should have the field
+      expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
+    });
+
+    it("should separate $dec as negative inc", async () => {
+      await productTable.updateOne({ id: 1, price: { $dec: 3 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[2]).toMatchObject({ inc: { price: -3 } });
+    });
+
+    it("should separate $mul ops", async () => {
+      await productTable.updateOne({ id: 1, price: { $mul: 1.1 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[2]).toMatchObject({ mul: { price: 1.1 } });
+    });
+
+    it("should pass mixed ops and regular fields", async () => {
+      await productTable.updateOne({ id: 1, name: "updated", price: { $inc: 5 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[1]).toEqual({ name: "updated" });
+      expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
+    });
+
+    it("should pass undefined ops when no field ops present", async () => {
+      await productTable.updateOne({ id: 1, name: "plain" } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[1]).toEqual({ name: "plain" });
+      expect(call!.args[2]).toBeUndefined();
+    });
+
+    it("should detect nested ops inside merge-strategy objects", async () => {
+      await productTable.updateOne({
+        id: 1,
+        stats: { views: { $inc: 1 }, rating: { $mul: 1.5 } },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      // After decompose flattens to dot-paths, ops should be separated
+      expect(call!.args[2]).toMatchObject({
+        inc: { stats__views: 1 },
+        mul: { stats__rating: 1.5 },
+      });
+      // The flattened data should not contain the ops
+      expect(call!.args[1]).not.toHaveProperty("stats__views");
+      expect(call!.args[1]).not.toHaveProperty("stats__rating");
+    });
+
+    it("should handle mixed nested ops and regular nested fields", async () => {
+      await productTable.updateOne({
+        id: 1,
+        stats: { views: { $inc: 1 }, rating: 4.5 },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[1]).toEqual({ stats__rating: 4.5 });
+      expect(call!.args[2]).toMatchObject({ inc: { stats__views: 1 } });
+    });
+
+    it("should handle top-level and nested ops together", async () => {
+      await productTable.updateOne({
+        id: 1,
+        price: { $mul: 0.9 },
+        stats: { views: { $inc: 1 } },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[2]).toMatchObject({
+        inc: { stats__views: 1 },
+        mul: { price: 0.9 },
+      });
+    });
+  });
+
+  describe("field ops via updateMany", () => {
+    let productTable: AtscriptDbTable;
+
+    beforeEach(() => {
+      productTable = new AtscriptDbTable(ProductTable, adapter);
+    });
+
+    it("should separate $inc and pass ops to adapter", async () => {
+      await productTable.updateMany({} as any, { price: { $inc: 10 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateMany");
+      expect(call).toBeDefined();
+      expect(call!.args[2]).toMatchObject({ inc: { price: 10 } });
+    });
+
+    it("should pass undefined ops when no field ops present", async () => {
+      await productTable.updateMany({} as any, { name: "bulk" } as any);
+      const call = adapter.calls.find((c) => c.method === "updateMany");
+      expect(call!.args[2]).toBeUndefined();
+    });
+  });
+
+  describe("field ops validation", () => {
+    let profileTable: AtscriptDbTable;
+    let productTable: AtscriptDbTable;
+
+    beforeEach(() => {
+      profileTable = new AtscriptDbTable(ProfileTable, adapter);
+      productTable = new AtscriptDbTable(ProductTable, adapter);
+    });
+
+    it("should reject $inc inside @db.json field", async () => {
+      await expect(
+        profileTable.updateOne({ id: 1, preferences: { theme: { $inc: 1 } } } as any),
+      ).rejects.toThrow(/not supported inside @db\.json/);
+    });
+
+    it("should reject $inc inside nested object without merge strategy", async () => {
+      // ProfileTable.contact has no @db.patch.strategy — defaults to replace
+      await expect(
+        profileTable.updateOne({ id: 1, contact: { email: { $inc: 1 } } } as any),
+      ).rejects.toThrow(/not supported inside/);
+    });
+
+    it("should allow $inc inside nested object with merge strategy", async () => {
+      // ProductTable.stats has @db.patch.strategy 'merge'
+      await productTable.updateOne({ id: 1, stats: { views: { $inc: 1 } } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      expect(call!.args[2]).toMatchObject({ inc: { stats__views: 1 } });
+    });
+
+    it("should allow $inc on top-level numeric field", async () => {
+      await productTable.updateOne({ id: 1, price: { $inc: 5 } } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
+    });
+  });
 
   describe("nested-objects adapter (bug #14)", () => {
     it("should build fieldDescriptors when adapter supports nested objects", () => {

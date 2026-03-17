@@ -112,6 +112,21 @@ describe("separateFieldOps", () => {
     expect(data).toEqual({ tags: { $insert: ["new-tag"] } });
   });
 
+  it("handles dot-path keys from flattened nested structures", () => {
+    const data: Record<string, unknown> = {
+      name: "Updated",
+      "stats.views": { $inc: 1 },
+      "stats.score": { $mul: 1.5 },
+      "meta.tag": "info",
+    };
+    const ops = separateFieldOps(data);
+    expect(ops).toEqual({
+      inc: { "stats.views": 1 },
+      mul: { "stats.score": 1.5 },
+    });
+    expect(data).toEqual({ name: "Updated", "meta.tag": "info" });
+  });
+
   it("skips null, arrays, and primitives without overhead", () => {
     const data: Record<string, unknown> = {
       a: null,

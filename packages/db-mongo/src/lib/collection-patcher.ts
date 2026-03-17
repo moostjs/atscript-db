@@ -6,7 +6,7 @@ import type {
   TValidatorOptions,
   Validator,
 } from "@atscript/typescript/utils";
-import { getKeyProps } from "@atscript/db";
+import { getKeyProps, getDbFieldOp } from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
 
@@ -79,12 +79,12 @@ export class CollectionPatcher {
     // Apply pre-separated field ops as aggregation expressions
     if (this.ops?.inc) {
       for (const key in this.ops.inc) {
-        this._set(key, { $add: [`$${key}`, this.ops.inc[key]!] });
+        this._set(key, this._fieldOpExpr(key, "inc", this.ops.inc[key]!));
       }
     }
     if (this.ops?.mul) {
       for (const key in this.ops.mul) {
-        this._set(key, { $multiply: [`$${key}`, this.ops.mul[key]!] });
+        this._set(key, this._fieldOpExpr(key, "mul", this.ops.mul[key]!));
       }
     }
     const updateFilter = this.updatePipeline;
@@ -103,6 +103,11 @@ export class CollectionPatcher {
   // ---------------------------------------------------------------------------
   //  Internals
   // ---------------------------------------------------------------------------
+
+  /** Builds a MongoDB aggregation expression for an $inc or $mul field op. */
+  private _fieldOpExpr(key: string, op: "inc" | "mul", value: number): Document {
+    return op === "inc" ? { $add: [`$${key}`, value] } : { $multiply: [`$${key}`, value] };
+  }
 
   /**
    * Helper – lazily create `$set` section and assign *key* → *value*.
@@ -148,7 +153,13 @@ export class CollectionPatcher {
       ) {
         this.flattenPayload(value, key);
       } else if (key !== "_id") {
-        this._set(key, value);
+        // Detect nested field ops and convert to aggregation expressions
+        const fieldOp = getDbFieldOp(value);
+        if (fieldOp) {
+          this._set(key, this._fieldOpExpr(key, fieldOp.op, fieldOp.value));
+        } else {
+          this._set(key, value);
+        }
       }
     }
     return this.updatePipeline;

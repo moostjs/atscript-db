@@ -471,11 +471,8 @@ export class AtscriptDbTable<
             delete data[pk];
           }
 
-          // Separate field ops ($inc/$dec/$mul) — mutates data, returns ops or undefined
-          const ops = separateFieldOps(data);
-
           // Skip if nothing left to update (e.g. only nav props + PK in payload)
-          if (_isEmptyObj(data) && !ops) {
+          if (_isEmptyObj(data)) {
             matchedCount += 1;
             modifiedCount += 0;
             continue;
@@ -483,11 +480,17 @@ export class AtscriptDbTable<
 
           let result: TDbUpdateResult;
           const translatedFilter = this._fieldMapper.translateFilter(filter, this._meta);
-          const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
           if (this.adapter.supportsNativePatch()) {
+            // Native patch path: separate top-level ops; patcher handles nested ops internally
+            const ops = separateFieldOps(data);
+            const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
             result = await this.adapter.nativePatch(translatedFilter, data, translatedOps);
           } else {
+            // Decompose flattens nested objects into dot-paths, preserving field ops verbatim.
+            // A single separateFieldOps pass after flattening catches both top-level and nested ops.
             const update = decomposePatch(data, this as AtscriptDbTable);
+            const ops = separateFieldOps(update);
+            const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
             const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
 
             // Resolve array ops via read-modify-write if any __$ keys present

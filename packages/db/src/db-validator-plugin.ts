@@ -61,6 +61,12 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
 
     // ── Field operation handling ($inc / $dec / $mul) ───────────────────────
     if (dbCtx.mode === "patch" && isDbFieldOp(value)) {
+      if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap)) {
+        ctx.error(
+          'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields or nested objects without @db.patch.strategy "merge"',
+        );
+        return false;
+      }
       return true;
     }
 
@@ -76,6 +82,25 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     // ── All other fields: fallthrough to default validation ─────────────────
     return undefined;
   };
+}
+
+/**
+ * Checks whether a field op is valid at `path` by walking up ancestors
+ * in the flatMap. Rejects if any ancestor is @db.json or a nested object
+ * without @db.patch.strategy "merge".
+ */
+function isFieldOpAllowed(path: string, flatMap: Map<string, TAtscriptAnnotatedType>): boolean {
+  let pos = path.length;
+  while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
+    const ancestor = path.slice(0, pos);
+    const entry = flatMap.get(ancestor);
+    if (!entry) continue;
+    if (entry.metadata.has("db.json")) return false;
+    if (entry.type.kind === "object" && entry.metadata.get("db.patch.strategy") !== "merge") {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ── Nav field handler ─────────────────────────────────────────────────────────

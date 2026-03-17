@@ -58,6 +58,21 @@ export interface ProfileTable {
     displayName?: string
 }
 
+@db.table 'products'
+export interface ProductTable {
+    @meta.id
+    id: number
+
+    name: string
+    price: number
+
+    @db.patch.strategy 'merge'
+    stats: {
+        views: number
+        rating: number
+    }
+}
+
 export interface NoTableAnnotation {
     name: string
 }
