@@ -52,8 +52,12 @@ export class MockAdapter extends BaseDbAdapter {
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    this.record("updateOne", filter, data);
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: any,
+  ): Promise<TDbUpdateResult> {
+    this.record("updateOne", filter, data, ops);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -81,8 +85,12 @@ export class MockAdapter extends BaseDbAdapter {
     return this._rows().filter((r) => matchesFilter(r, query.filter)).length;
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    this.record("updateMany", filter, data);
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: any,
+  ): Promise<TDbUpdateResult> {
+    this.record("updateMany", filter, data, ops);
     let modified = 0;
     for (const row of this._rows()) {
       if (matchesFilter(row, filter)) {

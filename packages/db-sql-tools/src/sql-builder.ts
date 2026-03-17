@@ -1,4 +1,4 @@
-import type { DbControls, UniquSelect } from "@atscript/db";
+import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
@@ -71,6 +71,7 @@ export function buildUpdate(
   data: Record<string, unknown>,
   where: TSqlFragment,
   limit?: number,
+  ops?: TFieldOps,
 ): TSqlFragment {
   const setClauses: string[] = [];
   const params: unknown[] = [];
@@ -78,6 +79,22 @@ export function buildUpdate(
   for (const [key, value] of Object.entries(data)) {
     setClauses.push(`${dialect.quoteIdentifier(key)} = ?`);
     params.push(dialect.toValue(value));
+  }
+
+  // Append pre-separated field operations
+  if (ops?.inc) {
+    for (const key in ops.inc) {
+      const col = dialect.quoteIdentifier(key);
+      setClauses.push(`${col} = ${col} + ?`);
+      params.push(ops.inc[key]!);
+    }
+  }
+  if (ops?.mul) {
+    for (const key in ops.mul) {
+      const col = dialect.quoteIdentifier(key);
+      setClauses.push(`${col} = ${col} * ?`);
+      params.push(ops.mul[key]!);
+    }
   }
 
   let sql = `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${where.sql}`;

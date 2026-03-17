@@ -1,4 +1,4 @@
-import type { TDbCollation, TDbFieldMeta, TDbForeignKey } from "@atscript/db";
+import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { SqlDialect, TSqlFragment } from "@atscript/db-sql-tools";
@@ -145,8 +145,9 @@ export function buildUpdate(
   data: Record<string, unknown>,
   where: TSqlFragment,
   limit?: number,
+  ops?: TFieldOps,
 ): TSqlFragment {
-  return _buildUpdate(pgDialect, table, data, where, limit);
+  return _buildUpdate(pgDialect, table, data, where, limit, ops);
 }
 
 export function buildDelete(table: string, where: TSqlFragment, limit?: number): TSqlFragment {

@@ -31,6 +31,7 @@ import type {
   TDbUpdateResult,
   TDbDeleteResult,
 } from "./types";
+import type { TFieldOps } from "./ops";
 import type { WithRelation } from "@uniqu/core";
 import type { AtscriptDbReadable } from "./table/db-readable";
 import type { TableMetadata } from "./table/table-metadata";
@@ -343,7 +344,11 @@ export abstract class BaseDbAdapter {
    * @param patch - The patch payload with array operations.
    * @returns Update result.
    */
-  async nativePatch(_filter: FilterExpr, _patch: unknown): Promise<TDbUpdateResult> {
+  async nativePatch(
+    _filter: FilterExpr,
+    _patch: unknown,
+    _ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     throw new Error("Native patch not supported by this adapter");
   }
 
@@ -593,7 +598,11 @@ export abstract class BaseDbAdapter {
   abstract insertOne(data: Record<string, unknown>): Promise<TDbInsertResult>;
   abstract insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult>;
   abstract replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
-  abstract updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
+  abstract updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult>;
   abstract deleteOne(filter: FilterExpr): Promise<TDbDeleteResult>;
   abstract findOne(query: DbQuery): Promise<Record<string, unknown> | null>;
   abstract findMany(query: DbQuery): Promise<Array<Record<string, unknown>>>;
@@ -601,7 +610,11 @@ export abstract class BaseDbAdapter {
 
   // ── Batch operations ──────────────────────────────────────────────────────
 
-  abstract updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
+  abstract updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult>;
   abstract replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
   abstract deleteMany(filter: FilterExpr): Promise<TDbDeleteResult>;
 

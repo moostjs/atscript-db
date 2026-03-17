@@ -5,6 +5,7 @@ import type {
   TValidatorPluginContext,
 } from "@atscript/typescript/utils";
 
+import { isDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
 
 export interface DbValidationContext {
@@ -56,6 +57,11 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
 
     if (isTo || isFrom || isVia) {
       return handleNavField(ctx, def, value, dbCtx, isTo, isFrom, isVia);
+    }
+
+    // ── Field operation handling ($inc / $dec / $mul) ───────────────────────
+    if (dbCtx.mode === "patch" && isDbFieldOp(value)) {
+      return true;
     }
 
     // ── Top-level array patch handling ──────────────────────────────────────

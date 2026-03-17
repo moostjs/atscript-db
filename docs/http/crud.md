@@ -266,7 +266,7 @@ curl -X PATCH http://localhost:3000/todos/ \
 { "matchedCount": 2, "modifiedCount": 2 }
 ```
 
-See [Update & Patch](/api/update-patch) for details on patch semantics and embedded object updates.
+Supports [field operations](/api/update-patch#field-ops) (`$inc`, `$dec`, `$mul`) and [array patch operators](/api/update-patch#embedded-array-patches) in the JSON body. See [Update & Patch](/api/update-patch) for full details.
 
 ## Deleting Records
 

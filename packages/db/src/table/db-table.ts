@@ -13,6 +13,8 @@ import type { FilterExpr } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
+import { separateFieldOps, type TFieldOps } from "../ops";
+import type { TableMetadata } from "./table-metadata";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import { decomposePatch } from "../patch/patch-decomposer";
 import { AtscriptDbReadable } from "./db-readable";
@@ -65,6 +67,32 @@ export { resolveDesignType } from "./db-readable";
  * @typeParam T - The Atscript annotated type for this table.
  * @typeParam DataType - The inferred data shape from the annotated type.
  */
+
+/** Zero-allocation emptiness check for objects. */
+function _isEmptyObj(obj: Record<string, unknown>): boolean {
+  for (const _ in obj) return false;
+  return true;
+}
+
+/** Translates a single ops record from logical to physical column names. */
+function _translateOpsRecord(
+  rec: Record<string, number>,
+  meta: TableMetadata,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const key in rec) {
+    out[meta.leafByLogical.get(key)?.physicalName ?? key] = rec[key]!;
+  }
+  return out;
+}
+
+/** Translates ops keys from logical field names to physical column names. */
+function _translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
+  return {
+    inc: ops.inc ? _translateOpsRecord(ops.inc, meta) : undefined,
+    mul: ops.mul ? _translateOpsRecord(ops.mul, meta) : undefined,
+  };
+}
 
 /**
  * Forces nav fields non-optional so the plugin handles null/undefined
@@ -428,7 +456,7 @@ export class AtscriptDbTable<
           true,
         );
 
-        // Phase 2: Main patch — strip nav fields, decompose, update each
+        // Phase 2: Main patch — strip nav fields, separate ops, decompose, update each
         let matchedCount = 0;
         let modifiedCount = 0;
         for (const payload of payloads) {
@@ -443,8 +471,11 @@ export class AtscriptDbTable<
             delete data[pk];
           }
 
+          // Separate field ops ($inc/$dec/$mul) — mutates data, returns ops or undefined
+          const ops = separateFieldOps(data);
+
           // Skip if nothing left to update (e.g. only nav props + PK in payload)
-          if (Object.keys(data).length === 0) {
+          if (_isEmptyObj(data) && !ops) {
             matchedCount += 1;
             modifiedCount += 0;
             continue;
@@ -452,8 +483,9 @@ export class AtscriptDbTable<
 
           let result: TDbUpdateResult;
           const translatedFilter = this._fieldMapper.translateFilter(filter, this._meta);
+          const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
           if (this.adapter.supportsNativePatch()) {
-            result = await this.adapter.nativePatch(translatedFilter, data);
+            result = await this.adapter.nativePatch(translatedFilter, data, translatedOps);
           } else {
             const update = decomposePatch(data, this as AtscriptDbTable);
             const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
@@ -466,9 +498,13 @@ export class AtscriptDbTable<
                 controls: {},
               })) as Record<string, unknown> | null;
               const resolved = resolveArrayOps(translatedUpdate, current, this as AtscriptDbTable);
-              result = await this.adapter.updateOne(translatedFilter, resolved);
+              result = await this.adapter.updateOne(translatedFilter, resolved, translatedOps);
             } else {
-              result = await this.adapter.updateOne(translatedFilter, translatedUpdate);
+              result = await this.adapter.updateOne(
+                translatedFilter,
+                translatedUpdate,
+                translatedOps,
+              );
             }
           }
           matchedCount += result.matchedCount;
@@ -537,10 +573,14 @@ export class AtscriptDbTable<
       this._writeTableResolver,
       true,
     );
+    const dataCopy = { ...data } as Record<string, unknown>;
+    const ops = separateFieldOps(dataCopy);
+    const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
     return enrichFkViolation(this._meta, () =>
       this.adapter.updateMany(
         this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
-        this._fieldMapper.prepareForWrite({ ...data }, this._meta, this.adapter),
+        this._fieldMapper.prepareForWrite(dataCopy, this._meta, this.adapter),
+        translatedOps,
       ),
     );
   }

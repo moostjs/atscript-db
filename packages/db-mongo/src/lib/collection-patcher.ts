@@ -7,6 +7,7 @@ import type {
   Validator,
 } from "@atscript/typescript/utils";
 import { getKeyProps } from "@atscript/db";
+import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
 
 /**
@@ -44,6 +45,7 @@ export class CollectionPatcher {
   constructor(
     private collection: TCollectionPatcherContext,
     private payload: any,
+    private ops?: TFieldOps,
   ) {}
 
   static getKeyProps = getKeyProps;
@@ -74,6 +76,17 @@ export class CollectionPatcher {
       _id: this.collection.prepareId(this.payload._id),
     };
     this.flattenPayload(this.payload);
+    // Apply pre-separated field ops as aggregation expressions
+    if (this.ops?.inc) {
+      for (const key in this.ops.inc) {
+        this._set(key, { $add: [`$${key}`, this.ops.inc[key]!] });
+      }
+    }
+    if (this.ops?.mul) {
+      for (const key in this.ops.mul) {
+        this._set(key, { $multiply: [`$${key}`, this.ops.mul[key]!] });
+      }
+    }
     const updateFilter = this.updatePipeline;
     return {
       toArgs: (): [Filter<any>, UpdateFilter<any> | Document[], UpdateOptions] => [

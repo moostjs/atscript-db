@@ -24,6 +24,7 @@ import {
   type TExistingTableOption,
   type TMetadataOverrides,
   type TableMetadata,
+  type TFieldOps,
   computeInsights,
 } from "@atscript/db";
 import type {
@@ -333,9 +334,13 @@ export class MongoAdapter extends BaseDbAdapter {
 
   // ── Native patch ─────────────────────────────────────────────────────────
 
-  override async nativePatch(filter: FilterExpr, patch: unknown): Promise<TDbUpdateResult> {
+  override async nativePatch(
+    filter: FilterExpr,
+    patch: unknown,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const mongoFilter = buildMongoFilter(filter);
-    const patcher = new CollectionPatcher(this.getPatcherContext(), patch);
+    const patcher = new CollectionPatcher(this.getPatcherContext(), patch, ops);
     const { updateFilter, updateOptions } = patcher.preparePatch();
     this._log("updateOne (patch)", mongoFilter, updateFilter);
     const result = await this.collection.updateOne(mongoFilter, updateFilter, {
@@ -738,14 +743,15 @@ export class MongoAdapter extends BaseDbAdapter {
     });
   }
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const mongoFilter = buildMongoFilter(filter);
-    this._log("updateOne", mongoFilter, { $set: data });
-    const result = await this.collection.updateOne(
-      mongoFilter,
-      { $set: data },
-      this._getSessionOpts(),
-    );
+    const updateDoc = buildMongoUpdateDoc(data, ops);
+    this._log("updateOne", mongoFilter, updateDoc);
+    const result = await this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts());
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
@@ -765,14 +771,15 @@ export class MongoAdapter extends BaseDbAdapter {
     return { deletedCount: result.deletedCount };
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const mongoFilter = buildMongoFilter(filter);
-    this._log("updateMany", mongoFilter, { $set: data });
-    const result = await this.collection.updateMany(
-      mongoFilter,
-      { $set: data },
-      this._getSessionOpts(),
-    );
+    const updateDoc = buildMongoUpdateDoc(data, ops);
+    this._log("updateMany", mongoFilter, updateDoc);
+    const result = await this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts());
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
@@ -1054,4 +1061,27 @@ export class MongoAdapter extends BaseDbAdapter {
       }
     }
   }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds a MongoDB update document from a data object that may contain
+ * field ops (`{ $inc: N }`, `{ $dec: N }`, `{ $mul: N }`).
+ * Regular fields go into `$set`, ops go into `$inc` / `$mul`.
+ */
+function buildMongoUpdateDoc(
+  data: Record<string, unknown>,
+  ops?: TFieldOps,
+): Record<string, unknown> {
+  const updateDoc: Record<string, unknown> = {};
+  let hasData = false;
+  for (const _ in data) {
+    hasData = true;
+    break;
+  }
+  if (hasData) updateDoc.$set = data;
+  if (ops?.inc) updateDoc.$inc = ops.inc;
+  if (ops?.mul) updateDoc.$mul = ops.mul;
+  return updateDoc;
 }

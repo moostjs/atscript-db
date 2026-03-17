@@ -12,6 +12,7 @@ export default defineConfig({
       "src/rel.ts",
       "src/agg.ts",
       "src/shared.ts",
+      "src/ops.ts",
     ],
     dts: true,
     format: ["esm", "cjs"],

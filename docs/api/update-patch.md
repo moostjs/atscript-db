@@ -20,6 +20,100 @@ await users.updateOne({
 
 Only the provided fields are changed — other fields remain untouched.
 
+## Field Operations {#field-ops}
+
+Field operations let you atomically increment, decrement, or multiply numeric fields without reading the current value first. This is essential for counters, stock levels, scores, and any field where concurrent updates must not lose data.
+
+### Available Operations
+
+| Operator | Effect                           | SQL                 | MongoDB           |
+| -------- | -------------------------------- | ------------------- | ----------------- |
+| `$inc`   | Add a number to the field        | `SET col = col + ?` | `$inc`            |
+| `$dec`   | Subtract a number from the field | `SET col = col - ?` | `$inc` (negative) |
+| `$mul`   | Multiply the field by a number   | `SET col = col * ?` | `$mul`            |
+
+All operations are **atomic** — they execute as a single database operation, safe for concurrent use.
+
+### Usage
+
+Pass an operation object instead of a plain value for any numeric field:
+
+```typescript
+// Increment views by 1
+await posts.updateOne({ id: 1, views: { $inc: 1 } });
+
+// Decrement stock by 5
+await products.updateOne({ id: 42, stock: { $dec: 5 } });
+
+// Apply a 10% price increase
+await products.updateOne({ id: 42, price: { $mul: 1.1 } });
+```
+
+Field operations can be mixed with regular field assignments in the same update:
+
+```typescript
+await posts.updateOne({
+  id: 1,
+  views: { $inc: 1 },
+  title: "Updated Title",
+  status: "published",
+});
+```
+
+### With `updateMany`
+
+Field operations also work with filter-based batch updates:
+
+```typescript
+// Give all active users 100 bonus points
+await users.updateMany({ status: "active" }, { points: { $inc: 100 } });
+```
+
+### With `bulkUpdate`
+
+Multiple records can receive different operations in one call:
+
+```typescript
+await products.bulkUpdate([
+  { id: 1, stock: { $dec: 2 } },
+  { id: 2, stock: { $dec: 5 } },
+  { id: 3, price: { $mul: 0.9 } },
+]);
+```
+
+### Over HTTP
+
+Field operations are plain JSON — they work naturally over HTTP with `PATCH`:
+
+```bash
+curl -X PATCH http://localhost:3000/products/ \
+  -H "Content-Type: application/json" \
+  -d '{"id": 42, "views": {"$inc": 1}, "stock": {"$dec": 1}}'
+```
+
+### Helper Functions
+
+The `@atscript/db/ops` sub-entry provides helper functions for building operation payloads. This module has **zero dependencies** — it's safe to use in frontend code without pulling in the full database package:
+
+```typescript
+import { $inc, $dec, $mul } from "@atscript/db/ops";
+
+await posts.updateOne({ id: 1, views: $inc() }); // +1 (default)
+await products.updateOne({ id: 42, stock: $dec(5) }); // -5
+await products.updateOne({ id: 42, price: $mul(1.1) }); // ×1.1
+```
+
+The same module also exports helpers for [array patch operators](#embedded-array-patches):
+
+```typescript
+import { $insert, $remove, $replace, $upsert, $update } from "@atscript/db/ops";
+
+await posts.updateOne({ id: 1, tags: $insert(["urgent"]) });
+await posts.updateOne({ id: 1, tags: $remove(["draft"]) });
+```
+
+These helpers simply return the corresponding JSON objects (`$inc(5)` → `{ $inc: 5 }`, `$insert([...])` → `{ $insert: [...] }`), making them convenient for both server-side and client-side code.
+
 ## Embedded Object Patches
 
 Nested objects stored on a record (not navigation properties) use a strategy-based approach controlled by `@db.patch.strategy`.

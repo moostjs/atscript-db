@@ -51,6 +51,11 @@
       "types": "./dist/shared.d.mts",
       "import": "./dist/shared.mjs"
     },
+    "./ops": {
+      "types": "./dist/ops.d.mts",
+      "import": "./dist/ops.mjs",
+      "require": "./dist/ops.cjs"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {

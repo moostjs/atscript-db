@@ -140,8 +140,8 @@ const result = await users.updateOne({
 // result: { matchedCount: 1, modifiedCount: 1 }
 ```
 
-::: info Patch Operators
-For updating embedded arrays and nested objects with fine-grained control, see [Update & Patch](/api/update-patch).
+::: info Patch Operators & Field Operations
+For atomic increments/decrements (`$inc`, `$dec`, `$mul`) and embedded array patch operators (`$insert`, `$remove`, etc.), see [Update & Patch](/api/update-patch).
 :::
 
 ### Update Many

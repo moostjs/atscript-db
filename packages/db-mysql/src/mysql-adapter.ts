@@ -14,6 +14,7 @@ import type {
   TDbFieldMeta,
   TDbDefaultFn,
   TValueFormatterPair,
+  TFieldOps,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 
@@ -473,18 +474,26 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     // MySQL supports native UPDATE ... LIMIT 1
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, 1);
+    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, 1, ops);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where);
+    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, undefined, ops);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };

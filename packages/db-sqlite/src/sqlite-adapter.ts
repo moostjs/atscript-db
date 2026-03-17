@@ -1,4 +1,5 @@
 import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
+import type { TFieldOps } from "@atscript/db";
 import type {
   TDbDeleteResult,
   TDbIndex,
@@ -25,7 +26,6 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   esc,
-  toSqliteValue,
   sqliteTypeFromDesignType,
 } from "./sql-builder";
 import type { TSqliteDriver } from "./types";
@@ -180,29 +180,30 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ───────────────────────────────────────────────────────────
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    // SQLite doesn't support UPDATE ... LIMIT 1 directly.
-    // Use a subquery on rowid to target one row.
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const setClauses: string[] = [];
-    const setParams: unknown[] = [];
-
-    for (const [key, value] of Object.entries(data)) {
-      setClauses.push(`"${esc(key)}" = ?`);
-      setParams.push(toSqliteValue(value));
-    }
-
-    const sql = `UPDATE "${esc(tableName)}" SET ${setClauses.join(", ")} WHERE rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`;
-    const allParams = [...setParams, ...where.params];
-    this._log(sql, allParams);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, allParams));
+    const limitedWhere = {
+      sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
+      params: where.params,
+    };
+    const { sql, params } = buildUpdate(tableName, data, limitedWhere, ops);
+    this._log(sql, params);
+    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where);
+    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops);
     this._log(sql, params);
     const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };

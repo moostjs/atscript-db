@@ -1,5 +1,6 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
 import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
+import type { TFieldOps } from "@atscript/db";
 import type {
   TDbDeleteResult,
   TDbIndex,
@@ -432,27 +433,32 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
-  async updateOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     // PostgreSQL does not support UPDATE ... LIMIT 1.
     // Use ctid subquery: UPDATE t SET ... WHERE ctid = (SELECT ctid FROM t WHERE ... LIMIT 1)
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const keys = Object.keys(data);
-    const setClauses = keys.map((k, i) => `${qi(k)} = $${i + 1}`);
-    const setParams = keys.map((k) => pgDialect.toValue(data[k]));
-    // Finalize WHERE ? → $N starting from $1, then offset by number of SET params
-    const finalizedWhere = finalizeParams(pgDialect, where);
-    const offsetWhere = offsetPlaceholders(finalizedWhere, keys.length);
-    const sql = `UPDATE ${quoteTableName(tableName)} SET ${setClauses.join(", ")} WHERE ctid = (SELECT ctid FROM ${quoteTableName(tableName)} WHERE ${offsetWhere.sql} LIMIT 1)`;
-    const params = [...setParams, ...where.params];
+    const limitedWhere = {
+      sql: `ctid = (SELECT ctid FROM ${quoteTableName(tableName)} WHERE ${where.sql} LIMIT 1)`,
+      params: where.params,
+    };
+    const { sql, params } = buildUpdate(tableName, data, limitedWhere, undefined, ops);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.affectedRows };
   }
 
-  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async updateMany(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    ops?: TFieldOps,
+  ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where);
+    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, undefined, ops);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.affectedRows };

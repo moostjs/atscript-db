@@ -29,6 +29,8 @@ export type {
 } from "./query/query-tree";
 
 export type { TArrayPatch, TDbPatch } from "./patch/patch-types";
+export { isDbFieldOp, getDbFieldOp, separateFieldOps } from "./ops";
+export type { TDbFieldOp, TFieldOps } from "./ops";
 export type {
   DbQuery,
   DbControls,

@@ -1,4 +1,4 @@
-import type { TDbFieldMeta, TDbForeignKey } from "@atscript/db";
+import type { TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { SqlDialect, TSqlFragment } from "@atscript/db-sql-tools";
@@ -117,8 +117,9 @@ export function buildUpdate(
   table: string,
   data: Record<string, unknown>,
   where: TSqlFragment,
+  ops?: TFieldOps,
 ): TSqlFragment {
-  return _buildUpdate(sqliteDialect, table, data, where);
+  return _buildUpdate(sqliteDialect, table, data, where, undefined, ops);
 }
 
 /**
