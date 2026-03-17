@@ -1,0 +1,597 @@
+# SAP HANA Adapter Research — `@atscript/db-hana`
+
+## 1. Overview
+
+This document researches the feasibility and design of a SAP HANA database adapter for the atscript-db framework. SAP HANA is an in-memory, column-oriented RDBMS with advanced features including full-text search, spatial processing, temporal data, and vector embeddings (`REAL_VECTOR`). It fits naturally into the SQL adapter family (`db-sql-tools`-based), similar to PostgreSQL, MySQL, and SQLite.
+
+## 2. Node.js Driver Landscape
+
+### 2.1 `hdb` (open-source, pure JS)
+
+- **Package**: [hdb on npm](https://www.npmjs.com/package/hdb) / [SAP/node-hdb on GitHub](https://github.com/SAP/node-hdb)
+- Pure JavaScript implementation, no native binaries
+- Callback-based API (needs promisification)
+- Core API:
+  - `hdb.createClient({ host, port, user, password })` — create client
+  - `client.connect(callback)` — establish connection
+  - `client.exec(sql, params?, callback)` — execute SQL (DDL returns nothing, DML returns `affectedRows`, SELECT returns rows)
+  - `client.prepare(sql, callback)` — create prepared statement
+  - `statement.exec(params, callback)` — execute prepared statement
+  - `statement.drop(callback)` — release server-side statement
+  - `client.setAutoCommit(false)` — begin manual transaction
+  - `client.commit(callback)` — commit transaction
+  - `client.rollback(callback)` — rollback transaction
+  - `client.disconnect()` — close connection
+- No built-in connection pooling (must implement or use generic pool)
+- LOB streaming support for BLOB/CLOB/NCLOB
+
+### 2.2 `@sap/hana-client` (official, native)
+
+- **Package**: [@sap/hana-client on npm](https://www.npmjs.com/package/@sap/hana-client)
+- Official SAP driver with native C++ bindings
+- Same API shape as `hdb` but with additional features:
+  - `execBatch()` for batch operations
+  - Built-in connection pooling
+  - Full SAP HANA Cloud support
+  - Better performance for large result sets
+- SAP recommends this for new projects
+- Requires native compilation (may be problematic in some CI/CD environments)
+
+### 2.3 Recommendation
+
+Support both drivers via the `THanaDriver` interface pattern (same approach as PostgreSQL's `TPgDriver`). Users provide their own driver wrapper. Ship a `HdbDriver` class wrapping the `hdb` package as the default, with documentation for `@sap/hana-client` usage.
+
+## 3. Driver Interface Design
+
+Following the established pattern from `TPgDriver` / `TPgConnection`:
+
+```typescript
+export interface THanaRunResult {
+  affectedRows: number;
+  rows: Record<string, unknown>[];
+}
+
+export interface THanaDriver {
+  run(sql: string, params?: unknown[]): Promise<THanaRunResult>;
+  all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
+  exec(sql: string): Promise<void>;
+  getConnection(): Promise<THanaConnection>;
+  close(): Promise<void>;
+}
+
+export interface THanaConnection {
+  run(sql: string, params?: unknown[]): Promise<THanaRunResult>;
+  all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
+  exec(sql: string): Promise<void>;
+  release(): void;
+}
+```
+
+### Transaction Mapping
+
+HANA uses `setAutoCommit(false)` / `commit()` / `rollback()` for transactions. The `HdbDriver` wrapper would:
+
+1. `getConnection()` → create a new `hdb` client (or acquire from pool), call `setAutoCommit(false)`
+2. Route all operations through that client
+3. `release()` → commit/rollback already handled by adapter, re-enable auto-commit, return to pool
+
+This maps cleanly to `BaseDbAdapter._beginTransaction()` / `_commitTransaction()` / `_rollbackTransaction()`.
+
+## 4. SQL Dialect
+
+HANA's SQL dialect is largely ANSI SQL-compliant with some specifics:
+
+```typescript
+const hanaDialect: SqlDialect = {
+  quoteIdentifier: (name) => `"${name.replace(/"/g, '""')}"`,
+  quoteTable: (name) => {
+    // HANA supports schema.table notation
+    const parts = name.split(".");
+    return parts.map((p) => `"${p.replace(/"/g, '""')}"`).join(".");
+  },
+  unlimitedLimit: "2147483647", // HANA INT max
+  toValue: (value) => {
+    if (typeof value === "boolean") return value ? 1 : 0;
+    return value;
+  },
+  toParam: (value) => {
+    if (typeof value === "boolean") return value ? 1 : 0;
+    return value;
+  },
+  regex: (quotedCol, value) => ({
+    // HANA uses LIKE_REGEXPR or OCCURRENCES_REGEXPR
+    sql: `${quotedCol} LIKE_REGEXPR ?`,
+    params: [value],
+  }),
+  createViewPrefix: "CREATE OR REPLACE VIEW",
+  paramPlaceholder: (_index) => "?",
+  // HANA uses positional ? placeholders (like MySQL), not numbered $1 $2
+};
+```
+
+### Key SQL Differences from Other Adapters
+
+| Feature | HANA Syntax |
+|---------|-------------|
+| Auto-increment | `GENERATED ALWAYS AS IDENTITY` or `GENERATED BY DEFAULT AS IDENTITY` |
+| UUID generation | No native `gen_random_uuid()`; use `SYSUUID` function |
+| Current timestamp | `CURRENT_TIMESTAMP` (returns TIMESTAMP type) |
+| Epoch milliseconds | `TO_BIGINT(SECONDS_BETWEEN('1970-01-01', CURRENT_TIMESTAMP) * 1000)` |
+| Boolean | No native BOOLEAN in older versions; use `TINYINT` (0/1). HANA Cloud has `BOOLEAN`. |
+| Upsert | `UPSERT ... WHERE ...` or `MERGE INTO ... USING ...` |
+| RETURNING clause | Not supported natively; use `SELECT` after `INSERT` or identity functions |
+| Regex | `LIKE_REGEXPR` or `OCCURRENCES_REGEXPR()` |
+| Limit/offset | `LIMIT n OFFSET m` (standard) |
+| Schema | `CREATE SCHEMA`, fully qualified `"SCHEMA"."TABLE"` |
+| Table type | Default is `COLUMN TABLE`; can specify `ROW TABLE` |
+
+### Notable Gap: No RETURNING Clause
+
+Unlike PostgreSQL, HANA doesn't support `INSERT ... RETURNING *`. For insert operations that need the generated ID:
+
+- **Identity columns**: Use `CURRENT_IDENTITY_VALUE()` after insert
+- **UUID columns**: Generate client-side (like MySQL adapter approach) or use `SELECT SYSUUID FROM DUMMY` before insert
+- **Sequences**: Use `<sequence>.CURRVAL` after insert
+
+This is the same pattern used by the MySQL adapter, so the approach is well-established.
+
+## 5. Type Mapping
+
+### Core Types
+
+| Atscript Design Type | HANA Column Type | Notes |
+|---------------------|-----------------|-------|
+| `string` | `NVARCHAR(255)` | Unicode by default in HANA |
+| `string.email` | `NVARCHAR(255)` | |
+| `string.uuid` | `NVARCHAR(36)` | |
+| `string.url` | `NVARCHAR(2048)` | |
+| `number` | `DOUBLE` | |
+| `number.integer` | `INTEGER` | |
+| `number.bigint` | `BIGINT` | |
+| `number.float` | `DOUBLE` | |
+| `number.timestamp` | `BIGINT` | Epoch milliseconds |
+| `boolean` | `BOOLEAN` | HANA Cloud; `TINYINT` for on-prem |
+| `object` / `json` | `NCLOB` | Store as JSON string |
+| `db.vector` | `REAL_VECTOR(n)` | HANA Cloud only, dimensions 1–65,000 |
+
+### HANA-Specific Types (via `@db.hana.type`)
+
+| Annotation | HANA Type | Use Case |
+|-----------|-----------|----------|
+| `@db.hana.type "TEXT"` | `TEXT` | Full-text search enabled column |
+| `@db.hana.type "SHORTTEXT"` | `SHORTTEXT(n)` | Short text with search + string search |
+| `@db.hana.type "ST_GEOMETRY"` | `ST_GEOMETRY` | Spatial data |
+| `@db.hana.type "ST_POINT"` | `ST_POINT` | Spatial point data |
+| `@db.hana.type "SECONDDATE"` | `SECONDDATE` | Date+time without fractional seconds |
+| `@db.hana.type "DECIMAL"` | `DECIMAL(p,s)` | Fixed precision (use with `@db.column.precision`) |
+
+## 6. HANA-Specific Features & Annotations
+
+### 6.1 Column Store vs Row Store
+
+HANA defaults to column store tables. Row store may be preferred for OLTP-heavy tables with frequent single-row updates.
+
+```
+@db.hana.store "column"   // default — column store (analytical, compressed)
+@db.hana.store "row"      // row store (transactional, single-row ops)
+```
+
+**Important**: Column store is required for `TEXT`/`SHORTTEXT` columns, `REAL_VECTOR` columns, spatial columns, and fulltext indexes.
+
+### 6.2 Full-Text Search
+
+HANA has native full-text search via `TEXT` / `SHORTTEXT` column types and `FULLTEXT INDEX`:
+
+```sql
+CREATE FULLTEXT INDEX "idx_ft_content" ON "articles" ("content")
+  SYNC                              -- synchronous indexing
+  LANGUAGE DETECTION ('EN', 'DE')   -- language detection
+  FUZZY SEARCH INDEX ON             -- enable fuzzy search
+  TEXT ANALYSIS ON;                  -- enable text analysis
+```
+
+Proposed annotations:
+
+```
+@db.hana.fulltext.sync "synchronous"       // "synchronous" | "asynchronous" (default)
+@db.hana.fulltext.language "EN", "DE"      // language detection languages
+@db.hana.fulltext.fuzzy                    // enable fuzzy search index
+@db.hana.fulltext.analysis                 // enable text analysis
+```
+
+Search query uses `CONTAINS()` predicate:
+
+```sql
+SELECT * FROM "articles" WHERE CONTAINS("content", 'search term', FUZZY(0.8))
+```
+
+### 6.3 Vector Search (HANA Cloud)
+
+HANA Cloud supports `REAL_VECTOR` columns with similarity functions:
+
+```sql
+-- Create table with vector column
+CREATE COLUMN TABLE "embeddings" (
+  "id" NVARCHAR(36) PRIMARY KEY,
+  "embedding" REAL_VECTOR(1536)
+);
+
+-- Insert (must use TO_REAL_VECTOR)
+INSERT INTO "embeddings" VALUES ('id1', TO_REAL_VECTOR('[0.1, 0.2, ...]'));
+
+-- Similarity search
+SELECT "id", COSINE_SIMILARITY("embedding", TO_REAL_VECTOR(?)) AS "score"
+FROM "embeddings"
+ORDER BY "score" DESC
+LIMIT 10;
+```
+
+Similarity functions: `COSINE_SIMILARITY()`, `L2DISTANCE()`, `INNER_PRODUCT()`.
+
+The existing `@db.search.vector` annotation maps naturally:
+
+```
+@db.search.vector 1536, "cosine"    // dimensions, similarity metric
+```
+
+Implementation maps `"cosine"` → `COSINE_SIMILARITY`, `"l2"` → `L2DISTANCE`, `"dot"` → `INNER_PRODUCT`.
+
+### 6.4 Schema Support
+
+HANA has full schema support similar to PostgreSQL:
+
+```
+@db.schema "MY_SCHEMA"
+@db.hana.schema "MY_SCHEMA"   // adapter-specific override
+```
+
+### 6.5 Partitioning (informational)
+
+HANA supports hash, range, and round-robin partitioning. This is an advanced feature that could be added later:
+
+```
+@db.hana.partition.hash "id", 4        // hash partition by id into 4 partitions
+@db.hana.partition.range "created_at"  // range partition
+```
+
+Not recommended for initial implementation — can be a follow-up.
+
+## 7. Schema Sync Strategy
+
+### 7.1 Column Introspection
+
+HANA exposes table metadata through system views:
+
+```sql
+-- Column information
+SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, SCALE, IS_NULLABLE, DEFAULT_VALUE,
+       GENERATION_TYPE, POSITION
+FROM TABLE_COLUMNS
+WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?
+ORDER BY POSITION;
+
+-- Index information
+SELECT INDEX_NAME, INDEX_TYPE, CONSTRAINT
+FROM INDEXES
+WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?;
+
+-- Index columns
+SELECT INDEX_NAME, COLUMN_NAME, ASCENDING_ORDER
+FROM INDEX_COLUMNS
+WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?
+ORDER BY POSITION;
+
+-- Foreign keys
+SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_SCHEMA_NAME,
+       REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME,
+       UPDATE_RULE, DELETE_RULE
+FROM REFERENTIAL_CONSTRAINTS
+WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?;
+
+-- Fulltext indexes
+SELECT INDEX_NAME, COLUMN_NAME
+FROM FULLTEXT_INDEXES
+WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?;
+```
+
+### 7.2 DDL Operations
+
+```sql
+-- Add column
+ALTER TABLE "schema"."table" ADD ("new_col" NVARCHAR(255) NULL);
+
+-- Drop column
+ALTER TABLE "schema"."table" DROP ("old_col");
+
+-- Modify column (change type, nullability)
+ALTER TABLE "schema"."table" ALTER ("col" NVARCHAR(500) NULL);
+
+-- Rename column
+RENAME COLUMN "schema"."table"."old_name" TO "new_name";
+
+-- Rename table
+RENAME TABLE "schema"."old_table" TO "schema"."new_table";
+
+-- Drop table
+DROP TABLE "schema"."table" CASCADE;
+```
+
+HANA supports `supportsColumnModify = true` (like PostgreSQL).
+
+### 7.3 Control Table & Distributed Locking
+
+The standard `SchemaSync` infrastructure (FNV-1a hash, distributed lock via control table) works without modification. The control table is a regular HANA column table. The only requirement is the adapter providing working CRUD on the control table, which is standard SQL.
+
+### 7.4 HDI Container Consideration
+
+SAP BTP uses HDI (HANA Deployment Infrastructure) containers for schema management. HDI follows a design-time artifact model where `.hdbcds`, `.hdbtable`, `.hdbview` files are deployed via `@sap/hdi-deploy`.
+
+**Recommendation**: The atscript-db schema sync is fundamentally incompatible with HDI's design-time approach. HDI manages schemas declaratively from build artifacts — runtime DDL is restricted inside HDI containers. Therefore:
+
+- **Direct HANA connection** (non-HDI): Full schema sync support, same as PostgreSQL/MySQL
+- **HDI containers**: Schema sync should be **disabled** (`@db.sync.method "none"` or similar). Tables are managed by HDI. The adapter operates in CRUD-only mode.
+
+A potential future enhancement could generate `.hdbtable` / `.hdbview` artifacts from `.as` model files, but this is out of scope for the initial adapter.
+
+## 8. Capability Flags
+
+```typescript
+class HanaAdapter extends BaseDbAdapter {
+  // HANA supports in-place ALTER TABLE ... ALTER COLUMN
+  override supportsColumnModify = true;
+
+  // HANA supports native FK constraints
+  override supportsNativeForeignKeys(): boolean { return true; }
+
+  // HANA supports DEFAULT values natively
+  override supportsNativeValueDefaults(): boolean { return true; }
+
+  // HANA does not support nested objects (SQL database)
+  override supportsNestedObjects(): boolean { return false; }
+
+  // No native patch support
+  override supportsNativePatch(): boolean { return false; }
+
+  // Native default functions
+  override nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
+    // "increment" via IDENTITY, "uuid" needs client-side or SYSUUID,
+    // "now" via epoch calculation
+    return new Set(["increment", "now"]);
+    // Note: "uuid" could be native via SYSUUID but requires
+    // a DEFAULT expression using a function, which HANA supports:
+    //   DEFAULT REPLACE(SYSUUID, '-', '')
+    // If this works reliably, add "uuid" to the set.
+  }
+
+  // Vector search support (HANA Cloud only)
+  override isVectorSearchable(): boolean {
+    return this._hasVectorColumns;
+  }
+
+  // Text search via CONTAINS()
+  override isSearchable(): boolean {
+    return this._hasFulltextIndexes;
+  }
+}
+```
+
+## 9. Package Structure
+
+```
+packages/db-hana/
+  src/
+    index.ts                    — Re-exports adapter + driver
+    plugin.ts                   — TAtscriptPlugin factory (annotation definitions)
+    hana-adapter.ts             — HanaAdapter class extending BaseDbAdapter
+    types.ts                    — THanaDriver, THanaConnection, THanaRunResult
+    hdb-driver.ts               — HdbDriver class wrapping `hdb` package
+    sql-builder.ts              — HANA-specific dialect, DDL builders, type mapping
+    filter-builder.ts           — HANA-specific filter visitor (LIKE_REGEXPR, CONTAINS)
+    plugin/
+      annotations.ts            — @db.hana.* annotation definitions
+      index.ts
+    __test__/
+      hana-adapter.spec.ts
+      fixtures/
+        *.as                    — Test model files
+  package.json
+  vite.config.ts
+```
+
+### package.json
+
+```json
+{
+  "name": "@atscript/db-hana",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.mts",
+      "import": "./dist/plugin.mjs",
+      "require": "./dist/plugin.cjs"
+    }
+  },
+  "peerDependencies": {
+    "@atscript/db": "workspace:^",
+    "@atscript/db-sql-tools": "workspace:^",
+    "hdb": ">=0.19.0"
+  },
+  "peerDependenciesMeta": {
+    "hdb": { "optional": true }
+  }
+}
+```
+
+## 10. Search Implementation
+
+### Full-Text Search
+
+```typescript
+override async search(
+  text: string,
+  query: DbQuery,
+  indexName?: string
+): Promise<Record<string, unknown>[]> {
+  // Build WHERE with CONTAINS() predicate
+  const searchCol = this._getFulltextColumn(indexName);
+  const where = buildWhere(hanaDialect, query.filter);
+
+  // CONTAINS supports fuzzy search
+  const sql = `SELECT * FROM ${this._quotedTable}
+    WHERE CONTAINS(${qi(searchCol)}, ?, FUZZY(0.8))
+    ${where.sql ? `AND ${where.sql}` : ""}
+    ${buildControls(query.controls)}`;
+
+  return this._driver.all(sql, [text, ...where.params]);
+}
+```
+
+### Vector Search
+
+```typescript
+override async vectorSearch(
+  vector: number[],
+  query: DbQuery,
+  indexName?: string
+): Promise<Record<string, unknown>[]> {
+  const vecCol = this._getVectorColumn(indexName);
+  const where = buildWhere(hanaDialect, query.filter);
+  const simFn = this._getSimFunction(); // COSINE_SIMILARITY, L2DISTANCE, etc.
+
+  const sql = `SELECT *, ${simFn}(${qi(vecCol)}, TO_REAL_VECTOR(?)) AS "_score"
+    FROM ${this._quotedTable}
+    ${where.sql ? `WHERE ${where.sql}` : ""}
+    ORDER BY "_score" DESC
+    ${buildControls(query.controls)}`;
+
+  const vectorStr = `[${vector.join(",")}]`;
+  return this._driver.all(sql, [vectorStr, ...where.params]);
+}
+```
+
+## 11. Value Formatters
+
+```typescript
+override formatValue(field: TDbFieldMeta): TValueFormatterPair | undefined {
+  // Vector fields: convert between number[] and HANA REAL_VECTOR string
+  if (field.designType === "vector") {
+    return {
+      toStorage: (value: unknown) => {
+        if (Array.isArray(value)) return `[${value.join(",")}]`;
+        return value;
+      },
+      fromStorage: (value: unknown) => {
+        if (typeof value === "string") {
+          return value.replace(/^\[|\]$/g, "").split(",").map(Number);
+        }
+        return value;
+      },
+    };
+  }
+
+  // Boolean fields (for HANA on-prem using TINYINT)
+  if (field.designType === "boolean") {
+    return {
+      toStorage: (value: unknown) => (value ? 1 : 0),
+      fromStorage: (value: unknown) => value === 1 || value === true,
+    };
+  }
+
+  // JSON fields stored in NCLOB
+  if (field.storage === "json") {
+    return {
+      toStorage: (value: unknown) =>
+        value != null ? JSON.stringify(value) : null,
+      fromStorage: (value: unknown) =>
+        typeof value === "string" ? JSON.parse(value) : value,
+    };
+  }
+}
+```
+
+## 12. Risk Assessment & Open Questions
+
+### Low Risk (well-understood, proven patterns)
+- Basic CRUD operations — standard SQL
+- Filter translation — `db-sql-tools` filter visitor works with minor dialect adjustments
+- Schema sync — control table + DDL introspection via system views
+- Transaction support — `setAutoCommit(false)` / `commit()` / `rollback()`
+- Index management — standard `CREATE INDEX` / `DROP INDEX`
+- Foreign key constraints — standard SQL
+
+### Medium Risk (needs investigation during implementation)
+- **RETURNING clause absence**: Need to verify `CURRENT_IDENTITY_VALUE()` reliability in concurrent scenarios. May need sequence-based approach for non-identity PKs.
+- **`SYSUUID` as DEFAULT**: Need to test if `DEFAULT SYSUUID` works on column definitions or if client-side UUID generation is needed.
+- **REAL_VECTOR handling**: The `TO_REAL_VECTOR()` function requirement for inserts means vector values can't be passed as normal parameters — they need to be embedded in the SQL or wrapped in the function call within the parameterized query.
+- **`hdb` connection pooling**: The `hdb` package lacks built-in pooling. Need to either implement a simple pool or use `generic-pool` as an optional dependency.
+
+### High Risk / Out of Scope
+- **HDI container support**: Fundamentally different deployment model. Not compatible with runtime schema sync. Recommend CRUD-only mode for HDI.
+- **HANA on-prem vs HANA Cloud differences**: Some features (REAL_VECTOR, BOOLEAN type) are HANA Cloud only. Need feature detection or configuration flag.
+- **Spatial data**: Complex type system (ST_GEOMETRY hierarchy). Recommend deferring to a follow-up.
+- **Partitioning**: Advanced feature, defer to follow-up.
+
+## 13. Implementation Plan
+
+### Phase 1: Core Adapter (MVP)
+1. Package scaffolding (`db-hana/`)
+2. `THanaDriver` / `THanaConnection` interfaces
+3. `HdbDriver` class wrapping `hdb` with promisification and basic pooling
+4. `hanaDialect` implementing `SqlDialect`
+5. CRUD operations (`insertOne`, `findOne`, `findMany`, `updateOne`, `deleteOne`, etc.)
+6. Type mapping (`hanaTypeFromField`)
+7. Schema introspection (`getExistingColumns` via `TABLE_COLUMNS` system view)
+8. DDL generation (`buildCreateTable`, `ALTER TABLE`)
+9. Index sync (`CREATE INDEX` / `DROP INDEX`)
+10. Foreign key sync
+11. Transaction support
+12. Plugin with `@db.hana.*` annotations
+13. Basic test suite
+
+### Phase 2: Advanced Features
+1. Full-text search via `CONTAINS()` with fuzzy support
+2. Vector search via `COSINE_SIMILARITY` / `L2DISTANCE`
+3. `@db.hana.store` annotation for column/row store selection
+4. `@db.hana.fulltext.*` annotations
+5. HANA Cloud vs on-prem feature detection
+
+### Phase 3: Future Enhancements
+1. HDI artifact generation from `.as` files
+2. Spatial data support
+3. Partitioning annotations
+4. `@sap/hana-client` driver wrapper
+5. Batch insert optimization (`execBatch`)
+
+## 14. Architecture Diagram
+
+```
+@atscript/db                     ← core: BaseDbAdapter, DbSpace, schema sync
+    ├── @atscript/db-sql-tools   ← shared SQL builders, filter visitor
+    │       ├── @atscript/db-sqlite
+    │       ├── @atscript/db-postgres
+    │       ├── @atscript/db-mysql
+    │       └── @atscript/db-hana    ← NEW: SAP HANA adapter
+    │               ├── HanaAdapter (extends BaseDbAdapter)
+    │               ├── hanaDialect (implements SqlDialect)
+    │               ├── HdbDriver (wraps hdb package)
+    │               └── plugin (@db.hana.* annotations)
+    ├── @atscript/db-mongo
+    └── @atscript/moost-db
+```
+
+## Sources
+
+- [SAP/node-hdb on GitHub](https://github.com/SAP/node-hdb)
+- [@sap/hana-client on npm](https://www.npmjs.com/package/@sap/hana-client)
+- [SAP HANA Vector Engine Guide — Creating Tables with REAL_VECTOR](https://help.sap.com/docs/hana-cloud-database/sap-hana-cloud-sap-hana-database-vector-engine-guide/creating-tables-with-real-vector-columns)
+- [SAP HANA CREATE FULLTEXT INDEX Statement](https://help.sap.com/docs/SAP_HANA_PLATFORM/4fe29514fd584807ac9f2a04f6754767/20d4117e75191014bd199cfe0d443c2f.html)
+- [SAP HANA CREATE TABLE Statement](https://help.sap.com/docs/SAP_HANA_PLATFORM/4fe29514fd584807ac9f2a04f6754767/20d44b4175191014a940afff4b47c7ea.html)
+- [SAP HANA Wikipedia](https://en.wikipedia.org/wiki/SAP_HANA)
+- [SAP HANA Data Types](https://www.tutorialspoint.com/sap_hana/sap_hana_data_types.htm)
