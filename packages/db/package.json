@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Database adapter utilities for atscript.",
   "keywords": [
     "atscript",
