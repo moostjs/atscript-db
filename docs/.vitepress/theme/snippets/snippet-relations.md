@@ -15,12 +15,12 @@ export interface Order {
   customerId: Customer.id
 
   // navigate to parent
-  @db.rel.to Customer 'customerId'
-  customer: Customer
+  @db.rel.to
+  customer?: Customer
 
   // navigate to children
-  @db.rel.from OrderItem.orderId
-  items: OrderItem[]
+  @db.rel.from
+  items?: OrderItem[]
 
   total: number
   createdAt: number.timestamp.created
