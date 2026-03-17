@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://atscript.dev/logo.svg" alt="Atscript" width="120" />
+  <img src="https://db.atscript.dev/logo.svg" alt="Atscript" width="120" />
 </p>
 
 <h1 align="center">@atscript/db</h1>
