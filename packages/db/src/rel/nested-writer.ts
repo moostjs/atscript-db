@@ -32,7 +32,7 @@ export interface TNestedWriterHost {
     thisTableName: string,
     alias?: string,
   ): TDbForeignKey | undefined;
-  _extractPrimaryKeyFilter(payload: Record<string, unknown>): FilterExpr;
+  _extractRecordFilter(payload: Record<string, unknown>): FilterExpr;
   findOne(query: {
     filter: FilterExpr;
     controls: Record<string, never>;
@@ -520,7 +520,7 @@ export async function batchPatchNestedTo(
 
       let fkValue = fk.localFields.length === 1 ? item[fk.localFields[0]] : undefined;
       if (fkValue === undefined) {
-        const pkFilter = host._extractPrimaryKeyFilter(item);
+        const pkFilter = host._extractRecordFilter(item);
         const current = await host.findOne({
           filter: pkFilter,
           controls: {} as Record<string, never>,

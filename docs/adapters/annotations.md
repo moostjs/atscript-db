@@ -15,7 +15,7 @@ Complete reference for all `@db.*` annotations available in `.as` files. Generic
 | `@db.table`            | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                    |
 | `@db.table.renamed`    | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration              |
 | `@db.schema`           | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                  |
-| `@db.column`           | Field      | `name` (string)                        | Override the physical column name                                                      |
+| `@db.column`           | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                       |
 | `@db.column.renamed`   | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration             |
 | `@db.column.collate`   | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                             |
 | `@db.column.precision` | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                         |
@@ -44,6 +44,12 @@ interface User {
   price: number
 }
 ```
+
+::: warning @db.column performance {#db-column-perf}
+Only use `@db.column` when you have a genuine reason — such as mapping to a legacy schema or meeting an external naming convention you cannot change. When a table has no `@db.column`, nested objects, or `@db.json` fields, the read, filter, and patch paths take a zero-allocation fast path that skips key translation entirely. Adding even one `@db.column` activates per-row key remapping on every read, write, filter, and patch operation for that table. In high-throughput scenarios this overhead is measurable.
+
+If you control the database schema, prefer naming your Atscript fields to match the desired column names directly. See [Custom Column Names](../api/tables#custom-column-names) for more details.
+:::
 
 ## Defaults
 

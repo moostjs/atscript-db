@@ -27,6 +27,14 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
       return this.applyFromStorageFormatters(this.coerceFieldValues(row, meta), meta);
     }
 
+    // Column-rename-only: coerce/format while row still has physical keys, then rename
+    if (meta.onlyColumnRenames) {
+      this.coerceFieldValues(row, meta);
+      this.applyFromStorageFormatters(row, meta);
+      this.reverseColumnRenames(row, meta);
+      return row;
+    }
+
     const result: Record<string, unknown> = {};
     const fromFmts = meta.fromStorageFormatters;
 
@@ -83,6 +91,7 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
         insights: query.insights,
       };
     }
+
     return {
       filter: this.translateFilterWithRename(query.filter as FilterExpr, meta),
       controls: query.controls ? this.translateControls(query.controls, meta) : {},
@@ -174,6 +183,20 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   /**
+   * Overrides the base `translateFilter` to use `leafByLogical` for key resolution
+   * (handles flattened nested paths like `contact.email` → `contact__email`).
+   */
+  override translateFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
+    if (!filter || typeof filter !== "object") {
+      return filter;
+    }
+    if (!meta.requiresMappings && !meta.toStorageFormatters) {
+      return filter;
+    }
+    return this.translateFilterWithRename(filter, meta);
+  }
+
+  /**
    * Translates filter with key renaming from logical to physical names.
    * Used by the relational query path where field paths must be mapped
    * to `__`-separated column names.
@@ -209,8 +232,13 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     const data = { ...payload };
     this.prepareCommon(data, meta, adapter);
 
-    // Fast path: no nested/json fields — just do column mapping
+    // Fast path: no mappings needed at all
     if (!meta.requiresMappings) {
+      return this.formatWriteValues(data, meta);
+    }
+
+    // Column-rename-only: apply renames without full flatten
+    if (meta.onlyColumnRenames) {
       for (const [logical, physical] of meta.columnMap.entries()) {
         if (logical in data) {
           data[physical] = data[logical];
@@ -230,6 +258,15 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   ): Record<string, unknown> {
     if (!meta.requiresMappings && !meta.toStorageFormatters) {
       return update;
+    }
+
+    // Column-rename-only: direct key mapping without regex/JSON handling
+    if (meta.onlyColumnRenames && !meta.toStorageFormatters) {
+      const result: Record<string, unknown> = {};
+      for (const key of Object.keys(update)) {
+        result[meta.leafByLogical.get(key)?.physicalName ?? key] = update[key];
+      }
+      return result;
     }
 
     const result: Record<string, unknown> = {};
@@ -374,10 +411,10 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     result: Record<string, unknown>,
     meta: TableMetadata,
   ): void {
-    const prefix = `${parentPath}.`;
-    for (const [path, fd] of meta.leafByLogical.entries()) {
-      if (path.startsWith(prefix)) {
-        result[fd.physicalName] = null;
+    const children = meta.childrenByParent.get(parentPath);
+    if (children) {
+      for (const physical of children) {
+        result[physical] = null;
       }
     }
   }

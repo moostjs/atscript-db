@@ -24,6 +24,7 @@ let UsersTable: any;
 let NoTableAnnotation: any;
 let ProfileTable: any;
 let ProductTable: any;
+let PostTable: any;
 
 // ── Mock adapter ────────────────────────────────────────────────────────────
 
@@ -119,6 +120,8 @@ describe("AtscriptDbTable", () => {
     NoTableAnnotation = fixtures.NoTableAnnotation;
     ProfileTable = fixtures.ProfileTable;
     ProductTable = fixtures.ProductTable;
+    const relFixtures = await import("./fixtures/test-relations.as");
+    PostTable = relFixtures.Post;
   });
 
   beforeEach(() => {
@@ -1367,6 +1370,106 @@ describe("AtscriptDbTable — embedded objects", () => {
       const call = adapter.calls.find((c) => c.method === "updateOne");
       expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
     });
+
+    it("should reject $inc directly on @db.json field", async () => {
+      // preferences is @db.json — $inc on the field itself is meaningless
+      await expect(
+        profileTable.updateOne({ id: 1, preferences: { $inc: 1 } } as any),
+      ).rejects.toThrow(/not supported inside @db\.json/);
+    });
+
+    it("should reject $inc on non-numeric field", async () => {
+      await expect(productTable.updateOne({ id: 1, name: { $inc: 1 } } as any)).rejects.toThrow(
+        /numeric fields/,
+      );
+    });
+
+    it("should allow $inc inside TO relation on numeric field", async () => {
+      // Post.author is a TO relation; Author.rating is a numeric field
+      const postTable = new AtscriptDbTable(PostTable, adapter);
+      // navFields may be empty for standalone tables (relation metadata is on the
+      // original type tree, not on flat entries). The fix works regardless because
+      // reference-typed nav fields (author: Author) have type.kind !== "object",
+      // so isFieldOpAllowed's non-merge-object check doesn't trigger.
+
+      // Validation should pass (not throw "not supported inside non-merge objects")
+      // Phase 1 (TO extraction) may fail without a resolver — that's OK,
+      // we're testing that validation accepts the field op
+      await expect(
+        postTable.updateOne({ id: 1, author: { id: 2, rating: { $inc: 1 } } } as any),
+      ).rejects.not.toThrow(/not supported inside/);
+    });
+  });
+
+  describe("updateOne with unique index filter", () => {
+    beforeEach(() => {
+      adapter = new MockAdapter();
+      table = new AtscriptDbTable(UsersTable, adapter);
+    });
+
+    it("should accept unique index field as filter key when PK is absent", async () => {
+      await table.updateOne({ email: "alice@example.com", name: "Alice" } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      // Filter should use the unique index field, translated to physical name
+      expect(call!.args[0]).toEqual({ email_address: "alice@example.com" });
+      // Data should not contain the filter key (logical or physical)
+      expect(call!.args[1]).not.toHaveProperty("email");
+      expect(call!.args[1]).not.toHaveProperty("email_address");
+      expect(call!.args[1]).toEqual({ name: "Alice" });
+    });
+
+    it("should prefer PK over unique index when both are present", async () => {
+      await table.updateOne({ id: 1, email: "alice@example.com", name: "Alice" } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      // Filter should use PK, not unique index
+      expect(call!.args[0]).toEqual({ id: 1 });
+      // email should remain in the update data, translated to physical name
+      expect(call!.args[1]).toHaveProperty("email_address", "alice@example.com");
+      expect(call!.args[1]).toHaveProperty("name", "Alice");
+    });
+
+    it("should throw when neither PK nor unique index field is present", async () => {
+      await expect(table.updateOne({ name: "Alice" } as any)).rejects.toThrow(
+        /Missing primary key field/,
+      );
+    });
+  });
+
+  describe("updateMany nested field ops", () => {
+    let productTable: AtscriptDbTable;
+
+    beforeEach(() => {
+      productTable = new AtscriptDbTable(ProductTable, adapter);
+    });
+
+    it("should detect nested $inc inside merge-strategy objects", async () => {
+      await productTable.updateMany(
+        {} as any,
+        {
+          stats: { views: { $inc: 1 } },
+        } as any,
+      );
+      const call = adapter.calls.find((c) => c.method === "updateMany");
+      expect(call).toBeDefined();
+      // After decompose flattens to dot-paths, ops should be separated
+      expect(call!.args[2]).toMatchObject({ inc: { stats__views: 1 } });
+      // The flattened data should not contain the ops
+      expect(call!.args[1]).not.toHaveProperty("stats__views");
+    });
+
+    it("should handle mixed nested ops and regular fields", async () => {
+      await productTable.updateMany(
+        {} as any,
+        {
+          stats: { views: { $inc: 1 }, rating: 4.5 },
+        } as any,
+      );
+      const call = adapter.calls.find((c) => c.method === "updateMany");
+      expect(call!.args[1]).toEqual({ stats__rating: 4.5 });
+      expect(call!.args[2]).toMatchObject({ inc: { stats__views: 1 } });
+    });
   });
 
   describe("nested-objects adapter (bug #14)", () => {
@@ -1382,6 +1485,51 @@ describe("AtscriptDbTable — embedded objects", () => {
       expect(Array.isArray(descriptors)).toBe(true);
       expect(descriptors.length).toBeGreaterThan(0);
       expect(descriptors.some((d) => d.path === "id")).toBe(true);
+    });
+  });
+
+  describe("native patch path (@db.column translation)", () => {
+    class NativePatchAdapter extends MockAdapter {
+      override supportsNativePatch(): boolean {
+        return true;
+      }
+      override supportsNestedObjects(): boolean {
+        return true;
+      }
+      override async nativePatch(filter: any, patch: any, ops?: any): Promise<TDbUpdateResult> {
+        this.calls.push({ method: "nativePatch", args: [filter, patch, ops] });
+        return { matchedCount: 1, modifiedCount: 1 };
+      }
+    }
+
+    it("should translate data keys to physical names for nativePatch", async () => {
+      const nativeAdapter = new NativePatchAdapter();
+      const nativeTable = new AtscriptDbTable(UsersTable, nativeAdapter);
+
+      await nativeTable.updateOne({ id: 1, email: "new@example.com" } as any);
+      const call = nativeAdapter.calls.find((c) => c.method === "nativePatch");
+      expect(call).toBeDefined();
+      // Data should have physical column name, not logical
+      expect(call!.args[1]).toHaveProperty("email_address", "new@example.com");
+      expect(call!.args[1]).not.toHaveProperty("email");
+    });
+
+    it("should translate both ops keys and data keys for nativePatch", async () => {
+      const nativeAdapter = new NativePatchAdapter();
+      const nativeTable = new AtscriptDbTable(ProductTable, nativeAdapter);
+
+      await nativeTable.updateOne({
+        id: 1,
+        name: "updated",
+        price: { $inc: 5 },
+      } as any);
+      const call = nativeAdapter.calls.find((c) => c.method === "nativePatch");
+      expect(call).toBeDefined();
+      // Regular field in data
+      expect(call!.args[1]).toHaveProperty("name", "updated");
+      // $inc should be in ops, not in data
+      expect(call!.args[1]).not.toHaveProperty("price");
+      expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
     });
   });
 });

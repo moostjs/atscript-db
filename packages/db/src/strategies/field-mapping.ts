@@ -48,15 +48,17 @@ export abstract class FieldMappingStrategy {
   abstract translateAggregateQuery(query: AggregateQuery, meta: TableMetadata): DbQuery;
 
   /**
-   * Recursively walks a filter expression, applying adapter-specific value
-   * formatting via `formatFilterValue`. Shared by both document and relational
-   * mappers (relational adds key-renaming via `translateFilterWithRename`).
+   * Recursively walks a filter expression, applying `@db.column` key renames
+   * via `columnMap` and adapter-specific value formatting via `formatFilterValue`.
+   *
+   * The relational mapper overrides this to use `leafByLogical` for deeper
+   * key resolution (flattened nested paths).
    */
   translateFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
     if (!filter || typeof filter !== "object") {
       return filter;
     }
-    if (!meta.toStorageFormatters) {
+    if (!meta.toStorageFormatters && meta.columnMap.size === 0) {
       return filter;
     }
 
@@ -69,7 +71,8 @@ export abstract class FieldMappingStrategy {
       } else if (key.startsWith("$")) {
         result[key] = value;
       } else {
-        result[key] = this.formatFilterValue(key, value, meta);
+        const physical = meta.columnMap.get(key) ?? key;
+        result[physical] = this.formatFilterValue(physical, value, meta);
       }
     }
     return result as FilterExpr;
@@ -89,6 +92,19 @@ export abstract class FieldMappingStrategy {
   ): Record<string, unknown>;
 
   // ── Shared implementations ──────────────────────────────────────────────
+
+  /**
+   * Reverse-maps `@db.column` renames on a row read from storage.
+   * Renames physical keys back to logical names in-place.
+   */
+  protected reverseColumnRenames(row: Record<string, unknown>, meta: TableMetadata): void {
+    for (const [logical, physical] of meta.columnMap.entries()) {
+      if (physical in row) {
+        row[logical] = row[physical];
+        delete row[physical];
+      }
+    }
+  }
 
   /**
    * Coerces field values from storage representation to JS types
@@ -281,15 +297,19 @@ export abstract class FieldMappingStrategy {
  */
 export class DocumentFieldMapper extends FieldMappingStrategy {
   reconstructFromRead(row: Record<string, unknown>, meta: TableMetadata): Record<string, unknown> {
-    return this.applyFromStorageFormatters(this.coerceFieldValues(row, meta), meta);
+    // Coerce/format while row still has physical keys, then rename
+    this.coerceFieldValues(row, meta);
+    this.applyFromStorageFormatters(row, meta);
+    if (meta.columnMap.size > 0) {
+      this.reverseColumnRenames(row, meta);
+    }
+    return row;
   }
 
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
     const controls = query.controls;
     return {
-      filter: meta.toStorageFormatters
-        ? this.translateFilter(query.filter as FilterExpr, meta)
-        : (query.filter as FilterExpr),
+      filter: this.translateFilter(query.filter as FilterExpr, meta),
       controls: {
         ...controls,
         $with: undefined,
@@ -304,9 +324,7 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
   translateAggregateQuery(query: AggregateQuery, meta: TableMetadata): DbQuery {
     const controls = query.controls;
     return {
-      filter: meta.toStorageFormatters
-        ? this.translateFilter(query.filter as FilterExpr, meta)
-        : ((query.filter ?? {}) as FilterExpr),
+      filter: this.translateFilter((query.filter ?? {}) as FilterExpr, meta),
       controls: {
         ...controls,
         $with: undefined,
@@ -340,6 +358,13 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
     update: Record<string, unknown>,
     meta: TableMetadata,
   ): Record<string, unknown> {
+    if (meta.columnMap.size > 0) {
+      const result: Record<string, unknown> = {};
+      for (const key of Object.keys(update)) {
+        result[meta.columnMap.get(key) ?? key] = update[key];
+      }
+      return this.formatWriteValues(result, meta);
+    }
     return this.formatWriteValues(update, meta);
   }
 }

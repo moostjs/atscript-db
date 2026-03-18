@@ -239,7 +239,7 @@ export class AtscriptDbTable<
 
         // Validate full payload (including nav fields) before any writes
         const validator = this.getValidator("insert");
-        const ctx: DbValidationContext = { mode: "insert" };
+        const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
         validateBatch(validator, items, ctx);
 
         // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
@@ -340,7 +340,7 @@ export class AtscriptDbTable<
         const originals = canNest ? payloads.map((p) => ({ ...p })) : [];
 
         const validator = this.getValidator("bulkReplace");
-        const ctx: DbValidationContext = { mode: "replace" };
+        const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
         validateBatch(validator, items, ctx);
 
         const host = this as any as TNestedWriterHost;
@@ -370,7 +370,7 @@ export class AtscriptDbTable<
           for (const navField of this._meta.navFields) {
             delete data[navField];
           }
-          const filter = this._extractPrimaryKeyFilter(data);
+          const filter = this._extractRecordFilter(data);
           const prepared = this._fieldMapper.prepareForWrite(data, this._meta, this.adapter);
           const result = await this.adapter.replaceOne(
             this._fieldMapper.translateFilter(filter, this._meta),
@@ -429,7 +429,11 @@ export class AtscriptDbTable<
       this.adapter.withTransaction(async () => {
         // Phase 0: Setup — validate full payload (plugin checks nav field constraints)
         const validator = this.getValidator("bulkUpdate");
-        const ctx: DbValidationContext = { mode: "patch", flatMap: this.flatMap };
+        const ctx: DbValidationContext = {
+          mode: "patch",
+          flatMap: this.flatMap,
+          navFields: this._meta.navFields,
+        };
         validateBatch(validator, payloads as Array<Record<string, unknown>>, ctx);
 
         // Preserve originals for FROM/VIA phase (nav fields are stripped in Phase 2)
@@ -464,11 +468,11 @@ export class AtscriptDbTable<
           for (const navField of this._meta.navFields) {
             delete data[navField];
           }
-          const filter = this._extractPrimaryKeyFilter(data);
+          const filter = this._extractRecordFilter(data);
 
-          // Strip PK fields from data — they're in the filter, not in the SET clause
-          for (const pk of this._meta.primaryKeys) {
-            delete data[pk];
+          // Strip filter keys from data — they identify the record, not in the SET clause
+          for (const key of Object.keys(filter)) {
+            delete data[key];
           }
 
           // Skip if nothing left to update (e.g. only nav props + PK in payload)
@@ -484,7 +488,12 @@ export class AtscriptDbTable<
             // Native patch path: separate top-level ops; patcher handles nested ops internally
             const ops = separateFieldOps(data);
             const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
-            result = await this.adapter.nativePatch(translatedFilter, data, translatedOps);
+            const translatedData = this._fieldMapper.translatePatchKeys(data, this._meta);
+            result = await this.adapter.nativePatch(
+              translatedFilter,
+              translatedData,
+              translatedOps,
+            );
           } else {
             // Decompose flattens nested objects into dot-paths, preserving field ops verbatim.
             // A single separateFieldOps pass after flattening catches both top-level and nested ops.
@@ -577,12 +586,16 @@ export class AtscriptDbTable<
       true,
     );
     const dataCopy = { ...data } as Record<string, unknown>;
-    const ops = separateFieldOps(dataCopy);
+    // Decompose flattens nested merge-strategy objects into dot-paths so that
+    // separateFieldOps catches nested ops like { account: { failedLoginAttempts: { $inc: 1 } } }.
+    const update = decomposePatch(dataCopy, this as AtscriptDbTable);
+    const ops = separateFieldOps(update);
     const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
+    const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
     return enrichFkViolation(this._meta, () =>
       this.adapter.updateMany(
         this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
-        this._fieldMapper.prepareForWrite(dataCopy, this._meta, this.adapter),
+        translatedUpdate,
         translatedOps,
       ),
     );
@@ -685,28 +698,81 @@ export class AtscriptDbTable<
   }
 
   /**
-   * Extracts primary key field(s) from a payload to build a filter.
+   * Extracts a record-identifying filter from a payload.
+   *
+   * Resolution order:
+   * 1. Primary key field(s) — if all PK fields are present in the payload.
+   * 2. Single-field unique index — first `@db.index.unique` field found.
+   * 3. Compound unique index — first compound unique index whose fields are all present.
+   *
+   * Throws when no identifying fields can be found.
    */
-  protected _extractPrimaryKeyFilter(payload: Record<string, unknown>): FilterExpr {
+  protected _extractRecordFilter(payload: Record<string, unknown>): FilterExpr {
     const pkFields = this.primaryKeys;
+
+    // 1. Try primary key
+    if (pkFields.length > 0) {
+      let allPresent = true;
+      for (const field of pkFields) {
+        if (payload[field] === undefined) {
+          allPresent = false;
+          break;
+        }
+      }
+      if (allPresent) {
+        const filter: FilterExpr = {};
+        for (const field of pkFields) {
+          filter[field] = this._prepareFilterValue(field, payload[field]);
+        }
+        return filter;
+      }
+    }
+
+    // 2. Try single-field unique index
+    for (const prop of this.uniqueProps) {
+      if (payload[prop] !== undefined) {
+        return { [prop]: this._prepareFilterValue(prop, payload[prop]) };
+      }
+    }
+
+    // 3. Try compound unique indexes
+    for (const index of this._meta.indexes.values()) {
+      if (index.type !== "unique" || index.fields.length < 2) {
+        continue;
+      }
+      let allPresent = true;
+      for (const indexField of index.fields) {
+        if (payload[indexField.name] === undefined) {
+          allPresent = false;
+          break;
+        }
+      }
+      if (allPresent) {
+        const filter: FilterExpr = {};
+        for (const indexField of index.fields) {
+          filter[indexField.name] = this._prepareFilterValue(
+            indexField.name,
+            payload[indexField.name],
+          );
+        }
+        return filter;
+      }
+    }
+
+    // Nothing found — throw
     if (pkFields.length === 0) {
       throw new DbError("NOT_FOUND", [
         { path: "", message: "No primary key defined — cannot extract filter" },
       ]);
     }
-    const filter: FilterExpr = {};
-    for (const field of pkFields) {
-      if (payload[field] === undefined) {
-        throw new DbError("NOT_FOUND", [
-          { path: field, message: `Missing primary key field "${field}" in payload` },
-        ]);
-      }
-      const fieldType = this.flatMap.get(field);
-      filter[field] = fieldType
-        ? this.adapter.prepareId(payload[field], fieldType)
-        : payload[field];
-    }
-    return filter;
+    throw new DbError("NOT_FOUND", [
+      { path: pkFields[0], message: `Missing primary key field "${pkFields[0]}" in payload` },
+    ]);
+  }
+
+  private _prepareFilterValue(field: string, value: unknown): unknown {
+    const fieldType = this.flatMap.get(field);
+    return fieldType ? this.adapter.prepareId(value, fieldType) : value;
   }
 
   /**
@@ -724,7 +790,7 @@ export class AtscriptDbTable<
 
     // Type validation: apply defaults, validate full payload
     const validator = this.getValidator("insert");
-    const ctx: DbValidationContext = { mode: "insert" };
+    const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
     const prepared = items.map((raw) => this._applyDefaults({ ...raw }));
     validateBatch(validator, prepared, ctx);
 

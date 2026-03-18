@@ -12,6 +12,8 @@ export interface DbValidationContext {
   mode: "insert" | "replace" | "patch";
   /** Flat map from the table — used to check if an array is a top-level array. */
   flatMap?: Map<string, TAtscriptAnnotatedType>;
+  /** Precomputed nav field names — used to skip field-op validation inside TO/FROM/VIA relations. */
+  navFields?: ReadonlySet<string>;
 }
 
 /** Set of recognised array‑patch operator keys. */
@@ -59,23 +61,33 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       return handleNavField(ctx, def, value, dbCtx, isTo, isFrom, isVia);
     }
 
-    // ── Field operation handling ($inc / $dec / $mul) ───────────────────────
-    if (dbCtx.mode === "patch" && isDbFieldOp(value)) {
-      if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap)) {
-        ctx.error(
-          'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields or nested objects without @db.patch.strategy "merge"',
-        );
-        return false;
+    // ── Patch-only checks ───────────────────────────────────────────────────
+    if (dbCtx.mode === "patch") {
+      // Field operation handling ($inc / $dec / $mul)
+      if (isDbFieldOp(value)) {
+        // Context check first: @db.json, non-merge objects, nav field passthrough
+        if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap, dbCtx.navFields)) {
+          ctx.error(
+            'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields or nested objects without @db.patch.strategy "merge"',
+          );
+          return false;
+        }
+        // Type check: field ops only make sense on numeric scalar fields
+        const isNumeric =
+          def.type.kind === "" && (def.type as { designType?: string }).designType === "number";
+        if (!isNumeric) {
+          ctx.error("Field operations ($inc/$dec/$mul) can only be applied to numeric fields");
+          return false;
+        }
+        return true;
       }
-      return true;
-    }
 
-    // ── Top-level array patch handling ──────────────────────────────────────
-    if (dbCtx.mode === "patch" && def.type.kind === "array" && dbCtx.flatMap) {
-      // Check via flatMap (the tag is set on flatMap entries, not on the original type tree)
-      const flatEntry = dbCtx.flatMap.get(ctx.path);
-      if (flatEntry?.metadata?.has("db.__topLevelArray") && !flatEntry.metadata.has("db.json")) {
-        return handleArrayPatch(ctx, def as TAtscriptAnnotatedType<TAtscriptTypeArray>, value);
+      // Top-level array patch handling
+      if (def.type.kind === "array" && dbCtx.flatMap) {
+        const flatEntry = dbCtx.flatMap.get(ctx.path);
+        if (flatEntry?.metadata?.has("db.__topLevelArray") && !flatEntry.metadata.has("db.json")) {
+          return handleArrayPatch(ctx, def as TAtscriptAnnotatedType<TAtscriptTypeArray>, value);
+        }
       }
     }
 
@@ -85,14 +97,35 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
 }
 
 /**
- * Checks whether a field op is valid at `path` by walking up ancestors
- * in the flatMap. Rejects if any ancestor is @db.json or a nested object
- * without @db.patch.strategy "merge".
+ * Checks whether a field op is valid at `path`.
+ *
+ * Rejects when:
+ * - The field itself is `@db.json` (ops on opaque blobs are meaningless).
+ * - Any ancestor is `@db.json`.
+ * - Any ancestor is a nested object without `@db.patch.strategy "merge"`.
+ *
+ * Accepts immediately when an ancestor is a navigation field (TO/FROM/VIA) —
+ * the nested data is extracted and validated against its own table separately.
  */
-function isFieldOpAllowed(path: string, flatMap: Map<string, TAtscriptAnnotatedType>): boolean {
+function isFieldOpAllowed(
+  path: string,
+  flatMap: Map<string, TAtscriptAnnotatedType>,
+  navFields?: ReadonlySet<string>,
+): boolean {
+  // Reject ops directly on @db.json fields (even if the underlying type is numeric)
+  const field = flatMap.get(path);
+  if (field?.metadata.has("db.json")) {
+    return false;
+  }
+
+  // Walk ancestors
   let pos = path.length;
   while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
     const ancestor = path.slice(0, pos);
+    // Nav field ancestor — ops inside are valid (validated by the related table)
+    if (navFields?.has(ancestor)) {
+      return true;
+    }
     const entry = flatMap.get(ancestor);
     if (!entry) continue;
     if (entry.metadata.has("db.json")) return false;
@@ -114,8 +147,8 @@ function handleNavField(
   isFrom: boolean,
   isVia: boolean,
 ): boolean | undefined {
-  const pathParts = ctx.path.split(".");
-  const fieldName = pathParts[pathParts.length - 1] || ctx.path;
+  const dotIdx = ctx.path.lastIndexOf(".");
+  const fieldName = dotIdx === -1 ? ctx.path : ctx.path.slice(dotIdx + 1);
 
   // Null nav prop is always an error
   if (value === null) {

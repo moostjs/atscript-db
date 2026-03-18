@@ -94,7 +94,11 @@ export class TableMetadata {
   booleanFields = new Set<string>();
   decimalFields = new Set<string>();
   allPhysicalFields: string[] = [];
+  /** Precomputed parent path → child physical column names for fast null-setting. */
+  childrenByParent = new Map<string, string[]>();
   requiresMappings = false;
+  /** True when the only mappings needed are simple `@db.column` renames (no nesting/JSON). */
+  onlyColumnRenames = false;
   toStorageFormatters?: Map<string, (value: unknown) => unknown>;
   fromStorageFormatters?: Map<string, (value: unknown) => unknown>;
 
@@ -563,7 +567,10 @@ export class TableMetadata {
       }
     }
 
-    this.requiresMappings = this.flattenedParents.size > 0 || this.jsonFields.size > 0;
+    this.onlyColumnRenames =
+      this.columnMap.size > 0 && this.flattenedParents.size === 0 && this.jsonFields.size === 0;
+    this.requiresMappings =
+      this.flattenedParents.size > 0 || this.jsonFields.size > 0 || this.onlyColumnRenames;
   }
 
   /** Returns the `__`-separated parent prefix for a dot-separated path, or empty string for top-level paths. */
@@ -585,6 +592,20 @@ export class TableMetadata {
       }
       this.leafByPhysical.set(fd.physicalName, fd);
       this.leafByLogical.set(fd.path, fd);
+    }
+
+    // Precompute parent → child physical names for fast null-setting
+    for (const parentPath of this.flattenedParents) {
+      const prefix = `${parentPath}.`;
+      const children: string[] = [];
+      for (const [path, fd] of this.leafByLogical.entries()) {
+        if (path.startsWith(prefix)) {
+          children.push(fd.physicalName);
+        }
+      }
+      if (children.length > 0) {
+        this.childrenByParent.set(parentPath, children);
+      }
     }
   }
 

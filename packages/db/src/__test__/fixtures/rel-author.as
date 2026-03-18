@@ -8,6 +8,8 @@ export interface Author {
 
     name: string
 
+    rating?: number
+
     @db.default.now
     createdAt?: number.timestamp.created
 

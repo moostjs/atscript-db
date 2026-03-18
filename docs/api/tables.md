@@ -133,6 +133,12 @@ email: string
 // Field in code: email
 ```
 
+::: warning Performance impact
+Only use `@db.column` when you have a genuine reason — such as mapping to a legacy schema or meeting an external naming convention you cannot change. When a table has no `@db.column`, nested objects, or `@db.json` fields, the read, filter, and patch paths take a zero-allocation fast path that skips key translation entirely. Adding even one `@db.column` activates per-row key remapping on every read, write, filter, and patch operation for that table. In high-throughput scenarios this overhead is measurable.
+
+If you control the database schema, prefer naming your Atscript fields to match the desired column names directly.
+:::
+
 For nested objects that are flattened, the parent prefix is prepended automatically. If you rename a parent field, all its flattened children reflect the new prefix.
 
 ## Excluding Fields
