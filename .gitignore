@@ -30,3 +30,4 @@ dist-ssr
 .specs
 docs/.vitepress/cache
 docs/.vitepress/dist
+*.local.md
