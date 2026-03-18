@@ -213,3 +213,4 @@ const todosTable = dbSpace.getTable(Todo);
 - [URL Query Syntax](./query-syntax) — Filter, sort, and paginate via URL parameters
 - [Relations & Search in URLs](./advanced) — Relation loading, text search, vector search
 - [Customization](./customization) — Hooks for access control, data transformation, and extending controllers
+- [HTTP Client](./client) — Browser-compatible TypeScript client for these endpoints

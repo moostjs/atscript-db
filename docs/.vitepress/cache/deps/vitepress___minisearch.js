@@ -549,8 +549,8 @@ var MiniSearch = class _MiniSearch {
       ...defaultOptions,
       ...options,
       autoVacuum,
-      searchOptions: { ...defaultSearchOptions, ...options.searchOptions },
-      autoSuggestOptions: { ...defaultAutoSuggestOptions, ...options.autoSuggestOptions },
+      searchOptions: { ...defaultSearchOptions, ...(options.searchOptions || {}) },
+      autoSuggestOptions: { ...defaultAutoSuggestOptions, ...(options.autoSuggestOptions || {}) },
     };
     this._index = new SearchableMap();
     this._documentCount = 0;
@@ -884,7 +884,7 @@ var MiniSearch = class _MiniSearch {
       });
       return this._enqueuedVacuum;
     }
-    if (!this.vacuumConditionsMet(conditions)) {
+    if (this.vacuumConditionsMet(conditions) === false) {
       return Promise.resolve();
     }
     this._currentVacuum = this.performVacuuming(options);
@@ -919,7 +919,7 @@ var MiniSearch = class _MiniSearch {
       }
       this._dirtCount -= initialDirtCount;
     }
-    null;
+    await null;
     this._currentVacuum = this._enqueuedVacuum;
     this._enqueuedVacuum = null;
   }

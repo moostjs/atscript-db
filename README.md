@@ -19,6 +19,7 @@
 | [`@atscript/db-mysql`](packages/db-mysql)         | MySQL adapter (via mysql2)                                                        |
 | [`@atscript/db-mongo`](packages/db-mongo)         | MongoDB adapter                                                                   |
 | [`@atscript/moost-db`](packages/moost-db)         | Moost framework integration — auto-generated REST CRUD controllers                |
+| [`@atscript/db-client`](packages/db-client)       | Browser-compatible HTTP client for moost-db REST endpoints                        |
 
 ## Architecture
 
@@ -29,7 +30,8 @@
     │       ├── @atscript/db-postgres
     │       └── @atscript/db-mysql
     ├── @atscript/db-mongo       ← native MongoDB driver, no SQL layer
-    └── @atscript/moost-db       ← Moost HTTP controllers wrapping db tables
+    ├── @atscript/moost-db       ← Moost HTTP controllers wrapping db tables
+    └── @atscript/db-client      ← browser/SSR HTTP client for moost-db
 ```
 
 ## Documentation

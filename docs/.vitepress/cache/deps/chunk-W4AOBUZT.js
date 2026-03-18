@@ -2519,7 +2519,7 @@ function flushPreFlushCbs(instance, seen, i = flushIndex + 1) {
 }
 function flushPostFlushCbs(seen) {
   if (pendingPostFlushCbs.length) {
-    const deduped = [...new Set(pendingPostFlushCbs)].toSorted((a, b) => getId(a) - getId(b));
+    const deduped = [...new Set(pendingPostFlushCbs)].sort((a, b) => getId(a) - getId(b));
     pendingPostFlushCbs.length = 0;
     if (activePostFlushCbs) {
       activePostFlushCbs.push(...deduped);
@@ -7327,7 +7327,7 @@ function getType(ctor) {
 function validateProps(rawProps, props, instance) {
   const resolvedValues = toRaw(props);
   const options = instance.propsOptions[0];
-  const camelizePropsKey = new Set(Object.keys(rawProps).map((key) => camelize(key)));
+  const camelizePropsKey = Object.keys(rawProps).map((key) => camelize(key));
   for (const key in options) {
     let opt = options[key];
     if (opt == null) continue;
@@ -7336,7 +7336,7 @@ function validateProps(rawProps, props, instance) {
       resolvedValues[key],
       opt,
       true ? shallowReadonly(resolvedValues) : resolvedValues,
-      !camelizePropsKey.has(key),
+      !camelizePropsKey.includes(key),
     );
   }
 }

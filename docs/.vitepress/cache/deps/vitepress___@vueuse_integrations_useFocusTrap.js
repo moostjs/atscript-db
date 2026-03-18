@@ -395,7 +395,7 @@ var _sortByOrder = function sortByOrder(candidates) {
     }
   });
   return orderedTabbables
-    .toSorted(sortOrderedTabbables)
+    .sort(sortOrderedTabbables)
     .reduce(function (acc, sortable) {
       sortable.isScope ? acc.push.apply(acc, sortable.content) : acc.push(sortable.content);
       return acc;
@@ -444,7 +444,7 @@ var isTabbable = function isTabbable2(node, options) {
   if (!node) {
     throw new Error("No node provided");
   }
-  if (!matches.call(node, candidateSelector)) {
+  if (matches.call(node, candidateSelector) === false) {
     return false;
   }
   return isNodeMatchingSelectorTabbable(options, node);
@@ -457,7 +457,7 @@ var isFocusable = function isFocusable2(node, options) {
   if (!node) {
     throw new Error("No node provided");
   }
-  if (!matches.call(node, focusableCandidateSelector)) {
+  if (matches.call(node, focusableCandidateSelector) === false) {
     return false;
   }
   return isNodeMatchingSelectorFocusable(options, node);
@@ -815,7 +815,6 @@ var createFocusTrap = function createFocusTrap2(elements, userOptions) {
           "`"
             .concat(optionName, '` appears to be an invalid selector; error="')
             .concat(err.message, '"'),
-          { cause: err },
         );
       }
       if (!node) {
@@ -861,7 +860,7 @@ var createFocusTrap = function createFocusTrap2(elements, userOptions) {
       });
       var lastDomTabbableNode = focusableNodes
         .slice()
-        .toReversed()
+        .reverse()
         .find(function (node) {
           return isTabbable(node);
         });
@@ -908,7 +907,7 @@ var createFocusTrap = function createFocusTrap2(elements, userOptions) {
             }
             return focusableNodes
               .slice(0, focusableNodes.indexOf(node))
-              .toReversed()
+              .reverse()
               .find(function (el) {
                 return isTabbable(el);
               });

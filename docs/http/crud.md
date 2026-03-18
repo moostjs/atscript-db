@@ -352,3 +352,4 @@ These validations apply to all endpoints that accept query controls — `/query`
 - [Relations & Search in URLs](./advanced) — `$with`, `$search`, `$vector`, `$groupBy` in query strings
 - [Customization](./customization) — Override hooks for access control and data transformation
 - [CRUD Operations](/api/crud) — Programmatic `AtscriptDbTable` API (non-HTTP)
+- [HTTP Client](./client) — TypeScript client for consuming these endpoints

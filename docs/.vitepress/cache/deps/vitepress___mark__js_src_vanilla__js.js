@@ -381,17 +381,17 @@ var DOMIterator = class _DOMIterator {
       }
     });
     if (this.compareNodeIframe(node, prevNode, currIfr)) {
-      if (!key && !handled) {
+      if (key === false && !handled) {
         ifr.push({
           val: currIfr,
           handled: true,
         });
-      } else if (key && !handled) {
+      } else if (key !== false && !handled) {
         ifr[key].handled = true;
       }
       return true;
     }
-    if (!key) {
+    if (key === false) {
       ifr.push({
         val: currIfr,
         handled: false,
@@ -602,7 +602,7 @@ var Mark = class {
    * @access protected
    */
   escapeStr(str) {
-    return str.replace(/[-[\]/{}()*+?.\\^$|]/g, "\\$&");
+    return str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
   }
   /**
    * Creates a regular expression string to match the specified search
@@ -885,7 +885,7 @@ var Mark = class {
     });
     return {
       // sort because of https://git.io/v6USg
-      keywords: stack.toSorted((a, b) => {
+      keywords: stack.sort((a, b) => {
         return b.length - a.length;
       }),
       length: stack.length,
@@ -931,7 +931,7 @@ var Mark = class {
     const stack = [];
     let last = 0;
     array
-      .toSorted((a, b) => {
+      .sort((a, b) => {
         return a.start - b.start;
       })
       .forEach((item) => {

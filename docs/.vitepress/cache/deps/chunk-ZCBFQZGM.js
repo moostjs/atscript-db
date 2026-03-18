@@ -885,8 +885,8 @@ function createUntil(r, isNot = false) {
   }
   function toContains(value, options) {
     return toMatch((v) => {
-      const array = new Set(Array.from(v));
-      return array.has(value) || array.has(toValue(value));
+      const array = Array.from(v);
+      return array.includes(value) || array.includes(toValue(value));
     }, options);
   }
   function changed(options) {
@@ -1939,7 +1939,8 @@ function onElementRemoval(target, callback, options = {}) {
           document2,
           (mutationsList) => {
             const targetRemoved = mutationsList
-              .flatMap((mutation) => [...mutation.removedNodes])
+              .map((mutation) => [...mutation.removedNodes])
+              .flat()
               .some((node) => node === el || node.contains(el));
             if (targetRemoved) {
               callback(mutationsList);
@@ -2363,7 +2364,7 @@ function useAnimate(target, keyframes, options) {
     var _a;
     if (!animate.value) update();
     try {
-      (_a = animate.value) == null ? void 0 : _a.toReversed();
+      (_a = animate.value) == null ? void 0 : _a.reverse();
       syncResume();
     } catch (e) {
       syncPause();
@@ -2979,7 +2980,7 @@ function useBreakpoints(breakpoints, options = {}) {
   function current() {
     const points = Object.keys(breakpoints)
       .map((k) => [k, shortcutMethods[k], pxValue(getValue2(k))])
-      .toSorted((a, b) => a[2] - b[2]);
+      .sort((a, b) => a[2] - b[2]);
     return computed(() => points.filter(([, v]) => v.value).map(([k]) => k));
   }
   return Object.assign(shortcutMethods, {
@@ -3558,7 +3559,7 @@ function useColorMode(options = {}) {
     auto: "",
     light: "light",
     dark: "dark",
-    ...options.modes,
+    ...(options.modes || {}),
   };
   const preferredDark = usePreferredDark({ window: window2 });
   const system = computed(() => (preferredDark.value ? "dark" : "light"));
@@ -4984,8 +4985,8 @@ function createFetch(config = {}) {
           ...fetchOptions,
           ...args[0],
           headers: {
-            ...headersToObject(fetchOptions.headers),
-            ...headersToObject(args[0].headers),
+            ...(headersToObject(fetchOptions.headers) || {}),
+            ...(headersToObject(args[0].headers) || {}),
           },
         };
       }

@@ -98,7 +98,7 @@ var require_rfdc = __commonJS({
         }
         const o2 = {};
         for (const k in o) {
-          if (!Object.hasOwnProperty.call(o, k)) continue;
+          if (Object.hasOwnProperty.call(o, k) === false) continue;
           const cur = o[k];
           if (typeof cur !== "object" || cur === null) {
             o2[k] = cur;
@@ -190,7 +190,7 @@ var require_rfdc = __commonJS({
         refs.push(o);
         refsNew.push(o2);
         for (const k in o) {
-          if (!Object.hasOwnProperty.call(o, k)) continue;
+          if (Object.hasOwnProperty.call(o, k) === false) continue;
           const cur = o[k];
           if (typeof cur !== "object" || cur === null) {
             o2[k] = cur;
@@ -2066,7 +2066,7 @@ var require_speakingurl = __commonJS2({
             if (i + 1 < l && lookAheadCharArray.indexOf(input[i + 1]) >= 0) {
               diatricString += ch;
               ch = "";
-            } else if (lastCharWasDiatric) {
+            } else if (lastCharWasDiatric === true) {
               ch = diatricMap[diatricString] + charMap[ch];
               diatricString = "";
             } else {
@@ -2097,7 +2097,7 @@ var require_speakingurl = __commonJS2({
             ch += input[i + 1] !== void 0 && input[i + 1].match(/[A-Za-z0-9]/) ? separator : "";
             lastCharWasSymbol = true;
           } else {
-            if (lastCharWasDiatric) {
+            if (lastCharWasDiatric === true) {
               ch = diatricMap[diatricString] + ch;
               diatricString = "";
               lastCharWasDiatric = false;
@@ -2141,7 +2141,7 @@ var require_speakingurl = __commonJS2({
         };
       };
       var escapeChars = function escapeChars2(input) {
-        return input.replace(/[-\\^$*+?.()|[\]{}/]/g, "\\$&");
+        return input.replace(/[-\\^$*+?.()|[\]{}\/]/g, "\\$&");
       };
       var isReplacedCustomChar = function (ch, customReplacements) {
         for (var c in customReplacements) {
@@ -4470,7 +4470,7 @@ function generateReferentialEqualityAnnotations(identitites, dedupe) {
       return;
     }
     if (!dedupe) {
-      paths = paths.map((path) => path.map(String)).toSorted((a, b) => a.length - b.length);
+      paths = paths.map((path) => path.map(String)).sort((a, b) => a.length - b.length);
     }
     const [representativePath, ...identicalPaths] = paths;
     if (representativePath.length === 0) {
