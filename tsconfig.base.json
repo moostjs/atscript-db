@@ -27,7 +27,8 @@
       "@atscript/db-postgres": ["./packages/db-postgres/src"],
       "@atscript/db-postgres/*": ["./packages/db-postgres/src/*"],
       "@atscript/db-sqlite": ["./packages/db-sqlite/src"],
-      "@atscript/moost-db": ["./packages/moost-db/src"]
+      "@atscript/moost-db": ["./packages/moost-db/src"],
+      "@atscript/db-client": ["./packages/db-client/src"]
     }
   }
 }

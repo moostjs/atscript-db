@@ -1,0 +1,52 @@
+{
+  "name": "@atscript/db-client",
+  "version": "0.1.42",
+  "description": "Browser-compatible HTTP client for @atscript/moost-db REST endpoints.",
+  "keywords": [
+    "atscript",
+    "client",
+    "database",
+    "http",
+    "rest"
+  ],
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-client#readme",
+  "bugs": {
+    "url": "https://github.com/moostjs/atscript-db/issues"
+  },
+  "license": "MIT",
+  "author": "Artem Maltsev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moostjs/atscript-db.git",
+    "directory": "packages/db-client"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "dependencies": {
+    "@uniqu/url": "^0.1.2"
+  },
+  "devDependencies": {
+    "@uniqu/core": "^0.1.2"
+  }
+}

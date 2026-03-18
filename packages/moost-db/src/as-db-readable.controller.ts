@@ -1,5 +1,6 @@
 import {
   serializeAnnotatedType,
+  type TSerializeOptions,
   type Validator,
   type TAtscriptAnnotatedType,
   type TAtscriptDataType,
@@ -37,13 +38,25 @@ export class AsDbReadableController<
   /** Cached search index list (static, computed once). */
   private _searchIndexes: ReturnType<AtscriptDbReadable<T>["getSearchIndexes"]>;
 
+  /** Cached full meta response (computed lazily on first meta() call). */
+  private _metaResponse?: {
+    searchable: boolean;
+    vectorSearchable: boolean;
+    searchIndexes: ReturnType<AtscriptDbReadable<T>["getSearchIndexes"]>;
+    primaryKeys: string[];
+    readOnly: boolean;
+    relations: Array<{ name: string; direction: string; isArray: boolean }>;
+    fields: Record<string, { sortable: boolean; filterable: boolean }>;
+    type: ReturnType<typeof serializeAnnotatedType>;
+  };
+
   constructor(
     @Inject(READABLE_DEF)
     readable: AtscriptDbReadable<T>,
     app: Moost,
   ) {
     this.readable = readable;
-    this._serializedType = serializeAnnotatedType(readable.type);
+    this._serializedType = serializeAnnotatedType(readable.type, this.getSerializeOptions());
     this._searchIndexes = readable.getSearchIndexes();
     this.logger = app.getLogger(`db [${readable.tableName}]`);
     this.logger.info(`Initializing ${readable.isView ? "view" : "table"} controller`);
@@ -65,6 +78,34 @@ export class AsDbReadableController<
    */
   protected init(): void | Promise<void> {
     // no-op by default
+  }
+
+  /**
+   * Returns serialization options for the `/meta` endpoint's type field.
+   * Default: whitelist — keeps `meta.*`, `expect.*`, and `db.rel.*` annotations,
+   * strips all other `db.*` annotations (table, column, index, default, etc.).
+   * Override in subclass to customise what annotations are exposed to clients.
+   */
+  protected getSerializeOptions(): TSerializeOptions {
+    return {
+      processAnnotation: ({ key, value }) => {
+        if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
+          return { key, value };
+        }
+        if (key.startsWith("db.")) {
+          return undefined;
+        }
+        return { key, value };
+      },
+    };
+  }
+
+  /**
+   * Whether this controller is read-only (no write endpoints).
+   * Returns `true` for readable/view controllers, overridden to `false` in AsDbController.
+   */
+  protected _isReadOnly(): boolean {
+    return true;
   }
 
   // ── Lazily built validators ────────────────────────────────────────────
@@ -459,11 +500,34 @@ export class AsDbReadableController<
    */
   @Get("meta")
   meta() {
-    return {
+    if (this._metaResponse) {
+      return this._metaResponse;
+    }
+
+    const relations: Array<{ name: string; direction: string; isArray: boolean }> = [];
+    for (const [name, rel] of this.readable.relations) {
+      relations.push({ name, direction: rel.direction, isArray: rel.isArray });
+    }
+
+    const fields: Record<string, { sortable: boolean; filterable: boolean }> = {};
+    for (const fd of this.readable.fieldDescriptors) {
+      if (fd.ignored) continue;
+      fields[fd.path] = {
+        sortable: !!fd.isIndexed,
+        filterable: true,
+      };
+    }
+
+    this._metaResponse = {
       searchable: this.readable.isSearchable(),
       vectorSearchable: this.readable.isVectorSearchable(),
       searchIndexes: this._searchIndexes,
+      primaryKeys: [...this.readable.primaryKeys],
+      readOnly: this._isReadOnly(),
+      relations,
+      fields,
       type: this._serializedType,
     };
+    return this._metaResponse;
   }
 }

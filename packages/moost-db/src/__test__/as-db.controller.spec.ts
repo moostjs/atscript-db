@@ -32,6 +32,13 @@ function createMockTable(overrides: Record<string, any> = {}) {
     primaryKeys: ["id"],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
+    relations: new Map(),
+    fieldDescriptors: [
+      { path: "id", ignored: false, isIndexed: true },
+      { path: "name", ignored: false, isIndexed: false },
+      { path: "email", ignored: false, isIndexed: true },
+    ],
+    isView: false,
     isSearchable: vi.fn().mockReturnValue(false),
     isVectorSearchable: vi.fn().mockReturnValue(false),
     getSearchIndexes: vi.fn().mockReturnValue([]),

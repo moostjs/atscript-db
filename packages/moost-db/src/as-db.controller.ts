@@ -34,6 +34,10 @@ export class AsDbController<
     super(table, app);
   }
 
+  protected override _isReadOnly(): boolean {
+    return false;
+  }
+
   // ── Hooks (overridable) ────────────────────────────────────────────────
 
   /**
