@@ -48,16 +48,16 @@
     "@uniqu/url": "^0.1.2"
   },
   "devDependencies": {
-    "@atscript/core": "^0.1.39",
-    "@atscript/typescript": "^0.1.39",
+    "@atscript/core": "^0.1.41",
+    "@atscript/typescript": "^0.1.41",
     "@moostjs/event-http": "^0.6.2",
     "@uniqu/core": "^0.1.2",
     "moost": "^0.6.2",
-    "unplugin-atscript": "^0.1.39"
+    "unplugin-atscript": "^0.1.41"
   },
   "peerDependencies": {
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "^0.1.39",
+    "@atscript/typescript": "^0.1.41",
     "@moostjs/event-http": "^0.6.2",
     "@uniqu/core": "^0.1.2",
     "moost": "^0.6.2"

@@ -336,6 +336,46 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
     });
   });
 
+  describe("TaskTag (composite PK: taskId + tagId, no @db.mongo.collection)", () => {
+    let table: ReturnType<typeof mongo.getTable>;
+    let adapter: MongoAdapter;
+
+    beforeAll(async () => {
+      const { TaskTag } = await import("./fixtures/composite-pk.as");
+      table = mongo.getTable(TaskTag);
+      adapter = mongo.getAdapter(TaskTag) as unknown as MongoAdapter;
+    });
+
+    it("should keep both fields as primary keys", () => {
+      expect(table.primaryKeys).toContain("taskId");
+      expect(table.primaryKeys).toContain("tagId");
+    });
+
+    it("should NOT have individual PK fields in uniqueProps", () => {
+      expect(table.uniqueProps.has("taskId")).toBe(false);
+      expect(table.uniqueProps.has("tagId")).toBe(false);
+    });
+
+    it("should have _id as a unique prop (synthetic ObjectId)", () => {
+      expect(table.uniqueProps.has("_id")).toBe(true);
+    });
+
+    it("should reject replaceOne with partial composite PK", async () => {
+      await expect(table.replaceOne({ taskId: 1 } as any)).rejects.toThrow(/primary key/i);
+    });
+
+    it("should accept replaceOne with full composite PK", async () => {
+      const mockCollection = {
+        replaceOne: vi.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
+      };
+      vi.spyOn(adapter, "collection" as any, "get").mockReturnValue(mockCollection as any);
+      vi.spyOn(adapter, "withTransaction" as any).mockImplementation((fn: any) => fn());
+
+      const result = await table.replaceOne({ taskId: 1, tagId: 2 } as any);
+      expect(result.matchedCount).toBe(1);
+    });
+  });
+
   describe("buildMongoFilter with ObjectId", () => {
     it("should preserve ObjectId as leaf value in equality filter", () => {
       const oid = new ObjectId(HEX_A);

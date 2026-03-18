@@ -460,7 +460,15 @@ export class MongoAdapter extends BaseDbAdapter {
     // Schema does NOT define _id. The user's @meta.id field is the primary key
     // for replace/update operations. Inject a synthetic _id as unique field so
     // that findById can resolve ObjectId strings via _resolveIdFilter.
-    uniqueFields.push("_id");
+    //
+    // For composite PKs, individual @meta.id fields are NOT individually unique —
+    // only the combination is. Don't promote them to uniqueProps, otherwise
+    // _extractRecordFilter resolves a partial composite PK via the single-field
+    // unique fallback instead of rejecting it.
+    const effectiveUnique = uniqueFields.filter(
+      (f) => meta.primaryKeys.length <= 1 || !meta.primaryKeys.includes(f),
+    );
+    effectiveUnique.push("_id");
     return {
       injectFields: [
         {
@@ -472,7 +480,7 @@ export class MongoAdapter extends BaseDbAdapter {
           } as any,
         },
       ],
-      addUniqueFields: uniqueFields,
+      addUniqueFields: effectiveUnique,
     };
   }
 

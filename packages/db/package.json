@@ -69,14 +69,14 @@
     "check": "vp check"
   },
   "devDependencies": {
-    "@atscript/core": "^0.1.39",
-    "@atscript/typescript": "^0.1.39",
+    "@atscript/core": "^0.1.41",
+    "@atscript/typescript": "^0.1.41",
     "@uniqu/core": "^0.1.2",
-    "unplugin-atscript": "^0.1.39"
+    "unplugin-atscript": "^0.1.41"
   },
   "peerDependencies": {
-    "@atscript/core": "^0.1.39",
-    "@atscript/typescript": "^0.1.39",
+    "@atscript/core": "^0.1.41",
+    "@atscript/typescript": "^0.1.41",
     "@uniqu/core": "^0.1.2"
   }
 }
