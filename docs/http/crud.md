@@ -266,7 +266,15 @@ curl -X PATCH http://localhost:3000/todos/ \
 { "matchedCount": 2, "modifiedCount": 2 }
 ```
 
-Supports [field operations](/api/update-patch#field-ops) (`$inc`, `$dec`, `$mul`) and [array patch operators](/api/update-patch#embedded-array-patches) in the JSON body. See [Update & Patch](/api/update-patch) for full details.
+**Field operations** (`$inc`, `$dec`, `$mul`) work as plain JSON objects in the body:
+
+```bash
+curl -X PATCH http://localhost:3000/products/ \
+  -H "Content-Type: application/json" \
+  -d '{"id": 42, "views": {"$inc": 1}, "stock": {"$dec": 1}}'
+```
+
+Also supports [array patch operators](/api/update-patch#embedded-array-patches). See [Update & Patch](/api/update-patch) for the full programmatic API.
 
 ## Deleting Records
 

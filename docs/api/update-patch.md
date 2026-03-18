@@ -83,15 +83,9 @@ await products.bulkUpdate([
 ]);
 ```
 
-### Over HTTP
-
-The helpers return plain JSON objects (`$inc(5)` → `{ $inc: 5 }`), so they work naturally over HTTP:
-
-```bash
-curl -X PATCH http://localhost:3000/products/ \
-  -H "Content-Type: application/json" \
-  -d '{"id": 42, "views": {"$inc": 1}, "stock": {"$dec": 1}}'
-```
+::: tip HTTP usage
+The helpers return plain JSON objects (`$inc(5)` → `{ $inc: 5 }`), so they serialize naturally. See the [HTTP PATCH endpoint](/http/crud#patch-update) for REST examples.
+:::
 
 ### Operation Helpers
 

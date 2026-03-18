@@ -90,18 +90,11 @@ await taskTags.replaceOne({ taskId: 1, tagId: 2, assignedAt: Date.now() });
 await taskTags.updateOne({ taskId: 1, tagId: 2, assignedAt: Date.now() });
 ```
 
-Via HTTP, composite key fields are passed as query parameters:
+Providing only some key fields results in a `400` error for operations that require the full key (findById, deleteOne, replaceOne, updateOne). For `findMany`, partial key fields act as regular filters.
 
-```
-GET    /task-tags/one?taskId=1&tagId=2
-DELETE /task-tags/?taskId=1&tagId=2
-```
-
-Providing only some key fields results in a `400` error for operations that require the full key (getOne, delete, replace, update). For `findMany`, partial key fields act as regular filters:
-
-```
-GET /task-tags/query?taskId=1    # returns all tags for task 1
-```
+::: tip HTTP usage
+See the [HTTP CRUD endpoints](/http/crud#get-one) for how composite keys map to URL query parameters.
+:::
 
 ## Field Types
 
