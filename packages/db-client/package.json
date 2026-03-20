@@ -47,6 +47,7 @@
     "@uniqu/url": "^0.1.2"
   },
   "devDependencies": {
+    "@atscript/typescript": "catalog:",
     "@uniqu/core": "^0.1.2"
   }
 }

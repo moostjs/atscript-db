@@ -24,3 +24,6 @@ export type {
   AggregateQuery,
   TypedWithRelation,
 } from "./types";
+
+// Re-exported from @atscript/typescript for convenience
+export type { TSerializedAnnotatedType } from "@atscript/typescript/utils";

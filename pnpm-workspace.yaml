@@ -2,14 +2,15 @@ packages:
   - packages/*
   - docs
 
-catalogMode: prefer
-
 catalog:
+  "@atscript/typescript": ^0.1.41
   "@types/node": ^24
   typescript: ^5
-  vite: npm:@voidzero-dev/vite-plus-core@latest
-  vitest: npm:@voidzero-dev/vite-plus-test@latest
+  vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest
+  vitest: npm:@voidzero-dev/vite-plus-test@latest
+
+catalogMode: prefer
 overrides:
   vite: "catalog:"
   vitest: "catalog:"

@@ -4,5 +4,8 @@ export default defineConfig({
   pack: {
     dts: true,
     format: ["esm", "cjs"],
+    deps: {
+      neverBundle: ["@atscript/typescript"],
+    },
   },
 });

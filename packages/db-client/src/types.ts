@@ -5,6 +5,7 @@ import type {
   AggregateQuery,
   TypedWithRelation,
 } from "@uniqu/core";
+import type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 // ── Re-export uniqu types for consumer convenience ──────────────────────────
 
@@ -66,7 +67,7 @@ export interface MetaResponse {
   readOnly: boolean;
   relations: RelationInfo[];
   fields: Record<string, FieldMeta>;
-  type: Record<string, unknown>;
+  type: TSerializedAnnotatedType;
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────
