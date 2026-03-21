@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-sql-tools",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "description": "Shared SQL builder utilities for @atscript database adapters.",
   "keywords": [
     "atscript",
