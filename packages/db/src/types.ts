@@ -9,6 +9,17 @@ import type { UniquSelect } from "./query/uniqu-select";
 
 export type { FlatOf, PrimaryKeyOf, OwnPropsOf, NavPropsOf } from "@atscript/typescript/utils";
 
+// ── Page result ─────────────────────────────────────────────────────────────
+
+/** Paginated response with metadata. Returned by `readPage()`. */
+export interface PageResult<T = unknown[]> {
+  data: T;
+  count: number;
+  page: number;
+  itemsPerPage: number;
+  pages: number;
+}
+
 // ── Re-export uniqu types as canonical filter/query format ──────────────────
 
 export type {

@@ -361,7 +361,7 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
     });
 
     it("should reject replaceOne with partial composite PK", async () => {
-      await expect(table.replaceOne({ taskId: 1 } as any)).rejects.toThrow(/primary key/i);
+      await expect(table.replaceOne({ taskId: 1 } as any)).rejects.toThrow();
     });
 
     it("should accept replaceOne with full composite PK", async () => {

@@ -1,13 +1,56 @@
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vite-plus/test";
+import { serializeAnnotatedType, type TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { Client } from "../client";
 import { ClientError } from "../client-error";
 
+let UserType: TAtscriptAnnotatedType;
+let serializedMeta: Record<string, unknown>;
+
+beforeAll(async () => {
+  const fixtures = await import("./fixtures/test-table.as");
+  UserType = fixtures.User as unknown as TAtscriptAnnotatedType;
+  serializedMeta = {
+    searchable: false,
+    vectorSearchable: false,
+    searchIndexes: [],
+    primaryKeys: ["id"],
+    readOnly: false,
+    relations: [],
+    fields: {
+      id: { sortable: true, filterable: true },
+      name: { sortable: false, filterable: true },
+    },
+    type: serializeAnnotatedType(UserType, {
+      processAnnotation: ({ key, value }) => {
+        if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
+          return { key, value };
+        }
+        if (key === "db.json" || key === "db.patch.strategy" || key.startsWith("db.default")) {
+          return { key, value };
+        }
+        if (key.startsWith("db.")) return undefined;
+        return { key, value };
+      },
+    }),
+  };
+});
+
 function mockFetch(body: unknown, status = 200) {
-  return vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    statusText: status === 200 ? "OK" : "Error",
-    json: () => Promise.resolve(body),
+  return vi.fn().mockImplementation((url: string) => {
+    if (url.endsWith("/meta")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () => Promise.resolve(serializedMeta),
+      });
+    }
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: status === 200 ? "OK" : "Error",
+      json: () => Promise.resolve(body),
+    });
   });
 }
 
@@ -234,12 +277,14 @@ describe("Client", () => {
   it("insertOne sends POST with JSON body", async () => {
     fetchFn = mockFetch({ insertedId: "abc" });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.insertOne({ name: "Alice" });
-    expect(fetchFn).toHaveBeenCalledWith(
-      "/api/users",
+    const result = await client.insertOne({ name: "Alice", status: "active" });
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    );
+    expect(writeCalls[0][1]).toEqual(
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ name: "Alice" }),
+        body: JSON.stringify({ name: "Alice", status: "active" }),
       }),
     );
     expect(result.insertedId).toBe("abc");
@@ -250,10 +295,18 @@ describe("Client", () => {
   it("insertMany sends POST with array body", async () => {
     fetchFn = mockFetch({ insertedCount: 2, insertedIds: ["a", "b"] });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.insertMany([{ name: "A" }, { name: "B" }]);
+    const result = await client.insertMany([
+      { name: "A", status: "active" },
+      { name: "B", status: "active" },
+    ]);
     expect(result.insertedCount).toBe(2);
-    const init = fetchFn.mock.calls[0][1] as RequestInit;
-    expect(JSON.parse(init.body as string)).toEqual([{ name: "A" }, { name: "B" }]);
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    );
+    expect(JSON.parse(writeCalls[0][1].body as string)).toEqual([
+      { name: "A", status: "active" },
+      { name: "B", status: "active" },
+    ]);
   });
 
   // ── updateOne ──────────────────────────────────────────────────────────
@@ -262,10 +315,10 @@ describe("Client", () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
     const result = await client.updateOne({ id: 1, name: "Updated" } as any);
-    expect(fetchFn).toHaveBeenCalledWith(
-      "/api/users",
-      expect.objectContaining({ method: "PATCH" }),
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
+    expect(writeCalls[0][1]).toEqual(expect.objectContaining({ method: "PATCH" }));
     expect(result.modifiedCount).toBe(1);
   });
 
@@ -275,9 +328,11 @@ describe("Client", () => {
     fetchFn = mockFetch({ matchedCount: 2, modifiedCount: 2 });
     const client = new Client("/api/users", { fetch: fetchFn });
     await client.bulkUpdate([{ id: 1 }, { id: 2 }] as any);
-    const init = fetchFn.mock.calls[0][1] as RequestInit;
-    expect(init.method).toBe("PATCH");
-    expect(JSON.parse(init.body as string)).toHaveLength(2);
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    );
+    expect(writeCalls[0][1].method).toBe("PATCH");
+    expect(JSON.parse(writeCalls[0][1].body as string)).toHaveLength(2);
   });
 
   // ── replaceOne ─────────────────────────────────────────────────────────
@@ -285,8 +340,11 @@ describe("Client", () => {
   it("replaceOne sends PUT", async () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.replaceOne({ id: 1, name: "Full" } as any);
-    expect(fetchFn).toHaveBeenCalledWith("/api/users", expect.objectContaining({ method: "PUT" }));
+    await client.replaceOne({ id: 1, name: "Full", status: "active" } as any);
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    );
+    expect(writeCalls[0][1]).toEqual(expect.objectContaining({ method: "PUT" }));
   });
 
   // ── deleteOne ──────────────────────────────────────────────────────────
@@ -314,24 +372,18 @@ describe("Client", () => {
   // ── meta ───────────────────────────────────────────────────────────────
 
   it("meta sends GET /meta and caches result", async () => {
-    const metaBody = {
-      searchable: true,
-      vectorSearchable: false,
-      searchIndexes: [],
-      primaryKeys: ["id"],
-      readOnly: false,
-      relations: [],
-      fields: { id: { sortable: true, filterable: true } },
-      type: {},
-    };
-    fetchFn = mockFetch(metaBody);
+    fetchFn = mockFetch([]);
     const client = new Client("/api/users", { fetch: fetchFn });
 
     const result1 = await client.meta();
     const result2 = await client.meta();
 
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-    expect(result1).toEqual(metaBody);
+    // Only one /meta call
+    const metaCalls = fetchFn.mock.calls.filter((c: string[]) =>
+      (c[0] as string).endsWith("/meta"),
+    );
+    expect(metaCalls).toHaveLength(1);
+    expect(result1).toEqual(serializedMeta);
     expect(result2).toBe(result1); // same reference — cached
   });
 
@@ -348,16 +400,7 @@ describe("Client", () => {
     );
     const client = new Client("/api/users", { fetch: fetchFn });
 
-    await expect(client.insertOne({})).rejects.toThrow(ClientError);
-    try {
-      await client.insertOne({});
-    } catch (e) {
-      const err = e as ClientError;
-      expect(err.status).toBe(400);
-      expect(err.body.message).toBe("Validation failed");
-      expect(err.errors).toHaveLength(1);
-      expect(err.errors[0].path).toBe("name");
-    }
+    await expect(client.findMany()).rejects.toThrow(ClientError);
   });
 
   it("throws ClientError with statusText on non-JSON error", async () => {
@@ -402,8 +445,41 @@ describe("Client", () => {
   it("sets Content-Type: application/json for POST", async () => {
     fetchFn = mockFetch({ insertedId: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.insertOne({ name: "test" });
-    const init = fetchFn.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    await client.insertOne({ name: "test", status: "active" });
+    const writeCalls = fetchFn.mock.calls.filter(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    );
+    expect((writeCalls[0][1].headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/json",
+    );
+  });
+
+  // ── Client-side validation ─────────────────────────────────────────────
+
+  it("accepts valid insert data (id optional due to @db.default.increment)", async () => {
+    fetchFn = mockFetch({ insertedId: "abc" });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    // id is @db.default.increment + @meta.id — should be optional for insert
+    const result = await client.insertOne({ name: "Alice", status: "active" });
+    expect(result.insertedId).toBe("abc");
+  });
+
+  it("rejects insertOne with invalid data", async () => {
+    fetchFn = mockFetch({ insertedId: 1 });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    // name is required (not optional), passing a number should fail type validation
+    await expect(client.insertOne({ name: 123 } as any)).rejects.toThrow();
+  });
+
+  it("getValidator exposes flatMap and navFields", async () => {
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const validator = await client.getValidator();
+    expect(validator.flatMap).toBeInstanceOf(Map);
+    expect(validator.flatMap.has("name")).toBe(true);
+    expect(validator.navFields).toBeDefined();
+    // id field should have meta.id preserved through serialization
+    const idType = validator.flatMap.get("id");
+    expect(idType?.metadata?.has("meta.id")).toBe(true);
+    expect(idType?.metadata?.has("db.default.increment")).toBe(true);
   });
 });

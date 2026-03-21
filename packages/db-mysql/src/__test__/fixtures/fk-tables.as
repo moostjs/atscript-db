@@ -1,6 +1,7 @@
 @db.table 'projects'
 export interface Project {
     @meta.id
+    @db.default.increment
     id: number
 
     name: string
@@ -9,6 +10,7 @@ export interface Project {
 @db.table 'tasks'
 export interface Task {
     @meta.id
+    @db.default.increment
     id: number
 
     title: string

@@ -2,6 +2,7 @@
 @db.schema 'auth'
 export interface UsersTable {
     @meta.id
+    @db.default.increment
     id: number
 
     @db.index.unique 'email_idx'
@@ -61,6 +62,7 @@ export interface ProfileTable {
 @db.table 'products'
 export interface ProductTable {
     @meta.id
+    @db.default.increment
     id: number
 
     name: string
@@ -96,6 +98,7 @@ export interface LegacyReportView {
 @db.table.renamed 'old_users'
 export interface RenamedTable {
     @meta.id
+    @db.default.increment
     id: number
     name: string
     email: string

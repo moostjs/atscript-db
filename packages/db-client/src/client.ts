@@ -2,6 +2,7 @@ import { buildUrl } from "@uniqu/url/builder";
 import type { Uniquery, UniqueryControls, AggregateQuery } from "@uniqu/core";
 
 import { ClientError } from "./client-error";
+import type { ClientValidator, ValidatorMode } from "./validator";
 import type {
   ClientOptions,
   DataOf,
@@ -20,7 +21,9 @@ import type {
 /**
  * Browser-compatible HTTP client for moost-db REST endpoints.
  *
- * Two usage modes (same class, different generic):
+ * Write operations are validated client-side against the Atscript type
+ * fetched from the `/meta` endpoint (lazily, on first write).
+ *
  * ```typescript
  * // Untyped — broad Record<string, unknown> typing
  * const users = new Client('/db/tables/users')
@@ -35,6 +38,7 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
   private readonly _fetch: typeof globalThis.fetch;
   private readonly _headers?: ClientOptions["headers"];
   private _metaPromise?: Promise<MetaResponse>;
+  private _validatorPromise?: Promise<ClientValidator>;
 
   constructor(path: string, opts?: ClientOptions) {
     // Normalize path: strip trailing slash
@@ -102,15 +106,25 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
   async findManyWithCount(
     query: Uniquery<OwnOf<T>, NavOf<T>>,
   ): Promise<{ data: DataOf<T>[]; count: number }> {
-    const controls = query?.controls ?? {};
-    const limit = ((controls as Record<string, unknown>).$limit as number | undefined) || 1000;
-    const skip = ((controls as Record<string, unknown>).$skip as number | undefined) || 0;
-    const page = Math.floor(skip / limit) + 1;
-    const result = (await this._get("pages", {
-      ...query,
-      controls: { ...controls, $page: page, $size: limit } as UniqueryControls,
-    })) as PagesResponse<DataOf<T>>;
+    const result = await this.readPage(query);
     return { data: result.data, count: result.count };
+  }
+
+  async readPage(
+    query?: Uniquery<OwnOf<T>, NavOf<T>>,
+    page = 1,
+    size = 10,
+  ): Promise<PagesResponse<DataOf<T>>> {
+    const controls = query?.controls ?? {};
+    // Extract $limit/$skip and convert to $page/$size if present
+    const { $limit, $skip, ...rest } = controls as Record<string, unknown>;
+    const effectivePage =
+      $skip != null && $limit ? Math.floor(Number($skip) / Number($limit)) + 1 : page;
+    const effectiveSize = $limit != null ? Number($limit) : size;
+    return this._get("pages", {
+      ...query,
+      controls: { ...rest, $page: effectivePage, $size: effectiveSize } as UniqueryControls,
+    }) as Promise<PagesResponse<DataOf<T>>>;
   }
 
   async pages(query?: Uniquery<OwnOf<T>, NavOf<T>>): Promise<PagesResponse<DataOf<T>>> {
@@ -138,26 +152,32 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
   // ── Write Methods ─────────────────────────────────────────────────────────
 
   async insertOne(data: Partial<DataOf<T>>): Promise<InsertResult> {
+    await this._validateData(data, "insert");
     return this._request("POST", "", data) as Promise<InsertResult>;
   }
 
   async insertMany(data: Partial<DataOf<T>>[]): Promise<InsertManyResult> {
+    await this._validateData(data, "insert");
     return this._request("POST", "", data) as Promise<InsertManyResult>;
   }
 
   async updateOne(data: Partial<DataOf<T>>): Promise<UpdateResult> {
+    await this._validateData(data, "patch");
     return this._request("PATCH", "", data) as Promise<UpdateResult>;
   }
 
   async bulkUpdate(data: Partial<DataOf<T>>[]): Promise<UpdateResult> {
+    await this._validateData(data, "patch");
     return this._request("PATCH", "", data) as Promise<UpdateResult>;
   }
 
   async replaceOne(data: DataOf<T>): Promise<UpdateResult> {
+    await this._validateData(data, "replace");
     return this._request("PUT", "", data) as Promise<UpdateResult>;
   }
 
   async bulkReplace(data: DataOf<T>[]): Promise<UpdateResult> {
+    await this._validateData(data, "replace");
     return this._request("PUT", "", data) as Promise<UpdateResult>;
   }
 
@@ -178,6 +198,37 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
       this._metaPromise = this._request("GET", "meta") as Promise<MetaResponse>;
     }
     return this._metaPromise;
+  }
+
+  // ── Validation ──────────────────────────────────────────────────────────
+
+  /**
+   * Returns a lazily-initialized {@link ClientValidator} backed by the `/meta` type.
+   * Useful for accessing `flatMap` and `navFields` (e.g. for form generation).
+   */
+  getValidator(): Promise<ClientValidator> {
+    return this._getValidator();
+  }
+
+  private async _validateData(data: unknown, mode: ValidatorMode): Promise<void> {
+    const validator = await this._getValidator();
+    validator.validate(data, mode);
+  }
+
+  private _getValidator(): Promise<ClientValidator> {
+    if (!this._validatorPromise) {
+      // Dynamic import keeps @atscript/db and @atscript/typescript optional.
+      // Clear cache on failure so transient errors don't permanently disable validation.
+      this._validatorPromise = this.meta()
+        .then((m) =>
+          import("./validator").then(({ createClientValidator }) => createClientValidator(m)),
+        )
+        .catch((err) => {
+          this._validatorPromise = undefined;
+          throw err;
+        });
+    }
+    return this._validatorPromise;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

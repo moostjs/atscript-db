@@ -92,6 +92,10 @@ export class AsDbReadableController<
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
           return { key, value };
         }
+        // Keep annotations needed for client-side validation
+        if (key === "db.json" || key === "db.patch.strategy" || key.startsWith("db.default")) {
+          return { key, value };
+        }
         if (key.startsWith("db.")) {
           return undefined;
         }

@@ -3,8 +3,10 @@ packages:
   - docs
 
 catalog:
-  "@atscript/typescript": ^0.1.41
+  "@atscript/core": ^0.1.42
+  "@atscript/typescript": ^0.1.42
   "@types/node": ^24
+  unplugin-atscript: ^0.1.42
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest

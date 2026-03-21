@@ -13,6 +13,7 @@ export default defineConfig({
       "src/agg.ts",
       "src/shared.ts",
       "src/ops.ts",
+      "src/validator.ts",
     ],
     dts: true,
     format: ["esm", "cjs"],

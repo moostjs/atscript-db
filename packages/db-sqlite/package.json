@@ -43,18 +43,18 @@
     "check": "vp check"
   },
   "devDependencies": {
-    "@atscript/core": "^0.1.41",
-    "@atscript/typescript": "^0.1.41",
+    "@atscript/core": "catalog:",
+    "@atscript/typescript": "^0.1.42",
     "@types/better-sqlite3": "^7.6.13",
     "@uniqu/core": "^0.1.2",
     "better-sqlite3": "^12.6.2",
-    "unplugin-atscript": "^0.1.41"
+    "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
-    "@atscript/core": "^0.1.41",
+    "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
     "@atscript/db-sql-tools": "workspace:^",
-    "@atscript/typescript": "^0.1.41",
+    "@atscript/typescript": "^0.1.42",
     "@uniqu/core": "^0.1.2",
     "better-sqlite3": ">=11.0.0"
   },

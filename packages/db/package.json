@@ -56,6 +56,11 @@
       "import": "./dist/ops.mjs",
       "require": "./dist/ops.cjs"
     },
+    "./validator": {
+      "types": "./dist/validator.d.mts",
+      "import": "./dist/validator.mjs",
+      "require": "./dist/validator.cjs"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -69,14 +74,14 @@
     "check": "vp check"
   },
   "devDependencies": {
-    "@atscript/core": "^0.1.41",
-    "@atscript/typescript": "^0.1.41",
+    "@atscript/core": "catalog:",
+    "@atscript/typescript": "^0.1.42",
     "@uniqu/core": "^0.1.2",
-    "unplugin-atscript": "^0.1.41"
+    "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
-    "@atscript/core": "^0.1.41",
-    "@atscript/typescript": "^0.1.41",
+    "@atscript/core": "catalog:",
+    "@atscript/typescript": "^0.1.42",
     "@uniqu/core": "^0.1.2"
   }
 }

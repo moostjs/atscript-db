@@ -61,6 +61,30 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       return handleNavField(ctx, def, value, dbCtx, isTo, isFrom, isVia);
     }
 
+    // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─
+    if (value === undefined && (dbCtx.mode === "insert" || dbCtx.mode === "replace")) {
+      const meta = def.metadata;
+      const hasDefault =
+        meta.has("db.default") ||
+        meta.has("db.default.increment") ||
+        meta.has("db.default.uuid") ||
+        meta.has("db.default.now");
+      const hasFK = meta.has("db.rel.FK");
+
+      if (hasDefault || hasFK) {
+        // Default/FK fields optional in both modes, EXCEPT top-level PK in replace
+        // (must identify the record). Nested nav children are effectively inserts.
+        if (
+          dbCtx.mode === "replace" &&
+          meta.has("meta.id") &&
+          !isInsideNavField(ctx.path, dbCtx.navFields)
+        ) {
+          return undefined;
+        }
+        return true;
+      }
+    }
+
     // ── Patch-only checks ───────────────────────────────────────────────────
     if (dbCtx.mode === "patch") {
       // Field operation handling ($inc / $dec / $mul)
@@ -134,6 +158,16 @@ function isFieldOpAllowed(
     }
   }
   return true;
+}
+
+/** Returns true if the given path is nested inside a navigation field. */
+function isInsideNavField(path: string, navFields?: ReadonlySet<string>): boolean {
+  if (!navFields) return false;
+  let pos = path.length;
+  while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
+    if (navFields.has(path.slice(0, pos))) return true;
+  }
+  return false;
 }
 
 // ── Nav field handler ─────────────────────────────────────────────────────────

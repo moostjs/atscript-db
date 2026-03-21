@@ -1,6 +1,7 @@
 @db.table "orders"
 export interface AggOrders {
     @meta.id
+    @db.default.increment
     id: number
 
     @db.column.dimension

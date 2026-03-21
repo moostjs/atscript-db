@@ -1,6 +1,7 @@
 @db.table "orders"
 export interface AggOrders {
     @meta.id
+    @db.default.increment
     id: number
 
     @db.column.dimension
@@ -22,6 +23,7 @@ export interface AggOrders {
 @db.table "plain_events"
 export interface PlainEvents {
     @meta.id
+    @db.default.increment
     id: number
 
     category: string
@@ -32,6 +34,7 @@ export interface PlainEvents {
 @db.table "indexed_metrics"
 export interface IndexedMetrics {
     @meta.id
+    @db.default.increment
     id: number
 
     @db.column.dimension

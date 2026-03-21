@@ -6,8 +6,37 @@ export { IntegrityStrategy, NativeIntegrity } from "./strategies/integrity";
 export { ApplicationIntegrity } from "./strategies/application-integrity";
 export { DbError } from "./db-error";
 export type { DbErrorCode } from "./db-error";
-export { createDbValidatorPlugin } from "./db-validator-plugin";
-export type { DbValidationContext } from "./db-validator-plugin";
+// ── Shared validator entry (used by both server and @atscript/db-client) ────
+export {
+  createDbValidatorPlugin,
+  buildDbValidator,
+  buildValidationContext,
+  isNavRelation,
+  forceNavNonOptional,
+  isDbFieldOp,
+  getKeyProps,
+  $inc,
+  $dec,
+  $mul,
+  $replace,
+  $insert,
+  $upsert,
+  $update,
+  $remove,
+} from "./validator";
+export type {
+  DbValidationContext,
+  ValidatorMode,
+  ValidationContext,
+  TDbFieldOp,
+  TArrayPatch,
+  TDbPatch,
+} from "./validator";
+
+// ── Server-only ops (not in ./validator) ────────────────────────────────────
+export { getDbFieldOp, separateFieldOps } from "./ops";
+export type { TFieldOps } from "./ops";
+
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView } from "./table/db-view";
@@ -17,7 +46,6 @@ export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export { decomposePatch } from "./patch/patch-decomposer";
-export { getKeyProps } from "./patch/patch-types";
 export { translateQueryTree } from "./query/query-tree";
 export type {
   TViewPlan,
@@ -27,10 +55,6 @@ export type {
   AtscriptQueryComparison,
   AtscriptRef,
 } from "./query/query-tree";
-
-export type { TArrayPatch, TDbPatch } from "./patch/patch-types";
-export { isDbFieldOp, getDbFieldOp, separateFieldOps } from "./ops";
-export type { TDbFieldOp, TFieldOps } from "./ops";
 export type {
   DbQuery,
   DbControls,
@@ -78,6 +102,7 @@ export type {
   AggregateControls,
   AggregateQuery,
   AggregateResult,
+  PageResult,
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";

@@ -27,3 +27,6 @@ export type {
 
 // Re-exported from @atscript/typescript for convenience
 export type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
+
+// Re-export validation types (runtime exports live in @atscript/db-client/validator)
+export type { ClientValidator, ClientValidationError, ValidatorMode } from "./validator";

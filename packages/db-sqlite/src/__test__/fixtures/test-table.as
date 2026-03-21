@@ -2,6 +2,7 @@
 @db.schema 'auth'
 export interface UsersTable {
     @meta.id
+    @db.default.increment
     id: number
 
     @db.index.unique 'email_idx'

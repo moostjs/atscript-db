@@ -34,7 +34,8 @@ import {
   batchPatchNestedFrom,
   batchPatchNestedVia,
 } from "../rel/nested-writer";
-import { createDbValidatorPlugin, type DbValidationContext } from "../db-validator-plugin";
+import { type DbValidationContext } from "../db-validator-plugin";
+import { buildDbValidator, dbPlugin, forceNavNonOptional, type ValidatorMode } from "../validator";
 import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
 import { ApplicationIntegrity } from "../strategies/application-integrity";
@@ -92,36 +93,6 @@ function _translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
     inc: ops.inc ? _translateOpsRecord(ops.inc, meta) : undefined,
     mul: ops.mul ? _translateOpsRecord(ops.mul, meta) : undefined,
   };
-}
-
-/**
- * Forces nav fields non-optional so the plugin handles null/undefined
- * checks (validator skips optional+null before plugins run).
- */
-function forceNavNonOptional(type: TAtscriptAnnotatedType): TAtscriptAnnotatedType {
-  if (
-    type.metadata?.has("db.rel.to") ||
-    type.metadata?.has("db.rel.from") ||
-    type.metadata?.has("db.rel.via")
-  ) {
-    return type.optional ? { ...type, optional: false } : type;
-  }
-  return type;
-}
-
-/** Makes PK, defaulted, and FK fields optional; forces nav fields non-optional. */
-function insertReplace(type: TAtscriptAnnotatedType) {
-  if (
-    type.metadata?.has("meta.id") ||
-    type.metadata?.has("db.default") ||
-    type.metadata?.has("db.default.increment") ||
-    type.metadata?.has("db.default.uuid") ||
-    type.metadata?.has("db.default.now") ||
-    type.metadata?.has("db.rel.FK")
-  ) {
-    return { ...type, optional: true };
-  }
-  return forceNavNonOptional(type);
 }
 
 export class AtscriptDbTable<
@@ -815,52 +786,30 @@ export class AtscriptDbTable<
    * (including inside nav field target types).
    */
   protected _buildValidator(purpose: string): Validator<T, DataType> {
-    const dbPlugin = createDbValidatorPlugin();
-    const plugins = [...this.adapter.getValidatorPlugins(), dbPlugin];
+    const adapterPlugins = this.adapter.getValidatorPlugins();
 
-    switch (purpose) {
-      case "insert": {
-        return this.createValidator({
-          plugins,
-          replace: insertReplace,
-        });
-      }
-      case "patch": {
-        return this.createValidator({
-          plugins,
-          partial: true,
-          replace: forceNavNonOptional,
-        });
-      }
-      case "bulkReplace": {
-        return this.createValidator({
-          plugins,
-          replace: insertReplace,
-        });
-      }
-      case "bulkUpdate": {
-        const navFields = this._meta.navFields;
-        return this.createValidator({
-          plugins,
-          // Top level: partial (all fields optional in a patch).
-          // Nav fields & their children: always partial (deep patch into related records).
-          // Embedded objects: partial only if merge strategy; replace-strategy requires all fields.
-          partial: (_def, path) => {
-            if (path === "") {
-              return true;
-            }
-            const root = path.split(".")[0];
-            if (navFields.has(root)) {
-              return true;
-            }
-            return _def.metadata.get("db.patch.strategy") === "merge";
-          },
-          replace: forceNavNonOptional,
-        });
-      }
-      default: {
-        return this.createValidator({ plugins });
-      }
+    // Standard modes use the shared builder
+    if (purpose === "insert" || purpose === "patch" || purpose === "bulkReplace") {
+      const mode: ValidatorMode = purpose === "bulkReplace" ? "replace" : purpose;
+      return buildDbValidator(this.type, mode, adapterPlugins) as Validator<T, DataType>;
     }
+
+    // bulkUpdate: same as patch but with path-aware partial for merge strategy
+    if (purpose === "bulkUpdate") {
+      const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
+      const navFields = this._meta.navFields;
+      return this.createValidator({
+        plugins,
+        partial: (_def, path) => {
+          if (path === "") return true;
+          const root = path.split(".")[0];
+          if (navFields.has(root)) return true;
+          return _def.metadata.get("db.patch.strategy") === "merge";
+        },
+        replace: forceNavNonOptional,
+      });
+    }
+
+    return this.createValidator({ plugins: adapterPlugins });
   }
 }
