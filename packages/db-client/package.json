@@ -61,6 +61,6 @@
   },
   "peerDependencies": {
     "@atscript/db": "^0.1.43",
-    "@atscript/typescript": "^0.1.42"
+    "@atscript/typescript": "^0.1.43"
   }
 }

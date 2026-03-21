@@ -3,25 +3,26 @@ export { ClientError } from "./client-error";
 export type {
   ClientOptions,
   MetaResponse,
-  PagesResponse,
+  PageResult,
   SearchIndexInfo,
   RelationInfo,
   FieldMeta,
   ServerError,
-  InsertResult,
-  InsertManyResult,
-  UpdateResult,
-  DeleteResult,
   DataOf,
   OwnOf,
   NavOf,
   IdOf,
-  DbInterface,
+  // Re-exported from @atscript/db
+  TDbInsertResult,
+  TDbInsertManyResult,
+  TDbUpdateResult,
+  TDbDeleteResult,
   // Re-exported from @uniqu/core
   FilterExpr,
   UniqueryControls,
   Uniquery,
   AggregateQuery,
+  AggregateResult,
   TypedWithRelation,
 } from "./types";
 

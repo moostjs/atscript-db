@@ -1,38 +1,43 @@
 import { buildUrl } from "@uniqu/url/builder";
-import type { Uniquery, UniqueryControls, AggregateQuery } from "@uniqu/core";
+import type { AggregateQuery, AggregateResult, Uniquery, UniqueryControls } from "@uniqu/core";
+import type {
+  TDbInsertResult,
+  TDbInsertManyResult,
+  TDbUpdateResult,
+  TDbDeleteResult,
+} from "@atscript/db";
 
 import { ClientError } from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
-import type {
-  ClientOptions,
-  DataOf,
-  DbInterface,
-  DeleteResult,
-  IdOf,
-  InsertManyResult,
-  InsertResult,
-  MetaResponse,
-  NavOf,
-  OwnOf,
-  PagesResponse,
-  UpdateResult,
-} from "./types";
+import type { ClientOptions, DataOf, IdOf, MetaResponse, NavOf, OwnOf, PageResult } from "./types";
+
+type Own<T> = OwnOf<T>;
+type Nav<T> = NavOf<T>;
+type Data<T> = DataOf<T>;
+type Id<T> = IdOf<T>;
 
 /**
- * Browser-compatible HTTP client for moost-db REST endpoints.
+ * HTTP client for moost-db REST endpoints.
  *
- * Write operations are validated client-side against the Atscript type
- * fetched from the `/meta` endpoint (lazily, on first write).
+ * Each method maps 1:1 to a controller endpoint:
+ * - `query()` → `GET /query`
+ * - `count()` → `GET /query` with `$count`
+ * - `aggregate()` → `GET /query` with `$groupBy`
+ * - `pages()` → `GET /pages`
+ * - `one()`   → `GET /one/:id` or `GET /one?compositeKeys`
+ * - `insert()`  → `POST /`
+ * - `update()`  → `PATCH /`
+ * - `replace()` → `PUT /`
+ * - `remove()`  → `DELETE /:id` or `DELETE /?compositeKeys`
+ * - `meta()`  → `GET /meta`
  *
  * ```typescript
- * // Untyped — broad Record<string, unknown> typing
- * const users = new Client('/db/tables/users')
- *
- * // Type-safe — Atscript type as generic parameter
- * const users = new Client<typeof User>('/db/tables/users')
+ * const users = new Client<typeof User>('/api/users')
+ * const all = await users.query()
+ * const page = await users.pages({ filter: { active: true } }, 1, 20)
  * ```
  */
-export class Client<T = Record<string, unknown>> implements DbInterface<T> {
+export class Client<T = Record<string, unknown>> {
   private readonly _path: string;
   private readonly _baseUrl: string;
   private readonly _fetch: typeof globalThis.fetch;
@@ -41,166 +46,157 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
   private _validatorPromise?: Promise<ClientValidator>;
 
   constructor(path: string, opts?: ClientOptions) {
-    // Normalize path: strip trailing slash
     this._path = path.endsWith("/") ? path.slice(0, -1) : path;
     this._baseUrl = opts?.baseUrl ?? "";
     this._fetch = opts?.fetch ?? globalThis.fetch.bind(globalThis);
     this._headers = opts?.headers;
   }
 
-  // ── Read Methods ──────────────────────────────────────────────────────────
+  // ── GET /query ─────────────────────────────────────────────────────────────
 
-  async findOne(query: Uniquery<OwnOf<T>, NavOf<T>>): Promise<DataOf<T> | null> {
-    const controls = { ...query?.controls, $limit: 1 };
-    const results = (await this._get("query", { ...query, controls })) as DataOf<T>[];
-    return results[0] ?? null;
+  /**
+   * `GET /query` — query records with typed filter, sort, select, and relations.
+   */
+  async query(query?: Uniquery<Own<T>, Nav<T>>): Promise<Data<T>[]> {
+    return this._get("query", query) as Promise<Data<T>[]>;
   }
 
-  async findMany(query?: Uniquery<OwnOf<T>, NavOf<T>>): Promise<DataOf<T>[]> {
-    return this._get("query", query) as Promise<DataOf<T>[]>;
+  // ── GET /query ($count) ────────────────────────────────────────────────────
+
+  /**
+   * `GET /query` with `$count: true` — returns record count.
+   */
+  async count(query?: { filter?: Uniquery<Own<T>, Nav<T>>["filter"] }): Promise<number> {
+    return this._get("query", {
+      ...query,
+      controls: { $count: true },
+    } as Uniquery) as Promise<number>;
   }
 
-  async findById(
-    id: IdOf<T>,
-    query?: { controls?: UniqueryControls<OwnOf<T>, NavOf<T>> },
-  ): Promise<DataOf<T> | null> {
-    if (id !== null && typeof id === "object") {
-      // Composite PK — send as query params
-      const params = this._idToParams(id as Record<string, unknown>);
-      if (query?.controls) {
-        const controlStr = buildUrl({ controls: query.controls as UniqueryControls });
-        if (controlStr) {
-          for (const [k, v] of new URLSearchParams(controlStr)) {
-            params.set(k, v);
-          }
-        }
-      }
-      const qs = params.toString();
-      try {
-        return (await this._request("GET", `one${qs ? `?${qs}` : ""}`)) as DataOf<T>;
-      } catch (e) {
-        if (e instanceof ClientError && e.status === 404) return null;
-        throw e;
-      }
-    }
-    // Single PK
+  // ── GET /query ($groupBy) ──────────────────────────────────────────────────
+
+  /**
+   * `GET /query` with `$groupBy` — aggregate query with typed dimension/measure fields.
+   */
+  async aggregate<Q extends AggregateQuery<Own<T>>>(
+    query: Q,
+  ): Promise<
+    Q["controls"]["$select"] extends readonly (string | { $fn: string; $field: string })[]
+      ? AggregateResult<Own<T>, Q["controls"]["$select"]>[]
+      : Record<string, unknown>[]
+  > {
+    return this._get("query", query as unknown as Uniquery) as Promise<any>;
+  }
+
+  // ── GET /pages ─────────────────────────────────────────────────────────────
+
+  /**
+   * `GET /pages` — paginated query with typed filter and relations.
+   */
+  async pages(query?: Uniquery<Own<T>, Nav<T>>, page = 1, size = 10): Promise<PageResult<Data<T>>> {
+    return this._get("pages", {
+      ...query,
+      controls: { ...query?.controls, $page: page, $size: size },
+    } as Uniquery) as Promise<PageResult<Data<T>>>;
+  }
+
+  // ── GET /one/:id ───────────────────────────────────────────────────────────
+
+  /**
+   * `GET /one/:id` or `GET /one?k1=v1&k2=v2` — single record by primary key.
+   *
+   * Returns `null` on 404.
+   */
+  async one(
+    id: Id<T>,
+    query?: { controls?: UniqueryControls<Own<T>, Nav<T>> },
+  ): Promise<Data<T> | null> {
     const controlStr = query?.controls
       ? buildUrl({ controls: query.controls as UniqueryControls })
       : "";
-    try {
-      return (await this._request(
-        "GET",
-        `one/${encodeURIComponent(String(id))}${controlStr ? `?${controlStr}` : ""}`,
-      )) as DataOf<T>;
-    } catch (e) {
-      if (e instanceof ClientError && e.status === 404) return null;
-      throw e;
+
+    if (id !== null && typeof id === "object") {
+      const params = this._idToParams(id as Record<string, unknown>);
+      if (controlStr) {
+        for (const [k, v] of new URLSearchParams(controlStr)) {
+          params.set(k, v);
+        }
+      }
+      const qs = params.toString();
+      return this._getOrNull(`one${qs ? `?${qs}` : ""}`);
     }
+
+    return this._getOrNull(
+      `one/${encodeURIComponent(String(id))}${controlStr ? `?${controlStr}` : ""}`,
+    );
   }
 
-  async count(query?: Uniquery<OwnOf<T>, NavOf<T>>): Promise<number> {
-    const controls = { ...query?.controls, $count: true };
-    return this._get("query", { ...query, controls }) as Promise<number>;
-  }
+  // ── POST / ─────────────────────────────────────────────────────────────────
 
-  async findManyWithCount(
-    query: Uniquery<OwnOf<T>, NavOf<T>>,
-  ): Promise<{ data: DataOf<T>[]; count: number }> {
-    const result = await this.readPage(query);
-    return { data: result.data, count: result.count };
-  }
-
-  async readPage(
-    query?: Uniquery<OwnOf<T>, NavOf<T>>,
-    page = 1,
-    size = 10,
-  ): Promise<PagesResponse<DataOf<T>>> {
-    const controls = query?.controls ?? {};
-    // Extract $limit/$skip and convert to $page/$size if present
-    const { $limit, $skip, ...rest } = controls as Record<string, unknown>;
-    const effectivePage =
-      $skip != null && $limit ? Math.floor(Number($skip) / Number($limit)) + 1 : page;
-    const effectiveSize = $limit != null ? Number($limit) : size;
-    return this._get("pages", {
-      ...query,
-      controls: { ...rest, $page: effectivePage, $size: effectiveSize } as UniqueryControls,
-    }) as Promise<PagesResponse<DataOf<T>>>;
-  }
-
-  async pages(query?: Uniquery<OwnOf<T>, NavOf<T>>): Promise<PagesResponse<DataOf<T>>> {
-    return this._get("pages", query) as Promise<PagesResponse<DataOf<T>>>;
-  }
-
-  // ── Search ────────────────────────────────────────────────────────────────
-
-  async search(
-    text: string,
-    query?: Uniquery<OwnOf<T>, NavOf<T>>,
-    indexName?: string,
-  ): Promise<DataOf<T>[]> {
-    const controls: Record<string, unknown> = { ...query?.controls, $search: text };
-    if (indexName) controls.$index = indexName;
-    return this._get("query", { ...query, controls } as Uniquery) as Promise<DataOf<T>[]>;
-  }
-
-  // ── Aggregate ─────────────────────────────────────────────────────────────
-
-  async aggregate(query: AggregateQuery): Promise<Record<string, unknown>[]> {
-    return this._get("query", query as unknown as Uniquery) as Promise<Record<string, unknown>[]>;
-  }
-
-  // ── Write Methods ─────────────────────────────────────────────────────────
-
-  async insertOne(data: Partial<DataOf<T>>): Promise<InsertResult> {
+  /**
+   * `POST /` — insert one record.
+   */
+  async insert(data: Partial<Data<T>>): Promise<TDbInsertResult>;
+  /**
+   * `POST /` — insert many records.
+   */
+  async insert(data: Partial<Data<T>>[]): Promise<TDbInsertManyResult>;
+  async insert(data: Partial<Data<T>> | Partial<Data<T>>[]): Promise<unknown> {
     await this._validateData(data, "insert");
-    return this._request("POST", "", data) as Promise<InsertResult>;
+    return this._request("POST", "", data);
   }
 
-  async insertMany(data: Partial<DataOf<T>>[]): Promise<InsertManyResult> {
-    await this._validateData(data, "insert");
-    return this._request("POST", "", data) as Promise<InsertManyResult>;
-  }
+  // ── PATCH / ────────────────────────────────────────────────────────────────
 
-  async updateOne(data: Partial<DataOf<T>>): Promise<UpdateResult> {
+  /**
+   * `PATCH /` — partial update one or many records by primary key.
+   */
+  async update(data: Partial<Data<T>> | Partial<Data<T>>[]): Promise<TDbUpdateResult> {
     await this._validateData(data, "patch");
-    return this._request("PATCH", "", data) as Promise<UpdateResult>;
+    return this._request("PATCH", "", data) as Promise<TDbUpdateResult>;
   }
 
-  async bulkUpdate(data: Partial<DataOf<T>>[]): Promise<UpdateResult> {
-    await this._validateData(data, "patch");
-    return this._request("PATCH", "", data) as Promise<UpdateResult>;
-  }
+  // ── PUT / ──────────────────────────────────────────────────────────────────
 
-  async replaceOne(data: DataOf<T>): Promise<UpdateResult> {
+  /**
+   * `PUT /` — full replace one or many records by primary key.
+   */
+  async replace(data: Data<T> | Data<T>[]): Promise<TDbUpdateResult> {
     await this._validateData(data, "replace");
-    return this._request("PUT", "", data) as Promise<UpdateResult>;
+    return this._request("PUT", "", data) as Promise<TDbUpdateResult>;
   }
 
-  async bulkReplace(data: DataOf<T>[]): Promise<UpdateResult> {
-    await this._validateData(data, "replace");
-    return this._request("PUT", "", data) as Promise<UpdateResult>;
-  }
+  // ── DELETE /:id ────────────────────────────────────────────────────────────
 
-  async deleteOne(id: IdOf<T>): Promise<DeleteResult> {
+  /**
+   * `DELETE /:id` or `DELETE /?k1=v1&k2=v2` — remove a record by primary key.
+   */
+  async remove(id: Id<T>): Promise<TDbDeleteResult> {
     if (id !== null && typeof id === "object") {
       return this._request(
         "DELETE",
         `?${this._idToParams(id as Record<string, unknown>).toString()}`,
-      ) as Promise<DeleteResult>;
+      ) as Promise<TDbDeleteResult>;
     }
-    return this._request("DELETE", encodeURIComponent(String(id))) as Promise<DeleteResult>;
+    return this._request("DELETE", encodeURIComponent(String(id))) as Promise<TDbDeleteResult>;
   }
 
-  // ── Meta ──────────────────────────────────────────────────────────────────
+  // ── GET /meta ──────────────────────────────────────────────────────────────
 
+  /**
+   * `GET /meta` — table/view metadata (cached after first call).
+   */
   async meta(): Promise<MetaResponse> {
     if (!this._metaPromise) {
-      this._metaPromise = this._request("GET", "meta") as Promise<MetaResponse>;
+      this._metaPromise = (this._request("GET", "meta") as Promise<MetaResponse>).catch((err) => {
+        this._metaPromise = undefined;
+        throw err;
+      });
     }
     return this._metaPromise;
   }
 
-  // ── Validation ──────────────────────────────────────────────────────────
+  // ── Validation (client utility) ────────────────────────────────────────────
 
   /**
    * Returns a lazily-initialized {@link ClientValidator} backed by the `/meta` type.
@@ -217,12 +213,8 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
 
   private _getValidator(): Promise<ClientValidator> {
     if (!this._validatorPromise) {
-      // Dynamic import keeps @atscript/db and @atscript/typescript optional.
-      // Clear cache on failure so transient errors don't permanently disable validation.
-      this._validatorPromise = this.meta()
-        .then((m) =>
-          import("./validator").then(({ createClientValidator }) => createClientValidator(m)),
-        )
+      this._validatorPromise = Promise.all([this.meta(), import("./validator")])
+        .then(([m, { createClientValidator }]) => createClientValidator(m))
         .catch((err) => {
           this._validatorPromise = undefined;
           throw err;
@@ -231,7 +223,7 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
     return this._validatorPromise;
   }
 
-  // ── Internal ──────────────────────────────────────────────────────────────
+  // ── Internal ───────────────────────────────────────────────────────────────
 
   private _idToParams(id: Record<string, unknown>): URLSearchParams {
     const params = new URLSearchParams();
@@ -239,6 +231,15 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
       params.set(k, String(v));
     }
     return params;
+  }
+
+  private async _getOrNull(endpoint: string): Promise<Data<T> | null> {
+    try {
+      return (await this._request("GET", endpoint)) as Data<T>;
+    } catch (e) {
+      if (e instanceof ClientError && e.status === 404) return null;
+      throw e;
+    }
   }
 
   private async _get(endpoint: string, query?: Uniquery): Promise<unknown> {
@@ -254,7 +255,11 @@ export class Client<T = Record<string, unknown>> implements DbInterface<T> {
     return this._headers;
   }
 
-  private async _request(method: string, endpoint: string, body?: unknown): Promise<unknown> {
+  private async _request(
+    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+    endpoint: string,
+    body?: unknown,
+  ): Promise<unknown> {
     const sep = endpoint && !endpoint.startsWith("?") ? "/" : "";
     const url = `${this._baseUrl}${this._path}${sep}${endpoint}`;
 

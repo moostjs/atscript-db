@@ -51,7 +51,7 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.42",
+    "@atscript/typescript": "^0.1.43",
     "@types/pg": "^8.11.0",
     "@uniqu/core": "^0.1.2",
     "pg": "^8.13.0",
@@ -61,7 +61,7 @@
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
     "@atscript/db-sql-tools": "workspace:^",
-    "@atscript/typescript": "^0.1.42",
+    "@atscript/typescript": "^0.1.43",
     "@uniqu/core": "^0.1.2",
     "pg": ">=8.0.0"
   },

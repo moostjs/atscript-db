@@ -25,7 +25,6 @@ import { DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type {
-  PageResult,
   TDbDefaultValue,
   TDbFieldMeta,
   TDbForeignKey,
@@ -459,37 +458,6 @@ export class AtscriptDbReadable<
     return {
       data: rows as Array<DbResponse<DataType, NavType, Q>>,
       count: result.count,
-    };
-  }
-
-  /**
-   * Returns a page of records with pagination metadata.
-   *
-   * Converts page/size to skip/limit internally, delegates to findManyWithCount,
-   * and wraps the result with pagination info.
-   */
-  public async readPage<Q extends Uniquery<OwnProps, NavType>>(
-    query: Q,
-    page = 1,
-    size = 10,
-  ): Promise<PageResult<Array<DbResponse<DataType, NavType, Q>>>> {
-    page = Math.max(page, 1);
-    size = Math.max(size, 1);
-    const skip = (page - 1) * size;
-
-    const paginatedQuery = {
-      ...query,
-      controls: { ...query.controls, $skip: skip, $limit: size },
-    } as Q;
-
-    const result = await this.findManyWithCount(paginatedQuery);
-
-    return {
-      data: result.data,
-      count: result.count,
-      page,
-      itemsPerPage: size,
-      pages: Math.ceil(result.count / size),
     };
   }
 

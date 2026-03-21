@@ -102,7 +102,6 @@ export type {
   AggregateControls,
   AggregateQuery,
   AggregateResult,
-  PageResult,
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";

@@ -75,13 +75,13 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.42",
+    "@atscript/typescript": "^0.1.43",
     "@uniqu/core": "^0.1.2",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.42",
+    "@atscript/typescript": "^0.1.43",
     "@uniqu/core": "^0.1.2"
   }
 }

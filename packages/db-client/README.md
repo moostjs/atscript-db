@@ -5,7 +5,7 @@
 <h1 align="center">@atscript/db-client</h1>
 
 <p align="center">
-  Browser-compatible HTTP client for <code>@atscript/moost-db</code> REST endpoints.
+  HTTP client for <code>@atscript/moost-db</code> REST endpoints.
 </p>
 
 <p align="center">
@@ -14,7 +14,9 @@
 
 ---
 
-Type-safe HTTP client that mirrors the server-side `AtscriptDbTable` API over REST. Works in browsers, Node.js, and any runtime with `fetch`. Supports the full query surface — filters, sorting, pagination, relation loading, text search, and aggregation.
+Type-safe HTTP client that mirrors moost-db controller endpoints. Works in browsers, Node.js, and any runtime with `fetch`. Each method maps 1:1 to a controller endpoint — filters, sorting, pagination, relation loading, text search, and aggregation are all supported through typed query controls.
+
+In SSR environments, Moost's `fetch` automatically routes local requests to handlers in-process, so the same `Client` instance works on both server and browser.
 
 ## Installation
 
@@ -32,27 +34,39 @@ const users = new Client<typeof User>("/api/users", {
   baseUrl: "https://api.example.com",
 });
 
-// Query
-const active = await users.findMany({ filter: { status: "active" } });
-const user = await users.findById("abc-123");
+// Query                            → GET /query
+const active = await users.query({ filter: { status: "active" } });
 
-// Write
-const { insertedId } = await users.insertOne({ name: "Alice" });
-await users.updateOne({ id: insertedId, role: "admin" });
-await users.deleteOne(insertedId);
+// Get one                          → GET /one/:id
+const user = await users.one("abc-123");
 
-// Metadata
+// Insert                           → POST /
+const { insertedId } = await users.insert({ name: "Alice" });
+
+// Update                           → PATCH /
+await users.update({ id: insertedId, role: "admin" });
+
+// Remove                           → DELETE /:id
+await users.remove(insertedId);
+
+// Count                            → GET /query ($count)
+const total = await users.count();
+
+// Paginate                         → GET /pages
+const page = await users.pages({ filter: { active: true } }, 1, 20);
+
+// Metadata                         → GET /meta
 const meta = await users.meta();
 ```
 
 ## Features
 
-- **Full CRUD** — `findMany`, `findOne`, `findById`, `count`, `pages`, `insertOne`, `insertMany`, `updateOne`, `bulkUpdate`, `replaceOne`, `bulkReplace`, `deleteOne`
-- **URL query syntax** — filtering, sorting, pagination, field selection, relation loading via `$with`
-- **Search** — full-text (`search()`) and vector search via query controls
-- **Aggregation** — `$groupBy` with aggregate functions
+- **Typed queries** — filter keys, sort fields, `$with` relation names, and primary keys are type-checked against the Atscript model
+- **Full CRUD** — `query`, `count`, `pages`, `one`, `insert`, `update`, `replace`, `remove`
+- **Aggregation** — typed `$groupBy` dimensions and measures with inferred result types
+- **Search** — full-text and vector search via query controls
+- **Client-side validation** — validates writes against the Atscript schema before sending
 - **Error handling** — `ClientError` with structured validation errors
-- **SSR isomorphism** — `DbInterface<T>` shared between server `AtscriptDbTable` and client `Client`
 - **Configurable** — custom `fetch`, static or async headers, base URL
 
 ## Documentation

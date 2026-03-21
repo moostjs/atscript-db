@@ -49,17 +49,17 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.42",
-    "@moostjs/event-http": "^0.6.2",
+    "@atscript/typescript": "^0.1.43",
+    "@moostjs/event-http": "^0.6.3",
     "@uniqu/core": "^0.1.2",
-    "moost": "^0.6.2",
+    "moost": "^0.6.3",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "^0.1.42",
-    "@moostjs/event-http": "^0.6.2",
+    "@atscript/typescript": "^0.1.43",
+    "@moostjs/event-http": "^0.6.3",
     "@uniqu/core": "^0.1.2",
-    "moost": "^0.6.2"
+    "moost": "^0.6.3"
   }
 }

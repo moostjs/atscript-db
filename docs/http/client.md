@@ -4,7 +4,9 @@ outline: deep
 
 # HTTP Client
 
-`@atscript/db-client` is a browser-compatible HTTP client that mirrors the server-side `AtscriptDbTable` API over REST. It works in browsers, Node.js, and any runtime with `fetch`. Under the hood it translates method calls into the [URL query syntax](./query-syntax) understood by `@atscript/moost-db` controllers.
+`@atscript/db-client` is an HTTP client that maps 1:1 to moost-db controller endpoints. Each method corresponds to a specific HTTP request — `query()` is `GET /query`, `insert()` is `POST /`, and so on. Works in browsers, Node.js, and any runtime with `fetch`.
+
+In SSR environments, Moost's `fetch` automatically routes local requests to handlers in-process, so the same `Client` instance works on both server and browser with zero configuration.
 
 ## Installation
 
@@ -24,6 +26,14 @@ const users = new Client("/api/users");
 import type { User } from "./models/user.as";
 const users = new Client<typeof User>("/api/users");
 ```
+
+When you provide `<typeof User>`, all methods become fully typed:
+
+- **Filters** check field names against the model's own properties
+- **`$sort`** keys are constrained to valid field names
+- **`$with`** entries are constrained to declared navigation properties
+- **Primary key** type flows through `one()` and `remove()`
+- **Insert/update data** is checked against the model's field types
 
 ### Options
 
@@ -55,116 +65,42 @@ const users = new Client<typeof User>("/api/users", {
 
 All query methods accept a [Uniquery](./query-syntax) object with `filter` and `controls`.
 
-### findMany {#findmany}
+### query {#query}
 
-Returns all matching records. Maps to [`GET /query`](./crud#get-query).
+`GET /query` — returns all matching records. See [CRUD — GET /query](./crud#get-query).
 
 ```typescript
-const active = await users.findMany({
+const active = await users.query({
   filter: { status: "active" },
   controls: { $sort: { createdAt: -1 }, $limit: 50 },
 });
 ```
 
-### findOne {#findone}
-
-Returns the first matching record or `null`. Internally sets `$limit: 1`.
+The `$search`, `$vector`, `$index`, and `$threshold` controls are also passed through `query()`:
 
 ```typescript
-const user = await users.findOne({ filter: { email: "alice@example.com" } });
-```
+// Text search
+const results = await users.query({
+  controls: { $search: "alice" },
+});
 
-### findById {#findbyid}
-
-Fetch by primary key. Returns `null` on 404. Maps to [`GET /one/:id`](./crud#get-one).
-
-```typescript
-// Scalar PK
-const user = await users.findById("abc-123");
-
-// Composite PK
-const row = await users.findById({ tenantId: "t1", userId: "u1" });
-```
-
-Supports `controls` for projection and relation loading:
-
-```typescript
-const user = await users.findById("abc", {
-  controls: { $select: ["id", "name"], $with: ["posts"] },
+// Vector search
+const similar = await posts.query({
+  controls: { $vector: "embedding", $search: "machine learning" },
 });
 ```
 
 ### count {#count}
 
-Returns the number of matching records. Uses `$count` control.
+`GET /query` with `$count: true` — returns the number of matching records.
 
 ```typescript
 const total = await users.count({ filter: { role: "admin" } });
 ```
 
-### pages {#pages}
+### aggregate {#aggregate}
 
-Page-based pagination. Maps to [`GET /pages`](./crud#get-pages).
-
-```typescript
-const page = await users.pages({
-  filter: { active: true },
-  controls: { $page: 2, $size: 25 },
-});
-// → { data: [...], page: 2, itemsPerPage: 25, pages: 10, count: 243 }
-```
-
-### findManyWithCount {#findmanywithcount}
-
-Offset-based pagination that also returns the total count. Uses the pages endpoint internally.
-
-```typescript
-const { data, count } = await users.findManyWithCount({
-  controls: { $limit: 10, $skip: 20 },
-});
-```
-
-## Relation Loading
-
-Load relations using `$with` in controls. See [Relations & Search](./advanced#with) for full syntax.
-
-```typescript
-const orders = await client.findMany({
-  controls: { $with: ["customer", "items"] },
-});
-```
-
-## Search
-
-### Text Search {#text-search}
-
-Full-text search across configured indexes. Maps to `$search` control.
-
-```typescript
-const results = await users.search("alice");
-
-// With specific index
-const results = await posts.search("typescript guide", undefined, "title_idx");
-
-// Combined with filters
-const results = await posts.search("guide", { filter: { published: true } });
-```
-
-### Vector Search
-
-Vector search is available through the regular query controls:
-
-```typescript
-const similar = await posts.findMany({
-  controls: { $vector: "content_embedding", $search: "machine learning concepts" },
-});
-```
-
-See [Relations & Search — Vector Search](./advanced#vector-search) for details.
-
-## Aggregation {#aggregation}
-
-Maps to `$groupBy` and aggregate select functions. See [Relations & Search — Aggregation](./advanced#aggregation).
+`GET /query` with `$groupBy` — typed aggregation. See [Relations & Search — Aggregation](./advanced#groupby).
 
 ```typescript
 const stats = await orders.aggregate({
@@ -179,75 +115,118 @@ const stats = await orders.aggregate({
 });
 ```
 
+When `$groupBy` fields and `$select` are typed, the result type is inferred — `stats[0].total` is `number`, `stats[0].status` preserves the original field type.
+
+### pages {#pages}
+
+`GET /pages` — page-based pagination. See [CRUD — GET /pages](./crud#get-pages).
+
+```typescript
+const page = await users.pages(
+  { filter: { active: true } },
+  2, // page (default: 1)
+  25, // size (default: 10)
+);
+// → { data: [...], page: 2, itemsPerPage: 25, pages: 10, count: 243 }
+```
+
+### one {#one}
+
+`GET /one/:id` — fetch by primary key. Returns `null` on 404. See [CRUD — GET /one](./crud#get-one).
+
+```typescript
+// Scalar PK
+const user = await users.one("abc-123");
+
+// Composite PK
+const row = await users.one({ tenantId: "t1", userId: "u1" });
+```
+
+Supports `controls` for projection and relation loading:
+
+```typescript
+const user = await users.one("abc", {
+  controls: { $select: ["id", "name"], $with: ["posts"] },
+});
+```
+
+## Relation Loading
+
+Load relations using `$with` in controls. See [Relations & Search](./advanced#with) for full syntax.
+
+```typescript
+const orders = await client.query({
+  controls: { $with: ["customer", "items"] },
+});
+```
+
 ## Write Operations {#writes}
 
 Write methods are available when the server uses `AsDbController` (not `AsDbReadableController`).
 
-### Insert {#insert}
+### insert {#insert}
+
+`POST /` — insert one or many records. See [CRUD — POST /](./crud#post-insert).
 
 ```typescript
 // Single insert → { insertedId }
-const { insertedId } = await users.insertOne({
+const { insertedId } = await users.insert({
   name: "Alice",
   email: "alice@example.com",
 });
 
 // Batch insert → { insertedCount, insertedIds }
-const { insertedCount } = await users.insertMany([{ name: "Alice" }, { name: "Bob" }]);
+const { insertedCount } = await users.insert([{ name: "Alice" }, { name: "Bob" }]);
 ```
 
-Maps to [`POST /`](./crud#post-insert).
+### update {#update}
 
-### Update {#update}
-
-Partial update — include the primary key and changed fields only.
+`PATCH /` — partial update. Include the primary key and changed fields only. See [CRUD — PATCH /](./crud#patch-update).
 
 ```typescript
-// Single update → { matchedCount, modifiedCount }
-const { modifiedCount } = await users.updateOne({ id: "abc", name: "Updated" });
+// Single or bulk → { matchedCount, modifiedCount }
+await users.update({ id: "abc", name: "Updated" });
 
-// Bulk update
-await users.bulkUpdate([
+// Bulk
+await users.update([
   { id: "a", status: "active" },
   { id: "b", status: "active" },
 ]);
 ```
 
-Maps to [`PATCH /`](./crud#patch-update). Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$dec`, `$mul`.
+Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$dec`, `$mul`.
 
-### Replace {#replace}
+### replace {#replace}
 
-Full document replace — all required fields must be present.
+`PUT /` — full document replace. All required fields must be present. See [CRUD — PUT /](./crud#put-replace).
 
 ```typescript
-await users.replaceOne({
+await users.replace({
   id: "abc",
   name: "Alice",
   email: "new@example.com",
   role: "admin",
 });
 
-// Bulk replace
-await users.bulkReplace([...]);
+// Bulk
+await users.replace([...]);
 ```
 
-Maps to [`PUT /`](./crud#put-replace).
+### remove {#remove}
 
-### Delete {#delete}
+`DELETE /:id` — remove by primary key. See [CRUD — DELETE](./crud#delete).
 
 ```typescript
 // Scalar PK
-const { deletedCount } = await users.deleteOne("abc");
+const { deletedCount } = await users.remove("abc");
 
 // Composite PK
-await users.deleteOne({ tenantId: "t1", userId: "u1" });
+await users.remove({ tenantId: "t1", userId: "u1" });
 ```
-
-Maps to [`DELETE /:id`](./crud#delete).
 
 ## Metadata {#meta}
 
-Fetch table/view metadata. The result is cached after the first call.
+`GET /meta` — fetch table/view metadata. The result is cached after the first call.
 
 ```typescript
 const meta = await users.meta();
@@ -290,7 +269,7 @@ Non-2xx responses throw a `ClientError` with the HTTP status and structured erro
 import { Client, ClientError } from "@atscript/db-client";
 
 try {
-  await users.insertOne({ name: "" });
+  await users.insert({ name: "" });
 } catch (e) {
   if (e instanceof ClientError) {
     e.status; // 400
@@ -301,36 +280,50 @@ try {
 }
 ```
 
-`findById` is the exception — it returns `null` on 404 instead of throwing.
+`one()` is the exception — it returns `null` on 404 instead of throwing.
 
-## SSR / Isomorphic Usage {#ssr}
+## Client-Side Validation {#validation}
 
-The `DbInterface<T>` type is shared between the server-side `AtscriptDbTable` and the client. This enables isomorphic code that works on both sides:
+Write methods (`insert`, `update`, `replace`) automatically validate data client-side against the Atscript type fetched from `/meta`. This catches type errors before they reach the server.
 
 ```typescript
-import type { DbInterface } from "@atscript/db-client";
-import type { User } from "./models/user.as";
+// Throws ClientValidationError before sending the request
+await users.insert({ name: 123 }); // name must be string
+```
 
-async function getActiveUsers(db: DbInterface<typeof User>) {
-  return db.findMany({ filter: { active: true } });
-}
+Access the validator directly for form generation or custom validation:
 
-// Server — pass AtscriptDbTable directly
-const users = getActiveUsers(usersTable);
-
-// Browser — pass Client instance
-const users = getActiveUsers(new Client<typeof User>("/api/users"));
+```typescript
+const validator = await users.getValidator();
+validator.flatMap; // Map of field paths → annotated types
+validator.navFields; // Set of navigation field names
+validator.validate(data, "insert"); // throws on failure
 ```
 
 ## Re-exported Types
 
-The package re-exports query types from `@uniqu/core` for convenience, so consumers don't need a separate dependency:
+The package re-exports query types from `@uniqu/core` for convenience:
 
 - `Uniquery`, `UniqueryControls` — query and control types
 - `FilterExpr` — filter expression type
-- `AggregateQuery` — aggregation query type
+- `AggregateQuery`, `AggregateResult` — aggregation types
 - `TypedWithRelation` — relation loading type
 
 ```typescript
 import type { FilterExpr, Uniquery } from "@atscript/db-client";
 ```
+
+## Method ↔ Endpoint Reference
+
+| Method        | HTTP   | Endpoint                 | Returns                                    |
+| ------------- | ------ | ------------------------ | ------------------------------------------ |
+| `query()`     | GET    | `/query`                 | `DataOf<T>[]`                              |
+| `count()`     | GET    | `/query` (`$count`)      | `number`                                   |
+| `aggregate()` | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                        |
+| `pages()`     | GET    | `/pages`                 | `PageResult<DataOf<T>>`                    |
+| `one()`       | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                        |
+| `insert()`    | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult` |
+| `update()`    | PATCH  | `/`                      | `TDbUpdateResult`                          |
+| `replace()`   | PUT    | `/`                      | `TDbUpdateResult`                          |
+| `remove()`    | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                          |
+| `meta()`      | GET    | `/meta`                  | `MetaResponse`                             |

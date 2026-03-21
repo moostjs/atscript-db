@@ -70,7 +70,7 @@ describe("Client", () => {
 
   it("strips trailing slash from path", async () => {
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findMany();
+    await client.query();
     expect(fetchFn).toHaveBeenCalledWith("/api/users/query", expect.anything());
   });
 
@@ -79,7 +79,7 @@ describe("Client", () => {
       fetch: fetchFn,
       baseUrl: "https://example.com",
     });
-    await client.findMany();
+    await client.query();
     expect(fetchFn).toHaveBeenCalledWith("https://example.com/api/users/query", expect.anything());
   });
 
@@ -90,7 +90,7 @@ describe("Client", () => {
       fetch: fetchFn,
       headers: { Authorization: "Bearer token123" },
     });
-    await client.findMany();
+    await client.query();
     const init = fetchFn.mock.calls[0][1] as RequestInit;
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer token123");
   });
@@ -100,17 +100,17 @@ describe("Client", () => {
       fetch: fetchFn,
       headers: async () => ({ "X-Custom": "dynamic" }),
     });
-    await client.findMany();
+    await client.query();
     const init = fetchFn.mock.calls[0][1] as RequestInit;
     expect((init.headers as Record<string, string>)["X-Custom"]).toBe("dynamic");
   });
 
-  // ── findMany ───────────────────────────────────────────────────────────
+  // ── query (GET /query) ─────────────────────────────────────────────────
 
-  it("findMany sends GET /query", async () => {
+  it("query sends GET /query", async () => {
     fetchFn = mockFetch([{ id: 1, name: "Alice" }]);
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findMany();
+    const result = await client.query();
     expect(fetchFn).toHaveBeenCalledWith(
       "/api/users/query",
       expect.objectContaining({ method: "GET" }),
@@ -118,18 +118,18 @@ describe("Client", () => {
     expect(result).toEqual([{ id: 1, name: "Alice" }]);
   });
 
-  it("findMany with filter builds query string", async () => {
+  it("query with filter builds query string", async () => {
     fetchFn = mockFetch([]);
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findMany({ filter: { status: "active" } });
+    await client.query({ filter: { status: "active" } });
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("status=active");
   });
 
-  it("findMany with controls", async () => {
+  it("query with controls", async () => {
     fetchFn = mockFetch([]);
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findMany({
+    await client.query({
       controls: { $limit: 10, $skip: 20, $sort: { name: 1 } },
     });
     const url = fetchFn.mock.calls[0][0] as string;
@@ -138,54 +138,18 @@ describe("Client", () => {
     expect(url).toContain("$skip=20");
   });
 
-  // ── findOne ────────────────────────────────────────────────────────────
-
-  it("findOne sends GET /query with $limit=1", async () => {
-    fetchFn = mockFetch([{ id: 1 }]);
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findOne({ filter: { id: 1 } });
+  it("query with $search passes control through", async () => {
+    fetchFn = mockFetch([{ id: 1, title: "matching" }]);
+    const client = new Client("/api/posts", { fetch: fetchFn });
+    await client.query({
+      controls: { $search: "hello", $index: "title_idx" } as any,
+    });
     const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("$limit=1");
-    expect(result).toEqual({ id: 1 });
+    expect(url).toContain("$search=hello");
+    expect(url).toContain("$index=title_idx");
   });
 
-  it("findOne returns null when empty", async () => {
-    fetchFn = mockFetch([]);
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findOne({ filter: { id: 999 } });
-    expect(result).toBeNull();
-  });
-
-  // ── findById ───────────────────────────────────────────────────────────
-
-  it("findById with scalar id sends GET /one/:id", async () => {
-    fetchFn = mockFetch({ id: "abc", name: "Alice" });
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findById("abc" as any);
-    expect(fetchFn).toHaveBeenCalledWith(
-      "/api/users/one/abc",
-      expect.objectContaining({ method: "GET" }),
-    );
-    expect(result).toEqual({ id: "abc", name: "Alice" });
-  });
-
-  it("findById with composite key sends GET /one?field1=val1&field2=val2", async () => {
-    fetchFn = mockFetch({ tenantId: "t1", userId: "u1" });
-    const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findById({ tenantId: "t1", userId: "u1" } as any);
-    const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("tenantId=t1");
-    expect(url).toContain("userId=u1");
-  });
-
-  it("findById returns null on 404", async () => {
-    fetchFn = mockFetch({ message: "Not found", statusCode: 404 }, 404);
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findById("nonexistent" as any);
-    expect(result).toBeNull();
-  });
-
-  // ── count ──────────────────────────────────────────────────────────────
+  // ── count (GET /query with $count) ─────────────────────────────────────
 
   it("count sends $count control", async () => {
     fetchFn = mockFetch(42);
@@ -193,70 +157,11 @@ describe("Client", () => {
     const result = await client.count({ filter: { active: true } });
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("$count");
+    expect(url).toContain("active=true");
     expect(result).toBe(42);
   });
 
-  // ── findManyWithCount ──────────────────────────────────────────────────
-
-  it("findManyWithCount uses pages endpoint", async () => {
-    fetchFn = mockFetch({
-      data: [{ id: 1 }],
-      page: 1,
-      itemsPerPage: 10,
-      pages: 5,
-      count: 42,
-    });
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.findManyWithCount({
-      controls: { $limit: 10, $skip: 0 },
-    });
-    const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("pages");
-    expect(result.data).toEqual([{ id: 1 }]);
-    expect(result.count).toBe(42);
-  });
-
-  // ── pages ──────────────────────────────────────────────────────────────
-
-  it("pages sends GET /pages", async () => {
-    const response = {
-      data: [{ id: 1 }],
-      page: 2,
-      itemsPerPage: 5,
-      pages: 10,
-      count: 50,
-    };
-    fetchFn = mockFetch(response);
-    const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.pages({
-      controls: { $page: 2, $size: 5 } as any,
-    });
-    const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("pages");
-    expect(result.page).toBe(2);
-    expect(result.count).toBe(50);
-  });
-
-  // ── search ─────────────────────────────────────────────────────────────
-
-  it("search sends $search control", async () => {
-    fetchFn = mockFetch([{ id: 1, title: "matching" }]);
-    const client = new Client("/api/posts", { fetch: fetchFn });
-    await client.search("hello");
-    const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("$search=hello");
-  });
-
-  it("search with indexName sends $index", async () => {
-    fetchFn = mockFetch([]);
-    const client = new Client("/api/posts", { fetch: fetchFn });
-    await client.search("hello", undefined, "title_idx");
-    const url = fetchFn.mock.calls[0][0] as string;
-    expect(url).toContain("$search=hello");
-    expect(url).toContain("$index=title_idx");
-  });
-
-  // ── aggregate ──────────────────────────────────────────────────────────
+  // ── aggregate (GET /query with $groupBy) ───────────────────────────────
 
   it("aggregate sends groupBy query", async () => {
     fetchFn = mockFetch([{ status: "active", count_star: 5 }]);
@@ -266,18 +171,86 @@ describe("Client", () => {
         $groupBy: ["status"],
         $select: ["status", { $fn: "count", $field: "*", $as: "total" }],
       },
-    });
+    } as any);
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("$groupBy=status");
     expect(result).toEqual([{ status: "active", count_star: 5 }]);
   });
 
-  // ── insertOne ──────────────────────────────────────────────────────────
+  // ── pages (GET /pages) ─────────────────────────────────────────────────
 
-  it("insertOne sends POST with JSON body", async () => {
+  it("pages sends GET /pages with $page and $size", async () => {
+    const response = {
+      data: [{ id: 1 }],
+      page: 2,
+      itemsPerPage: 5,
+      pages: 10,
+      count: 50,
+    };
+    fetchFn = mockFetch(response);
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const result = await client.pages(undefined, 2, 5);
+    const url = fetchFn.mock.calls[0][0] as string;
+    expect(url).toContain("pages");
+    expect(url).toContain("$page=2");
+    expect(url).toContain("$size=5");
+    expect(result.page).toBe(2);
+    expect(result.count).toBe(50);
+  });
+
+  it("pages defaults to page 1, size 10", async () => {
+    fetchFn = mockFetch({ data: [], page: 1, itemsPerPage: 10, pages: 0, count: 0 });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    await client.pages();
+    const url = fetchFn.mock.calls[0][0] as string;
+    expect(url).toContain("$page=1");
+    expect(url).toContain("$size=10");
+  });
+
+  it("pages with filter", async () => {
+    fetchFn = mockFetch({ data: [], page: 1, itemsPerPage: 10, pages: 0, count: 0 });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    await client.pages({ filter: { active: true } });
+    const url = fetchFn.mock.calls[0][0] as string;
+    expect(url).toContain("active=true");
+    expect(url).toContain("$page=1");
+  });
+
+  // ── one (GET /one/:id) ─────────────────────────────────────────────────
+
+  it("one with scalar id sends GET /one/:id", async () => {
+    fetchFn = mockFetch({ id: "abc", name: "Alice" });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const result = await client.one("abc" as any);
+    expect(fetchFn).toHaveBeenCalledWith(
+      "/api/users/one/abc",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(result).toEqual({ id: "abc", name: "Alice" });
+  });
+
+  it("one with composite key sends GET /one?k1=v1&k2=v2", async () => {
+    fetchFn = mockFetch({ tenantId: "t1", userId: "u1" });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    await client.one({ tenantId: "t1", userId: "u1" } as any);
+    const url = fetchFn.mock.calls[0][0] as string;
+    expect(url).toContain("tenantId=t1");
+    expect(url).toContain("userId=u1");
+  });
+
+  it("one returns null on 404", async () => {
+    fetchFn = mockFetch({ message: "Not found", statusCode: 404 }, 404);
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const result = await client.one("nonexistent" as any);
+    expect(result).toBeNull();
+  });
+
+  // ── insert (POST /) ────────────────────────────────────────────────────
+
+  it("insert single sends POST with JSON body", async () => {
     fetchFn = mockFetch({ insertedId: "abc" });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.insertOne({ name: "Alice", status: "active" });
+    const result = await client.insert({ name: "Alice", status: "active" });
     const writeCalls = fetchFn.mock.calls.filter(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
@@ -290,12 +263,10 @@ describe("Client", () => {
     expect(result.insertedId).toBe("abc");
   });
 
-  // ── insertMany ─────────────────────────────────────────────────────────
-
-  it("insertMany sends POST with array body", async () => {
+  it("insert array sends POST with array body", async () => {
     fetchFn = mockFetch({ insertedCount: 2, insertedIds: ["a", "b"] });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.insertMany([
+    const result = await client.insert([
       { name: "A", status: "active" },
       { name: "B", status: "active" },
     ]);
@@ -309,12 +280,12 @@ describe("Client", () => {
     ]);
   });
 
-  // ── updateOne ──────────────────────────────────────────────────────────
+  // ── update (PATCH /) ───────────────────────────────────────────────────
 
-  it("updateOne sends PATCH with JSON body", async () => {
+  it("update single sends PATCH with JSON body", async () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.updateOne({ id: 1, name: "Updated" } as any);
+    const result = await client.update({ id: 1, name: "Updated" } as any);
     const writeCalls = fetchFn.mock.calls.filter(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
@@ -322,12 +293,10 @@ describe("Client", () => {
     expect(result.modifiedCount).toBe(1);
   });
 
-  // ── bulkUpdate ─────────────────────────────────────────────────────────
-
-  it("bulkUpdate sends PATCH with array body", async () => {
+  it("update array sends PATCH with array body", async () => {
     fetchFn = mockFetch({ matchedCount: 2, modifiedCount: 2 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.bulkUpdate([{ id: 1 }, { id: 2 }] as any);
+    await client.update([{ id: 1 }, { id: 2 }] as any);
     const writeCalls = fetchFn.mock.calls.filter(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
@@ -335,24 +304,24 @@ describe("Client", () => {
     expect(JSON.parse(writeCalls[0][1].body as string)).toHaveLength(2);
   });
 
-  // ── replaceOne ─────────────────────────────────────────────────────────
+  // ── replace (PUT /) ────────────────────────────────────────────────────
 
-  it("replaceOne sends PUT", async () => {
+  it("replace sends PUT", async () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.replaceOne({ id: 1, name: "Full", status: "active" } as any);
+    await client.replace({ id: 1, name: "Full", status: "active" } as any);
     const writeCalls = fetchFn.mock.calls.filter(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
     expect(writeCalls[0][1]).toEqual(expect.objectContaining({ method: "PUT" }));
   });
 
-  // ── deleteOne ──────────────────────────────────────────────────────────
+  // ── remove (DELETE /:id) ───────────────────────────────────────────────
 
-  it("deleteOne with scalar id sends DELETE /:id", async () => {
+  it("remove with scalar id sends DELETE /:id", async () => {
     fetchFn = mockFetch({ deletedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    const result = await client.deleteOne("abc" as any);
+    const result = await client.remove("abc" as any);
     expect(fetchFn).toHaveBeenCalledWith(
       "/api/users/abc",
       expect.objectContaining({ method: "DELETE" }),
@@ -360,16 +329,16 @@ describe("Client", () => {
     expect(result.deletedCount).toBe(1);
   });
 
-  it("deleteOne with composite key sends DELETE with query params", async () => {
+  it("remove with composite key sends DELETE with query params", async () => {
     fetchFn = mockFetch({ deletedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.deleteOne({ tenantId: "t1", userId: "u1" } as any);
+    await client.remove({ tenantId: "t1", userId: "u1" } as any);
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("tenantId=t1");
     expect(url).toContain("userId=u1");
   });
 
-  // ── meta ───────────────────────────────────────────────────────────────
+  // ── meta (GET /meta) ──────────────────────────────────────────────────
 
   it("meta sends GET /meta and caches result", async () => {
     fetchFn = mockFetch([]);
@@ -378,13 +347,12 @@ describe("Client", () => {
     const result1 = await client.meta();
     const result2 = await client.meta();
 
-    // Only one /meta call
     const metaCalls = fetchFn.mock.calls.filter((c: string[]) =>
       (c[0] as string).endsWith("/meta"),
     );
     expect(metaCalls).toHaveLength(1);
     expect(result1).toEqual(serializedMeta);
-    expect(result2).toBe(result1); // same reference — cached
+    expect(result2).toBe(result1);
   });
 
   // ── Error Handling ─────────────────────────────────────────────────────
@@ -400,7 +368,7 @@ describe("Client", () => {
     );
     const client = new Client("/api/users", { fetch: fetchFn });
 
-    await expect(client.findMany()).rejects.toThrow(ClientError);
+    await expect(client.query()).rejects.toThrow(ClientError);
   });
 
   it("throws ClientError with statusText on non-JSON error", async () => {
@@ -411,7 +379,7 @@ describe("Client", () => {
       json: () => Promise.reject(new Error("not json")),
     });
     const client = new Client("/api/users", { fetch: fn });
-    await expect(client.findMany()).rejects.toThrow("Bad Gateway");
+    await expect(client.query()).rejects.toThrow("Bad Gateway");
   });
 
   // ── URL encoding ───────────────────────────────────────────────────────
@@ -419,15 +387,15 @@ describe("Client", () => {
   it("encodes special characters in scalar id", async () => {
     fetchFn = mockFetch({ id: "a/b" });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findById("a/b" as any);
+    await client.one("a/b" as any);
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("one/a%2Fb");
   });
 
-  it("encodes special characters in deleteOne scalar id", async () => {
+  it("encodes special characters in remove scalar id", async () => {
     fetchFn = mockFetch({ deletedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.deleteOne("a/b" as any);
+    await client.remove("a/b" as any);
     const url = fetchFn.mock.calls[0][0] as string;
     expect(url).toContain("a%2Fb");
   });
@@ -437,7 +405,7 @@ describe("Client", () => {
   it("does not set Content-Type for GET requests", async () => {
     fetchFn = mockFetch([]);
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.findMany();
+    await client.query();
     const init = fetchFn.mock.calls[0][1] as RequestInit;
     expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
   });
@@ -445,7 +413,7 @@ describe("Client", () => {
   it("sets Content-Type: application/json for POST", async () => {
     fetchFn = mockFetch({ insertedId: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    await client.insertOne({ name: "test", status: "active" });
+    await client.insert({ name: "test", status: "active" });
     const writeCalls = fetchFn.mock.calls.filter(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
     );
@@ -459,16 +427,14 @@ describe("Client", () => {
   it("accepts valid insert data (id optional due to @db.default.increment)", async () => {
     fetchFn = mockFetch({ insertedId: "abc" });
     const client = new Client("/api/users", { fetch: fetchFn });
-    // id is @db.default.increment + @meta.id — should be optional for insert
-    const result = await client.insertOne({ name: "Alice", status: "active" });
+    const result = await client.insert({ name: "Alice", status: "active" });
     expect(result.insertedId).toBe("abc");
   });
 
-  it("rejects insertOne with invalid data", async () => {
+  it("rejects insert with invalid data", async () => {
     fetchFn = mockFetch({ insertedId: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
-    // name is required (not optional), passing a number should fail type validation
-    await expect(client.insertOne({ name: 123 } as any)).rejects.toThrow();
+    await expect(client.insert({ name: 123 } as any)).rejects.toThrow();
   });
 
   it("getValidator exposes flatMap and navFields", async () => {
@@ -477,7 +443,6 @@ describe("Client", () => {
     expect(validator.flatMap).toBeInstanceOf(Map);
     expect(validator.flatMap.has("name")).toBe(true);
     expect(validator.navFields).toBeDefined();
-    // id field should have meta.id preserved through serialization
     const idType = validator.flatMap.get("id");
     expect(idType?.metadata?.has("meta.id")).toBe(true);
     expect(idType?.metadata?.has("db.default.increment")).toBe(true);
