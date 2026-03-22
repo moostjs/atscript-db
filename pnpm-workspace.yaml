@@ -3,10 +3,14 @@ packages:
   - docs
 
 catalog:
-  "@atscript/core": ^0.1.43
-  "@atscript/typescript": ^0.1.43
+  "@atscript/core": ^0.1.44
+  "@atscript/typescript": ^0.1.44
   "@types/node": ^24
-  unplugin-atscript: ^0.1.43
+  "@moostjs/event-http": ^0.6.4
+  moost: ^0.6.4
+  "@uniqu/core": ^0.1.2
+  "@uniqu/url": ^0.1.2
+  unplugin-atscript: ^0.1.44
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest

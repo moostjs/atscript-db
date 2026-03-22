@@ -60,14 +60,14 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.43",
+    "@atscript/typescript": "catalog:",
     "mongodb": "^6.17.0",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "^0.1.43",
+    "@atscript/typescript": "catalog:",
     "mongodb": "^6.17.0"
   }
 }

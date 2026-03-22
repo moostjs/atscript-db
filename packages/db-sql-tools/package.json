@@ -43,11 +43,11 @@
     "check": "vp check"
   },
   "devDependencies": {
-    "@uniqu/core": "^0.1.2",
+    "@uniqu/core": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/db": "workspace:^",
-    "@uniqu/core": "^0.1.2"
+    "@uniqu/core": "catalog:"
   }
 }

@@ -45,21 +45,21 @@
     "check": "vp check"
   },
   "dependencies": {
-    "@uniqu/url": "^0.1.2"
+    "@uniqu/url": "catalog:"
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.43",
-    "@moostjs/event-http": "^0.6.3",
-    "@uniqu/core": "^0.1.2",
-    "moost": "^0.6.3",
+    "@atscript/typescript": "catalog:",
+    "@moostjs/event-http": "catalog:",
+    "@uniqu/core": "catalog:",
+    "moost": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "^0.1.43",
-    "@moostjs/event-http": "^0.6.3",
-    "@uniqu/core": "^0.1.2",
-    "moost": "^0.6.3"
+    "@atscript/typescript": "catalog:",
+    "@moostjs/event-http": "catalog:",
+    "@uniqu/core": "catalog:",
+    "moost": "catalog:"
   }
 }

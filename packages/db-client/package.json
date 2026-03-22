@@ -50,17 +50,17 @@
     "check": "vp check"
   },
   "dependencies": {
-    "@uniqu/url": "^0.1.2"
+    "@uniqu/url": "catalog:"
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:*",
     "@atscript/typescript": "catalog:",
-    "@uniqu/core": "^0.1.2",
+    "@uniqu/core": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
-    "@atscript/db": "^0.1.43",
-    "@atscript/typescript": "^0.1.43"
+    "@atscript/db": "^0.1.44",
+    "@atscript/typescript": "catalog:"
   }
 }

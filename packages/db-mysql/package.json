@@ -49,8 +49,8 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
-    "@atscript/typescript": "^0.1.43",
-    "@uniqu/core": "^0.1.2",
+    "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:",
     "mysql2": "^3.11.0",
     "unplugin-atscript": "catalog:"
   },
@@ -58,8 +58,8 @@
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
     "@atscript/db-sql-tools": "workspace:^",
-    "@atscript/typescript": "^0.1.43",
-    "@uniqu/core": "^0.1.2",
+    "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:",
     "mysql2": ">=3.0.0"
   },
   "peerDependenciesMeta": {
