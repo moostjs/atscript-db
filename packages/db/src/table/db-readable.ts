@@ -238,6 +238,17 @@ export class AtscriptDbReadable<
     }
   }
 
+  protected _ensureSearchable(): void {
+    if (!this.adapter.isSearchable()) {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$search",
+          message: `Table "${this.tableName}" has no search indexes defined`,
+        },
+      ]);
+    }
+  }
+
   // ── Public getters ────────────────────────────────────────────────────────
 
   /** Whether this readable is a view (overridden in AtscriptDbView). */
@@ -555,6 +566,7 @@ export class AtscriptDbReadable<
     indexName?: string,
   ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
     this._ensureBuilt();
+    this._ensureSearchable();
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const results = await this.adapter.search(text, translated, indexName);
@@ -574,6 +586,7 @@ export class AtscriptDbReadable<
     indexName?: string,
   ): Promise<{ data: Array<DbResponse<DataType, NavType, Q>>; count: number }> {
     this._ensureBuilt();
+    this._ensureSearchable();
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.searchWithCount(text, translated, indexName);
