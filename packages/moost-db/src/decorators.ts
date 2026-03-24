@@ -34,12 +34,14 @@ export const TABLE_DEF = READABLE_DEF;
  * export class UsersController extends AsDbController<typeof UserModel> {}
  * ```
  */
-export const TableController = (table: AtscriptDbTable, prefix?: string) =>
-  ApplyDecorators(
+export const TableController = (table: AtscriptDbTable, prefix?: string) => {
+  const resolvedPath = prefix || (table.type.metadata.get("db.http.path") as string | undefined);
+  return ApplyDecorators(
     Provide(TABLE_DEF, () => table),
-    Controller(prefix || table.tableName),
+    Controller(resolvedPath || table.tableName),
     Inherit(),
   );
+};
 
 /**
  * Combines the boilerplate needed to turn an {@link AsDbReadableController}
@@ -54,12 +56,14 @@ export const TableController = (table: AtscriptDbTable, prefix?: string) =>
  * export class ActiveTasksController extends AsDbReadableController<typeof ActiveTasks> {}
  * ```
  */
-export const ReadableController = (readable: AtscriptDbReadable, prefix?: string) =>
-  ApplyDecorators(
+export const ReadableController = (readable: AtscriptDbReadable, prefix?: string) => {
+  const resolvedPath = prefix || (readable.type.metadata.get("db.http.path") as string | undefined);
+  return ApplyDecorators(
     Provide(READABLE_DEF, () => readable),
-    Controller(prefix || readable.tableName),
+    Controller(resolvedPath || readable.tableName),
     Inherit(),
   );
+};
 
 /**
  * Alias for {@link ReadableController} — use with view-backed controllers.

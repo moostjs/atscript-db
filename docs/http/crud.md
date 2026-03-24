@@ -144,12 +144,12 @@ curl http://localhost:3000/todos/meta
 }
 ```
 
-| Field              | Description                                                               |
-| ------------------ | ------------------------------------------------------------------------- |
-| `searchable`       | Whether the table has fulltext search indexes                             |
-| `vectorSearchable` | Whether the table has vector search indexes                               |
-| `searchIndexes`    | Array of available search index definitions                               |
-| `type`             | Full serialized Atscript type (field names, types, annotations, metadata) |
+| Field              | Description                                                                                                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                 |
+| `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                   |
+| `searchIndexes`    | Array of available search index definitions                                                                                                                                                                   |
+| `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields include the referenced table type one level deep (`refDepth: 1`), carrying its `@db.http.path` for value-help resolution |
 
 ## Creating Records
 

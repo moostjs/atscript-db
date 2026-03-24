@@ -84,6 +84,27 @@ export const dbTableAnnotations: TAnnotationsTree = {
     },
   }),
 
+  http: {
+    path: new AnnotationSpec({
+      description:
+        "HTTP endpoint path where this table is served. " +
+        "Used by the UI for value-help on FK fields. " +
+        "Gets overwritten by the final controller prefix at runtime." +
+        "\n\n**Example:**\n" +
+        "```atscript\n" +
+        '@db.table "authors"\n' +
+        '@db.http.path "/authors"\n' +
+        "export interface Author { ... }\n" +
+        "```\n",
+      nodeType: ["interface"],
+      argument: {
+        name: "path",
+        type: "string",
+        description: "Relative HTTP path (e.g., '/authors')",
+      },
+    }),
+  },
+
   sync: {
     method: new AnnotationSpec({
       description:

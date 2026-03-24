@@ -51,6 +51,24 @@ Only use `@db.column` when you have a genuine reason — such as mapping to a le
 If you control the database schema, prefer naming your Atscript fields to match the desired column names directly. See [Custom Column Names](../api/tables#custom-column-names) for more details.
 :::
 
+## HTTP
+
+| Annotation      | Applies To | Arguments       | Description                                                                                                                           |
+| --------------- | ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.http.path` | Interface  | `path` (string) | HTTP endpoint path for this table. Used by UI for value-help on FK fields. Overwritten at runtime by the controller's computed prefix |
+
+```atscript
+@db.table 'authors'
+@db.http.path '/authors'
+interface Author {
+  @meta.id
+  id: number
+  name: string
+}
+```
+
+When a controller is registered without an explicit prefix, `@db.http.path` is used as the route. At runtime, the final computed prefix (including parent routes) is written back to `@db.http.path` on the type metadata, so FK references always carry the correct URL.
+
 ## Defaults
 
 | Annotation              | Applies To | Arguments         | Description                                        |

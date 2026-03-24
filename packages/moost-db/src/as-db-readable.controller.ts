@@ -32,8 +32,11 @@ export class AsDbReadableController<
   /** Application-scoped logger. */
   protected logger: TConsoleBase;
 
-  /** Cached serialized type definition (static, computed once). */
-  private _serializedType: ReturnType<typeof serializeAnnotatedType>;
+  /** Cached serialized type definition (lazy, computed on first access). */
+  private _serializedType?: ReturnType<typeof serializeAnnotatedType>;
+
+  /** Moost application instance. */
+  protected app: Moost;
 
   /** Cached search index list (static, computed once). */
   private _searchIndexes: ReturnType<AtscriptDbReadable<T>["getSearchIndexes"]>;
@@ -56,10 +59,11 @@ export class AsDbReadableController<
     app: Moost,
   ) {
     this.readable = readable;
-    this._serializedType = serializeAnnotatedType(readable.type, this.getSerializeOptions());
+    this.app = app;
     this._searchIndexes = readable.getSearchIndexes();
     this.logger = app.getLogger(`db [${readable.tableName}]`);
     this.logger.info(`Initializing ${readable.isView ? "view" : "table"} controller`);
+    this._resolveHttpPath();
     try {
       const p = this.init();
       if (p instanceof Promise) {
@@ -71,6 +75,22 @@ export class AsDbReadableController<
       this.logger.error(error);
       throw error;
     }
+  }
+
+  /** Sets @db.http.path on the type metadata from the controller's computed prefix. */
+  private _resolveHttpPath() {
+    const overview = this.app.getControllersOverview?.()?.find((o) => o.type === this.constructor);
+    if (overview?.computedPrefix) {
+      this.readable.type.metadata.set("db.http.path" as any, overview.computedPrefix);
+    }
+  }
+
+  /** Lazily serializes the type (after all controllers have set their @db.http.path). */
+  protected get serializedType() {
+    if (!this._serializedType) {
+      this._serializedType = serializeAnnotatedType(this.readable.type, this.getSerializeOptions());
+    }
+    return this._serializedType;
   }
 
   /**
@@ -88,12 +108,18 @@ export class AsDbReadableController<
    */
   protected getSerializeOptions(): TSerializeOptions {
     return {
+      refDepth: 1,
       processAnnotation: ({ key, value }) => {
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
           return { key, value };
         }
-        // Keep annotations needed for client-side validation
-        if (key === "db.json" || key === "db.patch.strategy" || key.startsWith("db.default")) {
+        // Keep annotations needed for client-side validation and value-help
+        if (
+          key === "db.json" ||
+          key === "db.patch.strategy" ||
+          key.startsWith("db.default") ||
+          key === "db.http.path"
+        ) {
           return { key, value };
         }
         if (key.startsWith("db.")) {
@@ -530,7 +556,7 @@ export class AsDbReadableController<
       readOnly: this._isReadOnly(),
       relations,
       fields,
-      type: this._serializedType,
+      type: this.serializedType,
     };
     return this._metaResponse;
   }

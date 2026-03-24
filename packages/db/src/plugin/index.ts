@@ -22,6 +22,7 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
           default: dbColumnAnnotations.default,
           json: dbColumnAnnotations.json,
           ignore: dbColumnAnnotations.ignore,
+          http: dbTableAnnotations.http,
           sync: dbTableAnnotations.sync,
           rel: dbRelAnnotations.rel,
           view: dbViewAnnotations.view,

@@ -605,7 +605,7 @@ describe("AsDbController", () => {
       expect(result.vectorSearchable).toBe(false);
       expect(result.searchIndexes).toEqual([]);
       expect(result.type).toBeDefined();
-      expect(result.type.$v).toBe(1);
+      expect(result.type.$v).toBe(2);
     });
   });
 

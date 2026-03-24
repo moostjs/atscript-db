@@ -173,6 +173,30 @@ app.registerControllers(["api/v1/todos", TodoController]);
 
 Both `@ReadableController` and `@ViewController` accept the same optional prefix argument.
 
+**Override via schema annotation:**
+
+You can set the route path directly in the `.as` schema file using `@db.http.path`:
+
+```atscript
+@db.table 'todos'
+@db.http.path '/api/v1/todos'
+export interface Todo {
+  @meta.id
+  id: number
+  title: string
+}
+```
+
+```typescript
+// No prefix needed — uses @db.http.path from the schema
+@TableController(todosTable)
+export class TodoController extends AsDbController<typeof Todo> {}
+```
+
+**Precedence:** decorator prefix > `@db.http.path` annotation > table name.
+
+At runtime, the controller's final computed prefix (including any parent route nesting) is always written back to `@db.http.path` on the type metadata. This ensures FK references in serialized types carry the correct URL for value-help resolution in the UI.
+
 ### Multiple Controllers
 
 Mount multiple tables and views on different route prefixes:

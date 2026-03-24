@@ -30,19 +30,6 @@ declare global {
     "expect.array.uniqueItems": { message?: string }
     "expect.array.key": { message?: string }
     "emit.jsonSchema": boolean
-    "ui.placeholder": string
-    "ui.component": string
-    "ui.hidden": boolean
-    "ui.group": string
-    "ui.order": number
-    "ui.width": string
-    "ui.icon": string
-    "ui.hint": string
-    "ui.disabled": boolean
-    "ui.type": string
-    "ui.attr": ({ key: string, value: string })[]
-    "ui.class": (string)[]
-    "ui.style": (string)[]
     "db.patch.strategy": string
     "db.table": string | true
     "db.table.renamed": string
