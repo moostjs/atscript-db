@@ -1,6 +1,6 @@
 {
   "name": "@atscript/moost-db",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "Generic database controller for Moost with Atscript.",
   "keywords": [
     "annotations",
