@@ -4,10 +4,28 @@ import type { Document, Filter } from "mongodb";
 
 const EMPTY: Filter<any> = {};
 
+function parseRegexString(value: unknown): { pattern: string; flags: string } {
+  if (value instanceof RegExp) {
+    return { pattern: value.source, flags: value.flags };
+  }
+  const str = String(value);
+  const match = str.match(/^\/(.+)\/([gimsuy]*)$/);
+  if (match) {
+    return { pattern: match[1]!, flags: match[2]! };
+  }
+  return { pattern: str, flags: "" };
+}
+
 const mongoVisitor: FilterVisitor<Filter<any>> = {
   comparison(field: string, op: string, value: unknown): Filter<any> {
     if (op === "$eq") {
       return { [field]: value };
+    }
+    if (op === "$regex") {
+      const { pattern, flags } = parseRegexString(value);
+      return flags
+        ? { [field]: { $regex: pattern, $options: flags } }
+        : { [field]: { $regex: pattern } };
     }
     return { [field]: { [op]: value } };
   },

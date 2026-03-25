@@ -15,6 +15,7 @@ import {
   defaultValueForType as _defaultValueForType,
   defaultValueToSqlLiteral as _defaultValueToSqlLiteral,
   finalizeParams,
+  parseRegexString,
 } from "@atscript/db-sql-tools";
 
 // Re-export shared utilities for consumers that import from this package
@@ -117,8 +118,9 @@ export const pgDialect: SqlDialect = {
     return value;
   },
   regex(quotedCol: string, value: unknown): TSqlFragment {
-    const pattern = value instanceof RegExp ? value.source : String(value);
-    return { sql: `${quotedCol} ~ ?`, params: [pattern] };
+    const { pattern, flags } = parseRegexString(value);
+    const op = flags.includes("i") ? "~*" : "~";
+    return { sql: `${quotedCol} ${op} ?`, params: [pattern] };
   },
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {

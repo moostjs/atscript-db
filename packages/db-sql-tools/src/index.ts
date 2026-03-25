@@ -19,3 +19,4 @@ export {
   queryNodeToSql,
 } from "./common";
 export { AGG_FN_SQL, buildAggregateSelect, buildAggregateCount } from "./agg";
+export { parseRegexString } from "./regex";

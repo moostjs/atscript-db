@@ -143,6 +143,24 @@ describe("buildWhere", () => {
     expect(params).toEqual(["%oh%"]);
   });
 
+  it("should parse /pattern/flags format and extract raw pattern", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "/^Ali/" } });
+    expect(sql).toBe('"name" LIKE ?');
+    expect(params).toEqual(["Ali%"]);
+  });
+
+  it("should add COLLATE NOCASE for /pattern/i flag", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "/^Ali/i" } });
+    expect(sql).toBe('"name" LIKE ? COLLATE NOCASE');
+    expect(params).toEqual(["Ali%"]);
+  });
+
+  it("should handle RegExp objects with flags", () => {
+    const { sql, params } = buildWhere({ name: { $regex: /^Ali/i } });
+    expect(sql).toBe('"name" LIKE ? COLLATE NOCASE');
+    expect(params).toEqual(["Ali%"]);
+  });
+
   // ── Logical operators ──────────────────────────────────────────────────
 
   it("should handle $and", () => {

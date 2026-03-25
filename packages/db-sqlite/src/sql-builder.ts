@@ -15,6 +15,7 @@ import {
   refActionToSql,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  parseRegexString,
 } from "@atscript/db-sql-tools";
 
 // Re-export shared utilities for consumers that import from this package
@@ -80,8 +81,10 @@ export const sqliteDialect: SqlDialect = {
     return typeof value === "boolean" ? (value ? 1 : 0) : value;
   },
   regex(quotedCol: string, value: unknown): TSqlFragment {
-    const pattern = regexToLike(value instanceof RegExp ? value.source : String(value));
-    return { sql: `${quotedCol} LIKE ?`, params: [pattern] };
+    const { pattern, flags } = parseRegexString(value);
+    const likePattern = regexToLike(pattern);
+    const sql = flags.includes("i") ? `${quotedCol} LIKE ? COLLATE NOCASE` : `${quotedCol} LIKE ?`;
+    return { sql, params: [likePattern] };
   },
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };

@@ -15,6 +15,7 @@ import {
   refActionToSql,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  parseRegexString,
 } from "@atscript/db-sql-tools";
 
 // Re-export shared utilities for consumers that import from this package
@@ -73,8 +74,8 @@ export const mysqlDialect: SqlDialect = {
     return typeof value === "boolean" ? (value ? 1 : 0) : value;
   },
   regex(quotedCol: string, value: unknown): TSqlFragment {
-    // MySQL supports native REGEXP — no LIKE conversion needed
-    const pattern = value instanceof RegExp ? value.source : String(value);
+    // Flags are ignored — MySQL REGEXP case-sensitivity is determined by column collation
+    const { pattern } = parseRegexString(value);
     return { sql: `${quotedCol} REGEXP ?`, params: [pattern] };
   },
   createViewPrefix: "CREATE OR REPLACE VIEW",

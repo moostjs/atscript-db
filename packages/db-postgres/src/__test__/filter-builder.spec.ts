@@ -50,6 +50,27 @@ describe("buildWhere (PostgreSQL)", () => {
     expect(result.params).toEqual(["^Al"]);
   });
 
+  it("handles $regex with /pattern/flags format", () => {
+    const where = buildWhere({ name: { $regex: "/^Al/" } });
+    const result = finalizeParams(pgDialect, where);
+    expect(result.sql).toBe('"name" ~ $1');
+    expect(result.params).toEqual(["^Al"]);
+  });
+
+  it("uses ~* for case-insensitive /pattern/i format", () => {
+    const where = buildWhere({ name: { $regex: "/^Al/i" } });
+    const result = finalizeParams(pgDialect, where);
+    expect(result.sql).toBe('"name" ~* $1');
+    expect(result.params).toEqual(["^Al"]);
+  });
+
+  it("uses ~* for RegExp with i flag", () => {
+    const where = buildWhere({ name: { $regex: /^Al/i } });
+    const result = finalizeParams(pgDialect, where);
+    expect(result.sql).toBe('"name" ~* $1');
+    expect(result.params).toEqual(["^Al"]);
+  });
+
   it("handles $or", () => {
     const where = buildWhere({ $or: [{ name: "A" }, { name: "B" }] });
     const result = finalizeParams(pgDialect, where);

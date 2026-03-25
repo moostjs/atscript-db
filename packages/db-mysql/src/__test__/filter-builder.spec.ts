@@ -131,6 +131,18 @@ describe("buildWhere (MySQL)", () => {
     expect(params).toEqual(["John"]);
   });
 
+  it("should parse /pattern/flags format and extract raw pattern", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "/^John/" } });
+    expect(sql).toBe("`name` REGEXP ?");
+    expect(params).toEqual(["^John"]);
+  });
+
+  it("should strip flags from /pattern/flags format", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "/^John/i" } });
+    expect(sql).toBe("`name` REGEXP ?");
+    expect(params).toEqual(["^John"]);
+  });
+
   // ── Logical operators ──────────────────────────────────────────────────
 
   it("should handle $and", () => {
