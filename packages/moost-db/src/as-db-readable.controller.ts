@@ -38,9 +38,6 @@ export class AsDbReadableController<
   /** Moost application instance. */
   protected app: Moost;
 
-  /** Cached search index list (static, computed once). */
-  private _searchIndexes: ReturnType<AtscriptDbReadable<T>["getSearchIndexes"]>;
-
   /** Cached full meta response (computed lazily on first meta() call). */
   private _metaResponse?: {
     searchable: boolean;
@@ -60,7 +57,6 @@ export class AsDbReadableController<
   ) {
     this.readable = readable;
     this.app = app;
-    this._searchIndexes = readable.getSearchIndexes();
     this.logger = app.getLogger(`db [${readable.tableName}]`);
     this.logger.info(`Initializing ${readable.isView ? "view" : "table"} controller`);
     this._resolveHttpPath();
@@ -86,7 +82,7 @@ export class AsDbReadableController<
   }
 
   /** Lazily serializes the type (after all controllers have set their @db.http.path). */
-  protected get serializedType() {
+  protected getSerializedType() {
     if (!this._serializedType) {
       this._serializedType = serializeAnnotatedType(this.readable.type, this.getSerializeOptions());
     }
@@ -551,12 +547,12 @@ export class AsDbReadableController<
     this._metaResponse = {
       searchable: this.readable.isSearchable(),
       vectorSearchable: this.readable.isVectorSearchable(),
-      searchIndexes: this._searchIndexes,
+      searchIndexes: this.readable.getSearchIndexes(),
       primaryKeys: [...this.readable.primaryKeys],
       readOnly: this._isReadOnly(),
       relations,
       fields,
-      type: this.serializedType,
+      type: this.getSerializedType(),
     };
     return this._metaResponse;
   }
