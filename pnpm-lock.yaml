@@ -19,11 +19,11 @@ catalogs:
       specifier: ^24
       version: 24.12.0
     '@uniqu/core':
-      specifier: ^0.1.3
-      version: 0.1.3
+      specifier: ^0.1.4
+      version: 0.1.4
     '@uniqu/url':
-      specifier: ^0.1.3
-      version: 0.1.3
+      specifier: ^0.1.4
+      version: 0.1.4
     moost:
       specifier: ^0.6.6
       version: 0.6.6
@@ -79,7 +79,7 @@ importers:
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/typescript@0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8))
@@ -88,7 +88,7 @@ importers:
     dependencies:
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
@@ -101,7 +101,7 @@ importers:
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/typescript@0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8))
@@ -142,7 +142,7 @@ importers:
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       mysql2:
         specifier: ^3.11.0
         version: 3.20.0(@types/node@25.5.0)
@@ -170,7 +170,7 @@ importers:
         version: 8.20.0
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       pg:
         specifier: ^8.13.0
         version: 8.20.0
@@ -186,7 +186,7 @@ importers:
     devDependencies:
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.47(@atscript/core@0.1.47)(@atscript/typescript@0.1.47(@atscript/core@0.1.47)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(wooks@0.7.8))
@@ -211,7 +211,7 @@ importers:
         version: 7.6.13
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       better-sqlite3:
         specifier: ^12.6.2
         version: 12.8.0
@@ -226,7 +226,7 @@ importers:
         version: link:../db
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
@@ -239,7 +239,7 @@ importers:
         version: 0.6.6(@prostojs/infact@0.4.1)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.3)(@wooksjs/event-core@0.7.8)(moost@0.6.6)(wooks@0.7.8)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.3
+        version: 0.1.4
       moost:
         specifier: 'catalog:'
         version: 0.6.6
@@ -1248,11 +1248,11 @@ packages:
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
 
-  '@uniqu/core@0.1.3':
-    resolution: {integrity: sha512-76+5MuIOoJnxyQT+pdhSaD+U53wB4rhGkJFPsHEwSPr3gYOS7tn0kFsal6v+Lh5yFOIiwjjc3zdFpkjcHXw5cA==}
+  '@uniqu/core@0.1.4':
+    resolution: {integrity: sha512-Eh1Twk65nc/6BxzVnmFbbNICIRU9L4Hv8YA6YawQT1GfdxcdJSbo1Wicd82Jc2IE13CZ7P0BpN5reP+fdCxy8A==}
 
-  '@uniqu/url@0.1.3':
-    resolution: {integrity: sha512-INeX7DI68Q6SPgbzF5rrvIWYqqrQT/XEv8BHNstS9Apwl5xJvtwMsT+eP+7dBiGlOR67D7O/pY86lHafcEv4ww==}
+  '@uniqu/url@0.1.4':
+    resolution: {integrity: sha512-9xrycFvqFsF9zo7d2xgYe1k03emtChVxGc0XOR493lMJMSC4R0UuhPS/zxfSf4hZpRiVuXn4Ub4Sr1x1fAD5zA==}
 
   '@vitejs/plugin-vue@6.0.5':
     resolution: {integrity: sha512-bL3AxKuQySfk1iGcBsQnoRVexTPJq0Z/ixFVM8OhVJAP6ZXXXLtM7NFKWhLl30Kg7uTBqIaPXbh+nuQCuBDedg==}
@@ -2949,11 +2949,11 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@uniqu/core@0.1.3': {}
+  '@uniqu/core@0.1.4': {}
 
-  '@uniqu/url@0.1.3':
+  '@uniqu/url@0.1.4':
     dependencies:
-      '@uniqu/core': 0.1.3
+      '@uniqu/core': 0.1.4
 
   '@vitejs/plugin-vue@6.0.5(vite@7.3.1(@types/node@25.5.0)(lightningcss@1.32.0))(vue@3.5.30(typescript@5.9.3))':
     dependencies:
