@@ -49,6 +49,7 @@ declare global {
     "db.default.now": boolean
     "db.json": boolean
     "db.ignore": boolean
+    "db.http.path": string
     "db.sync.method": string
     "db.rel.FK": string | true
     "db.rel.to": string | true
