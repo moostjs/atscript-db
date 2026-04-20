@@ -599,13 +599,26 @@ describe("AsDbController", () => {
   // ── GET /meta ─────────────────────────────────────────────────────
 
   describe("meta", () => {
-    it("should return table metadata", () => {
-      const result = controller.meta();
+    it("should return table metadata", async () => {
+      const result = await controller.meta();
       expect(result.searchable).toBe(false);
       expect(result.vectorSearchable).toBe(false);
       expect(result.searchIndexes).toEqual([]);
       expect(result.type).toBeDefined();
       expect(result.type.$v).toBe(2);
+    });
+
+    it("should permit async overrides", async () => {
+      class AsyncMetaController extends AsDbController {
+        override async meta() {
+          const base = await super.meta();
+          return { ...base, searchable: true };
+        }
+      }
+      const ctx = createController();
+      const asyncController = new AsyncMetaController(ctx.table as any, (ctx as any).app);
+      const result = await asyncController.meta();
+      expect(result.searchable).toBe(true);
     });
   });
 
@@ -629,6 +642,39 @@ describe("AsDbController", () => {
       expect(spy).toHaveBeenCalled();
       const call = ctx.table.findMany.mock.calls[0][0];
       expect(call.controls.$select).toEqual(["id", "name"]);
+    });
+
+    it("should await async transformFilter overrides", async () => {
+      const ctx = createController();
+      vi.spyOn(ctx.controller as any, "transformFilter").mockResolvedValue({ tenant: "async" });
+      await ctx.controller.query("/query?name=Alice");
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.filter).toEqual({ tenant: "async" });
+    });
+
+    it("should await async transformProjection overrides", async () => {
+      const ctx = createController();
+      const spy = vi
+        .spyOn(ctx.controller as any, "transformProjection")
+        .mockResolvedValue(["id", "email"]);
+      await ctx.controller.query("/query?");
+      expect(spy).toHaveBeenCalled();
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.controls.$select).toEqual(["id", "email"]);
+    });
+
+    it("should await async onWrite overrides", async () => {
+      const ctx = createController();
+      vi.spyOn(ctx.controller as any, "onWrite").mockResolvedValue({ name: "async-hook" });
+      await ctx.controller.insert({ name: "Alice" });
+      expect(ctx.table.insertOne).toHaveBeenCalledWith({ name: "async-hook" });
+    });
+
+    it("should await async onRemove overrides", async () => {
+      const ctx = createController();
+      vi.spyOn(ctx.controller as any, "onRemove").mockResolvedValue("resolved-id");
+      await ctx.controller.remove("42");
+      expect(ctx.table.deleteOne).toHaveBeenCalledWith("resolved-id");
     });
   });
 });

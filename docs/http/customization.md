@@ -18,6 +18,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present    | Convert text to embedding vector         |
 | `onWrite(action, data)`                | AsDbController | Before insert/replace/update | Transform or reject write data           |
 | `onRemove(id)`                         | AsDbController | Before delete                | Allow or prevent deletion                |
+| `meta()`                               | Both           | On `GET /meta` request       | Enrich the metadata response             |
 | `init()`                               | Both           | On controller construction   | One-time setup                           |
 
 ## Read Hooks
@@ -48,6 +49,15 @@ protected transformFilter(filter: FilterExpr): FilterExpr {
 }
 ```
 
+**Async lookups:** the hook may return a `Promise` — useful when the filter additions depend on session, permissions, or a remote lookup.
+
+```typescript
+protected async transformFilter(filter: FilterExpr): Promise<FilterExpr> {
+  const tenantId = await this.resolveTenantFromSession()
+  return { $and: [filter, { tenantId }] }
+}
+```
+
 ### transformProjection {#transformprojection}
 
 Intercepts the projection before every read. If the client sends `$select`, `projection` contains it; otherwise it is `undefined`. Use this to enforce field exclusions:
@@ -58,7 +68,7 @@ protected transformProjection(projection?: UniqueryControls['$select']) {
 }
 ```
 
-When `projection` is `undefined` (no `$select` from the client), the hook supplies a default exclusion list. When the client does send `$select`, you can merge or override as needed.
+When `projection` is `undefined` (no `$select` from the client), the hook supplies a default exclusion list. When the client does send `$select`, you can merge or override as needed. This hook may also return a `Promise` for async decisions (e.g. per-user field visibility).
 
 ### validateInsights {#validateinsights}
 
@@ -156,6 +166,15 @@ protected onWrite(action: string, data: unknown) {
 }
 ```
 
+`onWrite` may also be `async` — every call site already awaits the result:
+
+```typescript
+protected async onWrite(action: string, data: unknown) {
+  const approved = await this.approveWithAuditService(action, data)
+  return approved ? data : undefined
+}
+```
+
 ### onRemove {#onremove}
 
 Intercepts DELETE requests. Receives the record ID (a string for single-key tables, or an object for composite keys). Return the ID to proceed with deletion, or `undefined` to abort (returns HTTP `500`).
@@ -182,6 +201,21 @@ protected async onRemove(id: unknown) {
 ```
 
 When `onRemove` returns `undefined`, the controller aborts the DELETE operation and returns HTTP `500`. Combine with `transformFilter` to exclude soft-deleted records from reads.
+
+## Metadata Hook
+
+### meta {#meta}
+
+Returns the payload emitted by `GET /meta`. Override to enrich the response with derived or remote data — the method may be sync or `async`.
+
+```typescript
+protected async meta() {
+  const base = await super.meta()
+  return { ...base, featureFlags: await this.loadFlags() }
+}
+```
+
+The base implementation caches its own result. Subclasses overriding with async enrichment should cache their own computation if they need per-request dedup.
 
 ## Initialization
 

@@ -42,6 +42,7 @@ export class AsDbController<
 
   /**
    * Intercepts write operations. Return `undefined` to abort.
+   * May be async (e.g. to enrich payloads from session / permissions).
    */
   protected onWrite(
     action: "insert" | "insertMany" | "replace" | "replaceMany" | "update" | "updateMany",
@@ -52,6 +53,7 @@ export class AsDbController<
 
   /**
    * Intercepts delete operations. Return `undefined` to abort.
+   * May be async (e.g. to resolve composite ids from external state).
    */
   protected onRemove(id: unknown): unknown {
     return id;

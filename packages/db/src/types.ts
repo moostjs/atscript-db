@@ -1,4 +1,4 @@
-import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
   FilterExpr as _FilterExpr,
   UniqueryControls as _UniqueryControls,
@@ -50,6 +50,35 @@ export interface TSearchIndexInfo {
   description?: string;
   /** Index type: text search or vector similarity search. */
   type?: "text" | "vector";
+}
+
+// ── Meta Response ───────────────────────────────────────────────────────────
+// Shared contract for the `GET /meta` endpoint — emitted by the moost-db
+// controller and consumed by the db-client runtime validator.
+
+/** Relation summary in a meta response. */
+export interface TRelationInfo {
+  name: string;
+  direction: "to" | "from" | "via";
+  isArray: boolean;
+}
+
+/** Per-field capability flags in a meta response. */
+export interface TFieldMeta {
+  sortable: boolean;
+  filterable: boolean;
+}
+
+/** Response payload for `GET /meta`. */
+export interface TMetaResponse {
+  searchable: boolean;
+  vectorSearchable: boolean;
+  searchIndexes: TSearchIndexInfo[];
+  primaryKeys: string[];
+  readOnly: boolean;
+  relations: TRelationInfo[];
+  fields: Record<string, TFieldMeta>;
+  type: TSerializedAnnotatedType;
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

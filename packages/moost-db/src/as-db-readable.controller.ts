@@ -5,7 +5,13 @@ import {
   type TAtscriptAnnotatedType,
   type TAtscriptDataType,
 } from "@atscript/typescript/utils";
-import type { AtscriptDbReadable, FilterExpr, UniqueryControls, Uniquery } from "@atscript/db";
+import type {
+  AtscriptDbReadable,
+  FilterExpr,
+  TMetaResponse,
+  UniqueryControls,
+  Uniquery,
+} from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inject, Moost, Param, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
@@ -39,16 +45,7 @@ export class AsDbReadableController<
   protected app: Moost;
 
   /** Cached full meta response (computed lazily on first meta() call). */
-  private _metaResponse?: {
-    searchable: boolean;
-    vectorSearchable: boolean;
-    searchIndexes: ReturnType<AtscriptDbReadable<T>["getSearchIndexes"]>;
-    primaryKeys: string[];
-    readOnly: boolean;
-    relations: Array<{ name: string; direction: string; isArray: boolean }>;
-    fields: Record<string, { sortable: boolean; filterable: boolean }>;
-    type: ReturnType<typeof serializeAnnotatedType>;
-  };
+  private _metaResponse?: TMetaResponse;
 
   constructor(
     @Inject(READABLE_DEF)
@@ -240,17 +237,19 @@ export class AsDbReadableController<
 
   /**
    * Transform filter before querying. Override to add tenant filtering, etc.
+   * May return a Promise for async lookups (session, permissions).
    */
-  protected transformFilter(filter: FilterExpr): FilterExpr {
+  protected transformFilter(filter: FilterExpr): FilterExpr | Promise<FilterExpr> {
     return filter;
   }
 
   /**
    * Transform projection before querying.
+   * May return a Promise for async lookups.
    */
   protected transformProjection(
     projection?: UniqueryControls["$select"],
-  ): UniqueryControls["$select"] | undefined {
+  ): UniqueryControls["$select"] | undefined | Promise<UniqueryControls["$select"] | undefined> {
     return projection;
   }
 
@@ -338,7 +337,7 @@ export class AsDbReadableController<
           return new HttpError(400, insightsError);
         }
       }
-      const filter = this.transformFilter(parsed.filter);
+      const filter = await this.transformFilter(parsed.filter);
       return this.readable.aggregate({
         filter,
         controls: controls as any,
@@ -352,8 +351,10 @@ export class AsDbReadableController<
       return error;
     }
 
-    const filter = this.transformFilter(parsed.filter);
-    const select = this.transformProjection(controls.$select);
+    const [filter, select] = await Promise.all([
+      this.transformFilter(parsed.filter),
+      this.transformProjection(controls.$select),
+    ]);
 
     if (controls.$count) {
       return this.readable.count({ filter, controls: { ...controls, $select: select } } as Uniquery<
@@ -418,8 +419,10 @@ export class AsDbReadableController<
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
-    const filter = this.transformFilter(parsed.filter);
-    const select = this.transformProjection(controls.$select);
+    const [filter, select] = await Promise.all([
+      this.transformFilter(parsed.filter),
+      this.transformProjection(controls.$select),
+    ]);
 
     const searchTerm = controls.$search as string | undefined;
     const indexName = controls.$index as string | undefined;
@@ -490,7 +493,7 @@ export class AsDbReadableController<
       return error;
     }
 
-    const select = this.transformProjection(parsed.controls.$select);
+    const select = await this.transformProjection(parsed.controls.$select);
     const controls = { ...parsed.controls, $select: select };
 
     return this.returnOne(
@@ -513,7 +516,7 @@ export class AsDbReadableController<
     }
 
     const parsed = this.parseQueryString(url);
-    const select = this.transformProjection(parsed.controls.$select);
+    const select = await this.transformProjection(parsed.controls.$select);
     const controls = { ...parsed.controls, $select: select };
 
     return this.returnOne(
@@ -523,19 +526,24 @@ export class AsDbReadableController<
 
   /**
    * **GET /meta** — returns table/view metadata for UI.
+   *
+   * The return type includes `Promise<...>` so subclasses can override with an
+   * async implementation (e.g. to enrich the payload from an external source).
+   * The base cache only covers the base payload — async overrides must cache
+   * their own enrichment if needed.
    */
   @Get("meta")
-  meta() {
+  meta(): TMetaResponse | Promise<TMetaResponse> {
     if (this._metaResponse) {
       return this._metaResponse;
     }
 
-    const relations: Array<{ name: string; direction: string; isArray: boolean }> = [];
+    const relations: TMetaResponse["relations"] = [];
     for (const [name, rel] of this.readable.relations) {
       relations.push({ name, direction: rel.direction, isArray: rel.isArray });
     }
 
-    const fields: Record<string, { sortable: boolean; filterable: boolean }> = {};
+    const fields: TMetaResponse["fields"] = {};
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
       fields[fd.path] = {
@@ -544,7 +552,7 @@ export class AsDbReadableController<
       };
     }
 
-    this._metaResponse = {
+    const response: TMetaResponse = {
       searchable: this.readable.isSearchable(),
       vectorSearchable: this.readable.isVectorSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),
@@ -554,6 +562,7 @@ export class AsDbReadableController<
       fields,
       type: this.getSerializedType(),
     };
-    return this._metaResponse;
+    this._metaResponse = response;
+    return response;
   }
 }

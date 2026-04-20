@@ -61,7 +61,13 @@ type ExtractWith<Q> = Q extends { controls: { $with: Array<{ name: infer N exten
  */
 export type DbResponse<Data, Nav, Q> = [keyof Nav] extends [never]
   ? Data
-  : Omit<Data, keyof Nav & string> & Pick<Data, ExtractWith<Q> & keyof Data & string>;
+  : // `NavPropsOf<T>` falls back to `Record<string, never>` for tables without
+    // any declared nav props. Its `keyof` is `string`, which would cause
+    // `Omit<Data, string>` to strip every field. Detect that index-signature-only
+    // shape and treat it as "no nav props".
+    string extends keyof Nav
+    ? Data
+    : Omit<Data, keyof Nav & string> & Pick<Data, ExtractWith<Q> & keyof Data & string>;
 
 /**
  * Resolves the design type from an annotated type.

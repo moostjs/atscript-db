@@ -6,12 +6,15 @@ import type {
   AggregateResult,
   TypedWithRelation,
 } from "@uniqu/core";
-import type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
   TDbDeleteResult,
+  TFieldMeta,
+  TMetaResponse,
+  TRelationInfo,
+  TSearchIndexInfo,
 } from "@atscript/db";
 
 // ── Re-export uniqu types for consumer convenience ──────────────────────────
@@ -55,38 +58,20 @@ export interface ClientOptions {
 }
 
 // ── Meta Response Types ─────────────────────────────────────────────────────
+// Re-exported from @atscript/db — the core owns the `GET /meta` contract so
+// the server controller and this client validator stay in lockstep.
 
 /** Search index metadata from the server. */
-export interface SearchIndexInfo {
-  name: string;
-  description?: string;
-  type?: "text" | "vector";
-}
+export type SearchIndexInfo = TSearchIndexInfo;
 
 /** Relation summary in meta response. */
-export interface RelationInfo {
-  name: string;
-  direction: "to" | "from" | "via";
-  isArray: boolean;
-}
+export type RelationInfo = TRelationInfo;
 
 /** Per-field capability flags. */
-export interface FieldMeta {
-  sortable: boolean;
-  filterable: boolean;
-}
+export type FieldMeta = TFieldMeta;
 
 /** Enhanced meta response from the server (`GET /meta`). */
-export interface MetaResponse {
-  searchable: boolean;
-  vectorSearchable: boolean;
-  searchIndexes: SearchIndexInfo[];
-  primaryKeys: string[];
-  readOnly: boolean;
-  relations: RelationInfo[];
-  fields: Record<string, FieldMeta>;
-  type: TSerializedAnnotatedType;
-}
+export type MetaResponse = TMetaResponse;
 
 // ── Paginated Response ──────────────────────────────────────────────────────
 
