@@ -13,7 +13,7 @@ import type {
   Uniquery,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
-import { Inject, Moost, Param, type TConsoleBase } from "moost";
+import { Inject, Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { READABLE_DEF } from "./decorators";
@@ -72,9 +72,28 @@ export class AsDbReadableController<
 
   /** Sets @db.http.path on the type metadata from the controller's computed prefix. */
   private _resolveHttpPath() {
-    const overview = this.app.getControllersOverview?.()?.find((o) => o.type === this.constructor);
-    if (overview?.computedPrefix) {
-      this.readable.type.metadata.set("db.http.path" as any, overview.computedPrefix);
+    let prefix: string | undefined;
+    // SINGLETON init runs the constructor inside Moost's event context, after
+    // setControllerContext(..., { prefix }) but before controllersOverview is
+    // populated — so the prefix is only reachable via the event context here.
+    try {
+      prefix = useControllerContext().getPrefix();
+    } catch {
+      // No active event context (e.g. direct instantiation in tests).
+    }
+    if (!prefix) {
+      // FOR_EVENT scope: constructor runs per-request before setControllerContext,
+      // but by then controllersOverview has been fully populated at init time.
+      const overview = this.app
+        .getControllersOverview?.()
+        ?.find((o) => o.type === this.constructor);
+      prefix = overview?.computedPrefix;
+    }
+    if (prefix) {
+      if (!prefix.startsWith("/")) {
+        prefix = `/${prefix}`;
+      }
+      this.readable.type.metadata.set("db.http.path", prefix);
     }
   }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import { ValidatorError } from "@atscript/typescript/utils";
 import { HttpError } from "@moostjs/event-http";
+import { createEventContext, setControllerContext } from "moost";
 
 import { AsDbController } from "../as-db.controller";
 
@@ -106,6 +107,65 @@ describe("AsDbController", () => {
       const t = createMockTable();
       new AsDbController(t, app);
       expect(app.getLogger).toHaveBeenCalledWith("db [test_table]");
+    });
+  });
+
+  // ── HTTP path resolution (db.http.path metadata) ────────────────────
+
+  describe("_resolveHttpPath", () => {
+    it("writes db.http.path metadata from event context prefix (SINGLETON init)", () => {
+      // Reproduces the runtime path in Moost: during bindController(), the
+      // SINGLETON instance is created inside createEventContext AFTER
+      // setControllerContext(..., { prefix }) has been called — but BEFORE
+      // controllersOverview is populated. The controller must read the prefix
+      // from the event context, not the (empty) overview.
+      const app = createMockApp();
+      const t = createMockTable();
+      createEventContext({ logger: app.getLogger() }, () => {
+        // Mimics moost.ts: setControllerContext with the computed prefix, then
+        // the constructor runs synchronously within the same context.
+        setControllerContext({} as Record<string, unknown>, "method", "", {
+          prefix: "api/db/tables/test",
+        });
+        new AsDbController(t, app);
+      });
+      expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/test");
+    });
+
+    it("falls back to controllersOverview when no event context prefix (FOR_EVENT scope)", () => {
+      // For FOR_EVENT controllers, the constructor fires per-request before
+      // setControllerContext(prefix). By that time controllersOverview is
+      // fully populated from init, so the overview lookup is the right fallback.
+      const app = createMockApp();
+      const t = createMockTable();
+      class TestController extends AsDbController {}
+      app.getControllersOverview = vi
+        .fn()
+        .mockReturnValue([{ type: TestController, computedPrefix: "api/db/tables/from-overview" }]);
+      new TestController(t, app);
+      expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/from-overview");
+    });
+
+    it("does not prepend a second slash when the prefix already has one", () => {
+      // Defensive: if a future Moost version ever emits a leading-slash prefix,
+      // we must not produce "//..." in the stored path.
+      const app = createMockApp();
+      const t = createMockTable();
+      class TestController extends AsDbController {}
+      app.getControllersOverview = vi
+        .fn()
+        .mockReturnValue([{ type: TestController, computedPrefix: "/api/already/slashed" }]);
+      new TestController(t, app);
+      expect(t.type.metadata.get("db.http.path")).toBe("/api/already/slashed");
+    });
+
+    it("leaves metadata unset when no context and no overview is available", () => {
+      // Direct instantiation (e.g. in unit tests) with neither context nor
+      // overview available must not throw and must not write bogus metadata.
+      const app = createMockApp();
+      const t = createMockTable();
+      new AsDbController(t, app);
+      expect(t.type.metadata.get("db.http.path")).toBeUndefined();
     });
   });
 
