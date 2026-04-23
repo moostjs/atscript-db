@@ -1,10 +1,4 @@
-import {
-  serializeAnnotatedType,
-  type TSerializeOptions,
-  type Validator,
-  type TAtscriptAnnotatedType,
-  type TAtscriptDataType,
-} from "@atscript/typescript/utils";
+import { type TAtscriptAnnotatedType, type TAtscriptDataType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbReadable,
   FilterExpr,
@@ -13,12 +7,10 @@ import type {
   Uniquery,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
-import { Inject, Moost, Param, useControllerContext, type TConsoleBase } from "moost";
-import { parseUrl } from "@uniqu/url";
+import { Inherit, Inject, Moost, Param } from "moost";
 
+import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
-import { UseValidationErrorTransform } from "./validation-interceptor";
-import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/controls.dto.as";
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -27,205 +19,61 @@ import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/con
  * For write operations (insert, replace, update, delete), use {@link AsDbController}.
  * For views, use {@link AsDbViewController}.
  */
-@UseValidationErrorTransform()
+@Inherit()
 export class AsDbReadableController<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
-> {
+> extends AsReadableController<T, DataType> {
   /** Reference to the underlying readable (table or view). */
   protected readable: AtscriptDbReadable<T>;
 
-  /** Application-scoped logger. */
-  protected logger: TConsoleBase;
-
-  /** Cached serialized type definition (lazy, computed on first access). */
-  private _serializedType?: ReturnType<typeof serializeAnnotatedType>;
-
-  /** Moost application instance. */
-  protected app: Moost;
-
-  /** Cached full meta response (computed lazily on first meta() call). */
-  private _metaResponse?: TMetaResponse;
+  private readonly _gates: ReadableGates;
 
   constructor(
     @Inject(READABLE_DEF)
     readable: AtscriptDbReadable<T>,
     app: Moost,
   ) {
+    super(readable.type as T, readable.tableName, app, readable.isView ? "view" : "table");
     this.readable = readable;
-    this.app = app;
-    this.logger = app.getLogger(`db [${readable.tableName}]`);
-    this.logger.info(`Initializing ${readable.isView ? "view" : "table"} controller`);
-    this._resolveHttpPath();
-    try {
-      const p = this.init();
-      if (p instanceof Promise) {
-        p.catch((error) => {
-          this.logger.error(error);
-        });
-      }
-    } catch (error) {
-      this.logger.error(error);
-      throw error;
+    this._gates = this._buildGates();
+  }
+
+  private _buildGates(): ReadableGates {
+    const meta = this.readable.type.metadata;
+    const gates: ReadableGates = {};
+    if (meta.get("db.table.filterable") === "manual") {
+      const allowed = this._collectAnnotated("db.column.filterable");
+      gates.filter = { predicate: (f) => allowed.has(f), annotation: "@db.column.filterable" };
     }
-  }
-
-  /** Sets @db.http.path on the type metadata from the controller's computed prefix. */
-  private _resolveHttpPath() {
-    let prefix: string | undefined;
-    // SINGLETON init runs the constructor inside Moost's event context, after
-    // setControllerContext(..., { prefix }) but before controllersOverview is
-    // populated — so the prefix is only reachable via the event context here.
-    try {
-      prefix = useControllerContext().getPrefix();
-    } catch {
-      // No active event context (e.g. direct instantiation in tests).
+    if (meta.get("db.table.sortable") === "manual") {
+      const allowed = this._collectAnnotated("db.column.sortable");
+      gates.sort = { predicate: (f) => allowed.has(f), annotation: "@db.column.sortable" };
     }
-    if (!prefix) {
-      // FOR_EVENT scope: constructor runs per-request before setControllerContext,
-      // but by then controllersOverview has been fully populated at init time.
-      const overview = this.app
-        .getControllersOverview?.()
-        ?.find((o) => o.type === this.constructor);
-      prefix = overview?.computedPrefix;
+    return gates;
+  }
+
+  private _collectAnnotated(annotation: string): Set<string> {
+    const out = new Set<string>();
+    for (const [path, entry] of this.readable.flatMap) {
+      if (entry.metadata.has(annotation)) out.add(path);
     }
-    if (prefix) {
-      if (!prefix.startsWith("/")) {
-        prefix = `/${prefix}`;
-      }
-      this.readable.type.metadata.set("db.http.path", prefix);
-    }
+    return out;
   }
 
-  /** Lazily serializes the type (after all controllers have set their @db.http.path). */
-  protected getSerializedType() {
-    if (!this._serializedType) {
-      this._serializedType = serializeAnnotatedType(this.readable.type, this.getSerializeOptions());
-    }
-    return this._serializedType;
+  protected hasField(path: string): boolean {
+    return this.readable.flatMap.has(path);
   }
 
-  /**
-   * One-time initialization hook. Override to seed data, register watchers, etc.
-   */
-  protected init(): void | Promise<void> {
-    // no-op by default
-  }
-
-  /**
-   * Returns serialization options for the `/meta` endpoint's type field.
-   * Default: whitelist — keeps `meta.*`, `expect.*`, and `db.rel.*` annotations,
-   * strips all other `db.*` annotations (table, column, index, default, etc.).
-   * Override in subclass to customise what annotations are exposed to clients.
-   */
-  protected getSerializeOptions(): TSerializeOptions {
-    const declared = (this.readable.type.metadata.get("db.deep.insert") as number | undefined) ?? 0;
-    return {
-      refDepth: declared + 0.5,
-      processAnnotation: ({ key, value }) => {
-        if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
-          return { key, value };
-        }
-        // Keep annotations needed for client-side validation and value-help
-        if (
-          key === "db.json" ||
-          key === "db.patch.strategy" ||
-          key.startsWith("db.default") ||
-          key === "db.http.path"
-        ) {
-          return { key, value };
-        }
-        if (key.startsWith("db.")) {
-          return undefined;
-        }
-        return { key, value };
-      },
-    };
-  }
-
-  /**
-   * Whether this controller is read-only (no write endpoints).
-   * Returns `true` for readable/view controllers, overridden to `false` in AsDbController.
-   */
-  protected _isReadOnly(): boolean {
-    return true;
-  }
-
-  // ── Lazily built validators ────────────────────────────────────────────
-
-  private _queryControlsValidator?: Validator<any>;
-  private _pagesControlsValidator?: Validator<any>;
-  private _getOneControlsValidator?: Validator<any>;
-
-  protected get queryControlsValidator() {
-    if (!this._queryControlsValidator) {
-      this._queryControlsValidator = QueryControlsDto.validator();
-    }
-    return this._queryControlsValidator;
-  }
-
-  protected get pagesControlsValidator() {
-    if (!this._pagesControlsValidator) {
-      this._pagesControlsValidator = PagesControlsDto.validator();
-    }
-    return this._pagesControlsValidator;
-  }
-
-  protected get getOneControlsValidator() {
-    if (!this._getOneControlsValidator) {
-      this._getOneControlsValidator = GetOneControlsDto.validator();
-    }
-    return this._getOneControlsValidator;
-  }
-
-  // ── Validation ─────────────────────────────────────────────────────────
-
-  protected validateControls(
-    controls: Record<string, unknown>,
-    type: "query" | "pages" | "getOne",
-  ): string | undefined {
-    const v =
-      type === "query"
-        ? this.queryControlsValidator
-        : type === "pages"
-          ? this.pagesControlsValidator
-          : this.getOneControlsValidator;
-    if (!v.validate(controls, true)) {
-      return v.errors[0]?.message || "Invalid controls";
-    }
-    return undefined;
-  }
-
-  protected validateInsights(insights: Map<string, unknown>): string | undefined {
-    for (const [key] of insights) {
-      if (key === "*") {
-        continue;
-      }
-      if (!this.readable.flatMap.has(key)) {
-        return `Unknown field "${key}"`;
-      }
-    }
-    return undefined;
-  }
-
-  protected validateParsed(
+  /** Validates $with relations against the readable. */
+  protected override validateParsed(
     parsed: Uniquery,
     type: "query" | "pages" | "getOne",
   ): HttpError | undefined {
-    const controlsError = this.validateControls(
-      parsed.controls as unknown as Record<string, unknown>,
-      type,
-    );
-    if (controlsError) {
-      return new HttpError(400, controlsError);
+    const baseError = super.validateParsed(parsed, type);
+    if (baseError) {
+      return baseError;
     }
-    if (parsed.insights) {
-      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
-      if (insightsError) {
-        return new HttpError(400, insightsError);
-      }
-    }
-    // Validate $with relation names
     const withRelations = (parsed.controls as Record<string, unknown>).$with as
       | Array<{ name: string }>
       | undefined;
@@ -273,27 +121,11 @@ export class AsDbReadableController<
     return projection;
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────
-
-  protected parseQueryString(url: string) {
-    const idx = url.indexOf("?");
-    return parseUrl(idx >= 0 ? url.slice(idx + 1) : "");
-  }
-
-  protected async returnOne(result: Promise<DataType | null>): Promise<DataType | HttpError> {
-    const item = await result;
-    if (!item) {
-      return new HttpError(404);
-    }
-    return item;
-  }
-
   /**
    * Extracts a composite identifier object from query params.
    * Tries composite primary key first, then compound unique indexes.
    */
   protected extractCompositeId(query: Record<string, string>): Record<string, unknown> | HttpError {
-    // Try composite primary key
     const pkFields = this.readable.primaryKeys;
     if (pkFields.length > 1) {
       const idObj: Record<string, unknown> = {};
@@ -310,7 +142,6 @@ export class AsDbReadableController<
       }
     }
 
-    // Try compound unique indexes
     for (const index of this.readable.indexes.values()) {
       if (index.type !== "unique" || index.fields.length < 2) {
         continue;
@@ -369,6 +200,15 @@ export class AsDbReadableController<
     const error = this.validateParsed(parsed, "query");
     if (error) {
       return error;
+    }
+
+    const gateError = this.checkGates(
+      parsed.filter,
+      controls as Record<string, unknown>,
+      this._gates,
+    );
+    if (gateError) {
+      return gateError;
     }
 
     const [filter, select] = await Promise.all([
@@ -434,14 +274,19 @@ export class AsDbReadableController<
       return error;
     }
 
-    const controls = parsed.controls as PagesControlsDto & Record<string, unknown>;
+    const controls = parsed.controls as Record<string, unknown>;
+
+    const gateError = this.checkGates(parsed.filter, controls, this._gates);
+    if (gateError) {
+      return gateError;
+    }
     const page = Math.max(Number(controls.$page || 1), 1);
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
     const [filter, select] = await Promise.all([
       this.transformFilter(parsed.filter),
-      this.transformProjection(controls.$select),
+      this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
 
     const searchTerm = controls.$search as string | undefined;
@@ -547,32 +392,32 @@ export class AsDbReadableController<
   /**
    * **GET /meta** — returns table/view metadata for UI.
    *
-   * The return type includes `Promise<...>` so subclasses can override with an
-   * async implementation (e.g. to enrich the payload from an external source).
-   * The base cache only covers the base payload — async overrides must cache
-   * their own enrichment if needed.
+   * Overrides the base's minimal envelope to add relations, searchable flags,
+   * vector-searchable flags, field-descriptor-derived filter/sort hints, and
+   * the configured primary keys.
    */
-  @Get("meta")
-  meta(): TMetaResponse | Promise<TMetaResponse> {
-    if (this._metaResponse) {
-      return this._metaResponse;
-    }
-
+  protected override async buildMetaResponse(): Promise<TMetaResponse> {
     const relations: TMetaResponse["relations"] = [];
     for (const [name, rel] of this.readable.relations) {
       relations.push({ name, direction: rel.direction, isArray: rel.isArray });
     }
 
+    const filterableMode = this.readable.type.metadata.get("db.table.filterable") === "manual";
+    const sortableMode = this.readable.type.metadata.get("db.table.sortable") === "manual";
+
     const fields: TMetaResponse["fields"] = {};
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
+      const annotations = fd.type?.metadata;
+      const annotatedFilterable = annotations?.has("db.column.filterable") ?? false;
+      const annotatedSortable = annotations?.has("db.column.sortable") ?? false;
       fields[fd.path] = {
-        sortable: !!fd.isIndexed,
-        filterable: true,
+        sortable: sortableMode ? annotatedSortable : !!fd.isIndexed,
+        filterable: filterableMode ? annotatedFilterable : true,
       };
     }
 
-    const response: TMetaResponse = {
+    return {
       searchable: this.readable.isSearchable(),
       vectorSearchable: this.readable.isVectorSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),
@@ -582,7 +427,5 @@ export class AsDbReadableController<
       fields,
       type: this.getSerializedType(),
     };
-    this._metaResponse = response;
-    return response;
   }
 }

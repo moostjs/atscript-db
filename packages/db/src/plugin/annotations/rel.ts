@@ -28,8 +28,16 @@ export const dbRelAnnotations: TAnnotationsTree = {
   rel: {
     FK: new AnnotationSpec({
       description:
-        "Declares a foreign key constraint on this field. The field must use a chain " +
-        "reference type (e.g., `User.id`) to specify the FK target.\n\n" +
+        "Declares a foreign key reference on this field. The field must use a chain " +
+        "reference type (e.g., `User.id`) whose target is a primary key (`@meta.id`) " +
+        "or unique (`@db.index.unique`) field.\n\n" +
+        "**Dual role:**\n" +
+        "- On a `@db.table` interface, `@db.rel.FK` additionally drives DB-relation semantics — " +
+        "  relation loading with `@db.rel.to` / `@db.rel.from`, junction pairing with `@db.rel.via`, etc.\n" +
+        "- On any other interface (value-help sources, WF forms, plain interfaces), `@db.rel.FK` " +
+        "  acts purely as the value-help indicator: the client-side picker resolver uses it to " +
+        "  decide which fields render a value-help picker. The target's `@db.http.path` (stamped " +
+        "  by its readable controller) supplies the picker URL.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         "@db.rel.FK\n" +
@@ -52,15 +60,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
         const field = token.parentNode!;
         const alias = args[0]?.text;
 
-        // F1: Must be on a @db.table interface
-        const owner = getDbTableOwner(token);
-        if (!owner || owner.countAnnotations("db.table") === 0) {
-          errors.push({
-            message: "@db.rel.FK is only valid on fields of a @db.table interface",
-            severity: 1,
-            range: token.range,
-          });
-        }
+        // F1 (relaxed): `@db.rel.FK` validates on any interface kind — @db.table hosts get the
+        // full DB-relation semantics, other hosts use it purely as the value-help indicator.
 
         // F6: Cannot coexist with @db.rel.to or @db.rel.from
         if (field.countAnnotations("db.rel.to") > 0 || field.countAnnotations("db.rel.from") > 0) {

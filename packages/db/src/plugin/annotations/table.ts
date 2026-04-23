@@ -5,6 +5,10 @@ import { hasAnyViewAnnotation } from "../../shared/validation-utils";
 
 export const dbTableAnnotations: TAnnotationsTree = {
   table: {
+    filterable: tableCapability("filterable"),
+
+    sortable: tableCapability("sortable"),
+
     $self: new AnnotationSpec({
       description:
         "Marks an interface as a database-persisted entity (table in SQL, collection in MongoDB). " +
@@ -191,3 +195,49 @@ export const dbTableAnnotations: TAnnotationsTree = {
     }),
   },
 };
+
+function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec {
+  const example =
+    capability === "filterable"
+      ? "  @db.column.filterable\n  email: string\n  // other fields not filterable via the controller\n"
+      : "  @db.column.sortable\n  createdAt: number.timestamp\n  // other fields not sortable via the controller\n";
+  const verb = capability === "filterable" ? "filter" : "sort";
+  return new AnnotationSpec({
+    description:
+      `Controls ${verb}-gating on the readable controller's \`/query\` and \`/pages\` endpoints.\n\n` +
+      `- **\`'auto'\`** (default when the annotation is absent) — every column is ${capability}.\n` +
+      `- **\`'manual'\`** — only fields annotated \`@db.column.${capability}\` are ${capability}; ` +
+      "  all others are rejected with HTTP 400.\n\n" +
+      `Writing the annotation explicitly as \`@db.table.${capability} 'auto'\` has the same ` +
+      "runtime effect as omitting it; use it to document intent.\n\n" +
+      "**Example:**\n" +
+      "```atscript\n" +
+      '@db.table "users"\n' +
+      `@db.table.${capability} "manual"\n` +
+      "export interface User {\n" +
+      example +
+      "}\n" +
+      "```\n",
+    nodeType: ["interface"],
+    multiple: false,
+    argument: {
+      optional: true,
+      name: "mode",
+      type: "string",
+      description: `${verb[0]!.toUpperCase()}${verb.slice(1)}-gating mode: 'auto' (default) or 'manual'.`,
+      values: ["auto", "manual"],
+    },
+    validate(token, _args, _doc) {
+      const errors = [] as TMessages;
+      const owner = token.parentNode!;
+      if (owner.countAnnotations("db.table") === 0) {
+        errors.push({
+          message: `@db.table.${capability} requires @db.table on the same interface`,
+          severity: 1,
+          range: token.range,
+        });
+      }
+      return errors;
+    },
+  });
+}

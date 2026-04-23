@@ -10,20 +10,24 @@ Complete reference for all `@db.*` annotations available in `.as` files. Generic
 
 ## Tables & Columns
 
-| Annotation             | Applies To | Arguments                              | Description                                                                                                                                                         |
-| ---------------------- | ---------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.table`            | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                                                                                                 |
-| `@db.table.renamed`    | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration                                                                                           |
-| `@db.schema`           | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                                                                                               |
-| `@db.deep.insert`      | Interface  | `depth` (number)                       | Maximum nested-insert depth accepted on this table. Client and server agree on the accepted nesting depth — HTTP 400 past the limit, `refDepth: N + 0.5` on `/meta` |
-| `@db.column`           | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                    |
-| `@db.column.renamed`   | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                          |
-| `@db.column.collate`   | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                          |
-| `@db.column.precision` | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                      |
-| `@db.column.dimension` | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                   |
-| `@db.column.measure`   | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                              |
-| `@db.json`             | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                 |
-| `@db.ignore`           | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                     |
+| Annotation              | Applies To | Arguments                              | Description                                                                                                                                                         |
+| ----------------------- | ---------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.table`             | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                                                                                                 |
+| `@db.table.renamed`     | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration                                                                                           |
+| `@db.schema`            | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                                                                                               |
+| `@db.deep.insert`       | Interface  | `depth` (number)                       | Maximum nested-insert depth accepted on this table. Client and server agree on the accepted nesting depth — HTTP 400 past the limit, `refDepth: N + 0.5` on `/meta` |
+| `@db.column`            | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                    |
+| `@db.column.renamed`    | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                          |
+| `@db.column.collate`    | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                          |
+| `@db.column.precision`  | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                      |
+| `@db.column.dimension`  | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                   |
+| `@db.column.measure`    | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                              |
+| `@db.column.filterable` | Field      | —                                      | Allow this field in client-side filter clauses when the table is in `@db.table.filterable 'manual'` mode (see below)                                                |
+| `@db.column.sortable`   | Field      | —                                      | Allow this field in client-side sort keys when the table is in `@db.table.sortable 'manual'` mode (see below)                                                       |
+| `@db.table.filterable`  | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Filter-gating mode. `'auto'` (default) keeps all columns filterable; `'manual'` requires `@db.column.filterable` on each filterable field                           |
+| `@db.table.sortable`    | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Sort-gating mode. `'auto'` (default) keeps all columns sortable; `'manual'` requires `@db.column.sortable` on each sortable field                                   |
+| `@db.json`              | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                 |
+| `@db.ignore`            | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                     |
 
 ```atscript
 @db.table 'users'
@@ -51,6 +55,36 @@ Only use `@db.column` when you have a genuine reason — such as mapping to a le
 
 If you control the database schema, prefer naming your Atscript fields to match the desired column names directly. See [Custom Column Names](../api/tables#custom-column-names) for more details.
 :::
+
+## Query Gate
+
+By default, every column on a `@db.table` is filterable and sortable — this preserves back-compat for tables where the author hasn't thought about the query surface. When a table should expose a **narrow** query surface (e.g., a customer-facing reports endpoint), opt into manual mode:
+
+```atscript
+@db.table 'users'
+@db.table.filterable 'manual'
+@db.table.sortable 'manual'
+interface User {
+  @meta.id
+  id: number
+
+  @db.column.filterable
+  email: string
+
+  @db.column.sortable
+  createdAt: number.timestamp
+}
+```
+
+Semantics:
+
+- `@db.table.filterable 'manual'` makes the readable controller reject (HTTP 400) any filter clause that references a field without `@db.column.filterable`.
+- `@db.table.sortable 'manual'` does the same for sort keys against `@db.column.sortable`.
+- `@db.table.filterable 'auto'` / `@db.table.sortable 'auto'` are documentary no-ops — they match the default behaviour when the annotation is absent, but make the author's intent explicit.
+- The two gates are independent: a table can opt into strict filtering while leaving sort open, or vice versa.
+- Without the annotation, behaviour is unchanged from previous releases — all columns are filterable/sortable.
+
+The `/meta` endpoint reflects the gate: `fields[<path>].filterable` and `.sortable` mirror the permissions that the server will enforce, so clients can hide controls for restricted columns.
 
 ## HTTP
 
@@ -178,15 +212,15 @@ interface Document {
 
 ## Relations
 
-| Annotation         | Applies To | Arguments          | Description                                                                 |
-| ------------------ | ---------- | ------------------ | --------------------------------------------------------------------------- |
-| `@db.rel.FK`       | Field      | `alias?` (string)  | [Foreign key](../relations/) (field must use chain ref)                     |
-| `@db.rel.to`       | Field      | `alias?` (string)  | Forward [navigation](../relations/navigation) (N:1, FK on this table)       |
-| `@db.rel.from`     | Field      | `alias?` (string)  | Reverse [navigation](../relations/navigation) (1:N, FK on other table)      |
-| `@db.rel.via`      | Field      | `junction` (ref)   | Many-to-many [navigation](../relations/navigation) through a junction table |
-| `@db.rel.onDelete` | Field      | `action` (string)  | Referential action on parent delete                                         |
-| `@db.rel.onUpdate` | Field      | `action` (string)  | Referential action on parent update                                         |
-| `@db.rel.filter`   | Field      | `condition` (expr) | Static filter condition on navigation property                              |
+| Annotation         | Applies To | Arguments          | Description                                                                             |
+| ------------------ | ---------- | ------------------ | --------------------------------------------------------------------------------------- |
+| `@db.rel.FK`       | Field      | `alias?` (string)  | [Foreign key](../relations/) (field must use chain ref). **Dual role** — see note below |
+| `@db.rel.to`       | Field      | `alias?` (string)  | Forward [navigation](../relations/navigation) (N:1, FK on this table)                   |
+| `@db.rel.from`     | Field      | `alias?` (string)  | Reverse [navigation](../relations/navigation) (1:N, FK on other table)                  |
+| `@db.rel.via`      | Field      | `junction` (ref)   | Many-to-many [navigation](../relations/navigation) through a junction table             |
+| `@db.rel.onDelete` | Field      | `action` (string)  | Referential action on parent delete                                                     |
+| `@db.rel.onUpdate` | Field      | `action` (string)  | Referential action on parent update                                                     |
+| `@db.rel.filter`   | Field      | `condition` (expr) | Static filter condition on navigation property                                          |
 
 ```atscript
 @db.table
@@ -209,6 +243,15 @@ interface Task {
   openSubtasks: Task[]
 }
 ```
+
+### `@db.rel.FK` dual role
+
+`@db.rel.FK` serves two purposes depending on the host interface:
+
+- On a `@db.table` interface it drives **DB-relation semantics** — the relation loader pairs it with `@db.rel.to` / `@db.rel.from`, it participates in `@db.rel.via` junction resolution, and the integrity layer validates it at write time.
+- On any other interface (value-help dictionaries, WF forms, plain interfaces) it acts purely as the **value-help indicator**: the client-side picker resolver reads `@db.rel.FK` to decide which fields render a value-help picker, and the URL for the picker comes from the target's `@db.http.path`.
+
+The host-restriction rule was relaxed so the same annotation covers both cases — authors don't need a separate marker for value-help. All other validation rules still apply (the target must be a chain reference to a `@meta.id` or `@db.index.unique` field).
 
 ### Referential Action Values
 

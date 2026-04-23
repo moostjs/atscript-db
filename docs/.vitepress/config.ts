@@ -237,7 +237,10 @@ const schemaApiSidebar = [
   },
   {
     text: "Reference",
-    items: [{ text: "Annotations Reference", link: "/adapters/annotations" }],
+    items: [
+      { text: "Annotations Reference", link: "/adapters/annotations" },
+      { text: "Value-Help Controllers", link: "/adapters/value-help" },
+    ],
   },
 ];
 

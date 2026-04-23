@@ -33,6 +33,8 @@ declare global {
     "db.patch.strategy": string
     "db.table": string | true
     "db.table.renamed": string
+    "db.table.filterable": string | true
+    "db.table.sortable": string | true
     "db.schema": string
     "db.deep.insert": number
     "db.index.plain": ({ name?: string, sort?: string })[]
@@ -44,6 +46,8 @@ declare global {
     "db.column.precision": { precision: number, scale: number }
     "db.column.dimension": boolean
     "db.column.measure": boolean
+    "db.column.filterable": boolean
+    "db.column.sortable": boolean
     "db.default": string
     "db.default.increment": number | true
     "db.default.uuid": boolean

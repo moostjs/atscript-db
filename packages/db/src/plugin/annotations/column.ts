@@ -2,7 +2,7 @@ import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isRef, isStructure, isPrimitive } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
-import { validateFieldBaseType } from "../../shared/annotation-utils";
+import { getDbTableOwner, validateFieldBaseType } from "../../shared/annotation-utils";
 
 export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
@@ -172,6 +172,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         return validateFieldBaseType(token, doc, "@db.column.measure", ["number", "decimal"]);
       },
     }),
+
+    filterable: columnCapability("filterable", "filtering"),
+
+    sortable: columnCapability("sortable", "sorting"),
   },
 
   default: {
@@ -307,3 +311,39 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     },
   }),
 };
+
+function columnCapability(capability: "filterable" | "sortable", verb: string): AnnotationSpec {
+  const example =
+    capability === "filterable"
+      ? "  @db.column.filterable\n  email: string\n"
+      : "  @db.column.sortable\n  createdAt: number.timestamp\n";
+  return new AnnotationSpec({
+    description:
+      `Marks a column as ${capability} in the readable controller's query/pages endpoints. ` +
+      `Relevant only when the host \`@db.table\` interface opts into strict mode with ` +
+      `\`@db.table.${capability} 'manual'\`; otherwise ${verb} is open on all columns ` +
+      "(default-open, back-compat).\n\n" +
+      "**Example:**\n" +
+      "```atscript\n" +
+      '@db.table "users"\n' +
+      `@db.table.${capability} "manual"\n` +
+      "export interface User {\n" +
+      example +
+      "}\n" +
+      "```\n",
+    nodeType: ["prop"],
+    multiple: false,
+    validate(token, _args, _doc) {
+      const errors = [] as TMessages;
+      const owner = getDbTableOwner(token);
+      if (!owner || owner.countAnnotations("db.table") === 0) {
+        errors.push({
+          message: `@db.column.${capability} is only valid on fields of a @db.table interface`,
+          severity: 1,
+          range: token.range,
+        });
+      }
+      return errors;
+    },
+  });
+}
