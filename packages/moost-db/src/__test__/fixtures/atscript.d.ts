@@ -32,6 +32,8 @@ declare global {
     "emit.jsonSchema": boolean
     "db.patch.strategy": string
     "db.table": string | true
+    "db.table.filterable": string | true
+    "db.table.sortable": string | true
     "db.table.renamed": string
     "db.schema": string
     "db.index.plain": ({ name?: string, sort?: string })[]
@@ -43,6 +45,8 @@ declare global {
     "db.column.precision": { precision: number, scale: number }
     "db.column.dimension": boolean
     "db.column.measure": boolean
+    "db.column.filterable": boolean
+    "db.column.sortable": boolean
     "db.default": string
     "db.default.increment": number | true
     "db.default.uuid": boolean
@@ -74,10 +78,6 @@ declare global {
     "db.search.vector": { dimensions: number, similarity?: string, indexName?: string }
     "db.search.vector.threshold": number
     "db.search.filter": (string)[]
-    "db.column.filterable": boolean
-    "db.table.filterable": string
-    "db.column.sortable": boolean
-    "db.table.sortable": string
   }
   type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector"
 }

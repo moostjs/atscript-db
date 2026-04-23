@@ -18,13 +18,8 @@
     "url": "git+https://github.com/moostjs/atscript-db.git",
     "directory": "packages/db-mongo"
   },
-  "bin": {
-    "atscript-db-mongo-skill": "./scripts/setup-skills.js"
-  },
   "files": [
-    "dist",
-    "skills",
-    "scripts/setup-skills.js"
+    "dist"
   ],
   "type": "module",
   "main": "dist/index.mjs",
@@ -55,8 +50,7 @@
     "build": "vp pack",
     "dev": "vp pack --watch",
     "test": "vp test",
-    "check": "vp check",
-    "setup-skills": "node ./scripts/setup-skills.js"
+    "check": "vp check"
   },
   "devDependencies": {
     "@atscript/core": "catalog:",

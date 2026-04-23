@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## AI agents
+
+Consumer-facing agent skill for this repo lives in [`skills/atscript-db/`](skills/atscript-db/SKILL.md). Install with `npx skills add moostjs/atscript-db` (agents working in downstream apps use this). This file is for contributor agents working inside the repo.
+
 ## Project Overview
 
 Atscript DB is a monorepo providing a unified database abstraction layer for [Atscript](https://github.com/moostjs/atscript). Models are defined in `.as` files with `@db.*` annotations, producing type-safe CRUD, schema sync, and REST APIs across SQLite, PostgreSQL, MySQL, and MongoDB.
