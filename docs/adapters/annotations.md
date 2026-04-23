@@ -104,6 +104,15 @@ interface Author {
 
 When a controller is registered without an explicit prefix, `@db.http.path` is used as the route. At runtime, the final computed prefix (including parent routes) is written back to `@db.http.path` on the type metadata, so FK references always carry the correct URL.
 
+### Normalization contract
+
+The value carried in `type.metadata["db.http.path"]` has distinct semantics for writers and readers:
+
+- **Writers** (annotation at compile time): the value is an optional path hint. The controller's computed prefix takes precedence at runtime, so the annotation may be omitted or overridden by the mount point.
+- **Readers** (UI / client code / custom consumers): the runtime value is always (a) prefixed with a leading `/`, (b) inclusive of the Moost `globalPrefix`, and (c) the final public URL — usable verbatim with `fetch()` or `new Client(url)`.
+
+Example: an author writes `@db.http.path '/authors'`; a consumer reading `type.metadata["db.http.path"]` at runtime sees `/api/db/tables/authors` when the controller is mounted under `globalPrefix: '/api'` at `/db/tables/authors`.
+
 ## Deep Insert
 
 `@db.deep.insert N` declares the maximum nested-write depth accepted by a table. Client and server agree on the accepted nesting depth: the server rejects payloads past `N` with HTTP 400, and the `/meta` endpoint exposes `refDepth: N + 0.5` so clients know exactly how many levels of FK expansion to expect on the wire.
