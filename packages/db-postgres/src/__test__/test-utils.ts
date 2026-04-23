@@ -1,38 +1,17 @@
-import { existsSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 
 import { vi } from "vite-plus/test";
-import { build } from "@atscript/core";
-import { tsPlugin as ts } from "@atscript/typescript";
+import { prepareFixtures as prepare } from "@atscript/typescript/test-utils";
 import dbPlugin from "@atscript/db/plugin";
 import PostgresPlugin from "../plugin/index";
 import type { TPgDriver, TPgConnection, TPgRunResult } from "../types";
 
 export async function prepareFixtures() {
-  const wd = path.join(path.dirname(import.meta.url.slice(7)), "fixtures");
-  const repo = await build({
-    rootDir: wd,
-    include: ["**/*.as"],
-    plugins: [ts(), dbPlugin(), PostgresPlugin()],
+  const fixturesDir = path.join(path.dirname(import.meta.url.slice(7)), "fixtures");
+  await prepare({
+    rootDir: fixturesDir,
+    plugins: [dbPlugin(), PostgresPlugin()],
   });
-  const out = await repo.generate({
-    outDir: ".",
-    format: "js",
-  });
-  const outDts = await repo.generate({
-    outDir: ".",
-    format: "dts",
-  });
-  for (const file of [...out, ...outDts]) {
-    if (existsSync(file.target)) {
-      const content = readFileSync(file.target).toString();
-      if (content !== file.content) {
-        writeFileSync(file.target, file.content);
-      }
-    } else {
-      writeFileSync(file.target, file.content);
-    }
-  }
 }
 
 // ── Mock driver ──────────────────────────────────────────────────────────────

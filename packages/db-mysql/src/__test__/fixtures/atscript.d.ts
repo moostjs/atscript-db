@@ -51,6 +51,7 @@ declare global {
     "db.ignore": boolean
     "db.http.path": string
     "db.sync.method": string
+    "db.deep.insert": number
     "db.rel.FK": string | true
     "db.rel.to": string | true
     "db.rel.from": string | true
