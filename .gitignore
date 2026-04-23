@@ -33,3 +33,12 @@ docs/.vitepress/dist
 *.local.md
 
 TODO.md
+
+.claude/skills
+.claude/commands
+.agents/skills
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+openspec

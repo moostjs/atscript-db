@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "moostjs": {
+      "source": "moostjs/moostjs",
+      "sourceType": "github",
+      "computedHash": "ed40fb4eab65fb696cb5b99690b9cc69c7d1be5c7599db57608bbfaef5e2f6dd"
+    },
+    "wooksjs": {
+      "source": "wooksjs/wooksjs",
+      "sourceType": "github",
+      "computedHash": "86a6085654a94e2344aa7cfed32c22a6b9e5950b4fe9e62d5d791dad0ab25b98"
+    }
+  }
+}
