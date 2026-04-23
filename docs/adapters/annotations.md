@@ -10,19 +10,20 @@ Complete reference for all `@db.*` annotations available in `.as` files. Generic
 
 ## Tables & Columns
 
-| Annotation             | Applies To | Arguments                              | Description                                                                            |
-| ---------------------- | ---------- | -------------------------------------- | -------------------------------------------------------------------------------------- |
-| `@db.table`            | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                    |
-| `@db.table.renamed`    | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration              |
-| `@db.schema`           | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                  |
-| `@db.column`           | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                       |
-| `@db.column.renamed`   | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration             |
-| `@db.column.collate`   | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                             |
-| `@db.column.precision` | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                         |
-| `@db.column.dimension` | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)      |
-| `@db.column.measure`   | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only |
-| `@db.json`             | Field      | —                                      | Store as a single JSON column instead of flattening                                    |
-| `@db.ignore`           | Field      | —                                      | Exclude field from the database schema entirely                                        |
+| Annotation             | Applies To | Arguments                              | Description                                                                                                                                                         |
+| ---------------------- | ---------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.table`            | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                                                                                                 |
+| `@db.table.renamed`    | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration                                                                                           |
+| `@db.schema`           | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                                                                                               |
+| `@db.deep.insert`      | Interface  | `depth` (number)                       | Maximum nested-insert depth accepted on this table. Client and server agree on the accepted nesting depth — HTTP 400 past the limit, `refDepth: N + 0.5` on `/meta` |
+| `@db.column`           | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                    |
+| `@db.column.renamed`   | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                          |
+| `@db.column.collate`   | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                          |
+| `@db.column.precision` | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                      |
+| `@db.column.dimension` | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                   |
+| `@db.column.measure`   | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                              |
+| `@db.json`             | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                 |
+| `@db.ignore`           | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                     |
 
 ```atscript
 @db.table 'users'
@@ -68,6 +69,32 @@ interface Author {
 ```
 
 When a controller is registered without an explicit prefix, `@db.http.path` is used as the route. At runtime, the final computed prefix (including parent routes) is written back to `@db.http.path` on the type metadata, so FK references always carry the correct URL.
+
+## Deep Insert
+
+`@db.deep.insert N` declares the maximum nested-write depth accepted by a table. Client and server agree on the accepted nesting depth: the server rejects payloads past `N` with HTTP 400, and the `/meta` endpoint exposes `refDepth: N + 0.5` so clients know exactly how many levels of FK expansion to expect on the wire.
+
+```atscript
+@db.table 'authors'
+@db.deep.insert 2
+interface Author {
+  @meta.id
+  id: number
+  name: string
+
+  @db.rel.from
+  posts?: Post[]
+}
+```
+
+::: danger BREAKING CHANGE
+Tables **without** `@db.deep.insert` are now treated as `@db.deep.insert 0`:
+
+- The server **rejects any nested-insert payload** (HTTP 400) before reaching the database.
+- `/meta` ships **shallow refs** (`{ id, metadata }`) for FK fields — no nested target body.
+
+Previously the server accepted arbitrary-depth nested inserts via the implicit `nested-writer` and the meta endpoint always shipped `refDepth: 1`. Those implicit behaviours have been removed: tables that require nested writes must opt in explicitly with `@db.deep.insert N` for the appropriate `N`. Declaring `@db.deep.insert 0` is the same as the new default but documents the contract.
+:::
 
 ## Defaults
 

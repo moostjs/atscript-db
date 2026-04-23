@@ -244,6 +244,16 @@ export class AtscriptDbReadable<
     }
   }
 
+  /**
+   * Built table metadata. Triggers a lazy build on first access — safe to call
+   * from peer tables that need this one's relations / nav fields before any
+   * operation has run against it directly.
+   */
+  public getMetadata(): TableMetadata {
+    this._ensureBuilt();
+    return this._meta;
+  }
+
   protected _ensureSearchable(): void {
     if (!this.adapter.isSearchable()) {
       throw new DbError("INVALID_QUERY", [

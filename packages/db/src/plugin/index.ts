@@ -24,6 +24,7 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
           ignore: dbColumnAnnotations.ignore,
           http: dbTableAnnotations.http,
           sync: dbTableAnnotations.sync,
+          deep: dbTableAnnotations.deep,
           rel: dbRelAnnotations.rel,
           view: dbViewAnnotations.view,
           agg: dbAggAnnotations.agg,

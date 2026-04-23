@@ -119,8 +119,9 @@ export class AsDbReadableController<
    * Override in subclass to customise what annotations are exposed to clients.
    */
   protected getSerializeOptions(): TSerializeOptions {
+    const declared = (this.readable.type.metadata.get("db.deep.insert") as number | undefined) ?? 0;
     return {
-      refDepth: 1,
+      refDepth: declared + 0.5,
       processAnnotation: ({ key, value }) => {
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {
           return { key, value };

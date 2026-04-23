@@ -11,7 +11,7 @@ import {
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError } from "../db-error";
+import { DbError, DeepInsertDepthExceededError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { separateFieldOps, type TFieldOps } from "../ops";
 import type { TableMetadata } from "./table-metadata";
@@ -196,8 +196,14 @@ export class AtscriptDbTable<
     opts?: { maxDepth?: number },
   ): Promise<TDbInsertManyResult> {
     this._ensureBuilt();
-    const maxDepth = opts?.maxDepth ?? 3;
-    const depth = (opts as { _depth?: number })?._depth ?? 0;
+    const { _depth, maxDepth: userMax } = (opts ?? {}) as { _depth?: number; maxDepth?: number };
+    // Nested-writer re-entries carry _depth; the root's pre-pass already
+    // validated the full tree, so skip redundant recursion here.
+    if (_depth === undefined) {
+      this._enforceDeclaredInsertDepth(payloads as Array<Record<string, unknown>>);
+    }
+    const maxDepth = userMax ?? 3;
+    const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
     if (!canNest && this._meta.navFields.size > 0) {
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
@@ -744,6 +750,58 @@ export class AtscriptDbTable<
   private _prepareFilterValue(field: string, value: unknown): unknown {
     const fieldType = this.flatMap.get(field);
     return fieldType ? this.adapter.prepareId(value, fieldType) : value;
+  }
+
+  /**
+   * Pre-pass: reject insert payloads whose nested `@db.rel.from` depth exceeds
+   * the declared `@db.deep.insert N` (default `0` when absent — the BREAKING
+   * contract). Walks children via `_writeTableResolver`; stops at level 1 when
+   * the resolver is not wired, which is enough for the default-0 case.
+   */
+  private _enforceDeclaredInsertDepth(rows: Array<Record<string, unknown>>): void {
+    if (this._meta.navFields.size === 0) {
+      return;
+    }
+    const declared = (this.type.metadata.get("db.deep.insert") as number | undefined) ?? 0;
+    const resolver = this._writeTableResolver;
+
+    const walk = (
+      row: Record<string, unknown>,
+      meta: TableMetadata,
+      currentDepth: number,
+      path: string,
+    ): void => {
+      for (const [navField, relation] of meta.relations) {
+        if (relation.direction !== "from") {
+          continue;
+        }
+        const raw = row[navField];
+        if (raw === undefined || raw === null) {
+          continue;
+        }
+        const children = Array.isArray(raw) ? raw : [raw];
+        const childDepth = currentDepth + 1;
+        const fieldPath = path ? `${path}.${navField}` : navField;
+        if (childDepth > declared) {
+          throw new DeepInsertDepthExceededError(fieldPath, declared, childDepth);
+        }
+        const childMeta = resolver?.(relation.targetType())?.getMetadata();
+        if (!childMeta) {
+          continue;
+        }
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i] as Record<string, unknown>;
+          if (child && typeof child === "object") {
+            walk(child, childMeta, childDepth, `${fieldPath}[${i}]`);
+          }
+        }
+      }
+    };
+
+    const batched = rows.length > 1;
+    for (let i = 0; i < rows.length; i++) {
+      walk(rows[i], this._meta, 0, batched ? `[${i}]` : "");
+    }
   }
 
   /**

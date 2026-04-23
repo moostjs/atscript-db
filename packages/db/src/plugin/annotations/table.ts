@@ -127,4 +127,67 @@ export const dbTableAnnotations: TAnnotationsTree = {
       },
     }),
   },
+
+  deep: {
+    insert: new AnnotationSpec({
+      description:
+        "Declares the maximum nesting depth this table accepts for insert payloads. " +
+        "`N` is a non-negative integer. Payloads deeper than `N` are rejected at the server boundary " +
+        "with HTTP 400, and the `/meta` serializer exposes `N + 0.5` as `refDepth` so clients know " +
+        "how many levels of FK expansion to expect on the wire.\n\n" +
+        "**BREAKING:** A table without this annotation is treated as `@db.deep.insert 0` — nested " +
+        "inserts are rejected and meta ships shallow refs only. Add `@db.deep.insert N` explicitly " +
+        "to any interface that needs nested-write support." +
+        "\n\n**Example:**\n" +
+        "```atscript\n" +
+        '@db.table "authors"\n' +
+        "@db.deep.insert 2\n" +
+        "export interface Author { ... }\n" +
+        "```\n",
+      nodeType: ["interface"],
+      multiple: false,
+      argument: {
+        name: "depth",
+        type: "number",
+        description: "Non-negative integer: maximum nesting depth accepted for nested inserts.",
+      },
+      validate(token, args, _doc) {
+        const errors = [] as TMessages;
+        const owner = token.parentNode!;
+
+        // D1: Must be on a @db.table interface
+        if (owner.countAnnotations("db.table") === 0) {
+          errors.push({
+            message: "@db.deep.insert is only valid on @db.table interfaces",
+            severity: 1,
+            range: token.range,
+          });
+        }
+
+        // D2: Must not appear more than once on the same interface
+        if (owner.countAnnotations("db.deep.insert") > 1) {
+          errors.push({
+            message: "Multiple @db.deep.insert annotations on the same interface",
+            severity: 1,
+            range: token.range,
+          });
+        }
+
+        // D3: Argument must be a non-negative integer
+        const raw = args[0]?.text;
+        if (raw !== undefined) {
+          const num = Number(raw);
+          if (!Number.isFinite(num) || !Number.isInteger(num) || num < 0) {
+            errors.push({
+              message: `@db.deep.insert depth must be a non-negative integer, got '${raw}'`,
+              severity: 1,
+              range: args[0]!.range,
+            });
+          }
+        }
+
+        return errors;
+      },
+    }),
+  },
 };

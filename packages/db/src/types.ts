@@ -6,6 +6,7 @@ import type {
   WithRelation,
 } from "@uniqu/core";
 import type { UniquSelect } from "./query/uniqu-select";
+import type { TableMetadata } from "./table/table-metadata";
 
 export type { FlatOf, PrimaryKeyOf, OwnPropsOf, NavPropsOf } from "@atscript/typescript/utils";
 
@@ -312,6 +313,7 @@ export interface AtscriptDbTableLike {
   primaryKeys: readonly string[];
   relations: ReadonlyMap<string, TDbRelation>;
   foreignKeys: ReadonlyMap<string, TDbForeignKey>;
+  getMetadata(): TableMetadata;
 }
 
 // ── Write Table Resolver ─────────────────────────────────────────────────
