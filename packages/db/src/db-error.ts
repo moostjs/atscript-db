@@ -20,18 +20,18 @@ export class DbError extends Error {
 }
 
 /**
- * Thrown when an insert payload nests deeper than the table's
- * declared `@db.deep.insert N`. Surfaced as HTTP 400 in moost-db.
+ * Thrown when a write payload nests deeper than the table's
+ * declared `@db.depth.limit N`. Surfaced as HTTP 400 in moost-db.
  */
-export class DeepInsertDepthExceededError extends DbError {
-  name = "DeepInsertDepthExceededError";
+export class DepthLimitExceededError extends DbError {
+  name = "DepthLimitExceededError";
 
   constructor(
     public readonly field: string,
     public readonly declared: number,
     public readonly actual: number,
   ) {
-    const message = `Nested insert depth ${actual} exceeds declared @db.deep.insert ${declared} at '${field}'`;
+    const message = `Nested write depth ${actual} exceeds declared @db.depth.limit ${declared} at '${field}'`;
     super("DEPTH_EXCEEDED", [{ path: field, message }], message);
   }
 }

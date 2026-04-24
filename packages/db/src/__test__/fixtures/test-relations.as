@@ -2,7 +2,7 @@ import { Author } from './rel-author'
 import { Comment } from './rel-comment'
 
 @db.table 'posts'
-@db.deep.insert 1
+@db.depth.limit 1
 export interface Post {
     @meta.id
     @db.default.increment

@@ -144,23 +144,23 @@ curl http://localhost:3000/todos/meta
 }
 ```
 
-| Field              | Description                                                                                                                                                                                                                       |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                                     |
-| `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                                       |
-| `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                       |
-| `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields include the referenced table type to the depth declared by [`@db.deep.insert`](../adapters/annotations#deep-insert) on the table (see below) |
+| Field              | Description                                                                                                                                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                                                                      |
+| `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                                                                        |
+| `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                                                        |
+| `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields ship as shallow refs (`{ id, metadata }`) — enough to resolve the target's URL via `db.http.path`; deeper structure is reachable through the target's own `/meta` (see below) |
 
 The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`.
 
-#### FK expansion and `@db.deep.insert`
+#### FK ref shape in meta
 
-The controller reads `@db.deep.insert N` from the table's metadata (default: `0` when the annotation is absent) and asks the serializer for `refDepth: N + 0.5`. The half-step at the leaf controls the terminal shape of each FK chain so clients always get a discoverable URL:
+`/meta` always serializes FK fields as shallow refs — `ref.type` is the `{ id, metadata }` shape, independent of `@db.depth.limit` (which is a security guard on nested writes, not a serialization policy). The target's `db.http.path` is carried in `metadata`, so clients can:
 
-- Tables annotated `@db.deep.insert 0` (or unannotated) ship shallow refs only — each FK field's `ref.type` is the `{ id, metadata }` shape, enough to resolve the target's `@db.http.path` without carrying its body.
-- Tables annotated `@db.deep.insert N >= 1` ship `N` levels of fully-expanded target bodies, with the `N+1`-th level falling back to the shallow shape.
+- resolve the target endpoint for value-help pickers, and
+- fetch the target's own `/meta` on demand when they need the target's structural body.
 
-Consumers should therefore not assume full target expansion past the declared depth. Deeper nav is still reachable via the target's own `/meta` endpoint, which carries its own `refDepth` according to its own annotation.
+Nav-prop trees (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) are fully expanded in meta regardless — they are not `.ref` nodes — so the write-payload shape clients need for nested inserts is always present. Only the FK pointer bodies are shallow, and those are recoverable via a cached per-target `/meta` fetch.
 
 ## Creating Records
 

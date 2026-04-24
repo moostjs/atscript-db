@@ -439,11 +439,28 @@ export class PostgresAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     // PostgreSQL does not support UPDATE ... LIMIT 1.
-    // Use ctid subquery: UPDATE t SET ... WHERE ctid = (SELECT ctid FROM t WHERE ... LIMIT 1)
+    // Re-key the outer UPDATE on the primary key (a stable column) via a subquery.
+    // Keying on ctid would lose concurrent writes: ctid is a physical tuple pointer
+    // that changes on every UPDATE, and SELECT ctid takes no row lock, so two
+    // parallel updaters can both capture the same ctid, have T1's commit invalidate
+    // it, then T2 matches zero rows and silently drops the update. A PK predicate
+    // lets Postgres' EvalPlanQual recovery follow the updated tuple under READ
+    // COMMITTED, so both UPDATEs serialize on the row lock and both take effect.
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
+    const quotedTable = quoteTableName(tableName);
+    const pkCols = this._table.primaryKeys;
+    // Single-col PKs use `<col> = (SELECT <col> …)`; composite PKs use the
+    // row-constructor form `(c1, c2) IN (SELECT c1, c2 …)`. Tables with no
+    // declared PK fall back to ctid — concurrency on PK-less tables is
+    // already ill-defined; preserve existing behavior rather than guess.
+    const keyCols = pkCols.length > 0 ? pkCols : ["ctid"];
+    const quotedKeys = keyCols.map((c) => (c === "ctid" ? "ctid" : qi(c)));
+    const colList = quotedKeys.join(", ");
+    const keyExpr = quotedKeys.length === 1 ? quotedKeys[0]! : `(${colList})`;
+    const op = quotedKeys.length === 1 ? "=" : "IN";
     const limitedWhere = {
-      sql: `ctid = (SELECT ctid FROM ${quoteTableName(tableName)} WHERE ${where.sql} LIMIT 1)`,
+      sql: `${keyExpr} ${op} (SELECT ${colList} FROM ${quotedTable} WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
     };
     const { sql, params } = buildUpdate(tableName, data, limitedWhere, undefined, ops);

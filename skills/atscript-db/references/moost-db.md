@@ -143,7 +143,7 @@ interface TMetaResponse {
   readOnly: boolean;
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<string, { sortable; filterable }>;
-  type: TSerializedAnnotatedType; // refDepth = (@db.deep.insert N) + 0.5
+  type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)
 }
 ```
 

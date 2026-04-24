@@ -1,7 +1,7 @@
 import { Post } from './test-relations'
 
 @db.table 'authors'
-@db.deep.insert 2
+@db.depth.limit 2
 export interface Author {
     @meta.id
     @db.default.increment

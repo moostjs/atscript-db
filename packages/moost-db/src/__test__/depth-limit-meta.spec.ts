@@ -9,10 +9,11 @@ import dbPlugin from "@atscript/db/plugin";
 import { AsDbReadableController } from "../as-db-readable.controller";
 
 /**
- * Meta-serializer integration for `@db.deep.insert`. Each scenario hits the
- * real atscript build + `serializeAnnotatedType` path — this is the contract
- * the db-client runtime observes on the wire, not just the controller's
- * `refDepth` option value.
+ * `/meta` serialization shape contract. Every scenario confirms that the meta
+ * serializer ships a fixed `refDepth: 0.5` — independent of `@db.depth.limit`,
+ * which is a security guard on nested writes and deliberately decoupled from
+ * wire shape. Each case hits the real atscript build + `serializeAnnotatedType`
+ * path so the observed shape matches what db-client sees at runtime.
  */
 
 async function prepareFixtures() {
@@ -81,74 +82,67 @@ function findFkRef(serialized: any, fkField: string): any {
   return entry?.ref;
 }
 
-describe("AsDbReadableController — @db.deep.insert meta serialization", () => {
+describe("AsDbReadableController — /meta serialization shape", () => {
   let RootZero: any;
   let RootTwo: any;
   let RootNone: any;
 
   beforeAll(async () => {
     await prepareFixtures();
-    const mod = await import("./fixtures/deep-insert-meta.as");
+    const mod = await import("./fixtures/depth-limit-meta.as");
     RootZero = mod.RootZero;
     RootTwo = mod.RootTwo;
     RootNone = mod.RootNone;
   });
 
-  // ── Wire-shape checks — exercise the full serializer path ────────────
+  // ── refDepth is statically 0.5 — not derived from @db.depth.limit ─────
 
-  it("sets refDepth = 0.5 when @db.deep.insert 0", () => {
+  it("ships refDepth = 0.5 for @db.depth.limit 0", () => {
     const c = new ExposedController(makeReadable(RootZero), makeApp());
-    const opts = c.expose();
-    expect(opts.refDepth).toBe(0.5);
+    expect(c.expose().refDepth).toBe(0.5);
   });
 
-  it("sets refDepth = 2.5 when @db.deep.insert 2", () => {
+  it("ships refDepth = 0.5 even when @db.depth.limit 2 (annotation does not raise ref expansion)", () => {
     const c = new ExposedController(makeReadable(RootTwo), makeApp());
-    const opts = c.expose();
-    expect(opts.refDepth).toBe(2.5);
+    expect(c.expose().refDepth).toBe(0.5);
   });
 
-  it("sets refDepth = 0.5 when no annotation (breaking default)", () => {
+  it("ships refDepth = 0.5 when no annotation is present", () => {
     const c = new ExposedController(makeReadable(RootNone), makeApp());
-    const opts = c.expose();
-    expect(opts.refDepth).toBe(0.5);
+    expect(c.expose().refDepth).toBe(0.5);
   });
 
-  it("@db.deep.insert 0 → FK ref.type is the shallow { id, metadata } shape", () => {
+  // ── Wire-shape: every FK ref is shallow regardless of annotation ──────
+
+  it("@db.depth.limit 0 → FK ref.type is the shallow { id, metadata } shape", () => {
     const c = new ExposedController(makeReadable(RootZero), makeApp());
-    const serialized = c.serialize();
-    const ref = findFkRef(serialized, "leafId");
+    const ref = findFkRef(c.serialize(), "leafId");
     expect(ref).toBeDefined();
-    expect(ref.type).toBeDefined();
-    // Shallow ref: no `type` kind / props expansion — only id + metadata
     expect(ref.type.props).toBeUndefined();
     expect(ref.type.kind).toBeUndefined();
     expect("id" in ref.type).toBe(true);
     expect("metadata" in ref.type).toBe(true);
   });
 
-  it("no annotation → FK ref.type is the shallow shape (BREAKING vs prior refDepth: 1)", () => {
+  it("no annotation → FK ref.type is the shallow shape", () => {
     const c = new ExposedController(makeReadable(RootNone), makeApp());
-    const serialized = c.serialize();
-    const ref = findFkRef(serialized, "leafId");
+    const ref = findFkRef(c.serialize(), "leafId");
     expect(ref).toBeDefined();
     expect(ref.type.props).toBeUndefined();
     expect(ref.type.kind).toBeUndefined();
     expect("id" in ref.type).toBe(true);
   });
 
-  it("@db.deep.insert 2 → first FK level is fully expanded, second shallow", () => {
+  it("@db.depth.limit 2 → FK ref.type is STILL the shallow shape (annotation does not trigger expansion)", () => {
     const c = new ExposedController(makeReadable(RootTwo), makeApp());
-    const serialized = c.serialize();
-    const midRef = findFkRef(serialized, "midId");
+    const midRef = findFkRef(c.serialize(), "midId");
     expect(midRef).toBeDefined();
-    // Level 1: Mid is fully expanded — has props.
-    expect(midRef.type.type?.props ?? midRef.type.props).toBeDefined();
-    // Level 2: Mid.leafId → Leaf should be shallow.
-    const leafRef = findFkRef(midRef.type, "leafId");
-    expect(leafRef).toBeDefined();
-    expect(leafRef.type.props).toBeUndefined();
-    expect(leafRef.type.kind).toBeUndefined();
-    expect("id" in leafRef.type).toBe(true);
+    // With refDepth: 0.5 the first FK hop is already shallow — the annotation
+    // does not open up deeper ref expansion in meta, only the write-acceptance
+    // gate (which is tested in packages/db/src/__test__/depth-limit-enforcement.spec.ts).
+    expect(midRef.type.props).toBeUndefined();
+    expect(midRef.type.kind).toBeUndefined();
+    expect("id" in midRef.type).toBe(true);
+    expect("metadata" in midRef.type).toBe(true);
   });
 });

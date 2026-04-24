@@ -1,7 +1,7 @@
 import { type Validator, ValidatorError } from "@atscript/typescript/utils";
 import type { FilterExpr } from "@uniqu/core";
 
-import { DbError } from "../db-error";
+import { DbError, DepthLimitExceededError } from "../db-error";
 import type { DbValidationContext } from "../db-validator-plugin";
 import type {
   AtscriptDbTableLike,
@@ -78,13 +78,18 @@ export function validateBatch(
     try {
       validator.validate(items[i], false, ctx);
     } catch (error) {
-      if (error instanceof ValidatorError && items.length > 1) {
-        throw new ValidatorError(
-          error.errors.map((err) => ({
-            ...err,
-            path: `[${i}].${err.path}`,
-          })),
-        );
+      if (items.length > 1) {
+        if (error instanceof ValidatorError) {
+          throw new ValidatorError(
+            error.errors.map((err) => ({
+              ...err,
+              path: `[${i}].${err.path}`,
+            })),
+          );
+        }
+        if (error instanceof DepthLimitExceededError) {
+          throw new DepthLimitExceededError(`[${i}].${error.field}`, error.declared, error.actual);
+        }
       }
       throw error;
     }

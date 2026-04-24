@@ -32,11 +32,10 @@ declare global {
     "emit.jsonSchema": boolean
     "db.patch.strategy": string
     "db.table": string | true
-    "db.table.renamed": string
     "db.table.filterable": string | true
     "db.table.sortable": string | true
+    "db.table.renamed": string
     "db.schema": string
-    "db.deep.insert": number
     "db.index.plain": ({ name?: string, sort?: string })[]
     "db.index.unique": (string | true)[]
     "db.index.fulltext": ({ name?: string, weight?: number })[]
@@ -56,6 +55,7 @@ declare global {
     "db.ignore": boolean
     "db.http.path": string
     "db.sync.method": string
+    "db.depth.limit": number
     "db.rel.FK": string | true
     "db.rel.to": string | true
     "db.rel.from": string | true

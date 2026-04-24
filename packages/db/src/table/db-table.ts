@@ -11,7 +11,7 @@ import {
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError, DeepInsertDepthExceededError } from "../db-error";
+import { DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { separateFieldOps, type TFieldOps } from "../ops";
 import type { TableMetadata } from "./table-metadata";
@@ -117,6 +117,8 @@ export class AtscriptDbTable<
 
   protected readonly validators = new Map<string, Validator<T, DataType>>();
 
+  private _fromDepthMap?: ReadonlyMap<string, number>;
+
   constructor(
     _type: T,
     adapter: A,
@@ -197,11 +199,6 @@ export class AtscriptDbTable<
   ): Promise<TDbInsertManyResult> {
     this._ensureBuilt();
     const { _depth, maxDepth: userMax } = (opts ?? {}) as { _depth?: number; maxDepth?: number };
-    // Nested-writer re-entries carry _depth; the root's pre-pass already
-    // validated the full tree, so skip redundant recursion here.
-    if (_depth === undefined) {
-      this._enforceDeclaredInsertDepth(payloads as Array<Record<string, unknown>>);
-    }
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
@@ -214,9 +211,12 @@ export class AtscriptDbTable<
         // Clone + apply defaults (keep originals for FROM phase)
         const items = payloads.map((p) => this._applyDefaults({ ...p }));
 
-        // Validate full payload (including nav fields) before any writes
+        // Validate full payload (including nav fields) before any writes.
+        // Depth is only enforced at the root call — nested-writer re-entries
+        // already had their full tree validated upstream.
         const validator = this.getValidator("insert");
         const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
+        this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
 
         // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
@@ -318,6 +318,7 @@ export class AtscriptDbTable<
 
         const validator = this.getValidator("bulkReplace");
         const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
+        this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
 
         const host = this as any as TNestedWriterHost;
@@ -411,6 +412,7 @@ export class AtscriptDbTable<
           flatMap: this.flatMap,
           navFields: this._meta.navFields,
         };
+        this._applyDepthCtx(ctx, depth);
         validateBatch(validator, payloads as Array<Record<string, unknown>>, ctx);
 
         // Preserve originals for FROM/VIA phase (nav fields are stripped in Phase 2)
@@ -753,55 +755,48 @@ export class AtscriptDbTable<
   }
 
   /**
-   * Pre-pass: reject insert payloads whose nested `@db.rel.from` depth exceeds
-   * the declared `@db.deep.insert N` (default `0` when absent — the BREAKING
-   * contract). Walks children via `_writeTableResolver`; stops at level 1 when
-   * the resolver is not wired, which is enough for the default-0 case.
+   * Lazy — builds a `normalized-path → from-depth` map from `this._meta.flatMap`
+   * on first use. Only paths reachable through an unbroken chain of `db.rel.from`
+   * nav fields from the root are included (chains crossing `to`/`via` are excluded).
    */
-  private _enforceDeclaredInsertDepth(rows: Array<Record<string, unknown>>): void {
-    if (this._meta.navFields.size === 0) {
-      return;
-    }
-    const declared = (this.type.metadata.get("db.deep.insert") as number | undefined) ?? 0;
-    const resolver = this._writeTableResolver;
-
-    const walk = (
-      row: Record<string, unknown>,
-      meta: TableMetadata,
-      currentDepth: number,
-      path: string,
-    ): void => {
-      for (const [navField, relation] of meta.relations) {
-        if (relation.direction !== "from") {
-          continue;
-        }
-        const raw = row[navField];
-        if (raw === undefined || raw === null) {
-          continue;
-        }
-        const children = Array.isArray(raw) ? raw : [raw];
-        const childDepth = currentDepth + 1;
-        const fieldPath = path ? `${path}.${navField}` : navField;
-        if (childDepth > declared) {
-          throw new DeepInsertDepthExceededError(fieldPath, declared, childDepth);
-        }
-        const childMeta = resolver?.(relation.targetType())?.getMetadata();
-        if (!childMeta) {
-          continue;
-        }
-        for (let i = 0; i < children.length; i++) {
-          const child = children[i] as Record<string, unknown>;
-          if (child && typeof child === "object") {
-            walk(child, childMeta, childDepth, `${fieldPath}[${i}]`);
+  private _getFromDepthMap(): ReadonlyMap<string, number> {
+    if (!this._fromDepthMap) {
+      const out = new Map<string, number>();
+      for (const [path, def] of this._meta.flatMap) {
+        const md = def.metadata;
+        if (!md?.has("db.rel.from")) continue;
+        const segments = path.split(".");
+        let prefix = "";
+        let depth = 0;
+        let valid = true;
+        for (let i = 0; i < segments.length; i++) {
+          prefix = prefix ? `${prefix}.${segments[i]}` : segments[i]!;
+          const pdef = this._meta.flatMap.get(prefix);
+          const pmd = pdef?.metadata;
+          if (pmd?.has("db.rel.to") || pmd?.has("db.rel.via")) {
+            valid = false;
+            break;
           }
+          if (pmd?.has("db.rel.from")) depth++;
         }
+        if (valid) out.set(path, depth);
       }
-    };
-
-    const batched = rows.length > 1;
-    for (let i = 0; i < rows.length; i++) {
-      walk(rows[i], this._meta, 0, batched ? `[${i}]` : "");
+      this._fromDepthMap = out;
     }
+    return this._fromDepthMap;
+  }
+
+  /**
+   * Populate the depth-limit bundle on a `DbValidationContext`. Only the root
+   * write call (`depth === 0`) enforces — nested re-entries leave `depthCheck`
+   * unset so the full tree is validated once at the root.
+   */
+  private _applyDepthCtx(ctx: DbValidationContext, depth: number): void {
+    if (depth !== 0 || this._meta.navFields.size === 0) return;
+    ctx.depthCheck = {
+      limit: (this.type.metadata.get("db.depth.limit") as number | undefined) ?? 0,
+      fromDepthMap: this._getFromDepthMap(),
+    };
   }
 
   /**
@@ -817,7 +812,10 @@ export class AtscriptDbTable<
   ): Promise<void> {
     this._ensureBuilt();
 
-    // Type validation: apply defaults, validate full payload
+    // Type + FK pre-validation only. Depth is authoritatively checked at the
+    // root write call against the root table's `@db.depth.limit`; re-applying
+    // the child's own limit here would reject children whose own table is
+    // unannotated but whose parent's limit admits them.
     const validator = this.getValidator("insert");
     const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
     const prepared = items.map((raw) => this._applyDefaults({ ...raw }));

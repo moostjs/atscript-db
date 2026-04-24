@@ -64,18 +64,18 @@ Fields tagged `@db.json` are serialized to a single JSON column (or native `JSON
 
 Avoid `@db.json` on high-write fields — every partial update becomes a read-modify-write.
 
-## `@db.deep.insert N` — depth gate
+## `@db.depth.limit N` — security guard on nested writes
 
-Controls whether writes can traverse navigation relations (`@db.rel.from`, `@db.rel.via`) to create/replace/patch related records.
+Controls whether writes (insert / replace / patch) may traverse `@db.rel.from` navigation relations to create/replace/patch related records. Purely a write-acceptance control; has no effect on `/meta` shape.
 
-| Value        | Effect                                                                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| absent / `0` | Server rejects any nested-write payload with HTTP 400. `/meta` returns shallow FK refs (`{ id, metadata }`).                          |
-| `N ≥ 1`      | Accept nesting up to depth `N`. `/meta` returns `refDepth: N + 0.5` (client knows exactly how deep targets are expanded on the wire). |
+| Value        | Effect                                                                           |
+| ------------ | -------------------------------------------------------------------------------- |
+| absent / `0` | Server rejects any nested-write payload with HTTP 400.                           |
+| `N ≥ 1`      | Accept nesting up to depth `N`. Payloads deeper than `N` rejected with HTTP 400. |
 
 ```atscript
 @db.table 'authors'
-@db.deep.insert 2
+@db.depth.limit 2
 interface Author { ... }
 ```
 
@@ -97,5 +97,5 @@ Array ops against scalar arrays in SQL columns emit an in-application diff-and-r
 
 - `ValidatorError` (from `@atscript/typescript`) — required field missing on replace, bad value shape.
 - `DbError('FK_VIOLATION')` — FK existence check failed on write.
-- `DbError('DEPTH_EXCEEDED')` (`DeepInsertDepthExceededError`) — payload nests past `@db.deep.insert N`.
+- `DbError('DEPTH_EXCEEDED')` (`DepthLimitExceededError`) — payload nests past `@db.depth.limit N`.
 - `DbError('CONFLICT')` — unique-index violation.

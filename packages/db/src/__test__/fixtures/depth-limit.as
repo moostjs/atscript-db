@@ -1,11 +1,11 @@
-// Fixture for @db.deep.insert annotation — success/failure cases are
-// exercised by packages/db/src/__test__/deep-insert-enforcement.spec.ts.
+// Fixture for @db.depth.limit annotation — success/failure cases are
+// exercised by packages/db/src/__test__/depth-limit-enforcement.spec.ts.
 //
 // Each annotated parent has its own child chain (FKs point back at the
 // matching parent) so the fixture compiles without cross-parent FK conflicts.
 
 @db.table 'deep_zero'
-@db.deep.insert 0
+@db.depth.limit 0
 export interface DeepZero {
     @meta.id
     @db.default.increment
@@ -33,7 +33,7 @@ export interface DeepZeroChild {
 }
 
 @db.table 'deep_two'
-@db.deep.insert 2
+@db.depth.limit 2
 export interface DeepTwo {
     @meta.id
     @db.default.increment

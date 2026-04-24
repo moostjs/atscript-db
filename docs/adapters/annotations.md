@@ -10,24 +10,24 @@ Complete reference for all `@db.*` annotations available in `.as` files. Generic
 
 ## Tables & Columns
 
-| Annotation              | Applies To | Arguments                              | Description                                                                                                                                                         |
-| ----------------------- | ---------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.table`             | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                                                                                                 |
-| `@db.table.renamed`     | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration                                                                                           |
-| `@db.schema`            | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                                                                                               |
-| `@db.deep.insert`       | Interface  | `depth` (number)                       | Maximum nested-insert depth accepted on this table. Client and server agree on the accepted nesting depth — HTTP 400 past the limit, `refDepth: N + 0.5` on `/meta` |
-| `@db.column`            | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                    |
-| `@db.column.renamed`    | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                          |
-| `@db.column.collate`    | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                          |
-| `@db.column.precision`  | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                      |
-| `@db.column.dimension`  | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                   |
-| `@db.column.measure`    | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                              |
-| `@db.column.filterable` | Field      | —                                      | Allow this field in client-side filter clauses when the table is in `@db.table.filterable 'manual'` mode (see below)                                                |
-| `@db.column.sortable`   | Field      | —                                      | Allow this field in client-side sort keys when the table is in `@db.table.sortable 'manual'` mode (see below)                                                       |
-| `@db.table.filterable`  | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Filter-gating mode. `'auto'` (default) keeps all columns filterable; `'manual'` requires `@db.column.filterable` on each filterable field                           |
-| `@db.table.sortable`    | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Sort-gating mode. `'auto'` (default) keeps all columns sortable; `'manual'` requires `@db.column.sortable` on each sortable field                                   |
-| `@db.json`              | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                 |
-| `@db.ignore`            | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                     |
+| Annotation              | Applies To | Arguments                              | Description                                                                                                                                                                             |
+| ----------------------- | ---------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.table`             | Interface  | `name?` (string)                       | Mark as database table (defaults to interface name)                                                                                                                                     |
+| `@db.table.renamed`     | Interface  | `oldName` (string)                     | Previous table name for [schema sync](../sync/what-gets-synced) migration                                                                                                               |
+| `@db.schema`            | Interface  | `name` (string)                        | Assign to a database schema/namespace                                                                                                                                                   |
+| `@db.depth.limit`       | Interface  | `depth` (number)                       | Security guard on nested writes. Default `0` rejects any nested insert / replace / patch with HTTP 400. Raise `N` to allow deep writes up to that depth. Does not affect `/meta` shape. |
+| `@db.column`            | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                                        |
+| `@db.column.renamed`    | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                                              |
+| `@db.column.collate`    | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                                              |
+| `@db.column.precision`  | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                                          |
+| `@db.column.dimension`  | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                                       |
+| `@db.column.measure`    | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                                                  |
+| `@db.column.filterable` | Field      | —                                      | Allow this field in client-side filter clauses when the table is in `@db.table.filterable 'manual'` mode (see below)                                                                    |
+| `@db.column.sortable`   | Field      | —                                      | Allow this field in client-side sort keys when the table is in `@db.table.sortable 'manual'` mode (see below)                                                                           |
+| `@db.table.filterable`  | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Filter-gating mode. `'auto'` (default) keeps all columns filterable; `'manual'` requires `@db.column.filterable` on each filterable field                                               |
+| `@db.table.sortable`    | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Sort-gating mode. `'auto'` (default) keeps all columns sortable; `'manual'` requires `@db.column.sortable` on each sortable field                                                       |
+| `@db.json`              | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                                     |
+| `@db.ignore`            | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                                         |
 
 ```atscript
 @db.table 'users'
@@ -113,13 +113,15 @@ The value carried in `type.metadata["db.http.path"]` has distinct semantics for 
 
 Example: an author writes `@db.http.path '/authors'`; a consumer reading `type.metadata["db.http.path"]` at runtime sees `/api/db/tables/authors` when the controller is mounted under `globalPrefix: '/api'` at `/db/tables/authors`.
 
-## Deep Insert
+## Depth Limit (security guard)
 
-`@db.deep.insert N` declares the maximum nested-write depth accepted by a table. Client and server agree on the accepted nesting depth: the server rejects payloads past `N` with HTTP 400, and the `/meta` endpoint exposes `refDepth: N + 0.5` so clients know exactly how many levels of FK expansion to expect on the wire.
+`@db.depth.limit N` is a **security guard** on nested-write payloads — a declared ceiling on how deep a client can send nested inserts, replaces, or patches through `@db.rel.from` relations. Payloads deeper than `N` are rejected at the server boundary with HTTP 400 before any database access. Default when the annotation is absent is `0`, meaning no nested writes are accepted at all; authors opt in explicitly to `N >= 1` when they want the server to accept deep writes.
+
+This annotation affects **only write acceptance**. It does not change `/meta` serialization, read/query behaviour, or wire shape (see the separate note below).
 
 ```atscript
 @db.table 'authors'
-@db.deep.insert 2
+@db.depth.limit 2
 interface Author {
   @meta.id
   id: number
@@ -131,12 +133,11 @@ interface Author {
 ```
 
 ::: danger BREAKING CHANGE
-Tables **without** `@db.deep.insert` are now treated as `@db.deep.insert 0`:
+Tables **without** `@db.depth.limit` are now treated as `@db.depth.limit 0`: the server **rejects any nested-write payload** (HTTP 400) before reaching the database. Previously the server accepted arbitrary-depth nested writes via the implicit `nested-writer`. That implicit behaviour has been removed: tables that require nested writes must opt in explicitly with `@db.depth.limit N` for the appropriate `N`.
+:::
 
-- The server **rejects any nested-insert payload** (HTTP 400) before reaching the database.
-- `/meta` ships **shallow refs** (`{ id, metadata }`) for FK fields — no nested target body.
-
-Previously the server accepted arbitrary-depth nested inserts via the implicit `nested-writer` and the meta endpoint always shipped `refDepth: 1`. Those implicit behaviours have been removed: tables that require nested writes must opt in explicitly with `@db.deep.insert N` for the appropriate `N`. Declaring `@db.deep.insert 0` is the same as the new default but documents the contract.
+::: info `/meta` FK ref shape is independent
+`/meta` always ships FK fields as shallow refs (`{ id, metadata }`) regardless of `@db.depth.limit`. The target's `db.http.path` is carried in the ref metadata, so clients can resolve value-help URLs and fetch the target's own `/meta` on demand when they need deeper structure. Nav-prop trees (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) are fully expanded in meta regardless of this annotation, so the write-payload shape clients need is unaffected. (Prior releases shipped `refDepth: 1` and coupled meta expansion to `@db.depth.limit`; that coupling has been removed.)
 :::
 
 ## Defaults

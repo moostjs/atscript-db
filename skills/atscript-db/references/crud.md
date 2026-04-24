@@ -20,7 +20,7 @@ await users.insertMany([{ name: "A" }, { name: "B" }]);
 
 - Server validates with mode `'insert'` (optional + required, plus `@db.rel.FK` existence check via the application integrity layer or native DB constraint).
 - Defaults from `@db.default*` are applied when the adapter doesn't do so natively (see `base-adapter.ts:nativeDefaultFns`).
-- Nested inserts (writes to `@db.rel.from` / `@db.rel.via` arrays) are rejected unless `@db.deep.insert N` is set for the right depth; `@db.deep.insert 0` rejects any nesting with HTTP 400.
+- Nested writes (insert / replace / patch into `@db.rel.from` arrays) are rejected unless `@db.depth.limit N` is set for the right depth; `@db.depth.limit 0` rejects any nesting with HTTP 400.
 
 ## Replaces (full-record)
 

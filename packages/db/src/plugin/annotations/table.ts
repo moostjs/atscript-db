@@ -132,20 +132,23 @@ export const dbTableAnnotations: TAnnotationsTree = {
     }),
   },
 
-  deep: {
-    insert: new AnnotationSpec({
+  depth: {
+    limit: new AnnotationSpec({
       description:
-        "Declares the maximum nesting depth this table accepts for insert payloads. " +
-        "`N` is a non-negative integer. Payloads deeper than `N` are rejected at the server boundary " +
-        "with HTTP 400, and the `/meta` serializer exposes `N + 0.5` as `refDepth` so clients know " +
-        "how many levels of FK expansion to expect on the wire.\n\n" +
-        "**BREAKING:** A table without this annotation is treated as `@db.deep.insert 0` — nested " +
-        "inserts are rejected and meta ships shallow refs only. Add `@db.deep.insert N` explicitly " +
-        "to any interface that needs nested-write support." +
+        "Security guard on nested-write payloads. `N` is a non-negative integer declaring " +
+        "the maximum depth a client may nest `@db.rel.from` children in insert, replace, " +
+        "or patch payloads. Writes deeper than `N` are rejected at the server boundary with " +
+        "HTTP 400 before any DB access.\n\n" +
+        "**Default when absent:** `0` — any nested-write payload is rejected. Authors opt in " +
+        "explicitly to `N >= 1` when they want the server to accept deep writes. This is a " +
+        "security / blast-radius control, not a performance knob.\n\n" +
+        "**Scope:** affects only write acceptance. Has no effect on `/meta` serialization, " +
+        "read/query paths, or wire shape — the meta endpoint always ships FK refs as the " +
+        "shallow `{ id, metadata }` shape regardless of this annotation." +
         "\n\n**Example:**\n" +
         "```atscript\n" +
         '@db.table "authors"\n' +
-        "@db.deep.insert 2\n" +
+        "@db.depth.limit 2\n" +
         "export interface Author { ... }\n" +
         "```\n",
       nodeType: ["interface"],
@@ -153,7 +156,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
       argument: {
         name: "depth",
         type: "number",
-        description: "Non-negative integer: maximum nesting depth accepted for nested inserts.",
+        description: "Non-negative integer: maximum nesting depth accepted for nested writes.",
       },
       validate(token, args, _doc) {
         const errors = [] as TMessages;
@@ -162,16 +165,16 @@ export const dbTableAnnotations: TAnnotationsTree = {
         // D1: Must be on a @db.table interface
         if (owner.countAnnotations("db.table") === 0) {
           errors.push({
-            message: "@db.deep.insert is only valid on @db.table interfaces",
+            message: "@db.depth.limit is only valid on @db.table interfaces",
             severity: 1,
             range: token.range,
           });
         }
 
         // D2: Must not appear more than once on the same interface
-        if (owner.countAnnotations("db.deep.insert") > 1) {
+        if (owner.countAnnotations("db.depth.limit") > 1) {
           errors.push({
-            message: "Multiple @db.deep.insert annotations on the same interface",
+            message: "Multiple @db.depth.limit annotations on the same interface",
             severity: 1,
             range: token.range,
           });
@@ -183,7 +186,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
           const num = Number(raw);
           if (!Number.isFinite(num) || !Number.isInteger(num) || num < 0) {
             errors.push({
-              message: `@db.deep.insert depth must be a non-negative integer, got '${raw}'`,
+              message: `@db.depth.limit depth must be a non-negative integer, got '${raw}'`,
               severity: 1,
               range: args[0]!.range,
             });

@@ -1,7 +1,7 @@
-// Fixture for deep-insert-meta.spec.ts — exercises how @db.deep.insert
+// Fixture for depth-limit-meta.spec.ts — exercises how @db.depth.limit
 // shapes the serialized `refDepth` on /meta responses.
 
-// ── Three-table chain for @db.deep.insert 2 ───────────────────────────
+// ── Three-table chain for @db.depth.limit 2 ───────────────────────────
 // Leaf table (no further FK).
 @db.table 'leaf'
 export interface Leaf {
@@ -28,9 +28,9 @@ export interface Mid {
     leaf?: Leaf
 }
 
-// Root table with @db.deep.insert 2, FK → Mid.
+// Root table with @db.depth.limit 2, FK → Mid (nested-to chain).
 @db.table 'root_two'
-@db.deep.insert 2
+@db.depth.limit 2
 export interface RootTwo {
     @meta.id
     @db.default.increment
@@ -47,7 +47,7 @@ export interface RootTwo {
 
 // ── Shallow-ref cases: annotation=0 and no annotation ─────────────────
 @db.table 'root_zero'
-@db.deep.insert 0
+@db.depth.limit 0
 export interface RootZero {
     @meta.id
     @db.default.increment

@@ -54,7 +54,7 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // adds @db.pg.*
 ```atscript
 // src/todo.as
 @db.table 'todos'
-@db.deep.insert 0                           // explicit: reject nested insert payloads
+@db.depth.limit 0                           // explicit: reject nested write payloads
 export interface Todo {
     @meta.id @db.default.increment
     id: number

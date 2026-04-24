@@ -229,8 +229,9 @@ describe("PostgresAdapter", () => {
       // WHERE uses $2 and $3 (offset by 1 SET param)
       expect(sql).toMatch(/\$2/);
       expect(sql).toMatch(/\$3/);
-      // ctid subquery
-      expect(sql).toContain("ctid");
+      // PK subquery (stable identifier, not ctid)
+      expect(sql).toContain(`"id" = (SELECT "id" FROM`);
+      expect(sql).not.toContain("ctid");
       // No ? placeholders
       expect(sql).not.toContain("?");
       // Params: [setValue, filterVal1, filterVal2]
@@ -328,7 +329,7 @@ describe("PostgresAdapter", () => {
       expect(selectCall!.sql).not.toContain("?");
     });
 
-    it("updateOne uses ctid subquery (no LIMIT on UPDATE)", async () => {
+    it("updateOne uses primary-key subquery (no LIMIT on UPDATE)", async () => {
       const { UsersTable } = await import("./fixtures/test-table.as");
       const driver = createMockDriver();
       const space = new DbSpace(() => new PostgresAdapter(driver));
@@ -341,7 +342,10 @@ describe("PostgresAdapter", () => {
 
       const updateCall = driver.calls.find((c) => c.sql.includes("UPDATE"));
       expect(updateCall).toBeDefined();
-      expect(updateCall!.sql).toContain("ctid");
+      // Keyed on PK (stable column) — required for concurrency correctness under
+      // READ COMMITTED. See regression test in the "concurrency" block below.
+      expect(updateCall!.sql).toContain(`"id" = (SELECT "id" FROM`);
+      expect(updateCall!.sql).not.toContain("ctid");
       expect(updateCall!.sql).toContain("LIMIT 1");
       expect(updateCall!.sql).toMatch(/\$\d/);
       expect(updateCall!.sql).not.toContain("?");
@@ -381,6 +385,48 @@ describe("PostgresAdapter", () => {
       expect(deleteCall).toBeDefined();
       expect(deleteCall!.sql).not.toContain("ctid");
       expect(deleteCall!.sql).toMatch(/\$\d/);
+    });
+  });
+
+  // Regression for as-test bug 02: updateOne must key the outer UPDATE on a
+  // stable PK column, not on ctid. Keying on ctid silently drops concurrent
+  // writes because every UPDATE creates a new tuple at a new ctid, and the
+  // inner SELECT ctid takes no row lock.
+  describe("updateOne concurrency (bug 02 regression)", () => {
+    it("keys the outer UPDATE on the PK column, not on ctid", async () => {
+      const { UsersTable } = await import("./fixtures/test-table.as");
+      const driver = createMockDriver();
+      const space = new DbSpace(() => new PostgresAdapter(driver));
+      const table = space.getTable(UsersTable as any);
+      await table.ensureTable();
+      driver.calls.length = 0;
+
+      const adapter = (table as any).adapter as PostgresAdapter;
+      await adapter.updateOne({ id: 1 }, { name: "Bob" });
+
+      const sql = driver.calls.find((c) => c.sql.includes("UPDATE"))!.sql;
+      expect(sql).toContain(`"id" = (SELECT "id" FROM`);
+      expect(sql).toContain("LIMIT 1");
+      expect(sql).not.toContain("ctid");
+    });
+
+    it("routes field ops ($inc) through the PK-keyed subquery", async () => {
+      const { UsersTable } = await import("./fixtures/test-table.as");
+      const driver = createMockDriver();
+      const space = new DbSpace(() => new PostgresAdapter(driver));
+      const table = space.getTable(UsersTable as any);
+      await table.ensureTable();
+      driver.calls.length = 0;
+
+      const adapter = (table as any).adapter as PostgresAdapter;
+      await adapter.updateOne({ id: 1 }, {}, { inc: { createdAt: 1 } });
+
+      const sql = driver.calls.find((c) => c.sql.includes("UPDATE"))!.sql;
+      // Atomic SET clause is preserved (correctness of the increment itself).
+      expect(sql).toContain(`"createdAt" = "createdAt" +`);
+      // Row selection uses the stable PK, not ctid.
+      expect(sql).toContain(`"id" = (SELECT "id" FROM`);
+      expect(sql).not.toContain("ctid");
     });
   });
 

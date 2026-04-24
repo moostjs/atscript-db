@@ -93,11 +93,11 @@ openSubtasks: Task[]
 
 ## Nested writes (depth-gated)
 
-`@db.deep.insert N` on the **host table** enables nested inserts/replaces/patches into navigation arrays. Without it, nested payloads error out with HTTP 400.
+`@db.depth.limit N` on the **host table** enables nested inserts/replaces/patches into navigation arrays. Without it, nested payloads error out with HTTP 400.
 
 ```atscript
 @db.table 'posts'
-@db.deep.insert 2
+@db.depth.limit 2
 interface Post { @meta.id id: number, @db.rel.from comments: Comment[] }
 ```
 
@@ -111,9 +111,9 @@ await posts.insertOne({
 
 Server runs nested writes in the same transaction as the parent; on failure the whole operation rolls back.
 
-## Fractional ref depth on `/meta`
+## Meta FK ref shape
 
-The `GET /meta` endpoint serializes the bound type with `refDepth: (@db.deep.insert N) + 0.5`. The `+0.5` signals to the client that the terminal FK target is expanded **as a shallow ref**, not a full nested object. Clients can count frames on serialized annotated types and match the server's acceptance envelope exactly.
+`GET /meta` serializes the bound type with a fixed `refDepth: 0.5`, independent of `@db.depth.limit` (which governs write acceptance, not serialization). Each FK's `ref.type` is the shallow `{ id, metadata }` shape, carrying the target's `db.http.path` so clients can resolve the target endpoint for value-help pickers and lazy-fetch the target's own `/meta` when deeper structure is needed. Nav-prop trees (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) are not `.ref` nodes and always fully expand in meta regardless — the shape clients need to construct nested-insert payloads is always present.
 
 ## Composite FK targets
 

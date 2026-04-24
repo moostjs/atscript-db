@@ -1,6 +1,6 @@
 # validation
 
-`createDbValidatorPlugin()` returns a plugin that extends the Atscript validator with DB-specific checks: field-op detection, patch vs replace vs insert mode, FK presence, nav-field non-optionality, `@db.deep.insert` depth.
+`createDbValidatorPlugin()` returns a plugin that extends the Atscript validator with DB-specific checks: field-op detection, patch vs replace vs insert mode, FK presence, nav-field non-optionality, `@db.depth.limit` depth gate.
 
 ## API
 
@@ -72,9 +72,9 @@ Moost HTTP transforms both into:
 
 ## Navigation & FK gates
 
-- **Nav props are stripped from inserts.** Declaring `@db.rel.to author: User` doesn't make `author` writable — the server expects the FK (`authorId`), not the nested target. Nested writes require `@db.deep.insert N`.
+- **Nav props are stripped from inserts.** Declaring `@db.rel.to author: User` doesn't make `author` writable — the server expects the FK (`authorId`), not the nested target. Nested writes require `@db.depth.limit N`.
 - **`@db.rel.FK` without a target.** Server runs an FK existence check through the integrity strategy — application-level `SELECT COUNT(*)` for non-native adapters, database constraint for native.
-- **`@db.deep.insert N`.** Payloads nested beyond depth `N` → `DbError('DEPTH_EXCEEDED')` (alias class `DeepInsertDepthExceededError`) → HTTP 400.
+- **`@db.depth.limit N`.** Write payloads (insert / replace / patch) nested beyond depth `N` → `DbError('DEPTH_EXCEEDED')` (`DepthLimitExceededError`) → HTTP 400.
 
 ## Field ops
 

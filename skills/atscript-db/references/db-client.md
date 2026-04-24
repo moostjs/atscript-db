@@ -77,7 +77,7 @@ try {
 ## Meta + validator caching
 
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response.
-- The client builds a runtime validator from the meta type (same validator engine as the server, `refDepth = (@db.deep.insert N) + 0.5` so nested writes match the server's acceptance depth exactly).
+- The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`.
 
 ```ts
 const validator = await client.getValidator();

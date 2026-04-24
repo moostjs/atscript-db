@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
+import { ValidatorError } from "@atscript/typescript/utils";
 import type { FilterExpr } from "@uniqu/core";
 
 import { AtscriptDbTable } from "../table/db-table";
 import { DbSpace } from "../table/db-space";
 import { BaseDbAdapter } from "../base-adapter";
-import { DeepInsertDepthExceededError } from "../db-error";
+import { DepthLimitExceededError } from "../db-error";
 import { prepareFixtures } from "./test-utils";
 import type {
   DbQuery,
@@ -79,10 +80,10 @@ class InMemoryAdapter extends BaseDbAdapter {
   async ensureTable(): Promise<void> {}
 }
 
-describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
+describe("AtscriptDbTable — @db.depth.limit enforcement", () => {
   beforeAll(async () => {
     await prepareFixtures();
-    const mod = await import("./fixtures/deep-insert.as");
+    const mod = await import("./fixtures/depth-limit.as");
     DeepZero = mod.DeepZero;
     DeepZeroChild = mod.DeepZeroChild;
     DeepTwo = mod.DeepTwo;
@@ -118,11 +119,11 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
     await expect(implicit.insertOne({ name: "c" })).resolves.toMatchObject({ insertedId: 1 });
   });
 
-  it("rejects any nested children on @db.deep.insert 0", async () => {
+  it("rejects any nested children on @db.depth.limit 0", async () => {
     const space = newSpace();
     const zero = space.getTable(DeepZero) as AtscriptDbTable;
     await expect(zero.insertOne({ name: "a", children: [{ title: "x" }] })).rejects.toBeInstanceOf(
-      DeepInsertDepthExceededError,
+      DepthLimitExceededError,
     );
   });
 
@@ -133,15 +134,15 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
       await implicit.insertOne({ name: "a", children: [{ title: "x" }] });
       expect.unreachable("should have thrown");
     } catch (err) {
-      expect(err).toBeInstanceOf(DeepInsertDepthExceededError);
-      const e = err as DeepInsertDepthExceededError;
+      expect(err).toBeInstanceOf(DepthLimitExceededError);
+      const e = err as DepthLimitExceededError;
       expect(e.declared).toBe(0);
       expect(e.actual).toBe(1);
       expect(e.field).toBe("children");
     }
   });
 
-  it("accepts one level of nesting on @db.deep.insert 2", async () => {
+  it("accepts one level of nesting on @db.depth.limit 2", async () => {
     const space = newSpace();
     const two = space.getTable(DeepTwo) as AtscriptDbTable;
     // Don't care about insert success past the depth check — the test is about the check.
@@ -150,7 +151,7 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
     await expect(p).resolves.toBeDefined();
   });
 
-  it("accepts two levels of nesting on @db.deep.insert 2", async () => {
+  it("accepts two levels of nesting on @db.depth.limit 2", async () => {
     const space = newSpace();
     const two = space.getTable(DeepTwo) as AtscriptDbTable;
     const p = two.insertOne({
@@ -160,7 +161,7 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
     await expect(p).resolves.toBeDefined();
   });
 
-  it("rejects three levels of nesting on @db.deep.insert 2 (depth+1)", async () => {
+  it("rejects three levels of nesting on @db.depth.limit 2 (depth+1)", async () => {
     const space = newSpace();
     const two = space.getTable(DeepTwo) as AtscriptDbTable;
     try {
@@ -180,8 +181,8 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
       });
       expect.unreachable("should have thrown");
     } catch (err) {
-      expect(err).toBeInstanceOf(DeepInsertDepthExceededError);
-      const e = err as DeepInsertDepthExceededError;
+      expect(err).toBeInstanceOf(DepthLimitExceededError);
+      const e = err as DepthLimitExceededError;
       expect(e.declared).toBe(2);
       expect(e.actual).toBe(3);
       expect(e.field).toBe("children[0].grandchildren[0].greatgrandchildren");
@@ -195,11 +196,92 @@ describe("AtscriptDbTable — @db.deep.insert enforcement", () => {
       await zero.insertMany([{ name: "a" }, { name: "b", children: [{ title: "x" }] }]);
       expect.unreachable("should have thrown");
     } catch (err) {
-      expect(err).toBeInstanceOf(DeepInsertDepthExceededError);
-      const e = err as DeepInsertDepthExceededError;
+      expect(err).toBeInstanceOf(DepthLimitExceededError);
+      const e = err as DepthLimitExceededError;
       expect(e.field).toBe("[1].children");
       expect(e.declared).toBe(0);
       expect(e.actual).toBe(1);
+    }
+  });
+
+  // ── Regression: null / non-object payloads must produce ValidatorError ──
+  // (previously crashed with TypeError in `_enforceDeclaredInsertDepth`).
+  it("rejects null insert payload with ValidatorError (regression)", async () => {
+    const space = newSpace();
+    const zero = space.getTable(DeepZero) as AtscriptDbTable;
+    await expect(zero.insertOne(null as unknown as Record<string, unknown>)).rejects.toBeInstanceOf(
+      ValidatorError,
+    );
+  });
+
+  it("rejects non-object batch items with ValidatorError and batch index prefix", async () => {
+    const space = newSpace();
+    const zero = space.getTable(DeepZero) as AtscriptDbTable;
+    try {
+      await zero.insertMany([{ name: "ok" }, "nope" as unknown as Record<string, unknown>]);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ValidatorError);
+      const e = err as ValidatorError;
+      expect(e.errors[0]?.path.startsWith("[1]")).toBe(true);
+    }
+  });
+
+  // ── Depth gate must also apply to replace ──
+  it("rejects nested children on bulkReplace when @db.depth.limit 0", async () => {
+    const space = newSpace();
+    const zero = space.getTable(DeepZero) as AtscriptDbTable;
+    await expect(
+      zero.bulkReplace([{ id: 1, name: "a", children: [{ title: "x" }] }]),
+    ).rejects.toBeInstanceOf(DepthLimitExceededError);
+  });
+
+  // ── Depth gate must also apply to patch (nav $insert op) ──
+  it("rejects nested $insert on bulkUpdate when @db.depth.limit 0", async () => {
+    const space = newSpace();
+    const zero = space.getTable(DeepZero) as AtscriptDbTable;
+    await expect(
+      zero.bulkUpdate([{ id: 1, children: { $insert: [{ title: "x" }] } }]),
+    ).rejects.toBeInstanceOf(DepthLimitExceededError);
+  });
+
+  it("accepts one-level $insert on bulkUpdate when @db.depth.limit 2", async () => {
+    const space = newSpace();
+    const two = space.getTable(DeepTwo) as AtscriptDbTable;
+    const p = two.bulkUpdate([{ id: 1, children: { $insert: [{ title: "x" }] } }]);
+    await expect(p).resolves.toBeDefined();
+  });
+
+  it("rejects three-level nested $insert on bulkUpdate when @db.depth.limit 2", async () => {
+    const space = newSpace();
+    const two = space.getTable(DeepTwo) as AtscriptDbTable;
+    try {
+      await two.bulkUpdate([
+        {
+          id: 1,
+          children: {
+            $insert: [
+              {
+                title: "x",
+                grandchildren: {
+                  $insert: [
+                    {
+                      label: "y",
+                      greatgrandchildren: { $insert: [{ tag: "z" }] },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ]);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DepthLimitExceededError);
+      const e = err as DepthLimitExceededError;
+      expect(e.declared).toBe(2);
+      expect(e.actual).toBe(3);
     }
   });
 });

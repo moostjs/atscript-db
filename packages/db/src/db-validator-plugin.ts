@@ -5,6 +5,7 @@ import type {
   TValidatorPluginContext,
 } from "@atscript/typescript/utils";
 
+import { DepthLimitExceededError } from "./db-error";
 import { isDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
 
@@ -14,6 +15,16 @@ export interface DbValidationContext {
   flatMap?: Map<string, TAtscriptAnnotatedType>;
   /** Precomputed nav field names — used to skip field-op validation inside TO/FROM/VIA relations. */
   navFields?: ReadonlySet<string>;
+  /**
+   * Depth-limit enforcement bundle. Set only on the root write call; nested
+   * re-entries leave it unset so the root's check isn't repeated. `limit` is
+   * `@db.depth.limit N`; `fromDepthMap` maps normalized paths (no array
+   * indices) to from-chain depth.
+   */
+  depthCheck?: {
+    limit: number;
+    fromDepthMap: ReadonlyMap<string, number>;
+  };
 }
 
 /** Set of recognised array‑patch operator keys. */
@@ -193,6 +204,16 @@ function handleNavField(
   // Absent nav prop is always OK (nav fields are optional)
   if (value === undefined) {
     return true;
+  }
+
+  // Enforce @db.depth.limit on FROM nav chains uniformly across insert/replace/patch.
+  // Throws DepthLimitExceededError (a DbError → HTTP 400 via moost-db).
+  if (isFrom && dbCtx.depthCheck) {
+    const { limit, fromDepthMap } = dbCtx.depthCheck;
+    const depth = fromDepthMap.get(stripNumericSegments(ctx.path));
+    if (depth !== undefined && depth > limit) {
+      throw new DepthLimitExceededError(dotPathToBracket(ctx.path), limit, depth);
+    }
   }
 
   // Patch mode: FROM/VIA require explicit patch operator object
@@ -395,4 +416,47 @@ function validatePartialItems(
   }
 
   return true;
+}
+
+// ── Path normalization helpers ────────────────────────────────────────────────
+
+/**
+ * Returns `true` when every char in `[start, end)` is an ASCII digit.
+ * Matches segments that represent array indices in dot-notation paths.
+ */
+function isNumericSegment(path: string, start: number, end: number): boolean {
+  if (start >= end) return false;
+  for (let i = start; i < end; i++) {
+    const c = path.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return true;
+}
+
+/**
+ * Strips numeric (array-index) segments from a dot-notation path.
+ * `"children.0.grandchildren.10.foo"` → `"children.grandchildren.foo"`.
+ */
+function stripNumericSegments(path: string): string {
+  if (!path) return path;
+  let out = "";
+  let segStart = 0;
+  for (let i = 0; i <= path.length; i++) {
+    if (i === path.length || path.charCodeAt(i) === 46 /* '.' */) {
+      if (!isNumericSegment(path, segStart, i)) {
+        if (out) out += ".";
+        out += path.slice(segStart, i);
+      }
+      segStart = i + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Converts dot-notation array-index paths to bracket notation:
+ * `"children.0.grandchildren.1.foo"` → `"children[0].grandchildren[1].foo"`.
+ */
+function dotPathToBracket(path: string): string {
+  return path.replace(/\.(\d+)/g, "[$1]");
 }

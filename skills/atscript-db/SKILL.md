@@ -54,7 +54,7 @@ pnpm add @atscript/db-client                                 # browser/SSR clien
 ```atscript
 // src/todo.as
 @db.table 'todos'
-@db.deep.insert 0
+@db.depth.limit 0
 export interface Todo {
     @meta.id @db.default.increment
     id: number
@@ -88,7 +88,7 @@ await todos.deleteOne(1);
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **adapter parity** — application code must not branch on adapter type. Every adapter accepts the same filter shape, patch shape, and controls; per-engine features are surfaced through annotations, not API forks. |
 | 2   | **`@meta.id` is the composite-key marker.** No `@meta.isKey`. Multiple `@meta.id` on different props form a composite PK. Takes no arguments.                                                                       |
-| 3   | **`@db.deep.insert N` gates nested inserts.** Absent or `0` → server rejects nested insert payloads with HTTP 400 and `/meta` ships shallow FK refs. Set `N ≥ 1` to opt in.                                         |
+| 3   | **`@db.depth.limit N` gates nested writes (insert / replace / patch).** Absent or `0` → server rejects nested payloads with HTTP 400 and `/meta` ships shallow FK refs. Set `N ≥ 1` to opt in.                      |
 | 4   | **MongoDB indexes use the `atscript__` prefix.** `syncIndexes()` only manages indexes with this prefix; consumer-created indexes that start with `atscript__` are treated as managed and may be dropped on drift.   |
 | 5   | **Generated `*.as.d.ts` / `atscript.d.ts` files in a consuming project are produced by `asc`.** Never hand-edit. Regenerate via `npx asc` (or let `unplugin-atscript` do it at bundle time).                        |
 | 6   | **Schema sync takes a distributed lock.** Multi-pod deployments must configure `podId`, `lockTtlMs`, `waitTimeoutMs` on the `syncSchema()` options; the control table is `__atscript_control`.                      |
@@ -137,7 +137,7 @@ import { Client } from "@atscript/db-client";
 | Tables & views       | [tables-and-views.md](references/tables-and-views.md)   | `DbSpace.getTable/getView/get`, lifecycle, `ensureTable`, `syncIndexes`, view kinds (managed/materialized/external)                                           |
 | CRUD                 | [crud.md](references/crud.md)                           | `insertOne/Many`, `replaceOne/Many`, `updateOne/Many`, `deleteOne/Many`, `findOne/Many`, `count`, `bulkUpdate/Replace`, `DbError`                             |
 | Queries              | [queries.md](references/queries.md)                     | Filter operators, `$and` / `$or` / `$not`, projection (`$select`), `$sort`, `$skip` / `$limit` / `$page` / `$size`, `$count`, `$with`, `$groupBy` aggregation |
-| Patch semantics      | [patch.md](references/patch.md)                         | Field ops (`$inc/$dec/$mul`), array ops, `@db.json` handling, `@db.patch.strategy` merge vs replace, `@db.deep.insert` depth gate, Mongo `CollectionPatcher`  |
+| Patch semantics      | [patch.md](references/patch.md)                         | Field ops (`$inc/$dec/$mul`), array ops, `@db.json` handling, `@db.patch.strategy` merge vs replace, `@db.depth.limit` depth gate, Mongo `CollectionPatcher`  |
 | Relations            | [relations.md](references/relations.md)                 | `@db.rel.FK/.to/.from/.via`, optional FKs, referential actions, `controls.$with`, fractional ref depth on `/meta`, nested writes                              |
 | Schema sync          | [schema-sync.md](references/schema-sync.md)             | FNV-1a hash, `__atscript_control` store, distributed lock (`podId`, `lockTtlMs`, `waitTimeoutMs`), `@db.sync.method`, `safe` mode, sync hooks                 |
 | SQLite specifics     | [adapters-sqlite.md](references/adapters-sqlite.md)     | `BetterSqlite3Driver`, FTS5, `@db.column.collate`, native FKs, in-memory `:memory:`                                                                           |
