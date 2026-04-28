@@ -1,13 +1,14 @@
 import { buildUrl } from "@uniqu/url/builder";
 import type { AggregateQuery, AggregateResult, Uniquery, UniqueryControls } from "@uniqu/core";
 import type {
+  TDbActionInfo,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
   TDbDeleteResult,
 } from "@atscript/db";
 
-import { ClientError } from "./client-error";
+import { ActionNotFoundError, ActionUnsupportedError, ClientError } from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
 import type { ClientOptions, DataOf, IdOf, MetaResponse, NavOf, OwnOf, PageResult } from "./types";
 
@@ -42,6 +43,7 @@ export class Client<T = Record<string, unknown>> {
   private readonly _baseUrl: string;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly _headers?: ClientOptions["headers"];
+  private readonly _navigate?: ClientOptions["navigate"];
   private _metaPromise?: Promise<MetaResponse>;
   private _validatorPromise?: Promise<ClientValidator>;
 
@@ -50,6 +52,7 @@ export class Client<T = Record<string, unknown>> {
     this._baseUrl = opts?.baseUrl ?? "";
     this._fetch = opts?.fetch ?? globalThis.fetch.bind(globalThis);
     this._headers = opts?.headers;
+    this._navigate = opts?.navigate;
   }
 
   // ── GET /query ─────────────────────────────────────────────────────────────
@@ -196,6 +199,52 @@ export class Client<T = Record<string, unknown>> {
     return this._metaPromise;
   }
 
+  // ── Actions ────────────────────────────────────────────────────────────────
+
+  /**
+   * Invoke a declared action by name. Resolves the action descriptor from the
+   * cached `/meta` response, then dispatches based on `processor`:
+   *
+   * - `'backend'` → POST `pk` (or `pks`) as a JSON body to the action's path
+   *   and return the parsed server response. The HTTP method is always POST.
+   * - `'navigate'` → for `level: 'row'`, substitute `$1` in `value` with the
+   *   PK (URL-encoded; composite PKs are URL-encoded per field and joined
+   *   with `/`); for `level: 'rows'` or `'table'`, navigate to `value`
+   *   verbatim. The default navigator (browser only) calls
+   *   `window.location.assign(url)`. Provide `ClientOptions.navigate` to
+   *   integrate with a SPA router.
+   * - `'custom'` → throw {@link ActionUnsupportedError}; UI-dispatched events
+   *   are the application's responsibility, not the client's.
+   *
+   * Throws {@link ActionNotFoundError} when the action is not present in `/meta`.
+   *
+   * For `level: 'rows'`, `pk` must be an array. If a non-array is supplied
+   * for a `'rows'` action it is wrapped into a single-element array — the
+   * server-side `@DbActionPKs()` resolver requires an array body.
+   */
+  async action(name: string, pk?: unknown): Promise<unknown> {
+    const meta = await this.meta();
+    const action = meta.actions.find((a) => a.name === name);
+    if (!action) throw new ActionNotFoundError(name);
+
+    if (action.processor === "custom") {
+      throw new ActionUnsupportedError(
+        name,
+        "custom",
+        `Action "${name}" has processor "custom" — applications must dispatch custom actions themselves; the client cannot.`,
+      );
+    }
+
+    if (action.processor === "navigate") {
+      const url = this._interpolateNavigateUrl(action, pk);
+      await this._dispatchNavigate(action, url);
+      return undefined;
+    }
+
+    const body = this._buildActionBody(action, pk);
+    return this._postAction(action, body);
+  }
+
   // ── Validation (client utility) ────────────────────────────────────────────
 
   /**
@@ -221,6 +270,44 @@ export class Client<T = Record<string, unknown>> {
         });
     }
     return this._validatorPromise;
+  }
+
+  // ── Action helpers ─────────────────────────────────────────────────────────
+
+  private _buildActionBody(action: TDbActionInfo, pk: unknown): unknown {
+    if (action.level === "table") return undefined;
+    if (action.level !== "rows") return pk;
+    if (Array.isArray(pk)) return pk;
+    return pk === undefined ? [] : [pk];
+  }
+
+  private _interpolateNavigateUrl(action: TDbActionInfo, pk: unknown): string {
+    if (action.level !== "row") return action.value;
+    if (pk === undefined) return action.value;
+    return action.value.replace(/\$1/g, encodeNavigatePk(pk));
+  }
+
+  private async _dispatchNavigate(action: TDbActionInfo, url: string): Promise<void> {
+    if (this._navigate) {
+      await this._navigate(url);
+      return;
+    }
+    const loc = (globalThis as { location?: { assign?: (url: string) => void } }).location;
+    if (loc?.assign) {
+      loc.assign(url);
+      return;
+    }
+    throw new ActionUnsupportedError(
+      action.name,
+      "navigate",
+      `Action "${action.name}" is processor: 'navigate' but no browser is available and no \`navigate\` option was provided to Client.`,
+    );
+  }
+
+  private async _postAction(action: TDbActionInfo, body: unknown): Promise<unknown> {
+    const url = `${this._baseUrl}${action.value}`;
+    const init = await this._buildInit("POST", body);
+    return this._send(url, init, true);
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -262,17 +349,24 @@ export class Client<T = Record<string, unknown>> {
   ): Promise<unknown> {
     const sep = endpoint && !endpoint.startsWith("?") ? "/" : "";
     const url = `${this._baseUrl}${this._path}${sep}${endpoint}`;
+    const init = await this._buildInit(method, body);
+    return this._send(url, init, false);
+  }
 
-    const headers: Record<string, string> = {
-      ...(await this._resolveHeaders()),
-    };
-
+  private async _buildInit(
+    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+    body?: unknown,
+  ): Promise<RequestInit> {
+    const headers: Record<string, string> = { ...(await this._resolveHeaders()) };
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
+    return init;
+  }
 
+  private async _send(url: string, init: RequestInit, allowEmpty: boolean): Promise<unknown> {
     const res = await this._fetch(url, init);
     if (!res.ok) {
       let errorBody: Record<string, unknown>;
@@ -281,9 +375,26 @@ export class Client<T = Record<string, unknown>> {
       } catch {
         errorBody = { message: res.statusText, statusCode: res.status };
       }
-      throw new ClientError(res.status, errorBody as any);
+      throw new ClientError(res.status, errorBody as never);
     }
-
-    return res.json();
+    if (!allowEmpty) return res.json();
+    if (res.status === 204 || res.headers.get("content-length") === "0") return undefined;
+    try {
+      return await res.json();
+    } catch {
+      return undefined;
+    }
   }
+}
+
+/**
+ * Encode a row PK for substitution into a `processor: 'navigate'` URL template.
+ * Scalars are URL-encoded directly; composite PK objects have each value
+ * URL-encoded and joined with `/` in object-key order (which mirrors
+ * `primaryKeys` for the table).
+ */
+function encodeNavigatePk(pk: unknown): string {
+  if (pk === null || pk === undefined) return "";
+  const values = typeof pk === "object" ? Object.values(pk as Record<string, unknown>) : [pk];
+  return values.map((v) => encodeURIComponent(String(v))).join("/");
 }

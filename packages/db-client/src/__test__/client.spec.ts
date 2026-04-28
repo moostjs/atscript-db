@@ -20,6 +20,7 @@ beforeAll(async () => {
       id: { sortable: true, filterable: true },
       name: { sortable: false, filterable: true },
     },
+    actions: [],
     type: serializeAnnotatedType(UserType, {
       processAnnotation: ({ key, value }) => {
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {

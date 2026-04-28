@@ -80,6 +80,43 @@ export interface TMetaResponse {
   relations: TRelationInfo[];
   fields: Record<string, TFieldMeta>;
   type: TSerializedAnnotatedType;
+  actions: TDbActionInfo[];
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────
+// Declarative action descriptors surfaced via `/meta`. The server emits the
+// information; UI clients render row buttons, batch toolbars, header buttons,
+// or dispatch custom events based on the `processor` discriminator.
+
+/** Where the action applies on the UI. */
+export type TDbActionLevel = "table" | "row" | "rows";
+
+/** Semantic intent the UI maps to its own visual language (color, prominence). */
+export type TDbActionIntent = "positive" | "negative" | "primary" | "secondary";
+
+/** How the UI client should handle the action when invoked. */
+export type TDbActionProcessor = "backend" | "navigate" | "custom";
+
+/**
+ * Single action descriptor in the `/meta` envelope. Flat shape — `processor`
+ * is a string discriminator; `value` is its sibling and is always populated.
+ *
+ * - `processor: 'backend'` — UI POSTs to `value` (full HTTP path).
+ * - `processor: 'navigate'` — UI routes to `value` (URL template; `$1` is the row PK).
+ * - `processor: 'custom'`  — UI dispatches `value` as an event name (defaults to action `name`).
+ */
+export interface TDbActionInfo {
+  name: string;
+  label: string;
+  level: TDbActionLevel;
+  processor: TDbActionProcessor;
+  value: string;
+  icon?: string;
+  intent?: TDbActionIntent;
+  description?: string;
+  order?: number;
+  default?: boolean;
+  promptText?: string;
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

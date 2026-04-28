@@ -21,3 +21,28 @@ export class ClientError extends Error {
     return this.body.errors ?? [];
   }
 }
+
+/** Thrown by `Client.action()` when the action name is not present in `/meta`. */
+export class ActionNotFoundError extends Error {
+  override name = "ActionNotFoundError";
+  constructor(public readonly action: string) {
+    super(`Action "${action}" is not declared on this controller`);
+  }
+}
+
+/**
+ * Thrown by `Client.action()` for actions that cannot be invoked through
+ * the client — currently `processor: 'custom'` (UI-dispatched events,
+ * which the application is responsible for handling) and `processor: 'navigate'`
+ * when no browser environment and no `navigate` option are configured.
+ */
+export class ActionUnsupportedError extends Error {
+  override name = "ActionUnsupportedError";
+  constructor(
+    public readonly action: string,
+    public readonly processor: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}

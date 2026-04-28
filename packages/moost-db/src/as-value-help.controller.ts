@@ -41,6 +41,12 @@ export interface ValueHelpQuery<T> {
  * requests against them. Subclasses that need a backend gate should compose
  * one of their own (see {@link AsDbReadableController} for the
  * `@db.column.filterable` / `@db.column.sortable` pattern).
+ *
+ * **Actions are intentionally NOT supported on value-help controllers.** The
+ * `/meta` payload still includes `actions: []` for shape uniformity, and any
+ * `@DbAction*` / `@DbActions*` decorators applied here are silently ignored.
+ * Value-help is for FK pickers and dictionary surfaces — adding row/table
+ * actions there would muddy the contract.
  */
 @Inherit()
 export abstract class AsValueHelpController<
@@ -207,6 +213,11 @@ export abstract class AsValueHelpController<
       relations: [],
       fields,
       type: this.getSerializedType(),
+      actions: [],
     };
+  }
+
+  protected override buildActions() {
+    return [];
   }
 }

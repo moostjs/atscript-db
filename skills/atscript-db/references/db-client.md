@@ -40,11 +40,31 @@ await users.meta()                                        // TMetaResponse — c
 new Client<T>(path, {
   baseUrl?: string,                  // prepended to every URL
   fetch?: typeof fetch,              // custom fetch (SSR / testing / auth proxying)
-  headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>),
+  headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>),
+  navigate?: (url: string) => void | Promise<void>,  // SPA router for action() navigate dispatch
 })
 ```
 
-`headers` may be a function — re-evaluated per request, useful for token refresh.
+`headers` may be a function — re-evaluated per request, useful for token refresh. `navigate` overrides the default browser `window.location.assign` for `Client.action(name)` invocations of `processor: 'navigate'` actions.
+
+## Actions
+
+`client.action(name, pk?)` invokes any declared action. POST is hardcoded for `'backend'`. See [actions.md](actions.md) for full semantics.
+
+```ts
+import { Client, ActionNotFoundError, ActionUnsupportedError } from "@atscript/db-client";
+
+await users.action("block", "abc"); // backend: POST PK as JSON body
+await users.action("lock", ["a", "b"]); // rows-level: array
+await users.action("lock", "a"); // wrapped automatically → ["a"]
+await users.action("promote", { tenantId, userId }); // composite PK
+await users.action("refresh-cache"); // table-level: no PK
+await users.action("edit", "abc"); // navigate: window.location.assign('/users/abc/edit')
+
+new Client("/api/users", { navigate: (url) => router.push(url) }); // SPA integration
+```
+
+Throws: `ActionNotFoundError` (unknown name), `ActionUnsupportedError` (`'custom'` processor; or `'navigate'` with no browser + no `navigate` option), `ClientError` (server non-2xx). Unknown actions, custom-processor actions, and missing navigate hooks all surface clear named errors.
 
 ## Typed filters
 

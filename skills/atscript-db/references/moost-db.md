@@ -2,6 +2,8 @@
 
 `@atscript/moost-db` exposes a table/view as a Moost HTTP controller.
 
+For declarative row/rows/table **actions** (Block, Approve, Edit-navigate, Export-CSV, …) surfaced via `/meta`, see [actions.md](actions.md). This file covers controllers, generated CRUD routes, hooks, gates, errors, and value-help.
+
 ## Install
 
 ```bash
@@ -144,6 +146,7 @@ interface TMetaResponse {
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<string, { sortable; filterable }>;
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)
+  actions: TDbActionInfo[]; // declared actions; `[]` when none. See actions.md.
 }
 ```
 

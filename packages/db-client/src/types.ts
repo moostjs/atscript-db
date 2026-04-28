@@ -55,6 +55,18 @@ export interface ClientOptions {
    * @example "https://api.example.com"
    */
   baseUrl?: string;
+
+  /**
+   * Override for `processor: 'navigate'` action dispatch. When `Client.action()`
+   * resolves a navigate action, this hook is invoked with the interpolated
+   * URL. Default behaviour (browser only) calls `window.location.assign(url)`.
+   *
+   * Provide a custom navigator to integrate with a SPA router:
+   * ```typescript
+   * new Client('/api/users', { navigate: (url) => router.push(url) })
+   * ```
+   */
+  navigate?: (url: string) => void | Promise<void>;
 }
 
 // ── Meta Response Types ─────────────────────────────────────────────────────

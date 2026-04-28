@@ -246,20 +246,106 @@ const meta = await users.meta();
     "id": { "sortable": true, "filterable": true },
     "name": { "sortable": false, "filterable": true }
   },
-  "type": { "...": "serialized Atscript type schema" }
+  "type": { "...": "serialized Atscript type schema" },
+  "actions": [
+    {
+      "name": "block",
+      "label": "Block",
+      "level": "row",
+      "processor": "backend",
+      "value": "/users/actions/block",
+      "intent": "negative"
+    }
+  ]
 }
 ```
 
-| Field              | Description                                       |
-| ------------------ | ------------------------------------------------- |
-| `searchable`       | Table has fulltext search indexes                 |
-| `vectorSearchable` | Table has vector search indexes                   |
-| `searchIndexes`    | Available search index definitions                |
-| `primaryKeys`      | Primary key field names                           |
-| `readOnly`         | `true` for `AsDbReadableController` / views       |
-| `relations`        | Available navigation properties                   |
-| `fields`           | Per-field capability flags (sortable, filterable) |
-| `type`             | Full serialized Atscript type definition          |
+| Field              | Description                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `searchable`       | Table has fulltext search indexes                                                                                                    |
+| `vectorSearchable` | Table has vector search indexes                                                                                                      |
+| `searchIndexes`    | Available search index definitions                                                                                                   |
+| `primaryKeys`      | Primary key field names                                                                                                              |
+| `readOnly`         | `true` for `AsDbReadableController` / views                                                                                          |
+| `relations`        | Available navigation properties                                                                                                      |
+| `fields`           | Per-field capability flags (sortable, filterable)                                                                                    |
+| `type`             | Full serialized Atscript type definition                                                                                             |
+| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields |
+
+## Actions {#actions}
+
+`action()` invokes any [declared action](./actions) on the controller by name. The client reads `/meta` (cached), looks up the action descriptor, then dispatches based on `processor`:
+
+```typescript
+// processor: 'backend' — POSTs the PK as JSON body, returns parsed response.
+const result = await users.action("block", "abc123");
+// → { message: "User abc123 blocked" }
+
+// level: 'rows' — pass an array. (A single PK is wrapped automatically.)
+await users.action("lock", ["a", "b", "c"]);
+await users.action("lock", "a"); // wrapped to ["a"] before sending
+
+// composite PK
+await members.action("promote", { tenantId: "acme", userId: "u1" });
+
+// level: 'table' — no PK
+await users.action("refresh-cache");
+
+// processor: 'navigate' — substitutes $1 with the PK and navigates.
+await users.action("edit", "abc"); // browser: window.location.assign('/users/abc/edit')
+```
+
+`action()` is always POST for `processor: 'backend'`. The path comes from the meta builder (method-decorator actions resolve to the bound HTTP path; class-level backend actions use the dev-supplied path verbatim).
+
+### Navigate dispatch
+
+By default, navigate actions call `window.location.assign(url)`. Inject a SPA router via the `navigate` option:
+
+```typescript
+import { useRouter } from "vue-router";
+const router = useRouter();
+
+const users = new Client<typeof User>("/api/users", {
+  navigate: (url) => router.push(url),
+});
+
+await users.action("edit", "abc"); // → router.push('/users/abc/edit')
+```
+
+For composite PKs, each field value is URL-encoded and joined with `/` (in `primaryKeys` order) before substituting `$1`. For `level: 'rows'` and `level: 'table'` navigate actions, `value` is used verbatim — no `$1` substitution.
+
+### Error cases
+
+```typescript
+import { ActionNotFoundError, ActionUnsupportedError } from "@atscript/db-client";
+
+try {
+  await users.action("blockz", "abc");
+} catch (e) {
+  if (e instanceof ActionNotFoundError) {
+    /* action name not in /meta */
+  }
+  if (e instanceof ActionUnsupportedError) {
+    /* processor: 'custom' (handle the event yourself), or
+       processor: 'navigate' with no browser env and no navigate option */
+  }
+  if (e instanceof ClientError) {
+    /* server returned non-2xx — same shape as other endpoints */
+  }
+}
+```
+
+`processor: 'custom'` actions cannot be invoked through the client — those describe UI events your application dispatches itself. The client throws `ActionUnsupportedError` in that case.
+
+### Success response convention
+
+Backend action handlers may return any JSON. Convention: if the response has `{ message: string }`, the UI toasts it; otherwise the UI uses a generic per-level message. See [Actions — Success response](./actions#success-response) for the server side.
+
+```typescript
+const result = (await users.action("block", "abc")) as { message?: string };
+if (result?.message) toast(result.message);
+else toast("Action completed");
+```
 
 ## Error Handling {#errors}
 
@@ -315,15 +401,16 @@ import type { FilterExpr, Uniquery } from "@atscript/db-client";
 
 ## Method ↔ Endpoint Reference
 
-| Method        | HTTP   | Endpoint                 | Returns                                    |
-| ------------- | ------ | ------------------------ | ------------------------------------------ |
-| `query()`     | GET    | `/query`                 | `DataOf<T>[]`                              |
-| `count()`     | GET    | `/query` (`$count`)      | `number`                                   |
-| `aggregate()` | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                        |
-| `pages()`     | GET    | `/pages`                 | `PageResult<DataOf<T>>`                    |
-| `one()`       | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                        |
-| `insert()`    | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult` |
-| `update()`    | PATCH  | `/`                      | `TDbUpdateResult`                          |
-| `replace()`   | PUT    | `/`                      | `TDbUpdateResult`                          |
-| `remove()`    | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                          |
-| `meta()`      | GET    | `/meta`                  | `MetaResponse`                             |
+| Method        | HTTP   | Endpoint                 | Returns                                                 |
+| ------------- | ------ | ------------------------ | ------------------------------------------------------- |
+| `query()`     | GET    | `/query`                 | `DataOf<T>[]`                                           |
+| `count()`     | GET    | `/query` (`$count`)      | `number`                                                |
+| `aggregate()` | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                                     |
+| `pages()`     | GET    | `/pages`                 | `PageResult<DataOf<T>>`                                 |
+| `one()`       | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                                     |
+| `insert()`    | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult`              |
+| `update()`    | PATCH  | `/`                      | `TDbUpdateResult`                                       |
+| `replace()`   | PUT    | `/`                      | `TDbUpdateResult`                                       |
+| `remove()`    | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                                       |
+| `meta()`      | GET    | `/meta`                  | `MetaResponse`                                          |
+| `action()`    | POST   | _resolved from `/meta`_  | `unknown` (server response, or `void` for `'navigate'`) |

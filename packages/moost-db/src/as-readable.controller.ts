@@ -5,7 +5,7 @@ import {
   type TAtscriptAnnotatedType,
   type TAtscriptDataType,
 } from "@atscript/typescript/utils";
-import type { FilterExpr, TMetaResponse, Uniquery } from "@atscript/db";
+import type { FilterExpr, TDbActionInfo, TMetaResponse, Uniquery } from "@atscript/db";
 import { Get, HttpError } from "@moostjs/event-http";
 import { Moost, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
@@ -13,6 +13,7 @@ import { parseUrl } from "@uniqu/url";
 import { UseValidationErrorTransform } from "./validation-interceptor";
 import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/controls.dto.as";
 import { findFilterOffender, findSortOffender } from "./gate-utils";
+import { discoverActions } from "./actions/discover";
 
 /**
  * Optional gate configuration for a single request. Each present entry enables
@@ -326,6 +327,8 @@ export abstract class AsReadableController<
    * Builds the `/meta` payload. Override in subclasses to populate source-specific
    * fields. Defaults return a minimal envelope with the serialized type and the
    * read-only flag; value-help dicts populate their capability hints here.
+   * Subclasses that fully replace the envelope must call {@link buildActions}
+   * directly so `@DbAction*` decorators still surface.
    */
   protected async buildMetaResponse(): Promise<TMetaResponse> {
     return {
@@ -337,6 +340,16 @@ export abstract class AsReadableController<
       relations: [],
       fields: {},
       type: this.getSerializedType(),
+      actions: this.buildActions(),
     };
+  }
+
+  /**
+   * Discovers `@DbAction*` and `@DbActions`-style class metadata on this
+   * controller and produces the `actions` array. Returns `[]` for value-help
+   * controllers — see {@link AsValueHelpController#buildMetaResponse}.
+   */
+  protected buildActions(): TDbActionInfo[] {
+    return discoverActions(this.constructor as Function, this.app, this.logger);
   }
 }

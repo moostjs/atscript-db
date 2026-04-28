@@ -267,6 +267,7 @@ const httpSidebar = [
       { text: "URL Query Syntax", link: "/http/query-syntax" },
       { text: "Relations & Search", link: "/http/advanced" },
       { text: "Customization", link: "/http/customization" },
+      { text: "Actions", link: "/http/actions" },
       { text: "HTTP Client", link: "/http/client" },
     ],
   },

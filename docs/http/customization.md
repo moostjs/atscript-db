@@ -6,6 +6,10 @@ outline: deep
 
 `AsDbController` and `AsDbReadableController` expose protected hooks that let you extend default behavior without reimplementing endpoints. Override the hooks you need to add access control, data transformation, and business logic.
 
+::: tip Looking for "Block User", "Approve", or "Edit" buttons?
+This page is about **intercepting existing CRUD**. For exposing **new domain operations** alongside CRUD — and having them surface in `/meta` so any UI can render row buttons, batch toolbars, and navigation entries generically — see [Actions](./actions).
+:::
+
 ## Available Hooks
 
 All hooks are protected methods with sensible defaults (pass-through or no-op). Override only the ones you need.
