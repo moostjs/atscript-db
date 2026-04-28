@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-postgres",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "PostgreSQL adapter for @atscript/db with pg (node-postgres) driver support.",
   "keywords": [
     "atscript",
