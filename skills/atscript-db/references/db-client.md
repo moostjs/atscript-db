@@ -98,6 +98,8 @@ try {
 
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response.
 - The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`.
+- The meta envelope carries `crud: TCrudPermissions` (see [moost-db.md](moost-db.md) for the full shape) — built-in CRUD discoverability surface. Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). There is no `readOnly` field; consumers compute it inline as `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
+- `TCrudOp` and `TCrudPermissions` are re-exported from `@atscript/db-client` for consumer convenience.
 
 ```ts
 const validator = await client.getValidator();

@@ -268,6 +268,7 @@ const httpSidebar = [
       { text: "Relations & Search", link: "/http/advanced" },
       { text: "Customization", link: "/http/customization" },
       { text: "Actions", link: "/http/actions" },
+      { text: "Permissions", link: "/http/permissions" },
       { text: "HTTP Client", link: "/http/client" },
     ],
   },

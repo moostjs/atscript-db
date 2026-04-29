@@ -1,5 +1,5 @@
 import type { TAtscriptAnnotatedType, TAtscriptDataType } from "@atscript/typescript/utils";
-import type { AtscriptDbTable } from "@atscript/db";
+import type { AtscriptDbTable, TCrudPermissions } from "@atscript/db";
 import { Body, Delete, HttpError, Patch, Post, Put, Query } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Param } from "moost";
 
@@ -34,8 +34,14 @@ export class AsDbController<
     super(table, app);
   }
 
-  protected override _isReadOnly(): boolean {
-    return false;
+  protected override buildCrud(): TCrudPermissions {
+    return {
+      ...super.buildCrud(),
+      insert: [],
+      update: [],
+      replace: [],
+      remove: [],
+    };
   }
 
   // ── Hooks (overridable) ────────────────────────────────────────────────

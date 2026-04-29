@@ -7,11 +7,15 @@ export * from "./decorators";
 export * from "./validation-interceptor";
 export * from "./actions";
 
-// Re-export the action types from @atscript/db so consumers can import
-// `TDbActionInfo` etc. from `@atscript/moost-db` in a single line.
+export { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "./permissions/crud-controls";
+
+// Re-export the action + permission types from @atscript/db so consumers can
+// import them from `@atscript/moost-db` in a single line.
 export type {
   TDbActionInfo,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,
+  TCrudOp,
+  TCrudPermissions,
 } from "@atscript/db";

@@ -96,6 +96,28 @@ export interface FakeHandler {
   paramKinds?: Array<"pk" | "pks" | "body" | "other">;
 }
 
+export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
+  return {
+    type: { kind: "", designType, tags: new Set() },
+    metadata: new Map(Object.entries(annotations)),
+  };
+}
+
+export function makeValueHelpType(options: {
+  interfaceAnnotations?: Record<string, unknown>;
+  props: Record<string, { designType: string; annotations?: Record<string, unknown> }>;
+}): any {
+  const props = new Map<string, any>();
+  for (const [name, def] of Object.entries(options.props)) {
+    props.set(name, makeProp(def.designType, def.annotations ?? {}));
+  }
+  return {
+    __is_atscript_annotated_type: true,
+    type: { kind: "object", props, propsPatterns: [], tags: new Set() },
+    metadata: new Map(Object.entries(options.interfaceAnnotations ?? {})),
+  };
+}
+
 export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
   const sharedMethodMeta = new Map<string, Record<string, unknown>>();
   // Group all verbs sharing the same JS method-name under one methodMeta —

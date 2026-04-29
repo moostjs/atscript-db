@@ -238,4 +238,5 @@ const todosTable = dbSpace.getTable(Todo);
 - [Relations & Search in URLs](./advanced) — Relation loading, text search, vector search
 - [Customization](./customization) — Hooks for access control, data transformation, and extending controllers
 - [Actions](./actions) — Declare row, batch, and table-scoped operations that surface in `/meta`
+- [Permissions](./permissions) — `/meta.crud` shape and the `applyMetaOverlay` per-request hook
 - [HTTP Client](./client) — Browser-compatible TypeScript client for these endpoints

@@ -63,11 +63,11 @@ describe("MetaResponse with actions field", () => {
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: ["id"],
-      readOnly: false,
       relations: [],
       fields: {},
       type: serializedType,
       actions,
+      crud: {},
     };
     const validator = createClientValidator(meta);
     expect(validator).toBeDefined();
@@ -80,11 +80,11 @@ describe("MetaResponse with actions field", () => {
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: ["id"],
-      readOnly: false,
       relations: [],
       fields: {},
       type: serializedType,
       actions: [],
+      crud: {},
     };
     const validator = createClientValidator(meta);
     expect(validator).toBeDefined();

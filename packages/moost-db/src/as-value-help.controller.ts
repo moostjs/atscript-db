@@ -3,11 +3,12 @@ import type {
   TAtscriptDataType,
   TAtscriptTypeObject,
 } from "@atscript/typescript/utils";
-import type { FilterExpr, TMetaResponse } from "@atscript/db";
+import type { FilterExpr, TCrudPermissions, TMetaResponse } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Moost, Param } from "moost";
 
 import { AsReadableController } from "./as-readable.controller";
+import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
 
 /**
  * Parsed Uniquery controls with the `$search` field carved out for value-help
@@ -196,7 +197,7 @@ export abstract class AsValueHelpController<
    * client picker UI (which controls to render); the server does not enforce
    * these flags at request time.
    */
-  protected override async buildMetaResponse(): Promise<TMetaResponse> {
+  protected override buildMetaResponse(): TMetaResponse {
     const fields: TMetaResponse["fields"] = {};
     for (const [path, meta] of this.fieldMeta) {
       fields[path] = {
@@ -209,15 +210,24 @@ export abstract class AsValueHelpController<
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: this.primaryKey ? [this.primaryKey] : [],
-      readOnly: this._isReadOnly(),
       relations: [],
       fields,
       type: this.getSerializedType(),
       actions: [],
+      crud: this.buildCrud(),
     };
   }
 
   protected override buildActions() {
     return [];
+  }
+
+  protected override buildCrud(): TCrudPermissions {
+    return {
+      ...super.buildCrud(),
+      query: [...QUERY_CONTROLS],
+      pages: [...PAGES_CONTROLS],
+      one: [...ONE_CONTROLS],
+    };
   }
 }

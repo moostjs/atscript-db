@@ -5,7 +5,13 @@ import {
   type TAtscriptAnnotatedType,
   type TAtscriptDataType,
 } from "@atscript/typescript/utils";
-import type { FilterExpr, TDbActionInfo, TMetaResponse, Uniquery } from "@atscript/db";
+import type {
+  FilterExpr,
+  TCrudPermissions,
+  TDbActionInfo,
+  TMetaResponse,
+  Uniquery,
+} from "@atscript/db";
 import { Get, HttpError } from "@moostjs/event-http";
 import { Moost, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
@@ -169,14 +175,6 @@ export abstract class AsReadableController<
     };
   }
 
-  /**
-   * Whether this controller is read-only (no write endpoints).
-   * Returns `true` by default; {@link AsDbController} overrides to `false`.
-   */
-  protected _isReadOnly(): boolean {
-    return true;
-  }
-
   // ── Lazily built validators ────────────────────────────────────────────
 
   private _queryControlsValidator?: Validator<any>;
@@ -306,41 +304,35 @@ export abstract class AsReadableController<
   // ── Meta endpoint ──────────────────────────────────────────────────────
 
   /**
-   * **GET /meta** — returns the bound interface's metadata envelope.
-   *
-   * Base implementation delegates to {@link buildMetaResponse}, which subclasses
-   * override to add source-specific fields (relations, searchable flags, etc.).
-   * The response is cached on the instance; async overrides must cache any
-   * extra enrichment themselves.
+   * **GET /meta** — returns the bound interface's metadata envelope. The
+   * static envelope is cached; {@link applyMetaOverlay} runs per request so
+   * subclasses can prune the response by principal.
    */
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
-    if (this._metaResponse) {
-      return this._metaResponse;
+    if (!this._metaResponse) {
+      this._metaResponse = this.buildMetaResponse();
     }
-    const response = await this.buildMetaResponse();
-    this._metaResponse = response;
-    return response;
+    return this.applyMetaOverlay(this._metaResponse);
   }
 
   /**
    * Builds the `/meta` payload. Override in subclasses to populate source-specific
-   * fields. Defaults return a minimal envelope with the serialized type and the
-   * read-only flag; value-help dicts populate their capability hints here.
-   * Subclasses that fully replace the envelope must call {@link buildActions}
-   * directly so `@DbAction*` decorators still surface.
+   * fields. Subclasses that fully replace the envelope must call
+   * {@link buildActions} and {@link buildCrud} directly so `@DbAction*`
+   * decorators and CRUD permissions still surface.
    */
-  protected async buildMetaResponse(): Promise<TMetaResponse> {
+  protected buildMetaResponse(): TMetaResponse {
     return {
       searchable: false,
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: [],
-      readOnly: this._isReadOnly(),
       relations: [],
       fields: {},
       type: this.getSerializedType(),
       actions: this.buildActions(),
+      crud: this.buildCrud(),
     };
   }
 
@@ -351,5 +343,26 @@ export abstract class AsReadableController<
    */
   protected buildActions(): TDbActionInfo[] {
     return discoverActions(this.constructor as Function, this.app, this.logger);
+  }
+
+  /**
+   * Declares the built-in CRUD operations this controller exposes. Subclasses
+   * override to add their keys; the bare base only exposes `/meta`. See
+   * `docs/http/permissions.md` for the wire shape and overlay rules.
+   */
+  protected buildCrud(): TCrudPermissions {
+    return {};
+  }
+
+  /**
+   * Per-request overlay applied to the cached `/meta` envelope. Default no-op.
+   * Subclasses may shallow-clone and prune `crud` keys, `crud[op]` arrays, or
+   * `actions[]` based on the current request principal (read via Moost
+   * composables). The cached envelope MUST NOT be mutated — see
+   * `docs/http/permissions.md` for the full contract, including the
+   * "discoverability only" caveat.
+   */
+  protected applyMetaOverlay(meta: TMetaResponse): TMetaResponse | Promise<TMetaResponse> {
+    return meta;
   }
 }

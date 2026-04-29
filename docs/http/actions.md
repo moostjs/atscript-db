@@ -14,6 +14,11 @@ A declared action is one of three kinds (`processor`):
 
 Actions also carry a **level** — `'row'`, `'rows'`, or `'table'` — telling the UI where the affordance belongs.
 
+> See [Permissions](./permissions) for the built-in CRUD surface (`/meta.crud`).
+> Actions and CRUD permissions are sibling fields on `/meta` with the same
+> overlay strategy but distinct dispatch paths — typed client methods for
+> CRUD, `Client.action()` for actions.
+
 ## Quick Example
 
 A row-level "Block" action that POSTs to a server handler:

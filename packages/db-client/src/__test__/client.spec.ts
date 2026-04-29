@@ -14,13 +14,13 @@ beforeAll(async () => {
     vectorSearchable: false,
     searchIndexes: [],
     primaryKeys: ["id"],
-    readOnly: false,
     relations: [],
     fields: {
       id: { sortable: true, filterable: true },
       name: { sortable: false, filterable: true },
     },
     actions: [],
+    crud: {},
     type: serializeAnnotatedType(UserType, {
       processAnnotation: ({ key, value }) => {
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {

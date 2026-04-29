@@ -2,6 +2,7 @@ import { type TAtscriptAnnotatedType, type TAtscriptDataType } from "@atscript/t
 import type {
   AtscriptDbReadable,
   FilterExpr,
+  TCrudPermissions,
   TMetaResponse,
   UniqueryControls,
   Uniquery,
@@ -11,6 +12,7 @@ import { Inherit, Inject, Moost, Param } from "moost";
 
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
+import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -396,7 +398,7 @@ export class AsDbReadableController<
    * vector-searchable flags, field-descriptor-derived filter/sort hints, and
    * the configured primary keys.
    */
-  protected override async buildMetaResponse(): Promise<TMetaResponse> {
+  protected override buildMetaResponse(): TMetaResponse {
     const relations: TMetaResponse["relations"] = [];
     for (const [name, rel] of this.readable.relations) {
       relations.push({ name, direction: rel.direction, isArray: rel.isArray });
@@ -422,11 +424,20 @@ export class AsDbReadableController<
       vectorSearchable: this.readable.isVectorSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),
       primaryKeys: [...this.readable.primaryKeys],
-      readOnly: this._isReadOnly(),
       relations,
       fields,
       type: this.getSerializedType(),
       actions: this.buildActions(),
+      crud: this.buildCrud(),
+    };
+  }
+
+  protected override buildCrud(): TCrudPermissions {
+    return {
+      ...super.buildCrud(),
+      query: [...QUERY_CONTROLS],
+      pages: [...PAGES_CONTROLS],
+      one: [...ONE_CONTROLS],
     };
   }
 }

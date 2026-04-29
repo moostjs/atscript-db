@@ -2,12 +2,14 @@ export { Client } from "./client";
 export { ClientError, ActionNotFoundError, ActionUnsupportedError } from "./client-error";
 
 // Re-exported from @atscript/db so consumers building UIs over /meta have a
-// single import point for the action wire types.
+// single import point for the action + CRUD permission wire types.
 export type {
   TDbActionInfo,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,
+  TCrudOp,
+  TCrudPermissions,
 } from "@atscript/db";
 export type {
   ClientOptions,

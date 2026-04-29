@@ -12,6 +12,8 @@
 
 If the operation already fits CRUD (`POST` / `PUT` / `PATCH` / `DELETE`), use CRUD. If it's a hook over CRUD (multi-tenant filter, audit fields, soft delete), use `transformFilter` / `onWrite` / etc. — see `moost-db.md`.
 
+> Sibling field on `/meta`: `crud: TCrudPermissions` describes the built-in CRUD surface (`query` / `pages` / `one` / `insert` / `update` / `replace` / `remove`) — see `moost-db.md`. `actions[]` and `crud` are intentionally separate: `actions[]` is dispatched via `Client.action(name, pk?)` (POST-locked, single-PK), while `crud` operations use the typed client methods. Same per-request overlay strategy applies to both via `applyMetaOverlay()`.
+
 ## Decorator cheat sheet
 
 | Decorator               | Target    | Effect                                                                    |

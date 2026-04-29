@@ -87,6 +87,8 @@ export type {
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,
+  TCrudOp,
+  TCrudPermissions,
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,

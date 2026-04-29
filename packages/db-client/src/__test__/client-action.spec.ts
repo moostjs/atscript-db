@@ -16,10 +16,10 @@ beforeAll(async () => {
     vectorSearchable: false,
     searchIndexes: [],
     primaryKeys: ["id"],
-    readOnly: false,
     relations: [],
     fields: {},
     actions: [],
+    crud: {},
     type: serializeAnnotatedType(UserType, {
       processAnnotation: ({ key, value }) => {
         if (key.startsWith("meta.") || key.startsWith("expect.") || key.startsWith("db.rel.")) {

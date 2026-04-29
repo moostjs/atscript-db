@@ -96,14 +96,11 @@ export interface TaskTag {
 
 ## Nested Inserts
 
-Deep inserts follow a 4-phase process to ensure foreign keys are resolved in the right order:
+The DB layer orchestrates multi-phase writes so foreign keys resolve in the
+correct order — TO parents first, the main record next, FROM children and VIA
+junction entries last. Failures roll back all phases.
 
-1. **Phase 1 — TO dependencies**: Parent records (via `@db.rel.to`) are created first, producing primary keys needed by the main record
-2. **Phase 2 — Main record**: The record itself is inserted with FK fields automatically populated from phase 1
-3. **Phase 3 — FROM dependents**: Child records (via `@db.rel.from`) are inserted with the main record's PK set as their FK
-4. **Phase 4 — VIA entries**: For many-to-many relations, target records are created first, then junction table entries linking them to the main record
-
-Here is an example inserting a Task with an inline Project (TO), Comments (FROM), and Tags (VIA):
+Inserting a Task with an inline Project (TO), Comments (FROM), and Tags (VIA):
 
 ```typescript
 await taskTable.insertOne({
@@ -121,16 +118,12 @@ You never need to manually set `projectId` on the task or `taskId` on the commen
 
 ## Nested Replaces (PUT)
 
-A deep replace performs a full record swap including all relations. This is a 4-phase process similar to inserts, but with intelligent cleanup of old related data:
-
-1. **TO relations**: Parent records are fully replaced
-2. **Main record**: The record itself is replaced
-3. **FROM relations**: Existing children are **diff-synced** — children whose primary key appears in the new payload are kept and updated in place, while orphaned children (present in the DB but absent from the payload) are deleted. New children (no PK or unrecognized PK) are inserted. This preserves the identity and downstream relations of kept children.
-4. **VIA relations**: Old junction entries are deleted, then new target records and junction entries are created
-
-::: tip Identity-preserving diff
-FROM replace does **not** delete all children and re-insert them. It compares by primary key (`@meta.id`) to detect which children are kept, which are new, and which are orphaned. Kept children retain their original PK and any downstream relations (e.g., a kept comment's replies survive the replace). Orphaned children are cascade-deleted according to their referential action rules.
-:::
+A deep replace fully swaps the record and its relations. FROM children are
+**diff-synced by primary key** rather than wiped: children whose `@meta.id`
+appears in the new payload are updated in place (preserving any downstream
+relations), absent ones are cascade-deleted per their referential rules, and
+unrecognized entries are inserted. VIA junction entries are recomputed against
+the new target set.
 
 ```typescript
 await taskTable.replaceOne({

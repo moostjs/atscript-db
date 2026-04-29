@@ -107,32 +107,12 @@ If the rollback itself fails, the rollback error is swallowed and the original e
 
 ## Adapter Behavior
 
-All four adapters support transactions, but with important behavioral differences:
-
-### SQLite
-
-- Synchronous `BEGIN` / `COMMIT` / `ROLLBACK` via the driver
-- Foreign keys are enabled automatically (`PRAGMA foreign_keys = ON`)
-- No transactional DDL — schema changes (CREATE TABLE, ALTER TABLE) take effect immediately and cannot be rolled back
-
-### PostgreSQL
-
-- `BEGIN` / `COMMIT` / `ROLLBACK` on a **dedicated connection** acquired from the pool
-- The connection is released back to the pool after commit or rollback
-- **Full transactional DDL** — even CREATE TABLE and ALTER TABLE roll back on failure
-- Best transaction support of all adapters
-
-### MongoDB
-
-- Uses the **Convenient Transaction API** (`session.withTransaction()`) which automatically retries on `TransientTransactionError` and `UnknownTransactionCommitResult`
-- **Requires a replica set** (or mongos topology) — standalone MongoDB does not support transactions
-- **Graceful degradation**: on standalone, the adapter detects the topology and silently skips transactional wrapping. Operations run normally without transactional guarantees — no errors are thrown. This allows the same code to work in both development (standalone) and production (replica set) environments
-
-### MySQL
-
-- `START TRANSACTION` / `COMMIT` / `ROLLBACK` on a **dedicated connection** acquired from the pool
-- InnoDB engine provides full transaction support for DML (data operations)
-- **No transactional DDL** — DDL statements (CREATE TABLE, ALTER TABLE) auto-commit. Schema changes cannot be rolled back
+| Adapter    | DML transactions | Transactional DDL | Notes                                                                                      |
+| ---------- | ---------------- | ----------------- | ------------------------------------------------------------------------------------------ |
+| PostgreSQL | ✅               | ✅                | Best support; CREATE / ALTER TABLE roll back on failure                                    |
+| SQLite     | ✅               | ❌                | Schema changes commit immediately                                                          |
+| MySQL      | ✅ (InnoDB)      | ❌                | DDL auto-commits                                                                           |
+| MongoDB    | ✅               | n/a               | **Requires a replica set**; falls back to no-op on standalone (same code works dev → prod) |
 
 ## When to Use Explicit Transactions
 

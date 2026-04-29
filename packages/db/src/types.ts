@@ -70,17 +70,28 @@ export interface TFieldMeta {
   filterable: boolean;
 }
 
+/** Built-in CRUD operation names; map 1:1 to public method names. */
+export type TCrudOp = "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove";
+
+/**
+ * CRUD permissions advertised in `/meta`. Key absent → operation is denied or
+ * not exposed. Key present → operation is allowed; the `string[]` value is the
+ * accepted UniQuery control whitelist for read ops (`[]` for write ops, which
+ * take no controls — presence still signals "allowed").
+ */
+export type TCrudPermissions = Partial<Record<TCrudOp, string[]>>;
+
 /** Response payload for `GET /meta`. */
 export interface TMetaResponse {
   searchable: boolean;
   vectorSearchable: boolean;
   searchIndexes: TSearchIndexInfo[];
   primaryKeys: string[];
-  readOnly: boolean;
   relations: TRelationInfo[];
   fields: Record<string, TFieldMeta>;
   type: TSerializedAnnotatedType;
   actions: TDbActionInfo[];
+  crud: TCrudPermissions;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────

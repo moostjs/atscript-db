@@ -240,7 +240,6 @@ const meta = await users.meta();
   "vectorSearchable": false,
   "searchIndexes": [{ "name": "title_idx", "type": "text" }],
   "primaryKeys": ["id"],
-  "readOnly": false,
   "relations": [{ "name": "posts", "direction": "from", "isArray": true }],
   "fields": {
     "id": { "sortable": true, "filterable": true },
@@ -256,21 +255,58 @@ const meta = await users.meta();
       "value": "/users/actions/block",
       "intent": "negative"
     }
-  ]
+  ],
+  "crud": {
+    "query": [
+      "filter",
+      "insights",
+      "skip",
+      "limit",
+      "count",
+      "sort",
+      "select",
+      "search",
+      "index",
+      "vector",
+      "threshold",
+      "with",
+      "groupBy"
+    ],
+    "pages": [
+      "filter",
+      "page",
+      "size",
+      "sort",
+      "select",
+      "search",
+      "index",
+      "vector",
+      "threshold",
+      "with"
+    ],
+    "one": ["select", "with"],
+    "insert": [],
+    "update": [],
+    "replace": [],
+    "remove": []
+  }
 }
 ```
 
-| Field              | Description                                                                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `searchable`       | Table has fulltext search indexes                                                                                                    |
-| `vectorSearchable` | Table has vector search indexes                                                                                                      |
-| `searchIndexes`    | Available search index definitions                                                                                                   |
-| `primaryKeys`      | Primary key field names                                                                                                              |
-| `readOnly`         | `true` for `AsDbReadableController` / views                                                                                          |
-| `relations`        | Available navigation properties                                                                                                      |
-| `fields`           | Per-field capability flags (sortable, filterable)                                                                                    |
-| `type`             | Full serialized Atscript type definition                                                                                             |
-| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields |
+| Field              | Description                                                                                                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `searchable`       | Table has fulltext search indexes                                                                                                                         |
+| `vectorSearchable` | Table has vector search indexes                                                                                                                           |
+| `searchIndexes`    | Available search index definitions                                                                                                                        |
+| `primaryKeys`      | Primary key field names                                                                                                                                   |
+| `relations`        | Available navigation properties                                                                                                                           |
+| `fields`           | Per-field capability flags (sortable, filterable)                                                                                                         |
+| `type`             | Full serialized Atscript type definition                                                                                                                  |
+| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                      |
+| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). |
+
+> **Read-only check:** consumers derive the boolean from `crud` inline:
+> `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
 
 ## Actions {#actions}
 

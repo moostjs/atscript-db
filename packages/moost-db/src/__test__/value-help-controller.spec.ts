@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vite-plus/test";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsJsonValueHelpController } from "../as-json-value-help.controller";
+import { makeValueHelpType } from "./actions-test-utils";
 
 /**
  * Tests for `AsValueHelpController` + `AsJsonValueHelpController`.
@@ -13,28 +14,6 @@ import { AsJsonValueHelpController } from "../as-json-value-help.controller";
  */
 
 type Status = { id: string; label: string; description?: string };
-
-function makeProp(designType: string, annotations: Record<string, unknown> = {}) {
-  return {
-    type: { kind: "", designType, tags: new Set() },
-    metadata: new Map(Object.entries(annotations)),
-  } as any;
-}
-
-function makeValueHelpType(options: {
-  interfaceAnnotations?: Record<string, unknown>;
-  props: Record<string, { designType: string; annotations?: Record<string, unknown> }>;
-}) {
-  const props = new Map<string, any>();
-  for (const [name, def] of Object.entries(options.props)) {
-    props.set(name, makeProp(def.designType, def.annotations ?? {}));
-  }
-  return {
-    __is_atscript_annotated_type: true,
-    type: { kind: "object", props, propsPatterns: [], tags: new Set() },
-    metadata: new Map(Object.entries(options.interfaceAnnotations ?? {})),
-  } as any;
-}
 
 function makeApp() {
   return {
@@ -230,6 +209,9 @@ describe("AsValueHelpController — meta response", () => {
     expect(meta.searchable).toBe(true);
     expect(meta.fields.label).toEqual({ filterable: true, sortable: true });
     expect(meta.fields.description).toEqual({ filterable: false, sortable: false });
-    expect(meta.readOnly).toBe(true);
+    expect(meta.crud.insert).toBeUndefined();
+    expect(meta.crud.update).toBeUndefined();
+    expect(meta.crud.replace).toBeUndefined();
+    expect(meta.crud.remove).toBeUndefined();
   });
 });

@@ -137,9 +137,9 @@ Dropping a column permanently deletes all data stored in it. Use `--safe` mode t
 
 ## Indexes
 
-Schema sync manages indexes that are prefixed with `atscript__` — these are considered "managed" indexes. Unmanaged indexes (those you created manually or through other tools) are left untouched.
-
-When `@db.index.*` annotations are added, sync creates the corresponding indexes. When annotations are removed, sync drops the matching managed indexes. Index changes are applied after column operations to ensure the target columns exist.
+Sync manages indexes prefixed with `atscript__`. Indexes you create with any
+other name are left alone — useful for custom partial / expression indexes
+that schema sync shouldn't touch.
 
 ```atscript
 @db.table 'users'
@@ -155,11 +155,8 @@ export interface User {
 }
 ```
 
-The `syncIndexesWithDiff()` helper in the base adapter handles the comparison: it lists existing indexes with the managed prefix, compares them against the desired index definitions, and creates or drops indexes as needed.
-
-::: tip
-If you need to manage an index outside of schema sync (custom partial indexes, expression indexes, etc.), create it without the `atscript__` prefix and sync will leave it alone.
-:::
+Adding `@db.index.*` creates the matching managed index; removing the
+annotation drops it.
 
 ## Foreign Keys
 
@@ -339,14 +336,9 @@ export interface User {
 }
 ```
 
-Sync follows a multi-step process:
-
-1. Create a temporary table with the new schema
-2. Copy all compatible data from the old table into the temporary table
-3. Drop the old table
-4. Rename the temporary table to the original name
-
-Data is preserved wherever the old and new types are compatible. Incompatible columns may lose data during the copy.
+Sync copies the data into a new table with the updated schema and swaps it
+in. Data is preserved wherever the old and new types are compatible;
+incompatible columns may lose data during the copy.
 
 ### When Required
 

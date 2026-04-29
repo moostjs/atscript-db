@@ -61,7 +61,7 @@ Captures the current time at insert. Works with number (Unix epoch milliseconds)
 createdAt?: number
 ```
 
-Timestamps use `number` (epoch milliseconds) rather than a `Date` type — this is deliberate. Numbers are JSON-native, so timestamps pass through HTTP boundaries (client ↔ server) without any serialization or hydration step. A `Date` type would require walking every response to convert strings back to `Date` instances on both sides.
+Use `number` (epoch ms) for timestamps so they cross HTTP boundaries without any serialization step.
 
 ::: tip Semantic Types Include Defaults
 Semantic types like `number.timestamp.created` already include `@db.default.now` — you don't need to add it manually:

@@ -112,16 +112,8 @@ The storage mode determines what you can query:
 
 **Flattened fields** are fully queryable — they are real columns with their own types, indexes, and constraints. You can filter, sort, and index them like any other field.
 
-**JSON fields** have limited and adapter-dependent queryability:
-
-| Adapter    | JSON Query Support                                       |
-| ---------- | -------------------------------------------------------- |
-| SQLite     | Limited — `json_extract()` via raw queries               |
-| PostgreSQL | JSONB operators and indexing                             |
-| MySQL      | JSON functions                                           |
-| MongoDB    | Native nested query syntax (objects are stored natively) |
-
-See [Adapters](/adapters/) for adapter-specific details on JSON querying.
+**JSON fields** have limited, adapter-dependent queryability — see your
+[adapter docs](/adapters/) for the specifics.
 
 ::: info
 If you need to filter on a field, prefer flattened storage (the default for objects). Use `@db.json` only when you treat the object as an opaque blob that is read and written as a whole.

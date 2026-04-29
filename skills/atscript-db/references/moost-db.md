@@ -137,18 +137,54 @@ export class RolesController extends AsValueHelpController<typeof RolesDictionar
 ## Meta endpoint shape
 
 ```ts
+type TCrudOp = "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove";
+type TCrudPermissions = Partial<Record<TCrudOp, string[]>>;
+
 interface TMetaResponse {
   searchable: boolean;
   vectorSearchable: boolean;
   searchIndexes: { name; description?; type? }[];
   primaryKeys: string[];
-  readOnly: boolean;
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<string, { sortable; filterable }>;
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)
   actions: TDbActionInfo[]; // declared actions; `[]` when none. See actions.md.
+  crud: TCrudPermissions; // built-in CRUD surface; key absent = denied
 }
 ```
+
+`crud` declares which built-in CRUD operations the controller exposes and the
+accepted UniQuery control whitelist per read op (`[]` for write ops). Per-base-class emission:
+
+- `AsDbReadableController` → `{ query, pages, one }`
+- `AsDbController` → inherits + `{ insert: [], update: [], replace: [], remove: [] }`
+- `AsValueHelpController` / `AsJsonValueHelpController` → `{ query, pages, one }`
+
+Whitelists are exported as constants from `@atscript/moost-db`: `QUERY_CONTROLS`, `PAGES_CONTROLS`, `ONE_CONTROLS`.
+
+There is no `readOnly` field; consumers compute it inline as
+`!('insert' in crud) && !('update' in crud) && !('replace' in crud) && !('remove' in crud)`.
+
+### Per-request overlay hook
+
+`AsReadableController` exposes a protected `applyMetaOverlay(meta): TMetaResponse | Promise<TMetaResponse>`
+that runs on every `/meta` request after the cached static envelope is built.
+Default no-op. Subclasses override it to prune `crud` keys, `crud[op]`
+controls arrays, and `actions[]` based on the current request principal —
+derive the principal via `@wooksjs/event-http` composables inside the hook
+(`useAuthorization()`, `useHeaders()`, `useCookies()`, `useRequest()`,
+`useHttpContext()` — there is no `useRequestContext`). Must shallow-clone
+before pruning; mutating the cached envelope leaks per-request state.
+
+### Pitfalls
+
+- Overlay filtering is informational only — hiding a `crud` key or `actions[]`
+  entry does NOT block the underlying route. Custom `applyMetaOverlay()`
+  overrides are discoverability hints, not access control; per-principal
+  request enforcement is a separate concern.
+- `client.meta()` caches per `Client` instance. SSR setups that share a Client
+  across users will pin the first principal's overlay; instantiate a Client
+  per request when running per-principal overlays server-side.
 
 Consumed by `@atscript/db-client` to build a client-side validator matching the server's.
 
