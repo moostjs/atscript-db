@@ -8,7 +8,13 @@ import type {
   TDbDeleteResult,
 } from "@atscript/db";
 
-import { ActionNotFoundError, ActionUnsupportedError, ClientError } from "./client-error";
+import {
+  ActionDisabledError,
+  ActionNotFoundError,
+  ActionUnsupportedError,
+  ClientError,
+  type ActionDisabledErrorBody,
+} from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
 import type { ClientOptions, DataOf, IdOf, MetaResponse, NavOf, OwnOf, PageResult } from "./types";
 
@@ -374,6 +380,9 @@ export class Client<T = Record<string, unknown>> {
         errorBody = (await res.json()) as Record<string, unknown>;
       } catch {
         errorBody = { message: res.statusText, statusCode: res.status };
+      }
+      if (errorBody.name === "ActionDisabledError") {
+        throw new ActionDisabledError(res.status, errorBody as unknown as ActionDisabledErrorBody);
       }
       throw new ClientError(res.status, errorBody as never);
     }

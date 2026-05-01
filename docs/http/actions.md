@@ -85,12 +85,14 @@ curl -X POST http://localhost:3000/users/actions/block \
 
 The `level` tells the UI where the action belongs. It is **inferred** from the parameter decorators of the handler — you never set it directly on `@DbAction`:
 
-| Parameter decorator | Inferred level | Body shape (JSON)                                               |
-| ------------------- | -------------- | --------------------------------------------------------------- |
-| `@DbActionPK()`     | `row`          | scalar PK (e.g. `"abc"`, `42`) or composite-PK object           |
-| `@DbActionPKs()`    | `rows`         | array of scalar PKs or array of composite-PK objects            |
-| _(neither)_         | `table`        | typically empty body (or whatever your handler defines)         |
-| Both `@DbActionPK*` | _illegal_      | action dropped from `/meta` with a `[moost-db actions]` warning |
+| Parameter decorator(s)                | Inferred level | Body shape (JSON)                                               |
+| ------------------------------------- | -------------- | --------------------------------------------------------------- |
+| `@DbActionPK()` or `@DbActionRow()`   | `row`          | scalar PK (e.g. `"abc"`, `42`) or composite-PK object           |
+| `@DbActionPKs()` or `@DbActionRows()` | `rows`         | array of scalar PKs or array of composite-PK objects            |
+| _(none)_                              | `table`        | typically empty body (or whatever your handler defines)         |
+| Both row + rows cardinality           | _illegal_      | action dropped from `/meta` with a `[moost-db actions]` warning |
+
+`@DbActionRow()` / `@DbActionRows()` inject the actual row(s) (already loaded by the gate); they are described under [Server-side Gate § Row injection](#row-injection).
 
 For class-level actions (declared via `@DbActions` family), you set `level` on the dict entry — see [Class-level actions](#class-level-actions) below.
 
@@ -148,15 +150,20 @@ Use these when the action has a server-side handler.
 
 Marks a method as an action. Does **not** register an HTTP route — pair it with `@Post(...)`. The `name` is the action's stable identifier surfaced to the UI.
 
-| Option        | Type                                                   | Description                                                                 |
-| ------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `label`       | `string`                                               | Human-readable label. Required (or use `@Label('...')`).                    |
-| `icon`        | `string`                                               | Icon name; UI maps to its own icon set.                                     |
-| `intent`      | `'positive' \| 'negative' \| 'primary' \| 'secondary'` | Semantic colour/prominence hint.                                            |
-| `description` | `string`                                               | Tooltip / longer description.                                               |
-| `order`       | `number`                                               | Display order hint.                                                         |
-| `default`     | `boolean`                                              | Marks this as the level's default (e.g. row dblclick handler).              |
-| `promptText`  | `string`                                               | Confirmation prompt template; `$1` (PK) and `$N` (count) substituted by UI. |
+| Option           | Type                                                                | Description                                                                                                                                                                                                                             |
+| ---------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `label`          | `string`                                                            | Human-readable label. Required (or use `@Label('...')`).                                                                                                                                                                                |
+| `icon`           | `string`                                                            | Icon name; UI maps to its own icon set.                                                                                                                                                                                                 |
+| `intent`         | `'positive' \| 'negative' \| 'warning' \| 'primary' \| 'secondary'` | Semantic colour/prominence hint. Suggested ordering (most → least): `negative` (destructive) > `warning` (risky-but-not-destructive: retry, force-recompute) > `primary` > `positive` > `secondary`.                                    |
+| `description`    | `string`                                                            | Tooltip / longer description.                                                                                                                                                                                                           |
+| `order`          | `number`                                                            | Display order hint.                                                                                                                                                                                                                     |
+| `default`        | `boolean`                                                           | Marks this as the level's default (e.g. row dblclick handler).                                                                                                                                                                          |
+| `promptText`     | `string \| [string, string]`                                        | Confirmation prompt. Tuple form is `[singular, plural]` — UI picks `[0]` when the action will execute against a single PK, `[1]` otherwise. `$1` (single PK) and `$N` (count) substituted by UI.                                        |
+| `shortcut`       | `string`                                                            | Single-character keyboard hint. Modifier prefix (Alt+, Ctrl+, bare key) and activation scope are UI/UX concerns; server forwards the character verbatim and does no conflict resolution.                                                |
+| `disabled`       | `(row: TRow) => boolean`                                            | Per-row gate predicate. Truthy → action is disabled for that row. Server enforces; UI mirrors. See [Server-side Gate](#server-side-gate). Annotate `row` arg explicitly — TS decorators can't infer `TRow` from class generic.          |
+| `requiredFields` | `string[]`                                                          | Dot-notation paths the UI should union into `$select` for predicate evaluation. Stripped if `disabled` absent. See [`requiredFields`](#requiredfields).                                                                                 |
+| `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level batch policy. Default `'reject'`. See [Batch mode](#rows-batch-mode).                                                                                                                                                    |
+| `table`          | `AtscriptDbTable<any>`                                              | Required when declaring `disabled` or any `@DbActionRow*` on a class that does **not** extend `AsDbReadableController`. Silently ignored on subclasses (the bound table wins). See [Bound-table requirement](#bound-table-requirement). |
 
 ::: tip Label resolution
 The label resolves in this order: `opts.label` > `@Label('...')` decorator > drop-with-warning. Pick one — both with the same value is benign; mismatched values let `opts.label` win.
@@ -207,10 +214,16 @@ Validation is **strict** — no type coercion. If the PK is numeric, JSON `"42"`
 A `'rows'` action MUST receive a JSON array, even when the client invokes it on a single row. Send `["a"]`, not `"a"`. The `@DbActionPKs()` resolver rejects non-array bodies with HTTP 400. An empty array `[]` is accepted — `client.action(name)` with no PK posts `[]`, and your handler runs with `ids === []`.
 :::
 
-::: danger `@DbActionPK*` requires an attached typed table
-`@DbActionPK()` and `@DbActionPKs()` validate the body against the controller's bound table schema — they only work on subclasses of `AsDbController` / `AsDbReadableController` (controllers wired with `@TableController` / `@ReadableController`). Applied to a controller without a typed table (e.g. a value-help controller, or a plain Moost controller without `@TableController`), the resolver throws **HTTP 500** at request time. That's a server-misconfiguration signal — not a client error.
+::: danger `@DbActionPK*` requires a bound table
+`@DbActionPK()` and `@DbActionPKs()` validate the body against the controller's bound table schema. The bound table is resolved in this order:
 
-If you need to accept PK-shaped bodies on a controller without a typed table, use Moost's `@Body()` and parse / validate the PK yourself. The control and the responsibility are then yours.
+1. `opts.table` (any controller class) — declare it on `@DbAction(name, { table })`.
+2. Subclass of `AsDbController` / `AsDbReadableController` (wired with `@TableController` / `@ReadableController`) — bound table comes from the controller automatically.
+3. Duck-type fallback — a `readable` or `table` instance property on the controller (legacy support).
+
+If none resolves at request time, the resolver throws **HTTP 500** — a server-misconfiguration signal, not a client error. For controllers that genuinely have no typed table, use Moost's `@Body()` and parse / validate the PK yourself.
+
+When you also declare `disabled` or any `@DbActionRow*` decorator on a non-`AsDbReadableController` class, the duck-type fallback is **NOT** sufficient — you must pass `opts.table` explicitly so discovery can validate at first `/meta` (see [Bound-table requirement](#bound-table-requirement)).
 :::
 
 Validation errors flow through the existing validation interceptor and emit the same envelope as DTO failures:
@@ -285,6 +298,194 @@ Use `processor: 'backend'` at the class level to point an action at a shared or 
 - **Method decorator** (`@DbAction`): the action has a server handler living on this controller. The path, validation, and label all live in one place.
 - **Class decorator** (`@DbActions` family): the action is `'navigate'` or `'custom'` (no server handler at all), or it points at a shared/legacy `'backend'` endpoint that lives elsewhere. Also useful for declaring many actions compactly.
 
+## Server-side Gate {#server-side-gate}
+
+Many actions only apply under specific row state — "Ship" should run only on orders with `status === 'processing'`, "Approve" only on pending requests. Without a declarative gate, the controller has to guard the handler manually and return `{ ok: false, message: 'Already shipped' }` after the user clicks; the UI button stays live for every row because the UI has no machine-readable predicate. The same predicate ends up duplicated (or, today, missing) in the UI, and the two drift.
+
+The gate collapses this to **one declaration**: the server enforces it via an interceptor, and the wire emits the predicate's source so a UI can grey-out / hide the button per row.
+
+### Basic recipe
+
+A row-level "Ship" action gated on order status:
+
+```typescript
+import { AsDbController, TableController, DbAction, DbActionPK } from "@atscript/moost-db";
+import { Post } from "@moostjs/event-http";
+import { Order } from "./schema/order.as";
+import { ordersTable } from "./db";
+
+@TableController(ordersTable)
+export class OrdersController extends AsDbController<typeof Order> {
+  @Post("actions/ship")
+  @DbAction("ship", {
+    label: "Ship",
+    intent: "primary",
+    disabled: (order: Order) => order.status !== "processing",
+  })
+  async ship(@DbActionPK() id: string) {
+    await this.table.updateOne({ id, status: "shipped" });
+    return { message: "Shipped" };
+  }
+}
+```
+
+The gate interceptor runs **after** auth guards and **before** the handler. When `disabled` returns truthy, the request is rejected with `ActionDisabledError` (HTTP 409) and the handler never runs. No guard code in the handler body — by the time `ship()` executes, the gate has already vetted the row.
+
+::: tip TS row-arg annotation is required
+TypeScript decorators can't infer `TRow` from the enclosing controller's class generic, so the dev MUST annotate the row arg explicitly: `(order: Order) => …`. Without it, TS infers `unknown` and you lose autocomplete.
+:::
+
+### Row injection — `@DbActionRow()` / `@DbActionRows()` {#row-injection}
+
+The gate already loaded the row(s) to evaluate `disabled`. The same loaded row(s) can be injected into the handler — no second fetch:
+
+```typescript
+import { DbAction, DbActionPK, DbActionRow } from "@atscript/moost-db";
+
+@Post("actions/ship")
+@DbAction("ship", {
+  label: "Ship",
+  disabled: (order: Order) => order.status !== "processing",
+})
+async ship(@DbActionPK() id: string, @DbActionRow() order: Order) {
+  // `order` is the same row the gate evaluated. No re-fetch.
+  await this.table.updateOne({ id, status: "shipped", shippedAt: Date.now() });
+  return { message: `Shipped order ${order.orderNumber}` };
+}
+```
+
+`@DbActionRow()` / `@DbActionRows()` are also recognized as level signals (see [Action Levels](#action-levels)) — `@DbActionRow()` infers `'row'`, `@DbActionRows()` infers `'rows'`. They are interchangeable with `@DbActionPK*` for level inference; mixing row-cardinality and rows-cardinality decorators on the same method drops the action with a warning.
+
+In `'rows'` + `'skip'` mode, `@DbActionRows()` resolves to filtered survivors only — the original request rows are not retrievable post-filter.
+
+### `'rows'`-level batch mode {#rows-batch-mode}
+
+For `@DbActionPKs()` / `@DbActionRows()` actions, `onDisabledRows` controls how the gate handles partial failures:
+
+| Mode                 | Predicate evaluated   | On any failure                                                    | Handler runs with  |
+| -------------------- | --------------------- | ----------------------------------------------------------------- | ------------------ |
+| `'reject'` (default) | every row (FULL scan) | throws `ActionDisabledError` listing **all** failing PKs          | n/a                |
+| `'skip'`             | every row (FULL scan) | filters cached PKs + rows to passing-only; zero survivors → throw | only the survivors |
+
+```typescript
+@Post("actions/archive")
+@DbAction("archive", {
+  label: "Archive Selected",
+  disabled: (order: Order) => order.archived,
+  onDisabledRows: "skip",   // archive only un-archived rows; ignore the rest
+})
+async archive(@DbActionPKs() ids: string[]) {
+  // `ids` contains only survivors when `onDisabledRows: 'skip'`.
+  await this.table.bulkUpdate(ids.map((id) => ({ id, archived: true })));
+  return { message: `${ids.length} orders archived` };
+}
+```
+
+Two notes:
+
+- `'reject'` is the default because it preserves request-atomicity — partial success is opt-in.
+- Both modes do a **FULL scan** (not short-circuit) before throwing — so the rejection body lists every failing PK, not just the first. Predicates with side-effects (rare; predicates should be pure) are called for every row.
+
+### Bound-table requirement {#bound-table-requirement}
+
+The gate / `@DbActionRow*` need a typed table at request time to load the row(s). Discovery enforces this at first `/meta`:
+
+| Controller                                                               | What's required for `disabled` / `@DbActionRow*`                                                                 |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `AsDbController` / `AsDbReadableController` subclass                     | nothing — bound table comes from `@TableController` / `@ReadableController`; `opts.table` is silently ignored    |
+| Plain Moost controller (no extends, no `readable`/`table` field)         | **MUST** declare `opts.table` on `@DbAction(name, { table })`                                                    |
+| Plain Moost controller WITH `readable` / `table` instance field (legacy) | duck-type fallback covers plain `@DbActionPK*` only — gates and `@DbActionRow*` still need explicit `opts.table` |
+
+When the requirement isn't met, discovery emits a `[moost-db actions]` warning and **drops** the action from `/meta`. Plain `@DbActionPK()` / `@DbActionPKs()` (no gate, no row injection) still works on any controller via the existing duck-type fallback — only gated / row-injecting actions need the explicit `table` opt.
+
+```typescript
+// Plain controller — gated action MUST pass opts.table
+@Controller()
+export class AdminController {
+  @Post("orders/ship")
+  @DbAction("ship", {
+    label: "Ship",
+    table: ordersTable, // ← required
+    disabled: (order: Order) => order.status !== "processing",
+  })
+  async ship(@DbActionPK() id: string, @DbActionRow() row: Order) {
+    /* ... */
+  }
+}
+```
+
+### `requiredFields` {#requiredfields}
+
+`requiredFields` is a UI hint listing dot-notation paths the predicate references. The UI unions these into `$select` so it can evaluate `disabled` against fetched rows.
+
+- Without `disabled` → stripped at discovery with a `[moost-db actions]` warning. The action itself stays.
+- When present → UI uses verbatim, no parsing of the stringified `disabled` source.
+- When absent (and `disabled` set) → UI parses `fn.toString()` itself for property accesses (works against minified output where property names aren't mangled).
+- Plain `string[]` of dot-notation paths in v1 (typed `PathOf<TRow>[]` is a future upgrade).
+
+### Closure-emission pitfall
+
+The wire emits `fn.toString()` of the predicate **verbatim** — captured outer-scope identifiers come along. The server doesn't validate closure-cleanliness; it runs the original closure successfully. The UI, on the other hand, evaluates the stringified source in a different scope and throws `ReferenceError` on captured names.
+
+::: warning Predicate body must reference only the row arg
+Outer-scope identifiers (constants, helpers, imports, `this.*`) work server-side but break UI mirroring. Keep predicates pure and self-contained.
+
+```typescript
+// ✅ self-contained — works server + UI
+disabled: (order: Order) => order.status !== "processing";
+
+// ❌ captures outer-scope SHIPPED — server runs, UI throws ReferenceError
+const SHIPPED = "shipped";
+disabled: (order: Order) => order.status === SHIPPED;
+
+// ❌ captures `this` — same problem
+disabled: (order: Order) => order.tenantId === this.currentTenant;
+```
+
+:::
+
+### `ActionDisabledError` (HTTP 409)
+
+When the gate rejects, the response is HTTP 409 with this body:
+
+```json
+{
+  "name": "ActionDisabledError",
+  "message": "Action \"ship\" is disabled for this row",
+  "statusCode": 409,
+  "action": "ship",
+  "pk": "abc"
+}
+```
+
+For `'rows'`-level rejections, `pks: [...]` replaces `pk`:
+
+- `'reject'` mode: `pks` lists ALL failing PKs (full-scan, not just the first).
+- `'skip'` mode with zero survivors: `pks` lists ALL request PKs.
+
+The error class lives in `@atscript/moost-db` (`ActionDisabledError extends HttpError`). The discriminator `name: 'ActionDisabledError'` lets `@atscript/db-client` construct the typed `ActionDisabledError` subclass on the consumer side — see [HTTP Client — Actions § Error cases](./client#error-cases).
+
+### Class-level dict entries are UI-only
+
+Class-level `@DbActions` / `@DbRowActions` / `@DbRowsActions` accept `disabled` and `requiredFields`, but they only forward to the wire — no interceptor registers, because the dict entry's `value` may point at an endpoint in another controller (or a method that doesn't exist in this scope). The UI still grays out the button.
+
+For symmetric server enforcement at the actual `@Post`-bound handler, also declare `@DbAction(name, { disabled })` on that method. The wire shape is identical either way.
+
+### Composables
+
+Useful when composing custom interceptors that need access to the gate's cached PKs / rows without re-parsing the body or re-fetching:
+
+```typescript
+import { useDbActionPk, useDbActionPks, useDbActionRow, useDbActionRows } from "@atscript/moost-db";
+
+const pk = await useDbActionPk().load(); // cached, validated single PK
+const pks = await useDbActionPks().load(); // cached, validated PK array
+const row = await useDbActionRow().load(); // cached single row (gate-loaded)
+const rows = await useDbActionRows().load(); // cached row array (gate-loaded; filtered in skip mode)
+```
+
+All four follow the Wooks `defineWook` pattern and return `{ load() }`. The gate runs at `AFTER_GUARD` priority so reads are safe inside any `INTERCEPTOR`-priority custom interceptor.
+
 ## Request and Response Contracts
 
 ### Request body
@@ -337,6 +538,8 @@ async refreshCache() {
 
 Errors flow through the existing validation interceptor — same envelope as CRUD endpoints. PK validation failures, missing fields, and wrong types all emit HTTP 400 with structured `errors[]`. See [CRUD — Error Handling](./crud#error-handling).
 
+Gate rejections are HTTP **409** with the `ActionDisabledError` body shape — see [Server-side Gate § `ActionDisabledError`](#actiondisablederror-http-409).
+
 ## Composing with Auth and Interceptors
 
 `@DbAction` does not interfere with any other Moost decorator. `@Authenticate`, `@Intercept`, pipe decorators, and parameter decorators all behave as if `@DbAction` were absent:
@@ -354,6 +557,8 @@ async block(@DbActionPK() id: string) {
 
 If the guard rejects the request, the handler body never runs and the auth-failure response is returned — exactly as for any other Moost handler.
 
+The internal gate interceptor (registered automatically when `disabled` or `@DbActionRow*` is present) runs at `AFTER_GUARD` priority — so auth guards run first, the gate runs after, then any custom `INTERCEPTOR`-priority interceptors, then the handler.
+
 ## The `/meta` Surface
 
 The `actions` field of the `/meta` response is an array of `TDbActionInfo`:
@@ -366,13 +571,18 @@ interface TDbActionInfo {
   processor: "backend" | "navigate" | "custom";
   value: string;
   icon?: string;
-  intent?: "positive" | "negative" | "primary" | "secondary";
+  intent?: "positive" | "negative" | "warning" | "primary" | "secondary";
   description?: string;
   order?: number;
   default?: boolean;
-  promptText?: string;
+  promptText?: string | [string, string]; // [singular, plural]
+  shortcut?: string; // single character; UI binds the modifier
+  disabled?: string; // fn.toString() of the gate predicate
+  requiredFields?: string[]; // UI's $select union hint
 }
 ```
+
+The server emits `fn.toString()` verbatim — closures and outer-scope references included. No parsing, no AST transform. The UI evaluates the source against a level-specific scope (the row for `'row'`-level, each row for `'rows'`-level) to grey-out / hide the button. Server enforcement is authoritative; this field is purely a UI hint. Class-level dict entries with a `disabled` predicate also emit `disabled` on the wire — but the server cannot enforce them (see [Class-level dict entries are UI-only](#class-level-dict-entries-are-ui-only)).
 
 Discovery is **lazy** — it runs on the first `GET /meta` request and the result is cached alongside the rest of the meta envelope. Startup is unaffected. Warnings (missing label, missing `@Post`, `@Body` co-occurrence, duplicate `default`, …) emit on that first call, not at `app.init()` time.
 
@@ -382,17 +592,21 @@ The `@atscript/db-client` consumer reads `actions` off the meta response — see
 
 The meta builder enforces several rules. Every violation emits a console warning prefixed `[moost-db actions]` and **drops** the offending action from `/meta` rather than throwing — this keeps `/meta` deliverable even with misconfigurations.
 
-| Rule                                                                    | Outcome                          |
-| ----------------------------------------------------------------------- | -------------------------------- |
-| `@DbAction` method has no `@Post(...)`                                  | warn + drop                      |
-| `@DbAction` method's only verb is non-POST (`@Get`, `@Put`, …)          | warn + drop                      |
-| Both `@DbActionPK()` and `@DbActionPKs()` on the same method            | warn + drop                      |
-| `@DbActionPK*` co-occurs with `@Body()`                                 | warn + drop                      |
-| Method has no label (no `opts.label`, no `@Label`)                      | warn + drop                      |
-| `@DbActionDefault()` applied without a corresponding `@DbAction(name)`  | warn + drop                      |
-| Class-level `'navigate'` or `'backend'` entry has missing/empty `value` | warn + drop                      |
-| Class-level `'custom'` entry supplies a `value`                         | warn + drop                      |
-| Two actions with `default: true` at the same level                      | first wins, second demoted, warn |
+| Rule                                                                                | Outcome                                     |
+| ----------------------------------------------------------------------------------- | ------------------------------------------- |
+| `@DbAction` method has no `@Post(...)`                                              | warn + drop                                 |
+| `@DbAction` method's only verb is non-POST (`@Get`, `@Put`, …)                      | warn + drop                                 |
+| Both `@DbActionPK()` and `@DbActionPKs()` on the same method                        | warn + drop                                 |
+| `@DbActionPK*` co-occurs with `@Body()`                                             | warn + drop                                 |
+| Method has no label (no `opts.label`, no `@Label`)                                  | warn + drop                                 |
+| `@DbActionDefault()` applied without a corresponding `@DbAction(name)`              | warn + drop                                 |
+| Class-level `'navigate'` or `'backend'` entry has missing/empty `value`             | warn + drop                                 |
+| Class-level `'custom'` entry supplies a `value`                                     | warn + drop                                 |
+| Two actions with `default: true` at the same level                                  | first wins, second demoted, warn            |
+| `'table'`-level action declares `disabled`                                          | warn + drop                                 |
+| Gated / row-injecting on a non-`AsDbReadableController` class without `opts.table`  | warn + drop                                 |
+| `requiredFields` set without `disabled`                                             | warn + strip `requiredFields` (action kept) |
+| Mixing row + rows cardinality (`@DbActionPK*` / `@DbActionRow*`) on the same method | warn + drop                                 |
 
 The single greppable prefix `[moost-db actions]` makes it easy to detect issues in CI logs.
 

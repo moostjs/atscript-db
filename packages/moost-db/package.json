@@ -52,6 +52,8 @@
     "@atscript/typescript": "catalog:",
     "@moostjs/event-http": "catalog:",
     "@uniqu/core": "catalog:",
+    "@wooksjs/event-core": "catalog:",
+    "@wooksjs/event-http": "catalog:",
     "@wooksjs/http-body": "catalog:",
     "moost": "catalog:",
     "unplugin-atscript": "catalog:"
@@ -61,6 +63,7 @@
     "@atscript/typescript": "catalog:",
     "@moostjs/event-http": "catalog:",
     "@uniqu/core": "catalog:",
+    "@wooksjs/event-core": "catalog:",
     "@wooksjs/http-body": "catalog:",
     "moost": "catalog:"
   }

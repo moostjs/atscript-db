@@ -1,6 +1,16 @@
 import { vi, type Mock } from "vite-plus/test";
+import { current } from "@wooksjs/event-core";
+import { prepareTestHttpContext } from "@wooksjs/event-http";
+import { getMoostMate, setControllerContext } from "moost";
 
-import { MOOST_DB_ACTION, MOOST_DB_ACTION_PARAM, type TDbActionMeta } from "../actions/keys";
+import {
+  MOOST_DB_ACTION,
+  MOOST_DB_ACTION_PARAM,
+  MOOST_DB_ACTION_ROW,
+  MOOST_DB_ACTION_ROWS,
+  type TDbActionMeta,
+} from "../actions/keys";
+import { boundTableKey } from "../actions/pk-cache";
 import type { DbActionOpts } from "../actions/types";
 
 /** Per-test logger spy compatible with `TConsoleBase`. */
@@ -10,6 +20,7 @@ export type LoggerSpy = {
   error: Mock;
   log: Mock;
   debug: Mock;
+  trace: Mock;
 };
 
 export function makeLogger(): LoggerSpy {
@@ -19,6 +30,7 @@ export function makeLogger(): LoggerSpy {
     error: vi.fn(),
     log: vi.fn(),
     debug: vi.fn(),
+    trace: vi.fn(),
   };
 }
 
@@ -93,7 +105,7 @@ export interface FakeHandler {
   action?: { name: string; opts?: DbActionOpts };
   /** The `@Label` decorator value to fall back to when `opts.label` is absent. */
   label?: string;
-  paramKinds?: Array<"pk" | "pks" | "body" | "other">;
+  paramKinds?: Array<"pk" | "pks" | "row" | "rows" | "body" | "other">;
 }
 
 export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
@@ -118,6 +130,113 @@ export function makeValueHelpType(options: {
   };
 }
 
+export type ActionParamKind = "pk" | "pks" | "row" | "rows";
+
+/** HTTP test-context wrapper for action interceptor / wook tests. */
+export function runInActionCtx<T>(
+  rawBody: string,
+  fn: () => T | Promise<T>,
+  opts: { url?: string; method?: string } = {},
+): T | Promise<T> {
+  return prepareTestHttpContext({
+    url: opts.url ?? "/c/act",
+    method: opts.method ?? "POST",
+    headers: { "content-type": "application/json" },
+    rawBody,
+  })(fn);
+}
+
+/** Invoke a `before` interceptor; converts `reply(v)` → reject. */
+export async function runBeforeInterceptor(def: {
+  before?: (reply: (v: unknown) => void) => unknown;
+}): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    Promise.resolve(def.before!((v: unknown) => reject(v)))
+      .then(() => resolve(undefined))
+      .catch(reject);
+  });
+}
+
+/**
+ * Write `MOOST_DB_ACTION` + param markers onto a class method via mate.
+ * Drives discovery's level inference and the gate / row interceptors.
+ */
+export function setupActionMeta(
+  ctor: Function,
+  methodName: string,
+  action: { name: string; opts?: Record<string, unknown> },
+  paramKinds: ActionParamKind[] = [],
+): void {
+  const fn = (currentMeta: unknown) =>
+    ({
+      ...(currentMeta as Record<string, unknown>),
+      [MOOST_DB_ACTION]: { name: action.name, opts: action.opts ?? {} },
+      params: paramKinds.map((kind) => {
+        if (kind === "pk") return { [MOOST_DB_ACTION_PARAM]: "pk" };
+        if (kind === "pks") return { [MOOST_DB_ACTION_PARAM]: "pks" };
+        if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
+        return { [MOOST_DB_ACTION_ROWS]: true };
+      }),
+    }) as never;
+  getMoostMate().decorate(fn as never)(ctor.prototype, methodName);
+}
+
+/** Fake table with `findById` / `findMany` spies — for interceptor + row-cache tests. */
+export function makeOpsTable(rows: Record<string, unknown>[]): {
+  primaryKeys: string[];
+  fieldDescriptors: Array<{ path: string; designType: string }>;
+  findById: Mock;
+  findMany: Mock;
+} {
+  return {
+    primaryKeys: ["id"],
+    fieldDescriptors: [{ path: "id", designType: "string" }],
+    findById: vi
+      .fn()
+      .mockImplementation((pk: unknown) => Promise.resolve(rows.find((r) => r.id === pk) ?? null)),
+    findMany: vi.fn().mockResolvedValue(rows),
+  };
+}
+
+/** PK-validation-only fake table — for cached-PK-wook tests. */
+export function makePkOnlyTable(designType: "string" | "number" = "string"): {
+  primaryKeys: string[];
+  fieldDescriptors: Array<{ path: string; designType: string }>;
+} {
+  return {
+    primaryKeys: ["id"],
+    fieldDescriptors: [{ path: "id", designType }],
+  };
+}
+
+/** Wrap `setControllerContext` for the in-test controller. */
+export function bindController(ctrl: object, methodName: string, url = "/c/act"): void {
+  setControllerContext(ctrl as never, methodName, url);
+}
+
+/**
+ * Bind a duck-type controller (`{ readable: table }`) for tests that exercise
+ * the `useControllerContext().getController()` fallback path. The prototype
+ * trick is needed so `getController().constructor` is a real class.
+ */
+export function bindDuckTypeController(
+  table: unknown,
+  methodName = "handler",
+  url = "/c/act",
+): void {
+  const ctrl = { readable: table };
+  class FakeCtrl {
+    handler() {}
+  }
+  Object.setPrototypeOf(ctrl, FakeCtrl.prototype);
+  setControllerContext(ctrl as never, methodName, url);
+}
+
+/** Seed the bound-table slot on the current event context. */
+export function setBoundTable(table: unknown): void {
+  current().set(boundTableKey, table);
+}
+
 export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
   const sharedMethodMeta = new Map<string, Record<string, unknown>>();
   // Group all verbs sharing the same JS method-name under one methodMeta —
@@ -129,6 +248,8 @@ export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
       if (kind === "body") return { paramSource: "BODY" };
       if (kind === "pk") return { [MOOST_DB_ACTION_PARAM]: "pk" };
       if (kind === "pks") return { [MOOST_DB_ACTION_PARAM]: "pks" };
+      if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
+      if (kind === "rows") return { [MOOST_DB_ACTION_ROWS]: true };
       return {};
     });
     const action: TDbActionMeta | undefined = h.action

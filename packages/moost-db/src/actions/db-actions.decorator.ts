@@ -44,7 +44,8 @@ function classLevelActions(
 ): ClassDecorator {
   const entries: TDbClassActionMeta[] = [];
   for (const [name, entry] of Object.entries(dict)) {
-    entries.push({ name, entry: entry as TDbActionsEntry, forcedLevel });
+    const merged = (forcedLevel ? { ...entry, level: forcedLevel } : entry) as TDbActionsEntry;
+    entries.push({ name, entry: merged });
   }
   const mate = getMoostMate();
   return mate.decorate((current) => {

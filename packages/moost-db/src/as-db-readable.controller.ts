@@ -10,6 +10,7 @@ import type {
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Param } from "moost";
 
+import { registerAsDbReadableController } from "./actions/controller-registry";
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
 import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
@@ -441,3 +442,9 @@ export class AsDbReadableController<
     };
   }
 }
+
+// Self-register so action discovery's static check
+// (`isAsDbReadableControllerSubclass`) and the gate interceptor's runtime
+// `instanceof` probe can find this class without forming an import cycle
+// through the actions module.
+registerAsDbReadableController(AsDbReadableController);

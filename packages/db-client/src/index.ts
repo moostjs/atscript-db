@@ -1,5 +1,11 @@
 export { Client } from "./client";
-export { ClientError, ActionNotFoundError, ActionUnsupportedError } from "./client-error";
+export {
+  ClientError,
+  ActionNotFoundError,
+  ActionUnsupportedError,
+  ActionDisabledError,
+} from "./client-error";
+export type { ActionDisabledErrorBody } from "./client-error";
 
 // Re-exported from @atscript/db so consumers building UIs over /meta have a
 // single import point for the action + CRUD permission wire types.

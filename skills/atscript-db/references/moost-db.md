@@ -118,6 +118,7 @@ Status-code mapping (`validation-interceptor.ts`):
 | `ValidatorError`                                                                                           | 400  |
 | `DbError` code `CONFLICT`                                                                                  | 409  |
 | `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`) | 400  |
+| `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                   | 409  |
 
 ## Value-help controllers
 
@@ -185,6 +186,9 @@ before pruning; mutating the cached envelope leaks per-request state.
 - `client.meta()` caches per `Client` instance. SSR setups that share a Client
   across users will pin the first principal's overlay; instantiate a Client
   per request when running per-principal overlays server-side.
+- `actions[].disabled` and `actions[].requiredFields` are UI hints emitted by
+  `discoverActions()`; server enforcement is via the gate interceptor on the
+  decorated `@Post` handler (authoritative). See [actions.md § Server-side gate](actions.md#server-side-gate).
 
 Consumed by `@atscript/db-client` to build a client-side validator matching the server's.
 

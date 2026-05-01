@@ -1,5 +1,4 @@
 import { createPkParamDecorator } from "./pk-source";
-import { validateMultiPk } from "./pk-validation";
 
 /**
  * Parameter resolver that reads a JSON array of primary keys from the request
@@ -10,7 +9,11 @@ import { validateMultiPk } from "./pk-validation";
  *
  * Validation is strict — no type coercion. Marks the param so
  * {@link discoverActions} can infer the action's `level` as `'rows'`.
+ *
+ * In `'rows'` skip mode the resolved value reflects the gate interceptor's
+ * filtered subset (the cached PK slot is overwritten in place); see
+ * {@link dbActionPksSlot} for precedence details.
  */
 export function DbActionPKs(): ParameterDecorator {
-  return createPkParamDecorator("pks", validateMultiPk, "dbActionPks");
+  return createPkParamDecorator("pks");
 }

@@ -248,12 +248,14 @@ const meta = await users.meta();
   "type": { "...": "serialized Atscript type schema" },
   "actions": [
     {
-      "name": "block",
-      "label": "Block",
+      "name": "ship",
+      "label": "Ship",
       "level": "row",
       "processor": "backend",
-      "value": "/users/actions/block",
-      "intent": "negative"
+      "value": "/orders/actions/ship",
+      "intent": "primary",
+      "disabled": "(order) => order.status !== \"processing\"",
+      "requiredFields": ["status"]
     }
   ],
   "crud": {
@@ -333,6 +335,8 @@ await users.action("edit", "abc"); // browser: window.location.assign('/users/ab
 
 `action()` is always POST for `processor: 'backend'`. The path comes from the meta builder (method-decorator actions resolve to the bound HTTP path; class-level backend actions use the dev-supplied path verbatim).
 
+When the server's [disabled gate](./actions#server-side-gate) rejects a row, `action()` throws `ActionDisabledError` (HTTP 409) — see [Error cases](#error-cases) below.
+
 ### Navigate dispatch
 
 By default, navigate actions call `window.location.assign(url)`. Inject a SPA router via the `navigate` option:
@@ -350,13 +354,18 @@ await users.action("edit", "abc"); // → router.push('/users/abc/edit')
 
 For composite PKs, each field value is URL-encoded and joined with `/` (in `primaryKeys` order) before substituting `$1`. For `level: 'rows'` and `level: 'table'` navigate actions, `value` is used verbatim — no `$1` substitution.
 
-### Error cases
+### Error cases {#error-cases}
 
 ```typescript
-import { ActionNotFoundError, ActionUnsupportedError } from "@atscript/db-client";
+import {
+  ActionNotFoundError,
+  ActionUnsupportedError,
+  ActionDisabledError,
+  ClientError,
+} from "@atscript/db-client";
 
 try {
-  await users.action("blockz", "abc");
+  await users.action("ship", "abc");
 } catch (e) {
   if (e instanceof ActionNotFoundError) {
     /* action name not in /meta */
@@ -365,11 +374,19 @@ try {
     /* processor: 'custom' (handle the event yourself), or
        processor: 'navigate' with no browser env and no navigate option */
   }
-  if (e instanceof ClientError) {
-    /* server returned non-2xx — same shape as other endpoints */
+  if (e instanceof ActionDisabledError) {
+    /* HTTP 409 — server-side disabled gate rejected the row(s).
+       Typed accessors layered on top of ClientError: */
+    e.action; // "ship"
+    e.pk; // "abc"  (row-level rejection)
+    e.pks; // [...]  (rows-level rejection — full list of failing PKs)
+  } else if (e instanceof ClientError) {
+    /* any other server non-2xx — same shape as other endpoints */
   }
 }
 ```
+
+`ActionDisabledError extends ClientError`, so a generic `instanceof ClientError` catch still handles gate rejections — use the typed branch when you want `e.action` / `e.pk` / `e.pks` without indexing into `body`. See [Actions — Server-side Gate](./actions#server-side-gate) for the server-side declaration.
 
 `processor: 'custom'` actions cannot be invoked through the client — those describe UI events your application dispatches itself. The client throws `ActionUnsupportedError` in that case.
 

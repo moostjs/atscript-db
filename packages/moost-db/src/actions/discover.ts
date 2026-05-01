@@ -2,17 +2,22 @@ import type { TDbActionInfo, TDbActionLevel } from "@atscript/db";
 import type { Moost, TConsoleBase } from "moost";
 import { getMoostMate } from "moost";
 
+import { isAsDbReadableControllerSubclass } from "./controller-registry";
 import {
   MOOST_DB_ACTION,
-  MOOST_DB_ACTION_PARAM,
   MOOST_DB_ACTIONS,
+  WARN_PREFIX,
   type TDbActionMeta,
   type TDbClassActionMeta,
-  type TDbActionParamKind,
 } from "./keys";
+import { scanParamLevel } from "./param-level";
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
-/** Optional fields shared between method opts and class-level entries. */
+/**
+ * Pure structural-copy fields. `disabled` and `requiredFields` are handled
+ * as special cases in {@link emitInfo} so the function-to-string transform
+ * stays out of the copy loop.
+ */
 const OPTIONAL_FIELDS = [
   "icon",
   "intent",
@@ -20,10 +25,9 @@ const OPTIONAL_FIELDS = [
   "order",
   "default",
   "promptText",
+  "shortcut",
 ] as const;
 type OptionalField = (typeof OPTIONAL_FIELDS)[number];
-
-const WARN_PREFIX = "[moost-db actions]";
 
 const actionsCache = new WeakMap<Function, TDbActionInfo[]>();
 
@@ -100,9 +104,33 @@ function collectMethodActions(
     if (!levelInfer) continue;
     if (levelInfer.bodyConflict) {
       logger.warn(
-        `${WARN_PREFIX} action "${action.name}" cannot mix @DbActionPK*/@DbActionPKs with @Body() — dropping`,
+        `${WARN_PREFIX} action "${action.name}" cannot mix @DbActionPK*/@DbActionPKs/@DbActionRow*/@DbActionRows with @Body() — dropping`,
       );
       continue;
+    }
+
+    // ── 'table' + disabled rejection ──
+    if (levelInfer.level === "table" && action.opts.disabled !== undefined) {
+      logger.warn(
+        `${WARN_PREFIX} action "${action.name}" — \`disabled\` is not allowed at the 'table' level; ` +
+          `row-state predicates are not meaningful when no row is in scope. Use @Authenticate / arbac for ` +
+          `table-level access — dropping`,
+      );
+      continue;
+    }
+
+    const isGated = action.opts.disabled !== undefined || levelInfer.hasRowParam;
+    if (isGated) {
+      const extendsReadable = isAsDbReadableControllerSubclass(ctor);
+      const hasOptsTable = action.opts.table != null;
+      if (!extendsReadable && !hasOptsTable) {
+        logger.warn(
+          `${WARN_PREFIX} action "${action.name}" declares a gate or row injection but the controller does ` +
+            `not extend AsDbReadableController and \`opts.table\` is not provided. Either extend ` +
+            `AsDbReadableController / AsDbController or pass \`opts.table\` on @DbAction — dropping`,
+        );
+        continue;
+      }
     }
 
     const postEntry = handlers.find(
@@ -137,7 +165,7 @@ function collectMethodActions(
       processor: "backend",
       value: path,
     };
-    copyOptionalFields(info, action.opts);
+    emitInfo(info, action.opts, action.name, logger);
     out.push(info);
   }
 }
@@ -145,6 +173,7 @@ function collectMethodActions(
 interface LevelInferResult {
   level: TDbActionLevel;
   bodyConflict: boolean;
+  hasRowParam: boolean;
 }
 
 function inferMethodLevel(
@@ -152,23 +181,19 @@ function inferMethodLevel(
   actionName: string,
   logger: TConsoleBase,
 ): LevelInferResult | null {
-  let hasPk = false;
-  let hasPks = false;
-  let hasBody = false;
-  for (const p of params) {
-    const kind = p[MOOST_DB_ACTION_PARAM] as TDbActionParamKind | undefined;
-    if (kind === "pk") hasPk = true;
-    else if (kind === "pks") hasPks = true;
-    if (p.paramSource === "BODY") hasBody = true;
-  }
-  if (hasPk && hasPks) {
+  const scan = scanParamLevel(params);
+  if (scan.single && scan.multi) {
     logger.warn(
-      `${WARN_PREFIX} action "${actionName}" has both @DbActionPK and @DbActionPKs — dropping`,
+      `${WARN_PREFIX} action "${actionName}" mixes single-cardinality and multi-cardinality decorators ` +
+        `(@DbActionPK / @DbActionRow vs @DbActionPKs / @DbActionRows) — dropping`,
     );
     return null;
   }
-  const level: TDbActionLevel = hasPk ? "row" : hasPks ? "rows" : "table";
-  return { level, bodyConflict: hasBody && level !== "table" };
+  return {
+    level: scan.level as TDbActionLevel,
+    bodyConflict: scan.hasBody && scan.level !== "table",
+    hasRowParam: scan.hasRowParam,
+  };
 }
 
 // ── Class-level actions ───────────────────────────────────────────────────
@@ -179,8 +204,8 @@ function collectClassActions(ctor: Function, logger: TConsoleBase, out: TDbActio
     | undefined;
   const list = classMeta?.[MOOST_DB_ACTIONS];
   if (!list) return;
-  for (const { name, entry, forcedLevel } of list) {
-    const built = buildClassEntry(name, entry, forcedLevel, logger);
+  for (const { name, entry } of list) {
+    const built = buildClassEntry(name, entry, logger);
     if (built) out.push(built);
   }
 }
@@ -188,10 +213,9 @@ function collectClassActions(ctor: Function, logger: TConsoleBase, out: TDbActio
 function buildClassEntry(
   name: string,
   entry: TDbActionsEntry,
-  forcedLevel: TDbActionLevel | undefined,
   logger: TConsoleBase,
 ): TDbActionInfo | null {
-  const level = forcedLevel ?? entry.level;
+  const level = entry.level;
   if (!level) {
     logger.warn(
       `${WARN_PREFIX} class-level action "${name}" requires a level — dropping. Use @DbTableActions/@DbRowActions/@DbRowsActions or set "level" explicitly.`,
@@ -200,6 +224,13 @@ function buildClassEntry(
   }
   if (!entry.label) {
     logger.warn(`${WARN_PREFIX} class-level action "${name}" requires a label — dropping`);
+    return null;
+  }
+  // ── 'table' + disabled rejection (class-level) ──
+  if (level === "table" && entry.disabled !== undefined) {
+    logger.warn(
+      `${WARN_PREFIX} class-level action "${name}" — \`disabled\` is not allowed at the 'table' level — dropping`,
+    );
     return null;
   }
   const processor = entry.processor;
@@ -235,7 +266,13 @@ function buildClassEntry(
     processor,
     value,
   };
-  copyOptionalFields(info, entry);
+  // Class-level dict entries forward `disabled.toString()` and `requiredFields`
+  // EXACTLY as for method-decorator actions. The server does NOT register a
+  // gate interceptor here — class-level entries point at endpoints (possibly
+  // in other controllers) where the decorator can't introspect a method;
+  // server enforcement is the dev's responsibility (typically by adding
+  // `@DbAction(name, { disabled })` on the actual handler).
+  emitInfo(info, entry, name, logger);
   return info;
 }
 
@@ -258,6 +295,44 @@ function applyDefaultPerLevel(actions: TDbActionInfo[], logger: TConsoleBase): v
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Emit structural-copy fields plus `disabled` (stringified) and
+ * `requiredFields` (forwarded verbatim — server doesn't auto-derive).
+ * `requiredFields` without `disabled` is dropped with a warning before the
+ * structural copy runs, so method-decorator and class-level-dict origins
+ * stay symmetric.
+ */
+function emitInfo(
+  info: TDbActionInfo,
+  source: DbActionOpts | TDbActionsEntry,
+  name: string,
+  logger: TConsoleBase,
+): void {
+  const disabled = (source as { disabled?: unknown }).disabled;
+  const hasDisabled = typeof disabled === "function";
+  let requiredFields = (source as { requiredFields?: unknown }).requiredFields;
+  if (!hasDisabled && requiredFields !== undefined) {
+    logger.warn(
+      `${WARN_PREFIX} action "${name}" has \`requiredFields\` without \`disabled\` — \`requiredFields\` is ` +
+        `purely a UI hint and meaningless without a predicate. Dropping \`requiredFields\` from /meta.`,
+    );
+    requiredFields = undefined;
+  }
+  copyOptionalFields(info, source);
+  // The result is memoized in `actionsCache`; defensively clone the tuple
+  // form of `promptText` so a downstream mutation of the dev-supplied opts
+  // can't shift the cached wire output.
+  if (Array.isArray(info.promptText)) {
+    info.promptText = info.promptText.slice() as [string, string];
+  }
+  if (hasDisabled) {
+    info.disabled = (disabled as () => unknown).toString();
+  }
+  if (Array.isArray(requiredFields)) {
+    info.requiredFields = requiredFields.slice();
+  }
+}
 
 function copyOptionalFields(info: TDbActionInfo, source: DbActionOpts | TDbActionsEntry): void {
   for (const key of OPTIONAL_FIELDS) {

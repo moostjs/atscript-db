@@ -13,9 +13,9 @@ describe("@atscript/db action types — public surface", () => {
     expectTypeOf<TDbActionLevel>().toEqualTypeOf<"table" | "row" | "rows">();
   });
 
-  it("TDbActionIntent is the union of the four UI-mappable semantics", () => {
+  it("TDbActionIntent is the union of the five UI-mappable semantics", () => {
     expectTypeOf<TDbActionIntent>().toEqualTypeOf<
-      "positive" | "negative" | "primary" | "secondary"
+      "positive" | "negative" | "warning" | "primary" | "secondary"
     >();
   });
 
@@ -41,5 +41,15 @@ describe("@atscript/db action types — public surface", () => {
 
   it("TMetaResponse.actions is a TDbActionInfo[]", () => {
     expectTypeOf<TMetaResponse["actions"]>().toEqualTypeOf<TDbActionInfo[]>();
+  });
+
+  it("TDbActionInfo.shortcut is an optional string", () => {
+    expectTypeOf<TDbActionInfo["shortcut"]>().toEqualTypeOf<string | undefined>();
+  });
+
+  it("TDbActionInfo.promptText accepts string | [string, string]", () => {
+    expectTypeOf<TDbActionInfo["promptText"]>().toEqualTypeOf<
+      string | [string, string] | undefined
+    >();
   });
 });

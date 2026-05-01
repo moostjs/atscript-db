@@ -1,5 +1,4 @@
 import { createPkParamDecorator } from "./pk-source";
-import { validateSinglePk } from "./pk-validation";
 
 /**
  * Parameter resolver that reads the primary key from the JSON request body
@@ -14,7 +13,11 @@ import { validateSinglePk } from "./pk-validation";
  *
  * Marks the param so {@link discoverActions} can infer the action's `level`
  * as `'row'`.
+ *
+ * Implementation note: the resolver is a thin reader of the cached PK wook
+ * — validation logic lives in the wook factory, which runs once per request
+ * regardless of how many readers consume the value.
  */
 export function DbActionPK(): ParameterDecorator {
-  return createPkParamDecorator("pk", validateSinglePk, "dbActionPk");
+  return createPkParamDecorator("pk");
 }

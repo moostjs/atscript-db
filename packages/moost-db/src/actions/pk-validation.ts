@@ -17,6 +17,12 @@ export interface PkValidationSource {
   fieldDescriptors: readonly TDbFieldMeta[];
 }
 
+export function isPkValidationSource(value: unknown): value is PkValidationSource {
+  if (!value || typeof value !== "object") return false;
+  const v = value as { primaryKeys?: unknown; fieldDescriptors?: unknown };
+  return Array.isArray(v.primaryKeys) && Array.isArray(v.fieldDescriptors);
+}
+
 /**
  * Validate a JSON-decoded body against a single-row PK shape (scalar or
  * composite). Throws {@link ValidatorError} with structured `errors` so the

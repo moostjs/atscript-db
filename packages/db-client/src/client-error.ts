@@ -22,6 +22,46 @@ export class ClientError extends Error {
   }
 }
 
+/**
+ * Wire-body shape for `ActionDisabledError` responses (HTTP 409). Extends
+ * the base `ServerError` envelope with a `name` discriminator, the action
+ * name, and the offending PK(s). The bridge between `@atscript/moost-db`'s
+ * server-side error and this typed client-side subclass is the wire JSON
+ * body — neither package depends on the other.
+ */
+export interface ActionDisabledErrorBody extends ServerError {
+  name: "ActionDisabledError";
+  action: string;
+  pk?: unknown;
+  pks?: unknown[];
+}
+
+/**
+ * Typed marker thrown by `Client._send` when the server response body's
+ * `name === 'ActionDisabledError'`. The transport / status / base body are
+ * identical to a generic `ClientError`; this subclass adds typed accessors
+ * so consumers can write `catch (e) { if (e instanceof ActionDisabledError) … }`
+ * to access `action` / `pk` / `pks` without indexing into `body`.
+ */
+export class ActionDisabledError extends ClientError {
+  override name = "ActionDisabledError";
+
+  /** The `@DbAction` name that rejected the request. */
+  get action(): string {
+    return (this.body as ActionDisabledErrorBody).action;
+  }
+
+  /** Present only for `'row'`-level rejections. */
+  get pk(): unknown {
+    return (this.body as ActionDisabledErrorBody).pk;
+  }
+
+  /** Present only for `'rows'`-level rejections (full list of failing PKs). */
+  get pks(): unknown[] | undefined {
+    return (this.body as ActionDisabledErrorBody).pks;
+  }
+}
+
 /** Thrown by `Client.action()` when the action name is not present in `/meta`. */
 export class ActionNotFoundError extends Error {
   override name = "ActionNotFoundError";

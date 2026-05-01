@@ -52,7 +52,12 @@ new Client<T>(path, {
 `client.action(name, pk?)` invokes any declared action. POST is hardcoded for `'backend'`. See [actions.md](actions.md) for full semantics.
 
 ```ts
-import { Client, ActionNotFoundError, ActionUnsupportedError } from "@atscript/db-client";
+import {
+  Client,
+  ActionNotFoundError,
+  ActionUnsupportedError,
+  ActionDisabledError,
+} from "@atscript/db-client";
 
 await users.action("block", "abc"); // backend: POST PK as JSON body
 await users.action("lock", ["a", "b"]); // rows-level: array
@@ -64,7 +69,12 @@ await users.action("edit", "abc"); // navigate: window.location.assign('/users/a
 new Client("/api/users", { navigate: (url) => router.push(url) }); // SPA integration
 ```
 
-Throws: `ActionNotFoundError` (unknown name), `ActionUnsupportedError` (`'custom'` processor; or `'navigate'` with no browser + no `navigate` option), `ClientError` (server non-2xx). Unknown actions, custom-processor actions, and missing navigate hooks all surface clear named errors.
+Throws:
+
+- `ActionNotFoundError` — unknown name (not in `/meta`).
+- `ActionUnsupportedError` — `'custom'` processor (UI dispatches the event itself); or `'navigate'` with no browser + no `navigate` option.
+- `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.pk` / `e.pks` accessors. See [actions.md § Server-side gate](actions.md#server-side-gate).
+- `ClientError` — server non-2xx (other). `ActionDisabledError extends ClientError`, so a generic catch still works.
 
 ## Typed filters
 
@@ -81,12 +91,17 @@ Autocomplete works on every filter path, sort key, and `$select` element.
 ## Error handling
 
 ```ts
-import { ClientError } from "@atscript/db-client";
+import { ClientError, ActionDisabledError } from "@atscript/db-client";
 
 try {
   await users.insert({ email: "bad" });
 } catch (e) {
-  if (e instanceof ClientError) {
+  if (e instanceof ActionDisabledError) {
+    // HTTP 409 from server-side action gate (only thrown by client.action()).
+    e.action; // the @DbAction name that rejected
+    e.pk; // row-level rejection
+    e.pks; // rows-level rejection (full list of failing PKs)
+  } else if (e instanceof ClientError) {
     e.status; // HTTP status
     e.body; // parsed JSON body from the server (includes `errors[]`)
     e.errors; // convenience: `body.errors ?? []`

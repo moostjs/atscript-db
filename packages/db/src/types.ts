@@ -102,8 +102,16 @@ export interface TMetaResponse {
 /** Where the action applies on the UI. */
 export type TDbActionLevel = "table" | "row" | "rows";
 
-/** Semantic intent the UI maps to its own visual language (color, prominence). */
-export type TDbActionIntent = "positive" | "negative" | "primary" | "secondary";
+/**
+ * Semantic intent the UI maps to its own visual language (color, prominence).
+ *
+ * Suggested visual prominence (most → least): `negative` > `warning` > `primary`
+ * > `positive` > `secondary`. Use `negative` for destructive ops (delete, purge),
+ * `warning` for risky-but-non-destructive ops (retry payment, force recompute,
+ * reset state), `primary` for the headline action, `positive` for benign
+ * confirmations (approve, publish), `secondary` for everything else.
+ */
+export type TDbActionIntent = "positive" | "negative" | "warning" | "primary" | "secondary";
 
 /** How the UI client should handle the action when invoked. */
 export type TDbActionProcessor = "backend" | "navigate" | "custom";
@@ -127,7 +135,43 @@ export interface TDbActionInfo {
   description?: string;
   order?: number;
   default?: boolean;
-  promptText?: string;
+  /**
+   * Confirmation prompt copy. String form is shown verbatim. Tuple form is
+   * `[singular, plural]`: the UI picks `[0]` when the action will execute
+   * against a single PK (always for `'row'`-level; for `'rows'`-level when the
+   * current selection has exactly one PK) and `[1]` otherwise.
+   *
+   * Placeholder substitution is UI-resolved, not server-parsed. Conventional
+   * placeholders: `$1` for the single PK (singular form) and `$N` for the
+   * count (plural form), e.g. `['Delete order $1?', 'Delete $N orders?']`.
+   */
+  promptText?: string | [string, string];
+  /**
+   * Single-character keyboard shortcut hint. The server stores this verbatim
+   * — choice of modifier prefix (Alt+, Ctrl+, bare key) and activation scope
+   * (e.g. only when an actions dropdown is open) are UI/UX concerns. Conflict
+   * resolution between actions sharing the same key is also up to the UI;
+   * the server does no dedup.
+   */
+  shortcut?: string;
+  /**
+   * Stringified gate predicate (`fn.toString()`). Present only for `'row'`
+   * and `'rows'` level actions whose decorator declared a `disabled` function.
+   * The UI evaluates against a level-specific scope to grey-out / hide the
+   * button. The server has already enforced this predicate before the
+   * action's handler ran — the server is authoritative; this field is purely
+   * a UI hint.
+   */
+  disabled?: string;
+  /**
+   * Optional dev-supplied list of dot-notation paths over the row that the
+   * `disabled` predicate references. Plain `string[]` in v1 (a typed
+   * `PathOf<TRow>[]` upgrade is a documented follow-up). The UI unions these
+   * into `$select` across all actions on a table. When absent, the UI parses
+   * `disabled` itself. When present, the UI uses this list verbatim — the
+   * server does NOT auto-derive or merge.
+   */
+  requiredFields?: string[];
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

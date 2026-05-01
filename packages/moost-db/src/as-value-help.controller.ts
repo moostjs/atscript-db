@@ -7,6 +7,7 @@ import type { FilterExpr, TCrudPermissions, TMetaResponse } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Moost, Param } from "moost";
 
+import { registerAsValueHelpController } from "./actions/controller-registry";
 import { AsReadableController } from "./as-readable.controller";
 import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
 
@@ -231,3 +232,8 @@ export abstract class AsValueHelpController<
     };
   }
 }
+
+// Self-register so the @DbAction decorator factory can apply the value-help
+// carve-out (skip interceptor registration) without forming an import cycle
+// through the actions module.
+registerAsValueHelpController(AsValueHelpController);
