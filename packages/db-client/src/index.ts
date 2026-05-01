@@ -1,4 +1,4 @@
-export { Client } from "./client";
+export { Client, encodeNavigateId, formatIdentifier, formatIdentifierField } from "./client";
 export {
   ClientError,
   ActionNotFoundError,

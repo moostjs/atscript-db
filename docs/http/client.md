@@ -374,7 +374,7 @@ const users = new Client<typeof User>("/api/users", {
 await users.action("edit", { slug: "alpha" }); // → router.push('/users/alpha/edit')
 ```
 
-For `'row'`-level navigate, the client substitutes `$1` by walking `meta.preferredId` declaration order — NOT object-key insertion order. Each value is `encodeURIComponent`'d, compound preferred-ids are joined with `/`.
+For `'row'`-level navigate, the client substitutes `$1` by walking `meta.preferredId` declaration order — NOT object-key insertion order. Each value is `encodeURIComponent`'d, compound preferred-ids are joined with `/`. Missing fields render as empty segments (e.g. `acme//jane`), not the literal `"undefined"`.
 
 ```typescript
 // preferredId = ['tenantId', 'userId']
@@ -383,6 +383,34 @@ await users.action("edit", { userId: "jane", tenantId: "acme/co" });
 ```
 
 For `level: 'rows'` and `level: 'table'` navigate actions, `value` is used verbatim — no `$1` substitution.
+
+### Identifier rendering helpers {#identifier-helpers}
+
+The same identifier-to-string logic the client uses internally for `$1` substitution is exported as standalone helpers. Reach for these when you need to render a row identifier outside `Client.action()` — prompt text in a confirm dialog, log lines, deep-link copy, audit messages.
+
+```typescript
+import { formatIdentifier, encodeNavigateId, formatIdentifierField } from "@atscript/db-client";
+
+// Raw form (no URL encoding) — for prompt text, error messages, logs.
+formatIdentifier({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
+// → "acme/co/jane"
+
+// URL-encoded form — same logic Client.action() applies for navigate $1.
+encodeNavigateId({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
+// → "acme%2Fco/jane"
+
+// Single-value coercion (null / undefined → "", primitives via String,
+// objects/arrays via JSON.stringify).
+formatIdentifierField(undefined); // ""
+formatIdentifierField(123n); // "123"
+formatIdentifierField({ a: 1 }); // '{"a":1}'
+```
+
+| Helper                  | Encoding   | Use for                                                                |
+| ----------------------- | ---------- | ---------------------------------------------------------------------- |
+| `formatIdentifier`      | none       | Prompt text, error messages, log lines, dialog titles                  |
+| `encodeNavigateId`      | URL-encode | Navigate-URL templates (only when building deep links outside actions) |
+| `formatIdentifierField` | none       | Single-value coercion with `null`/`undefined` → `""` semantics         |
 
 ### Error cases {#error-cases}
 

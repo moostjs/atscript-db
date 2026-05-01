@@ -176,7 +176,7 @@ import { DbRowActions } from "@atscript/moost-db";
 export class UsersController extends AsDbController<typeof User> {}
 ```
 
-The `$1` placeholder is substituted client-side with the row's `preferredId` field values, walking `meta.preferredId` declaration order (NOT object-key insertion order). Each value is `encodeURIComponent`'d; compound preferred-ids are joined with `/`. The server emits `value` verbatim. See [Preferred row identifier](#preferred-id).
+The `$1` placeholder is substituted client-side with the row's `preferredId` field values, walking `meta.preferredId` declaration order (NOT object-key insertion order). Each value is `encodeURIComponent`'d; compound preferred-ids are joined with `/`; missing fields render as empty segments (`acme//jane`), not the literal `"undefined"`. The server emits `value` verbatim. See [Preferred row identifier](#preferred-id) and the [identifier rendering helpers](./client#identifier-helpers) (`formatIdentifier` / `encodeNavigateId`) the client exports for use outside `Client.action()`.
 
 `'rows'`- and `'table'`-level navigate entries do NOT substitute `$1` — `value` is sent verbatim.
 

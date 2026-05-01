@@ -281,6 +281,38 @@ describe("Client.action — navigate processor", () => {
     expect(navigate).toHaveBeenCalledWith("/members/acme%2Fco/jane/edit");
   });
 
+  it("renders a missing preferredId field as an empty URL segment (NOT literal 'undefined')", async () => {
+    const fetchFn = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/meta")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () =>
+            Promise.resolve({
+              ...baseMeta,
+              primaryKeys: ["tenantId", "userId"],
+              preferredId: ["tenantId", "userId"],
+              actions: [
+                {
+                  name: "edit",
+                  label: "Edit",
+                  level: "row",
+                  processor: "navigate",
+                  value: "/members/$1/edit",
+                } as TDbActionInfo,
+              ],
+            }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => ({}) });
+    });
+    const navigate = vi.fn();
+    const c = new Client("/api/members", { fetch: fetchFn, navigate });
+    await c.action("edit", { tenantId: "acme" } as unknown as Record<string, unknown>);
+    expect(navigate).toHaveBeenCalledWith("/members/acme//edit");
+  });
+
   it("navigates to value verbatim for level: 'table' (no substitution)", async () => {
     const fetchFn = fetchWith([
       {

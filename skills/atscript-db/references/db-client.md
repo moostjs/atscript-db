@@ -119,7 +119,7 @@ Default `R = unknown` when omitted.
 
 ### Navigate URL substitution
 
-For `level: 'row'` + `processor: 'navigate'`, the client substitutes `$1` in the action's `value` template by walking `meta.preferredId` field declaration order — NOT object-key insertion order. Each value is `encodeURIComponent`'d, compound preferred-id values are joined with `/`.
+For `level: 'row'` + `processor: 'navigate'`, the client substitutes `$1` in the action's `value` template by walking `meta.preferredId` field declaration order — NOT object-key insertion order. Each value is `encodeURIComponent`'d, compound preferred-id values are joined with `/`. Missing fields render as empty segments (e.g. `acme//jane`), NOT the literal `"undefined"`.
 
 ```ts
 // preferredId = ['tenantId', 'userId']
@@ -128,6 +128,30 @@ await users.action("edit", { userId: "jane", tenantId: "acme/co" });
 ```
 
 For `'rows'` / `'table'` navigate, `value` is sent verbatim (no substitution).
+
+### Identifier rendering helpers
+
+The same logic the client uses for `$1` substitution is exported for consumers that need to render identifiers outside `Client.action()` (prompt text, log lines, deep-link copy):
+
+```ts
+import { formatIdentifier, encodeNavigateId, formatIdentifierField } from "@atscript/db-client";
+
+formatIdentifier({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
+// → "acme/co/jane"  (raw, no encoding — for prompt text / error messages)
+
+encodeNavigateId({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
+// → "acme%2Fco/jane"  (URL-encoded — same logic Client.action() applies internally)
+
+formatIdentifierField(undefined); // "" (NOT "undefined")
+formatIdentifierField(123n); // "123"
+formatIdentifierField({ a: 1 }); // '{"a":1}'
+```
+
+When to use which:
+
+- **`formatIdentifier`** — human-readable contexts: prompt text (`Delete user $1?`), error messages, log lines, dialog titles. Raw form, no encoding.
+- **`encodeNavigateId`** — only for navigate-URL templates. The `Client` uses it internally for `$1`; consumers reach for it directly only when building deep links outside the action API.
+- **`formatIdentifierField`** — single-value coercion. Useful when you have an individual identifier value (not the whole object) and want the same `null`/`undefined` → `""` semantics.
 
 ### Errors
 

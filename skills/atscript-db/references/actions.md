@@ -122,11 +122,11 @@ Every row-returning read endpoint (`GET /query`, `/pages`, `/one`, `/one/:id`, i
 
 ## Processor
 
-| `processor`  | `value` at definition                                   | `value` in `/meta`                   | UI dispatch                                                                                                                         |
-| ------------ | ------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `'backend'`  | required (class) / N/A (method, auto from `@Post` path) | bound POST path / dict path verbatim | UI POSTs identifier object (or array of objects) as JSON body                                                                       |
-| `'navigate'` | required, non-empty (class only)                        | dict value verbatim                  | UI routes to `value`; `$1` → row's `preferredId` field values (URL-encoded; compound joined `/` in `preferredId` declaration order) |
-| `'custom'`   | **forbidden** (class only)                              | dict key (auto-filled)               | UI dispatches event named `value`                                                                                                   |
+| `processor`  | `value` at definition                                   | `value` in `/meta`                   | UI dispatch                                                                                                                                                                                       |
+| ------------ | ------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'backend'`  | required (class) / N/A (method, auto from `@Post` path) | bound POST path / dict path verbatim | UI POSTs identifier object (or array of objects) as JSON body                                                                                                                                     |
+| `'navigate'` | required, non-empty (class only)                        | dict value verbatim                  | UI routes to `value`; `$1` → row's `preferredId` field values (URL-encoded; compound joined `/` in `preferredId` declaration order; missing fields → empty segments, never literal `"undefined"`) |
+| `'custom'`   | **forbidden** (class only)                              | dict key (auto-filled)               | UI dispatches event named `value`                                                                                                                                                                 |
 
 `'navigate'`/`'backend'` empty/missing `value` → drop. `'custom'` with `value` → drop.
 

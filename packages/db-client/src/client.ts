@@ -337,7 +337,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private _interpolateNavigateUrl(
     action: TDbActionInfo,
     id: unknown,
-    preferredId: string[],
+    preferredId: readonly string[],
   ): string {
     if (action.level !== "row") return action.value;
     if (id === undefined) return action.value;
@@ -456,13 +456,42 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
 }
 
 /**
- * Encode a row identifier for substitution into a `processor: 'navigate'` URL template.
- * The values are URL-encoded and joined with `/` in `meta.preferredId` field
- * declaration order — NOT in object-key insertion order (which is unstable
- * across callers).
+ * Render a single identifier field for substitution into a navigate-URL
+ * template or human-readable string. `null` / `undefined` collapse to `""`
+ * (NOT the literal `"undefined"` / `"null"` that `String()` would produce).
  */
-function encodeNavigateId(id: Record<string, unknown>, preferredId: string[]): string {
-  return preferredId.map((f) => encodeURIComponent(String(id[f]))).join("/");
+export function formatIdentifierField(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v);
+  return JSON.stringify(v);
+}
+
+/**
+ * Render a row identifier as a `/`-joined string in `preferredId`
+ * declaration order — NOT object-key insertion order (which is unstable
+ * across callers). Raw form, no URL-encoding; for prompt text, error
+ * messages, log lines, etc.
+ */
+export function formatIdentifier(
+  id: Record<string, unknown> | undefined,
+  preferredId: readonly string[],
+): string {
+  if (id === undefined) return "";
+  return preferredId.map((f) => formatIdentifierField(id[f])).join("/");
+}
+
+/**
+ * URL-encoded form of `formatIdentifier` — for `processor: 'navigate'`
+ * `$1` substitution. Each field is `encodeURIComponent`'d, then joined
+ * with a literal `/`. Missing fields render as empty segments (e.g.
+ * `acme//jane`), not the literal `"undefined"`.
+ */
+export function encodeNavigateId(
+  id: Record<string, unknown>,
+  preferredId: readonly string[],
+): string {
+  return preferredId.map((f) => encodeURIComponent(formatIdentifierField(id[f]))).join("/");
 }
 
 function describeShape(value: unknown): string {
