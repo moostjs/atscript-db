@@ -148,10 +148,24 @@ Throws:
 // Nav<User>: nav-relation fields (Record<string, unknown> when no nav present)
 // Id<User>:  composite id shape when PK is composite, scalar otherwise
 // Data<T>:   full data shape (Own + Nav)
-// ClientResponse<T, Q>: response row narrowed by the literal $with array in Q
+// ClientResponse<T, Q>: response row — narrowed by literal $with; carries optional $actions?: string[]
 ```
 
 Autocomplete works on every filter path, sort key, and `$select` element. The query/one/pages return-type narrowing is automatic when `$with` is a literal (use `as const` if TS doesn't infer it as literal).
+
+## Per-row action availability — `$actions=true`
+
+Opt-in URL control on read methods. When set, every returned row carries `$actions: string[]` — names of `'row'`/`'rows'`-level actions NOT disabled for that row. See [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability) for the server-side pipeline.
+
+```ts
+const r = await users.query({
+  filter: { active: true },
+  controls: { $actions: true } as const,
+});
+r[0].$actions; // string[] | undefined  (typed via ClientResponse<T, Q>)
+```
+
+Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$groupBy` paths are not augmented. `'table'`-level actions never appear.
 
 ## Error handling
 

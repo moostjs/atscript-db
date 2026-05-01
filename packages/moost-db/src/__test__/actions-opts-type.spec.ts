@@ -4,14 +4,15 @@ import type { AtscriptDbTable, TDbActionInfo } from "@atscript/db";
 import type { DbActionOpts } from "../actions/types";
 
 /**
- * `DbActionOpts<TRow>` mirrors `TDbActionInfo` for the structural fields,
+ * `DbActionOpts<TRow, R>` mirrors `TDbActionInfo` for the structural fields,
  * EXCEPT `disabled` and `requiredFields` which differ in shape between
  * decorator opts (function / dev-supplied) and the wire (string / forwarded).
  * Plus four moost-db-only fields: `disabled`, `requiredFields`,
  * `onDisabledRows`, `table`.
  *
- * Renaming a field on `TDbActionInfo` (other than the four overridden ones)
- * SHOULD produce a type error in these assertions.
+ * When `TRow = unknown` (no decorator generic), the gate options are loose
+ * (any string[] for requiredFields, any[] for disabled rows). When `TRow`
+ * is provided, the per-call narrowing kicks in via `Pick<FlatOf<TRow>, R[number]>`.
  */
 
 describe("DbActionOpts type derivation", () => {
@@ -19,17 +20,16 @@ describe("DbActionOpts type derivation", () => {
     type Structural = Partial<
       Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "requiredFields">
     >;
-    // The base `Partial<Omit<…>>` portion is structurally a subset of
-    // `DbActionOpts` — every key in `Structural` must be assignable.
     expectTypeOf<DbActionOpts>().toMatchTypeOf<Structural>();
   });
 
-  it("disabled is a batch function (TRow[] → boolean[]), not a string", () => {
-    type DisabledField = NonNullable<DbActionOpts<{ status: string }>["disabled"]>;
-    expectTypeOf<DisabledField>().toEqualTypeOf<(rows: { status: string }[]) => boolean[]>();
+  it("disabled (loose, TRow=unknown) is a batch function (any[] → boolean[])", () => {
+    type DisabledField = NonNullable<DbActionOpts["disabled"]>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expectTypeOf<DisabledField>().toEqualTypeOf<(rows: any[]) => boolean[]>();
   });
 
-  it("requiredFields is plain string[] in v1", () => {
+  it("requiredFields (loose, TRow=unknown) is plain string[]", () => {
     type RF = NonNullable<DbActionOpts["requiredFields"]>;
     expectTypeOf<RF>().toEqualTypeOf<string[]>();
   });

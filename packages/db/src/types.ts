@@ -158,21 +158,13 @@ export interface TDbActionInfo {
   /**
    * Stringified gate predicate (`fn.toString()`). Present only for `'row'`
    * and `'rows'` level actions whose decorator declared a `disabled` function.
-   * The UI evaluates against a level-specific scope to grey-out / hide the
+   * The function is the batch shape `(rows: TRow[]) => boolean[]` (sync). The
+   * UI evaluates against a level-specific scope to grey-out / hide the
    * button. The server has already enforced this predicate before the
    * action's handler ran — the server is authoritative; this field is purely
    * a UI hint.
    */
   disabled?: string;
-  /**
-   * Optional dev-supplied list of dot-notation paths over the row that the
-   * `disabled` predicate references. Plain `string[]` in v1 (a typed
-   * `PathOf<TRow>[]` upgrade is a documented follow-up). The UI unions these
-   * into `$select` across all actions on a table. When absent, the UI parses
-   * `disabled` itself. When present, the UI uses this list verbatim — the
-   * server does NOT auto-derive or merge.
-   */
-  requiredFields?: string[];
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

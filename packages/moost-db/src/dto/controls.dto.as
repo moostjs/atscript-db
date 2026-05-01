@@ -9,6 +9,7 @@ export interface QueryControlsDto {
     $vector?: string
     $threshold?: string
     $with?: WithRelationDto[]
+    $actions?: boolean
 }
 
 export interface PagesControlsDto {
@@ -23,11 +24,13 @@ export interface PagesControlsDto {
     $vector?: string
     $threshold?: string
     $with?: WithRelationDto[]
+    $actions?: boolean
 }
 
 export interface GetOneControlsDto {
     $select?: SelectControlDto | string[]
     $with?: WithRelationDto[]
+    $actions?: boolean
 }
 
 interface WithRelationDto {

@@ -1,10 +1,12 @@
 import { cached, defineWook, type EventContext } from "@wooksjs/event-core";
 import { HttpError } from "@moostjs/event-http";
 
+import { readCurrentActionMeta } from "./current-action";
 import { dbActionIdSlot, dbActionIdsSlot, getActionTable, noTableError } from "./id-cache";
 
 interface RowFetchTable {
   primaryKeys: readonly string[];
+  preferredId?: readonly string[];
   findOne(query: { filter: unknown; controls?: unknown }): Promise<Record<string, unknown> | null>;
   findMany(query: { filter: unknown; controls?: unknown }): Promise<Record<string, unknown>[]>;
 }
@@ -28,11 +30,34 @@ function stringifyScalar(value: unknown): string {
   return String(value as string | number | boolean | bigint);
 }
 
+/** Returns the action's `requiredFields` or null when called outside a controller context (e.g. direct wook usage in tests). */
+function readActionFieldSet(ctx: EventContext): readonly string[] | null {
+  const action = readCurrentActionMeta(ctx);
+  if (!action) return null;
+  const opts = action.opts as { requiredFields?: unknown };
+  return Array.isArray(opts.requiredFields) ? (opts.requiredFields as string[]) : null;
+}
+
+function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> {
+  const fields = new Set<string>();
+  for (const f of table.preferredId ?? table.primaryKeys) fields.add(f);
+  const action = readActionFieldSet(ctx);
+  if (action) for (const f of action) fields.add(f);
+  return fields;
+}
+
 async function loadRow(ctx: EventContext): Promise<unknown> {
-  const id = await ctx.get(dbActionIdSlot);
+  const id = (await ctx.get(dbActionIdSlot)) as Record<string, unknown>;
   const table = asFetchTable(getActionTable(ctx));
   if (!table) throw noTableError(ctx);
-  const row = await table.findOne({ filter: id });
+
+  const fields = seedActionFields(ctx, table);
+  for (const k of Object.keys(id)) fields.add(k);
+
+  const row = await table.findOne({
+    filter: id,
+    controls: { $select: [...fields] },
+  });
   if (row == null) {
     throw new HttpError(404, "Row not found for action identifier");
   }
@@ -45,7 +70,8 @@ async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown
   if (!table) throw noTableError(ctx);
   if (ids.length === 0) return [];
 
-  const fields = new Set<string>();
+  const fields = seedActionFields(ctx, table);
+
   const idKeys: string[] = [];
   const shapes = new Map<string, readonly string[]>();
   const dedupedIds: Record<string, unknown>[] = [];

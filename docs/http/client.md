@@ -240,6 +240,7 @@ const meta = await users.meta();
   "vectorSearchable": false,
   "searchIndexes": [{ "name": "title_idx", "type": "text" }],
   "primaryKeys": ["id"],
+  "preferredId": ["id"],
   "relations": [{ "name": "posts", "direction": "from", "isArray": true }],
   "fields": {
     "id": { "sortable": true, "filterable": true },
@@ -254,8 +255,7 @@ const meta = await users.meta();
       "processor": "backend",
       "value": "/orders/actions/ship",
       "intent": "primary",
-      "disabled": "(order) => order.status !== \"processing\"",
-      "requiredFields": ["status"]
+      "disabled": "(orders) => orders.map((o) => o.status !== \"processing\")"
     }
   ],
   "crud": {
@@ -272,7 +272,8 @@ const meta = await users.meta();
       "vector",
       "threshold",
       "with",
-      "groupBy"
+      "groupBy",
+      "actions"
     ],
     "pages": [
       "filter",
@@ -284,9 +285,10 @@ const meta = await users.meta();
       "index",
       "vector",
       "threshold",
-      "with"
+      "with",
+      "actions"
     ],
-    "one": ["select", "with"],
+    "one": ["select", "with", "actions"],
     "insert": [],
     "update": [],
     "replace": [],
@@ -295,47 +297,67 @@ const meta = await users.meta();
 }
 ```
 
-| Field              | Description                                                                                                                                               |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `searchable`       | Table has fulltext search indexes                                                                                                                         |
-| `vectorSearchable` | Table has vector search indexes                                                                                                                           |
-| `searchIndexes`    | Available search index definitions                                                                                                                        |
-| `primaryKeys`      | Primary key field names                                                                                                                                   |
-| `relations`        | Available navigation properties                                                                                                                           |
-| `fields`           | Per-field capability flags (sortable, filterable)                                                                                                         |
-| `type`             | Full serialized Atscript type definition                                                                                                                  |
-| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                      |
-| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). |
+| Field              | Description                                                                                                                                                                                                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                              |
+| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                |
+| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                             |
+| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                        |
+| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)). |
+| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                |
+| `fields`           | Per-field capability flags (sortable, filterable)                                                                                                                                                                                                                                                                              |
+| `type`             | Full serialized Atscript type definition                                                                                                                                                                                                                                                                                       |
+| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                           |
+| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                      |
 
 > **Read-only check:** consumers derive the boolean from `crud` inline:
 > `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
 
 ## Actions {#actions}
 
-`action()` invokes any [declared action](./actions) on the controller by name. The client reads `/meta` (cached), looks up the action descriptor, then dispatches based on `processor`:
+`action<R>()` invokes any [declared action](./actions) on the controller by name. The client reads `/meta` (cached), looks up the action descriptor, then dispatches based on `processor`.
+
+The identifier is **object-only** — single object for `'row'` actions, array of objects for `'rows'` actions, omitted for `'table'` actions. Even single-field PK tables send `{ id: "abc" }`, never bare `"abc"`. See [Actions — Identifier shape](./actions#identifier-shape) for the full server-side contract.
 
 ```typescript
-// processor: 'backend' — POSTs the PK as JSON body, returns parsed response.
-const result = await users.action("block", "abc123");
+// processor: 'backend', level: 'row' — POST identifier object as JSON body
+const result = await users.action("block", { id: "abc123" });
 // → { message: "User abc123 blocked" }
 
-// level: 'rows' — pass an array. (A single PK is wrapped automatically.)
-await users.action("lock", ["a", "b", "c"]);
-await users.action("lock", "a"); // wrapped to ["a"] before sending
+// level: 'rows' — pass an array of identifier objects
+await users.action("lock", [{ id: "a" }, { id: "b" }]);
 
 // composite PK
 await members.action("promote", { tenantId: "acme", userId: "u1" });
 
-// level: 'table' — no PK
+// unique-index addressing (same controller, different identification)
+await users.action("promote", { email: "jane@example.com" });
+
+// level: 'table' — no identifier
 await users.action("refresh-cache");
 
-// processor: 'navigate' — substitutes $1 with the PK and navigates.
-await users.action("edit", "abc"); // browser: window.location.assign('/users/abc/edit')
+// processor: 'navigate' — substitutes $1 with preferredId and navigates
+await users.action("edit", { slug: "alpha" }); // → /users/alpha/edit
+
+// Typed return shape
+const r = await users.action<{ message: string }>("block", { id: "abc" });
+r.message; // typed
 ```
 
-`action()` is always POST for `processor: 'backend'`. The path comes from the meta builder (method-decorator actions resolve to the bound HTTP path; class-level backend actions use the dev-supplied path verbatim).
+The `<R>` return-type generic asserts the server handler's response shape (commonly `{ message?: string, ... }` per convention). Default `R = unknown`.
 
-When the server's [disabled gate](./actions#server-side-gate) rejects a row, `action()` throws `ActionDisabledError` (HTTP 409) — see [Error cases](#error-cases) below.
+`action()` is always POST for `processor: 'backend'`. The path comes from the meta builder — method-decorator actions resolve to the bound HTTP path; class-level backend actions use the dev-supplied path verbatim.
+
+### Client-side validation
+
+The client refuses obviously-wrong shapes BEFORE the network round-trip:
+
+- `'row'` level + non-object (scalar, `null`, array) → `TypeError`.
+- `'rows'` level + non-array (single object included — no auto-wrap) → `TypeError`.
+
+The TypeScript signature catches the same cases at compile time when `Client<typeof T>` is used; untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
+
+When the server's [disabled gate](./actions#server-side-gate) rejects, `action()` throws `ActionDisabledError` (HTTP 409) — see [Error cases](#error-cases) below.
 
 ### Navigate dispatch
 
@@ -349,10 +371,18 @@ const users = new Client<typeof User>("/api/users", {
   navigate: (url) => router.push(url),
 });
 
-await users.action("edit", "abc"); // → router.push('/users/abc/edit')
+await users.action("edit", { slug: "alpha" }); // → router.push('/users/alpha/edit')
 ```
 
-For composite PKs, each field value is URL-encoded and joined with `/` (in `primaryKeys` order) before substituting `$1`. For `level: 'rows'` and `level: 'table'` navigate actions, `value` is used verbatim — no `$1` substitution.
+For `'row'`-level navigate, the client substitutes `$1` by walking `meta.preferredId` declaration order — NOT object-key insertion order. Each value is `encodeURIComponent`'d, compound preferred-ids are joined with `/`.
+
+```typescript
+// preferredId = ['tenantId', 'userId']
+await users.action("edit", { userId: "jane", tenantId: "acme/co" });
+// → navigate('/members/acme%2Fco/jane/edit') — order from preferredId, not object keys
+```
+
+For `level: 'rows'` and `level: 'table'` navigate actions, `value` is used verbatim — no `$1` substitution.
 
 ### Error cases {#error-cases}
 
@@ -365,7 +395,7 @@ import {
 } from "@atscript/db-client";
 
 try {
-  await users.action("ship", "abc");
+  await users.action("ship", { id: "abc" });
 } catch (e) {
   if (e instanceof ActionNotFoundError) {
     /* action name not in /meta */
@@ -378,15 +408,15 @@ try {
     /* HTTP 409 — server-side disabled gate rejected the row(s).
        Typed accessors layered on top of ClientError: */
     e.action; // "ship"
-    e.pk; // "abc"  (row-level rejection)
-    e.pks; // [...]  (rows-level rejection — full list of failing PKs)
+    e.id; // { id: "abc" }  (row-level rejection — submitted identifier object)
+    e.ids; // [...]          (rows-level rejection — full list of failing identifier objects)
   } else if (e instanceof ClientError) {
     /* any other server non-2xx — same shape as other endpoints */
   }
 }
 ```
 
-`ActionDisabledError extends ClientError`, so a generic `instanceof ClientError` catch still handles gate rejections — use the typed branch when you want `e.action` / `e.pk` / `e.pks` without indexing into `body`. See [Actions — Server-side Gate](./actions#server-side-gate) for the server-side declaration.
+`ActionDisabledError extends ClientError`, so a generic `instanceof ClientError` catch still handles gate rejections — use the typed branch when you want `e.action` / `e.id` / `e.ids` without indexing into `body`. See [Actions — Server-side Gate](./actions#server-side-gate) for the server-side declaration.
 
 `processor: 'custom'` actions cannot be invoked through the client — those describe UI events your application dispatches itself. The client throws `ActionUnsupportedError` in that case.
 
@@ -395,10 +425,33 @@ try {
 Backend action handlers may return any JSON. Convention: if the response has `{ message: string }`, the UI toasts it; otherwise the UI uses a generic per-level message. See [Actions — Success response](./actions#success-response) for the server side.
 
 ```typescript
-const result = (await users.action("block", "abc")) as { message?: string };
+const result = await users.action<{ message?: string }>("block", { id: "abc" });
 if (result?.message) toast(result.message);
 else toast("Action completed");
 ```
+
+## Per-row action availability — `$actions=true` {#dollar-actions}
+
+Add `$actions: true` to any read-method `controls` to ask the server which row/rows-level actions each returned row qualifies for. The server runs every row/rows-level `disabled` predicate against the result set and attaches `$actions: string[]` (action names that did NOT reject the row) to each row.
+
+```typescript
+const r = await users.query({
+  filter: { active: true },
+  controls: { $actions: true } as const,
+});
+r[0].$actions; // string[] | undefined  (typed via ClientResponse<T, Q>)
+
+// Pages and one() too
+const page = await users.pages({ controls: { $actions: true } as const }, 1, 25);
+page.data[0].$actions;
+
+const single = await users.one({ id: "abc" }, { controls: { $actions: true } as const });
+single?.$actions;
+```
+
+NOT augmented on `count()` and `aggregate()` — no row shape. `'table'`-level actions never appear in `$actions`. Action ordering follows `/meta.actions[]` declaration order.
+
+See [Actions — `$actions=true`](./actions#actions-augmentation) for the full server-side pipeline (overlay filtering, `requiredFields`-driven projection widening, length-mismatch handling).
 
 ## Error Handling {#errors}
 

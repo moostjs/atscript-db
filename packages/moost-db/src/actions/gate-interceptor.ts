@@ -1,5 +1,4 @@
 import { current } from "@wooksjs/event-core";
-import { HttpError } from "@moostjs/event-http";
 import {
   defineBeforeInterceptor,
   TInterceptorPriority,
@@ -12,6 +11,7 @@ import { isAsDbReadableControllerInstance } from "./controller-registry";
 import { boundTableKey, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
 import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import type { TOnDisabledRows } from "./types";
+import { assertVerdictLength } from "./verdict";
 
 const GATE_PRIORITY = TInterceptorPriority.AFTER_GUARD;
 
@@ -94,19 +94,6 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
       throw new ActionDisabledError(action, undefined, failingIds);
     }
   }, GATE_PRIORITY);
-}
-
-function assertVerdictLength(
-  action: string,
-  verdicts: unknown,
-  expected: number,
-): asserts verdicts is boolean[] {
-  if (!Array.isArray(verdicts) || verdicts.length !== expected) {
-    throw new HttpError(
-      500,
-      `Action "${action}" disabled predicate returned an invalid verdict array`,
-    );
-  }
 }
 
 /** Thin interceptor for `@DbActionRow*` without `disabled` — injects only the bound table. */

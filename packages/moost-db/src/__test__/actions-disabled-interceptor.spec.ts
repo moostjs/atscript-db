@@ -75,7 +75,12 @@ describe("Gate interceptor — row-level", () => {
       setBoundTable(table);
       await runBeforeInterceptor(def);
       expect(table.findOne).toHaveBeenCalledTimes(1);
-      expect(table.findOne).toHaveBeenCalledWith({ filter: { id: "a" } });
+      const arg = table.findOne.mock.calls[0][0] as {
+        filter: unknown;
+        controls: { $select: string[] };
+      };
+      expect(arg.filter).toEqual({ id: "a" });
+      expect(new Set(arg.controls.$select)).toEqual(new Set(["id"]));
       const ctx = current();
       const row1 = await ctx.get(dbActionRowSlot);
       const row2 = await ctx.get(dbActionRowSlot);

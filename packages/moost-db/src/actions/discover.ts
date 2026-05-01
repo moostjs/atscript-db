@@ -13,11 +13,7 @@ import {
 import { scanParamLevel } from "./param-level";
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
-/**
- * Pure structural-copy fields. `disabled` and `requiredFields` are handled
- * as special cases in {@link emitInfo} so the function-to-string transform
- * stays out of the copy loop.
- */
+/** Structural-copy fields; `disabled` is handled separately in {@link emitInfo} (function-to-string transform). */
 const OPTIONAL_FIELDS = [
   "icon",
   "intent",
@@ -29,33 +25,52 @@ const OPTIONAL_FIELDS = [
 ] as const;
 type OptionalField = (typeof OPTIONAL_FIELDS)[number];
 
-const actionsCache = new WeakMap<Function, TDbActionInfo[]>();
-
 /**
- * Discover all actions declared on a controller and produce the `/meta` array.
- * Reads class + method metadata via `getMoostMate()` and resolves bound POST
- * paths through the Moost controller overview.
- *
- * Result is memoized per controller constructor — discovery walks every
- * handler entry and reads decorator metadata, which is wasted work to repeat
- * across instances.
+ * Pairs the wire-shaped `info` with the original decorator opts / dict entry,
+ * so the augmenter can invoke the live `disabled` reference (deliberately
+ * absent from the wire `info`).
  */
+export interface TDbActionEnvelope {
+  info: TDbActionInfo;
+  raw: DbActionOpts | TDbActionsEntry;
+}
+
+const actionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
+const rowLevelActionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
+
+/** Discover actions on a controller, memoized per ctor. `info`-only callers map `e => e.info`. */
 export function discoverActions(
   controllerCtor: Function,
   app: Moost,
   logger: TConsoleBase,
-): TDbActionInfo[] {
+): TDbActionEnvelope[] {
   const cached = actionsCache.get(controllerCtor);
   if (cached) return cached;
   const overview = app
     .getControllersOverview?.()
     ?.find((o) => o.type === controllerCtor) as unknown as MoostControllerOverview | undefined;
-  const out: TDbActionInfo[] = [];
-  collectMethodActions(controllerCtor, overview, logger, out);
-  collectClassActions(controllerCtor, logger, out);
+  const out: TDbActionEnvelope[] = [];
+  const seen = new Set<string>();
+  collectMethodActions(controllerCtor, overview, logger, out, seen);
+  collectClassActions(controllerCtor, logger, out, seen);
   applyDefaultPerLevel(out, logger);
   actionsCache.set(controllerCtor, out);
   return out;
+}
+
+/** Row/rows-level subset of {@link discoverActions}; memoized per ctor. */
+export function discoverRowLevelActions(
+  controllerCtor: Function,
+  app: Moost,
+  logger: TConsoleBase,
+): TDbActionEnvelope[] {
+  const cached = rowLevelActionsCache.get(controllerCtor);
+  if (cached) return cached;
+  const filtered = discoverActions(controllerCtor, app, logger).filter(
+    (e) => e.info.level === "row" || e.info.level === "rows",
+  );
+  rowLevelActionsCache.set(controllerCtor, filtered);
+  return filtered;
 }
 
 // ── Method-decorator actions ──────────────────────────────────────────────
@@ -79,7 +94,8 @@ function collectMethodActions(
   ctor: Function,
   overview: MoostControllerOverview | undefined,
   logger: TConsoleBase,
-  out: TDbActionInfo[],
+  out: TDbActionEnvelope[],
+  seen: Set<string>,
 ): void {
   if (!overview) return;
   const byMethod = new Map<string, MoostHandlerEntry[]>();
@@ -115,6 +131,15 @@ function collectMethodActions(
         `${WARN_PREFIX} action "${action.name}" — \`disabled\` is not allowed at the 'table' level; ` +
           `row-state predicates are not meaningful when no row is in scope. Use @Authenticate / arbac for ` +
           `table-level access — dropping`,
+      );
+      continue;
+    }
+
+    // ── disabled requires requiredFields ──
+    if (action.opts.disabled !== undefined && !isNonEmptyStringArray(action.opts.requiredFields)) {
+      logger.warn(
+        `${WARN_PREFIX} action "${action.name}" — \`disabled\` requires a non-empty \`requiredFields\` ` +
+          `array (the predicate's field dependencies must be declared explicitly) — dropping`,
       );
       continue;
     }
@@ -158,6 +183,12 @@ function collectMethodActions(
       continue;
     }
 
+    if (seen.has(action.name)) {
+      logger.warn(
+        `${WARN_PREFIX} duplicate action name "${action.name}" within controller — dropping the second declaration`,
+      );
+      continue;
+    }
     const info: TDbActionInfo = {
       name: action.name,
       label,
@@ -165,8 +196,9 @@ function collectMethodActions(
       processor: "backend",
       value: path,
     };
-    emitInfo(info, action.opts, action.name, logger);
-    out.push(info);
+    emitInfo(info, action.opts);
+    seen.add(action.name);
+    out.push({ info, raw: action.opts });
   }
 }
 
@@ -198,15 +230,29 @@ function inferMethodLevel(
 
 // ── Class-level actions ───────────────────────────────────────────────────
 
-function collectClassActions(ctor: Function, logger: TConsoleBase, out: TDbActionInfo[]): void {
+function collectClassActions(
+  ctor: Function,
+  logger: TConsoleBase,
+  out: TDbActionEnvelope[],
+  seen: Set<string>,
+): void {
   const classMeta = getMoostMate().read(ctor) as
     | { [MOOST_DB_ACTIONS]?: TDbClassActionMeta[] }
     | undefined;
   const list = classMeta?.[MOOST_DB_ACTIONS];
   if (!list) return;
   for (const { name, entry } of list) {
+    if (seen.has(name)) {
+      logger.warn(
+        `${WARN_PREFIX} duplicate action name "${name}" within controller — dropping the second declaration`,
+      );
+      continue;
+    }
     const built = buildClassEntry(name, entry, logger);
-    if (built) out.push(built);
+    if (built) {
+      seen.add(name);
+      out.push({ info: built, raw: entry });
+    }
   }
 }
 
@@ -230,6 +276,14 @@ function buildClassEntry(
   if (level === "table" && entry.disabled !== undefined) {
     logger.warn(
       `${WARN_PREFIX} class-level action "${name}" — \`disabled\` is not allowed at the 'table' level — dropping`,
+    );
+    return null;
+  }
+  // ── disabled requires requiredFields (class-level) ──
+  if (entry.disabled !== undefined && !isNonEmptyStringArray(entry.requiredFields)) {
+    logger.warn(
+      `${WARN_PREFIX} class-level action "${name}" — \`disabled\` requires a non-empty ` +
+        `\`requiredFields\` array (the predicate's field dependencies must be declared explicitly) — dropping`,
     );
     return null;
   }
@@ -266,71 +320,47 @@ function buildClassEntry(
     processor,
     value,
   };
-  // Class-level dict entries forward `disabled.toString()` and `requiredFields`
-  // EXACTLY as for method-decorator actions. The server does NOT register a
-  // gate interceptor here — class-level entries point at endpoints (possibly
-  // in other controllers) where the decorator can't introspect a method;
-  // server enforcement is the dev's responsibility (typically by adding
+  // Class-level dict entries forward `disabled.toString()` EXACTLY as for
+  // method-decorator actions. The server does NOT register a gate interceptor
+  // here — class-level entries point at endpoints (possibly in other
+  // controllers) where the decorator can't introspect a method; server
+  // enforcement is the dev's responsibility (typically by adding
   // `@DbAction(name, { disabled })` on the actual handler).
-  emitInfo(info, entry, name, logger);
+  emitInfo(info, entry);
   return info;
 }
 
 // ── Default-per-level resolution ──────────────────────────────────────────
 
-function applyDefaultPerLevel(actions: TDbActionInfo[], logger: TConsoleBase): void {
+function applyDefaultPerLevel(envelopes: TDbActionEnvelope[], logger: TConsoleBase): void {
   const winners = new Map<TDbActionLevel, string>();
-  for (const a of actions) {
-    if (!a.default) continue;
-    const existing = winners.get(a.level);
+  for (const { info } of envelopes) {
+    if (!info.default) continue;
+    const existing = winners.get(info.level);
     if (existing) {
-      a.default = false;
+      info.default = false;
       logger.warn(
-        `${WARN_PREFIX} duplicate default action at level "${a.level}": "${existing}" wins, "${a.name}" demoted`,
+        `${WARN_PREFIX} duplicate default action at level "${info.level}": "${existing}" wins, "${info.name}" demoted`,
       );
     } else {
-      winners.set(a.level, a.name);
+      winners.set(info.level, info.name);
     }
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/**
- * Emit structural-copy fields plus `disabled` (stringified) and
- * `requiredFields` (forwarded verbatim — server doesn't auto-derive).
- * `requiredFields` without `disabled` is dropped with a warning before the
- * structural copy runs, so method-decorator and class-level-dict origins
- * stay symmetric.
- */
-function emitInfo(
-  info: TDbActionInfo,
-  source: DbActionOpts | TDbActionsEntry,
-  name: string,
-  logger: TConsoleBase,
-): void {
+/** Emit structural-copy fields plus stringified `disabled`. `requiredFields` is server-internal (never on the wire). */
+function emitInfo(info: TDbActionInfo, source: DbActionOpts | TDbActionsEntry): void {
   const disabled = (source as { disabled?: unknown }).disabled;
   const hasDisabled = typeof disabled === "function";
-  let requiredFields = (source as { requiredFields?: unknown }).requiredFields;
-  if (!hasDisabled && requiredFields !== undefined) {
-    logger.warn(
-      `${WARN_PREFIX} action "${name}" has \`requiredFields\` without \`disabled\` — \`requiredFields\` is ` +
-        `purely a UI hint and meaningless without a predicate. Dropping \`requiredFields\` from /meta.`,
-    );
-    requiredFields = undefined;
-  }
   copyOptionalFields(info, source);
-  // The result is memoized in `actionsCache`; defensively clone the tuple
-  // form of `promptText` so a downstream mutation of the dev-supplied opts
-  // can't shift the cached wire output.
+  // WHY: the result is memoized in `actionsCache`, so clone the tuple form of `promptText` to prevent dev-supplied mutations from shifting cached output.
   if (Array.isArray(info.promptText)) {
     info.promptText = info.promptText.slice() as [string, string];
   }
   if (hasDisabled) {
     info.disabled = (disabled as () => unknown).toString();
-  }
-  if (Array.isArray(requiredFields)) {
-    info.requiredFields = requiredFields.slice();
   }
 }
 
@@ -341,4 +371,8 @@ function copyOptionalFields(info: TDbActionInfo, source: DbActionOpts | TDbActio
       (info as Record<OptionalField, unknown>)[key] = value;
     }
   }
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string");
 }

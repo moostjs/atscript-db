@@ -343,7 +343,7 @@ export abstract class AsReadableController<
    * controllers — see {@link AsValueHelpController#buildMetaResponse}.
    */
   protected buildActions(): TDbActionInfo[] {
-    return discoverActions(this.constructor as Function, this.app, this.logger);
+    return discoverActions(this.constructor as Function, this.app, this.logger).map((e) => e.info);
   }
 
   /**

@@ -1,82 +1,120 @@
-import type { AtscriptDbTable, TDbActionInfo, TDbActionIntent, TDbActionLevel } from "@atscript/db";
+import type {
+  AtscriptDbTable,
+  FlatOf,
+  TDbActionInfo,
+  TDbActionIntent,
+  TDbActionLevel,
+} from "@atscript/db";
 
 /** `'rows'`-level batch policy — controls whether failing rows reject or are filtered out. */
 export type TOnDisabledRows = "reject" | "skip";
 
 /**
- * Options accepted by `@DbAction(name, opts?)`. Structurally derived from
- * {@link TDbActionInfo} so every wire-shape addition propagates here, EXCEPT
- * `disabled` and `requiredFields` which differ in shape between decorator
- * opts (function / dev-supplied) and the wire (string / forwarded verbatim).
+ * Dot-notation field paths of `TRow`'s flat type. Drives both the runtime
+ * projection widening and the type narrowing of the `disabled` predicate's
+ * row argument. Relations are absent from `FlatOf<T>` — listing a relation
+ * field is therefore a compile error.
  *
- * Fields owned by the framework (`name`, `level`, `processor`, `value`) are
- * excluded — `name` comes from the decorator argument, `level` is inferred
- * from `@DbActionID*` / `@DbActionRow*` usage, `processor` is fixed to
- * `'backend'` for method-decorator actions, and `value` is filled from the
- * `@Post` path.
- *
- * Generic over `TRow` so the `disabled` predicate can be type-checked against
- * the bound table's row shape. Note: TS decorators cannot infer `TRow` from
- * the enclosing controller's class generic, so the dev MUST annotate the rows
- * arg explicitly (`(rows: Order[]) => …`) to get type-checking.
+ * Permissive fallback when `TRow = unknown` (no explicit decorator generic):
+ * any string is allowed and the `disabled` predicate's row arg is `any[]`,
+ * preserving the prior loose typing for un-annotated call sites.
  */
-export type DbActionOpts<TRow = unknown> = Partial<
-  Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "requiredFields">
-> & {
+export type FlatKey<TRow> = unknown extends TRow ? string : keyof FlatOf<TRow> & string;
+
+/** Row-shape narrowing for the `disabled` predicate. Falls back to `any` when `TRow = unknown`. */
+type DisabledRowsArg<TRow, R extends readonly FlatKey<TRow>[]> = unknown extends TRow
+  ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    any[]
+  : Pick<FlatOf<TRow>, R[number] & keyof FlatOf<TRow>>[];
+
+// ── Gate shape ─────────────────────────────────────────────────────────────
+// Two-branch union: either no gate (no `requiredFields`, no `disabled`), or
+// BOTH `requiredFields` AND an optional `disabled` whose `rows` arg is typed
+// as `Pick<FlatOf<TRow>, R[number]>[]`. Setting `disabled` without
+// `requiredFields` is a compile error; the runtime mirrors this by dropping
+// the action at discovery.
+
+interface NoGate {
+  requiredFields?: never;
+  disabled?: never;
+  onDisabledRows?: never;
+}
+
+interface WithGate<TRow, R extends readonly FlatKey<TRow>[]> {
   /**
-   * Batch gate predicate. Each truthy verdict disables the corresponding row.
-   * Server enforces (via the gate interceptor); UI evaluates the same
-   * expression to grey-out / hide the button.
-   *
-   * The dev MUST annotate the rows arg explicitly (`(rows: Order[]) => …`) —
-   * TS decorators cannot infer `TRow` from the enclosing class generic.
+   * Dot-notation field paths the predicate references. SERVER-INTERNAL —
+   * never emitted on the `/meta` wire. Consumed verbatim to widen the DB
+   * projection so `disabled` always sees the fields it declared.
    */
-  disabled?: (rows: TRow[]) => boolean[];
+  requiredFields: R;
   /**
-   * Optional dot-notation field paths the UI should union into `$select`.
-   * Plain `string[]` in v1.
+   * Sync batch gate predicate — returns a parallel `boolean[]` aligned with
+   * the input. `true` = disabled for the corresponding row. The `rows`
+   * argument is type-narrowed to `Pick<FlatOf<TRow>, R[number]>[]`; reading
+   * a field not listed in `requiredFields` is a compile error.
    *
-   * TODO: upgrade to typed `PathOf<TRow>[]` in a follow-up — the recursive
-   * type pattern is finicky for nested objects/arrays/optionals and isn't
-   * blocking v1.
-   *
-   * When omitted, the UI parses the stringified `disabled` itself to extract
-   * row-property accesses. When present, the UI uses this list verbatim — the
-   * server does NOT auto-derive or merge.
+   * Promise return is NOT permitted — the predicate is consumed in the
+   * same tick by the gate and the augmenter.
    */
-  requiredFields?: string[];
+  disabled?: (rows: DisabledRowsArg<TRow, R>) => boolean[];
   /**
    * `'rows'`-level batch policy. Default `'reject'`.
    *
-   * - `'reject'`: evaluate every row (FULL scan, NOT short-circuit) before
-   *   throwing; if any row fails, the error body lists ALL failing IDs;
-   *   handler not invoked.
-   * - `'skip'`: filter cached rows + cached IDs to passing-only;
-   *   zero survivors → reject. Handler runs against the survivors.
+   * - `'reject'`: evaluate every row before throwing; if any row fails, the
+   *   error body lists ALL failing IDs; handler not invoked.
+   * - `'skip'`: filter cached rows + cached IDs to passing-only; zero
+   *   survivors → reject. Handler runs against the survivors.
    *
    * Ignored for `'row'` and `'table'` level actions.
    */
   onDisabledRows?: TOnDisabledRows;
+}
+
+/**
+ * Loose gate shape used when `TRow = unknown` (no explicit decorator generic).
+ * Preserves the prior un-typed call-site flexibility; the runtime still drops
+ * actions where `disabled` is set without `requiredFields`.
+ */
+interface LooseGate {
+  requiredFields?: string[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  disabled?: (rows: any[]) => boolean[];
+  onDisabledRows?: TOnDisabledRows;
+}
+
+export type GateOpts<TRow, R extends readonly FlatKey<TRow>[]> = unknown extends TRow
+  ? LooseGate
+  : NoGate | WithGate<TRow, R>;
+
+// ── Method-decorator opts (`@DbAction`) ────────────────────────────────────
+
+interface BaseActionOpts extends Partial<
+  Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled">
+> {
   /**
    * Bound table reference. REQUIRED on non-`AsDbReadableController` classes
    * when `disabled` is set OR a `@DbActionRow*` parameter is declared.
    *
    * Silently ignored on `AsDbReadableController` subclasses (which include
-   * `AsDbController`) — the bound table from the controller wins; the
-   * gate / thin interceptor probes `instanceof AsDbReadableController` and
-   * populates the bound-table slot from `controller.readable` before
-   * checking `opts.table`.
+   * `AsDbController`) — the bound table from the controller wins.
    */
   table?: AtscriptDbTable<any>;
-};
+}
 
-// ── Class-level dict entries ───────────────────────────────────────────────
+/**
+ * Options accepted by `@DbAction(name, opts?)`. Generic over `TRow` (the
+ * controller's bound atscript type) and `R` (the literal `requiredFields`
+ * tuple). Both are inferred at the call site via the decorator's `<TRow>`
+ * argument plus `const R` generic.
+ */
+export type DbActionOpts<TRow = unknown, R extends readonly FlatKey<TRow>[] = []> = BaseActionOpts &
+  GateOpts<TRow, R>;
+
+// ── Class-level dict entries (`@DbActions` family) ─────────────────────────
 // Discriminated over `processor`. The shortcut decorators (`@DbTableActions`,
-// `@DbRowActions`, `@DbRowsActions`) inject `level` into each entry — the
-// shortcut-form of these branches omits `level` and is exposed as
-// {@link TDbActionsEntryUnpinned}.
+// `@DbRowActions`, `@DbRowsActions`) inject `level` into each entry.
 
-interface DbActionsEntryCommon {
+interface DbActionsEntryCommonBase {
   label: string;
   level: TDbActionLevel;
   icon?: string;
@@ -88,45 +126,49 @@ interface DbActionsEntryCommon {
   promptText?: string | [string, string];
   /** Mirrors {@link TDbActionInfo.shortcut} — single-character UI hint. */
   shortcut?: string;
-  /**
-   * UI-only gate predicate (class-level dict entries do NOT register a
-   * server-side gate interceptor — the dict entry's `value` may point at an
-   * endpoint in another controller). The wire emits `fn.toString()` so the
-   * UI can grey-out / hide the button. For symmetric server enforcement at
-   * the actual `@Post`-bound handler, declare `@DbAction(name, { disabled })`
-   * on that handler too.
-   *
-   * Not generic over `TRow` — devs type the row arg explicitly.
-   */
-  disabled?: (rows: any[]) => boolean[];
-  /** Same as method-decorator `requiredFields`. UI hint, not server-derived. */
-  requiredFields?: string[];
-  /**
-   * Reserved for future API symmetry with method-decorator opts. Currently a
-   * no-op for class-level dict entries (no gate interceptor registers).
-   */
-  onDisabledRows?: TOnDisabledRows;
 }
+
+type DbActionsEntryWithGate<TRow, R extends readonly FlatKey<TRow>[]> = DbActionsEntryCommonBase &
+  GateOpts<TRow, R>;
 
 /**
  * Class-level dict entry. `value` semantics by processor:
  *
- * - `'navigate'` — REQUIRED, non-empty. The URL template (with `$1` substituted client-side).
- * - `'backend'`  — REQUIRED, non-empty. The full HTTP POST path the UI client should invoke.
- *   For row/rows entries the dev-supplied path MUST point to a `@Post`-bound
- *   handler accepting the ID-shaped JSON body (object / array thereof) —
- *   typically a method using `@DbActionID()` or `@DbActionIDs()`. The meta
- *   builder does NOT validate this.
+ * - `'navigate'` — REQUIRED, non-empty. URL template (`$1` substituted client-side).
+ * - `'backend'`  — REQUIRED, non-empty. Full HTTP POST path the UI client invokes.
  * - `'custom'`   — `value` is forbidden in the entry; the meta builder fills it
  *   with the dict key.
  */
-export type TDbActionsEntry =
-  | (DbActionsEntryCommon & { processor: "navigate"; value: string })
-  | (DbActionsEntryCommon & { processor: "custom"; value?: never })
-  | (DbActionsEntryCommon & { processor: "backend"; value: string });
+export type TDbActionsEntry<TRow = unknown, R extends readonly FlatKey<TRow>[] = []> =
+  | (DbActionsEntryWithGate<TRow, R> & { processor: "navigate"; value: string })
+  | (DbActionsEntryWithGate<TRow, R> & { processor: "custom"; value?: never })
+  | (DbActionsEntryWithGate<TRow, R> & { processor: "backend"; value: string });
 
 /** Distributes `Omit` across the discriminated union members. */
 type DistributiveOmit<T, K extends keyof T> = T extends T ? Omit<T, K> : never;
 
 /** Same as {@link TDbActionsEntry} but without the `level` field — used by the level-pinned shortcuts. */
-export type TDbActionsEntryUnpinned = DistributiveOmit<TDbActionsEntry, "level">;
+export type TDbActionsEntryUnpinned<
+  TRow = unknown,
+  R extends readonly FlatKey<TRow>[] = [],
+> = DistributiveOmit<TDbActionsEntry<TRow, R>, "level">;
+
+// ── Per-entry inference helpers ────────────────────────────────────────────
+// Used as decorator-level constraints so each entry's `disabled` is narrowed
+// by its own `requiredFields` literal. Pattern: `dict: D & ValidatedDict<TRow, D>`.
+
+type DbActionsDictBase = Record<string, unknown>;
+
+type EntryRequiredFields<E, TRow> = E extends { requiredFields: infer R }
+  ? R extends readonly FlatKey<TRow>[]
+    ? R
+    : []
+  : [];
+
+export type ValidatedDict<TRow, D extends DbActionsDictBase> = {
+  [K in keyof D]: TDbActionsEntry<TRow, EntryRequiredFields<D[K], TRow>>;
+};
+
+export type ValidatedUnpinnedDict<TRow, D extends DbActionsDictBase> = {
+  [K in keyof D]: TDbActionsEntryUnpinned<TRow, EntryRequiredFields<D[K], TRow>>;
+};

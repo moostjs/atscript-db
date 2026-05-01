@@ -4,19 +4,17 @@ import { AsDbController } from "../as-db.controller";
 import { DbRowActions, DbTableActions } from "../actions/db-actions.decorator";
 import { fakeOverview, makeApp, makeTable } from "./actions-test-utils";
 
-const PREFIX = "[moost-db actions]";
 const disabledWhenNotProcessing = (rows: unknown[]) =>
   rows.map((row) => (row as { status: string }).status !== "processing");
 
 /**
- * Wire-shape coverage for the new `disabled` and `requiredFields` fields on
- * `TDbActionInfo`. These tests use the existing `fakeOverview` synthetic
- * meta to exercise the `discoverActions` emission path without needing a
- * full Moost HTTP runtime.
+ * Wire-shape coverage for the `disabled` field on `TDbActionInfo`. These
+ * tests use the existing `fakeOverview` synthetic meta to exercise the
+ * `discoverActions` emission path without needing a full Moost HTTP runtime.
  */
 
-describe("Action discovery — disabled + requiredFields wire emission", () => {
-  it("emits disabled as fn.toString() and no requiredFields when not declared", async () => {
+describe("Action discovery — disabled wire emission", () => {
+  it("emits disabled as fn.toString() and no requiredFields on the wire", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -25,7 +23,14 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
           method: "ship",
           httpMethod: "POST",
           path: "/orders/actions/ship",
-          action: { name: "ship", opts: { label: "Ship", disabled: disabledWhenNotProcessing } },
+          action: {
+            name: "ship",
+            opts: {
+              label: "Ship",
+              requiredFields: ["status"],
+              disabled: disabledWhenNotProcessing,
+            },
+          },
           paramKinds: ["id"],
         },
       ]),
@@ -37,7 +42,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
     expect(meta.actions[0]).not.toHaveProperty("requiredFields");
   });
 
-  it("forwards requiredFields verbatim (no merge, no auto-derivation)", async () => {
+  it("requiredFields decorator opt is NEVER emitted on the wire", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -61,10 +66,10 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
     ]);
     const ctrl = new C(makeTable() as never, ctx.app);
     const meta = await ctrl.meta();
-    expect(meta.actions[0].requiredFields).toEqual(["status", "address.locked"]);
+    expect(meta.actions[0]).not.toHaveProperty("requiredFields");
   });
 
-  it("emits a class-level dict entry's disabled.toString() and requiredFields", async () => {
+  it("class-level dict requiredFields is NEVER emitted on the wire", async () => {
     @DbRowActions({
       block: {
         label: "Block",
@@ -81,7 +86,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
     expect(meta.actions).toHaveLength(1);
     expect(typeof meta.actions[0].disabled).toBe("string");
     expect(meta.actions[0].disabled).toContain("blocked");
-    expect(meta.actions[0].requiredFields).toEqual(["blocked", "role"]);
+    expect(meta.actions[0]).not.toHaveProperty("requiredFields");
   });
 
   it("'table'-level + disabled emits a warning and DROPS the action", async () => {
@@ -109,7 +114,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
     );
   });
 
-  it("requiredFields without disabled (method-decorator) warns and strips the field", async () => {
+  it("requiredFields without disabled is silently dropped (server-only opt; never on the wire)", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -128,29 +133,11 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
     expect(meta.actions).toHaveLength(1);
     expect(meta.actions[0]).not.toHaveProperty("requiredFields");
     expect(meta.actions[0]).not.toHaveProperty("disabled");
-    expect(ctx.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("`requiredFields` without `disabled`"),
+    const warned = ctx.logger.warn.mock.calls.some(
+      (args: unknown[]) =>
+        typeof args[0] === "string" && args[0].includes("`requiredFields` without `disabled`"),
     );
-  });
-
-  it("requiredFields without disabled (class-level dict) warns and strips the field", async () => {
-    @DbRowActions({
-      block: {
-        label: "Block",
-        processor: "backend",
-        value: "/users/actions/block",
-        requiredFields: ["blocked"],
-      },
-    })
-    class C extends AsDbController {}
-    const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
-    const meta = await ctrl.meta();
-    expect(meta.actions).toHaveLength(1);
-    expect(meta.actions[0]).not.toHaveProperty("requiredFields");
-    expect(ctx.logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(new RegExp(`\\${PREFIX}.*requiredFields.*disabled`)),
-    );
+    expect(warned).toBe(false);
   });
 
   it("'table'-level class-level dict + disabled is dropped with a warning", async () => {
@@ -183,7 +170,10 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
           method: "ship",
           httpMethod: "POST",
           path: "/orders/actions/ship",
-          action: { name: "ship", opts: { label: "Ship", disabled: captures } },
+          action: {
+            name: "ship",
+            opts: { label: "Ship", requiredFields: ["status"], disabled: captures },
+          },
           paramKinds: ["id"],
         },
       ]),
@@ -212,7 +202,7 @@ describe("Action discovery — body conflict with row decorators", () => {
       const ctx = makeApp();
       const opts =
         kinds[0] === "row" || kinds[0] === "rows"
-          ? { label: "Mix", disabled: () => [false] }
+          ? { label: "Mix", requiredFields: ["state"], disabled: () => [false] }
           : { label: "Mix" };
       ctx.setOverview([
         fakeOverview(C, [

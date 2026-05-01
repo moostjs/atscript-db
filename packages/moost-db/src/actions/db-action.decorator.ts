@@ -4,7 +4,7 @@ import { isAsValueHelpControllerSubclass } from "./controller-registry";
 import { buildGateInterceptor, buildThinInterceptor } from "./gate-interceptor";
 import { MOOST_DB_ACTION, WARN_PREFIX, mergeActionMeta, type TDbActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
-import type { DbActionOpts } from "./types";
+import type { DbActionOpts, FlatKey, TOnDisabledRows } from "./types";
 
 /**
  * Mark a controller method as a database action surfaced via `/meta`. Writes
@@ -12,10 +12,15 @@ import type { DbActionOpts } from "./types";
  * (gate when `disabled` is set, thin bound-table injector when only
  * `@DbActionRow*` is present). Stacking two `@DbAction` on the same method
  * is undefined and emits a warning.
+ *
+ * Generic over `TRow` (annotate at the call site: `@DbAction<Order>(...)`)
+ * and `R` (the literal `requiredFields` tuple, inferred via `const R`).
+ * The `disabled` predicate's `rows` argument is type-narrowed to
+ * `Pick<FlatOf<TRow>, R[number]>[]`.
  */
-export function DbAction<TRow = unknown>(
+export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[] = []>(
   name: string,
-  opts: DbActionOpts<TRow> = {},
+  opts: DbActionOpts<TRow, R> = {} as DbActionOpts<TRow, R>,
 ): MethodDecorator {
   const mate = getMoostMate();
   return ((target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
@@ -53,19 +58,24 @@ export function DbAction<TRow = unknown>(
       | { params?: Array<Record<string, unknown>> }
       | undefined;
     const scan = scanParamLevel(merged?.params ?? []);
-    const hasDisabled = !!opts.disabled;
+    const rawOpts = opts as {
+      disabled?: unknown;
+      onDisabledRows?: TOnDisabledRows;
+      table?: unknown;
+    };
+    const hasDisabled = typeof rawOpts.disabled === "function";
 
     if (hasDisabled && (scan.level === "row" || scan.level === "rows")) {
       const def = buildGateInterceptor({
         action: name,
         level: scan.level,
-        disabled: opts.disabled as (rows: unknown[]) => boolean[],
-        onDisabledRows: opts.onDisabledRows ?? "reject",
-        table: opts.table,
+        disabled: rawOpts.disabled as (rows: unknown[]) => boolean[],
+        onDisabledRows: rawOpts.onDisabledRows ?? "reject",
+        table: rawOpts.table,
       });
       Intercept(def)(target, propertyKey, descriptor);
     } else if (scan.hasRowParam) {
-      Intercept(buildThinInterceptor({ table: opts.table }))(target, propertyKey, descriptor);
+      Intercept(buildThinInterceptor({ table: rawOpts.table }))(target, propertyKey, descriptor);
     }
 
     return descriptor;

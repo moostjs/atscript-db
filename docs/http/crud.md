@@ -10,6 +10,22 @@ See [HTTP Setup](./) for installation and wiring.
 
 ## Reading Records
 
+### Read-response baseline {#read-response-baseline}
+
+Every row-returning read endpoint (`/query`, `/pages`, `/one`, `/one/:id`, including `$search` and vector-search paths) silently widens the projection so each row carries the table's `preferredId` field set, regardless of `$select`.
+
+| `$select` shape                              | Behaviour                                                                                                                                          |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| absent / `undefined`                         | full projection — preferred-id fields already present                                                                                              |
+| `string[]` inclusion                         | dedupe + append missing preferred-id fields                                                                                                        |
+| pure inclusion map (`{ name: 1 }`)           | add missing preferred-id keys with value `1`                                                                                                       |
+| pure exclusion map (`{ id: 0 }`)             | rewritten to inclusion (all non-ignored own-table fields minus excluded) + every preferred-id field — exclusion CANNOT remove a preferred-id field |
+| mixed inclusion/exclusion (`{ a: 1, b: 0 }`) | rejected before the readable call (HTTP 400)                                                                                                       |
+
+**Not** widened: `$groupBy` aggregate (group keys are the only fields) and `$count` (returns a number).
+
+`preferredId` defaults to `primaryKeys`. Declare `@db.table.preferredId.uniqueIndex(name?)` to use a specific `@db.index.unique` group as the preferred identifier — see [Actions — Preferred row identifier](./actions#preferred-id). The widening happens AFTER any `transformProjection()` override resolves; preferred-id fields cannot be suppressed via projection. Hide identifiers at the network/authz layer instead.
+
 ### GET /query {#get-query}
 
 Returns an array of records. Supports filtering, sorting, pagination, projection, relation loading, and search.

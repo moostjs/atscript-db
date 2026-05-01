@@ -105,6 +105,8 @@ export type {
   TMetadataOverrides,
   WithRelation,
   TypedWithRelation,
+  FlatOf,
+  PrimaryKeyOf,
   OwnPropsOf,
   NavPropsOf,
   AggregateExpr,

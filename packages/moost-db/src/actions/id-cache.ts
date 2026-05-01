@@ -1,9 +1,10 @@
 import { cached, defineWook, key, type EventContext } from "@wooksjs/event-core";
 import { useBody } from "@wooksjs/http-body";
 import { HttpError } from "@moostjs/event-http";
-import { getMoostMate, useControllerContext } from "moost";
+import { useControllerContext } from "moost";
 
-import { MOOST_DB_ACTION, WARN_PREFIX, type TDbActionMeta } from "./keys";
+import { readCurrentActionMeta } from "./current-action";
+import { WARN_PREFIX } from "./keys";
 import {
   isIdValidationSource,
   validateMultiId,
@@ -23,16 +24,7 @@ export function getActionTable(ctx: EventContext): unknown {
 }
 
 export function noTableError(ctx: EventContext): HttpError {
-  const cc = useControllerContext(ctx);
-  const ctrl = cc.getController() as object | undefined;
-  const methodName = cc.getMethod();
-  let actionName: string | undefined;
-  if (ctrl && methodName) {
-    const meta = getMoostMate().read(ctrl.constructor, methodName) as
-      | { [MOOST_DB_ACTION]?: TDbActionMeta }
-      | undefined;
-    actionName = meta?.[MOOST_DB_ACTION]?.name;
-  }
+  const actionName = readCurrentActionMeta(ctx)?.name;
   const tag = actionName ? `"${actionName}"` : "<unknown>";
   return new HttpError(
     500,

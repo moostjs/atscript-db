@@ -146,10 +146,15 @@ export type IdOf<T> = T extends { __pk: infer PK } ? PK : unknown;
  * Narrow a read-method response type by the literal `$with` array in the
  * query, mirroring the backend's `DbResponse<Data, Nav, Q>` algebra. Nav
  * properties are stripped by default and re-added only for relations the
- * caller listed in `$with`.
- *
- * When `T` carries no nav-prop brand (or the consumer passed no generic)
- * `DbResponse` short-circuits to the data type — no behaviour change for
- * un-typed callers.
+ * caller listed in `$with`. When `T` carries no nav-prop brand, `DbResponse`
+ * short-circuits to the data type. `$actions` is always optional — the
+ * server emits it only when the request set `?$actions=true`.
  */
-export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q>;
+export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q> & {
+  /**
+   * Server-evaluated per-row availability for `'row'` and `'rows'`-level
+   * actions. Each entry is the `name` of an action that is NOT disabled for
+   * this row.
+   */
+  $actions?: string[];
+};

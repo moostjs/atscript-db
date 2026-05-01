@@ -19,11 +19,12 @@ describe("crud-controls — exported constants", () => {
         "threshold",
         "with",
         "groupBy",
+        "actions",
       ]),
     );
   });
 
-  it("PAGES_CONTROLS excludes count and groupBy", () => {
+  it("PAGES_CONTROLS excludes count and groupBy but includes actions", () => {
     expect(new Set(PAGES_CONTROLS)).toEqual(
       new Set([
         "filter",
@@ -36,14 +37,17 @@ describe("crud-controls — exported constants", () => {
         "vector",
         "threshold",
         "with",
+        "actions",
       ]),
     );
     expect(PAGES_CONTROLS).not.toContain("count");
     expect(PAGES_CONTROLS).not.toContain("groupBy");
+    expect(PAGES_CONTROLS).toContain("actions");
   });
 
-  it("ONE_CONTROLS contains only select and with", () => {
-    expect(new Set(ONE_CONTROLS)).toEqual(new Set(["select", "with"]));
+  it("ONE_CONTROLS contains select, with, actions", () => {
+    expect(new Set(ONE_CONTROLS)).toEqual(new Set(["select", "with", "actions"]));
     expect(ONE_CONTROLS).not.toContain("filter");
+    expect(ONE_CONTROLS).toContain("actions");
   });
 });

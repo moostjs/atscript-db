@@ -12,6 +12,8 @@ import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Param } from "moost";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
+import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
+import { augmentRowsWithActions } from "./actions/list-augmenter";
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
 import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
@@ -34,6 +36,7 @@ export class AsDbReadableController<
   private readonly _gates: ReadableGates;
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _compositeIdShapes: readonly TIdentification[];
+  private readonly _overlayIsNoOp: boolean;
 
   constructor(
     @Inject(READABLE_DEF)
@@ -47,6 +50,10 @@ export class AsDbReadableController<
     this._compositeIdShapes = (readable.identifications ?? []).filter(
       (id) => id.fields.length >= 2,
     );
+    const defaultOverlay = (
+      AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
+    ).applyMetaOverlay;
+    this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
   }
 
   private _buildGates(): ReadableGates {
@@ -205,6 +212,168 @@ export class AsDbReadableController<
     return widened as UniqueryControls["$select"];
   }
 
+  /** WHY: the URL parser only auto-coerces `$count`; every other boolean control reaches us as `"true"`/`"1"` and would fail DTO validation. */
+  private _coerceActionsControl(controls: Record<string, unknown>): void {
+    const v = controls.$actions;
+    if (typeof v === "string") {
+      controls.$actions = v === "true" || v === "1" || v === "";
+    }
+  }
+
+  /** Normalize a post-`widenPreferredIdProjection` $select into `string[] | null` (`null` = all fields). */
+  private _resolveProjectionForAugmenter(
+    select: UniqueryControls["$select"] | undefined,
+  ): string[] | null {
+    if (select === undefined) return null;
+    if (Array.isArray(select)) {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const item of select) {
+        if (typeof item === "string" && !seen.has(item)) {
+          seen.add(item);
+          out.push(item);
+        }
+      }
+      return out;
+    }
+    const obj = select as Record<string, unknown>;
+    const included: string[] = [];
+    const excluded: string[] = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === 1 || v === true) included.push(k);
+      else if (v === 0 || v === false) excluded.push(k);
+    }
+    if (included.length > 0 && excluded.length === 0) return included;
+    if (excluded.length > 0 && included.length === 0) {
+      const excludedSet = new Set(excluded);
+      const out: string[] = [];
+      for (const fd of this.readable.fieldDescriptors) {
+        if (!fd.ignored && !excludedSet.has(fd.path)) out.push(fd.path);
+      }
+      return out;
+    }
+    throw new HttpError(
+      500,
+      "[moost-db] mixed inclusion/exclusion projection reached augmenter; widenPreferredIdProjection should have rejected it",
+    );
+  }
+
+  /** WHY: filter row/rows envelopes by the per-request `applyMetaOverlay` action set; skip `meta()` when overlay is identity. */
+  private async _resolveAugmentEnvelopes(): Promise<readonly TDbActionEnvelope[] | null> {
+    const rowLevelEnvelopes = discoverRowLevelActions(
+      this.constructor as Function,
+      this.app,
+      this.logger,
+    );
+    if (rowLevelEnvelopes.length === 0) return null;
+    if (this._overlayIsNoOp) return rowLevelEnvelopes;
+    const overlayMeta = await this.meta();
+    const allowedNames = new Set(overlayMeta.actions.map((a) => a.name));
+    const filtered = rowLevelEnvelopes.filter((e) => allowedNames.has(e.info.name));
+    return filtered.length === 0 ? null : filtered;
+  }
+
+  /** Returns a widened `$select` only when at least one `requiredFields` entry is missing; `null` means "no widening needed". */
+  private _widenSelectForActions(
+    envelopes: readonly TDbActionEnvelope[],
+    baseSelect: readonly string[],
+  ): string[] | null {
+    let resultSet: Set<string> | null = null;
+    let result: string[] | null = null;
+    for (const e of envelopes) {
+      const raw = e.raw as { requiredFields?: unknown };
+      if (!Array.isArray(raw.requiredFields)) continue;
+      for (const f of raw.requiredFields as string[]) {
+        const present = resultSet ? resultSet.has(f) : baseSelect.includes(f);
+        if (present) continue;
+        if (resultSet === null) {
+          resultSet = new Set(baseSelect);
+          result = [...baseSelect];
+        }
+        resultSet.add(f);
+        result!.push(f);
+      }
+    }
+    return result;
+  }
+
+  private async _prepareAugmentation(
+    controls: Record<string, unknown>,
+    select: UniqueryControls["$select"] | undefined,
+  ): Promise<{
+    envelopes: readonly TDbActionEnvelope[];
+    resolvedProjection: string[] | null;
+    widenedSelect: string[] | null;
+  } | null> {
+    if (!controls.$actions) return null;
+    const envelopes = await this._resolveAugmentEnvelopes();
+    if (envelopes === null) return null;
+    const resolvedProjection = this._resolveProjectionForAugmenter(select);
+    const widenedSelect =
+      resolvedProjection === null
+        ? null
+        : this._widenSelectForActions(envelopes, resolvedProjection);
+    return { envelopes, resolvedProjection, widenedSelect };
+  }
+
+  private async _resolveReadStrategy(
+    controls: Record<string, unknown>,
+  ): Promise<
+    | { kind: "vector"; vector: number[]; vectorField: string }
+    | { kind: "search"; term: string; index?: string }
+    | { kind: "plain" }
+  > {
+    const searchTerm = controls.$search as string | undefined;
+    const indexName = controls.$index as string | undefined;
+    const vectorField = controls.$vector as string | undefined;
+    if (vectorField !== undefined && searchTerm) {
+      const vector = await this.computeEmbedding(searchTerm, vectorField || undefined);
+      return { kind: "vector", vector, vectorField };
+    }
+    if (searchTerm && this.readable.isSearchable()) {
+      return { kind: "search", term: searchTerm, index: indexName };
+    }
+    return { kind: "plain" };
+  }
+
+  /**
+   * Shared `query` / `pages` pipeline: prepare actions augmentation + read
+   * strategy in parallel, pre-widen $select for `requiredFields`, run
+   * `exec`, and augment `result.data` with `$actions` when the request set
+   * `$actions=true`. Caller dispatches the strategy to its read-method
+   * family (count vs no-count).
+   */
+  private async _runReadWithActions<R extends { data: unknown[] }>(
+    queryObj: Uniquery<any, any>,
+    controls: Record<string, unknown>,
+    select: UniqueryControls["$select"] | undefined,
+    exec: (
+      q: Uniquery<any, any>,
+      strategy: Awaited<ReturnType<AsDbReadableController["_resolveReadStrategy"]>>,
+    ) => Promise<R>,
+  ): Promise<R> {
+    const [prep, strategy] = await Promise.all([
+      this._prepareAugmentation(controls, select),
+      this._resolveReadStrategy(controls),
+    ]);
+
+    const initialQuery = prep?.widenedSelect
+      ? ({
+          ...queryObj,
+          controls: { ...queryObj.controls, $select: prep.widenedSelect },
+        } as Uniquery<any, any>)
+      : queryObj;
+
+    const result = await exec(initialQuery, strategy);
+    if (!prep) return result;
+    result.data = augmentRowsWithActions({
+      envelopes: prep.envelopes,
+      rows: result.data as Record<string, unknown>[],
+      resolvedProjection: prep.resolvedProjection,
+    }) as R["data"];
+    return result;
+  }
+
   /**
    * Extracts a composite identifier object from query params.
    * Tries composite primary key first, then compound unique indexes.
@@ -238,6 +407,7 @@ export class AsDbReadableController<
   async query(@Url() url: string): Promise<DataType[] | number | HttpError> {
     const parsed = this.parseQueryString(url);
     const controls = parsed.controls;
+    this._coerceActionsControl(controls as Record<string, unknown>);
 
     // ── Aggregate path (before DTO validation — $groupBy is not in QueryControlsDto) ──
     const groupBy = controls.$groupBy as string[] | undefined;
@@ -291,9 +461,6 @@ export class AsDbReadableController<
       return select;
     }
 
-    const searchTerm = controls.$search as string | undefined;
-    const indexName = controls.$index as string | undefined;
-    const vectorField = controls.$vector as string | undefined;
     const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
 
     const queryObj = {
@@ -306,19 +473,28 @@ export class AsDbReadableController<
       },
     } as Uniquery<any, any>;
 
-    if (vectorField !== undefined && searchTerm) {
-      const vector = await this.computeEmbedding(searchTerm, vectorField || undefined);
-      if (vectorField) {
-        return this.readable.vectorSearch(vectorField, vector, queryObj) as Promise<DataType[]>;
-      }
-      return this.readable.vectorSearch(vector, queryObj) as Promise<DataType[]>;
-    }
-
-    if (searchTerm && this.readable.isSearchable()) {
-      return this.readable.search(searchTerm, queryObj, indexName) as Promise<DataType[]>;
-    }
-
-    return this.readable.findMany(queryObj) as Promise<DataType[]>;
+    const wrapped = await this._runReadWithActions(
+      queryObj,
+      controls as Record<string, unknown>,
+      select,
+      async (q, strategy): Promise<{ data: DataType[] }> => {
+        switch (strategy.kind) {
+          case "vector":
+            return {
+              data: (await (strategy.vectorField
+                ? this.readable.vectorSearch(strategy.vectorField, strategy.vector, q)
+                : this.readable.vectorSearch(strategy.vector, q))) as DataType[],
+            };
+          case "search":
+            return {
+              data: (await this.readable.search(strategy.term, q, strategy.index)) as DataType[],
+            };
+          case "plain":
+            return { data: (await this.readable.findMany(q)) as DataType[] };
+        }
+      },
+    );
+    return wrapped.data;
   }
 
   /**
@@ -336,6 +512,8 @@ export class AsDbReadableController<
     | HttpError
   > {
     const parsed = this.parseQueryString(url);
+
+    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
 
     const error = this.validateParsed(parsed, "pages");
     if (error) {
@@ -361,9 +539,6 @@ export class AsDbReadableController<
       return select;
     }
 
-    const searchTerm = controls.$search as string | undefined;
-    const indexName = controls.$index as string | undefined;
-    const vectorField = controls.$vector as string | undefined;
     const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
 
     const query = {
@@ -377,33 +552,31 @@ export class AsDbReadableController<
       },
     };
 
-    let result: { data: DataType[]; count: number };
-    if (vectorField !== undefined && searchTerm) {
-      const vector = await this.computeEmbedding(searchTerm, vectorField || undefined);
-      if (vectorField) {
-        result = (await this.readable.vectorSearchWithCount(
-          vectorField,
-          vector,
-          query as Uniquery<any, any>,
-        )) as { data: DataType[]; count: number };
-      } else {
-        result = (await this.readable.vectorSearchWithCount(
-          vector,
-          query as Uniquery<any, any>,
-        )) as { data: DataType[]; count: number };
-      }
-    } else if (searchTerm && this.readable.isSearchable()) {
-      result = (await this.readable.searchWithCount(
-        searchTerm,
-        query as Uniquery<any, any>,
-        indexName,
-      )) as { data: DataType[]; count: number };
-    } else {
-      result = (await this.readable.findManyWithCount(query as Uniquery<any, any>)) as {
-        data: DataType[];
-        count: number;
-      };
-    }
+    const result = await this._runReadWithActions(
+      query as Uniquery<any, any>,
+      controls,
+      select,
+      async (q, strategy): Promise<{ data: DataType[]; count: number }> => {
+        switch (strategy.kind) {
+          case "vector":
+            return (
+              strategy.vectorField
+                ? this.readable.vectorSearchWithCount(strategy.vectorField, strategy.vector, q)
+                : this.readable.vectorSearchWithCount(strategy.vector, q)
+            ) as Promise<{ data: DataType[]; count: number }>;
+          case "search":
+            return this.readable.searchWithCount(strategy.term, q, strategy.index) as Promise<{
+              data: DataType[];
+              count: number;
+            }>;
+          case "plain":
+            return this.readable.findManyWithCount(q) as Promise<{
+              data: DataType[];
+              count: number;
+            }>;
+        }
+      },
+    );
 
     return {
       data: result.data,
@@ -420,6 +593,7 @@ export class AsDbReadableController<
   @Get("one/:id")
   async getOne(@Param("id") id: string, @Url() url: string): Promise<DataType | HttpError> {
     const parsed = this.parseQueryString(url);
+    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
 
     if (Object.keys(parsed.filter).length > 0) {
       return new HttpError(400, 'Filtering is not allowed for "one" endpoint');
@@ -435,11 +609,7 @@ export class AsDbReadableController<
     if (select instanceof HttpError) {
       return select;
     }
-    const controls = { ...parsed.controls, $select: select };
-
-    return this.returnOne(
-      this.readable.findById(id as any, { controls } as any) as Promise<DataType | null>,
-    );
+    return this._findByIdAndAugment(id, parsed.controls, select);
   }
 
   /**
@@ -457,16 +627,35 @@ export class AsDbReadableController<
     }
 
     const parsed = this.parseQueryString(url);
+    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
     const rawSelect = await this.transformProjection(parsed.controls.$select);
     const select = this.widenPreferredIdProjection(rawSelect);
     if (select instanceof HttpError) {
       return select;
     }
-    const controls = { ...parsed.controls, $select: select };
+    return this._findByIdAndAugment(idObj, parsed.controls, select);
+  }
 
-    return this.returnOne(
-      this.readable.findById(idObj as any, { controls } as any) as Promise<DataType | null>,
-    );
+  private async _findByIdAndAugment(
+    id: string | Record<string, unknown>,
+    parsedControls: UniqueryControls,
+    select: UniqueryControls["$select"] | undefined,
+  ): Promise<DataType | HttpError> {
+    const prep = await this._prepareAugmentation(parsedControls as Record<string, unknown>, select);
+    const initialSelect = prep?.widenedSelect ?? select;
+    const controls = { ...parsedControls, $select: initialSelect };
+
+    const row = (await this.readable.findById(id as any, { controls } as any)) as DataType | null;
+
+    const item = await this.returnOne(Promise.resolve(row));
+    if (item instanceof HttpError) return item;
+    if (!prep) return item;
+    const [augmented] = augmentRowsWithActions({
+      envelopes: prep.envelopes,
+      rows: [item as unknown as Record<string, unknown>],
+      resolvedProjection: prep.resolvedProjection,
+    });
+    return augmented as DataType;
   }
 
   /**

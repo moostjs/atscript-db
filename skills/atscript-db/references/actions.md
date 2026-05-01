@@ -27,6 +27,8 @@ import {
   useDbActionIds,
   useDbActionRow,
   useDbActionRows,
+  // Helpers
+  perRow,
   // Errors
   ActionDisabledError,
 } from "@atscript/moost-db";
@@ -130,20 +132,37 @@ Every row-returning read endpoint (`GET /query`, `/pages`, `/one`, `/one/:id`, i
 
 ## DbActionOpts
 
-| Opt              | Type                                                                | Semantics                                                                                                                                                                                                                                                           |
-| ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `label`          | `string`                                                            | Required (or use `@Label('...')`; `opts.label` wins on conflict).                                                                                                                                                                                                   |
-| `icon`           | `string`                                                            | UI icon name.                                                                                                                                                                                                                                                       |
-| `intent`         | `'positive' \| 'negative' \| 'warning' \| 'primary' \| 'secondary'` | Color/prominence hint.                                                                                                                                                                                                                                              |
-| `description`    | `string`                                                            | Tooltip.                                                                                                                                                                                                                                                            |
-| `order`          | `number`                                                            | Display order.                                                                                                                                                                                                                                                      |
-| `default`        | `boolean`                                                           | One per `(controller × level)`; subsequent demoted with warn.                                                                                                                                                                                                       |
-| `promptText`     | `string \| [string, string]`                                        | Tuple = `[singular, plural]`; UI picks `[0]` for single ID, `[1]` otherwise. UI substitutes `$1` (preferred-id values), `$N` (count).                                                                                                                               |
-| `shortcut`       | `string`                                                            | Single char. UI binds modifier (Alt+/Ctrl+/bare); server is opaque.                                                                                                                                                                                                 |
-| `disabled`       | `(rows: TRow[]) => boolean[]`                                       | **Sync batch gate.** One verdict per input row, parallel by index. Length mismatch → HTTP 500. **Annotate `rows` arg explicitly** — TS decorators can't infer `TRow` from class generic. Also widens `@DbActionRow*` projection for the fields the predicate reads. |
-| `requiredFields` | `string[]`                                                          | Dot-paths the UI unions into `$select` for predicate eval. Server-side: also unioned into `@DbActionRow*` fetch projection (rows are otherwise projected to identifier-shape fields only). Stripped from `/meta` if `disabled` absent.                              |
-| `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level only. Default `'reject'`.                                                                                                                                                                                                                            |
-| `table`          | `AtscriptDbTable<TRow>`                                             | Required on plain controllers when declaring `disabled`, `@DbActionID*`, or `@DbActionRow*`. Ignored on `AsDbReadableController` subclasses.                                                                                                                        |
+`@DbAction<TRow, const R>(name, opts)` — annotate `<TRow>` at the call site (TS decorators can't infer it from the enclosing class). `R` is the literal `requiredFields` tuple (inferred via `const R`).
+
+| Opt              | Type                                                                | Semantics                                                                                                                                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `label`          | `string`                                                            | Required (or `@Label('...')`; `opts.label` wins).                                                                                                                                                                                                                         |
+| `icon`           | `string`                                                            | UI icon name.                                                                                                                                                                                                                                                             |
+| `intent`         | `'positive' \| 'negative' \| 'warning' \| 'primary' \| 'secondary'` | Color/prominence.                                                                                                                                                                                                                                                         |
+| `description`    | `string`                                                            | Tooltip.                                                                                                                                                                                                                                                                  |
+| `order`          | `number`                                                            | Display order.                                                                                                                                                                                                                                                            |
+| `default`        | `boolean`                                                           | One per `(controller × level)`; later demoted with warn.                                                                                                                                                                                                                  |
+| `promptText`     | `string \| [string, string]`                                        | Tuple = `[singular, plural]`. UI substitutes `$1` (preferred-id values), `$N` (count).                                                                                                                                                                                    |
+| `shortcut`       | `string`                                                            | Single char. UI binds modifier.                                                                                                                                                                                                                                           |
+| `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-paths the predicate reads. Server-internal — never on the wire. Type-narrows `disabled`'s row arg AND drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation read). Listing a relation field is a TS error. |
+| `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`              | **Sync batch gate.** Row arg is narrowed to `requiredFields` only; reading another field is a TS error. One verdict per input row, parallel by index. Length mismatch → HTTP 500. `Promise<boolean[]>` not permitted. Without `requiredFields` → action dropped.          |
+| `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level only. Default `'reject'`.                                                                                                                                                                                                                                  |
+| `table`          | `AtscriptDbTable<TRow>`                                             | Required on plain controllers when `disabled`, `@DbActionID*`, or `@DbActionRow*` present. Ignored on `AsDbReadableController` subclasses.                                                                                                                                |
+
+`FlatKey<TRow> = keyof FlatOf<TRow> & string` (dot-paths over scalars; relations excluded). When `TRow = unknown` (no `<TRow>` generic), all string keys allowed; `disabled` row arg falls back to `any[]` and `requiredFields` is loosely `string[]` — runtime still drops `disabled` without `requiredFields`.
+
+### `perRow()` helper
+
+Lift a per-row predicate into batch shape; polarity preserved (`true` = disabled).
+
+```ts
+import { perRow } from "@atscript/moost-db";
+
+@DbAction<Order, ["status"]>("archive", {
+  requiredFields: ["status"],
+  disabled: perRow((o) => o.status === "archived"),
+})
+```
 
 ## Examples
 
@@ -168,17 +187,16 @@ export class UsersController extends AsDbController<typeof User> {
 @TableController(ordersTable)
 export class OrdersController extends AsDbController<typeof Order> {
   @Post("actions/ship")
-  @DbAction("ship", {
+  @DbAction<Order, ["status"]>("ship", {
     label: "Ship",
     intent: "primary",
-    // Sync batch predicate — one verdict per input row.
-    disabled: (orders: Order[]) => orders.map((o) => o.status !== "processing"),
+    requiredFields: ["status"], // REQUIRED with `disabled`; narrows row arg
+    disabled: (orders) => orders.map((o) => o.status !== "processing"),
   })
   async ship(@DbActionID() id: { id: string }, @DbActionRow() order: Order) {
     // gate already vetted; `order` is gate-loaded (no second fetch).
-    // NOTE: `order` is projected to ONLY identifier-shape fields + the fields
-    // `disabled` read (`status` here). Add `requiredFields: ['orderNumber']`
-    // to widen.
+    // `order` is projected to identifier-shape ∪ preferredId ∪ requiredFields.
+    // To access `orderNumber`, add it to requiredFields.
     await this.table.updateOne({ id: id.id, status: "shipped" });
     return { message: `Shipped order ${id.id}` };
   }
@@ -209,10 +227,11 @@ export class UsersController extends AsDbController<typeof User> {
 @Controller()
 export class AdminController {
   @Post("orders/ship")
-  @DbAction("ship", {
+  @DbAction<Order, ["status"]>("ship", {
     label: "Ship",
     table: ordersTable, // REQUIRED — no AsDbReadableController extends
-    disabled: (orders: Order[]) => orders.map((o) => o.status !== "processing"),
+    requiredFields: ["status"],
+    disabled: (orders) => orders.map((o) => o.status !== "processing"),
   })
   async ship(@DbActionID() id: { id: string }, @DbActionRow() order: Order) {
     /* ... */
@@ -242,18 +261,18 @@ For `'navigate'` actions, `$1` is substituted with the row's `preferredId` field
 
 `disabled` predicate enforced via Moost interceptor at `AFTER_GUARD` priority (auth → gate → handler). Wire emits `fn.toString()` for UI mirroring. Server is authoritative.
 
-### Batch contract — sync `(rows: TRow[]) => boolean[]`
+### Batch contract — sync `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`
 
-The predicate runs **once per request** with all relevant rows in one call:
+Runs **once per request**:
 
 | Level    | Gate calls                                    |
 | -------- | --------------------------------------------- |
 | `'row'`  | `disabled([row])` → reads `verdicts[0]`       |
 | `'rows'` | `disabled(survivorRows)` (existing rows only) |
 
-Verdicts MUST be **parallel by index** to the input rows. Mixed `true`/`false` is normal — partial-disabled is the whole point of the gate. The verdict array LENGTH MUST equal the input length; length mismatch (e.g. a buggy `() => [true]` predicate, or `rows.filter(...).map(...)`) throws HTTP 500 identifying the offending action — the gate cannot map verdicts back to rows.
+Verdicts MUST be **parallel by index** to the input. Length mismatch → HTTP 500 (gate can't map verdicts back). `Promise<boolean[]>` not permitted.
 
-`Promise<boolean[]>` is **not** permitted. The TS type `(rows: TRow[]) => boolean[]` enforces this.
+Same predicate runs in three places (gate enforcement → `@DbActionRow*` injection sees survivors only; `$actions` augmentation on read endpoints; UI mirroring via `fn.toString()`).
 
 ### Missing-row handling (`'rows'` level)
 
@@ -274,10 +293,10 @@ Reject mode preserves request order across both failure types (missing-row + pre
 
 ```ts
 // ✅ self-contained
-disabled: (orders: Order[]) => orders.map((o) => o.status !== "processing");
+disabled: (orders) => orders.map((o) => o.status !== "processing");
 // ❌ captures SHIPPED — server runs, UI breaks
 const SHIPPED = "shipped";
-disabled: (orders: Order[]) => orders.map((o) => o.status === SHIPPED);
+disabled: (orders) => orders.map((o) => o.status === SHIPPED);
 ```
 
 ### `ActionDisabledError` (HTTP 409)
@@ -298,26 +317,28 @@ Server class: `@atscript/moost-db` (`extends HttpError`). Client class: `@atscri
 
 ### Class-level dict gating is UI-only
 
-`@DbActions*` accept `disabled` / `requiredFields` but DO NOT register a server interceptor (the dict's `value` may target another controller). Wire still emits `disabled` for UI gating; for server enforcement, also declare `@DbAction(name, { disabled })` on the actual `@Post` handler.
+`@DbActions*` accept `disabled` (with required `requiredFields`) but DO NOT register a server interceptor — the dict's `value` may target another controller. The predicate runs in two places: (1) `$actions=true` augmentation against the controller's own read result; (2) UI mirror via wire `disabled` string. POSTs to the dict's `value` endpoint are NOT blocked here. For server enforcement on the actual handler, also declare `@DbAction(name, { requiredFields, disabled })` on it.
 
 ## `@DbActionRow*` projection narrowing
 
-Handlers using `@DbActionRow()` / `@DbActionRows()` receive rows projected to ONLY the **identifier-shape fields** the request used (the union of every distinct field set across the submitted identifiers, plus any `requiredFields`). Other table columns are absent.
+Handlers using `@DbActionRow()` / `@DbActionRows()` receive rows projected to:
 
-```ts
-@DbAction("archive", {
-  disabled: (orders: Order[]) => orders.map((o) => o.archived === true),
-  // Without requiredFields, only identifier-shape fields appear on `orders[i]`.
-  // `o.archived` is the field the predicate reads — server unions it from
-  // the predicate's stringified body (see DbActionOpts.requiredFields).
-})
-async archive(@DbActionIDs() ids, @DbActionRows() orders: Order[]) {
-  // `orders[i]` contains identifier fields + `archived`. To access
-  // `orderNumber`, declare `requiredFields: ['orderNumber']` or re-fetch.
-}
+```
+identifier-shape fields ∪ preferredId ∪ requiredFields
 ```
 
-`requiredFields` is the explicit knob: `requiredFields: ['name', 'email']` widens both the UI's `$select` AND the server's row fetch projection.
+Other table columns are absent. `requiredFields` is the only knob — there is no auto-deps tracker.
+
+```ts
+@DbAction<Order, ["archived", "orderNumber"]>("archive", {
+  requiredFields: ["archived", "orderNumber"],
+  disabled: (orders) => orders.map((o) => o.archived === true),
+})
+async archive(@DbActionIDs() ids, @DbActionRows() orders: Order[]) {
+  // `orders[i]` contains identifier fields ∪ preferredId ∪ ['archived', 'orderNumber'].
+  // To access `customerEmail`, add it to requiredFields.
+}
+```
 
 ### Composables
 
@@ -372,10 +393,11 @@ interface TDbActionInfo {
   default?: boolean;
   promptText?: string | [string, string]; // [singular, plural]; UI substitutes $1 (preferred-id values), $N (count)
   shortcut?: string; // single char; UI binds modifier
-  disabled?: string; // fn.toString() — UI mirrors via eval; server is authoritative (batch contract)
-  requiredFields?: string[]; // UI's $select union hint
+  disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
 }
 ```
+
+`requiredFields` is **server-internal only** — it never crosses the wire. Predicate field-deps are declared by the dev, drive server-side projection widening, and are surfaced to UIs implicitly via the row-level `$actions` overlay (see § `$actions=true`).
 
 `TMetaResponse.actions: TDbActionInfo[]`. Always present; `[]` when none declared. Discovery is **lazy** — runs on first `GET /meta`; warnings (greppable `[moost-db actions]`) emit then, not at `app.init()`.
 
@@ -393,13 +415,49 @@ interface TDbActionInfo {
 - Two `default: true` at same `(controller × level)` — first wins, second demoted.
 - `'table'`-level action with `disabled` (no row scope; gate via auth/arbac).
 - Gate / `@DbActionRow*` on plain controller without `opts.table`.
-- `requiredFields` set without `disabled` → strip the field (action kept).
+- **`disabled` set without (non-empty) `requiredFields` → drop the action.** Field-deps must be declared explicitly.
+- Duplicate action name within a controller — second declaration dropped.
 
 Value-help controllers (`AsValueHelpController` / `AsJsonValueHelpController`) silently emit `actions: []`; decorators on them are ignored.
 
 ## Class-level `'backend'` row/rows caveat
 
 Dict-supplied `value` MUST point to a `@Post`-bound endpoint accepting the identifier-shaped JSON body — typically a method using `@DbActionID()` / `@DbActionIDs()` on the controller serving that path. Builder does NOT validate; dev-side contract.
+
+## `$actions=true` — server-evaluated row availability
+
+URL control on `/query`, `/pages`, `/one`, `/one/:id` (and `$search` / vector paths). When set, every returned row carries `$actions: string[]` — names of `'row'` and `'rows'`-level actions NOT disabled for that row. Action ordering follows `/meta.actions[]` declaration order.
+
+```
+GET /users/query?status=active&$actions=true
+→ [{ id, status, $actions: ['edit', 'archive'] }, ...]
+```
+
+Pipeline (per request, on `AsDbReadableController`):
+
+1. Discover row/rows-level envelopes (memoized per controller ctor).
+2. Filter through per-request `applyMetaOverlay()` — actions stripped by overlay are absent. Skipped when overlay is the default no-op.
+3. Pre-widen `$select` to union all `requiredFields` (only when caller restricted projection).
+4. Run the read.
+5. Run each `disabled` once on the full result, fan verdicts into per-row `$actions`. Actions without `disabled` are unconditionally included.
+6. Strip `requiredFields`-only fields the caller didn't ask for (so the response shape matches the original `$select`).
+
+Notes:
+
+- `'table'`-level actions never appear in `$actions`.
+- `$count` / `$groupBy` paths are NOT augmented (no row shape).
+- A `disabled` length mismatch on the result-set still throws HTTP 500 — same contract as the gate.
+- Caller boolean control: URL (`?$actions=true`/`1`) → server coerces; programmatic (`controls: { $actions: true }`) → boolean.
+- Same predicate also runs in two other places — server-side gate enforcement on POST and UI mirror via `disabled` string.
+
+```ts
+// Client
+const r = await users.query({
+  filter: { active: true },
+  controls: { $actions: true } as const,
+});
+r[0].$actions; // typed string[] on ClientResponse<T, Q>
+```
 
 ## Client side: `client.action(name, id?)`
 

@@ -43,7 +43,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
     };
     const actions = discoverActions(Plain, app as Moost, logger);
     expect(actions).toHaveLength(1);
-    expect(actions[0].name).toBe("act");
+    expect(actions[0].info.name).toBe("act");
     // No warning about missing table.
     const warnedAboutTable = logger.warn.mock.calls.some((args: unknown[]) =>
       typeof args[0] === "string" ? args[0].includes("does not extend") : false,
@@ -66,7 +66,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
             path: "/c/act",
             action: {
               name: "act",
-              opts: { label: "Act", disabled: () => [false] },
+              opts: { label: "Act", requiredFields: ["state"], disabled: () => [false] },
             },
             paramKinds: ["id"],
           },
@@ -97,6 +97,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
               name: "act",
               opts: {
                 label: "Act",
+                requiredFields: ["state"],
                 disabled: () => [false],
                 table: makeTable() as never,
               },
@@ -108,7 +109,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
     };
     const actions = discoverActions(Plain, app as Moost, logger);
     expect(actions).toHaveLength(1);
-    expect(actions[0].name).toBe("act");
+    expect(actions[0].info.name).toBe("act");
   });
 
   it("AsDbReadableController subclass + disabled (no opts.table) — passes static check", () => {
@@ -122,7 +123,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
           path: "/c/act",
           action: {
             name: "act",
-            opts: { label: "Act", disabled: () => [false] },
+            opts: { label: "Act", requiredFields: ["state"], disabled: () => [false] },
           },
           paramKinds: ["id"],
         },
@@ -148,6 +149,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
             name: "act",
             opts: {
               label: "Act",
+              requiredFields: ["state"],
               disabled: () => [false],
               // table forwarded into opts but the runtime instanceof
               // AsDbReadableController check makes the bound table win;

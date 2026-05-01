@@ -46,17 +46,18 @@ filter: {
 
 ## Controls
 
-| Control               | Value                                     | Effect                                                                                |
-| --------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| `$select`             | `string[] \| { [path]: 0 \| 1 }`          | Projection. Array form = include-list; map form = explicit.                           |
-| `$sort`               | `{ [path]: 1 \| -1 }`                     | Ordered keys.                                                                         |
-| `$skip`               | `number`                                  | Offset.                                                                               |
-| `$limit`              | `number`                                  | Row cap.                                                                              |
-| `$page` / `$size`     | `number`                                  | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                          |
-| `$count`              | `true`                                    | Return a count instead of rows.                                                       |
-| `$with`               | `Array<{ name: string; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation.                             |
-| `$groupBy`            | `string[]`                                | Aggregate query. Requires `@db.column.dimension` on keys and `@db.agg.*` on measures. |
-| `$search` / `$vector` | `string` / `number[]`                     | Full-text / vector search (adapter must support).                                     |
+| Control               | Value                                     | Effect                                                                                                                                                                                                                                                            |
+| --------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$select`             | `string[] \| { [path]: 0 \| 1 }`          | Projection. Array form = include-list; map form = explicit.                                                                                                                                                                                                       |
+| `$sort`               | `{ [path]: 1 \| -1 }`                     | Ordered keys.                                                                                                                                                                                                                                                     |
+| `$skip`               | `number`                                  | Offset.                                                                                                                                                                                                                                                           |
+| `$limit`              | `number`                                  | Row cap.                                                                                                                                                                                                                                                          |
+| `$page` / `$size`     | `number`                                  | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                                                                                                                                                                                                      |
+| `$count`              | `true`                                    | Return a count instead of rows.                                                                                                                                                                                                                                   |
+| `$with`               | `Array<{ name: string; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation.                                                                                                                                                                                                         |
+| `$groupBy`            | `string[]`                                | Aggregate query. Requires `@db.column.dimension` on keys and `@db.agg.*` on measures.                                                                                                                                                                             |
+| `$search` / `$vector` | `string` / `number[]`                     | Full-text / vector search (adapter must support).                                                                                                                                                                                                                 |
+| `$actions`            | `boolean`                                 | `moost-db` HTTP only. When `true`, server attaches `$actions: string[]` to each returned row — `'row'`/`'rows'`-level action names NOT disabled. NOT widened on `$count`/`$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
 
 ## Projection with $with
 

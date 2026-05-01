@@ -84,6 +84,19 @@ The widening happens AFTER any `transformProjection()` override resolves — dev
 
 `preferredId` defaults to `primaryKeys`. To make it a slug or other unique-index field, declare `@db.table.preferredId.uniqueIndex(name?)` on the interface — see [annotations.md](annotations.md) and [actions.md § Preferred row identifier](actions.md#preferred-row-identifier).
 
+### `$actions=true` augmentation
+
+Opt-in URL/control flag (`?$actions=true`, or `controls: { $actions: true }`). When set, every returned row gets `$actions: string[]` listing `'row'`/`'rows'`-level action names that are NOT disabled for that row. The pipeline:
+
+1. Discover row/rows-level envelopes for the controller (memoized).
+2. Filter through per-request `applyMetaOverlay()` (`meta()` skipped when overlay is identity).
+3. Pre-widen `$select` to union all `requiredFields` when caller restricted projection.
+4. Run the read.
+5. Run each `disabled` predicate once on the full result (length-mismatch → HTTP 500).
+6. Strip widened-only fields the caller didn't ask for.
+
+Not augmented: `$count`, `$groupBy`. See [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability).
+
 ## Hooks (override on subclass)
 
 ```ts
@@ -205,9 +218,7 @@ before pruning; mutating the cached envelope leaks per-request state.
 - `client.meta()` caches per `Client` instance. SSR setups that share a Client
   across users will pin the first principal's overlay; instantiate a Client
   per request when running per-principal overlays server-side.
-- `actions[].disabled` and `actions[].requiredFields` are UI hints emitted by
-  `discoverActions()`; server enforcement is via the gate interceptor on the
-  decorated `@Post` handler (authoritative). See [actions.md § Server-side gate](actions.md#server-side-gate).
+- `actions[].disabled` is the stringified predicate (`fn.toString()`) — UI mirror only. Server enforcement on POST is the gate interceptor; per-row availability on read endpoints is `$actions=true` (see [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability)). `requiredFields` is server-internal and never on the wire.
 
 Consumed by `@atscript/db-client` to build a client-side validator matching the server's.
 

@@ -29,10 +29,12 @@ describe("cached ID row wook", () => {
       async () => {
         setBoundTable(table);
         const rows = await current().get(dbActionRowsSlot);
-        expect(findMany).toHaveBeenCalledWith({
-          filter: { $or: [{ email: "b@example.com" }, { id: "1" }] },
-          controls: { $select: ["email", "id"] },
-        });
+        const arg = findMany.mock.calls[0][0] as {
+          filter: unknown;
+          controls: { $select: string[] };
+        };
+        expect(arg.filter).toEqual({ $or: [{ email: "b@example.com" }, { id: "1" }] });
+        expect(new Set(arg.controls.$select)).toEqual(new Set(["email", "id"]));
         expect(rows).toEqual([
           { id: "2", email: "b@example.com" },
           { id: "1", email: "a@example.com" },
@@ -64,10 +66,14 @@ describe("cached ID row wook", () => {
     await runInActionCtx('[{"slug":"alpha"}]', async () => {
       setBoundTable(table);
       const rows = await current().get(dbActionRowsSlot);
-      expect(findMany).toHaveBeenCalledWith({
-        filter: { $or: [{ slug: "alpha" }] },
-        controls: { $select: ["slug"] },
-      });
+      const arg = findMany.mock.calls[0][0] as {
+        filter: unknown;
+        controls: { $select: string[] };
+      };
+      expect(arg.filter).toEqual({ $or: [{ slug: "alpha" }] });
+      // Effective projection unions the readable's preferredId (here =
+      // primaryKeys = ['id']) with the submitted identifier-shape field.
+      expect(new Set(arg.controls.$select)).toEqual(new Set(["id", "slug"]));
       expect(rows).toEqual([{ id: "1", slug: "alpha" }]);
     });
   });

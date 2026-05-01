@@ -11,3 +11,4 @@ export { useDbActionId, useDbActionIds } from "./id-cache";
 export { useDbActionRow, useDbActionRows } from "./row-cache";
 export { ActionDisabledError } from "./action-disabled-error";
 export type { ActionDisabledErrorBody } from "./action-disabled-error";
+export { perRow } from "./per-row";
