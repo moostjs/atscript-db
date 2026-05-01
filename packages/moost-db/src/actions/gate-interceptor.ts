@@ -1,32 +1,20 @@
 import { current } from "@wooksjs/event-core";
-import {
-  defineBeforeInterceptor,
-  TInterceptorPriority,
-  useControllerContext,
-  type TInterceptorDef,
-} from "moost";
+import { defineBeforeInterceptor, TInterceptorPriority, type TInterceptorDef } from "moost";
 
 import { ActionDisabledError } from "./action-disabled-error";
-import { isAsDbReadableControllerInstance } from "./controller-registry";
-import { boundTableKey, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
+import { boundTableKey, controllerTable, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
 import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import type { TOnDisabledRows } from "./types";
 import { assertVerdictLength } from "./verdict";
 
 const GATE_PRIORITY = TInterceptorPriority.AFTER_GUARD;
 
-function injectBoundTable(table: unknown): void {
+// Bound-table controller wins over opts.table (spec contract).
+function injectBoundTable(fallback: unknown): void {
   const ctx = current();
   if (ctx.has(boundTableKey)) return;
-  const controller = useControllerContext(ctx).getController();
-  if (isAsDbReadableControllerInstance(controller)) {
-    // Bound-table controller wins over opts.table (spec contract).
-    ctx.set(boundTableKey, (controller as { readable?: unknown }).readable);
-    return;
-  }
-  if (table != null) {
-    ctx.set(boundTableKey, table);
-  }
+  const t = controllerTable(ctx) ?? fallback;
+  if (t != null) ctx.set(boundTableKey, t);
 }
 
 export interface GateInterceptorOpts {

@@ -63,7 +63,7 @@ describe("Cached ID wook — single ID", () => {
     expect(caught).toBeInstanceOf(ValidatorError);
   });
 
-  it("throws HttpError(500) with dev-mistake framing when no table is bound (plain controller, no opts.table)", async () => {
+  it("throws opaque HttpError(500) with code ACTION_TABLE_NOT_BOUND when no table is bound (plain controller, no opts.table)", async () => {
     let caught: unknown;
     const run = prepareTestHttpContext({
       url: "/api/c/act",
@@ -84,10 +84,14 @@ describe("Cached ID wook — single ID", () => {
       }
     });
     expect(caught).toBeInstanceOf(HttpError);
-    expect((caught as HttpError).body.statusCode).toBe(500);
-    expect((caught as HttpError).body.message).toContain(
-      "controller has no readable/table property",
-    );
+    const body = (caught as HttpError).body as {
+      statusCode: number;
+      message: string;
+      code?: string;
+    };
+    expect(body.statusCode).toBe(500);
+    expect(body.message).toBe("Internal server error");
+    expect(body.code).toBe("ACTION_TABLE_NOT_BOUND");
   });
 });
 

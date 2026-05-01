@@ -22,7 +22,7 @@ interface SpyTable {
   primaryKeys: readonly string[];
   preferredId: readonly string[];
   fieldDescriptors: ReadonlyArray<{ path: string; designType: string }>;
-  getIdentifications: () => readonly { fields: readonly string[]; source: string }[];
+  identifications: readonly { fields: readonly string[]; source: string }[];
   findOne: ReturnType<typeof vi.fn>;
   findMany: ReturnType<typeof vi.fn>;
 }
@@ -44,7 +44,7 @@ function spyTable(opts: {
     primaryKeys,
     preferredId,
     fieldDescriptors,
-    getIdentifications: () => [{ fields: [...primaryKeys], source: "primaryKey" }],
+    identifications: [{ fields: [...primaryKeys], source: "primaryKey" }],
     findOne: vi.fn().mockImplementation((q: { filter: Record<string, unknown> }) => {
       if (opts.rowsForFilter) return Promise.resolve(opts.rowsForFilter(q.filter) ?? null);
       return Promise.resolve(opts.rows?.[0] ?? null);
@@ -153,7 +153,7 @@ describe("@DbActionRow projection — 'row' level", () => {
         { path: "id", designType: "string" },
         { path: "slug", designType: "string" },
       ],
-      getIdentifications: () => [
+      identifications: [
         { fields: ["id"], source: "primaryKey" as const },
         { fields: ["slug"], source: "by_slug" },
       ],
@@ -210,7 +210,7 @@ describe("@DbActionRow projection — 'rows' level", () => {
         { path: "email", designType: "string" },
         { path: "state", designType: "string" },
       ],
-      getIdentifications: () => [
+      identifications: [
         { fields: ["id"], source: "primaryKey" as const },
         { fields: ["email"], source: "by_email" },
       ],

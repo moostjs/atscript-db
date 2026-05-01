@@ -3,7 +3,6 @@ import type {
   AtscriptDbReadable,
   FilterExpr,
   TCrudPermissions,
-  TIdentification,
   TMetaResponse,
   UniqueryControls,
   Uniquery,
@@ -35,7 +34,6 @@ export class AsDbReadableController<
 
   private readonly _gates: ReadableGates;
   private readonly _preferredIdSet: ReadonlySet<string>;
-  private readonly _compositeIdShapes: readonly TIdentification[];
   private readonly _overlayIsNoOp: boolean;
 
   constructor(
@@ -47,9 +45,6 @@ export class AsDbReadableController<
     this.readable = readable;
     this._gates = this._buildGates();
     this._preferredIdSet = new Set(readable.preferredId ?? []);
-    this._compositeIdShapes = (readable.identifications ?? []).filter(
-      (id) => id.fields.length >= 2,
-    );
     const defaultOverlay = (
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
@@ -374,12 +369,9 @@ export class AsDbReadableController<
     return result;
   }
 
-  /**
-   * Extracts a composite identifier object from query params.
-   * Tries composite primary key first, then compound unique indexes.
-   */
-  protected extractCompositeId(query: Record<string, string>): Record<string, unknown> | HttpError {
-    for (const id of this._compositeIdShapes) {
+  /** Pick the first identification (PK or unique index) whose fields are all present in the query. */
+  protected extractIdShape(query: Record<string, string>): Record<string, unknown> | HttpError {
+    for (const id of this.readable.identifications) {
       const idObj: Record<string, unknown> = {};
       let allPresent = true;
       for (const field of id.fields) {
@@ -392,10 +384,7 @@ export class AsDbReadableController<
       if (allPresent) return idObj;
     }
 
-    return new HttpError(
-      400,
-      "Query params do not match any composite primary key or compound unique index",
-    );
+    return new HttpError(400, "Query params do not match any primary key or unique index");
   }
 
   // ── REST Endpoints (read-only) ──────────────────────────────────────────
@@ -621,7 +610,7 @@ export class AsDbReadableController<
     @Query() query: Record<string, string>,
     @Url() url: string,
   ): Promise<DataType | HttpError> {
-    const idObj = this.extractCompositeId(query);
+    const idObj = this.extractIdShape(query);
     if (idObj instanceof HttpError) {
       return idObj;
     }

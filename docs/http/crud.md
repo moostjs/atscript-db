@@ -111,10 +111,11 @@ All other query parameters from `GET /query` (filters, `$sort`, `$select`, `$sea
 
 ### GET /one/:id {#get-one}
 
-Retrieves a single record by primary key. Returns `404` if not found.
+Retrieves a single record by primary key (or any single-field unique index — the path resolver walks every legitimate identification). Returns `404` if not found.
 
 ```bash
 curl http://localhost:3000/todos/one/42
+curl http://localhost:3000/users/one/admin   # by username unique index
 ```
 
 **Response:**
@@ -133,13 +134,16 @@ curl "http://localhost:3000/todos/one/42?\$select=id,title&\$with=project"
 Filter parameters (like `status=active`) are **not allowed** on this endpoint. They return a `400` error. Use `GET /query` with filters instead.
 :::
 
-**Composite keys** — use query parameters instead of a path parameter:
+When the table declares `@db.table.preferredId.uniqueIndex` (the canonical addressing identifier), scalar lookups via `/one/:id` resolve against the preferredId field first; PK and other unique indexes are not retried for the same scalar (the named form below covers them when needed).
+
+**Named-form (object) addressing** — use query parameters when you want to be explicit about which identification you are addressing, or when the identifier is compound:
 
 ```bash
-curl "http://localhost:3000/task-tags/one?taskId=1&tagId=2"
+curl "http://localhost:3000/users/one?username=admin"          # single-field unique index
+curl "http://localhost:3000/task-tags/one?taskId=1&tagId=2"    # composite primary key
 ```
 
-The controller matches query parameters against composite primary keys first, then compound unique indexes.
+The controller walks every registered identification (primary key + every unique index, single-field and compound) in declaration order and picks the first whose fields are all present in the query.
 
 ### GET /meta {#get-meta}
 

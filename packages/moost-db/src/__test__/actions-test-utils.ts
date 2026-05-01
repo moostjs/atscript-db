@@ -82,7 +82,6 @@ export function makeTable(
     primaryKeys,
     preferredId: [...primaryKeys],
     identifications: [{ fields: [...primaryKeys], source: "primaryKey" }],
-    getIdentifications: () => [{ fields: [...primaryKeys], source: "primaryKey" }],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
     relations: new Map(),
@@ -188,14 +187,14 @@ export function setupActionMeta(
 export function makeOpsTable(rows: Record<string, unknown>[]): {
   primaryKeys: string[];
   fieldDescriptors: Array<{ path: string; designType: string }>;
-  getIdentifications: () => readonly { fields: readonly string[]; source: string }[];
+  identifications: readonly { fields: readonly string[]; source: string }[];
   findOne: Mock;
   findMany: Mock;
 } {
   return {
     primaryKeys: ["id"],
     fieldDescriptors: [{ path: "id", designType: "string" }],
-    getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
+    identifications: [{ fields: ["id"], source: "primaryKey" }],
     findOne: vi
       .fn()
       .mockImplementation((query: { filter: Record<string, unknown> }) =>
@@ -209,12 +208,12 @@ export function makeOpsTable(rows: Record<string, unknown>[]): {
 export function makePkOnlyTable(designType: "string" | "number" = "string"): {
   primaryKeys: string[];
   fieldDescriptors: Array<{ path: string; designType: string }>;
-  getIdentifications: () => readonly { fields: readonly string[]; source: string }[];
+  identifications: readonly { fields: readonly string[]; source: string }[];
 } {
   return {
     primaryKeys: ["id"],
     fieldDescriptors: [{ path: "id", designType }],
-    getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
+    identifications: [{ fields: ["id"], source: "primaryKey" }],
   };
 }
 

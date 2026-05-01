@@ -33,7 +33,6 @@ function makeMockTable(rows: Record<string, unknown>[]): ReturnType<typeof Objec
     primaryKeys: ["id"],
     preferredId: ["id"],
     identifications: [{ fields: ["id"], source: "primaryKey" }],
-    getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
     relations: new Map(),

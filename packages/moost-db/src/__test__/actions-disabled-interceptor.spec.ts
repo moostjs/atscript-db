@@ -379,3 +379,71 @@ describe("Gate interceptor — type contract", () => {
     expect(_opts).toBeDefined();
   });
 });
+
+describe("Gate interceptor — table resolution from controller (regression)", () => {
+  it("resolves the bound table from `controller.readable` without relying on `instanceof` (duck-typed)", async () => {
+    const table = makeOpsTable([{ id: "a", status: "processing" }]);
+    class CtrlExposingReadable {
+      readable = table;
+      ship(): void {}
+    }
+    setupActionMeta(CtrlExposingReadable, "ship", { name: "ship" }, ["row"]);
+    const def = buildGateInterceptor({
+      action: "ship",
+      level: "row",
+      disabled: () => [false],
+      onDisabledRows: "reject",
+    });
+
+    await runInActionCtx('{"id":"a"}', async () => {
+      bindController(new CtrlExposingReadable(), "ship");
+      await runBeforeInterceptor(def);
+      expect(table.findOne).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("falls through to `controller.table` when `readable` is absent", async () => {
+    const table = makeOpsTable([{ id: "b", status: "processing" }]);
+    class CtrlExposingTable {
+      table = table;
+      ship(): void {}
+    }
+    setupActionMeta(CtrlExposingTable, "ship", { name: "ship" }, ["row"]);
+    const def = buildGateInterceptor({
+      action: "ship",
+      level: "row",
+      disabled: () => [false],
+      onDisabledRows: "reject",
+    });
+
+    await runInActionCtx('{"id":"b"}', async () => {
+      bindController(new CtrlExposingTable(), "ship");
+      await runBeforeInterceptor(def);
+      expect(table.findOne).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("`controller.readable` wins over opts.table when both are present (controller is the spec contract)", async () => {
+    const ctrlTable = makeOpsTable([{ id: "x", status: "processing" }]);
+    const optsTable = makeOpsTable([]);
+    class CtrlExposingReadable {
+      readable = ctrlTable;
+      ship(): void {}
+    }
+    setupActionMeta(CtrlExposingReadable, "ship", { name: "ship" }, ["row"]);
+    const def = buildGateInterceptor({
+      action: "ship",
+      level: "row",
+      disabled: () => [false],
+      onDisabledRows: "reject",
+      table: optsTable,
+    });
+
+    await runInActionCtx('{"id":"x"}', async () => {
+      bindController(new CtrlExposingReadable(), "ship");
+      await runBeforeInterceptor(def);
+      expect(ctrlTable.findOne).toHaveBeenCalledTimes(1);
+      expect(optsTable.findOne).not.toHaveBeenCalled();
+    });
+  });
+});

@@ -7,9 +7,10 @@ interface IdError {
   details?: IdError[];
 }
 
+/** Duck-typed shape; matches `AtscriptDbReadable`'s public surface. */
 export interface IdValidationSource {
-  getIdentifications(): readonly TIdentification[];
-  fieldDescriptors: readonly TDbFieldMeta[];
+  readonly identifications: readonly TIdentification[];
+  readonly fieldDescriptors: readonly TDbFieldMeta[];
 }
 
 interface SourceCache {
@@ -23,7 +24,7 @@ const SOURCE_CACHE = new WeakMap<IdValidationSource, SourceCache>();
 function getSourceCache(source: IdValidationSource): SourceCache {
   let cache = SOURCE_CACHE.get(source);
   if (cache) return cache;
-  const identifications = source.getIdentifications();
+  const identifications = source.identifications;
   const byKeySig = new Map<string, TIdentification>();
   for (const ident of identifications) {
     byKeySig.set(fieldsSig(ident.fields), ident);
@@ -44,8 +45,8 @@ function fieldsSig(fields: readonly string[]): string {
 
 export function isIdValidationSource(value: unknown): value is IdValidationSource {
   if (!value || typeof value !== "object") return false;
-  const v = value as { getIdentifications?: unknown; fieldDescriptors?: unknown };
-  return typeof v.getIdentifications === "function" && Array.isArray(v.fieldDescriptors);
+  const v = value as { identifications?: unknown; fieldDescriptors?: unknown };
+  return Array.isArray(v.identifications) && Array.isArray(v.fieldDescriptors);
 }
 
 export function validateSingleId(

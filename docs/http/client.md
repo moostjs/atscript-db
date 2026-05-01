@@ -132,13 +132,18 @@ const page = await users.pages(
 
 ### one {#one}
 
-`GET /one/:id` — fetch by primary key. Returns `null` on 404. See [CRUD — GET /one](./crud#get-one).
+`GET /one/:id` (scalar) or `GET /one?key=val` (object) — fetch by any registered identification: primary key, single-field unique index, or compound unique index. Returns `null` on 404. See [CRUD — GET /one](./crud#get-one).
 
 ```typescript
-// Scalar PK
+// Scalar — resolves through every identification (PK + every unique index).
+// When the table declares an explicit `@db.table.preferredId.uniqueIndex`,
+// the scalar lookup is restricted to that field for determinism.
 const user = await users.one("abc-123");
 
-// Composite PK
+// Object — recommended for non-PK lookups; deterministic (avoids any ambiguity
+// when the same scalar could match multiple unique fields). The client routes
+// any object id to the named-form `/one?key=val` endpoint.
+const userByName = await users.one({ username: "admin" });
 const row = await users.one({ tenantId: "t1", userId: "u1" });
 ```
 

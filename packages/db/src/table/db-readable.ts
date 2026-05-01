@@ -764,91 +764,76 @@ export class AtscriptDbReadable<
   }
 
   /**
-   * Resolves an id value into a filter expression.
+   * Resolve an id value into a filter expression.
+   *
+   * When `preferredId` differs from the PK, scalar ids resolve only against
+   * the preferred field (deterministic addressing). Otherwise scalars try PK
+   * + every single-field unique index; objects try PK + compound unique
+   * indexes.
    */
   protected _resolveIdFilter(id: unknown): FilterExpr | null {
-    const orFilters: FilterExpr[] = [];
-
     const pkFields = this.primaryKeys;
-    if (pkFields.length === 1) {
-      const filter = this._tryFieldFilter(pkFields[0], id);
-      if (filter) {
-        orFilters.push(filter);
-      }
-    } else if (pkFields.length > 1 && typeof id === "object" && id !== null) {
-      const idObj = id as Record<string, unknown>;
-      const compositeFilter: FilterExpr = {};
-      let valid = true;
-      for (const field of pkFields) {
-        const fieldType = this.flatMap.get(field);
-        if (fieldType && !isIdCompatible(idObj[field], fieldType)) {
-          valid = false;
-          break;
-        }
-        try {
-          compositeFilter[field] = fieldType
-            ? this.adapter.prepareId(idObj[field], fieldType)
-            : idObj[field];
-        } catch {
-          valid = false;
-          break;
-        }
-      }
-      if (valid) {
-        orFilters.push(compositeFilter);
+    const preferredFields = this.preferredId;
+    const isExplicitPreferred =
+      preferredFields.length !== pkFields.length ||
+      preferredFields.some((f, i) => f !== pkFields[i]);
+    const isScalar = id === null || typeof id !== "object";
+
+    if (isScalar && isExplicitPreferred && preferredFields.length === 1) {
+      return this._tryFieldFilter(preferredFields[0]!, id);
+    }
+
+    // Accept both scalar id and `{[field]: scalar}` object form.
+    const tryScalarOrField = (field: string): FilterExpr | null => {
+      const value = isScalar ? id : (id as Record<string, unknown>)[field];
+      return value === undefined ? null : this._tryFieldFilter(field, value);
+    };
+
+    const orFilters: FilterExpr[] = [];
+    const idObj = isScalar ? null : (id as Record<string, unknown>);
+
+    // Single-field identifications (PK + every single-field unique index).
+    for (const ident of this.identifications) {
+      if (ident.fields.length !== 1) continue;
+      const filter = tryScalarOrField(ident.fields[0]!);
+      if (filter) orFilters.push(filter);
+    }
+
+    // Compound identifications (object form only). PK is unconditional;
+    // compound unique indexes are fallback — only attempted when nothing
+    // else has matched, so a single-field match wins over a compound one.
+    if (idObj) {
+      for (const ident of this.identifications) {
+        if (ident.fields.length < 2) continue;
+        if (ident.source !== "primaryKey" && orFilters.length > 0) break;
+        const filter = this._tryCompoundFilter(ident.fields, idObj);
+        if (filter) orFilters.push(filter);
       }
     }
 
-    // Try single-field unique indexes
-    for (const prop of this.uniqueProps) {
-      const filter = this._tryFieldFilter(prop, id);
-      if (filter) {
-        orFilters.push(filter);
-      }
-    }
-
-    // Try compound unique indexes when id is an object
-    if (typeof id === "object" && id !== null && orFilters.length === 0) {
-      const idObj = id as Record<string, unknown>;
-      for (const index of this._meta.indexes.values()) {
-        if (index.type !== "unique" || index.fields.length < 2) {
-          continue;
-        }
-        const compoundFilter: FilterExpr = {};
-        let valid = true;
-        for (const indexField of index.fields) {
-          const fieldName = indexField.name;
-          if (idObj[fieldName] === undefined) {
-            valid = false;
-            break;
-          }
-          const fieldType = this.flatMap.get(fieldName);
-          if (fieldType && !isIdCompatible(idObj[fieldName], fieldType)) {
-            valid = false;
-            break;
-          }
-          try {
-            compoundFilter[fieldName] = fieldType
-              ? this.adapter.prepareId(idObj[fieldName], fieldType)
-              : idObj[fieldName];
-          } catch {
-            valid = false;
-            break;
-          }
-        }
-        if (valid) {
-          orFilters.push(compoundFilter);
-        }
-      }
-    }
-
-    if (orFilters.length === 0) {
-      return null;
-    }
-    if (orFilters.length === 1) {
-      return orFilters[0];
-    }
+    if (orFilters.length === 0) return null;
+    if (orFilters.length === 1) return orFilters[0];
     return { $or: orFilters } as FilterExpr;
+  }
+
+  /** Build a single-key filter from `idObj` over `fields`, or null if any field is missing/incompatible. */
+  private _tryCompoundFilter(
+    fields: readonly string[],
+    idObj: Record<string, unknown>,
+  ): FilterExpr | null {
+    const filter: FilterExpr = {};
+    for (const field of fields) {
+      const value = idObj[field];
+      if (value === undefined) return null;
+      const fieldType = this.flatMap.get(field);
+      if (fieldType && !isIdCompatible(value, fieldType)) return null;
+      try {
+        filter[field] = fieldType ? this.adapter.prepareId(value, fieldType) : value;
+      } catch {
+        return null;
+      }
+    }
+    return filter;
   }
 
   /**

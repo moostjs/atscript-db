@@ -53,7 +53,6 @@ function createMockTable(overrides: Record<string, any> = {}) {
     primaryKeys,
     preferredId: primaryKeys,
     identifications,
-    getIdentifications: () => identifications,
     uniqueProps: new Set<string>(),
     indexes,
     relations: new Map(),
@@ -528,10 +527,33 @@ describe("AsDbController", () => {
       expect((result as HttpError).body.statusCode).toBe(400);
     });
 
-    it("should return 400 when no composite ID and no compound unique indexes", async () => {
-      const result = await controller.getOneComposite({ id: "123" }, "/one?id=123");
+    it("should return 400 when query params match no identification (PK or unique index)", async () => {
+      const result = await controller.getOneComposite({ unknown: "x" }, "/one?unknown=x");
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(400);
+    });
+
+    it("accepts a single-field unique-index identifier via query params (e.g. ?username=admin)", async () => {
+      const ctx = createController({
+        primaryKeys: ["id"],
+        indexes: new Map([
+          [
+            "by_username",
+            {
+              key: "by_username",
+              name: "by_username",
+              type: "unique",
+              fields: [{ name: "username", sort: "asc" }],
+            },
+          ],
+        ]),
+      });
+      const result = await ctx.controller.getOneComposite(
+        { username: "alice" },
+        "/one?username=alice",
+      );
+      expect(ctx.table.findById).toHaveBeenCalledWith({ username: "alice" }, expect.any(Object));
+      expect(result).toEqual({ id: "1", name: "Alice" });
     });
 
     it("should return 404 when not found", async () => {
@@ -759,8 +781,8 @@ describe("AsDbController", () => {
       expect((result as HttpError).body.statusCode).toBe(400);
     });
 
-    it("should return 400 when no composite ID and no compound unique indexes", async () => {
-      const result = await controller.removeComposite({ id: "123" });
+    it("should return 400 when query params match no identification (PK or unique index)", async () => {
+      const result = await controller.removeComposite({ unknown: "x" });
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(400);
     });

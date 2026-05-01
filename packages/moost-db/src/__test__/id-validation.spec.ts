@@ -3,6 +3,7 @@ import { ValidatorError } from "@atscript/typescript/utils";
 import type { TDbFieldMeta, TIdentification } from "@atscript/db";
 
 import {
+  isIdValidationSource,
   validateSingleId,
   validateMultiId,
   type IdValidationSource,
@@ -18,7 +19,7 @@ function makeSource(
   fieldDescriptors: readonly Pick<TDbFieldMeta, "path" | "designType">[],
 ): IdValidationSource {
   return {
-    getIdentifications: () => identifications,
+    identifications,
     fieldDescriptors: fieldDescriptors as readonly TDbFieldMeta[],
   };
 }
@@ -183,5 +184,53 @@ describe("validateMultiId", () => {
     expect(() =>
       validateMultiId([{ id: "1" }, { email: "a@example.com" }], uniqueSource),
     ).not.toThrow();
+  });
+});
+
+describe("isIdValidationSource", () => {
+  it("accepts the canonical AtscriptDbReadable shape (`identifications` + `fieldDescriptors` getters returning arrays)", () => {
+    const source = {
+      get identifications() {
+        return [{ fields: ["id"], source: "primaryKey" }];
+      },
+      get fieldDescriptors() {
+        return [{ path: "id", designType: "string" }];
+      },
+    };
+    expect(isIdValidationSource(source)).toBe(true);
+  });
+
+  it("accepts plain-object data shape (no getter, just array properties)", () => {
+    const source = {
+      identifications: [{ fields: ["id"], source: "primaryKey" }],
+      fieldDescriptors: [{ path: "id", designType: "string" }],
+    };
+    expect(isIdValidationSource(source)).toBe(true);
+  });
+
+  it("rejects the legacy method-shape `{ getIdentifications: fn, fieldDescriptors: [] }`", () => {
+    // Regression: prior contract was `getIdentifications()` as a method;
+    // current contract is the `identifications` getter to match
+    // `AtscriptDbReadable`'s public surface.
+    const legacy = {
+      getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
+      fieldDescriptors: [{ path: "id", designType: "string" }],
+    };
+    expect(isIdValidationSource(legacy)).toBe(false);
+  });
+
+  it("rejects values missing `identifications`", () => {
+    expect(isIdValidationSource({ fieldDescriptors: [] })).toBe(false);
+  });
+
+  it("rejects values missing `fieldDescriptors`", () => {
+    expect(isIdValidationSource({ identifications: [] })).toBe(false);
+  });
+
+  it("rejects non-object inputs", () => {
+    expect(isIdValidationSource(null)).toBe(false);
+    expect(isIdValidationSource(undefined)).toBe(false);
+    expect(isIdValidationSource("table")).toBe(false);
+    expect(isIdValidationSource(42)).toBe(false);
   });
 });

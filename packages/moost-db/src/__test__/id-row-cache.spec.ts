@@ -16,7 +16,7 @@ describe("cached ID row wook", () => {
         { path: "id", designType: "string" },
         { path: "email", designType: "string" },
       ],
-      getIdentifications: () => [
+      identifications: [
         { fields: ["id"], source: "primaryKey" as const },
         { fields: ["email"], source: "email" },
       ],
@@ -55,7 +55,7 @@ describe("cached ID row wook", () => {
         { path: "id", designType: "string" },
         { path: "slug", designType: "string" },
       ],
-      getIdentifications: () => [
+      identifications: [
         { fields: ["id"], source: "primaryKey" as const },
         { fields: ["slug"], source: "by_slug" },
       ],
@@ -86,7 +86,7 @@ describe("cached ID row wook", () => {
         { path: "id", designType: "string" },
         { path: "name", designType: "string" },
       ],
-      getIdentifications: () => [{ fields: ["id"], source: "primaryKey" as const }],
+      identifications: [{ fields: ["id"], source: "primaryKey" as const }],
       findOne: vi.fn(),
       findMany,
     };
@@ -116,7 +116,7 @@ describe("cached ID row wook", () => {
         { path: "id", designType: "string" },
         { path: "name", designType: "string" },
       ],
-      getIdentifications: () => [{ fields: ["id"], source: "primaryKey" as const }],
+      identifications: [{ fields: ["id"], source: "primaryKey" as const }],
       findOne: vi.fn(),
       findMany,
     };

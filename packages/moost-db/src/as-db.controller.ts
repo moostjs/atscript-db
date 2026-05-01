@@ -150,7 +150,7 @@ export class AsDbController<
    */
   @Delete("")
   async removeComposite(@Query() query: Record<string, string>): Promise<unknown> {
-    const idObj = this.extractCompositeId(query);
+    const idObj = this.extractIdShape(query);
     if (idObj instanceof HttpError) {
       return idObj;
     }

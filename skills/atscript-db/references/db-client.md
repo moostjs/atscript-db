@@ -19,7 +19,8 @@ const users = new Client<typeof User>("/api/users");
 await users.query(); // GET /api/users/query
 await users.query({ filter: { active: true } });
 await users.pages({ controls: { $sort: { name: 1 } } }, 1, 20);
-await users.one(42); // GET /api/users/one/42
+await users.one(42); // GET /api/users/one/42 — by PK or single-field unique index
+await users.one({ username: "admin" }); // single-field unique idx → GET /api/users/one?username=admin (deterministic, no field-shape ambiguity)
 await users.one({ orderId: 1, productId: 2 }); // composite key → GET /api/users/one?orderId=1&productId=2
 await users.count({ filter: { active: true } }); // GET /api/users/query?$count=1
 await users.aggregate({ controls: { $groupBy: ["role"], $select: [...] } });
