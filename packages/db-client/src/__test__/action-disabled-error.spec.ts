@@ -16,6 +16,7 @@ beforeAll(async () => {
     vectorSearchable: false,
     searchIndexes: [],
     primaryKeys: ["id"],
+    preferredId: ["id"],
     relations: [],
     fields: {},
     actions: [],
@@ -80,15 +81,15 @@ describe("ActionDisabledError — client-side typed marker", () => {
         message: 'Action "ship" is disabled for this row',
         statusCode: 409,
         action: "ship",
-        pk: 7,
+        id: { id: 7 },
       },
     });
     const c = new Client("/api/users", { fetch: fetchFn });
-    await expect(c.action("ship", 7)).rejects.toBeInstanceOf(ActionDisabledError);
+    await expect(c.action("ship", { id: 7 })).rejects.toBeInstanceOf(ActionDisabledError);
 
     let caught: unknown;
     try {
-      await c.action("ship", 7);
+      await c.action("ship", { id: 7 });
     } catch (e) {
       caught = e;
     }
@@ -96,13 +97,13 @@ describe("ActionDisabledError — client-side typed marker", () => {
     expect(caught).toBeInstanceOf(ClientError); // subclass relation preserved
     const err = caught as ActionDisabledError;
     expect(err.action).toBe("ship");
-    expect(err.pk).toBe(7);
-    expect(err.pks).toBeUndefined();
+    expect(err.id).toEqual({ id: 7 });
+    expect(err.ids).toBeUndefined();
     expect(err.status).toBe(409);
     expect(err.message).toBe('Action "ship" is disabled for this row');
   });
 
-  it("exposes pks accessor for rows-level rejections", async () => {
+  it("exposes ids accessor for rows-level rejections", async () => {
     const fetchFn = fetchWith([archiveAction], {
       status: 409,
       body: {
@@ -110,32 +111,32 @@ describe("ActionDisabledError — client-side typed marker", () => {
         message: 'Action "archive" is disabled for 2 of the selected rows',
         statusCode: 409,
         action: "archive",
-        pks: [2, 3],
+        ids: [{ id: 2 }, { id: 3 }],
       },
     });
     const c = new Client("/api/users", { fetch: fetchFn });
     let caught: unknown;
     try {
-      await c.action("archive", [1, 2, 3]);
+      await c.action("archive", [{ id: 1 }, { id: 2 }, { id: 3 }]);
     } catch (e) {
       caught = e;
     }
     expect(caught).toBeInstanceOf(ActionDisabledError);
     const err = caught as ActionDisabledError;
     expect(err.action).toBe("archive");
-    expect(err.pks).toEqual([2, 3]);
-    expect(err.pk).toBeUndefined();
+    expect(err.ids).toEqual([{ id: 2 }, { id: 3 }]);
+    expect(err.id).toBeUndefined();
   });
 
   it("falls back to plain ClientError when error body has no `name: 'ActionDisabledError'`", async () => {
     const fetchFn = fetchWith([shipAction], {
       status: 400,
-      body: { message: "bad PK", statusCode: 400 },
+      body: { message: "bad ID", statusCode: 400 },
     });
     const c = new Client("/api/users", { fetch: fetchFn });
     let caught: unknown;
     try {
-      await c.action("ship", 7);
+      await c.action("ship", { id: 7 });
     } catch (e) {
       caught = e;
     }
@@ -152,7 +153,7 @@ describe("ActionDisabledError — client-side typed marker", () => {
     const c = new Client("/api/users", { fetch: fetchFn });
     let caught: unknown;
     try {
-      await c.action("ship", 7);
+      await c.action("ship", { id: 7 });
     } catch (e) {
       caught = e;
     }

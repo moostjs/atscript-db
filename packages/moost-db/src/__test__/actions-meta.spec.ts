@@ -28,7 +28,7 @@ describe("AsDbController — actions in /meta", () => {
           httpMethod: "POST",
           path: "/users/actions/block",
           action: { name: "block", opts: { label: "Block", icon: "i-as-block" } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);

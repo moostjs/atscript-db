@@ -1,13 +1,13 @@
 export { DbAction } from "./db-action.decorator";
 export { DbActionDefault } from "./db-action-default.decorator";
-export { DbActionPK } from "./db-action-pk.decorator";
-export { DbActionPKs } from "./db-action-pks.decorator";
+export { DbActionID } from "./db-action-id.decorator";
+export { DbActionIDs } from "./db-action-ids.decorator";
 export { DbActionRow, DbActionRows } from "./db-action-row.decorator";
 export { DbActions, DbTableActions, DbRowActions, DbRowsActions } from "./db-actions.decorator";
 export type { DbActionOpts, TDbActionsEntry, TDbActionsEntryUnpinned } from "./types";
 export { discoverActions } from "./discover";
-export type { PkValidationSource } from "./pk-validation";
-export { useDbActionPk, useDbActionPks } from "./pk-cache";
+export type { IdValidationSource } from "./id-validation";
+export { useDbActionId, useDbActionIds } from "./id-cache";
 export { useDbActionRow, useDbActionRows } from "./row-cache";
 export { ActionDisabledError } from "./action-disabled-error";
 export type { ActionDisabledErrorBody } from "./action-disabled-error";

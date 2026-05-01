@@ -328,6 +328,7 @@ export abstract class AsReadableController<
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: [],
+      preferredId: [],
       relations: [],
       fields: {},
       type: this.getSerializedType(),

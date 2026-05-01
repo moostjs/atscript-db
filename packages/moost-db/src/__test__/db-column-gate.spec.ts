@@ -41,6 +41,7 @@ function makeMockTable({
     },
     flatMap,
     primaryKeys: ["id"],
+    preferredId: ["id"],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
     relations: new Map(),

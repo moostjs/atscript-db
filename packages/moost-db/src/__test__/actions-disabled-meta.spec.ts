@@ -5,6 +5,8 @@ import { DbRowActions, DbTableActions } from "../actions/db-actions.decorator";
 import { fakeOverview, makeApp, makeTable } from "./actions-test-utils";
 
 const PREFIX = "[moost-db actions]";
+const disabledWhenNotProcessing = (rows: unknown[]) =>
+  rows.map((row) => (row as { status: string }).status !== "processing");
 
 /**
  * Wire-shape coverage for the new `disabled` and `requiredFields` fields on
@@ -17,22 +19,21 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
   it("emits disabled as fn.toString() and no requiredFields when not declared", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
-    const fn = (row: unknown) => (row as { status: string }).status !== "processing";
     ctx.setOverview([
       fakeOverview(C, [
         {
           method: "ship",
           httpMethod: "POST",
           path: "/orders/actions/ship",
-          action: { name: "ship", opts: { label: "Ship", disabled: fn } },
-          paramKinds: ["pk"],
+          action: { name: "ship", opts: { label: "Ship", disabled: disabledWhenNotProcessing } },
+          paramKinds: ["id"],
         },
       ]),
     ]);
     const ctrl = new C(makeTable() as never, ctx.app);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
-    expect(meta.actions[0].disabled).toBe(fn.toString());
+    expect(meta.actions[0].disabled).toBe(disabledWhenNotProcessing.toString());
     expect(meta.actions[0]).not.toHaveProperty("requiredFields");
   });
 
@@ -49,11 +50,12 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
             name: "ship",
             opts: {
               label: "Ship",
-              disabled: (row: unknown) => (row as { status: string }).status !== "processing",
+              disabled: (rows: unknown[]) =>
+                rows.map((row) => (row as { status: string }).status !== "processing"),
               requiredFields: ["status", "address.locked"],
             },
           },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -68,7 +70,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
         label: "Block",
         processor: "backend",
         value: "/users/actions/block",
-        disabled: (row: { blocked: boolean }) => row.blocked,
+        disabled: (rows: { blocked: boolean }[]) => rows.map((row) => row.blocked),
         requiredFields: ["blocked", "role"],
       },
     })
@@ -93,7 +95,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
           path: "/c/refresh",
           action: {
             name: "refresh",
-            opts: { label: "Refresh", disabled: () => false },
+            opts: { label: "Refresh", disabled: () => [false] },
           },
           paramKinds: [],
         },
@@ -117,7 +119,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
           httpMethod: "POST",
           path: "/orders/actions/ship",
           action: { name: "ship", opts: { label: "Ship", requiredFields: ["status"] } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -156,7 +158,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
       refresh: {
         label: "Refresh",
         processor: "custom",
-        disabled: () => false,
+        disabled: () => [false],
       },
     })
     class C extends AsDbController {}
@@ -171,7 +173,8 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
 
   it("capturing closure emits via fn.toString() — server does NOT validate cleanliness", async () => {
     const allowed = new Set(["processing"]);
-    const captures = (row: unknown) => !allowed.has((row as { status: string }).status);
+    const captures = (rows: unknown[]) =>
+      rows.map((row) => !allowed.has((row as { status: string }).status));
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -181,7 +184,7 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
           httpMethod: "POST",
           path: "/orders/actions/ship",
           action: { name: "ship", opts: { label: "Ship", disabled: captures } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -199,8 +202,8 @@ describe("Action discovery — disabled + requiredFields wire emission", () => {
 
 describe("Action discovery — body conflict with row decorators", () => {
   for (const [label, kinds] of [
-    ["@DbActionPK + @Body", ["pk", "body"]],
-    ["@DbActionPKs + @Body", ["pks", "body"]],
+    ["@DbActionID + @Body", ["id", "body"]],
+    ["@DbActionIDs + @Body", ["ids", "body"]],
     ["@DbActionRow + @Body", ["row", "body"]],
     ["@DbActionRows + @Body", ["rows", "body"]],
   ] as const) {
@@ -209,7 +212,7 @@ describe("Action discovery — body conflict with row decorators", () => {
       const ctx = makeApp();
       const opts =
         kinds[0] === "row" || kinds[0] === "rows"
-          ? { label: "Mix", disabled: () => false }
+          ? { label: "Mix", disabled: () => [false] }
           : { label: "Mix" };
       ctx.setOverview([
         fakeOverview(C, [

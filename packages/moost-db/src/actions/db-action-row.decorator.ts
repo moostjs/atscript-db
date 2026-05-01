@@ -17,9 +17,8 @@ function createRowParamDecorator(
 }
 
 /**
- * Parameter decorator that injects the row whose PK was supplied in the
- * request body. Reads from the cached row wook (fetched once per request,
- * shared with the gate interceptor when `disabled` is set).
+ * Parameter decorator that injects the row whose identifier was supplied in
+ * the request body.
  *
  * Marks the param so {@link discoverActions} infers the action's `level` as
  * `'row'`. Co-occurrence with `@DbActionRows()` (or any multi-cardinality
@@ -33,8 +32,8 @@ export function DbActionRow(): ParameterDecorator {
 }
 
 /**
- * Parameter decorator that injects the rows-array fetched by primary keys
- * from the request body. Reads from the cached row-array wook.
+ * Parameter decorator that injects the rows fetched by the identifiers
+ * supplied in the request body.
  *
  * Marks the param so {@link discoverActions} infers the action's `level` as
  * `'rows'`. In `'rows'` + `'skip'` mode the resolved value contains only the

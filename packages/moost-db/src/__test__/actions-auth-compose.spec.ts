@@ -3,7 +3,7 @@ import { Label, getMoostMate } from "moost";
 import { Post } from "@moostjs/event-http";
 
 import { DbAction } from "../actions/db-action.decorator";
-import { DbActionPK } from "../actions/db-action-pk.decorator";
+import { DbActionID } from "../actions/db-action-id.decorator";
 import { MOOST_DB_ACTION, MOOST_DB_ACTION_PARAM } from "../actions/keys";
 
 /**
@@ -19,7 +19,7 @@ describe("@DbAction composition with Moost decorators", () => {
       @Post("actions/block")
       @Label("Block User")
       @DbAction("block", { icon: "i-as-block" })
-      async block(@DbActionPK() id: string) {
+      async block(@DbActionID() id: string) {
         return id;
       }
     }
@@ -39,9 +39,9 @@ describe("@DbAction composition with Moost decorators", () => {
       name: "block",
       opts: { icon: "i-as-block" },
     });
-    // @DbActionPK marked the param.
+    // @DbActionID marked the param.
     expect((meta.params?.[0] as unknown as Record<string, unknown>)?.[MOOST_DB_ACTION_PARAM]).toBe(
-      "pk",
+      "id",
     );
   });
 });

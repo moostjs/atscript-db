@@ -149,7 +149,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
           httpMethod: "POST",
           path: "/c/approve",
           action: { name: "approve", opts: { label: "Approve" } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);

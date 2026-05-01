@@ -21,6 +21,7 @@ describe("MetaResponse — crud shape", () => {
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: ["id"],
+      preferredId: ["id"],
       relations: [],
       fields: {},
       type: { kind: "object" } as never,

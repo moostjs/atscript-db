@@ -58,14 +58,14 @@ describe("Action discovery — warning + drop scenarios", () => {
           httpMethod: "POST",
           path: "/c/edit1",
           action: { name: "edit1", opts: { label: "Edit 1", default: true } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
         {
           method: "edit2",
           httpMethod: "POST",
           path: "/c/edit2",
           action: { name: "edit2", opts: { label: "Edit 2", default: true } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -88,7 +88,7 @@ describe("Action discovery — warning + drop scenarios", () => {
           httpMethod: "POST",
           path: "/c/block",
           action: { name: "block", opts: {} },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -109,7 +109,7 @@ describe("Action discovery — warning + drop scenarios", () => {
           path: "/c/block",
           action: { name: "block", opts: {} },
           label: "Block User",
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -131,7 +131,7 @@ describe("Action discovery — warning + drop scenarios", () => {
           path: "/c/block",
           action: { name: "block", opts: { label: "Block User" } },
           label: "Block",
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -140,7 +140,7 @@ describe("Action discovery — warning + drop scenarios", () => {
     expect(meta.actions[0].label).toBe("Block User");
   });
 
-  it("rejects @DbActionPK + @Body co-occurrence", async () => {
+  it("rejects @DbActionID + @Body co-occurrence", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -150,7 +150,7 @@ describe("Action discovery — warning + drop scenarios", () => {
           httpMethod: "POST",
           path: "/c/block",
           action: { name: "blockWithReason", opts: { label: "Block w/ reason" } },
-          paramKinds: ["pk", "body"],
+          paramKinds: ["id", "body"],
         },
       ]),
     ]);

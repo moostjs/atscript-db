@@ -24,9 +24,9 @@ describe("DbActionOpts type derivation", () => {
     expectTypeOf<DbActionOpts>().toMatchTypeOf<Structural>();
   });
 
-  it("disabled is a function (TRow → boolean), not a string", () => {
+  it("disabled is a batch function (TRow[] → boolean[]), not a string", () => {
     type DisabledField = NonNullable<DbActionOpts<{ status: string }>["disabled"]>;
-    expectTypeOf<DisabledField>().toEqualTypeOf<(row: { status: string }) => boolean>();
+    expectTypeOf<DisabledField>().toEqualTypeOf<(rows: { status: string }[]) => boolean[]>();
   });
 
   it("requiredFields is plain string[] in v1", () => {

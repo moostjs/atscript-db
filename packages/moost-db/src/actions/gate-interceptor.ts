@@ -1,4 +1,5 @@
 import { current } from "@wooksjs/event-core";
+import { HttpError } from "@moostjs/event-http";
 import {
   defineBeforeInterceptor,
   TInterceptorPriority,
@@ -8,11 +9,10 @@ import {
 
 import { ActionDisabledError } from "./action-disabled-error";
 import { isAsDbReadableControllerInstance } from "./controller-registry";
-import { boundTableKey, dbActionPkSlot, dbActionPksSlot } from "./pk-cache";
+import { boundTableKey, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
 import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import type { TOnDisabledRows } from "./types";
 
-// AFTER_GUARD: pins the gate after `@Authenticate` and before the resolve pipe.
 const GATE_PRIORITY = TInterceptorPriority.AFTER_GUARD;
 
 function injectBoundTable(table: unknown): void {
@@ -32,7 +32,7 @@ function injectBoundTable(table: unknown): void {
 export interface GateInterceptorOpts {
   action: string;
   level: "row" | "rows";
-  disabled: (row: unknown) => boolean;
+  disabled: (rows: unknown[]) => boolean[];
   onDisabledRows: TOnDisabledRows;
   table?: unknown;
 }
@@ -44,40 +44,69 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
     const ctx = current();
     if (level === "row") {
       const row = await ctx.get(dbActionRowSlot);
-      if (disabled(row)) {
-        const pk = await ctx.get(dbActionPkSlot);
-        throw new ActionDisabledError(action, pk);
+      const verdicts = disabled([row]);
+      assertVerdictLength(action, verdicts, 1);
+      if (verdicts[0]) {
+        const id = await ctx.get(dbActionIdSlot);
+        throw new ActionDisabledError(action, id);
       }
       return;
     }
-    const pks = (await ctx.get(dbActionPksSlot)) as unknown[];
-    const rows = (await ctx.get(dbActionRowsSlot)) as unknown[];
-    const failingPks: unknown[] = [];
-    const passingRows: unknown[] = [];
-    const passingPks: unknown[] = [];
-    // FULL scan — must not short-circuit; reject mode lists ALL failing PKs.
-    for (let i = 0; i < rows.length; i++) {
-      if (disabled(rows[i])) {
-        failingPks.push(pks[i]);
-      } else {
-        passingRows.push(rows[i]);
-        passingPks.push(pks[i]);
+
+    const ids = (await ctx.get(dbActionIdsSlot)) as Record<string, unknown>[];
+    const rows = (await ctx.get(dbActionRowsSlot)) as Array<Record<string, unknown> | undefined>;
+    const existingRows: unknown[] = [];
+    for (const row of rows) {
+      if (row !== undefined) {
+        existingRows.push(row);
       }
     }
+
+    const verdicts = disabled(existingRows);
+    assertVerdictLength(action, verdicts, existingRows.length);
+
+    const failingIds: Record<string, unknown>[] = [];
+    const passingRows: unknown[] = [];
+    const passingIds: Record<string, unknown>[] = [];
+    let verdictIndex = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const row = rows[i];
+      const failed = row === undefined || verdicts[verdictIndex++];
+      if (failed) {
+        failingIds.push(ids[i]);
+      } else {
+        passingRows.push(row);
+        passingIds.push(ids[i]);
+      }
+    }
+
     if (onDisabledRows === "skip") {
       if (passingRows.length === 0) {
-        throw new ActionDisabledError(action, undefined, [...pks]);
+        throw new ActionDisabledError(action, undefined, [...ids]);
       }
-      if (failingPks.length > 0) {
+      if (failingIds.length > 0) {
         ctx.set(dbActionRowsSlot, Promise.resolve(passingRows));
-        ctx.set(dbActionPksSlot, Promise.resolve(passingPks));
+        ctx.set(dbActionIdsSlot, Promise.resolve(passingIds));
       }
       return;
     }
-    if (failingPks.length > 0) {
-      throw new ActionDisabledError(action, undefined, failingPks);
+    if (failingIds.length > 0) {
+      throw new ActionDisabledError(action, undefined, failingIds);
     }
   }, GATE_PRIORITY);
+}
+
+function assertVerdictLength(
+  action: string,
+  verdicts: unknown,
+  expected: number,
+): asserts verdicts is boolean[] {
+  if (!Array.isArray(verdicts) || verdicts.length !== expected) {
+    throw new HttpError(
+      500,
+      `Action "${action}" disabled predicate returned an invalid verdict array`,
+    );
+  }
 }
 
 /** Thin interceptor for `@DbActionRow*` without `disabled` — injects only the bound table. */

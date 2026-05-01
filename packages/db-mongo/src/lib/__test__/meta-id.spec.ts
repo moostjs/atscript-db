@@ -256,8 +256,8 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
       expect(table.uniqueProps.has("id")).toBe(true);
     });
 
-    it("should track originalMetaIdFields", () => {
-      expect(table.originalMetaIdFields).toEqual(["id"]);
+    it("should resolve metaIdPhysical to the @meta.id field", () => {
+      expect(table.metaIdPhysical).toBe("id");
     });
 
     it("should track id as increment field", () => {

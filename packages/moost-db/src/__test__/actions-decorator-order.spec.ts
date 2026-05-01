@@ -90,7 +90,7 @@ describe("@DbAction + @DbActionDefault — decorator order independence", () => 
           httpMethod: "POST",
           path: "/a/edit",
           action: { name: "edit", opts: { label: "Edit", default: true } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -101,7 +101,7 @@ describe("@DbAction + @DbActionDefault — decorator order independence", () => 
           httpMethod: "POST",
           path: "/b/edit",
           action: { name: "edit", opts: { label: "Edit", default: true } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);

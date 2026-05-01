@@ -70,6 +70,7 @@ export type {
   TDbIndexField,
   TDbDefaultValue,
   TIdDescriptor,
+  TIdentification,
   TDbFieldMeta,
   TValueFormatterPair,
   TDbStorageType,

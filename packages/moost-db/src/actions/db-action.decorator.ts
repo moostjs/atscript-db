@@ -59,7 +59,7 @@ export function DbAction<TRow = unknown>(
       const def = buildGateInterceptor({
         action: name,
         level: scan.level,
-        disabled: opts.disabled as (row: unknown) => boolean,
+        disabled: opts.disabled as (rows: unknown[]) => boolean[],
         onDisabledRows: opts.onDisabledRows ?? "reject",
         table: opts.table,
       });

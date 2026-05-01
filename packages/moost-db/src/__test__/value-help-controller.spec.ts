@@ -34,7 +34,7 @@ const STATUSES: Status[] = [
 ];
 
 describe("AsJsonValueHelpController — basic plumbing", () => {
-  it("getOne returns matching row by PK", async () => {
+  it("getOne returns matching row by ID", async () => {
     const type = makeValueHelpType({
       props: {
         id: { designType: "string", annotations: { "meta.id": true } },
@@ -185,7 +185,7 @@ describe("AsJsonValueHelpController — pagination", () => {
 });
 
 describe("AsValueHelpController — meta response", () => {
-  it("meta.fields reflect @ui.dict.* annotations as hints; PK name is reported", async () => {
+  it("meta.fields reflect @ui.dict.* annotations as hints; ID name is reported", async () => {
     const type = makeValueHelpType({
       props: {
         id: { designType: "string", annotations: { "meta.id": true } },

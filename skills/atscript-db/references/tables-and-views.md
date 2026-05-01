@@ -25,21 +25,22 @@ new DbSpace(adapterFactory, myLogger);
 
 ## AtscriptDbReadable (common to tables + views)
 
-| Member                                 | Purpose                                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------------------ |
-| `tableName: string`                    | Resolved physical name (adapter override > `@db.table` > `@db.view` > interface id). |
-| `schema: string \| undefined`          | From `@db.schema`.                                                                   |
-| `primaryKeys: readonly string[]`       | PK field names (multiple = composite).                                               |
-| `indexes: Map<name, TDbIndex>`         | Resolved index definitions.                                                          |
-| `relations: Map<name, TDbRelation>`    | Nav relations.                                                                       |
-| `foreignKeys: Map<key, TDbForeignKey>` | Resolved FK constraints.                                                             |
-| `flatMap: Map<path, type>`             | All fields as dot-notation paths.                                                    |
-| `columnMap: Map<logical, physical>`    | From `@db.column`.                                                                   |
-| `navFields: ReadonlySet<string>`       | Fields that are `@db.rel.to/.from/.via`.                                             |
-| `dbAdapter / getAdapter()`             | Underlying adapter instance.                                                         |
-| `setVerbose(bool)`                     | Toggles DB debug logging (zero cost when disabled).                                  |
-| `findOne(q) / findMany(q) / count(q)`  | Read ops (signatures in `crud.md`).                                                  |
-| `aggregate(q)`                         | Group-by aggregation (see `queries.md`).                                             |
+| Member                                 | Purpose                                                                                                                                                                                                                    |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tableName: string`                    | Resolved physical name (adapter override > `@db.table` > `@db.view` > interface id).                                                                                                                                       |
+| `schema: string \| undefined`          | From `@db.schema`.                                                                                                                                                                                                         |
+| `primaryKeys: readonly string[]`       | PK field names (multiple = composite).                                                                                                                                                                                     |
+| `preferredId: readonly string[]`       | Preferred row identifier (logical field names). Equals `primaryKeys` unless `@db.table.preferredId.uniqueIndex` is set on the interface. See [actions.md § Preferred row identifier](actions.md#preferred-row-identifier). |
+| `indexes: Map<name, TDbIndex>`         | Resolved index definitions.                                                                                                                                                                                                |
+| `relations: Map<name, TDbRelation>`    | Nav relations.                                                                                                                                                                                                             |
+| `foreignKeys: Map<key, TDbForeignKey>` | Resolved FK constraints.                                                                                                                                                                                                   |
+| `flatMap: Map<path, type>`             | All fields as dot-notation paths.                                                                                                                                                                                          |
+| `columnMap: Map<logical, physical>`    | From `@db.column`.                                                                                                                                                                                                         |
+| `navFields: ReadonlySet<string>`       | Fields that are `@db.rel.to/.from/.via`.                                                                                                                                                                                   |
+| `dbAdapter / getAdapter()`             | Underlying adapter instance.                                                                                                                                                                                               |
+| `setVerbose(bool)`                     | Toggles DB debug logging (zero cost when disabled).                                                                                                                                                                        |
+| `findOne(q) / findMany(q) / count(q)`  | Read ops (signatures in `crud.md`).                                                                                                                                                                                        |
+| `aggregate(q)`                         | Group-by aggregation (see `queries.md`).                                                                                                                                                                                   |
 
 Metadata is built lazily on first access — safe to reference from peer tables.
 

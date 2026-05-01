@@ -66,6 +66,24 @@ export class ActiveTasksController extends AsDbReadableController<typeof ActiveT
 - At runtime the controller writes the final absolute path (Moost `globalPrefix` + computed prefix, leading `/`) back onto `type.metadata["db.http.path"]`.
 - The `/meta` endpoint exposes this value so FK references carry the correct URL for browser value-help pickers.
 
+## Read-response baseline
+
+Every row-returning read endpoint (`/query`, `/pages`, `/one`, `/one/:id`, including `$search` and vector-search paths) silently unions the table's `preferredId` field set into the projection BEFORE the readable is called. Rows always carry the preferred-id fields regardless of `$select`.
+
+| `$select` shape                              | Behaviour                                                                                                                                          |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| absent / `undefined`                         | full projection — preferred-id fields already present, no widening needed                                                                          |
+| `string[]` inclusion                         | dedupe + append missing preferred-id fields                                                                                                        |
+| pure inclusion map (`{ name: 1 }`)           | add missing preferred-id keys with value `1`                                                                                                       |
+| pure exclusion map (`{ id: 0 }`)             | rewritten to inclusion (all non-ignored own-table fields minus excluded) + every preferred-id field — exclusion CANNOT remove a preferred-id field |
+| mixed inclusion/exclusion (`{ a: 1, b: 0 }`) | rejected before the readable call (HTTP 400)                                                                                                       |
+
+NOT widened: `$groupBy` aggregate path (group keys are the only fields), `$count` (returns a number).
+
+The widening happens AFTER any `transformProjection()` override resolves — devs cannot suppress preferred-id fields from a specific consumer via projection. That's intentional: every row returned by a read op is guaranteed addressable. Hide identifiers at the network/authz layer instead.
+
+`preferredId` defaults to `primaryKeys`. To make it a slug or other unique-index field, declare `@db.table.preferredId.uniqueIndex(name?)` on the interface — see [annotations.md](annotations.md) and [actions.md § Preferred row identifier](actions.md#preferred-row-identifier).
+
 ## Hooks (override on subclass)
 
 ```ts
@@ -89,7 +107,7 @@ export class UsersController extends AsDbController<typeof User> {
 }
 ```
 
-- `transformFilter` / `transformProjection` may be async (session / ACL lookups).
+- `transformFilter` / `transformProjection` may be async (session / ACL lookups). The framework unions `preferredId` into the projection AFTER `transformProjection()` resolves — overrides cannot suppress preferred-id fields (see § Read-response baseline).
 - `onWrite` / `onRemove` returning `undefined` aborts with HTTP 500 (override to throw a richer error).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
 
@@ -146,6 +164,7 @@ interface TMetaResponse {
   vectorSearchable: boolean;
   searchIndexes: { name; description?; type? }[];
   primaryKeys: string[];
+  preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<string, { sortable; filterable }>;
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)

@@ -25,10 +25,12 @@ export type {
   RelationInfo,
   FieldMeta,
   ServerError,
+  AtscriptClientShape,
   DataOf,
   OwnOf,
   NavOf,
   IdOf,
+  ClientResponse,
   // Re-exported from @atscript/db
   TDbInsertResult,
   TDbInsertManyResult,

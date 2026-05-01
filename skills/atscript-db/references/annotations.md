@@ -4,27 +4,28 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 
 ## Table & column
 
-| Annotation              | Target    | Args                                | Effect                                                                                                                                             |
-| ----------------------- | --------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.table`             | Interface | `name?: string`                     | Mark as table (defaults to interface name).                                                                                                        |
-| `@db.table.renamed`     | Interface | `oldName: string`                   | Previous table name — schema sync renames in place.                                                                                                |
-| `@db.schema`            | Interface | `name: string`                      | Database schema/namespace.                                                                                                                         |
-| `@db.depth.limit`       | Interface | `depth: number`                     | Security guard on nested writes (insert / replace / patch). Absent or `0` → server rejects nested payloads (HTTP 400). Unrelated to `/meta` shape. |
-| `@db.column`            | Field     | `name: string`                      | Physical column name override. **Has perf cost — activates per-row key remapping for the whole table.**                                            |
-| `@db.column.renamed`    | Field     | `oldName: string`                   | Previous column name — schema sync renames.                                                                                                        |
-| `@db.column.collate`    | Field     | `'binary' \| 'nocase' \| 'unicode'` | Portable collation.                                                                                                                                |
-| `@db.column.precision`  | Field     | `precision, scale`                  | Decimal precision (e.g. `DECIMAL(10,2)`).                                                                                                          |
-| `@db.column.dimension`  | Field     | —                                   | Dimension — groupable in aggregate queries.                                                                                                        |
-| `@db.column.measure`    | Field     | —                                   | Measure — aggregatable (numeric/decimal only).                                                                                                     |
-| `@db.column.filterable` | Field     | —                                   | Allow field in `/query` filters when the interface is gated `'manual'`.                                                                            |
-| `@db.column.sortable`   | Field     | —                                   | Allow field in `$sort` when the interface is gated `'manual'`.                                                                                     |
-| `@db.table.filterable`  | Interface | `'auto' \| 'manual'`                | Filter gate. Absent or `'auto'` → every column filterable. `'manual'` → HTTP 400 for filters on fields without `@db.column.filterable`.            |
-| `@db.table.sortable`    | Interface | `'auto' \| 'manual'`                | Sort gate. Same semantics for sort keys.                                                                                                           |
-| `@db.json`              | Field     | —                                   | Store as one JSON column instead of flattening. **Has perf cost — activates key remapping.**                                                       |
-| `@db.ignore`            | Field     | —                                   | Exclude from DB schema entirely.                                                                                                                   |
-| `@db.http.path`         | Interface | `path: string`                      | Hint for REST route. Overwritten at runtime with the controller's computed prefix (useful for FK value-help URLs).                                 |
-| `@db.sync.method`       | Interface | `'drop' \| 'recreate'`              | Structural-change strategy: `drop` loses data, `recreate` preserves via copy.                                                                      |
-| `@db.patch.strategy`    | Field     | `'replace' \| 'merge'`              | Nested-object update behavior.                                                                                                                     |
+| Annotation                          | Target    | Args                                | Effect                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------- | --------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.table`                         | Interface | `name?: string`                     | Mark as table (defaults to interface name).                                                                                                                                                                                                                                                              |
+| `@db.table.renamed`                 | Interface | `oldName: string`                   | Previous table name — schema sync renames in place.                                                                                                                                                                                                                                                      |
+| `@db.table.preferredId.uniqueIndex` | Interface | `name?: string`                     | Pick a `@db.index.unique` group as the row's preferred identifier (UI/wire addressing). Defaults to PK when absent. Optional `name` matches the unique-index name; omitted → first declared. View interfaces rejected. See [actions.md § Preferred row identifier](actions.md#preferred-row-identifier). |
+| `@db.schema`                        | Interface | `name: string`                      | Database schema/namespace.                                                                                                                                                                                                                                                                               |
+| `@db.depth.limit`                   | Interface | `depth: number`                     | Security guard on nested writes (insert / replace / patch). Absent or `0` → server rejects nested payloads (HTTP 400). Unrelated to `/meta` shape.                                                                                                                                                       |
+| `@db.column`                        | Field     | `name: string`                      | Physical column name override. **Has perf cost — activates per-row key remapping for the whole table.**                                                                                                                                                                                                  |
+| `@db.column.renamed`                | Field     | `oldName: string`                   | Previous column name — schema sync renames.                                                                                                                                                                                                                                                              |
+| `@db.column.collate`                | Field     | `'binary' \| 'nocase' \| 'unicode'` | Portable collation.                                                                                                                                                                                                                                                                                      |
+| `@db.column.precision`              | Field     | `precision, scale`                  | Decimal precision (e.g. `DECIMAL(10,2)`).                                                                                                                                                                                                                                                                |
+| `@db.column.dimension`              | Field     | —                                   | Dimension — groupable in aggregate queries.                                                                                                                                                                                                                                                              |
+| `@db.column.measure`                | Field     | —                                   | Measure — aggregatable (numeric/decimal only).                                                                                                                                                                                                                                                           |
+| `@db.column.filterable`             | Field     | —                                   | Allow field in `/query` filters when the interface is gated `'manual'`.                                                                                                                                                                                                                                  |
+| `@db.column.sortable`               | Field     | —                                   | Allow field in `$sort` when the interface is gated `'manual'`.                                                                                                                                                                                                                                           |
+| `@db.table.filterable`              | Interface | `'auto' \| 'manual'`                | Filter gate. Absent or `'auto'` → every column filterable. `'manual'` → HTTP 400 for filters on fields without `@db.column.filterable`.                                                                                                                                                                  |
+| `@db.table.sortable`                | Interface | `'auto' \| 'manual'`                | Sort gate. Same semantics for sort keys.                                                                                                                                                                                                                                                                 |
+| `@db.json`                          | Field     | —                                   | Store as one JSON column instead of flattening. **Has perf cost — activates key remapping.**                                                                                                                                                                                                             |
+| `@db.ignore`                        | Field     | —                                   | Exclude from DB schema entirely.                                                                                                                                                                                                                                                                         |
+| `@db.http.path`                     | Interface | `path: string`                      | Hint for REST route. Overwritten at runtime with the controller's computed prefix (useful for FK value-help URLs).                                                                                                                                                                                       |
+| `@db.sync.method`                   | Interface | `'drop' \| 'recreate'`              | Structural-change strategy: `drop` loses data, `recreate` preserves via copy.                                                                                                                                                                                                                            |
+| `@db.patch.strategy`                | Field     | `'replace' \| 'merge'`              | Nested-object update behavior.                                                                                                                                                                                                                                                                           |
 
 ## Defaults
 
@@ -99,6 +100,22 @@ interface OrderLine {
     quantity: number
 }
 ```
+
+### Preferred row identifier (slug-keyed example)
+
+```atscript
+@db.table 'users'
+@db.table.preferredId.uniqueIndex 'by_slug'
+interface User {
+    @meta.id @db.default.uuid
+    id: string
+    @db.index.unique 'by_slug'
+    slug: string
+    name: string
+}
+```
+
+`meta.preferredId` ships `["slug"]` instead of `["id"]`; UI URLs, list keys, and action invocations route by `slug`. PK still works for action addressing (precedence: PK first), but the UI default is the slug.
 
 ## Array helpers for patches
 

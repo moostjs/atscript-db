@@ -10,7 +10,7 @@ import {
   MOOST_DB_ACTION_ROWS,
   type TDbActionMeta,
 } from "../actions/keys";
-import { boundTableKey } from "../actions/pk-cache";
+import { boundTableKey } from "../actions/id-cache";
 import type { DbActionOpts } from "../actions/types";
 
 /** Per-test logger spy compatible with `TConsoleBase`. */
@@ -54,7 +54,7 @@ export function makeApp(logger: LoggerSpy = makeLogger()): {
   };
 }
 
-/** Bare table mock with PK-typed field descriptors — sufficient for action discovery + PK validation. */
+/** Bare table mock with ID-typed field descriptors — sufficient for action discovery + ID validation. */
 export function makeTable(
   opts: {
     primaryKeys?: string[];
@@ -80,6 +80,9 @@ export function makeTable(
     },
     flatMap: new Map([["", {}], ...primaryKeys.map((p) => [p, {}] as [string, unknown])]),
     primaryKeys,
+    preferredId: [...primaryKeys],
+    identifications: [{ fields: [...primaryKeys], source: "primaryKey" }],
+    getIdentifications: () => [{ fields: [...primaryKeys], source: "primaryKey" }],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
     relations: new Map(),
@@ -105,7 +108,7 @@ export interface FakeHandler {
   action?: { name: string; opts?: DbActionOpts };
   /** The `@Label` decorator value to fall back to when `opts.label` is absent. */
   label?: string;
-  paramKinds?: Array<"pk" | "pks" | "row" | "rows" | "body" | "other">;
+  paramKinds?: Array<"id" | "ids" | "row" | "rows" | "body" | "other">;
 }
 
 export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
@@ -130,7 +133,7 @@ export function makeValueHelpType(options: {
   };
 }
 
-export type ActionParamKind = "pk" | "pks" | "row" | "rows";
+export type ActionParamKind = "id" | "ids" | "row" | "rows";
 
 /** HTTP test-context wrapper for action interceptor / wook tests. */
 export function runInActionCtx<T>(
@@ -172,8 +175,8 @@ export function setupActionMeta(
       ...(currentMeta as Record<string, unknown>),
       [MOOST_DB_ACTION]: { name: action.name, opts: action.opts ?? {} },
       params: paramKinds.map((kind) => {
-        if (kind === "pk") return { [MOOST_DB_ACTION_PARAM]: "pk" };
-        if (kind === "pks") return { [MOOST_DB_ACTION_PARAM]: "pks" };
+        if (kind === "id") return { [MOOST_DB_ACTION_PARAM]: "id" };
+        if (kind === "ids") return { [MOOST_DB_ACTION_PARAM]: "ids" };
         if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
         return { [MOOST_DB_ACTION_ROWS]: true };
       }),
@@ -181,32 +184,42 @@ export function setupActionMeta(
   getMoostMate().decorate(fn as never)(ctor.prototype, methodName);
 }
 
-/** Fake table with `findById` / `findMany` spies — for interceptor + row-cache tests. */
+/** Fake table with `findOne` / `findMany` spies — for interceptor + row-cache tests. */
 export function makeOpsTable(rows: Record<string, unknown>[]): {
   primaryKeys: string[];
   fieldDescriptors: Array<{ path: string; designType: string }>;
-  findById: Mock;
+  getIdentifications: () => readonly { fields: readonly string[]; source: string }[];
+  findOne: Mock;
   findMany: Mock;
 } {
   return {
     primaryKeys: ["id"],
     fieldDescriptors: [{ path: "id", designType: "string" }],
-    findById: vi
+    getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
+    findOne: vi
       .fn()
-      .mockImplementation((pk: unknown) => Promise.resolve(rows.find((r) => r.id === pk) ?? null)),
+      .mockImplementation((query: { filter: Record<string, unknown> }) =>
+        Promise.resolve(rows.find((r) => matchesFilter(r, query.filter)) ?? null),
+      ),
     findMany: vi.fn().mockResolvedValue(rows),
   };
 }
 
-/** PK-validation-only fake table — for cached-PK-wook tests. */
+/** ID-validation-only fake table — for cached-ID-wook tests. */
 export function makePkOnlyTable(designType: "string" | "number" = "string"): {
   primaryKeys: string[];
   fieldDescriptors: Array<{ path: string; designType: string }>;
+  getIdentifications: () => readonly { fields: readonly string[]; source: string }[];
 } {
   return {
     primaryKeys: ["id"],
     fieldDescriptors: [{ path: "id", designType }],
+    getIdentifications: () => [{ fields: ["id"], source: "primaryKey" }],
   };
+}
+
+function matchesFilter(row: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+  return Object.entries(filter).every(([key, value]) => Object.is(row[key], value));
 }
 
 /** Wrap `setControllerContext` for the in-test controller. */
@@ -246,8 +259,8 @@ export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
     if (sharedMethodMeta.has(h.method)) continue;
     const params = (h.paramKinds ?? []).map((kind) => {
       if (kind === "body") return { paramSource: "BODY" };
-      if (kind === "pk") return { [MOOST_DB_ACTION_PARAM]: "pk" };
-      if (kind === "pks") return { [MOOST_DB_ACTION_PARAM]: "pks" };
+      if (kind === "id") return { [MOOST_DB_ACTION_PARAM]: "id" };
+      if (kind === "ids") return { [MOOST_DB_ACTION_PARAM]: "ids" };
       if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
       if (kind === "rows") return { [MOOST_DB_ACTION_ROWS]: true };
       return {};

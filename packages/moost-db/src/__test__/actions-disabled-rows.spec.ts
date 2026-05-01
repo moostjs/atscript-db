@@ -28,15 +28,16 @@ describe("'rows'-level reject mode (default)", () => {
     class Ctrl {
       archive() {}
     }
-    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["pks"]);
+    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["ids"]);
     const def = buildGateInterceptor({
       action: "archive",
       level: "rows",
-      disabled: (row: unknown) => (row as { archived: boolean }).archived,
+      disabled: (rowsArg: unknown[]) =>
+        rowsArg.map((row) => (row as { archived: boolean }).archived),
       onDisabledRows: "reject",
     });
     let threw = false;
-    await runInActionCtx('["1","2"]', async () => {
+    await runInActionCtx('[{"id":"1"},{"id":"2"}]', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -48,7 +49,7 @@ describe("'rows'-level reject mode (default)", () => {
     expect(threw).toBe(false);
   });
 
-  it("failing PKs are listed in REQUEST order (preserves user-supplied ordering)", async () => {
+  it("failing IDs are listed in REQUEST order (preserves user-supplied ordering)", async () => {
     const rows = [
       { id: "5", archived: true },
       { id: "1", archived: false },
@@ -61,16 +62,17 @@ describe("'rows'-level reject mode (default)", () => {
     class Ctrl {
       archive() {}
     }
-    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["pks"]);
+    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["ids"]);
     const def = buildGateInterceptor({
       action: "archive",
       level: "rows",
-      disabled: (row: unknown) => (row as { archived: boolean }).archived,
+      disabled: (rowsArg: unknown[]) =>
+        rowsArg.map((row) => (row as { archived: boolean }).archived),
       onDisabledRows: "reject",
     });
     let caught: unknown;
-    // Request order: ["5","1","3"]. Failing in request order: ["5","3"].
-    await runInActionCtx('["5","1","3"]', async () => {
+    // Request order: [{id:"5"},{id:"1"},{id:"3"}]. Failing in request order: [{id:"5"},{id:"3"}].
+    await runInActionCtx('[{"id":"5"},{"id":"1"},{"id":"3"}]', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -80,8 +82,8 @@ describe("'rows'-level reject mode (default)", () => {
       }
     });
     expect(caught).toBeInstanceOf(ActionDisabledError);
-    const body = (caught as ActionDisabledError).body as { pks?: unknown[] };
-    expect(body.pks).toEqual(["5", "3"]);
+    const body = (caught as ActionDisabledError).body as { ids?: unknown[] };
+    expect(body.ids).toEqual([{ id: "5" }, { id: "3" }]);
   });
 });
 
@@ -96,15 +98,16 @@ describe("'rows'-level skip mode — happy path", () => {
     class Ctrl {
       archive() {}
     }
-    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["pks"]);
+    setupActionMeta(Ctrl, "archive", { name: "archive" }, ["ids"]);
     const def = buildGateInterceptor({
       action: "archive",
       level: "rows",
-      disabled: (row: unknown) => (row as { archived: boolean }).archived,
+      disabled: (rowsArg: unknown[]) =>
+        rowsArg.map((row) => (row as { archived: boolean }).archived),
       onDisabledRows: "skip",
     });
     let threw = false;
-    await runInActionCtx('["1","2","3"]', async () => {
+    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {

@@ -7,11 +7,31 @@ import { AsDbController } from "../as-db.controller";
 
 // ── Mock table ──────────────────────────────────────────────────────────────
 
+function deriveIdentifications(
+  primaryKeys: readonly string[],
+  indexes: Map<string, { type: string; name: string; fields: { name: string }[] }>,
+): Array<{ fields: readonly string[]; source: string }> {
+  const out: Array<{ fields: readonly string[]; source: string }> = [];
+  if (primaryKeys.length > 0) {
+    out.push({ fields: [...primaryKeys], source: "primaryKey" });
+  }
+  for (const index of indexes.values()) {
+    if (index.type === "unique") {
+      out.push({ fields: index.fields.map((f) => f.name), source: index.name });
+    }
+  }
+  return out;
+}
+
 function createMockTable(overrides: Record<string, any> = {}) {
   const mockValidator = {
     validate: vi.fn().mockReturnValue(true),
     errors: [],
   };
+
+  const primaryKeys = overrides.primaryKeys ?? ["id"];
+  const indexes: Map<string, any> = overrides.indexes ?? new Map();
+  const identifications = overrides.identifications ?? deriveIdentifications(primaryKeys, indexes);
 
   return {
     tableName: "test_table",
@@ -30,9 +50,12 @@ function createMockTable(overrides: Record<string, any> = {}) {
       ["region", {} as any],
       ["total", {} as any],
     ]),
-    primaryKeys: ["id"],
+    primaryKeys,
+    preferredId: primaryKeys,
+    identifications,
+    getIdentifications: () => identifications,
     uniqueProps: new Set<string>(),
-    indexes: new Map(),
+    indexes,
     relations: new Map(),
     fieldDescriptors: [
       { path: "id", ignored: false, isIndexed: true },
@@ -50,6 +73,10 @@ function createMockTable(overrides: Record<string, any> = {}) {
     findManyWithCount: vi.fn().mockResolvedValue({ data: [{ id: "1", name: "Alice" }], count: 1 }),
     search: vi.fn().mockResolvedValue([{ id: "1", name: "Alice" }]),
     searchWithCount: vi.fn().mockResolvedValue({ data: [{ id: "1", name: "Alice" }], count: 1 }),
+    vectorSearch: vi.fn().mockResolvedValue([{ id: "1", name: "Alice" }]),
+    vectorSearchWithCount: vi
+      .fn()
+      .mockResolvedValue({ data: [{ id: "1", name: "Alice" }], count: 1 }),
     count: vi.fn().mockResolvedValue(42),
     aggregate: vi.fn().mockResolvedValue([{ status: "active", total: 100 }]),
     insertOne: vi.fn().mockResolvedValue({ insertedId: "1" }),
@@ -237,6 +264,57 @@ describe("AsDbController", () => {
       const call = table.findMany.mock.calls[0][0];
       expect(call.filter).toEqual({ id: "69aca32e434504011457636c" });
     });
+
+    it("widens string-array projection with preferred ID fields", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.query("/query?");
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
+    });
+
+    it("widens pure inclusion projection maps with preferred ID fields", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue({ name: 1 });
+      await ctx.controller.query("/query?");
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.controls.$select).toEqual({ name: 1, slug: 1 });
+    });
+
+    it("converts exclusion projection maps before adding preferred ID fields", async () => {
+      const ctx = createController();
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue({ id: 0 });
+      await ctx.controller.query("/query?");
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.controls.$select).toEqual({ name: 1, email: 1, id: 1 });
+    });
+
+    it("rejects mixed inclusion/exclusion projection maps before reading", async () => {
+      const ctx = createController();
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue({ name: 1, id: 0 });
+      const result = await ctx.controller.query("/query?");
+      expect(result).toBeInstanceOf(HttpError);
+      expect(ctx.table.findMany).not.toHaveBeenCalled();
+    });
+
+    it("widens search-path projection with preferred ID fields", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      ctx.table.isSearchable.mockReturnValue(true);
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.query("/query?$search=hello");
+      const call = ctx.table.search.mock.calls[0][1];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
+    });
+
+    it("does NOT widen $count projection with preferred ID fields", async () => {
+      // The count path returns a number — there are no rows to widen, so the
+      // raw user-requested projection passes through unchanged.
+      const ctx = createController({ preferredId: ["slug"] });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.query("/query?$count=true");
+      const call = ctx.table.count.mock.calls[0][0];
+      expect(call.controls.$select).toEqual(["name"]);
+    });
   });
 
   // ── GET /query (aggregate) ──────────────────────────────────────────
@@ -293,6 +371,19 @@ describe("AsDbController", () => {
       const call = ctx.table.aggregate.mock.calls[0][0];
       expect(call.filter).toEqual({ tenant: "abc" });
     });
+
+    it("does NOT widen aggregate projection with preferred ID fields", async () => {
+      // Aggregate returns group-keys + measures, not row identifiers — the
+      // preferred-id baseline does not apply.
+      const ctx = createController({ preferredId: ["slug"] });
+      await ctx.controller.query("/query?$groupBy=status&$select=status,sum(amount):total");
+      const call = ctx.table.aggregate.mock.calls[0][0];
+      const select = call.controls.$select as unknown;
+      const flatString = Array.isArray(select)
+        ? (select as unknown[]).map(String).join(",")
+        : JSON.stringify(select);
+      expect(flatString).not.toContain("slug");
+    });
   });
 
   // ── GET /pages ──────────────────────────────────────────────────────
@@ -339,6 +430,20 @@ describe("AsDbController", () => {
       expect(call.controls.$skip).toBe(0);
       expect(call.controls.$limit).toBe(10);
     });
+
+    it("widens pages vector-search projection with preferred ID fields", async () => {
+      class VectorController extends AsDbController {
+        protected override computeEmbedding(): Promise<number[]> {
+          return Promise.resolve([1, 2, 3]);
+        }
+      }
+      const ctx = createController({ preferredId: ["slug"] });
+      const vectorController = new VectorController(ctx.table as any, (ctx as any).app);
+      vi.spyOn(vectorController as any, "transformProjection").mockReturnValue(["name"]);
+      await vectorController.pages("/pages?$search=hello&$vector=embedding");
+      const call = ctx.table.vectorSearchWithCount.mock.calls[0][2];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
+    });
   });
 
   // ── GET /one/:id ──────────────────────────────────────────────────
@@ -362,12 +467,20 @@ describe("AsDbController", () => {
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(400);
     });
+
+    it("widens getOne projection with preferred ID fields", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.getOne("alpha", "/one/alpha?$select=name");
+      const call = ctx.table.findById.mock.calls[0][1];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
+    });
   });
 
   // ── GET /one (composite key) ──────────────────────────────────────
 
   describe("getOneComposite", () => {
-    it("should call findById with composite PK object from query", async () => {
+    it("should call findById with composite ID object from query", async () => {
       const ctx = createController({ primaryKeys: ["taskId", "tagId"] });
       const result = await ctx.controller.getOneComposite(
         { taskId: "5", tagId: "1" },
@@ -415,7 +528,7 @@ describe("AsDbController", () => {
       expect((result as HttpError).body.statusCode).toBe(400);
     });
 
-    it("should return 400 when no composite PK and no compound unique indexes", async () => {
+    it("should return 400 when no composite ID and no compound unique indexes", async () => {
       const result = await controller.getOneComposite({ id: "123" }, "/one?id=123");
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(400);
@@ -432,6 +545,20 @@ describe("AsDbController", () => {
       );
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(404);
+    });
+
+    it("widens getOneComposite projection with preferred ID fields", async () => {
+      const ctx = createController({
+        primaryKeys: ["taskId", "tagId"],
+        preferredId: ["slug"],
+      });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.getOneComposite(
+        { taskId: "5", tagId: "1" },
+        "/one?taskId=5&tagId=1&$select=name",
+      );
+      const call = ctx.table.findById.mock.calls[0][1];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
     });
   });
 
@@ -596,7 +723,7 @@ describe("AsDbController", () => {
   // ── DELETE / (composite key) ───────────────────────────────────────
 
   describe("removeComposite", () => {
-    it("should delete by composite PK from query params", async () => {
+    it("should delete by composite ID from query params", async () => {
       const ctx = createController({ primaryKeys: ["taskId", "tagId"] });
       const result = await ctx.controller.removeComposite({ taskId: "5", tagId: "1" });
       expect(ctx.table.deleteOne).toHaveBeenCalledWith({ taskId: "5", tagId: "1" });
@@ -632,7 +759,7 @@ describe("AsDbController", () => {
       expect((result as HttpError).body.statusCode).toBe(400);
     });
 
-    it("should return 400 when no composite PK and no compound unique indexes", async () => {
+    it("should return 400 when no composite ID and no compound unique indexes", async () => {
       const result = await controller.removeComposite({ id: "123" });
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(400);
@@ -664,8 +791,16 @@ describe("AsDbController", () => {
       expect(result.searchable).toBe(false);
       expect(result.vectorSearchable).toBe(false);
       expect(result.searchIndexes).toEqual([]);
+      expect(result.preferredId).toEqual(["id"]);
       expect(result.type).toBeDefined();
       expect(result.type.$v).toBe(2);
+    });
+
+    it("should return configured preferred ID fields", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      const result = await ctx.controller.meta();
+      expect(result.primaryKeys).toEqual(["id"]);
+      expect(result.preferredId).toEqual(["slug"]);
     });
 
     it("should permit async overrides", async () => {
@@ -702,6 +837,14 @@ describe("AsDbController", () => {
       expect(spy).toHaveBeenCalled();
       const call = ctx.table.findMany.mock.calls[0][0];
       expect(call.controls.$select).toEqual(["id", "name"]);
+    });
+
+    it("should re-add preferred ID fields after transformProjection override", async () => {
+      const ctx = createController({ preferredId: ["slug"] });
+      vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
+      await ctx.controller.query("/query?");
+      const call = ctx.table.findMany.mock.calls[0][0];
+      expect(call.controls.$select).toEqual(["name", "slug"]);
     });
 
     it("should await async transformFilter overrides", async () => {

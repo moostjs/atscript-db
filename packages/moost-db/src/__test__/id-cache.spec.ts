@@ -7,15 +7,15 @@ import { setControllerContext } from "moost";
 
 import {
   boundTableKey,
-  dbActionPkSlot,
-  dbActionPksSlot,
+  dbActionIdSlot,
+  dbActionIdsSlot,
   getActionTable,
-} from "../actions/pk-cache";
+} from "../actions/id-cache";
 import { bindDuckTypeController, makePkOnlyTable, runInActionCtx } from "./actions-test-utils";
 
 /**
- * Coverage for the cached PK wook (single source of truth for parsed +
- * validated action PKs). These tests set up a real `EventContext` via
+ * Coverage for the cached ID wook (single source of truth for parsed +
+ * validated action IDs). These tests set up a real `EventContext` via
  * `prepareTestHttpContext` so `useBody().parseBody()` can read the seeded
  * raw body and the validation path produces the same `ValidatorError` that
  * surfaces as HTTP 400 in production.
@@ -34,28 +34,28 @@ function runWith(rawBody: string, table: unknown, fn: () => Promise<unknown>) {
   );
 }
 
-describe("Cached PK wook — single PK", () => {
-  it("validates body once and returns the validated PK to all readers", async () => {
+describe("Cached ID wook — single ID", () => {
+  it("validates body once and returns the validated ID to all readers", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('"abc123"', table, async () => {
+    const result = await runWith('{"id":"abc123"}', table, async () => {
       const ctx = current();
-      const a = await ctx.get(dbActionPkSlot);
-      const b = await ctx.get(dbActionPkSlot);
+      const a = await ctx.get(dbActionIdSlot);
+      const b = await ctx.get(dbActionIdSlot);
       // Both reads return the same value (cached).
-      expect(a).toBe("abc123");
-      expect(b).toBe("abc123");
+      expect(a).toEqual({ id: "abc123" });
+      expect(b).toEqual({ id: "abc123" });
       return a;
     });
-    expect(result).toBe("abc123");
+    expect(result).toEqual({ id: "abc123" });
   });
 
-  it("rejects wrong scalar type (no coercion) — bad PK never reaches the gate", async () => {
+  it("rejects wrong scalar type (no coercion) — bad ID never reaches the gate", async () => {
     const table = makePkOnlyTable("number");
     let caught: unknown;
-    await runWith('"42"', table, async () => {
+    await runWith('{"id":"42"}', table, async () => {
       const ctx = current();
       try {
-        await ctx.get(dbActionPkSlot);
+        await ctx.get(dbActionIdSlot);
       } catch (e) {
         caught = e;
       }
@@ -78,7 +78,7 @@ describe("Cached PK wook — single PK", () => {
       const ctrl = new Plain();
       setControllerContext(ctrl as never, "handler", "/api/c/act");
       try {
-        await current().get(dbActionPkSlot);
+        await current().get(dbActionIdSlot);
       } catch (e) {
         caught = e;
       }
@@ -91,13 +91,13 @@ describe("Cached PK wook — single PK", () => {
   });
 });
 
-describe("Cached PK wook — multi PK + skip-mode mutation", () => {
+describe("Cached ID wook — multi ID + skip-mode mutation", () => {
   it("validates JSON array and rejects non-array body", async () => {
     const table = makePkOnlyTable("string");
     let caught: unknown;
-    await runWith('"a"', table, async () => {
+    await runWith('{"id":"a"}', table, async () => {
       try {
-        await current().get(dbActionPksSlot);
+        await current().get(dbActionIdsSlot);
       } catch (e) {
         caught = e;
       }
@@ -105,19 +105,19 @@ describe("Cached PK wook — multi PK + skip-mode mutation", () => {
     expect(caught).toBeInstanceOf(ValidatorError);
   });
 
-  it("ctx.set on dbActionPksSlot replaces the cached value (skip-mode contract)", async () => {
+  it("ctx.set on dbActionIdsSlot replaces the cached value (skip-mode contract)", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('["a","b","c"]', table, async () => {
+    const result = await runWith('[{"id":"a"},{"id":"b"},{"id":"c"}]', table, async () => {
       const ctx = current();
-      const initial = (await ctx.get(dbActionPksSlot)) as unknown[];
-      expect(initial).toEqual(["a", "b", "c"]);
+      const initial = (await ctx.get(dbActionIdsSlot)) as unknown[];
+      expect(initial).toEqual([{ id: "a" }, { id: "b" }, { id: "c" }]);
       // Simulate the gate interceptor's skip-mode filtering.
-      ctx.set(dbActionPksSlot, Promise.resolve(["a"]));
-      const filtered = (await ctx.get(dbActionPksSlot)) as unknown[];
-      expect(filtered).toEqual(["a"]);
+      ctx.set(dbActionIdsSlot, Promise.resolve([{ id: "a" }]));
+      const filtered = (await ctx.get(dbActionIdsSlot)) as unknown[];
+      expect(filtered).toEqual([{ id: "a" }]);
       return filtered;
     });
-    expect(result).toEqual(["a"]);
+    expect(result).toEqual([{ id: "a" }]);
   });
 });
 
@@ -125,21 +125,21 @@ describe("getActionTable — bound-table slot precedence", () => {
   it("boundTableKey wins over controller-context duck-type fallback", async () => {
     const ductTable = makePkOnlyTable("string");
     const explicitTable = makePkOnlyTable("number");
-    await runWith("42", ductTable, async () => {
+    await runWith('{"id":42}', ductTable, async () => {
       const ctx = current();
       ctx.set(boundTableKey, explicitTable);
       const resolved = getActionTable(ctx);
       expect(resolved).toBe(explicitTable);
-      // The validated PK uses the explicit (numeric) table — `42` parses fine,
+      // The validated ID uses the explicit (numeric) table — `42` parses fine,
       // would have failed against the duct (string) table.
-      const pk = await ctx.get(dbActionPkSlot);
-      expect(pk).toBe(42);
+      const id = await ctx.get(dbActionIdSlot);
+      expect(id).toEqual({ id: 42 });
     });
   });
 
   it("falls through to controller-context duck-type when boundTableKey is unset", async () => {
     const ductTable = makePkOnlyTable("string");
-    await runWith('"abc"', ductTable, async () => {
+    await runWith('{"id":"abc"}', ductTable, async () => {
       const ctx = current();
       // boundTableKey is intentionally NOT set.
       const resolved = getActionTable(ctx);
@@ -148,20 +148,20 @@ describe("getActionTable — bound-table slot precedence", () => {
   });
 });
 
-describe("Cached PK wook — single fetch shared by gate and handler", () => {
+describe("Cached ID wook — single fetch shared by gate and handler", () => {
   it("body-parsing happens exactly once per request even with multiple readers", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('"abc"', table, async () => {
+    const result = await runWith('{"id":"abc"}', table, async () => {
       const ctx = current();
       const reads = await Promise.all([
-        ctx.get(dbActionPkSlot),
-        ctx.get(dbActionPkSlot),
-        ctx.get(dbActionPkSlot),
+        ctx.get(dbActionIdSlot),
+        ctx.get(dbActionIdSlot),
+        ctx.get(dbActionIdSlot),
       ]);
       // All reads share the same Promise → same value.
-      expect(reads[0]).toBe("abc");
-      expect(reads[1]).toBe("abc");
-      expect(reads[2]).toBe("abc");
+      expect(reads[0]).toEqual({ id: "abc" });
+      expect(reads[1]).toEqual({ id: "abc" });
+      expect(reads[2]).toEqual({ id: "abc" });
       return reads;
     });
     expect(result).toHaveLength(3);

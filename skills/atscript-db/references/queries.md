@@ -91,3 +91,7 @@ Groups over fields marked `@db.column.dimension`; aggregates over fields marked 
 ## URL parsing
 
 For HTTP consumption see `http-query-syntax.md` — the URL encoding differs (uses `field=v`, `field!=v`, `field>v`, etc.) and is parsed into the same `Uniquery` shape before reaching the adapter.
+
+## moost-db read-response baseline
+
+Direct adapter calls (`AtscriptDbTable.findOne`/`findMany`) honor `$select` exactly. The `moost-db` HTTP layer adds one extra step: every row-returning read endpoint (`/query`, `/pages`, `/one`, `/one/:id`, including `$search` and vector-search paths) silently widens `$select` to include the table's `preferredId` field set. Aggregate (`$groupBy`) and count (`$count`) responses are NOT widened. See [moost-db.md § Read-response baseline](moost-db.md#read-response-baseline) for the full contract — this is a controller behaviour, not a query-engine behaviour.

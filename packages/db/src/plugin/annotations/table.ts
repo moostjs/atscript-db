@@ -1,6 +1,8 @@
 import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
+import type { SemanticNode } from "@atscript/core";
+import { isInterface, isStructure } from "@atscript/core";
 import { hasAnyViewAnnotation } from "../../shared/validation-utils";
 
 export const dbTableAnnotations: TAnnotationsTree = {
@@ -69,6 +71,86 @@ export const dbTableAnnotations: TAnnotationsTree = {
         return errors;
       },
     }),
+
+    preferredId: {
+      uniqueIndex: new AnnotationSpec({
+        description:
+          "Selects a unique index as the table's preferred row identifier. " +
+          "When the unique-index name is omitted, the first declared unique-index group wins." +
+          "\n\n**Example:**\n" +
+          "```atscript\n" +
+          "@db.table\n" +
+          '@db.table.preferredId.uniqueIndex "by_slug"\n' +
+          "export interface Post {\n" +
+          '  @db.index.unique "by_slug"\n' +
+          "  slug: string\n" +
+          "}\n" +
+          "```\n",
+        nodeType: ["interface"],
+        multiple: false,
+        argument: {
+          optional: true,
+          name: "name",
+          type: "string",
+          description: "Unique-index group name. If omitted, the first declared group is used.",
+        },
+        validate(token, args, _doc) {
+          const errors = [] as TMessages;
+          const owner = token.parentNode!;
+
+          if (hasAnyViewAnnotation(owner)) {
+            errors.push({
+              message:
+                "@db.table.preferredId.uniqueIndex is not supported on @db.view interfaces (views have no unique-index declarations).",
+              severity: 1,
+              range: token.range,
+            });
+          }
+
+          if (owner.countAnnotations("db.table") === 0) {
+            errors.push({
+              message: "@db.table.preferredId.uniqueIndex requires @db.table on the same interface",
+              severity: 1,
+              range: token.range,
+            });
+          }
+
+          const groups = collectUniqueIndexGroups(owner);
+          if (groups.length === 0) {
+            errors.push({
+              message:
+                "@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.",
+              severity: 1,
+              range: token.range,
+            });
+            return errors;
+          }
+
+          const requestedName = args[0]?.text;
+          if (requestedName !== undefined && !groups.some((group) => group === requestedName)) {
+            errors.push({
+              message:
+                `@db.table.preferredId.uniqueIndex("${requestedName}") does not match any declared ` +
+                `@db.index.unique on this interface; declared groups: ${JSON.stringify(groups)}.`,
+              severity: 1,
+              range: args[0]!.range,
+            });
+          }
+
+          if (requestedName === undefined && groups.length >= 2) {
+            errors.push({
+              message:
+                "@db.table.preferredId.uniqueIndex without a name uses the first declared unique-index group; " +
+                "this can shift if props are reordered.",
+              severity: 2,
+              range: token.range,
+            });
+          }
+
+          return errors;
+        },
+      }),
+    },
   },
 
   schema: new AnnotationSpec({
@@ -198,6 +280,30 @@ export const dbTableAnnotations: TAnnotationsTree = {
     }),
   },
 };
+
+function collectUniqueIndexGroups(owner: SemanticNode | undefined): string[] {
+  if (!isInterface(owner)) {
+    return [];
+  }
+  const definition = owner.getDefinition();
+  if (!isStructure(definition)) {
+    return [];
+  }
+
+  const groups: string[] = [];
+  const seen = new Set<string>();
+  for (const [propName, prop] of definition.props) {
+    const annotations = prop.annotations?.filter((ann) => ann.name === "db.index.unique") ?? [];
+    for (const ann of annotations) {
+      const groupName = ann.args[0]?.text ?? propName;
+      if (!seen.has(groupName)) {
+        seen.add(groupName);
+        groups.push(groupName);
+      }
+    }
+  }
+  return groups;
+}
 
 function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec {
   const example =

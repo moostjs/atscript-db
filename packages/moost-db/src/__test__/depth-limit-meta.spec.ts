@@ -44,6 +44,7 @@ function makeReadable(type: any) {
     type,
     flatMap: new Map([["", {} as any]]),
     primaryKeys: ["id"],
+    preferredId: ["id"],
     uniqueProps: new Set<string>(),
     indexes: new Map(),
     relations: new Map(),

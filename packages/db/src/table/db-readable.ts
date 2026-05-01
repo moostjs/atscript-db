@@ -31,6 +31,7 @@ import type {
   TDbIndex,
   TDbRelation,
   TIdDescriptor,
+  TIdentification,
   TSearchIndexInfo,
   TTableResolver,
   TWriteTableResolver,
@@ -199,6 +200,8 @@ export class AtscriptDbReadable<
 
   protected _writeTableResolver?: TWriteTableResolver;
 
+  private _metaIdPhysical: string | null | undefined;
+
   constructor(
     protected readonly _type: T,
     protected readonly adapter: A,
@@ -300,10 +303,37 @@ export class AtscriptDbReadable<
     return this._meta.primaryKeys;
   }
 
-  /** Original `@meta.id` field names as declared in the schema (before adapter manipulation). */
-  public get originalMetaIdFields(): readonly string[] {
+  /** Preferred row identifier field names. Defaults to primary keys. */
+  public get preferredId(): readonly string[] {
     this._ensureBuilt();
-    return this._meta.originalMetaIdFields;
+    return this._meta.preferredId;
+  }
+
+  /** Legitimate row-identifier shapes (primary key + every unique index). */
+  public get identifications(): readonly TIdentification[] {
+    this._ensureBuilt();
+    return this._meta.getIdentifications();
+  }
+
+  /**
+   * Physical column name of the single `@meta.id` field, or `null` when the
+   * schema has zero or multiple `@meta.id` fields. Used by adapters to return
+   * the user's logical ID instead of the DB-generated one on insert.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   */
+  public get metaIdPhysical(): string | null {
+    this._ensureBuilt();
+    if (this._metaIdPhysical === undefined) {
+      const fields = this._meta.originalMetaIdFields;
+      if (fields.length === 1) {
+        const field = fields[0];
+        this._metaIdPhysical = this._meta.columnMap.get(field) ?? field;
+      } else {
+        this._metaIdPhysical = null;
+      }
+    }
+    return this._metaIdPhysical;
   }
 
   /** Dimension fields from `@db.column.dimension`. */

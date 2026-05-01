@@ -14,6 +14,7 @@ beforeAll(async () => {
     vectorSearchable: false,
     searchIndexes: [],
     primaryKeys: ["id"],
+    preferredId: ["id"],
     relations: [],
     fields: {
       id: { sortable: true, filterable: true },
@@ -252,10 +253,10 @@ describe("Client", () => {
     fetchFn = mockFetch({ insertedId: "abc" });
     const client = new Client("/api/users", { fetch: fetchFn });
     const result = await client.insert({ name: "Alice", status: "active" });
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect(writeCalls[0][1]).toEqual(
+    )!;
+    expect(writeCall[1]).toEqual(
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ name: "Alice", status: "active" }),
@@ -272,10 +273,10 @@ describe("Client", () => {
       { name: "B", status: "active" },
     ]);
     expect(result.insertedCount).toBe(2);
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect(JSON.parse(writeCalls[0][1].body as string)).toEqual([
+    )!;
+    expect(JSON.parse(writeCall[1].body as string)).toEqual([
       { name: "A", status: "active" },
       { name: "B", status: "active" },
     ]);
@@ -287,10 +288,10 @@ describe("Client", () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
     const result = await client.update({ id: 1, name: "Updated" } as any);
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect(writeCalls[0][1]).toEqual(expect.objectContaining({ method: "PATCH" }));
+    )!;
+    expect(writeCall[1]).toEqual(expect.objectContaining({ method: "PATCH" }));
     expect(result.modifiedCount).toBe(1);
   });
 
@@ -298,11 +299,11 @@ describe("Client", () => {
     fetchFn = mockFetch({ matchedCount: 2, modifiedCount: 2 });
     const client = new Client("/api/users", { fetch: fetchFn });
     await client.update([{ id: 1 }, { id: 2 }] as any);
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect(writeCalls[0][1].method).toBe("PATCH");
-    expect(JSON.parse(writeCalls[0][1].body as string)).toHaveLength(2);
+    )!;
+    expect(writeCall[1].method).toBe("PATCH");
+    expect(JSON.parse(writeCall[1].body as string)).toHaveLength(2);
   });
 
   // ── replace (PUT /) ────────────────────────────────────────────────────
@@ -311,10 +312,10 @@ describe("Client", () => {
     fetchFn = mockFetch({ matchedCount: 1, modifiedCount: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
     await client.replace({ id: 1, name: "Full", status: "active" } as any);
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect(writeCalls[0][1]).toEqual(expect.objectContaining({ method: "PUT" }));
+    )!;
+    expect(writeCall[1]).toEqual(expect.objectContaining({ method: "PUT" }));
   });
 
   // ── remove (DELETE /:id) ───────────────────────────────────────────────
@@ -415,10 +416,10 @@ describe("Client", () => {
     fetchFn = mockFetch({ insertedId: 1 });
     const client = new Client("/api/users", { fetch: fetchFn });
     await client.insert({ name: "test", status: "active" });
-    const writeCalls = fetchFn.mock.calls.filter(
+    const writeCall = fetchFn.mock.calls.find(
       (c: string[]) => !(c[0] as string).endsWith("/meta"),
-    );
-    expect((writeCalls[0][1].headers as Record<string, string>)["Content-Type"]).toBe(
+    )!;
+    expect((writeCall[1].headers as Record<string, string>)["Content-Type"]).toBe(
       "application/json",
     );
   });

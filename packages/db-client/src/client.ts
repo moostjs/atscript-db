@@ -16,12 +16,23 @@ import {
   type ActionDisabledErrorBody,
 } from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
-import type { ClientOptions, DataOf, IdOf, MetaResponse, NavOf, OwnOf, PageResult } from "./types";
+import type {
+  AtscriptClientShape,
+  ClientOptions,
+  ClientResponse,
+  DataOf,
+  IdOf,
+  MetaResponse,
+  NavOf,
+  OwnOf,
+  PageResult,
+} from "./types";
 
 type Own<T> = OwnOf<T>;
 type Nav<T> = NavOf<T>;
 type Data<T> = DataOf<T>;
 type Id<T> = IdOf<T>;
+type Response<T, Q> = ClientResponse<T, Q>;
 
 /**
  * HTTP client for moost-db REST endpoints.
@@ -44,7 +55,7 @@ type Id<T> = IdOf<T>;
  * const page = await users.pages({ filter: { active: true } }, 1, 20)
  * ```
  */
-export class Client<T = Record<string, unknown>> {
+export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private readonly _path: string;
   private readonly _baseUrl: string;
   private readonly _fetch: typeof globalThis.fetch;
@@ -65,9 +76,14 @@ export class Client<T = Record<string, unknown>> {
 
   /**
    * `GET /query` — query records with typed filter, sort, select, and relations.
+   *
+   * The response type narrows by the literal `$with` array in `query` —
+   * relations not listed in `$with` are stripped from the row type.
    */
-  async query(query?: Uniquery<Own<T>, Nav<T>>): Promise<Data<T>[]> {
-    return this._get("query", query) as Promise<Data<T>[]>;
+  async query<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+    query?: Q,
+  ): Promise<Response<T, Q>[]> {
+    return this._get("query", query) as Promise<Response<T, Q>[]>;
   }
 
   // ── GET /query ($count) ────────────────────────────────────────────────────
@@ -101,12 +117,19 @@ export class Client<T = Record<string, unknown>> {
 
   /**
    * `GET /pages` — paginated query with typed filter and relations.
+   *
+   * Response rows narrow by the literal `$with` array — same algebra as
+   * {@link query}.
    */
-  async pages(query?: Uniquery<Own<T>, Nav<T>>, page = 1, size = 10): Promise<PageResult<Data<T>>> {
+  async pages<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+    query?: Q,
+    page = 1,
+    size = 10,
+  ): Promise<PageResult<Response<T, Q>>> {
     return this._get("pages", {
       ...query,
       controls: { ...query?.controls, $page: page, $size: size },
-    } as Uniquery) as Promise<PageResult<Data<T>>>;
+    } as Uniquery) as Promise<PageResult<Response<T, Q>>>;
   }
 
   // ── GET /one/:id ───────────────────────────────────────────────────────────
@@ -114,12 +137,14 @@ export class Client<T = Record<string, unknown>> {
   /**
    * `GET /one/:id` or `GET /one?k1=v1&k2=v2` — single record by primary key.
    *
-   * Returns `null` on 404.
+   * Returns `null` on 404. Response narrows by the literal `$with` array in
+   * `query.controls` — same algebra as {@link query}.
    */
-  async one(
-    id: Id<T>,
-    query?: { controls?: UniqueryControls<Own<T>, Nav<T>> },
-  ): Promise<Data<T> | null> {
+  async one<
+    Q extends { controls?: UniqueryControls<Own<T>, Nav<T>> } = {
+      controls?: UniqueryControls<Own<T>, Nav<T>>;
+    },
+  >(id: Id<T>, query?: Q): Promise<Response<T, Q> | null> {
     const controlStr = query?.controls
       ? buildUrl({ controls: query.controls as UniqueryControls })
       : "";
@@ -132,10 +157,10 @@ export class Client<T = Record<string, unknown>> {
         }
       }
       const qs = params.toString();
-      return this._getOrNull(`one${qs ? `?${qs}` : ""}`);
+      return this._getOrNull<Q>(`one${qs ? `?${qs}` : ""}`);
     }
 
-    return this._getOrNull(
+    return this._getOrNull<Q>(
       `one/${encodeURIComponent(String(id))}${controlStr ? `?${controlStr}` : ""}`,
     );
   }
@@ -211,24 +236,35 @@ export class Client<T = Record<string, unknown>> {
    * Invoke a declared action by name. Resolves the action descriptor from the
    * cached `/meta` response, then dispatches based on `processor`:
    *
-   * - `'backend'` → POST `pk` (or `pks`) as a JSON body to the action's path
+   * - `'backend'` → POST the identifier as a JSON body to the action's path
    *   and return the parsed server response. The HTTP method is always POST.
    * - `'navigate'` → for `level: 'row'`, substitute `$1` in `value` with the
-   *   PK (URL-encoded; composite PKs are URL-encoded per field and joined
-   *   with `/`); for `level: 'rows'` or `'table'`, navigate to `value`
-   *   verbatim. The default navigator (browser only) calls
-   *   `window.location.assign(url)`. Provide `ClientOptions.navigate` to
-   *   integrate with a SPA router.
+   *   identifier values, walking `meta.preferredId` field order (each value
+   *   URL-encoded, compound IDs joined with `/`); for `level: 'rows'` or
+   *   `'table'`, navigate to `value` verbatim. The default navigator (browser
+   *   only) calls `window.location.assign(url)`. Provide
+   *   `ClientOptions.navigate` to integrate with a SPA router.
    * - `'custom'` → throw {@link ActionUnsupportedError}; UI-dispatched events
    *   are the application's responsibility, not the client's.
    *
    * Throws {@link ActionNotFoundError} when the action is not present in `/meta`.
    *
-   * For `level: 'rows'`, `pk` must be an array. If a non-array is supplied
-   * for a `'rows'` action it is wrapped into a single-element array — the
-   * server-side `@DbActionPKs()` resolver requires an array body.
+   * **Identifier shape (server contract).** `id` is always an object (single)
+   * or array of objects (multi) — never a scalar. Each object's field set
+   * must exactly match one legitimate identification on the table (PK or any
+   * `@db.index.unique` group). Even single-field PK tables send `{ id: 'abc' }`,
+   * not `'abc'`. `level: 'table'` actions take no identifier (`undefined`).
+   *
+   * The TypeScript signature widens to `Partial<Own<T>>` because the server's
+   * exact-match validation cannot be expressed at the type level. Mismatched
+   * field sets produce HTTP 400; obvious type errors (scalars, `null`) are
+   * caught at compile time when `T` is typed.
+   *
+   * @typeParam R Caller-asserted return shape from the action handler. The
+   *              server returns whatever the handler emits (commonly
+   *              `{ message?: string, ... }`); the client cannot validate.
    */
-  async action(name: string, pk?: unknown): Promise<unknown> {
+  async action<R = unknown>(name: string, id?: Partial<Own<T>> | Partial<Own<T>>[]): Promise<R> {
     const meta = await this.meta();
     const action = meta.actions.find((a) => a.name === name);
     if (!action) throw new ActionNotFoundError(name);
@@ -242,13 +278,13 @@ export class Client<T = Record<string, unknown>> {
     }
 
     if (action.processor === "navigate") {
-      const url = this._interpolateNavigateUrl(action, pk);
+      const url = this._interpolateNavigateUrl(action, id, meta.preferredId);
       await this._dispatchNavigate(action, url);
-      return undefined;
+      return undefined as R;
     }
 
-    const body = this._buildActionBody(action, pk);
-    return this._postAction(action, body);
+    const body = this._buildActionBody(action, id);
+    return this._postAction(action, body) as Promise<R>;
   }
 
   // ── Validation (client utility) ────────────────────────────────────────────
@@ -280,17 +316,40 @@ export class Client<T = Record<string, unknown>> {
 
   // ── Action helpers ─────────────────────────────────────────────────────────
 
-  private _buildActionBody(action: TDbActionInfo, pk: unknown): unknown {
+  private _buildActionBody(action: TDbActionInfo, id: unknown): unknown {
     if (action.level === "table") return undefined;
-    if (action.level !== "rows") return pk;
-    if (Array.isArray(pk)) return pk;
-    return pk === undefined ? [] : [pk];
+    if (action.level === "rows") {
+      if (id === undefined) return [];
+      if (!Array.isArray(id)) {
+        throw new TypeError(
+          `client.action("${action.name}"): rows-level actions require an array of identifier objects; received ${describeShape(id)}.`,
+        );
+      }
+      return id;
+    }
+    // 'row' level: must be a plain identifier object.
+    if (id !== null && typeof id === "object" && !Array.isArray(id)) return id;
+    throw new TypeError(
+      `client.action("${action.name}"): row-level actions require an identifier object; received ${describeShape(id)}.`,
+    );
   }
 
-  private _interpolateNavigateUrl(action: TDbActionInfo, pk: unknown): string {
+  private _interpolateNavigateUrl(
+    action: TDbActionInfo,
+    id: unknown,
+    preferredId: string[],
+  ): string {
     if (action.level !== "row") return action.value;
-    if (pk === undefined) return action.value;
-    return action.value.replace(/\$1/g, encodeNavigatePk(pk));
+    if (id === undefined) return action.value;
+    if (id === null || typeof id !== "object" || Array.isArray(id)) {
+      throw new TypeError(
+        `client.action("${action.name}"): row-level navigate actions require an identifier object; received ${describeShape(id)}.`,
+      );
+    }
+    return action.value.replace(
+      /\$1/g,
+      encodeNavigateId(id as Record<string, unknown>, preferredId),
+    );
   }
 
   private async _dispatchNavigate(action: TDbActionInfo, url: string): Promise<void> {
@@ -326,9 +385,9 @@ export class Client<T = Record<string, unknown>> {
     return params;
   }
 
-  private async _getOrNull(endpoint: string): Promise<Data<T> | null> {
+  private async _getOrNull<Q>(endpoint: string): Promise<Response<T, Q> | null> {
     try {
-      return (await this._request("GET", endpoint)) as Data<T>;
+      return (await this._request("GET", endpoint)) as Response<T, Q>;
     } catch (e) {
       if (e instanceof ClientError && e.status === 404) return null;
       throw e;
@@ -397,13 +456,17 @@ export class Client<T = Record<string, unknown>> {
 }
 
 /**
- * Encode a row PK for substitution into a `processor: 'navigate'` URL template.
- * Scalars are URL-encoded directly; composite PK objects have each value
- * URL-encoded and joined with `/` in object-key order (which mirrors
- * `primaryKeys` for the table).
+ * Encode a row identifier for substitution into a `processor: 'navigate'` URL template.
+ * The values are URL-encoded and joined with `/` in `meta.preferredId` field
+ * declaration order — NOT in object-key insertion order (which is unstable
+ * across callers).
  */
-function encodeNavigatePk(pk: unknown): string {
-  if (pk === null || pk === undefined) return "";
-  const values = typeof pk === "object" ? Object.values(pk as Record<string, unknown>) : [pk];
-  return values.map((v) => encodeURIComponent(String(v))).join("/");
+function encodeNavigateId(id: Record<string, unknown>, preferredId: string[]): string {
+  return preferredId.map((f) => encodeURIComponent(String(id[f]))).join("/");
+}
+
+function describeShape(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
 }

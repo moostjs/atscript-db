@@ -19,7 +19,7 @@ import { fakeOverview, makeApp, makeLogger, makeTable } from "./actions-test-uti
  */
 
 describe("Discovery static-table check (non-AsDbController gating)", () => {
-  it("plain @DbActionPK without disabled or row-injection works without opts.table (duck-type at request time only)", () => {
+  it("plain @DbActionID without disabled or row-injection works without opts.table (duck-type at request time only)", () => {
     // A plain controller (no AsDbReadableController inheritance, no
     // disabled, no @DbActionRow*) — discovery does NOT probe the
     // duck-type. The action is emitted normally.
@@ -36,7 +36,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
             httpMethod: "POST",
             path: "/c/act",
             action: { name: "act", opts: { label: "Act" } },
-            paramKinds: ["pk"],
+            paramKinds: ["id"],
           },
         ]),
       ],
@@ -66,9 +66,9 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
             path: "/c/act",
             action: {
               name: "act",
-              opts: { label: "Act", disabled: () => false },
+              opts: { label: "Act", disabled: () => [false] },
             },
-            paramKinds: ["pk"],
+            paramKinds: ["id"],
           },
         ]),
       ],
@@ -97,11 +97,11 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
               name: "act",
               opts: {
                 label: "Act",
-                disabled: () => false,
+                disabled: () => [false],
                 table: makeTable() as never,
               },
             },
-            paramKinds: ["pk"],
+            paramKinds: ["id"],
           },
         ]),
       ],
@@ -122,9 +122,9 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
           path: "/c/act",
           action: {
             name: "act",
-            opts: { label: "Act", disabled: () => false },
+            opts: { label: "Act", disabled: () => [false] },
           },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -148,14 +148,14 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
             name: "act",
             opts: {
               label: "Act",
-              disabled: () => false,
+              disabled: () => [false],
               // table forwarded into opts but the runtime instanceof
               // AsDbReadableController check makes the bound table win;
               // discovery doesn't warn about the redundancy.
               table: makeTable() as never,
             },
           },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);

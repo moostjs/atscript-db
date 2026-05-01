@@ -7,6 +7,7 @@ import type {
   TypedWithRelation,
 } from "@uniqu/core";
 import type {
+  DbResponse,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
@@ -105,6 +106,20 @@ export interface ServerError {
 
 // ── Type Helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Minimal brand shape every `Client<T>` generic must satisfy. All fields are
+ * optional — plain interfaces and `Record<string, unknown>` satisfy this
+ * constraint, so `new Client('/path')` (no generic) keeps working with
+ * `unknown` / `Record<string, unknown>` fallbacks. Atscript-generated types
+ * fill these brand fields and unlock per-method inference.
+ */
+export type AtscriptClientShape = {
+  __pk?: unknown;
+  __ownProps?: Record<string, unknown>;
+  __navProps?: Record<string, unknown>;
+  type?: { __dataType?: unknown };
+};
+
 /** Extract the data type from an Atscript annotated type `T`. */
 export type DataOf<T> = T extends { type: { __dataType?: infer D } }
   ? unknown extends D
@@ -126,3 +141,15 @@ export type NavOf<T> = T extends {
 
 /** Extract primary key type from an Atscript annotated type. */
 export type IdOf<T> = T extends { __pk: infer PK } ? PK : unknown;
+
+/**
+ * Narrow a read-method response type by the literal `$with` array in the
+ * query, mirroring the backend's `DbResponse<Data, Nav, Q>` algebra. Nav
+ * properties are stripped by default and re-added only for relations the
+ * caller listed in `$with`.
+ *
+ * When `T` carries no nav-prop brand (or the consumer passed no generic)
+ * `DbResponse` short-circuits to the data type — no behaviour change for
+ * un-typed callers.
+ */
+export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q>;

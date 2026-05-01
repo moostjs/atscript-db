@@ -17,6 +17,7 @@ import type {
   TDbIndexField,
   TDbRelation,
   TDbStorageType,
+  TIdentification,
   TMetadataOverrides,
 } from "../types";
 
@@ -72,6 +73,7 @@ export class TableMetadata {
   flatMap!: Map<string, TAtscriptAnnotatedType>;
   fieldDescriptors!: readonly TDbFieldMeta[];
   primaryKeys: string[] = [];
+  preferredId: string[] = [];
   originalMetaIdFields: string[] = [];
   indexes = new Map<string, TDbIndex>();
   foreignKeys = new Map<string, TDbForeignKey>();
@@ -112,6 +114,7 @@ export class TableMetadata {
   // ── Build state ──────────────────────────────────────────────────────────
 
   private _built = false;
+  private _identifications?: readonly TIdentification[];
 
   // Intermediate build-time maps (not exposed after build)
   private _collateMap = new Map<string, TDbCollation>();
@@ -208,6 +211,10 @@ export class TableMetadata {
       this._buildLeafIndexes();
     }
 
+    // Build identifications BEFORE _finalizeIndexes mutates index field names
+    // from logical → physical, so the captured field lists stay logical.
+    this._buildIdentifications();
+    this._resolvePreferredId(type);
     this._finalizeIndexes();
 
     // Release intermediate build-time maps
@@ -808,5 +815,48 @@ export class TableMetadata {
           this.pathToPhysical.get(field.name) ?? this.columnMap.get(field.name) ?? field.name;
       }
     }
+  }
+
+  /**
+   * Captures legitimate row-identifier shapes from the metadata: primary key
+   * (when present) followed by every unique index. Must run BEFORE
+   * `_finalizeIndexes` rewrites `index.fields[i].name` from logical to
+   * physical, so the field lists stay logical.
+   */
+  private _buildIdentifications(): void {
+    const out: TIdentification[] = [];
+    if (this.primaryKeys.length > 0) {
+      out.push({ fields: [...this.primaryKeys], source: "primaryKey" });
+    }
+    for (const index of this.indexes.values()) {
+      if (index.type === "unique") {
+        out.push({
+          fields: index.fields.map((field) => field.name),
+          source: index.name,
+        });
+      }
+    }
+    this._identifications = out;
+  }
+
+  /** Legitimate row-identifier shapes — primary key first, then each unique index. */
+  public getIdentifications(): readonly TIdentification[] {
+    return this._identifications ?? [];
+  }
+
+  private _resolvePreferredId(type: TAtscriptAnnotatedType<TAtscriptTypeObject>): void {
+    const preferred = type.metadata.get("db.table.preferredId.uniqueIndex");
+    if (preferred === undefined) {
+      this.preferredId = [...this.primaryKeys];
+      return;
+    }
+
+    const requestedName = typeof preferred === "string" ? preferred : undefined;
+    const selected = this.getIdentifications().find(
+      (id) =>
+        id.source !== "primaryKey" && (requestedName === undefined || id.source === requestedName),
+    );
+
+    this.preferredId = selected ? [...selected.fields] : [...this.primaryKeys];
   }
 }

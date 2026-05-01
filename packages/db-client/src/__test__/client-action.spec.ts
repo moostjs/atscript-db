@@ -16,6 +16,7 @@ beforeAll(async () => {
     vectorSearchable: false,
     searchIndexes: [],
     primaryKeys: ["id"],
+    preferredId: ["id"],
     relations: [],
     fields: {},
     actions: [],
@@ -60,7 +61,7 @@ function fetchWith(actions: TDbActionInfo[], actionResponse: unknown = { message
 }
 
 describe("Client.action — backend processor", () => {
-  it("POSTs the scalar PK as a JSON body to the resolved path", async () => {
+  it("POSTs the object-shaped ID as a JSON body to the resolved path", async () => {
     const fetchFn = fetchWith([
       {
         name: "block",
@@ -71,18 +72,18 @@ describe("Client.action — backend processor", () => {
       },
     ]);
     const c = new Client("/api/users", { fetch: fetchFn });
-    const result = await c.action("block", "abc123");
+    const result = await c.action("block", { id: "abc123" });
 
     expect(result).toEqual({ message: "ok" });
     const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
     expect(postCall[0]).toBe("/api/users/actions/block");
     const init = postCall[1] as RequestInit;
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toBe("abc123");
+    expect(JSON.parse(init.body as string)).toEqual({ id: "abc123" });
     expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
   });
 
-  it("POSTs the composite PK object", async () => {
+  it("POSTs the composite ID object", async () => {
     const fetchFn = fetchWith([
       {
         name: "promote",
@@ -102,7 +103,7 @@ describe("Client.action — backend processor", () => {
     });
   });
 
-  it("wraps a single PK into an array for level: 'rows'", async () => {
+  it("throws TypeError when a single object is passed to a level: 'rows' action", async () => {
     const fetchFn = fetchWith([
       {
         name: "lock",
@@ -113,13 +114,28 @@ describe("Client.action — backend processor", () => {
       },
     ]);
     const c = new Client("/api/users", { fetch: fetchFn });
-    await c.action("lock", "abc");
-
-    const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
-    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual(["abc"]);
+    // Server contract: rows-level requires an explicit array of identifier
+    // objects. Single objects are not auto-wrapped; consumers must pass `[{...}]`.
+    await expect(c.action("lock", { id: "abc" } as never)).rejects.toBeInstanceOf(TypeError);
   });
 
-  it("passes an array PK through unchanged for level: 'rows'", async () => {
+  it("throws TypeError when a non-object is passed to a level: 'row' action", async () => {
+    const fetchFn = fetchWith([
+      {
+        name: "block",
+        label: "Block",
+        level: "row",
+        processor: "backend",
+        value: "/api/users/actions/block",
+      },
+    ]);
+    const c = new Client("/api/users", { fetch: fetchFn });
+    await expect(c.action("block", "abc" as never)).rejects.toBeInstanceOf(TypeError);
+    await expect(c.action("block", 42 as never)).rejects.toBeInstanceOf(TypeError);
+    await expect(c.action("block", null as never)).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("passes an array ID through unchanged for level: 'rows'", async () => {
     const fetchFn = fetchWith([
       {
         name: "lock",
@@ -130,10 +146,14 @@ describe("Client.action — backend processor", () => {
       },
     ]);
     const c = new Client("/api/users", { fetch: fetchFn });
-    await c.action("lock", ["a", "b", "c"]);
+    await c.action("lock", [{ id: "a" }, { id: "b" }, { id: "c" }]);
 
     const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
-    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual(["a", "b", "c"]);
+    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual([
+      { id: "a" },
+      { id: "b" },
+      { id: "c" },
+    ]);
   });
 
   it("sends no body for level: 'table'", async () => {
@@ -169,13 +189,13 @@ describe("Client.action — backend processor", () => {
       fetch: fetchFn,
       baseUrl: "https://example.com",
     });
-    await c.action("block", "abc");
+    await c.action("block", { id: "abc" });
     const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
     expect(postCall[0]).toBe("https://example.com/api/users/actions/block");
   });
 
   it("propagates server errors as ClientError", async () => {
-    const errBody = { statusCode: 400, message: "bad PK", errors: [] };
+    const errBody = { statusCode: 400, message: "bad ID", errors: [] };
     const fetchFn = vi.fn().mockImplementation((url: string) => {
       if (url.endsWith("/meta")) {
         return Promise.resolve({
@@ -204,12 +224,12 @@ describe("Client.action — backend processor", () => {
       });
     });
     const c = new Client("/api/users", { fetch: fetchFn });
-    await expect(c.action("block", "abc")).rejects.toBeInstanceOf(ClientError);
+    await expect(c.action("block", { id: "abc" })).rejects.toBeInstanceOf(ClientError);
   });
 });
 
 describe("Client.action — navigate processor", () => {
-  it("substitutes $1 with the URL-encoded scalar PK and calls the navigate hook (level: 'row')", async () => {
+  it("substitutes $1 with the URL-encoded preferred-id value and calls the navigate hook (level: 'row')", async () => {
     const fetchFn = fetchWith([
       {
         name: "edit",
@@ -221,23 +241,43 @@ describe("Client.action — navigate processor", () => {
     ]);
     const navigate = vi.fn();
     const c = new Client("/api/users", { fetch: fetchFn, navigate });
-    await c.action("edit", "abc/123");
+    await c.action("edit", { id: "abc/123" });
     expect(navigate).toHaveBeenCalledWith("/users/abc%2F123/edit");
   });
 
-  it("joins composite PK values with `/` (each URL-encoded) for level: 'row'", async () => {
-    const fetchFn = fetchWith([
-      {
-        name: "edit",
-        label: "Edit",
-        level: "row",
-        processor: "navigate",
-        value: "/members/$1/edit",
-      },
-    ]);
+  it("joins compound preferred-id values with `/` in preferredId field order, not object-key insertion order", async () => {
+    // Override preferredId on the meta to a compound shape; submit the object
+    // with keys in REVERSE order to lock in that the join walks
+    // `meta.preferredId`, not `Object.values(id)`.
+    const fetchFn = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/meta")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () =>
+            Promise.resolve({
+              ...baseMeta,
+              primaryKeys: ["tenantId", "userId"],
+              preferredId: ["tenantId", "userId"],
+              actions: [
+                {
+                  name: "edit",
+                  label: "Edit",
+                  level: "row",
+                  processor: "navigate",
+                  value: "/members/$1/edit",
+                } as TDbActionInfo,
+              ],
+            }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, statusText: "OK", json: () => ({}) });
+    });
     const navigate = vi.fn();
     const c = new Client("/api/members", { fetch: fetchFn, navigate });
-    await c.action("edit", { tenantId: "acme/co", userId: "jane" });
+    // Object keys deliberately in reverse declaration order.
+    await c.action("edit", { userId: "jane", tenantId: "acme/co" });
     expect(navigate).toHaveBeenCalledWith("/members/acme%2Fco/jane/edit");
   });
 
@@ -272,7 +312,7 @@ describe("Client.action — navigate processor", () => {
     delete (globalThis as { location?: unknown }).location;
     try {
       const c = new Client("/api/users", { fetch: fetchFn });
-      await expect(c.action("edit", "abc")).rejects.toBeInstanceOf(ActionUnsupportedError);
+      await expect(c.action("edit", { id: "abc" })).rejects.toBeInstanceOf(ActionUnsupportedError);
     } finally {
       if (originalLocation !== undefined) {
         (globalThis as { location?: unknown }).location = originalLocation;

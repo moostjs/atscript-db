@@ -24,7 +24,7 @@ pnpm add @atscript/moost-db
 
 Peer dependencies: `moost`, `@moostjs/event-http`, `@wooksjs/http-body`, `@atscript/db`, `@atscript/typescript`.
 
-`@wooksjs/http-body` is required by the `@DbActionPK` / `@DbActionPKs` parameter resolvers (used by the action layer) to read the parsed JSON request body.
+`@wooksjs/http-body` is required by the `@DbActionID` / `@DbActionIDs` parameter resolvers (used by the action layer) to read the parsed JSON request body.
 
 ## Quick Start
 

@@ -87,6 +87,7 @@ export interface TMetaResponse {
   vectorSearchable: boolean;
   searchIndexes: TSearchIndexInfo[];
   primaryKeys: string[];
+  preferredId: string[];
   relations: TRelationInfo[];
   fields: Record<string, TFieldMeta>;
   type: TSerializedAnnotatedType;
@@ -232,6 +233,14 @@ export interface TIdDescriptor {
   fields: string[];
   /** Whether this is a composite key (multiple fields). */
   isComposite: boolean;
+}
+
+/** A legitimate row-identifier shape: primary key or a unique index. */
+export interface TIdentification {
+  /** Logical (path) field names that form this identifier. */
+  fields: readonly string[];
+  /** `'primaryKey'` for the PK; the unique-index name otherwise. */
+  source: string;
 }
 
 // ── Field Storage ──────────────────────────────────────────────────────────
@@ -394,7 +403,7 @@ export type TTableResolver = (
 ) =>
   | Pick<
       AtscriptDbTableLike,
-      "findMany" | "loadRelations" | "primaryKeys" | "relations" | "foreignKeys"
+      "findMany" | "loadRelations" | "primaryKeys" | "preferredId" | "relations" | "foreignKeys"
     >
   | undefined;
 
@@ -403,6 +412,7 @@ export interface AtscriptDbTableLike {
   findMany(query: unknown): Promise<Array<Record<string, unknown>>>;
   loadRelations(rows: Array<Record<string, unknown>>, withRelations: WithRelation[]): Promise<void>;
   primaryKeys: readonly string[];
+  preferredId: readonly string[];
   relations: ReadonlyMap<string, TDbRelation>;
   foreignKeys: ReadonlyMap<string, TDbForeignKey>;
   getMetadata(): TableMetadata;

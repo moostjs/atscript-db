@@ -20,8 +20,8 @@ export function scanParamLevel(params: ReadonlyArray<Record<string, unknown>>): 
   let hasBody = false;
   for (const p of params) {
     const kind = p[MOOST_DB_ACTION_PARAM] as TDbActionParamKind | undefined;
-    if (kind === "pk") single = true;
-    else if (kind === "pks") multi = true;
+    if (kind === "id") single = true;
+    else if (kind === "ids") multi = true;
     if (p[MOOST_DB_ACTION_ROW]) {
       single = true;
       hasRowParam = true;

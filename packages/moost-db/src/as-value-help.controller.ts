@@ -211,6 +211,7 @@ export abstract class AsValueHelpController<
       vectorSearchable: false,
       searchIndexes: [],
       primaryKeys: this.primaryKey ? [this.primaryKey] : [],
+      preferredId: this.primaryKey ? [this.primaryKey] : [],
       relations: [],
       fields,
       type: this.getSerializedType(),

@@ -3,8 +3,8 @@ import { describe, it, expect } from "vite-plus/test";
 import { AsDbController } from "../as-db.controller";
 import { fakeOverview, makeApp, makeTable } from "./actions-test-utils";
 
-describe("Action level inference from PK-decorator usage", () => {
-  it("infers level: 'row' from @DbActionPK", async () => {
+describe("Action level inference from ID-decorator usage", () => {
+  it("infers level: 'row' from @DbActionID", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -14,7 +14,7 @@ describe("Action level inference from PK-decorator usage", () => {
           httpMethod: "POST",
           path: "/c/block",
           action: { name: "block", opts: { label: "Block" } },
-          paramKinds: ["pk"],
+          paramKinds: ["id"],
         },
       ]),
     ]);
@@ -23,7 +23,7 @@ describe("Action level inference from PK-decorator usage", () => {
     expect(meta.actions[0].level).toBe("row");
   });
 
-  it("infers level: 'rows' from @DbActionPKs", async () => {
+  it("infers level: 'rows' from @DbActionIDs", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -33,7 +33,7 @@ describe("Action level inference from PK-decorator usage", () => {
           httpMethod: "POST",
           path: "/c/lock",
           action: { name: "lock", opts: { label: "Lock" } },
-          paramKinds: ["pks"],
+          paramKinds: ["ids"],
         },
       ]),
     ]);
@@ -42,7 +42,7 @@ describe("Action level inference from PK-decorator usage", () => {
     expect(meta.actions[0].level).toBe("rows");
   });
 
-  it("infers level: 'table' when no PK decorator is present", async () => {
+  it("infers level: 'table' when no ID decorator is present", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -61,7 +61,7 @@ describe("Action level inference from PK-decorator usage", () => {
     expect(meta.actions[0].level).toBe("table");
   });
 
-  it("drops the action when both @DbActionPK and @DbActionPKs are present", async () => {
+  it("drops the action when both @DbActionID and @DbActionIDs are present", async () => {
     class C extends AsDbController {}
     const ctx = makeApp();
     ctx.setOverview([
@@ -71,7 +71,7 @@ describe("Action level inference from PK-decorator usage", () => {
           httpMethod: "POST",
           path: "/c/ambig",
           action: { name: "ambig", opts: { label: "Ambig" } },
-          paramKinds: ["pk", "pks"],
+          paramKinds: ["id", "ids"],
         },
       ]),
     ]);

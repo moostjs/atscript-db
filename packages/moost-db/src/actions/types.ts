@@ -11,27 +11,27 @@ export type TOnDisabledRows = "reject" | "skip";
  *
  * Fields owned by the framework (`name`, `level`, `processor`, `value`) are
  * excluded — `name` comes from the decorator argument, `level` is inferred
- * from `@DbActionPK*` / `@DbActionRow*` usage, `processor` is fixed to
+ * from `@DbActionID*` / `@DbActionRow*` usage, `processor` is fixed to
  * `'backend'` for method-decorator actions, and `value` is filled from the
  * `@Post` path.
  *
  * Generic over `TRow` so the `disabled` predicate can be type-checked against
  * the bound table's row shape. Note: TS decorators cannot infer `TRow` from
- * the enclosing controller's class generic, so the dev MUST annotate the row
- * arg explicitly (`(row: Order) => …`) to get type-checking.
+ * the enclosing controller's class generic, so the dev MUST annotate the rows
+ * arg explicitly (`(rows: Order[]) => …`) to get type-checking.
  */
 export type DbActionOpts<TRow = unknown> = Partial<
   Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "requiredFields">
 > & {
   /**
-   * Per-row gate predicate. Truthy → action is disabled for that row.
+   * Batch gate predicate. Each truthy verdict disables the corresponding row.
    * Server enforces (via the gate interceptor); UI evaluates the same
    * expression to grey-out / hide the button.
    *
-   * The dev MUST annotate the row arg explicitly (`(row: Order) => …`) —
+   * The dev MUST annotate the rows arg explicitly (`(rows: Order[]) => …`) —
    * TS decorators cannot infer `TRow` from the enclosing class generic.
    */
-  disabled?: (row: TRow) => boolean;
+  disabled?: (rows: TRow[]) => boolean[];
   /**
    * Optional dot-notation field paths the UI should union into `$select`.
    * Plain `string[]` in v1.
@@ -49,9 +49,9 @@ export type DbActionOpts<TRow = unknown> = Partial<
    * `'rows'`-level batch policy. Default `'reject'`.
    *
    * - `'reject'`: evaluate every row (FULL scan, NOT short-circuit) before
-   *   throwing; if any row fails, the error body lists ALL failing PKs;
+   *   throwing; if any row fails, the error body lists ALL failing IDs;
    *   handler not invoked.
-   * - `'skip'`: filter cached rows + cached PKs to passing-only;
+   * - `'skip'`: filter cached rows + cached IDs to passing-only;
    *   zero survivors → reject. Handler runs against the survivors.
    *
    * Ignored for `'row'` and `'table'` level actions.
@@ -98,7 +98,7 @@ interface DbActionsEntryCommon {
    *
    * Not generic over `TRow` — devs type the row arg explicitly.
    */
-  disabled?: (row: any) => boolean;
+  disabled?: (rows: any[]) => boolean[];
   /** Same as method-decorator `requiredFields`. UI hint, not server-derived. */
   requiredFields?: string[];
   /**
@@ -114,9 +114,9 @@ interface DbActionsEntryCommon {
  * - `'navigate'` — REQUIRED, non-empty. The URL template (with `$1` substituted client-side).
  * - `'backend'`  — REQUIRED, non-empty. The full HTTP POST path the UI client should invoke.
  *   For row/rows entries the dev-supplied path MUST point to a `@Post`-bound
- *   handler accepting the PK-shaped JSON body (single PK scalar / composite
- *   object / array thereof) — typically a method using `@DbActionPK()` or
- *   `@DbActionPKs()`. The meta builder does NOT validate this.
+ *   handler accepting the ID-shaped JSON body (object / array thereof) —
+ *   typically a method using `@DbActionID()` or `@DbActionIDs()`. The meta
+ *   builder does NOT validate this.
  * - `'custom'`   — `value` is forbidden in the entry; the meta builder fills it
  *   with the dict key.
  */

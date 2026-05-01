@@ -7,7 +7,7 @@ export const WARN_PREFIX = "[moost-db actions]";
 export const MOOST_DB_ACTION = "atscript_db_action";
 /** Class-level metadata key — written by `@DbActions` and the level-pinned shortcuts. Stored as an array; decorators accumulate. */
 export const MOOST_DB_ACTIONS = "atscript_db_actions";
-/** Param-level metadata key — written by `@DbActionPK()` / `@DbActionPKs()`. Drives level inference. */
+/** Param-level metadata key — written by `@DbActionID()` / `@DbActionIDs()`. Drives level inference. */
 export const MOOST_DB_ACTION_PARAM = "atscript_db_action_param";
 /** Param-level marker keys — written by `@DbActionRow()` / `@DbActionRows()`. */
 export const MOOST_DB_ACTION_ROW = "atscript_db_action_row";
@@ -27,8 +27,8 @@ export interface TDbClassActionMeta {
   entry: TDbActionsEntry;
 }
 
-/** Param marker kind — informs level inference and PK-resolution shape. */
-export type TDbActionParamKind = "pk" | "pks";
+/** Param marker kind — informs level inference and ID-resolution shape. */
+export type TDbActionParamKind = "id" | "ids";
 
 /**
  * Shared method-decorator update used by `@DbAction` and `@DbActionDefault`:

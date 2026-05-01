@@ -104,7 +104,7 @@ function collectMethodActions(
     if (!levelInfer) continue;
     if (levelInfer.bodyConflict) {
       logger.warn(
-        `${WARN_PREFIX} action "${action.name}" cannot mix @DbActionPK*/@DbActionPKs/@DbActionRow*/@DbActionRows with @Body() — dropping`,
+        `${WARN_PREFIX} action "${action.name}" cannot mix @DbActionID*/@DbActionIDs/@DbActionRow*/@DbActionRows with @Body() — dropping`,
       );
       continue;
     }
@@ -185,7 +185,7 @@ function inferMethodLevel(
   if (scan.single && scan.multi) {
     logger.warn(
       `${WARN_PREFIX} action "${actionName}" mixes single-cardinality and multi-cardinality decorators ` +
-        `(@DbActionPK / @DbActionRow vs @DbActionPKs / @DbActionRows) — dropping`,
+        `(@DbActionID / @DbActionRow vs @DbActionIDs / @DbActionRows) — dropping`,
     );
     return null;
   }

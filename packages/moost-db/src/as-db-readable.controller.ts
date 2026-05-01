@@ -3,6 +3,7 @@ import type {
   AtscriptDbReadable,
   FilterExpr,
   TCrudPermissions,
+  TIdentification,
   TMetaResponse,
   UniqueryControls,
   Uniquery,
@@ -31,6 +32,8 @@ export class AsDbReadableController<
   protected readable: AtscriptDbReadable<T>;
 
   private readonly _gates: ReadableGates;
+  private readonly _preferredIdSet: ReadonlySet<string>;
+  private readonly _compositeIdShapes: readonly TIdentification[];
 
   constructor(
     @Inject(READABLE_DEF)
@@ -40,6 +43,10 @@ export class AsDbReadableController<
     super(readable.type as T, readable.tableName, app, readable.isView ? "view" : "table");
     this.readable = readable;
     this._gates = this._buildGates();
+    this._preferredIdSet = new Set(readable.preferredId ?? []);
+    this._compositeIdShapes = (readable.identifications ?? []).filter(
+      (id) => id.fields.length >= 2,
+    );
   }
 
   private _buildGates(): ReadableGates {
@@ -124,43 +131,96 @@ export class AsDbReadableController<
     return projection;
   }
 
+  private widenPreferredIdProjection(
+    projection?: UniqueryControls["$select"],
+  ): UniqueryControls["$select"] | undefined | HttpError {
+    const preferredIdSet = this._preferredIdSet;
+    if (preferredIdSet.size === 0 || projection === undefined) {
+      return projection;
+    }
+    if (Array.isArray(projection)) {
+      return this._widenArrayProjection(projection);
+    }
+    return this._widenMapProjection(projection as Record<string, unknown>);
+  }
+
+  private _widenArrayProjection(
+    projection: readonly unknown[],
+  ): UniqueryControls["$select"] | undefined {
+    const stringItems = new Set<string>();
+    for (const item of projection) {
+      if (typeof item === "string") stringItems.add(item);
+    }
+    let allPresent = true;
+    for (const field of this._preferredIdSet) {
+      if (!stringItems.has(field)) {
+        allPresent = false;
+        break;
+      }
+    }
+    if (allPresent) return projection as UniqueryControls["$select"];
+    const out = [...projection] as unknown[];
+    for (const field of this._preferredIdSet) {
+      if (!stringItems.has(field)) out.push(field);
+    }
+    return out as UniqueryControls["$select"];
+  }
+
+  private _widenMapProjection(
+    projection: Record<string, unknown>,
+  ): UniqueryControls["$select"] | undefined | HttpError {
+    const entries = Object.entries(projection);
+    if (entries.length === 0) return projection as UniqueryControls["$select"];
+
+    const included = new Set<string>();
+    const excluded = new Set<string>();
+    for (const [k, v] of entries) {
+      if (v === 1 || v === true) included.add(k);
+      else if (v === 0 || v === false) excluded.add(k);
+    }
+    if (included.size > 0 && excluded.size > 0) {
+      return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
+    }
+
+    if (excluded.size === 0) {
+      let allPresent = true;
+      for (const field of this._preferredIdSet) {
+        if (!included.has(field)) {
+          allPresent = false;
+          break;
+        }
+      }
+      if (allPresent) return projection as UniqueryControls["$select"];
+      const widened: Record<string, 1> = {};
+      for (const k of included) widened[k] = 1;
+      for (const field of this._preferredIdSet) widened[field] = 1;
+      return widened as UniqueryControls["$select"];
+    }
+
+    const widened: Record<string, 1> = {};
+    for (const fd of this.readable.fieldDescriptors) {
+      if (!fd.ignored && !excluded.has(fd.path)) widened[fd.path] = 1;
+    }
+    for (const field of this._preferredIdSet) widened[field] = 1;
+    return widened as UniqueryControls["$select"];
+  }
+
   /**
    * Extracts a composite identifier object from query params.
    * Tries composite primary key first, then compound unique indexes.
    */
   protected extractCompositeId(query: Record<string, string>): Record<string, unknown> | HttpError {
-    const pkFields = this.readable.primaryKeys;
-    if (pkFields.length > 1) {
+    for (const id of this._compositeIdShapes) {
       const idObj: Record<string, unknown> = {};
       let allPresent = true;
-      for (const field of pkFields) {
+      for (const field of id.fields) {
         if (query[field] === undefined) {
           allPresent = false;
           break;
         }
         idObj[field] = query[field];
       }
-      if (allPresent) {
-        return idObj;
-      }
-    }
-
-    for (const index of this.readable.indexes.values()) {
-      if (index.type !== "unique" || index.fields.length < 2) {
-        continue;
-      }
-      const idObj: Record<string, unknown> = {};
-      let allPresent = true;
-      for (const indexField of index.fields) {
-        if (query[indexField.name] === undefined) {
-          allPresent = false;
-          break;
-        }
-        idObj[indexField.name] = query[indexField.name];
-      }
-      if (allPresent) {
-        return idObj;
-      }
+      if (allPresent) return idObj;
     }
 
     return new HttpError(
@@ -214,16 +274,21 @@ export class AsDbReadableController<
       return gateError;
     }
 
-    const [filter, select] = await Promise.all([
+    const [filter, rawSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select),
     ]);
 
     if (controls.$count) {
-      return this.readable.count({ filter, controls: { ...controls, $select: select } } as Uniquery<
-        any,
-        any
-      >);
+      return this.readable.count({
+        filter,
+        controls: { ...controls, $select: rawSelect },
+      } as Uniquery<any, any>);
+    }
+
+    const select = this.widenPreferredIdProjection(rawSelect);
+    if (select instanceof HttpError) {
+      return select;
     }
 
     const searchTerm = controls.$search as string | undefined;
@@ -287,10 +352,14 @@ export class AsDbReadableController<
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
-    const [filter, select] = await Promise.all([
+    const [filter, rawSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
+    const select = this.widenPreferredIdProjection(rawSelect);
+    if (select instanceof HttpError) {
+      return select;
+    }
 
     const searchTerm = controls.$search as string | undefined;
     const indexName = controls.$index as string | undefined;
@@ -361,7 +430,11 @@ export class AsDbReadableController<
       return error;
     }
 
-    const select = await this.transformProjection(parsed.controls.$select);
+    const rawSelect = await this.transformProjection(parsed.controls.$select);
+    const select = this.widenPreferredIdProjection(rawSelect);
+    if (select instanceof HttpError) {
+      return select;
+    }
     const controls = { ...parsed.controls, $select: select };
 
     return this.returnOne(
@@ -384,7 +457,11 @@ export class AsDbReadableController<
     }
 
     const parsed = this.parseQueryString(url);
-    const select = await this.transformProjection(parsed.controls.$select);
+    const rawSelect = await this.transformProjection(parsed.controls.$select);
+    const select = this.widenPreferredIdProjection(rawSelect);
+    if (select instanceof HttpError) {
+      return select;
+    }
     const controls = { ...parsed.controls, $select: select };
 
     return this.returnOne(
@@ -425,6 +502,7 @@ export class AsDbReadableController<
       vectorSearchable: this.readable.isVectorSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),
       primaryKeys: [...this.readable.primaryKeys],
+      preferredId: [...this.readable.preferredId],
       relations,
       fields,
       type: this.getSerializedType(),

@@ -77,31 +77,12 @@ export abstract class BaseDbAdapter {
 
   protected _table!: AtscriptDbReadable<any, any, any, any, any, any, any>;
 
-  private _metaIdPhysical: string | null | undefined;
-
-  /**
-   * Returns the physical column name of the single @meta.id field (if any).
-   * Used to return the user's logical ID instead of the DB-generated ID on insert.
-   */
-  protected _getMetaIdPhysical(): string | null {
-    if (this._metaIdPhysical === undefined) {
-      const fields = this._table.originalMetaIdFields;
-      if (fields.length === 1) {
-        const field = fields[0];
-        this._metaIdPhysical = this._table.columnMap.get(field) ?? field;
-      } else {
-        this._metaIdPhysical = null;
-      }
-    }
-    return this._metaIdPhysical;
-  }
-
   /**
    * Resolves the correct insertedId: prefers the user-supplied PK value
    * from the data over the DB-generated fallback (e.g. rowid, _id).
    */
   protected _resolveInsertedId(data: Record<string, unknown>, dbGeneratedId: unknown): unknown {
-    const metaIdPhysical = this._getMetaIdPhysical();
+    const metaIdPhysical = this._table.metaIdPhysical;
     return metaIdPhysical ? (data[metaIdPhysical] ?? dbGeneratedId) : dbGeneratedId;
   }
 

@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from "vite-plus/test";
 import { AsJsonValueHelpController } from "../as-json-value-help.controller";
 import { AsValueHelpController } from "../as-value-help.controller";
 import { DbAction } from "../actions/db-action.decorator";
-import { DbActionPK } from "../actions/db-action-pk.decorator";
+import { DbActionID } from "../actions/db-action-id.decorator";
 import { DbTableActions } from "../actions/db-actions.decorator";
 import { makeTable } from "./actions-test-utils";
 
@@ -68,9 +68,9 @@ describe("AsJsonValueHelpController + @DbTableActions", () => {
           // value-help carve-out in db-action.decorator.ts, an interceptor
           // would register at module load. The carve-out blocks it.
           table: makeTable() as never,
-          disabled: () => true,
+          disabled: () => [true],
         })
-        foo(@DbActionPK() _id: string) {
+        foo(@DbActionID() _id: string) {
           return "ok";
         }
 

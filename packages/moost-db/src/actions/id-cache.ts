@@ -5,31 +5,24 @@ import { getMoostMate, useControllerContext } from "moost";
 
 import { MOOST_DB_ACTION, WARN_PREFIX, type TDbActionMeta } from "./keys";
 import {
-  isPkValidationSource,
-  validateMultiPk,
-  validateSinglePk,
-  type PkValidationSource,
-} from "./pk-validation";
+  isIdValidationSource,
+  validateMultiId,
+  validateSingleId,
+  type IdValidationSource,
+} from "./id-validation";
 
-// Resolution precedence: gate-injected slot → controller.readable → controller.table.
 export const boundTableKey = key<unknown>("atscript_db_action_bound_table");
 
 export function getActionTable(ctx: EventContext): unknown {
-  if (ctx.has(boundTableKey)) {
-    const fromSlot = ctx.get(boundTableKey);
-    if (fromSlot) return fromSlot;
-  }
+  const fromSlot = ctx.has(boundTableKey) ? ctx.get(boundTableKey) : undefined;
+  if (fromSlot) return fromSlot;
   const ctrl = useControllerContext(ctx).getController() as
     | { readable?: unknown; table?: unknown }
     | undefined;
-  if (ctrl) {
-    const t = ctrl.readable ?? ctrl.table;
-    if (t) return t;
-  }
-  return null;
+  return ctrl?.readable ?? ctrl?.table ?? null;
 }
 
-function noTableError(ctx: EventContext): HttpError {
+export function noTableError(ctx: EventContext): HttpError {
   const cc = useControllerContext(ctx);
   const ctrl = cc.getController() as object | undefined;
   const methodName = cc.getMethod();
@@ -47,12 +40,12 @@ function noTableError(ctx: EventContext): HttpError {
   );
 }
 
-async function resolveValidatedPk(
+async function resolveValidatedId(
   ctx: EventContext,
-  validate: (body: unknown, src: PkValidationSource) => void,
+  validate: (body: unknown, src: IdValidationSource) => unknown,
 ): Promise<unknown> {
   const table = getActionTable(ctx);
-  if (!isPkValidationSource(table)) {
+  if (!isIdValidationSource(table)) {
     throw noTableError(ctx);
   }
   const body = await useBody(ctx).parseBody<unknown>();
@@ -60,20 +53,19 @@ async function resolveValidatedPk(
   return body;
 }
 
-export const dbActionPkSlot = cached<Promise<unknown>>((ctx) =>
-  resolveValidatedPk(ctx, validateSinglePk),
+export const dbActionIdSlot = cached<Promise<Record<string, unknown>>>(
+  (ctx) => resolveValidatedId(ctx, validateSingleId) as Promise<Record<string, unknown>>,
 );
 
-// Gate's skip mode overwrites this slot via ctx.set with the survivors.
-export const dbActionPksSlot = cached<Promise<unknown[]>>(async (ctx) => {
-  const result = await resolveValidatedPk(ctx, validateMultiPk);
-  return result as unknown[];
+export const dbActionIdsSlot = cached<Promise<Record<string, unknown>[]>>(async (ctx) => {
+  const result = await resolveValidatedId(ctx, validateMultiId);
+  return result as Record<string, unknown>[];
 });
 
-export const useDbActionPk = defineWook((ctx) => ({
-  load: () => ctx.get(dbActionPkSlot),
+export const useDbActionId = defineWook((ctx) => ({
+  load: () => ctx.get(dbActionIdSlot),
 }));
 
-export const useDbActionPks = defineWook((ctx) => ({
-  load: () => ctx.get(dbActionPksSlot),
+export const useDbActionIds = defineWook((ctx) => ({
+  load: () => ctx.get(dbActionIdsSlot),
 }));
