@@ -1,19 +1,14 @@
 ---
 name: atscript-db
 description: >-
-  Use when consuming `@atscript/db`, any `@atscript/db-{sqlite,postgres,mysql,mongo}`
-  adapter, `@atscript/db-sql-tools`, `@atscript/moost-db`, or `@atscript/db-client`,
-  or authoring `.as` models with `@db.*` annotations. Covers `DbSpace` + adapter wiring,
-  `AtscriptDbTable` / `AtscriptDbView` CRUD, MongoDB-style filters, patch decomposition
-  with field ops (`$inc`/`$dec`/`$mul`) and array ops (`$replace`/`$insert`/`$upsert`/
-  `$update`/`$remove`), relations (`@db.rel.FK`/.to/.from/.via, fractional ref depth),
-  views, schema sync, per-engine capabilities (FTS, pgvector/HNSW, MySQL VECTOR,
-  Atlas Search), `BaseDbAdapter` subclassing, `AsDbController`/`AsDbReadableController`
-  REST routes, declarative actions (`@DbAction`/`@DbActionPK*`/`@DbActionRow*`/`@DbActions*`
-  row/rows/table operations surfaced via `/meta` with optional server-side row gate via
-  `disabled` predicate + `ActionDisabledError`), URL query syntax, browser `Client` (typed
-  CRUD + `client.action()`), and `createDbValidatorPlugin()`. DB layer only — for `.as` syntax,
-  `@meta.*`/`@expect.*`, asc, unplugin, VSCode, install `moostjs/atscript`.
+  Use when working with @atscript/db, @atscript/db-{sqlite,postgres,mysql,mongo},
+  @atscript/db-sql-tools, @atscript/moost-db, @atscript/db-client, or .as models
+  with @db.* annotations. Covers DbSpace, adapter wiring, table/view CRUD, query
+  filters, patch/field/array ops, relations, views, schema sync, engine-specific
+  capabilities, BaseDbAdapter subclassing, moost-db REST routes, declarative
+  actions, URL query syntax, browser Client, client.action(), and DB validation.
+  Scope is DB only; use the atscript skill for .as syntax, @meta.*, @expect.*, asc,
+  unplugin, or VSCode.
 ---
 
 # atscript-db
