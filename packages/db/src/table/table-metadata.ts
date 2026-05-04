@@ -822,19 +822,36 @@ export class TableMetadata {
    * (when present) followed by every unique index. Must run BEFORE
    * `_finalizeIndexes` rewrites `index.fields[i].name` from logical to
    * physical, so the field lists stay logical.
+   *
+   * Sources:
+   * - `this.primaryKeys` — composite-aware PK (one identification covering
+   *   the PK columns).
+   * - `this.indexes` — user-declared `@db.index.unique` (single or compound).
+   * - `this.uniqueProps` — single-field uniques contributed by adapter
+   *   overrides (`addUniqueFields`); these aren't reflected in
+   *   `this.indexes` but still legitimate addressing identifications.
+   *   Deduped against any single-field unique index already captured.
    */
   private _buildIdentifications(): void {
     const out: TIdentification[] = [];
+    const seenSingleFields = new Set<string>();
     if (this.primaryKeys.length > 0) {
       out.push({ fields: [...this.primaryKeys], source: "primaryKey" });
     }
     for (const index of this.indexes.values()) {
       if (index.type === "unique") {
-        out.push({
-          fields: index.fields.map((field) => field.name),
-          source: index.name,
-        });
+        const fields = index.fields.map((field) => field.name);
+        out.push({ fields, source: index.name });
+        if (fields.length === 1) seenSingleFields.add(fields[0]!);
       }
+    }
+    // Adapter-contributed single-field uniques (e.g. MongoDB demotes `@meta.id`
+    // on a non-`_id` field to a unique index named `__pk` whose record lives
+    // only in the adapter's local index map, not on `this.indexes`).
+    for (const field of this.uniqueProps) {
+      if (seenSingleFields.has(field)) continue;
+      if (this.primaryKeys.length === 1 && this.primaryKeys[0] === field) continue;
+      out.push({ fields: [field], source: `unique:${field}` });
     }
     this._identifications = out;
   }
