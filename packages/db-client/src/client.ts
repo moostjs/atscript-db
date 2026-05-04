@@ -1,5 +1,10 @@
 import { buildUrl } from "@uniqu/url/builder";
 import type { AggregateQuery, AggregateResult, Uniquery, UniqueryControls } from "@uniqu/core";
+import {
+  deserializeAnnotatedType,
+  type TAtscriptAnnotatedType,
+  type TSerializedAnnotatedType,
+} from "@atscript/typescript/utils";
 import type {
   TDbActionInfo,
   TDbInsertResult,
@@ -63,6 +68,8 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private readonly _navigate?: ClientOptions["navigate"];
   private _metaPromise?: Promise<MetaResponse>;
   private _validatorPromise?: Promise<ClientValidator>;
+  /** Cached deserialized form schemas keyed by form name. */
+  private _formCache = new Map<string, Promise<TAtscriptAnnotatedType>>();
 
   constructor(path: string, opts?: ClientOptions) {
     this._path = path.endsWith("/") ? path.slice(0, -1) : path;
@@ -260,11 +267,22 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * field sets produce HTTP 400; obvious type errors (scalars, `null`) are
    * caught at compile time when `T` is typed.
    *
+   * **Form input.** When the action's `inputForm` field is set, the server
+   * expects a structured payload in the envelope's `input` field. Pass it as
+   * the third argument; the schema can be fetched ahead of time via
+   * {@link getActionForm} to drive a UI form. Body shape on the wire is
+   * `{ ids?, input? }` — `ids` carries `id` (object or array per level),
+   * `input` carries the form payload.
+   *
    * @typeParam R Caller-asserted return shape from the action handler. The
    *              server returns whatever the handler emits (commonly
    *              `{ message?: string, ... }`); the client cannot validate.
    */
-  async action<R = unknown>(name: string, id?: Partial<Own<T>> | Partial<Own<T>>[]): Promise<R> {
+  async action<R = unknown>(
+    name: string,
+    id?: Partial<Own<T>> | Partial<Own<T>>[],
+    input?: unknown,
+  ): Promise<R> {
     const meta = await this.meta();
     const action = meta.actions.find((a) => a.name === name);
     if (!action) throw new ActionNotFoundError(name);
@@ -283,8 +301,42 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       return undefined as R;
     }
 
-    const body = this._buildActionBody(action, id);
+    const body = this._buildActionBody(action, id, input);
     return this._postAction(action, body) as Promise<R>;
+  }
+
+  /**
+   * Fetches and caches the deserialized form schema for an action's
+   * `@InputForm()` parameter. Returns `null` when the action has no form
+   * declared, or doesn't exist on `/meta`. Callers typically pass the
+   * returned annotated type to a form-renderer (e.g. `@atscript/ui` form
+   * components) and then submit the collected payload through
+   * {@link action}'s `input` argument.
+   */
+  async getActionForm(actionName: string): Promise<TAtscriptAnnotatedType | null> {
+    const meta = await this.meta();
+    const action = meta.actions.find((a) => a.name === actionName);
+    if (!action?.inputForm) return null;
+    return this._loadActionForm(action.inputForm);
+  }
+
+  private _loadActionForm(formName: string): Promise<TAtscriptAnnotatedType> {
+    let p = this._formCache.get(formName);
+    if (!p) {
+      p = (
+        this._request(
+          "GET",
+          `meta/form/${encodeURIComponent(formName)}`,
+        ) as Promise<TSerializedAnnotatedType>
+      )
+        .then((schema) => deserializeAnnotatedType(schema))
+        .catch((err) => {
+          this._formCache.delete(formName);
+          throw err;
+        });
+      this._formCache.set(formName, p);
+    }
+    return p;
   }
 
   // ── Validation (client utility) ────────────────────────────────────────────
@@ -316,22 +368,35 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
 
   // ── Action helpers ─────────────────────────────────────────────────────────
 
-  private _buildActionBody(action: TDbActionInfo, id: unknown): unknown {
-    if (action.level === "table") return undefined;
-    if (action.level === "rows") {
-      if (id === undefined) return [];
-      if (!Array.isArray(id)) {
-        throw new TypeError(
-          `client.action("${action.name}"): rows-level actions require an array of identifier objects; received ${describeShape(id)}.`,
-        );
-      }
-      return id;
+  private _buildActionBody(action: TDbActionInfo, id: unknown, input: unknown): unknown {
+    const envelope: { ids?: unknown; input?: unknown } = {};
+    switch (action.level) {
+      case "rows":
+        if (id === undefined) {
+          envelope.ids = [];
+        } else if (!Array.isArray(id)) {
+          throw new TypeError(
+            `client.action("${action.name}"): rows-level actions require an array of identifier objects; received ${describeShape(id)}.`,
+          );
+        } else {
+          envelope.ids = id;
+        }
+        break;
+      case "row":
+        if (id === null || typeof id !== "object" || Array.isArray(id)) {
+          throw new TypeError(
+            `client.action("${action.name}"): row-level actions require an identifier object; received ${describeShape(id)}.`,
+          );
+        }
+        envelope.ids = id;
+        break;
+      case "table":
+        // Bare table-level action with no input → no body sent at all.
+        if (input === undefined) return undefined;
+        break;
     }
-    // 'row' level: must be a plain identifier object.
-    if (id !== null && typeof id === "object" && !Array.isArray(id)) return id;
-    throw new TypeError(
-      `client.action("${action.name}"): row-level actions require an identifier object; received ${describeShape(id)}.`,
-    );
+    if (input !== undefined) envelope.input = input;
+    return envelope;
   }
 
   private _interpolateNavigateUrl(

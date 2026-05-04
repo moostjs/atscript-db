@@ -42,7 +42,7 @@ describe("Gate interceptor — row-level", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "ship");
       setBoundTable(table);
       try {
@@ -70,7 +70,7 @@ describe("Gate interceptor — row-level", () => {
       onDisabledRows: "reject",
     });
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "ship");
       setBoundTable(table);
       await runBeforeInterceptor(def);
@@ -96,7 +96,7 @@ describe("Thin interceptor — bound-table injection only", () => {
     const predicate = vi.fn().mockReturnValue(false);
     const thin = buildThinInterceptor({ table });
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       class Ctrl {
         ship(): void {}
       }
@@ -137,7 +137,7 @@ describe("Gate interceptor — rows-level reject mode (full scan)", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -174,7 +174,7 @@ describe("Gate interceptor — rows-level skip mode", () => {
       onDisabledRows: "skip",
     });
 
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       const ctx = current();
@@ -207,7 +207,7 @@ describe("Gate interceptor — rows-level skip mode", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -242,7 +242,7 @@ describe("Gate interceptor — missing-row handling", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -279,7 +279,7 @@ describe("Gate interceptor — missing-row handling", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -313,7 +313,7 @@ describe("Gate interceptor — missing-row handling", () => {
       onDisabledRows: "skip",
     });
 
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       const ctx = current();
@@ -348,7 +348,7 @@ describe("Gate interceptor — verdict-array invariant", () => {
     });
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -395,7 +395,7 @@ describe("Gate interceptor — table resolution from controller (regression)", (
       onDisabledRows: "reject",
     });
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new CtrlExposingReadable(), "ship");
       await runBeforeInterceptor(def);
       expect(table.findOne).toHaveBeenCalledTimes(1);
@@ -416,7 +416,7 @@ describe("Gate interceptor — table resolution from controller (regression)", (
       onDisabledRows: "reject",
     });
 
-    await runInActionCtx('{"id":"b"}', async () => {
+    await runInActionCtx('{"ids":{"id":"b"}}', async () => {
       bindController(new CtrlExposingTable(), "ship");
       await runBeforeInterceptor(def);
       expect(table.findOne).toHaveBeenCalledTimes(1);
@@ -439,7 +439,7 @@ describe("Gate interceptor — table resolution from controller (regression)", (
       table: optsTable,
     });
 
-    await runInActionCtx('{"id":"x"}', async () => {
+    await runInActionCtx('{"ids":{"id":"x"}}', async () => {
       bindController(new CtrlExposingReadable(), "ship");
       await runBeforeInterceptor(def);
       expect(ctrlTable.findOne).toHaveBeenCalledTimes(1);

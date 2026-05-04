@@ -17,16 +17,18 @@ import {
   DbActionIDs,
   DbActionRow,
   DbActionRows,
+  InputForm,
   // Class decorators
   DbActions,
   DbTableActions,
   DbRowActions,
   DbRowsActions,
-  // Composables (gate-cached identifiers / rows)
+  // Composables (gate-cached identifiers / rows / form input)
   useDbActionId,
   useDbActionIds,
   useDbActionRow,
   useDbActionRows,
+  useDbActionInput,
   // Helpers
   perRow,
   // Errors
@@ -40,6 +42,7 @@ import type {
   TDbActionProcessor,
   TDbActionsEntry,
   DbActionOpts,
+  TDbActionInputFormMeta,
   ActionDisabledErrorBody,
 } from "@atscript/moost-db";
 ```
@@ -56,6 +59,7 @@ Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` +
 | `@DbActionIDs()`         | param  | Identifier-object array from body. Infers `level: 'rows'`.                                                     |
 | `@DbActionRow()`         | param  | Injects gate-loaded row (no double-fetch). Infers `level: 'row'`.                                              |
 | `@DbActionRows()`        | param  | Injects gate-loaded rows (survivors only in `'skip'` mode). Infers `level: 'rows'`.                            |
+| `@InputForm(FormType)`   | param  | Injects `body.input`; stamps form ref + `FormType.name` on param mate. Does NOT affect level. One per action.  |
 | `@DbActions(dict)`       | class  | Generic dict; each entry must include `level`.                                                                 |
 | `@DbTableActions(dict)`  | class  | Sugar — pins `level: 'table'`.                                                                                 |
 | `@DbRowActions(dict)`    | class  | Sugar — pins `level: 'row'`.                                                                                   |
@@ -71,9 +75,23 @@ Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` +
 | mixing row + rows cardinality                              | warn + drop |
 | any `@DbAction*` + `@Body()`                               | warn + drop |
 
-## Identifier shape — object only
+## Body envelope — `{ ids?, input? }`
 
-The request body for an action is **always an object** (single) or **array of objects** (multi) — never a scalar. Each object's field set must EXACTLY match one **legitimate identification** on the table:
+Every action POST body is a JSON object envelope. `ids` carries the identifier(s); `input` carries `@InputForm` payload. Both fields optional.
+
+```json
+// row              { "ids": { "id": "abc" } }
+// rows             { "ids": [{ "id": "a" }, { "id": "b" }] }
+// table (no form)  {}                              ← or no body at all
+// row + form       { "ids": { "id": "abc" }, "input": { "note": "looks good" } }
+// table + form     { "input": { "message": "hi" } }
+```
+
+Array or scalar root → HTTP 400 `ValidatorError` (envelope is strict; this is the breaking change vs the pre-`InputForm` shape that placed identifiers at the root).
+
+### Identifier shape (`ids` field)
+
+`ids` is **always an object** (single) or **array of objects** (multi) — never a scalar. Each object's field set must EXACTLY match one **legitimate identification** on the table:
 
 - the **primary key** (`primaryKeys`), or
 - any declared `@db.index.unique` group (single-field or compound).
@@ -81,16 +99,20 @@ The request body for an action is **always an object** (single) or **array of ob
 The validator is **strict** — unknown fields are rejected with HTTP 400. Precedence: PK first, then unique-index groups in declaration order. The same `@DbActionIDs()` array MAY mix shapes per-element (one element by PK, another by `email`, etc.).
 
 ```json
-{ "id": "abc123" }                                  // row, single-field PK as object
-{ "tenantId": "acme", "userId": "u1" }              // row, composite PK
-{ "email": "jane@example.com" }                     // row, unique-index addressing
-[{ "id": "a" }, { "id": "b" }]                      // rows, single-field PK
-[{ "id": 1 }, { "email": "x@y" }]                   // rows, mixed identifier shapes
+{ "ids": { "id": "abc123" } }                                  // row, single-field PK
+{ "ids": { "tenantId": "acme", "userId": "u1" } }              // row, composite PK
+{ "ids": { "email": "jane@example.com" } }                     // row, unique-index addressing
+{ "ids": [{ "id": "a" }, { "id": "b" }] }                      // rows, single-field PK
+{ "ids": [{ "id": 1 }, { "email": "x@y" }] }                   // rows, mixed identifier shapes
 ```
 
-Even single-field PK tables MUST send `{ id: "abc" }`, never bare `"abc"`. `Content-Type: application/json` only.
+Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `"abc"`. `Content-Type: application/json` only.
 
 Field names are **logical** (the `.as` prop names) — never physical column names from `@db.column "..."`. The matcher always operates in logical-name space.
+
+### Input shape (`input` field)
+
+Free-form (no server-side validation by default — see § InputForm). Present iff the action declares `@InputForm(FormType)`. Empty `{}` body is fine; `input` defaults to `undefined`.
 
 ## Preferred row identifier
 
@@ -124,7 +146,7 @@ Every row-returning read endpoint (`GET /query`, `/pages`, `/one`, `/one/:id`, i
 
 | `processor`  | `value` at definition                                   | `value` in `/meta`                   | UI dispatch                                                                                                                                                                                       |
 | ------------ | ------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'backend'`  | required (class) / N/A (method, auto from `@Post` path) | bound POST path / dict path verbatim | UI POSTs identifier object (or array of objects) as JSON body                                                                                                                                     |
+| `'backend'`  | required (class) / N/A (method, auto from `@Post` path) | bound POST path / dict path verbatim | UI POSTs envelope `{ ids?, input? }` as JSON body (omits body for table-level + no form)                                                                                                          |
 | `'navigate'` | required, non-empty (class only)                        | dict value verbatim                  | UI routes to `value`; `$1` → row's `preferredId` field values (URL-encoded; compound joined `/` in `preferredId` declaration order; missing fields → empty segments, never literal `"undefined"`) |
 | `'custom'`   | **forbidden** (class only)                              | dict key (auto-filled)               | UI dispatches event named `value`                                                                                                                                                                 |
 
@@ -216,8 +238,8 @@ export class UsersController extends AsDbController<typeof User> {
     return { message: `Promoted ${id.slug}` };
   }
 }
-// Client POSTs `{ "slug": "alpha" }` — slug is a `@db.index.unique` field.
-// Same controller can also accept `{ "id": "<uuid>" }` (PK precedence) on
+// Client POSTs `{ "ids": { "slug": "alpha" } }` — slug is a `@db.index.unique` field.
+// Same controller can also accept `{ "ids": { "id": "<uuid>" } }` (PK precedence) on
 // the same endpoint; both shapes are legitimate identifications.
 ```
 
@@ -347,11 +369,77 @@ const id = await useDbActionId().load(); // single identifier object: Record<str
 const ids = await useDbActionIds().load(); // identifier-object array: Record<string, unknown>[]
 const row = await useDbActionRow().load(); // gate-loaded row
 const rows = await useDbActionRows().load(); // gate-loaded rows (survivors in `'skip'` mode)
+const input = await useDbActionInput().load(); // body.input — unknown; not validated by default
 ```
 
 `defineWook`-based, return `{ load() }`. Read inside `INTERCEPTOR`-priority interceptors — gate (`AFTER_GUARD`) has populated them.
 
 In skip-mode, `useDbActionIds().load()` returns the **filtered subset of original objects** (reference-equal to the entries the client posted), and `useDbActionRows().load()` returns the parallel-aligned filtered rows. No `undefined` gaps.
+
+## `@InputForm(FormType)` — structured user input
+
+Marks a param as the action's `input` payload (`body.input`). `FormType` is a compiled `.as` interface class. One per action; for multiple structured inputs, compose a single `.as` interface.
+
+Stamps two param mate keys:
+
+| Key                          | Value                                | Consumer                                                                         |
+| ---------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
+| `MOOST_DB_ACTION_INPUT_FORM` | `{ type: FormType, name: <string> }` | Discovery — emits `inputForm` on `/meta`; registers form for `/meta/form/:name`. |
+| `MOOST_ATSCRIPT_TYPE`        | `FormType`                           | Generic atscript-aware Moost pipe (validation hook).                             |
+
+**Validation is NOT performed by the decorator.** Install a Moost pipe that reads `MOOST_ATSCRIPT_TYPE` and runs `FormType.validator()` — globally via `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`. Without a pipe, `input` arrives as raw JSON. `ValidatorError` from such a pipe surfaces as HTTP 400 via the existing `validationErrorTransform()` interceptor.
+
+Form name on the wire is `FormType.name` (compiled `.as` classes have stable names). Reusing the same `FormType` across multiple actions on the same controller is allowed; clashing names with different type refs → discovery warns and drops the second action.
+
+Co-occurrence rules: orthogonal to level — `@InputForm` alone keeps the action `'table'`-level. Combines freely with `@DbActionID*` / `@DbActionRow*`. NOT supported on class-level dict actions (no params to decorate).
+
+### Example — `@InputForm` on a row action
+
+```atscript
+// schema/comment.as
+export interface CommentForm {
+    note: string
+
+    visibility?: 'public' | 'internal'
+}
+```
+
+```ts
+import { CommentForm } from "./schema/comment.as";
+
+@TableController(ordersTable)
+export class OrdersController extends AsDbController<typeof Order> {
+  @Post("actions/approve")
+  @DbAction("approve", { label: "Approve", intent: "positive" })
+  async approve(@DbActionID() id: { id: string }, @InputForm(CommentForm) input: CommentForm) {
+    await this.table.updateOne({ id: id.id, status: "approved", note: input.note });
+    return { message: `Approved ${id.id}` };
+  }
+}
+```
+
+Wire body: `{ "ids": { "id": "abc" }, "input": { "note": "ok", "visibility": "public" } }`.
+
+`/meta.actions[*]` for this action carries `inputForm: "CommentForm"`. Clients fetch the schema via `GET /orders/meta/form/CommentForm` and render a form.
+
+### `GET /meta/form/:name` — form schema discovery
+
+Per-controller route on every `AsReadableController` subclass. Returns the serialized `TSerializedAnnotatedType` of the named form (same annotation-allowlist policy as `/meta.type`). 404 when the name is unregistered.
+
+```bash
+GET /orders/meta/form/CommentForm
+→ <TSerializedAnnotatedType>
+```
+
+Discovery is lazy — calling `metaForm` triggers `discoverActions` if `/meta` hasn't been hit yet. Schemas are serialized once and cached per `(controller, name)`.
+
+### `useDbActionInput()` composable
+
+```ts
+const input = await useDbActionInput().load(); // body.input — unknown
+```
+
+Reads the cached envelope; safe inside any `INTERCEPTOR`-priority interceptor.
 
 ## Bound-table resolution (request time)
 
@@ -394,6 +482,7 @@ interface TDbActionInfo {
   promptText?: string | [string, string]; // [singular, plural]; UI substitutes $1 (preferred-id values), $N (count)
   shortcut?: string; // single char; UI binds modifier
   disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
+  inputForm?: string; // FormType.name when @InputForm declared; client fetches GET /meta/form/<name>
 }
 ```
 
@@ -417,6 +506,7 @@ interface TDbActionInfo {
 - Gate / `@DbActionRow*` on plain controller without `opts.table`.
 - **`disabled` set without (non-empty) `requiredFields` → drop the action.** Field-deps must be declared explicitly.
 - Duplicate action name within a controller — second declaration dropped.
+- Two actions with the same `@InputForm` form name but different type refs on the same controller — second declaration dropped.
 
 Value-help controllers (`AsValueHelpController` / `AsJsonValueHelpController`) silently emit `actions: []`; decorators on them are ignored.
 
@@ -459,24 +549,34 @@ const r = await users.query({
 r[0].$actions; // typed string[] on ClientResponse<T, Q>
 ```
 
-## Client side: `client.action(name, id?)`
+## Client side: `client.action(name, id?, input?)` + `client.getActionForm(name)`
 
 ```ts
 const users = new Client<typeof User>("/api/users", { navigate: (url) => router.push(url) });
 
-await users.action("block", { id: "abc123" }); // backend, row → POST identifier object
-await users.action("lock", [{ id: "a" }, { id: "b" }]); // rows → POST array of identifier objects
+await users.action("block", { id: "abc123" }); // backend, row → POST { ids: { id: "abc123" } }
+await users.action("lock", [{ id: "a" }, { id: "b" }]); // rows → POST { ids: [...] }
 await users.action("promote", { tenantId: "acme", userId: "u1" }); // composite PK
 await users.action("promote", { email: "jane@example.com" }); // unique-index addressing (same endpoint)
-await users.action("refresh-cache"); // table → POST empty
+await users.action("refresh-cache"); // table, no form → no body
 await users.action("edit", { slug: "alpha" }); // navigate → /users/alpha/edit (preferredId-driven $1)
 
+// Form input (third arg)
+await users.action("approve", { id: "o1" }, { note: "ok" }); // → POST { ids: ..., input: { note: "ok" } }
+await users.action("broadcast", undefined, { msg: "hi" }); // table + form → POST { input: ... }
+
 await users.action<{ message: string }>("block", { id: "abc" }); // typed return shape
+
+// Discovery — fetch the deserialized form schema for an action's @InputForm
+const form = await users.getActionForm("approve"); // TAtscriptAnnotatedType | null
+// → null when action has no inputForm or the action name is unknown.
+// → cached per form name on the client instance.
 ```
 
-- POST always (hardcoded for `'backend'`).
+- POST always (hardcoded for `'backend'`). Body is the `{ ids?, input? }` envelope; table-level + no form ⇒ no body sent.
 - Single object on `'rows'`-level → **TypeError client-side** (no auto-wrap; pass `[{...}]`).
-- Scalars / `null` → **TypeError client-side** for both row and rows. The TS signature also rejects them at compile time when `Client<typeof T>` is used.
+- Scalars / `null` for `id` → **TypeError client-side** for both row and rows. TS signature also rejects them at compile time when `Client<typeof T>` is used.
+- `input` is `unknown` at the type level — caller's responsibility to match `FormType` (no client-side validation).
 - Compound preferred-id navigate: each `preferredId` field's value URL-encoded, joined `/` in field-declaration order (NOT object-key insertion order).
 - `'rows'` / `'table'` navigate: `value` verbatim (no `$1` substitution).
 - `'custom'` → `ActionUnsupportedError` (UI dispatches itself).

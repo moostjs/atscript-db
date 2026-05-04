@@ -1,3 +1,5 @@
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
 /** Log-message prefix for warnings emitted from the actions subsystem. */
@@ -12,8 +14,29 @@ export const MOOST_DB_ACTION_PARAM = "atscript_db_action_param";
 /** Param-level marker keys — written by `@DbActionRow()` / `@DbActionRows()`. */
 export const MOOST_DB_ACTION_ROW = "atscript_db_action_row";
 export const MOOST_DB_ACTION_ROWS = "atscript_db_action_rows";
+/**
+ * Param-level metadata key — written by `@InputForm(FormType)`. Carries the
+ * compiled `.as` class plus its `.name` so {@link discoverActions} can both
+ * emit `inputForm` on `/meta` and register the type in the controller's form
+ * registry for `GET /meta/form/:name`.
+ */
+export const MOOST_DB_ACTION_INPUT_FORM = "atscript_db_action_input_form";
+/**
+ * Generic param-level metadata key — written by `@InputForm(FormType)`
+ * alongside {@link MOOST_DB_ACTION_INPUT_FORM}. Holds just the type ref so a
+ * generic atscript-aware Moost pipe (installed globally via
+ * `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`) can validate the
+ * resolved value without knowing about the moost-db-specific key.
+ */
+export const MOOST_ATSCRIPT_TYPE = "atscript_type";
 
 type TDbActionRowMarker = true;
+
+/** Stamped by `@InputForm(FormType)` — the compiled `.as` class + the wire name (`FormType.name`). */
+export interface TDbActionInputFormMeta {
+  type: TAtscriptAnnotatedType;
+  name: string;
+}
 
 /** Method-level action metadata written by `@DbAction(name, opts)`. */
 export interface TDbActionMeta {
@@ -59,5 +82,7 @@ declare module "moost" {
     [MOOST_DB_ACTION_PARAM]?: TDbActionParamKind;
     [MOOST_DB_ACTION_ROW]?: TDbActionRowMarker;
     [MOOST_DB_ACTION_ROWS]?: TDbActionRowMarker;
+    [MOOST_DB_ACTION_INPUT_FORM]?: TDbActionInputFormMeta;
+    [MOOST_ATSCRIPT_TYPE]?: TAtscriptAnnotatedType;
   }
 }

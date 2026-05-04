@@ -36,7 +36,7 @@ describe("disabled — batch-shape invocation contract", () => {
       rows.map((row) => (row as { status: string }).status === "shipped"),
     );
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "ship");
       setBoundTable(table);
       await runBeforeInterceptor(
@@ -70,7 +70,7 @@ describe("disabled — batch-shape invocation contract", () => {
     );
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -107,7 +107,7 @@ describe("disabled — batch-shape invocation contract", () => {
       rows.map((row) => (row as { archived: boolean }).archived),
     );
 
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       const ctx = current();
@@ -138,7 +138,7 @@ describe("disabled — batch-shape invocation contract", () => {
     setupActionMeta(Ctrl, "archive", { name: "archive" }, ["ids"]);
 
     let caught: unknown;
-    await runInActionCtx('[{"id":"1"},{"id":"2"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {

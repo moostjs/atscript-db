@@ -25,7 +25,7 @@ describe("cached ID row wook", () => {
     };
 
     await runInActionCtx(
-      '[{"email":"b@example.com"},{"id":"1"},{"email":"b@example.com"}]',
+      '{"ids":[{"email":"b@example.com"},{"id":"1"},{"email":"b@example.com"}]}',
       async () => {
         setBoundTable(table);
         const rows = await current().get(dbActionRowsSlot);
@@ -63,7 +63,7 @@ describe("cached ID row wook", () => {
       findMany,
     };
 
-    await runInActionCtx('[{"slug":"alpha"}]', async () => {
+    await runInActionCtx('{"ids":[{"slug":"alpha"}]}', async () => {
       setBoundTable(table);
       const rows = await current().get(dbActionRowsSlot);
       const arg = findMany.mock.calls[0][0] as {
@@ -91,7 +91,7 @@ describe("cached ID row wook", () => {
       findMany,
     };
 
-    await runInActionCtx('[{"id":"1"},{"id":"1"},{"id":"1"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"1"},{"id":"1"}]}', async () => {
       setBoundTable(table);
       const rows = (await current().get(dbActionRowsSlot)) as Array<
         Record<string, unknown> | undefined
@@ -121,7 +121,7 @@ describe("cached ID row wook", () => {
       findMany,
     };
 
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       setBoundTable(table);
       const rows = (await current().get(dbActionRowsSlot)) as Array<
         Record<string, unknown> | undefined

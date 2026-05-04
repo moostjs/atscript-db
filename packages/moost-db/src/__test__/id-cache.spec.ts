@@ -37,7 +37,7 @@ function runWith(rawBody: string, table: unknown, fn: () => Promise<unknown>) {
 describe("Cached ID wook — single ID", () => {
   it("validates body once and returns the validated ID to all readers", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('{"id":"abc123"}', table, async () => {
+    const result = await runWith('{"ids":{"id":"abc123"}}', table, async () => {
       const ctx = current();
       const a = await ctx.get(dbActionIdSlot);
       const b = await ctx.get(dbActionIdSlot);
@@ -52,7 +52,7 @@ describe("Cached ID wook — single ID", () => {
   it("rejects wrong scalar type (no coercion) — bad ID never reaches the gate", async () => {
     const table = makePkOnlyTable("number");
     let caught: unknown;
-    await runWith('{"id":"42"}', table, async () => {
+    await runWith('{"ids":{"id":"42"}}', table, async () => {
       const ctx = current();
       try {
         await ctx.get(dbActionIdSlot);
@@ -99,7 +99,7 @@ describe("Cached ID wook — multi ID + skip-mode mutation", () => {
   it("validates JSON array and rejects non-array body", async () => {
     const table = makePkOnlyTable("string");
     let caught: unknown;
-    await runWith('{"id":"a"}', table, async () => {
+    await runWith('{"ids":{"id":"a"}}', table, async () => {
       try {
         await current().get(dbActionIdsSlot);
       } catch (e) {
@@ -111,7 +111,7 @@ describe("Cached ID wook — multi ID + skip-mode mutation", () => {
 
   it("ctx.set on dbActionIdsSlot replaces the cached value (skip-mode contract)", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('[{"id":"a"},{"id":"b"},{"id":"c"}]', table, async () => {
+    const result = await runWith('{"ids":[{"id":"a"},{"id":"b"},{"id":"c"}]}', table, async () => {
       const ctx = current();
       const initial = (await ctx.get(dbActionIdsSlot)) as unknown[];
       expect(initial).toEqual([{ id: "a" }, { id: "b" }, { id: "c" }]);
@@ -129,7 +129,7 @@ describe("getActionTable — bound-table slot precedence", () => {
   it("boundTableKey wins over controller-context duck-type fallback", async () => {
     const ductTable = makePkOnlyTable("string");
     const explicitTable = makePkOnlyTable("number");
-    await runWith('{"id":42}', ductTable, async () => {
+    await runWith('{"ids":{"id":42}}', ductTable, async () => {
       const ctx = current();
       ctx.set(boundTableKey, explicitTable);
       const resolved = getActionTable(ctx);
@@ -143,7 +143,7 @@ describe("getActionTable — bound-table slot precedence", () => {
 
   it("falls through to controller-context duck-type when boundTableKey is unset", async () => {
     const ductTable = makePkOnlyTable("string");
-    await runWith('{"id":"abc"}', ductTable, async () => {
+    await runWith('{"ids":{"id":"abc"}}', ductTable, async () => {
       const ctx = current();
       // boundTableKey is intentionally NOT set.
       const resolved = getActionTable(ctx);
@@ -155,7 +155,7 @@ describe("getActionTable — bound-table slot precedence", () => {
 describe("Cached ID wook — single fetch shared by gate and handler", () => {
   it("body-parsing happens exactly once per request even with multiple readers", async () => {
     const table = makePkOnlyTable("string");
-    const result = await runWith('{"id":"abc"}', table, async () => {
+    const result = await runWith('{"ids":{"id":"abc"}}', table, async () => {
       const ctx = current();
       const reads = await Promise.all([
         ctx.get(dbActionIdSlot),

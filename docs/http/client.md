@@ -322,10 +322,14 @@ const meta = await users.meta();
 
 `action<R>()` invokes any [declared action](./actions) on the controller by name. The client reads `/meta` (cached), looks up the action descriptor, then dispatches based on `processor`.
 
-The identifier is **object-only** — single object for `'row'` actions, array of objects for `'rows'` actions, omitted for `'table'` actions. Even single-field PK tables send `{ id: "abc" }`, never bare `"abc"`. See [Actions — Identifier shape](./actions#identifier-shape) for the full server-side contract.
+```typescript
+client.action<R>(name: string, id?: ..., input?: unknown): Promise<R>
+```
+
+The identifier is **object-only** — single object for `'row'` actions, array of objects for `'rows'` actions, omitted for `'table'` actions. Even single-field PK tables send `{ id: "abc" }`, never bare `"abc"`. The third `input` argument carries the action's `@InputForm` payload — see [Form input](./actions#input-form). The wire body is the envelope `{ ids?, input? }`; the client wraps your call's args into it.
 
 ```typescript
-// processor: 'backend', level: 'row' — POST identifier object as JSON body
+// processor: 'backend', level: 'row' — POST { "ids": { "id": "abc123" } }
 const result = await users.action("block", { id: "abc123" });
 // → { message: "User abc123 blocked" }
 
@@ -338,11 +342,17 @@ await members.action("promote", { tenantId: "acme", userId: "u1" });
 // unique-index addressing (same controller, different identification)
 await users.action("promote", { email: "jane@example.com" });
 
-// level: 'table' — no identifier
+// level: 'table' — no identifier, no input → no body sent
 await users.action("refresh-cache");
 
 // processor: 'navigate' — substitutes $1 with preferredId and navigates
 await users.action("edit", { slug: "alpha" }); // → /users/alpha/edit
+
+// @InputForm payload (third arg) — POST { "ids": ..., "input": ... }
+await users.action("approve", { id: "o1" }, { note: "looks good" });
+
+// Table-level + @InputForm (no id) — POST { "input": ... }
+await users.action("broadcast", undefined, { message: "hi" });
 
 // Typed return shape
 const r = await users.action<{ message: string }>("block", { id: "abc" });
@@ -353,14 +363,33 @@ The `<R>` return-type generic asserts the server handler's response shape (commo
 
 `action()` is always POST for `processor: 'backend'`. The path comes from the meta builder — method-decorator actions resolve to the bound HTTP path; class-level backend actions use the dev-supplied path verbatim.
 
+### Form-schema discovery — `getActionForm()` {#get-action-form}
+
+When an action declares [`@InputForm()`](./actions#input-form), `/meta` carries an `inputForm` field with the form's name. `getActionForm(name)` lazily fetches the schema from `GET <controller>/meta/form/<inputForm>`, deserializes it via `deserializeAnnotatedType`, and returns the `TAtscriptAnnotatedType` ready to hand to a form renderer.
+
+```typescript
+const meta = await users.meta();
+const action = meta.actions.find((a) => a.name === "approve");
+
+if (action?.inputForm) {
+  const form = await users.getActionForm("approve");
+  // → TAtscriptAnnotatedType, ready for @atscript/ui form components
+  // Render the form, collect input, then:
+  await users.action("approve", { id: "o1" }, collectedInput);
+}
+```
+
+Returns `null` when the action has no `inputForm`, or the action name isn't on `/meta`. Cached per form name on the client instance — repeated calls for the same form make only one HTTP request. Failed fetches are evicted from the cache so retries can re-fetch.
+
 ### Client-side validation
 
 The client refuses obviously-wrong shapes BEFORE the network round-trip:
 
-- `'row'` level + non-object (scalar, `null`, array) → `TypeError`.
-- `'rows'` level + non-array (single object included — no auto-wrap) → `TypeError`.
+- `'row'` level + non-object (scalar, `null`, array) for `id` → `TypeError`.
+- `'rows'` level + non-array (single object included — no auto-wrap) for `id` → `TypeError`.
+- `input` is `unknown` at the type level — the client does **not** validate it. The caller's responsibility is to match the action's `inputForm` schema; server-side validation depends on a Moost atscript validator pipe being installed (see [Actions — Validation](./actions#input-form)).
 
-The TypeScript signature catches the same cases at compile time when `Client<typeof T>` is used; untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
+The TypeScript signature catches the `id`-shape cases at compile time when `Client<typeof T>` is used; untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
 
 When the server's [disabled gate](./actions#server-side-gate) rejects, `action()` throws `ActionDisabledError` (HTTP 409) — see [Error cases](#error-cases) below.
 
@@ -540,16 +569,17 @@ import type { FilterExpr, Uniquery } from "@atscript/db-client";
 
 ## Method ↔ Endpoint Reference
 
-| Method        | HTTP   | Endpoint                 | Returns                                                 |
-| ------------- | ------ | ------------------------ | ------------------------------------------------------- |
-| `query()`     | GET    | `/query`                 | `DataOf<T>[]`                                           |
-| `count()`     | GET    | `/query` (`$count`)      | `number`                                                |
-| `aggregate()` | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                                     |
-| `pages()`     | GET    | `/pages`                 | `PageResult<DataOf<T>>`                                 |
-| `one()`       | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                                     |
-| `insert()`    | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult`              |
-| `update()`    | PATCH  | `/`                      | `TDbUpdateResult`                                       |
-| `replace()`   | PUT    | `/`                      | `TDbUpdateResult`                                       |
-| `remove()`    | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                                       |
-| `meta()`      | GET    | `/meta`                  | `MetaResponse`                                          |
-| `action()`    | POST   | _resolved from `/meta`_  | `unknown` (server response, or `void` for `'navigate'`) |
+| Method            | HTTP   | Endpoint                 | Returns                                                 |
+| ----------------- | ------ | ------------------------ | ------------------------------------------------------- |
+| `query()`         | GET    | `/query`                 | `DataOf<T>[]`                                           |
+| `count()`         | GET    | `/query` (`$count`)      | `number`                                                |
+| `aggregate()`     | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                                     |
+| `pages()`         | GET    | `/pages`                 | `PageResult<DataOf<T>>`                                 |
+| `one()`           | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                                     |
+| `insert()`        | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult`              |
+| `update()`        | PATCH  | `/`                      | `TDbUpdateResult`                                       |
+| `replace()`       | PUT    | `/`                      | `TDbUpdateResult`                                       |
+| `remove()`        | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                                       |
+| `meta()`          | GET    | `/meta`                  | `MetaResponse`                                          |
+| `getActionForm()` | GET    | `/meta/form/:name`       | `TAtscriptAnnotatedType \| null`                        |
+| `action()`        | POST   | _resolved from `/meta`_  | `unknown` (server response, or `void` for `'navigate'`) |

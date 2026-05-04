@@ -27,7 +27,7 @@ describe("readCurrentActionMeta", () => {
       ["id"],
     );
     let meta: ReturnType<typeof readCurrentActionMeta>;
-    await runInActionCtx('{"id":"a"}', () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', () => {
       bindController(new Ctrl(), "ship");
       meta = readCurrentActionMeta(current());
     });
@@ -38,7 +38,7 @@ describe("readCurrentActionMeta", () => {
 
   it("returns undefined when no controller is bound (direct-wook test context)", async () => {
     let meta: ReturnType<typeof readCurrentActionMeta>;
-    await runInActionCtx('{"id":"a"}', () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', () => {
       meta = readCurrentActionMeta(current());
     });
     expect(meta!).toBeUndefined();
@@ -49,7 +49,7 @@ describe("readCurrentActionMeta", () => {
       plain(): void {}
     }
     let meta: ReturnType<typeof readCurrentActionMeta>;
-    await runInActionCtx('{"id":"a"}', () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', () => {
       bindController(new Ctrl(), "plain");
       meta = readCurrentActionMeta(current());
     });

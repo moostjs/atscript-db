@@ -79,7 +79,7 @@ describe("Client.action — backend processor", () => {
     expect(postCall[0]).toBe("/api/users/actions/block");
     const init = postCall[1] as RequestInit;
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ id: "abc123" });
+    expect(JSON.parse(init.body as string)).toEqual({ ids: { id: "abc123" } });
     expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
   });
 
@@ -98,8 +98,10 @@ describe("Client.action — backend processor", () => {
 
     const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
     expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual({
-      tenantId: "acme",
-      userId: "u1",
+      ids: {
+        tenantId: "acme",
+        userId: "u1",
+      },
     });
   });
 
@@ -149,14 +151,12 @@ describe("Client.action — backend processor", () => {
     await c.action("lock", [{ id: "a" }, { id: "b" }, { id: "c" }]);
 
     const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
-    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual([
-      { id: "a" },
-      { id: "b" },
-      { id: "c" },
-    ]);
+    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual({
+      ids: [{ id: "a" }, { id: "b" }, { id: "c" }],
+    });
   });
 
-  it("sends no body for level: 'table'", async () => {
+  it("sends no body for level: 'table' with no input", async () => {
     const fetchFn = fetchWith([
       {
         name: "refresh",
@@ -173,6 +173,47 @@ describe("Client.action — backend processor", () => {
     const init = postCall[1] as RequestInit;
     expect(init.body).toBeUndefined();
     expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+  });
+
+  it("wraps `input` in the envelope on a row-level action with @InputForm", async () => {
+    const fetchFn = fetchWith([
+      {
+        name: "approve",
+        label: "Approve",
+        level: "row",
+        processor: "backend",
+        value: "/api/orders/actions/approve",
+        inputForm: "CommentForm",
+      },
+    ]);
+    const c = new Client("/api/orders", { fetch: fetchFn });
+    await c.action("approve", { id: "o1" }, { note: "looks good" });
+
+    const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
+    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual({
+      ids: { id: "o1" },
+      input: { note: "looks good" },
+    });
+  });
+
+  it("sends only `input` for a table-level action with @InputForm and no ID", async () => {
+    const fetchFn = fetchWith([
+      {
+        name: "broadcast",
+        label: "Broadcast",
+        level: "table",
+        processor: "backend",
+        value: "/api/users/actions/broadcast",
+        inputForm: "MessageForm",
+      },
+    ]);
+    const c = new Client("/api/users", { fetch: fetchFn });
+    await c.action("broadcast", undefined, { message: "hi" });
+
+    const postCall = fetchFn.mock.calls.find(([u]) => !u.endsWith("/meta"))!;
+    expect(JSON.parse((postCall[1] as RequestInit).body as string)).toEqual({
+      input: { message: "hi" },
+    });
   });
 
   it("prepends baseUrl to the action's value path", async () => {
@@ -374,5 +415,112 @@ describe("Client.action — unknown action", () => {
     const fetchFn = fetchWith([]);
     const c = new Client("/api/users", { fetch: fetchFn });
     await expect(c.action("missing")).rejects.toBeInstanceOf(ActionNotFoundError);
+  });
+});
+
+describe("Client.getActionForm — form-schema lookup", () => {
+  function fetchWithForm(actions: TDbActionInfo[], formSchema: unknown) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/meta")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () => Promise.resolve(metaWith(actions)),
+        });
+      }
+      if (url.includes("/meta/form/")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: () => Promise.resolve(formSchema),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: () => Promise.resolve({}),
+      });
+    });
+  }
+
+  it("returns null for actions with no inputForm declared", async () => {
+    const fetchFn = fetchWithForm(
+      [
+        {
+          name: "block",
+          label: "Block",
+          level: "row",
+          processor: "backend",
+          value: "/api/users/actions/block",
+        },
+      ],
+      null,
+    );
+    const c = new Client("/api/users", { fetch: fetchFn });
+    const form = await c.getActionForm("block");
+    expect(form).toBeNull();
+    // No /meta/form/* request should have been made.
+    expect(
+      fetchFn.mock.calls.some((call: unknown[]) => String(call[0]).includes("/meta/form/")),
+    ).toBe(false);
+  });
+
+  it("returns null when the action does not exist on /meta", async () => {
+    const fetchFn = fetchWithForm([], null);
+    const c = new Client("/api/users", { fetch: fetchFn });
+    const form = await c.getActionForm("missing");
+    expect(form).toBeNull();
+  });
+
+  it("fetches /meta/form/:name and deserializes the schema", async () => {
+    const formSchema = serializeAnnotatedType(UserType, {});
+    const fetchFn = fetchWithForm(
+      [
+        {
+          name: "approve",
+          label: "Approve",
+          level: "row",
+          processor: "backend",
+          value: "/api/orders/actions/approve",
+          inputForm: "User",
+        },
+      ],
+      formSchema,
+    );
+    const c = new Client("/api/orders", { fetch: fetchFn });
+    const form = await c.getActionForm("approve");
+    expect(form).toBeTruthy();
+    const formCall = fetchFn.mock.calls.find((call: unknown[]) =>
+      String(call[0]).includes("/meta/form/"),
+    )!;
+    expect(formCall[0]).toBe("/api/orders/meta/form/User");
+  });
+
+  it("caches the deserialized schema across calls", async () => {
+    const formSchema = serializeAnnotatedType(UserType, {});
+    const fetchFn = fetchWithForm(
+      [
+        {
+          name: "approve",
+          label: "Approve",
+          level: "row",
+          processor: "backend",
+          value: "/api/orders/actions/approve",
+          inputForm: "User",
+        },
+      ],
+      formSchema,
+    );
+    const c = new Client("/api/orders", { fetch: fetchFn });
+    const a = await c.getActionForm("approve");
+    const b = await c.getActionForm("approve");
+    expect(a).toBe(b);
+    const formCalls = fetchFn.mock.calls.filter((call: unknown[]) =>
+      String(call[0]).includes("/meta/form/"),
+    );
+    expect(formCalls).toHaveLength(1);
   });
 });

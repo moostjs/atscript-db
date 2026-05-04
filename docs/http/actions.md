@@ -14,6 +14,8 @@ A declared action is one of three kinds (`processor`):
 
 Actions also carry a **level** — `'row'`, `'rows'`, or `'table'` — telling the UI where the affordance belongs.
 
+Backend actions can additionally declare a **form input** via [`@InputForm()`](#input-form): the controller advertises a `.as` interface as the action's payload schema, the UI fetches it from a per-controller endpoint, renders a form, and submits the user-filled data alongside the identifier — no manual modal plumbing.
+
 > See [Permissions](./permissions) for the built-in CRUD surface (`/meta.crud`).
 > Actions and CRUD permissions are sibling fields on `/meta` with the same
 > overlay strategy but distinct dispatch paths — typed client methods for
@@ -72,37 +74,54 @@ Fetch `GET /users/meta` and the `actions` array now contains:
 }
 ```
 
-A UI consuming `/meta` renders a per-row "Block" button. When the user clicks it, the client POSTs the row's identifier as a JSON object:
+A UI consuming `/meta` renders a per-row "Block" button. When the user clicks it, the client POSTs the row's identifier wrapped in the action **envelope**:
 
 ```bash
 curl -X POST http://localhost:3000/users/actions/block \
   -H "Content-Type: application/json" \
-  -d '{"id":"abc123"}'
+  -d '{"ids":{"id":"abc123"}}'
 # → { "message": "User abc123 blocked" }
 ```
 
-::: tip Identifier shape is object-only
-Action request bodies are always JSON objects (single) or arrays of objects (multi) — never bare scalars. Each object's field set must EXACTLY match a **legitimate identification**: the primary key, or any `@db.index.unique` group. See [Identifier shape](#identifier-shape).
+::: tip The body is an envelope: `{ ids?, input? }`
+Every action request body is an object envelope. `ids` carries the identifier(s); `input` carries the optional `@InputForm` payload (see [Form input](#input-form)). Both fields are optional: a `'table'`-level action with no form declares no `ids`, and an action without `@InputForm` carries no `input`. Even single-field PK tables send `{ "ids": { "id": "abc" } }`, never the bare scalar. See [Body envelope](#body-envelope).
 :::
 
 ## Action Levels
 
 The `level` tells the UI where the action belongs. It is **inferred** from the parameter decorators of the handler — you never set it directly on `@DbAction`:
 
-| Parameter decorator(s)                | Inferred level | Body shape (JSON)                                               |
-| ------------------------------------- | -------------- | --------------------------------------------------------------- |
-| `@DbActionID()` or `@DbActionRow()`   | `row`          | identifier object (e.g. `{ "id": "abc" }`)                      |
-| `@DbActionIDs()` or `@DbActionRows()` | `rows`         | array of identifier objects                                     |
-| _(none)_                              | `table`        | typically empty body (or whatever your handler defines)         |
-| Both row + rows cardinality           | _illegal_      | action dropped from `/meta` with a `[moost-db actions]` warning |
+| Parameter decorator(s)                | Inferred level | Body envelope (JSON)                                             |
+| ------------------------------------- | -------------- | ---------------------------------------------------------------- |
+| `@DbActionID()` or `@DbActionRow()`   | `row`          | `{ "ids": { ... } }` — identifier object as the `ids` field      |
+| `@DbActionIDs()` or `@DbActionRows()` | `rows`         | `{ "ids": [ ... ] }` — array of identifier objects               |
+| _(none)_                              | `table`        | empty body (or `{ "input": ... }` when paired with `@InputForm`) |
+| Both row + rows cardinality           | _illegal_      | action dropped from `/meta` with a `[moost-db actions]` warning  |
+
+`@InputForm()` is **orthogonal** to level — it adds an `input` field to the envelope without affecting whether the action is row/rows/table.
 
 `@DbActionRow()` / `@DbActionRows()` inject the actual row(s) (already loaded by the gate); they are described under [Server-side Gate § Row injection](#row-injection).
 
 For class-level actions (declared via `@DbActions` family), you set `level` on the dict entry — see [Class-level actions](#class-level-actions) below.
 
+## Body envelope {#body-envelope}
+
+Every action POST body is a JSON object **envelope** with two optional fields:
+
+```ts
+{
+  ids?: object | object[],   // identifier(s) — see Identifier shape below
+  input?: unknown,           // payload for @InputForm — see Form input below
+}
+```
+
+The envelope shape is fixed: arrays or scalars at the body root are rejected with HTTP 400 `ValidatorError`. This is a **breaking change** from the pre-`@InputForm()` shape that placed identifiers at the root — older clients sending the bare identifier (e.g. `{"id":"abc"}` or `[{"id":"a"}]`) need to be updated to wrap them in `ids`.
+
+Empty `{}` is always valid — it means "table-level action, no input, no identifier". A `'table'`-level action with no `@InputForm` may be invoked with no body at all; the client SHOULD omit the body in that case (and `@atscript/db-client` does).
+
 ## Identifier shape {#identifier-shape}
 
-The request body for an action is **always an object** (single) or **array of objects** (multi) — never a scalar. Each object's field set must EXACTLY match one **legitimate identification** on the table:
+The `ids` field is **always an object** (single) or **array of objects** (multi) — never a scalar. Each object's field set must EXACTLY match one **legitimate identification** on the table:
 
 - the **primary key** (`primaryKeys`), or
 - any declared `@db.index.unique` group (single-field or compound).
@@ -110,14 +129,14 @@ The request body for an action is **always an object** (single) or **array of ob
 The validator is **strict** — unknown fields are rejected with HTTP 400. Precedence: PK first, then unique-index groups in declaration order. The same `@DbActionIDs()` array MAY mix shapes per-element (one element by PK, another by `email`, etc.).
 
 ```json
-{ "id": "abc123" }                        // row, single-field PK
-{ "tenantId": "acme", "userId": "u1" }    // row, composite PK
-{ "email": "jane@example.com" }           // row, unique-index addressing
-[{ "id": "a" }, { "id": "b" }]            // rows, single-field PK
-[{ "id": 1 }, { "email": "x@y" }]         // rows, mixed identifier shapes
+{ "ids": { "id": "abc123" } }                                  // row, single-field PK
+{ "ids": { "tenantId": "acme", "userId": "u1" } }              // row, composite PK
+{ "ids": { "email": "jane@example.com" } }                     // row, unique-index addressing
+{ "ids": [{ "id": "a" }, { "id": "b" }] }                      // rows, single-field PK
+{ "ids": [{ "id": 1 }, { "email": "x@y" }] }                   // rows, mixed identifier shapes
 ```
 
-Even single-field PK tables MUST send `{ id: "abc" }`, never bare `"abc"`. `Content-Type: application/json` only.
+Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `"abc"`. `Content-Type: application/json` only.
 
 Field names are **logical** (the `.as` prop names) — never physical column names from `@db.column "..."`. The matcher always operates in logical-name space.
 
@@ -246,34 +265,34 @@ Parameter resolvers that read the identifier object(s) from the JSON request bod
 @Post("actions/block")
 @DbAction("block", { label: "Block" })
 async block(@DbActionID() id: { id: string }) {
-  // body: { "id": "abc" }
+  // body: { "ids": { "id": "abc" } }
 }
 
 // Single row, composite PK
 @Post("actions/promote")
 @DbAction("promote", { label: "Promote" })
 async promote(@DbActionID() id: { tenantId: string; userId: string }) {
-  // body: { "tenantId": "acme", "userId": "u1" }
+  // body: { "ids": { "tenantId": "acme", "userId": "u1" } }
 }
 
 // Single row, unique-index addressing (same controller, same endpoint)
 @Post("actions/promote")
 async promoteByEmail(@DbActionID() id: { email: string }) {
-  // body: { "email": "jane@example.com" } — works as long as `email` is `@db.index.unique`
+  // body: { "ids": { "email": "jane@example.com" } } — works as long as `email` is `@db.index.unique`
 }
 
 // Multiple rows
 @Post("actions/lock")
 @DbAction("lock", { label: "Lock Selected" })
 async lock(@DbActionIDs() ids: Array<{ id: string }>) {
-  // body: [{ "id": "a" }, { "id": "b" }]  (mixed shapes per element are allowed)
+  // body: { "ids": [{ "id": "a" }, { "id": "b" }] }  (mixed shapes per element are allowed)
 }
 ```
 
 Validation is **strict** — unknown fields are rejected, no coercion. The identifier object's field set must EXACTLY match one legitimate identification on the table. See [Identifier shape](#identifier-shape) for precedence rules and the full contract.
 
-::: warning `rows`-level body is always an array
-A `'rows'` action MUST receive a JSON array, even when the client invokes it on a single row. Send `[{"id":"a"}]`, not `{"id":"a"}`. The `@DbActionIDs()` resolver rejects non-array bodies with HTTP 400. An empty array `[]` is accepted — `client.action(name, [])` posts `[]`, and your handler runs with `ids === []`.
+::: warning `rows`-level `ids` is always an array
+A `'rows'` action MUST receive a JSON array under `ids`, even when the client invokes it on a single row. Send `{ "ids": [{"id":"a"}] }`, not `{ "ids": {"id":"a"} }`. The `@DbActionIDs()` resolver rejects non-array `ids` with HTTP 400. An empty array `[]` is accepted — `client.action(name, [])` posts `{ "ids": [] }`, and your handler runs with `ids === []`.
 :::
 
 ::: danger `@DbActionID*` requires a bound table
@@ -301,6 +320,129 @@ Validation errors flow through the existing validation interceptor and emit the 
 ::: warning No `@Body()` alongside `@DbActionID*`
 Mixing `@DbActionID()` or `@DbActionIDs()` with `@Body()` on the same method drops the action with a warning. If your action needs additional input beyond the identifier, model it as `processor: 'custom'` and POST to a regular `@Post`-decorated handler from your UI client.
 :::
+
+## Form input — `@InputForm()` {#input-form}
+
+Some actions need more than just an identifier — "Approve with comment", "Transfer amount", "Update status to one of N values". Without a declarative form contract, this falls back to a custom modal hand-rolled per action: the UI doesn't know what fields to render, the server doesn't know how to validate them, and the two drift over time.
+
+`@InputForm(FormType)` collapses this into a single declaration. You point the parameter at a `.as` interface; the discoverer surfaces the form's name on `/meta`; a UI client fetches the schema from a per-controller `GET /meta/form/:name` endpoint and renders a form generically; the user-filled payload arrives at your handler in the action envelope's `input` field.
+
+### Quick example
+
+```atscript
+// schema/comment.as
+export interface CommentForm {
+    note: string
+
+    visibility?: 'public' | 'internal'
+}
+```
+
+```typescript
+import {
+  AsDbController,
+  TableController,
+  DbAction,
+  DbActionID,
+  InputForm,
+} from "@atscript/moost-db";
+import { Post } from "@moostjs/event-http";
+import { Order } from "./schema/order.as";
+import { CommentForm } from "./schema/comment.as";
+import { ordersTable } from "./db";
+
+@TableController(ordersTable)
+export class OrdersController extends AsDbController<typeof Order> {
+  @Post("actions/approve")
+  @DbAction("approve", { label: "Approve", intent: "positive" })
+  async approve(@DbActionID() id: { id: string }, @InputForm(CommentForm) input: CommentForm) {
+    await this.table.updateOne({ id: id.id, status: "approved", note: input.note });
+    return { message: `Approved order ${id.id}` };
+  }
+}
+```
+
+`/meta` for `OrdersController` carries `inputForm: "CommentForm"` on the `approve` action:
+
+```json
+{
+  "actions": [
+    {
+      "name": "approve",
+      "label": "Approve",
+      "level": "row",
+      "processor": "backend",
+      "value": "/orders/actions/approve",
+      "intent": "positive",
+      "inputForm": "CommentForm"
+    }
+  ]
+}
+```
+
+The client (or your UI) fetches the form schema from `GET /orders/meta/form/CommentForm`, renders a form (the `@atscript/ui` form components consume `TSerializedAnnotatedType` directly), then submits the envelope:
+
+```bash
+curl -X POST http://localhost:3000/orders/actions/approve \
+  -H "Content-Type: application/json" \
+  -d '{"ids":{"id":"o1"},"input":{"note":"looks good","visibility":"internal"}}'
+```
+
+### Form name resolution
+
+The form's wire name is `FormType.name` — the compiled `.as` class's identifier. Compiled atscript interfaces are real classes with stable names, so `InputForm(CommentForm)` is enough; the decorator never asks for an explicit string.
+
+A single `FormType` may be reused across multiple actions on the same controller — this is fine, the registry maps `name → type`. If two actions on the same controller declare different type refs but share the same `name` (e.g. via two anonymous classes that compile to the same identifier), discovery emits a `[moost-db actions]` warning and **drops** the second action: the discovery endpoint can only serve one schema per name.
+
+### `GET /meta/form/:name` {#meta-form-endpoint}
+
+Every `AsReadableController` subclass automatically exposes:
+
+```
+GET /<controller>/meta/form/:name
+→ TSerializedAnnotatedType
+```
+
+Returns the serialized form schema for the named `@InputForm` type. Annotation allowlist matches `/meta.type` (kept: `meta.*`, `expect.*`, `db.rel.*`, plus a small `db.json` / `db.patch.strategy` / `db.default*` / `db.http.path` whitelist). Schemas are serialized once and cached per `(controller, name)`.
+
+Discovery is lazy: hitting `/meta/form/:name` triggers `discoverActions` if `/meta` hasn't been called yet on this process. Unknown names → HTTP 404.
+
+### Validation — pluggable, not built-in
+
+`@InputForm()` is **intentionally validation-free**. The decorator stamps two pieces of param metadata:
+
+- `MOOST_DB_ACTION_INPUT_FORM` — `{ type: FormType, name: <string> }`. Consumed by discovery.
+- `MOOST_ATSCRIPT_TYPE` — the type ref alone. A generic, atscript-aware Moost pipe reads this and runs `FormType.validator()` against the resolved value.
+
+Without a pipe installed, `input` arrives at your handler as raw JSON — no validation, no coercion. To enable validation, install an atscript validator pipe globally on the Moost app or scope it per-controller / per-method:
+
+```typescript
+import { Moost } from "moost";
+import { atscriptValidatorPipe } from "<your-pipe-package>"; // not bundled with moost-db
+
+const app = new Moost();
+app.applyGlobalPipes(atscriptValidatorPipe());
+```
+
+A validator pipe that throws `ValidatorError` from `@atscript/typescript/utils` flows through the existing `validationErrorTransform()` interceptor and surfaces as HTTP 400 with the same envelope as DTO failures — no extra wiring needed.
+
+This separation is deliberate: validation policy varies (replace mode, partial mode, custom plugins, schema dialect), and forcing one default into the decorator would lock in choices the consumer may not want.
+
+### Constraints
+
+- **One `@InputForm` per action.** For multiple structured inputs, compose them into a single `.as` interface (object with sub-objects, or an array field for repeated items).
+- **No class-level support.** `@DbActions` / `@DbRowActions` / `@DbRowsActions` cannot bind a form — class-level entries point at endpoints that may live in other controllers, so the form binding can't be derived. If the target endpoint needs a form, declare it with `@DbAction(name, ...) + @InputForm(...)` on the actual handler.
+- **Body shape stays the envelope.** With or without `@InputForm`, the body is still `{ ids?, input? }`. Mixing `@InputForm` with `@Body()` on the same method is allowed but unusual: `@Body()` would receive the full envelope while `@InputForm` resolves to `body.input`.
+
+### Composable
+
+```typescript
+import { useDbActionInput } from "@atscript/moost-db";
+
+const input = await useDbActionInput().load(); // body.input — `unknown`, no validation
+```
+
+For interceptors that need to inspect the form payload alongside the gate-cached identifier or row.
 
 ## Class-level Actions
 
@@ -604,18 +746,20 @@ In `'skip'` mode, `useDbActionIds().load()` returns the **filtered subset of ori
 
 ### Request body
 
-All action requests use `Content-Type: application/json`. Bodies are always **objects** (single) or **arrays of objects** (multi) — never scalars.
+All action requests use `Content-Type: application/json`. The body is always the envelope `{ ids?, input? }` — see [Body envelope](#body-envelope).
 
-| Level   | Identification        | JSON body                                     |
-| ------- | --------------------- | --------------------------------------------- |
-| `row`   | single-field PK       | `{ "id": "abc" }`                             |
-| `row`   | composite PK          | `{ "tenantId": "acme", "userId": "u1" }`      |
-| `row`   | unique-index addr.    | `{ "email": "jane@example.com" }`             |
-| `rows`  | single-field PK       | `[{ "id": "a" }, { "id": "b" }]`              |
-| `rows`  | mixed identifications | `[{ "id": 1 }, { "email": "x@y" }]`           |
-| `table` | none required         | empty body (or whatever your handler accepts) |
+| Level                  | Identification (`ids` field) | Form input (`input` field) | JSON body                                                       |
+| ---------------------- | ---------------------------- | -------------------------- | --------------------------------------------------------------- |
+| `row`                  | single-field PK              | n/a                        | `{ "ids": { "id": "abc" } }`                                    |
+| `row`                  | composite PK                 | n/a                        | `{ "ids": { "tenantId": "acme", "userId": "u1" } }`             |
+| `row`                  | unique-index addr.           | n/a                        | `{ "ids": { "email": "jane@example.com" } }`                    |
+| `row` + `@InputForm`   | single-field PK              | form payload               | `{ "ids": { "id": "abc" }, "input": { "note": "looks good" } }` |
+| `rows`                 | single-field PK              | n/a                        | `{ "ids": [{ "id": "a" }, { "id": "b" }] }`                     |
+| `rows`                 | mixed identifications        | n/a                        | `{ "ids": [{ "id": 1 }, { "email": "x@y" }] }`                  |
+| `table`                | none                         | n/a                        | empty body (or `{}`)                                            |
+| `table` + `@InputForm` | none                         | form payload               | `{ "input": { "msg": "hi" } }`                                  |
 
-Strict typing — no coercion, unknown fields rejected. Schema mismatches return HTTP 400 with the same envelope as DTO validation failures. **`rows`-level bodies are always arrays** even for a single identifier — send `[{"id":"a"}]`, never `{"id":"a"}`.
+Strict typing on `ids` — no coercion, unknown fields rejected. Schema mismatches return HTTP 400 with the same envelope as DTO validation failures. **`rows`-level `ids` is always an array** even for a single identifier — send `{ "ids": [{"id":"a"}] }`, never `{ "ids": {"id":"a"} }`. Validation of `input` depends on a user-installed atscript validator pipe — see [Form input — Validation](#input-form).
 
 ### Success response
 
@@ -693,6 +837,7 @@ interface TDbActionInfo {
   promptText?: string | [string, string]; // [singular, plural]
   shortcut?: string; // single character; UI binds the modifier
   disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
+  inputForm?: string; // FormType.name when @InputForm declared; client fetches GET /meta/form/<name>
 }
 ```
 
@@ -770,6 +915,7 @@ The meta builder enforces several rules. Every violation emits a console warning
 | `disabled` set without (non-empty) `requiredFields`                                 | warn + drop                      |
 | Mixing row + rows cardinality (`@DbActionID*` / `@DbActionRow*`) on the same method | warn + drop                      |
 | Duplicate action name within the same controller                                    | warn + drop second declaration   |
+| Two actions sharing the same `@InputForm` form name with **different** type refs    | warn + drop second declaration   |
 
 The single greppable prefix `[moost-db actions]` makes it easy to detect issues in CI logs.
 

@@ -165,6 +165,14 @@ export interface TDbActionInfo {
    * a UI hint.
    */
   disabled?: string;
+  /**
+   * Name of the `.as` interface the action's `@InputForm()` parameter expects
+   * (the compiled class's `.name`). Present only when the handler declares an
+   * `@InputForm(FormType)` parameter. Clients fetch the serialized schema via
+   * `GET /meta/form/:name` on the same controller and render a form to
+   * collect the `input` field of the action's request envelope.
+   */
+  inputForm?: string;
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

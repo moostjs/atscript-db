@@ -1,6 +1,7 @@
 import {
   serializeAnnotatedType,
   type TSerializeOptions,
+  type TSerializedAnnotatedType,
   type Validator,
   type TAtscriptAnnotatedType,
   type TAtscriptDataType,
@@ -13,13 +14,13 @@ import type {
   Uniquery,
 } from "@atscript/db";
 import { Get, HttpError } from "@moostjs/event-http";
-import { Moost, useControllerContext, type TConsoleBase } from "moost";
+import { Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { UseValidationErrorTransform } from "./validation-interceptor";
 import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/controls.dto.as";
 import { findFilterOffender, findSortOffender } from "./gate-utils";
-import { discoverActions } from "./actions/discover";
+import { discoverActions, getControllerFormType } from "./actions/discover";
 
 /**
  * Optional gate configuration for a single request. Each present entry enables
@@ -75,6 +76,9 @@ export abstract class AsReadableController<
 
   /** Cached full meta response (computed lazily on first meta() call). */
   private _metaResponse?: TMetaResponse;
+
+  /** Cached serialized form schemas keyed by `FormType.name` — populated lazily by {@link metaForm}. */
+  private _formSchemas = new Map<string, TSerializedAnnotatedType>();
 
   constructor(boundType: T, controllerName: string, app: Moost, kindTag = "readable") {
     this.boundType = boundType;
@@ -314,6 +318,31 @@ export abstract class AsReadableController<
       this._metaResponse = this.buildMetaResponse();
     }
     return this.applyMetaOverlay(this._metaResponse);
+  }
+
+  /**
+   * **GET /meta/form/:name** — returns the serialized schema of a form
+   * referenced by an action's `inputForm` field. The form name is the
+   * compiled `.as` class's `.name`, registered when an action's parameter is
+   * decorated with `@InputForm(FormType)`. Schemas are serialized once and
+   * cached per controller; the response uses the same annotation-allowlist
+   * policy as {@link getSerializeOptions}.
+   */
+  @Get("meta/form/:name")
+  async metaForm(@Param("name") name: string): Promise<TSerializedAnnotatedType> {
+    // Form registry is populated as a side-effect of action discovery — run
+    // it here so /meta/form works even before the first /meta hit.
+    discoverActions(this.constructor as Function, this.app, this.logger);
+    const formType = getControllerFormType(this.constructor as Function, name);
+    if (!formType) {
+      throw new HttpError(404, `Unknown form "${name}"`);
+    }
+    let cached = this._formSchemas.get(name);
+    if (!cached) {
+      cached = serializeAnnotatedType(formType, this.getSerializeOptions());
+      this._formSchemas.set(name, cached);
+    }
+    return cached;
   }
 
   /**

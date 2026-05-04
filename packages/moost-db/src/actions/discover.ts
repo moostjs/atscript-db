@@ -1,3 +1,4 @@
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { TDbActionInfo, TDbActionLevel } from "@atscript/db";
 import type { Moost, TConsoleBase } from "moost";
 import { getMoostMate } from "moost";
@@ -7,6 +8,7 @@ import {
   MOOST_DB_ACTION,
   MOOST_DB_ACTIONS,
   WARN_PREFIX,
+  type TDbActionInputFormMeta,
   type TDbActionMeta,
   type TDbClassActionMeta,
 } from "./keys";
@@ -37,6 +39,48 @@ export interface TDbActionEnvelope {
 
 const actionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
 const rowLevelActionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
+
+/**
+ * Per-controller registry of form names → compiled `.as` classes, populated
+ * during {@link discoverActions} when a method param carries
+ * {@link MOOST_DB_ACTION_INPUT_FORM}. Backs `GET /meta/form/:name`.
+ *
+ * Same name + same type ref across multiple actions is fine (forms can be
+ * reused). Same name + *different* type refs is an ambiguity — discovery
+ * warns and drops the second action.
+ */
+const formRegistry = new WeakMap<Function, Map<string, TAtscriptAnnotatedType>>();
+
+/** Lookup helper for `AsReadableController.metaForm()`. */
+export function getControllerFormType(
+  ctor: Function,
+  name: string,
+): TAtscriptAnnotatedType | undefined {
+  return formRegistry.get(ctor)?.get(name);
+}
+
+function registerFormType(
+  ctor: Function,
+  meta: TDbActionInputFormMeta,
+  actionName: string,
+  logger: TConsoleBase,
+): boolean {
+  let map = formRegistry.get(ctor);
+  if (!map) {
+    map = new Map();
+    formRegistry.set(ctor, map);
+  }
+  const existing = map.get(meta.name);
+  if (existing && existing !== meta.type) {
+    logger.warn(
+      `${WARN_PREFIX} action "${actionName}" — form name "${meta.name}" already registered on this controller with a different type. ` +
+        `Reusing the same FormType across actions is fine; clashing names are not — dropping`,
+    );
+    return false;
+  }
+  if (!existing) map.set(meta.name, meta.type);
+  return true;
+}
 
 /** Discover actions on a controller, memoized per ctor. `info`-only callers map `e => e.info`. */
 export function discoverActions(
@@ -189,6 +233,7 @@ function collectMethodActions(
       );
       continue;
     }
+
     const info: TDbActionInfo = {
       name: action.name,
       label,
@@ -196,6 +241,10 @@ function collectMethodActions(
       processor: "backend",
       value: path,
     };
+    if (levelInfer.inputForm) {
+      if (!registerFormType(ctor, levelInfer.inputForm, action.name, logger)) continue;
+      info.inputForm = levelInfer.inputForm.name;
+    }
     emitInfo(info, action.opts);
     seen.add(action.name);
     out.push({ info, raw: action.opts });
@@ -206,6 +255,7 @@ interface LevelInferResult {
   level: TDbActionLevel;
   bodyConflict: boolean;
   hasRowParam: boolean;
+  inputForm?: TDbActionInputFormMeta;
 }
 
 function inferMethodLevel(
@@ -221,10 +271,17 @@ function inferMethodLevel(
     );
     return null;
   }
+  if (scan.hasDuplicateInputForm) {
+    logger.warn(
+      `${WARN_PREFIX} action "${actionName}" has more than one @InputForm() param — only the first is honored. ` +
+        `Compose multiple inputs into a single form interface.`,
+    );
+  }
   return {
     level: scan.level as TDbActionLevel,
     bodyConflict: scan.hasBody && scan.level !== "table",
     hasRowParam: scan.hasRowParam,
+    inputForm: scan.inputForm,
   };
 }
 

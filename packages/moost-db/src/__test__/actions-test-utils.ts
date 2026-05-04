@@ -1,13 +1,16 @@
 import { vi, type Mock } from "vite-plus/test";
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { current } from "@wooksjs/event-core";
 import { prepareTestHttpContext } from "@wooksjs/event-http";
 import { getMoostMate, setControllerContext } from "moost";
 
 import {
   MOOST_DB_ACTION,
+  MOOST_DB_ACTION_INPUT_FORM,
   MOOST_DB_ACTION_PARAM,
   MOOST_DB_ACTION_ROW,
   MOOST_DB_ACTION_ROWS,
+  type TDbActionInputFormMeta,
   type TDbActionMeta,
 } from "../actions/keys";
 import { boundTableKey } from "../actions/id-cache";
@@ -108,6 +111,43 @@ export interface FakeHandler {
   /** The `@Label` decorator value to fall back to when `opts.label` is absent. */
   label?: string;
   paramKinds?: Array<"id" | "ids" | "row" | "rows" | "body" | "other">;
+  /**
+   * Pre-built param mate objects. When present, takes precedence over
+   * `paramKinds` — use this when you need to attach mates that `paramKinds`
+   * doesn't model (e.g. `MOOST_DB_ACTION_INPUT_FORM` with a real type ref).
+   */
+  paramMates?: Record<string, unknown>[];
+}
+
+/** Build the param-mate object for a given `FakeHandler.paramKinds` entry. */
+export function paramKindToMate(
+  kind: "id" | "ids" | "row" | "rows" | "body" | "other",
+): Record<string, unknown> {
+  switch (kind) {
+    case "id":
+      return { [MOOST_DB_ACTION_PARAM]: "id" };
+    case "ids":
+      return { [MOOST_DB_ACTION_PARAM]: "ids" };
+    case "row":
+      return { [MOOST_DB_ACTION_ROW]: true };
+    case "rows":
+      return { [MOOST_DB_ACTION_ROWS]: true };
+    case "body":
+      return { paramSource: "BODY" };
+    case "other":
+      return {};
+  }
+}
+
+/** Mate entry that marks a param as `@DbActionID` (single id). */
+export const idMate = (): Record<string, unknown> => paramKindToMate("id");
+
+/** Mate entry for an `@InputForm(FormType)` param — registers the form type with discovery. */
+export function inputFormMate(
+  formType: TAtscriptAnnotatedType & { name: string },
+): Record<string, unknown> {
+  const meta: TDbActionInputFormMeta = { type: formType, name: formType.name };
+  return { [MOOST_DB_ACTION_INPUT_FORM]: meta };
 }
 
 export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
@@ -173,12 +213,7 @@ export function setupActionMeta(
     ({
       ...(currentMeta as Record<string, unknown>),
       [MOOST_DB_ACTION]: { name: action.name, opts: action.opts ?? {} },
-      params: paramKinds.map((kind) => {
-        if (kind === "id") return { [MOOST_DB_ACTION_PARAM]: "id" };
-        if (kind === "ids") return { [MOOST_DB_ACTION_PARAM]: "ids" };
-        if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
-        return { [MOOST_DB_ACTION_ROWS]: true };
-      }),
+      params: paramKinds.map(paramKindToMate),
     }) as never;
   getMoostMate().decorate(fn as never)(ctor.prototype, methodName);
 }
@@ -256,14 +291,7 @@ export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
   // a single array.
   for (const h of handlers) {
     if (sharedMethodMeta.has(h.method)) continue;
-    const params = (h.paramKinds ?? []).map((kind) => {
-      if (kind === "body") return { paramSource: "BODY" };
-      if (kind === "id") return { [MOOST_DB_ACTION_PARAM]: "id" };
-      if (kind === "ids") return { [MOOST_DB_ACTION_PARAM]: "ids" };
-      if (kind === "row") return { [MOOST_DB_ACTION_ROW]: true };
-      if (kind === "rows") return { [MOOST_DB_ACTION_ROWS]: true };
-      return {};
-    });
+    const params = h.paramMates ?? (h.paramKinds ?? []).map(paramKindToMate);
     const action: TDbActionMeta | undefined = h.action
       ? { name: h.action.name, opts: h.action.opts ?? {} }
       : undefined;

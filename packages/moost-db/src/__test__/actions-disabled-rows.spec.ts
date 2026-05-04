@@ -37,7 +37,7 @@ describe("'rows'-level reject mode (default)", () => {
       onDisabledRows: "reject",
     });
     let threw = false;
-    await runInActionCtx('[{"id":"1"},{"id":"2"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -72,7 +72,7 @@ describe("'rows'-level reject mode (default)", () => {
     });
     let caught: unknown;
     // Request order: [{id:"5"},{id:"1"},{id:"3"}]. Failing in request order: [{id:"5"},{id:"3"}].
-    await runInActionCtx('[{"id":"5"},{"id":"1"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"5"},{"id":"1"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {
@@ -107,7 +107,7 @@ describe("'rows'-level skip mode — happy path", () => {
       onDisabledRows: "skip",
     });
     let threw = false;
-    await runInActionCtx('[{"id":"1"},{"id":"2"},{"id":"3"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"id":"2"},{"id":"3"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       try {

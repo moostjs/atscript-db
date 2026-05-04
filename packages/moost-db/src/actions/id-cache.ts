@@ -1,9 +1,9 @@
 import { cached, defineWook, key, type EventContext } from "@wooksjs/event-core";
-import { useBody } from "@wooksjs/http-body";
 import { HttpError } from "@moostjs/event-http";
 import { useControllerContext } from "moost";
 
 import { readCurrentActionMeta } from "./current-action";
+import { dbActionBodySlot } from "./input-form-cache";
 import { WARN_PREFIX } from "./keys";
 import {
   isIdValidationSource,
@@ -57,9 +57,9 @@ async function resolveValidatedId(
   if (!isIdValidationSource(table)) {
     throw noTableError(ctx);
   }
-  const body = await useBody(ctx).parseBody<unknown>();
-  validate(body, table);
-  return body;
+  const env = await ctx.get(dbActionBodySlot);
+  validate(env.ids, table);
+  return env.ids;
 }
 
 export const dbActionIdSlot = cached<Promise<Record<string, unknown>>>(

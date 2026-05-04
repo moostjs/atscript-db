@@ -83,7 +83,7 @@ describe("@DbActionRow projection — 'row' level", () => {
       ["id"],
     );
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "ship");
       setBoundTable(table);
       await current().get(dbActionRowSlot);
@@ -110,7 +110,7 @@ describe("@DbActionRow projection — 'row' level", () => {
     // Action without `requiredFields` and without `disabled` — no widening.
     setupActionMeta(Ctrl, "ship", { name: "ship", opts: {} }, ["id"]);
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "ship");
       setBoundTable(table);
       await current().get(dbActionRowSlot);
@@ -134,7 +134,7 @@ describe("@DbActionRow projection — 'row' level", () => {
     }
     setupActionMeta(Ctrl, "open", { name: "open" }, ["id"]);
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "open");
       setBoundTable(table);
       await current().get(dbActionRowSlot);
@@ -165,7 +165,7 @@ describe("@DbActionRow projection — 'row' level", () => {
     }
     setupActionMeta(Ctrl, "open", { name: "open" }, ["id"]);
 
-    await runInActionCtx('{"slug":"alpha"}', async () => {
+    await runInActionCtx('{"ids":{"slug":"alpha"}}', async () => {
       bindController(new Ctrl(), "open");
       setBoundTable(table);
       await current().get(dbActionRowSlot);
@@ -185,7 +185,7 @@ describe("@DbActionRow projection — 'row' level", () => {
     }
     setupActionMeta(Ctrl, "open", { name: "open" }, ["id"]);
 
-    await runInActionCtx('{"id":"a"}', async () => {
+    await runInActionCtx('{"ids":{"id":"a"}}', async () => {
       bindController(new Ctrl(), "open");
       setBoundTable(table);
       await current().get(dbActionRowSlot);
@@ -224,7 +224,7 @@ describe("@DbActionRow projection — 'rows' level", () => {
       "ids",
     ]);
 
-    await runInActionCtx('[{"id":"1"},{"email":"b@example.com"}]', async () => {
+    await runInActionCtx('{"ids":[{"id":"1"},{"email":"b@example.com"}]}', async () => {
       bindController(new Ctrl(), "archive");
       setBoundTable(table);
       await current().get(dbActionRowsSlot);

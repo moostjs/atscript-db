@@ -72,9 +72,18 @@ new Client<T>(path, {
 ```ts
 client.action<R = unknown>(
   name: string,
-  id?: Partial<Own<T>> | Partial<Own<T>>[]
+  id?: Partial<Own<T>> | Partial<Own<T>>[],
+  input?: unknown
 ): Promise<R>
+
+client.getActionForm(name: string): Promise<TAtscriptAnnotatedType | null>
 ```
+
+Body shape on the wire is the **envelope** `{ ids?, input? }`:
+
+- `ids` carries `id` (object for `'row'`, array of objects for `'rows'`, omitted for `'table'`).
+- `input` carries the third arg, present only when supplied.
+- Table-level + no `input` ⇒ no body sent (back-compat with bare table actions).
 
 Identifier shape is **object-only** — single object for `'row'` actions, array of objects for `'rows'` actions, omitted for `'table'` actions. Even single-field PK tables send `{ id: "abc" }`, never the bare scalar. See [actions.md](actions.md) for the full server-side contract (legitimate identification list, strict unknown-field rejection, precedence).
 
@@ -86,12 +95,16 @@ import {
   ActionDisabledError,
 } from "@atscript/db-client";
 
-await users.action("block", { id: "abc" }); // backend, row → POST identifier object
-await users.action("lock", [{ id: "a" }, { id: "b" }]); // rows → POST array of identifier objects
+await users.action("block", { id: "abc" }); // backend, row → POST { ids: { id: "abc" } }
+await users.action("lock", [{ id: "a" }, { id: "b" }]); // rows → POST { ids: [...] }
 await users.action("promote", { tenantId, userId }); // composite PK
 await users.action("promote", { email: "jane@example.com" }); // unique-index addressing
-await users.action("refresh-cache"); // table → POST empty
+await users.action("refresh-cache"); // table, no form → no body
 await users.action("edit", { slug: "alpha" }); // navigate → /users/alpha/edit (preferredId-driven)
+
+// @InputForm payload (third arg)
+await users.action("approve", { id: "o1" }, { note: "ok" }); // → POST { ids: ..., input: ... }
+await users.action("broadcast", undefined, { msg: "hi" }); // table + form → POST { input: ... }
 
 await users.action<{ message: string }>("block", { id: "abc" }); // typed return shape
 
@@ -102,10 +115,24 @@ new Client("/api/users", { navigate: (url) => router.push(url) }); // SPA integr
 
 The client refuses obviously-wrong shapes BEFORE the network round-trip:
 
-- `'row'` level + non-object (scalar, `null`, array) → `TypeError`.
-- `'rows'` level + non-array (single object included — no auto-wrap) → `TypeError`.
+- `'row'` level + non-object (scalar, `null`, array) for `id` → `TypeError`.
+- `'rows'` level + non-array (single object included — no auto-wrap) for `id` → `TypeError`.
+- `input` is `unknown` — no client-side validation. Caller must match the action's `inputForm` schema; server-side validation depends on a Moost atscript validator pipe (see [actions.md § `@InputForm`](actions.md#inputformformtype--structured-user-input)).
 
-The TypeScript signature catches the same cases at compile time when `Client<typeof T>` is used. Untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
+The TypeScript signature catches the `id`-shape cases at compile time when `Client<typeof T>` is used. Untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
+
+### Form-schema discovery — `getActionForm(name)`
+
+Lazily fetches `GET <controller>/meta/form/<inputForm>` and returns the deserialized `TAtscriptAnnotatedType`. Returns `null` when the action has no `inputForm` declared, or the action name isn't on `/meta`. Cached per form name on the client instance; failed fetches are evicted.
+
+```ts
+const meta = await users.meta();
+const action = meta.actions.find((a) => a.name === "approve");
+if (action?.inputForm) {
+  const form = await users.getActionForm("approve");
+  // → pass `form` to a UI form-renderer (e.g. @atscript/ui)
+}
+```
 
 ### `<R>` return-type generic
 
