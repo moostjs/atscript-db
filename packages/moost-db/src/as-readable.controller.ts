@@ -297,6 +297,43 @@ export abstract class AsReadableController<
     return parseUrl(idx >= 0 ? url.slice(idx + 1) : "");
   }
 
+  /**
+   * Parse a URL keeping only `$*` control keywords; report whether any
+   * non-control parts were present. Used by `/one` routes where the
+   * uniquery lexer cannot tokenise PK values containing `-` and other
+   * reserved chars, so non-control parts must be stripped before lexing.
+   * `/one/:id` rejects stray filter params with 400 via `hasNonControl`;
+   * `/one` (composite) ignores it because the composite-key params have
+   * already been extracted via `@Query()`.
+   */
+  protected parseControlsOnlyFromUrl(url: string): {
+    parsed: ReturnType<typeof parseUrl>;
+    hasNonControl: boolean;
+  } {
+    const idx = url.indexOf("?");
+    const qs = idx >= 0 ? url.slice(idx + 1) : "";
+    if (!qs) return { parsed: parseUrl(""), hasNonControl: false };
+    const kept: string[] = [];
+    let hasNonControl = false;
+    for (const part of qs.split("&")) {
+      if (!part) continue;
+      const eq = part.indexOf("=");
+      const rawKey = eq === -1 ? part : part.slice(0, eq);
+      let key: string;
+      try {
+        key = decodeURIComponent(rawKey);
+      } catch {
+        key = rawKey;
+      }
+      if (key.startsWith("$")) {
+        kept.push(part);
+      } else {
+        hasNonControl = true;
+      }
+    }
+    return { parsed: parseUrl(kept.join("&")), hasNonControl };
+  }
+
   protected async returnOne(result: Promise<DataType | null>): Promise<DataType | HttpError> {
     const item = await result;
     if (!item) {

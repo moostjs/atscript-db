@@ -582,6 +582,29 @@ describe("AsDbController", () => {
       const call = ctx.table.findById.mock.calls[0][1];
       expect(call.controls.$select).toEqual(["name", "slug"]);
     });
+
+    it("accepts PK values containing characters reserved by the uniquery lexer (e.g. '-')", async () => {
+      const ctx = createController({
+        primaryKeys: ["id"],
+        indexes: new Map([
+          [
+            "by_sku",
+            {
+              key: "by_sku",
+              name: "by_sku",
+              type: "unique",
+              fields: [{ name: "sku", sort: "asc" }],
+            },
+          ],
+        ]),
+      });
+      const result = await ctx.controller.getOneComposite(
+        { sku: "SKU-00006" },
+        "/one?sku=SKU-00006",
+      );
+      expect(ctx.table.findById).toHaveBeenCalledWith({ sku: "SKU-00006" }, expect.any(Object));
+      expect(result).toEqual({ id: "1", name: "Alice" });
+    });
   });
 
   // ── POST / ────────────────────────────────────────────────────────

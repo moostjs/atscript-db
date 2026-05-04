@@ -581,12 +581,11 @@ export class AsDbReadableController<
    */
   @Get("one/:id")
   async getOne(@Param("id") id: string, @Url() url: string): Promise<DataType | HttpError> {
-    const parsed = this.parseQueryString(url);
-    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
-
-    if (Object.keys(parsed.filter).length > 0) {
+    const { parsed, hasNonControl } = this.parseControlsOnlyFromUrl(url);
+    if (hasNonControl) {
       return new HttpError(400, 'Filtering is not allowed for "one" endpoint');
     }
+    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
 
     const error = this.validateParsed(parsed, "getOne");
     if (error) {
@@ -615,7 +614,7 @@ export class AsDbReadableController<
       return idObj;
     }
 
-    const parsed = this.parseQueryString(url);
+    const { parsed } = this.parseControlsOnlyFromUrl(url);
     this._coerceActionsControl(parsed.controls as Record<string, unknown>);
     const rawSelect = await this.transformProjection(parsed.controls.$select);
     const select = this.widenPreferredIdProjection(rawSelect);
