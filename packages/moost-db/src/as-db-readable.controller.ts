@@ -35,6 +35,8 @@ export class AsDbReadableController<
   private readonly _gates: ReadableGates;
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
+  /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
+  private readonly _quantityRefByPath: ReadonlyMap<string, string>;
 
   constructor(
     @Inject(READABLE_DEF)
@@ -45,10 +47,24 @@ export class AsDbReadableController<
     this.readable = readable;
     this._gates = this._buildGates();
     this._preferredIdSet = new Set(readable.preferredId ?? []);
+    this._quantityRefByPath = this._collectQuantityRefs();
     const defaultOverlay = (
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
+  }
+
+  private _collectQuantityRefs(): Map<string, string> {
+    const out = new Map<string, string>();
+    if (!this.readable.flatMap) return out;
+    for (const [path, entry] of this.readable.flatMap) {
+      const meta = entry?.metadata;
+      const ref =
+        (meta?.get("db.amount.currency.ref") as string | undefined) ??
+        (meta?.get("db.unit.ref") as string | undefined);
+      if (ref) out.set(path, ref);
+    }
+    return out;
   }
 
   private _buildGates(): ReadableGates {
@@ -136,14 +152,17 @@ export class AsDbReadableController<
   private widenPreferredIdProjection(
     projection?: UniqueryControls["$select"],
   ): UniqueryControls["$select"] | undefined | HttpError {
+    // Quantity-ref widening runs first so the preferred-id pass sees the already-widened projection.
+    const widened = this.widenQuantityRefProjection(projection);
+    if (widened instanceof HttpError) return widened;
     const preferredIdSet = this._preferredIdSet;
-    if (preferredIdSet.size === 0 || projection === undefined) {
-      return projection;
+    if (preferredIdSet.size === 0 || widened === undefined) {
+      return widened;
     }
-    if (Array.isArray(projection)) {
-      return this._widenArrayProjection(projection);
+    if (Array.isArray(widened)) {
+      return this._widenArrayProjection(widened);
     }
-    return this._widenMapProjection(projection as Record<string, unknown>);
+    return this._widenMapProjection(widened as Record<string, unknown>);
   }
 
   private _widenArrayProjection(
@@ -205,6 +224,75 @@ export class AsDbReadableController<
     }
     for (const field of this._preferredIdSet) widened[field] = 1;
     return widened as UniqueryControls["$select"];
+  }
+
+  /**
+   * Auto-includes the sibling-ref field whenever its `@db.amount.currency.ref`
+   * / `@db.unit.ref` quantity is selected — UI must never get a value without
+   * its dimension. No-op when `$select` is undefined (full row covers it).
+   */
+  private widenQuantityRefProjection(
+    projection?: UniqueryControls["$select"],
+  ): UniqueryControls["$select"] | undefined | HttpError {
+    if (this._quantityRefByPath.size === 0 || projection === undefined) {
+      return projection;
+    }
+    if (Array.isArray(projection)) {
+      return this._widenQuantityArrayProjection(projection);
+    }
+    return this._widenQuantityMapProjection(projection as Record<string, unknown>);
+  }
+
+  private _widenQuantityArrayProjection(
+    projection: readonly unknown[],
+  ): UniqueryControls["$select"] | undefined {
+    const stringItems = new Set<string>();
+    for (const item of projection) {
+      if (typeof item === "string") stringItems.add(item);
+    }
+    const toAdd: string[] = [];
+    for (const [valuePath, refPath] of this._quantityRefByPath) {
+      if (stringItems.has(valuePath) && !stringItems.has(refPath)) {
+        toAdd.push(refPath);
+        stringItems.add(refPath);
+      }
+    }
+    if (toAdd.length === 0) return projection as UniqueryControls["$select"];
+    return [...projection, ...toAdd] as UniqueryControls["$select"];
+  }
+
+  private _widenQuantityMapProjection(
+    projection: Record<string, unknown>,
+  ): UniqueryControls["$select"] | undefined | HttpError {
+    const entries = Object.entries(projection);
+    if (entries.length === 0) return projection as UniqueryControls["$select"];
+
+    const included = new Set<string>();
+    const excluded = new Set<string>();
+    for (const [k, v] of entries) {
+      if (v === 1 || v === true) included.add(k);
+      else if (v === 0 || v === false) excluded.add(k);
+    }
+    if (included.size > 0 && excluded.size > 0) {
+      return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
+    }
+
+    if (excluded.size === 0) {
+      const toAdd: string[] = [];
+      for (const [valuePath, refPath] of this._quantityRefByPath) {
+        if (included.has(valuePath) && !included.has(refPath)) {
+          toAdd.push(refPath);
+        }
+      }
+      if (toAdd.length === 0) return projection as UniqueryControls["$select"];
+      const widened: Record<string, 1> = {};
+      for (const k of included) widened[k] = 1;
+      for (const k of toAdd) widened[k] = 1;
+      return widened as UniqueryControls["$select"];
+    }
+
+    // Exclusion form: don't silently override an explicit exclusion of a ref dimension.
+    return projection as UniqueryControls["$select"];
   }
 
   /** WHY: the URL parser only auto-coerces `$count`; every other boolean control reaches us as `"true"`/`"1"` and would fail DTO validation. */

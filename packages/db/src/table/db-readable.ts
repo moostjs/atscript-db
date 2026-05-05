@@ -575,6 +575,27 @@ export class AtscriptDbReadable<
       }
     }
 
+    // Quantity-ref dimension requirement: aggregating a field tagged with
+    // `@db.amount.currency.ref` or `@db.unit.ref` must group by the referenced
+    // sibling field — summing rows that mix currencies (or units) is wrong.
+    const { quantityRefByField } = this._meta;
+    if ($select && quantityRefByField.size > 0) {
+      const groupBySet = new Set($groupBy);
+      for (const item of $select) {
+        if (typeof item === "string") continue;
+        if (item.$field === "*") continue;
+        const refField = quantityRefByField.get(item.$field);
+        if (refField && !groupBySet.has(refField)) {
+          throw new DbError("INVALID_QUERY", [
+            {
+              path: "$select",
+              message: `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
+            },
+          ]);
+        }
+      }
+    }
+
     // Translate and delegate
     const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta);
     const results = await this.adapter.aggregate(dbQuery);

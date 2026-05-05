@@ -39,7 +39,7 @@ pnpm add @atscript/db-mysql mysql2
 
 ## Registering the DB Plugin
 
-The `dbPlugin()` function registers all `@db.*` annotations (`@db.table`, `@db.index.*`, `@db.column.*`, `@db.default.*`, `@db.rel.*`, `@db.view.*`, `@db.search.*`, `@db.agg.*`, `@db.patch.*`, etc.) and the `db.vector` primitive type. Call it in your config **before** compiling `.as` files:
+The `dbPlugin()` function registers all `@db.*` annotations (`@db.table`, `@db.index.*`, `@db.column.*`, `@db.default.*`, `@db.rel.*`, `@db.view.*`, `@db.search.*`, `@db.agg.*`, `@db.amount.currency.*`, `@db.unit.*`, `@db.patch.*`, etc.) and the `db.vector` and `db.currencyCode` primitive types. Call it in your config **before** compiling `.as` files:
 
 ```typescript
 import { defineConfig } from "@atscript/core";

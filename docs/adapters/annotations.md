@@ -330,6 +330,66 @@ interface CategoryStats {
 }
 ```
 
+## Quantity Tagging (currency & unit)
+
+Bind a numeric field to its **dimension** (currency code, unit of measure) so the runtime can enforce correct aggregation grouping and the readable controller can guarantee the dimension is always shipped alongside the value.
+
+| Annotation                | Applies To                | Arguments            | Description                                                                                                                                                                               |
+| ------------------------- | ------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.amount.currency`     | Field (`decimal`)         | `code` (string)      | Hard-coded ISO-style currency code (`'EUR'`, `'USD'`, `'BTC'`). Validated against `^[A-Z0-9]{2,10}$`. Schema-wide constant — no runtime aggregation constraint. UI reads it from `/meta`. |
+| `@db.amount.currency.ref` | Field (`decimal`)         | `fieldName` (string) | Bind this amount to a sibling field that holds the per-row currency code. Sibling must exist and resolve to a `string` (preferably `db.currencyCode`).                                    |
+| `@db.unit`                | Field (`decimal\|number`) | `code` (string)      | Hard-coded unit of measure (`'kg'`, `'rpm'`, `'qps'`, `'requests/sec'`). Free-form string — no shape validation. Schema-wide constant.                                                    |
+| `@db.unit.ref`            | Field (`decimal\|number`) | `fieldName` (string) | Bind this quantity to a sibling field holding the per-row unit. Sibling must exist and resolve to a `string`.                                                                             |
+
+The two forms (literal vs `.ref`) are mutually exclusive on the same field. Money-bearing fields must be `decimal` — floats lose cents. Quantity fields accept both `decimal` (weights, lengths) and `number` (counts, rates).
+
+### `db.currencyCode` primitive
+
+Companion type for the `.ref` target — a `string` constrained to `^[A-Z0-9]{2,10}$` so non-currency strings can't be silently used as the dimension.
+
+```atscript
+@db.table 'orders'
+interface Order {
+  @meta.id @db.default.uuid
+  id: string
+
+  // Per-row currency: each line carries its own code.
+  currency: db.currencyCode
+
+  @db.amount.currency.ref 'currency'
+  @db.column.measure
+  amount: decimal
+}
+
+@db.table 'metrics'
+interface Metric {
+  @meta.id @db.default.uuid
+  id: string
+
+  // Single-currency table: literal form, no sibling field.
+  @db.amount.currency 'EUR'
+  @db.column.measure
+  fee: decimal
+
+  // Mixed-unit measurement: ref form.
+  unit: string
+  @db.unit.ref 'unit'
+  @db.column.measure
+  weight: decimal
+
+  // Single-unit metric: literal form.
+  @db.unit 'qps'
+  @db.column.measure
+  rate: number
+}
+```
+
+### Runtime behavior
+
+- **Aggregation guard.** When `aggregate()` is called against a field carrying `@db.amount.currency.ref` or `@db.unit.ref`, the referenced field MUST appear in `$groupBy`. Otherwise `DbError("INVALID_QUERY")`. Literal forms (`@db.amount.currency 'EUR'`, `@db.unit 'kg'`) impose no runtime constraint — the dimension is satisfied schema-wide. `COUNT(*)` is exempt.
+- **`$select` auto-widening.** The `moost-db` readable controller automatically adds the referenced sibling to `$select` whenever its tagged value is requested. UI can ask for `$select=amount` and still receive `currency` in the response. Literal forms are NOT widened — the constant is on the field descriptor, not row data.
+- **Field descriptors.** `TDbFieldMeta` exposes `currencyCode` / `currencyRefField` / `unitCode` / `unitRefField` so clients can format quantities correctly without inspecting raw annotations.
+
 ## Schema Sync
 
 | Annotation        | Applies To | Arguments         | Description                             |

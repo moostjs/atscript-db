@@ -285,6 +285,14 @@ export interface TDbFieldMeta {
   collate?: TDbCollation;
   /** Whether this field participates in any index (@db.index.plain, @db.index.unique, @db.index.fulltext). */
   isIndexed?: boolean;
+  /** Literal currency code from `@db.amount.currency 'EUR'`. */
+  currencyCode?: string;
+  /** Sibling field path from `@db.amount.currency.ref 'fieldName'`. */
+  currencyRefField?: string;
+  /** Literal unit-of-measure from `@db.unit 'kg'`. */
+  unitCode?: string;
+  /** Sibling field path from `@db.unit.ref 'fieldName'`. */
+  unitRefField?: string;
   /**
    * For FK fields: the resolved field metadata of the referenced (target) PK column.
    * Adapters use this in `typeMapper` to produce matching DB types for FK columns

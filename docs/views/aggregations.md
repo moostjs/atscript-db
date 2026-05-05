@@ -126,6 +126,24 @@ When **all** fields are aggregated (no plain fields), there is no `GROUP BY` —
 
 Atscript validates type compatibility at build time — annotating a `string` field with `@db.agg.sum` produces a compile error.
 
+## Quantity Dimensions
+
+When the source column carries `@db.amount.currency.ref` or `@db.unit.ref` (see [Annotations § Quantity Tagging](../adapters/annotations#quantity-tagging-currency-unit)), the runtime rejects ad-hoc aggregations that don't include the referenced dimension in `$groupBy`. Summing rows that mix currencies — or kg with lb — is meaningless, and the guard catches it before it reaches the database.
+
+```ts
+// Schema: amount carries @db.amount.currency.ref 'currency'
+await orders.aggregate({
+  filter: {},
+  controls: {
+    $groupBy: ["status"], // ← missing 'currency'
+    $select: ["status", { $fn: "sum", $field: "amount", $as: "total" }],
+  },
+});
+// → DbError("INVALID_QUERY"): Aggregate "sum(amount)" requires "currency" in $groupBy
+```
+
+Add the ref field to `$groupBy` (`["status", "currency"]`) and the query proceeds. Literal forms (`@db.amount.currency 'EUR'`, `@db.unit 'qps'`) impose no constraint — the dimension is fixed schema-wide. `COUNT(*)` is exempt either way.
+
 ## Annotation Reference
 
 | Annotation              | Argument           | Required? | SQL Equivalent |

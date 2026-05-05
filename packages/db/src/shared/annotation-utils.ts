@@ -12,6 +12,72 @@ import {
   type TMessages,
 } from "@atscript/core";
 
+/** Asserts the field carrying this annotation does not also carry any of `others`. */
+export function validateExclusiveWith(
+  token: Token,
+  selfName: string,
+  others: Array<{ key: string; displayName?: string }>,
+): TMessages {
+  const errors = [] as TMessages;
+  const field = token.parentNode!;
+  for (const { key, displayName } of others) {
+    if (field.countAnnotations(key) > 0) {
+      errors.push({
+        message: `${selfName} cannot coexist with ${displayName ?? `@${key}`} on the same field — pick one form, not both`,
+        severity: 1,
+        range: token.range,
+      });
+    }
+  }
+  return errors;
+}
+
+/** Resolves a field/prop's primitive base type, or `undefined` if it isn't a ref-to-primitive. */
+function getPrimitiveBaseType(node: SemanticNode, doc: AtscriptDoc): string | undefined {
+  const def = node.getDefinition();
+  if (!def || !isRef(def)) return undefined;
+  const unwound = doc.unwindType(def.id!, def.chain);
+  if (!unwound || !isPrimitive(unwound.def)) return undefined;
+  const ct = unwound.def.config.type;
+  return typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
+}
+
+/** Asserts `args[0]` names a sibling property whose primitive base type is `string`. */
+export function validateSiblingStringField(
+  token: Token,
+  args: Token[],
+  doc: AtscriptDoc,
+  selfName: string,
+): TMessages {
+  const errors = [] as TMessages;
+  const fieldName = args[0]?.text;
+  if (!fieldName) return errors;
+
+  const struct = getParentStruct(token);
+  if (!struct) return errors;
+
+  const sibling = struct.props.get(fieldName);
+  if (!sibling) {
+    errors.push({
+      message: `${selfName} '${fieldName}': no sibling field named '${fieldName}' on this type`,
+      severity: 1,
+      range: token.range,
+    });
+    return errors;
+  }
+
+  const baseType = getPrimitiveBaseType(sibling, doc);
+  if (baseType !== undefined && baseType !== "string") {
+    errors.push({
+      message: `${selfName} '${fieldName}': sibling field must be a string, got '${baseType}'`,
+      severity: 1,
+      range: token.range,
+    });
+  }
+
+  return errors;
+}
+
 /**
  * Traverse from annotation token → prop → structure → interface
  * to check if the parent interface has @db.table.
@@ -58,18 +124,10 @@ export function validateFieldBaseType(
 ): TMessages {
   const errors = [] as TMessages;
   const field = token.parentNode!;
-  const definition = field.getDefinition();
-  if (!definition || !isRef(definition)) {
-    return errors;
-  }
-  const unwound = doc.unwindType(definition.id!, definition.chain);
-  if (!unwound || !isPrimitive(unwound.def)) {
-    return errors;
-  }
-  const ct = unwound.def.config.type;
-  const baseType = typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
+  const baseType = getPrimitiveBaseType(field, doc);
+  if (baseType === undefined) return errors;
   const allowed = Array.isArray(expectedType) ? expectedType : [expectedType];
-  if (!allowed.includes(baseType as string)) {
+  if (!allowed.includes(baseType)) {
     errors.push({
       message: `${annotationName} is not compatible with type "${baseType}" — requires ${allowed.join(" or ")}`,
       severity: 1,

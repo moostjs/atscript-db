@@ -85,6 +85,8 @@ export class TableMetadata {
   columnMap = new Map<string, string>();
   dimensions: string[] = [];
   measures: string[] = [];
+  /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
+  quantityRefByField = new Map<string, string>();
 
   // ── Hot-path lookup indexes — derived during build() ─────────────────────
 
@@ -675,6 +677,15 @@ export class TableMetadata {
         renamedFrom = isFlattened ? this._flattenedPrefix(path) + fromLocal : fromLocal;
       }
 
+      const currencyCode = type.metadata.get("db.amount.currency") as string | undefined;
+      const currencyRefField = type.metadata.get("db.amount.currency.ref") as string | undefined;
+      const unitCode = type.metadata.get("db.unit") as string | undefined;
+      const unitRefField = type.metadata.get("db.unit.ref") as string | undefined;
+      const quantityRef = currencyRefField ?? unitRefField;
+      if (quantityRef) {
+        this.quantityRefByField.set(path, quantityRef);
+      }
+
       descriptors.push({
         path,
         type,
@@ -689,6 +700,10 @@ export class TableMetadata {
         renamedFrom,
         collate: this._collateMap.get(path),
         isIndexed: indexedFields.has(path) || undefined,
+        currencyCode,
+        currencyRefField,
+        unitCode,
+        unitRefField,
       });
     }
 

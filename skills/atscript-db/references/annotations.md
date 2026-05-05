@@ -78,6 +78,31 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 | `@db.agg.min`   | `field: string`  | MIN.                         |
 | `@db.agg.max`   | `field: string`  | MAX.                         |
 
+## Quantity tagging (currency / unit)
+
+Bind a numeric field to its dimension. Mutually exclusive within a pair (literal vs `.ref`). `db.currencyCode` primitive is `string` constrained to `^[A-Z0-9]{2,10}$`.
+
+| Annotation                | Host                | Args                | Effect                                                                                                            |
+| ------------------------- | ------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `@db.amount.currency`     | `decimal`           | `code: string`      | Schema-wide literal currency. Validated `^[A-Z0-9]{2,10}$`. No runtime constraint.                                |
+| `@db.amount.currency.ref` | `decimal`           | `fieldName: string` | Per-row currency lives in named sibling. Sibling must exist + resolve to `string` (preferably `db.currencyCode`). |
+| `@db.unit`                | `decimal \| number` | `code: string`      | Schema-wide literal unit (`'kg'`, `'rpm'`, `'qps'`, …). Free-form, no shape check.                                |
+| `@db.unit.ref`            | `decimal \| number` | `fieldName: string` | Per-row unit in named sibling. Sibling must be `string`.                                                          |
+
+Runtime: `aggregate()` rejects `sum/avg/min/max` on a `.ref`-tagged field unless `$groupBy` includes the ref field (`COUNT(*)` exempt; literal forms impose nothing). `moost-db` `AsDbReadableController` auto-adds the ref sibling to `$select` when its tagged value is requested. Both `.ref` annotations feed one shared map (`TableMetadata.quantityRefByField`); descriptors keep separate `currencyCode` / `currencyRefField` / `unitCode` / `unitRefField`.
+
+```atscript
+@db.table 'orders'
+interface Order {
+    @meta.id @db.default.uuid
+    id: string
+    currency: db.currencyCode
+    @db.amount.currency.ref 'currency'
+    @db.column.measure
+    amount: decimal
+}
+```
+
 ## Vector search (generic)
 
 | Annotation                    | Args                                                          | Effect                                                                                   |
