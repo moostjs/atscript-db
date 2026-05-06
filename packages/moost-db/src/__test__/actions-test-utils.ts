@@ -4,15 +4,7 @@ import { current } from "@wooksjs/event-core";
 import { prepareTestHttpContext } from "@wooksjs/event-http";
 import { getMoostMate, setControllerContext } from "moost";
 
-import {
-  MOOST_DB_ACTION,
-  MOOST_DB_ACTION_INPUT_FORM,
-  MOOST_DB_ACTION_PARAM,
-  MOOST_DB_ACTION_ROW,
-  MOOST_DB_ACTION_ROWS,
-  type TDbActionInputFormMeta,
-  type TDbActionMeta,
-} from "../actions/keys";
+import type { TDbActionInputFormMeta, TDbActionMeta } from "../actions/keys";
 import { boundTableKey } from "../actions/id-cache";
 import type { DbActionOpts } from "../actions/types";
 
@@ -116,7 +108,7 @@ export interface FakeHandler {
   /**
    * Pre-built param mate objects. When present, takes precedence over
    * `paramKinds` — use this when you need to attach mates that `paramKinds`
-   * doesn't model (e.g. `MOOST_DB_ACTION_INPUT_FORM` with a real type ref).
+   * doesn't model (e.g. `atscript_db_action_input_form` with a real type ref).
    */
   paramMates?: Record<string, unknown>[];
 }
@@ -127,13 +119,13 @@ export function paramKindToMate(
 ): Record<string, unknown> {
   switch (kind) {
     case "id":
-      return { [MOOST_DB_ACTION_PARAM]: "id" };
+      return { atscript_db_action_param: "id" };
     case "ids":
-      return { [MOOST_DB_ACTION_PARAM]: "ids" };
+      return { atscript_db_action_param: "ids" };
     case "row":
-      return { [MOOST_DB_ACTION_ROW]: true };
+      return { atscript_db_action_row: true };
     case "rows":
-      return { [MOOST_DB_ACTION_ROWS]: true };
+      return { atscript_db_action_rows: true };
     case "body":
       return { paramSource: "BODY" };
     case "other":
@@ -149,7 +141,7 @@ export function inputFormMate(
   formType: TAtscriptAnnotatedType & { name: string },
 ): Record<string, unknown> {
   const meta: TDbActionInputFormMeta = { type: formType, name: formType.name };
-  return { [MOOST_DB_ACTION_INPUT_FORM]: meta };
+  return { atscript_db_action_input_form: meta };
 }
 
 export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
@@ -202,7 +194,7 @@ export async function runBeforeInterceptor(def: {
 }
 
 /**
- * Write `MOOST_DB_ACTION` + param markers onto a class method via mate.
+ * Write `atscript_db_action` + param markers onto a class method via mate.
  * Drives discovery's level inference and the gate / row interceptors.
  */
 export function setupActionMeta(
@@ -214,7 +206,7 @@ export function setupActionMeta(
   const fn = (currentMeta: unknown) =>
     ({
       ...(currentMeta as Record<string, unknown>),
-      [MOOST_DB_ACTION]: { name: action.name, opts: action.opts ?? {} },
+      atscript_db_action: { name: action.name, opts: action.opts ?? {} },
       params: paramKinds.map(paramKindToMate),
     }) as never;
   getMoostMate().decorate(fn as never)(ctor.prototype, methodName);
@@ -303,7 +295,7 @@ export function fakeOverview(ctor: Function, handlers: FakeHandler[]): unknown {
         .filter((x) => x.method === h.method)
         .map((x) => ({ method: x.httpMethod, path: x.path, type: "HTTP" })),
     };
-    if (action) methodMeta[MOOST_DB_ACTION] = action;
+    if (action) methodMeta.atscript_db_action = action;
     if (h.label) methodMeta.label = h.label;
     sharedMethodMeta.set(h.method, methodMeta);
   }

@@ -1,17 +1,10 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { TDbActionInfo, TDbActionLevel } from "@atscript/db";
 import type { Moost, TConsoleBase } from "moost";
-import { getMoostMate } from "moost";
 
+import { getAtscriptDbMate } from "../mate";
 import { isAsDbReadableControllerSubclass } from "./controller-registry";
-import {
-  MOOST_DB_ACTION,
-  MOOST_DB_ACTIONS,
-  WARN_PREFIX,
-  type TDbActionInputFormMeta,
-  type TDbActionMeta,
-  type TDbClassActionMeta,
-} from "./keys";
+import { WARN_PREFIX, type TDbActionInputFormMeta, type TDbActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
@@ -43,7 +36,7 @@ const rowLevelActionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
 /**
  * Per-controller registry of form names → compiled `.as` classes, populated
  * during {@link discoverActions} when a method param carries
- * {@link MOOST_DB_ACTION_INPUT_FORM}. Backs `GET /meta/form/:name`.
+ * `atscript_db_action_input_form`. Backs `GET /meta/form/:name`.
  *
  * Same name + same type ref across multiple actions is fine (forms can be
  * reused). Same name + *different* type refs is an ambiguity — discovery
@@ -150,7 +143,7 @@ function collectMethodActions(
   }
   for (const [methodName, handlers] of byMethod) {
     const methodMeta = handlers[0].meta;
-    const action = methodMeta[MOOST_DB_ACTION] as TDbActionMeta | undefined;
+    const action = methodMeta.atscript_db_action as TDbActionMeta | undefined;
     if (!action) continue;
     if (!action.name) {
       logger.warn(
@@ -293,10 +286,8 @@ function collectClassActions(
   out: TDbActionEnvelope[],
   seen: Set<string>,
 ): void {
-  const classMeta = getMoostMate().read(ctor) as
-    | { [MOOST_DB_ACTIONS]?: TDbClassActionMeta[] }
-    | undefined;
-  const list = classMeta?.[MOOST_DB_ACTIONS];
+  const classMeta = getAtscriptDbMate().read(ctor);
+  const list = classMeta?.atscript_db_actions;
   if (!list) return;
   for (const { name, entry } of list) {
     if (seen.has(name)) {

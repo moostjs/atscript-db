@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vite-plus/test";
-import { getMoostMate } from "moost";
 
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionDefault } from "../actions/db-action-default.decorator";
-import { MOOST_DB_ACTION, type TDbActionMeta } from "../actions/keys";
+import { type TDbActionMeta } from "../actions/keys";
 import { AsDbController } from "../as-db.controller";
+import { getAtscriptDbMate } from "../mate";
 import { fakeOverview, makeApp, makeTable } from "./actions-test-utils";
 
 /**
@@ -17,10 +17,7 @@ import { fakeOverview, makeApp, makeTable } from "./actions-test-utils";
  */
 
 function readActionMeta(target: object, propKey: string): TDbActionMeta | undefined {
-  const meta = getMoostMate().read(target, propKey) as
-    | { [MOOST_DB_ACTION]?: TDbActionMeta }
-    | undefined;
-  return meta?.[MOOST_DB_ACTION];
+  return getAtscriptDbMate().read(target, propKey)?.atscript_db_action;
 }
 
 describe("@DbAction + @DbActionDefault — decorator order independence", () => {

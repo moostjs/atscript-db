@@ -1,14 +1,15 @@
-import { Intercept, getMoostMate } from "moost";
+import { Intercept } from "moost";
 
+import { getAtscriptDbMate } from "../mate";
 import { isAsValueHelpControllerSubclass } from "./controller-registry";
 import { buildGateInterceptor, buildThinInterceptor } from "./gate-interceptor";
-import { MOOST_DB_ACTION, WARN_PREFIX, mergeActionMeta, type TDbActionMeta } from "./keys";
+import { WARN_PREFIX, mergeActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
 import type { DbActionOpts, FlatKey, TOnDisabledRows } from "./types";
 
 /**
  * Mark a controller method as a database action surfaced via `/meta`. Writes
- * `MOOST_DB_ACTION` metadata and registers a Moost interceptor when needed
+ * `atscript_db_action` metadata and registers a Moost interceptor when needed
  * (gate when `disabled` is set, thin bound-table injector when only
  * `@DbActionRow*` is present). Stacking two `@DbAction` on the same method
  * is undefined and emits a warning.
@@ -22,13 +23,10 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
   name: string,
   opts: DbActionOpts<TRow, R> = {} as DbActionOpts<TRow, R>,
 ): MethodDecorator {
-  const mate = getMoostMate();
+  const mate = getAtscriptDbMate();
   return ((target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
     // Read before mate.decorate so mergeActionMeta doesn't overwrite the prior name.
-    const existing = mate.read(target, propertyKey as string) as
-      | { [MOOST_DB_ACTION]?: TDbActionMeta }
-      | undefined;
-    const priorName = existing?.[MOOST_DB_ACTION]?.name;
+    const priorName = mate.read(target, propertyKey as string)?.atscript_db_action?.name;
     if (priorName) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -37,16 +35,13 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
       );
     }
 
-    mate.decorate((current) => {
-      const meta = current as { [MOOST_DB_ACTION]?: TDbActionMeta };
-      return {
-        ...current,
-        [MOOST_DB_ACTION]: mergeActionMeta(meta, {
-          name,
-          opts: opts as DbActionOpts,
-        }),
-      } as typeof current;
-    })(target, propertyKey, descriptor);
+    mate.decorate((current) => ({
+      ...current,
+      atscript_db_action: mergeActionMeta(current, {
+        name,
+        opts: opts as DbActionOpts,
+      }),
+    }))(target, propertyKey, descriptor);
 
     // Value-help controllers don't surface actions; skip interceptor registration.
     const ctor = typeof target === "function" ? target : target.constructor;
@@ -54,9 +49,7 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
       return descriptor;
     }
 
-    const merged = mate.read(target, propertyKey as string) as
-      | { params?: Array<Record<string, unknown>> }
-      | undefined;
+    const merged = mate.read(target, propertyKey as string);
     const scan = scanParamLevel(merged?.params ?? []);
     const rawOpts = opts as {
       disabled?: unknown;

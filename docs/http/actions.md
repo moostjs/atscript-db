@@ -411,8 +411,8 @@ Discovery is lazy: hitting `/meta/form/:name` triggers `discoverActions` if `/me
 
 `@InputForm()` is **intentionally validation-free**. The decorator stamps two pieces of param metadata:
 
-- `MOOST_DB_ACTION_INPUT_FORM` — `{ type: FormType, name: <string> }`. Consumed by discovery.
-- `MOOST_ATSCRIPT_TYPE` — the type ref alone. A generic, atscript-aware Moost pipe reads this and runs `FormType.validator()` against the resolved value.
+- `atscript_db_action_input_form` — `{ type: FormType, name: <string> }`. Consumed by discovery.
+- `atscript_type` — the type ref alone. A generic, atscript-aware Moost pipe reads this and runs `FormType.validator()` against the resolved value.
 
 Without a pipe installed, `input` arrives at your handler as raw JSON — no validation, no coercion. To enable validation, install an atscript validator pipe globally on the Moost app or scope it per-controller / per-method:
 
@@ -922,6 +922,46 @@ The single greppable prefix `[moost-db actions]` makes it easy to detect issues 
 ## Value-Help Controllers Are Excluded
 
 `AsValueHelpController` and `AsJsonValueHelpController` (used for FK pickers and dictionary surfaces) do **not** participate in action discovery. Action decorators applied to them are silently ignored — `actions` is always emitted as `[]` for shape uniformity. Adding actions to a value-help picker doesn't make sense; the contract is intentionally narrow.
+
+## Inspecting Action Metadata — `getAtscriptDbMate()`
+
+`@atscript/moost-db` writes its action metadata to the standard Moost mate workspace, but with a typed accessor so consumers don't have to retype string keys or hand-cast results:
+
+```typescript
+import { getAtscriptDbMate } from "@atscript/moost-db";
+
+const mate = getAtscriptDbMate();
+
+// Class- / method-level
+const meta = mate.read(OrdersController.prototype, "approve");
+meta?.atscript_db_action; // { name, opts } | undefined  — written by @DbAction
+meta?.atscript_db_actions; // class-level dict entries written by @DbActions / @DbRowActions / …
+
+// Param-level
+meta?.params?.[0]?.atscript_db_action_param; // 'id' | 'ids' — written by @DbActionID / @DbActionIDs
+meta?.params?.[0]?.atscript_db_action_row; // true — written by @DbActionRow
+meta?.params?.[0]?.atscript_db_action_rows; // true — written by @DbActionRows
+meta?.params?.[0]?.atscript_db_action_input_form; // { type, name } — written by @InputForm
+meta?.params?.[0]?.atscript_type; // FormType — also written by @InputForm
+```
+
+The returned `Mate` is the same singleton as `getMoostMate()` from `moost`, but narrowed via TypeScript declaration merging to every key `@atscript/moost-db` writes. Reach for it when:
+
+- Writing a custom Moost pipe that reads `atscript_type` to validate `@InputForm` payloads.
+- Building tooling that introspects the action surface without going through `/meta`.
+- Composing your own decorator on top of `@DbAction` / `@InputForm` and needing to read what they wrote.
+
+### Companion type exports
+
+| Export                   | Use for                                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `AtscriptDbMate`         | Return type of `getAtscriptDbMate()` — the fully-typed `Mate` shape.                                |
+| `AtscriptDbMeta`         | Class- / method-level keys (`atscript_db_action`, `atscript_db_actions`, …).                        |
+| `AtscriptDbParamsMeta`   | Param-level keys (`atscript_db_action_param`, `atscript_db_action_input_form`, `atscript_type`, …). |
+| `TDbActionMeta`          | `{ name, opts }` payload written by `@DbAction`.                                                    |
+| `TDbActionInputFormMeta` | `{ type, name }` payload written by `@InputForm`.                                                   |
+| `TDbActionParamKind`     | `'id' \| 'ids'` written by `@DbActionID` / `@DbActionIDs`.                                          |
+| `TDbClassActionMeta`     | Class-level dict entry written by `@DbActions` and the level-pinned shortcuts.                      |
 
 ## Next Steps
 

@@ -33,6 +33,8 @@ import {
   perRow,
   // Errors
   ActionDisabledError,
+  // Typed metadata accessor (see § getAtscriptDbMate())
+  getAtscriptDbMate,
 } from "@atscript/moost-db";
 
 import type {
@@ -43,6 +45,12 @@ import type {
   TDbActionsEntry,
   DbActionOpts,
   TDbActionInputFormMeta,
+  TDbActionMeta,
+  TDbActionParamKind,
+  TDbClassActionMeta,
+  AtscriptDbMate,
+  AtscriptDbMeta,
+  AtscriptDbParamsMeta,
   ActionDisabledErrorBody,
 } from "@atscript/moost-db";
 ```
@@ -382,12 +390,12 @@ Marks a param as the action's `input` payload (`body.input`). `FormType` is a co
 
 Stamps two param mate keys:
 
-| Key                          | Value                                | Consumer                                                                         |
-| ---------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
-| `MOOST_DB_ACTION_INPUT_FORM` | `{ type: FormType, name: <string> }` | Discovery — emits `inputForm` on `/meta`; registers form for `/meta/form/:name`. |
-| `MOOST_ATSCRIPT_TYPE`        | `FormType`                           | Generic atscript-aware Moost pipe (validation hook).                             |
+| Key                             | Value                                | Consumer                                                                         |
+| ------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
+| `atscript_db_action_input_form` | `{ type: FormType, name: <string> }` | Discovery — emits `inputForm` on `/meta`; registers form for `/meta/form/:name`. |
+| `atscript_type`                 | `FormType`                           | Generic atscript-aware Moost pipe (validation hook).                             |
 
-**Validation is NOT performed by the decorator.** Install a Moost pipe that reads `MOOST_ATSCRIPT_TYPE` and runs `FormType.validator()` — globally via `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`. Without a pipe, `input` arrives as raw JSON. `ValidatorError` from such a pipe surfaces as HTTP 400 via the existing `validationErrorTransform()` interceptor.
+**Validation is NOT performed by the decorator.** Install a Moost pipe that reads `atscript_type` and runs `FormType.validator()` — globally via `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`. Without a pipe, `input` arrives as raw JSON. `ValidatorError` from such a pipe surfaces as HTTP 400 via the existing `validationErrorTransform()` interceptor.
 
 Form name on the wire is `FormType.name` (compiled `.as` classes have stable names). Reusing the same `FormType` across multiple actions on the same controller is allowed; clashing names with different type refs → discovery warns and drops the second action.
 
@@ -585,3 +593,43 @@ const form = await users.getActionForm("approve"); // TAtscriptAnnotatedType | n
 - Other non-2xx → `ClientError` (same shape as other endpoints).
 
 See [db-client.md](db-client.md) for the full client surface.
+
+## `getAtscriptDbMate()` — typed metadata accessor
+
+Public API for inspecting metadata written by the action decorators. Returns a `Mate` instance narrowed to every key `@atscript/moost-db` writes — no magic strings, no manual casts.
+
+```ts
+import { getAtscriptDbMate } from "@atscript/moost-db";
+
+const mate = getAtscriptDbMate();
+
+// Class- / method-level
+const meta = mate.read(ControllerCtor.prototype, "approve");
+meta?.atscript_db_action; // TDbActionMeta | undefined  — { name, opts }
+meta?.atscript_db_actions; // TDbClassActionMeta[] | undefined  — class-level dict entries
+meta?.handlers; // standard moost handlers[]
+meta?.label; // standard @Label
+
+// Param-level
+meta?.params?.[0]?.atscript_db_action_param; // 'id' | 'ids' | undefined
+meta?.params?.[0]?.atscript_db_action_row; // true | undefined
+meta?.params?.[0]?.atscript_db_action_rows; // true | undefined
+meta?.params?.[0]?.atscript_db_action_input_form; // TDbActionInputFormMeta | undefined
+meta?.params?.[0]?.atscript_type; // TAtscriptAnnotatedType | undefined
+```
+
+Re-exports the same singleton as `getMoostMate()` from `moost`, just with the workspace-wide `TMoostMetadata` / `TMoostParamsMetadata` augmentation that `@atscript/moost-db` declares. Prefer it over `getMoostMate()` when reading `atscript_db_*` keys — the typed shape removes the need to retype string literals or hand-cast.
+
+Companion type exports for typing your own helpers:
+
+| Export                   | Use for                                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `AtscriptDbMate`         | The fully-typed `Mate` shape (return type of `getAtscriptDbMate()`).                                |
+| `AtscriptDbMeta`         | Class- and method-level keys (`atscript_db_action`, `atscript_db_actions`, …).                      |
+| `AtscriptDbParamsMeta`   | Param-level keys (`atscript_db_action_param`, `atscript_db_action_input_form`, `atscript_type`, …). |
+| `TDbActionMeta`          | Method-level `{ name, opts }` payload written by `@DbAction`.                                       |
+| `TDbActionInputFormMeta` | Param-level `{ type, name }` payload written by `@InputForm`.                                       |
+| `TDbActionParamKind`     | `'id' \| 'ids'` written by `@DbActionID*`.                                                          |
+| `TDbClassActionMeta`     | Class-level dict entry written by `@DbActions` and the level-pinned shortcuts.                      |
+
+Typical use cases: writing a custom Moost pipe that consumes `atscript_type` for validation, building tooling that introspects the `actions[]` surface without going through `/meta`, or composing a downstream decorator that needs to read what the action decorators wrote.

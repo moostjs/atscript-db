@@ -6,6 +6,12 @@ export * from "./as-json-value-help.controller";
 export * from "./decorators";
 export * from "./validation-interceptor";
 export * from "./actions";
+export {
+  type AtscriptDbMate,
+  type AtscriptDbMeta,
+  type AtscriptDbParamsMeta,
+  getAtscriptDbMate,
+} from "./mate";
 
 export { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "./permissions/crud-controls";
 

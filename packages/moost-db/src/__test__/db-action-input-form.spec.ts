@@ -1,16 +1,11 @@
 import { describe, it, expect } from "vite-plus/test";
 import { current } from "@wooksjs/event-core";
 import { prepareTestHttpContext } from "@wooksjs/event-http";
-import { getMoostMate } from "moost";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { InputForm } from "../actions/db-action-input-form.decorator";
-import {
-  MOOST_ATSCRIPT_TYPE,
-  MOOST_DB_ACTION_INPUT_FORM,
-  type TDbActionInputFormMeta,
-} from "../actions/keys";
 import { scanParamLevel } from "../actions/param-level";
+import { getAtscriptDbMate } from "../mate";
 
 /**
  * Unit coverage for the `@InputForm()` parameter decorator. We don't need a
@@ -27,14 +22,11 @@ class AmountForm {
 }
 
 function readParamMate(target: object, methodName: string, paramIndex: number) {
-  const meta = getMoostMate().read(target, methodName) as
-    | { params?: Record<string, unknown>[] }
-    | undefined;
-  return meta?.params?.[paramIndex] ?? {};
+  return getAtscriptDbMate().read(target, methodName)?.params?.[paramIndex];
 }
 
 describe("@InputForm — param mate", () => {
-  it("stamps MOOST_DB_ACTION_INPUT_FORM with `{ type, name }`", () => {
+  it("stamps atscript_db_action_input_form with `{ type, name }`", () => {
     class Ctrl {
       handler(_input: CommentForm) {
         void _input;
@@ -46,14 +38,13 @@ describe("@InputForm — param mate", () => {
       0,
     );
 
-    const param = readParamMate(Ctrl.prototype, "handler", 0);
-    const meta = param[MOOST_DB_ACTION_INPUT_FORM] as TDbActionInputFormMeta;
+    const meta = readParamMate(Ctrl.prototype, "handler", 0)?.atscript_db_action_input_form;
     expect(meta).toBeDefined();
-    expect(meta.name).toBe("CommentForm");
-    expect(meta.type).toBe(CommentForm);
+    expect(meta?.name).toBe("CommentForm");
+    expect(meta?.type).toBe(CommentForm);
   });
 
-  it("also stamps the generic MOOST_ATSCRIPT_TYPE key for pipe consumers", () => {
+  it("also stamps the generic atscript_type key for pipe consumers", () => {
     class Ctrl {
       handler(_input: AmountForm) {
         void _input;
@@ -66,7 +57,7 @@ describe("@InputForm — param mate", () => {
     );
 
     const param = readParamMate(Ctrl.prototype, "handler", 0);
-    expect(param[MOOST_ATSCRIPT_TYPE]).toBe(AmountForm);
+    expect(param?.atscript_type).toBe(AmountForm);
   });
 });
 
@@ -83,10 +74,8 @@ describe("@InputForm — level inference", () => {
       0,
     );
 
-    const meta = getMoostMate().read(Ctrl.prototype, "handler") as {
-      params?: Record<string, unknown>[];
-    };
-    const scan = scanParamLevel(meta.params ?? []);
+    const meta = getAtscriptDbMate().read(Ctrl.prototype, "handler");
+    const scan = scanParamLevel(meta?.params ?? []);
     expect(scan.level).toBe("table");
     expect(scan.inputForm).toEqual({ type: CommentForm, name: "CommentForm" });
     expect(scan.hasRowParam).toBe(false);

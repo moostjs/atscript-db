@@ -1,11 +1,5 @@
-import {
-  MOOST_DB_ACTION_INPUT_FORM,
-  MOOST_DB_ACTION_PARAM,
-  MOOST_DB_ACTION_ROW,
-  MOOST_DB_ACTION_ROWS,
-  type TDbActionInputFormMeta,
-  type TDbActionParamKind,
-} from "./keys";
+import type { AtscriptDbParamsMeta } from "../mate";
+import type { TDbActionInputFormMeta } from "./keys";
 
 export interface ParamLevelScan {
   level: "row" | "rows" | "table";
@@ -18,7 +12,9 @@ export interface ParamLevelScan {
   hasDuplicateInputForm: boolean;
 }
 
-export function scanParamLevel(params: ReadonlyArray<Record<string, unknown>>): ParamLevelScan {
+type ScannableParam = AtscriptDbParamsMeta & { paramSource?: string };
+
+export function scanParamLevel(params: ReadonlyArray<ScannableParam>): ParamLevelScan {
   let single = false;
   let multi = false;
   let hasRowParam = false;
@@ -26,22 +22,20 @@ export function scanParamLevel(params: ReadonlyArray<Record<string, unknown>>): 
   let inputForm: TDbActionInputFormMeta | undefined;
   let hasDuplicateInputForm = false;
   for (const p of params) {
-    const kind = p[MOOST_DB_ACTION_PARAM] as TDbActionParamKind | undefined;
-    if (kind === "id") single = true;
-    else if (kind === "ids") multi = true;
-    if (p[MOOST_DB_ACTION_ROW]) {
+    if (p.atscript_db_action_param === "id") single = true;
+    else if (p.atscript_db_action_param === "ids") multi = true;
+    if (p.atscript_db_action_row) {
       single = true;
       hasRowParam = true;
     }
-    if (p[MOOST_DB_ACTION_ROWS]) {
+    if (p.atscript_db_action_rows) {
       multi = true;
       hasRowParam = true;
     }
     if (p.paramSource === "BODY") hasBody = true;
-    const form = p[MOOST_DB_ACTION_INPUT_FORM] as TDbActionInputFormMeta | undefined;
-    if (form) {
+    if (p.atscript_db_action_input_form) {
       if (inputForm) hasDuplicateInputForm = true;
-      else inputForm = form;
+      else inputForm = p.atscript_db_action_input_form;
     }
   }
   const level = single && multi ? "table" : single ? "row" : multi ? "rows" : "table";

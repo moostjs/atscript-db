@@ -7,7 +7,7 @@ import { bindController, runInActionCtx, setupActionMeta } from "./actions-test-
 /**
  * Direct coverage for the shared helper used by `id-cache.noTableError` and
  * `row-cache.readActionFieldSet`. The helper centralizes the
- * `useControllerContext → getMoostMate().read → meta[MOOST_DB_ACTION]` lookup
+ * `useControllerContext → getAtscriptDbMate().read → meta.atscript_db_action` lookup
  * with try/catch tolerance for direct-wook test contexts (where no
  * controller is bound).
  */

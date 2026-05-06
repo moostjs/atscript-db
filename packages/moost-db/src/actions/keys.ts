@@ -5,31 +5,6 @@ import type { DbActionOpts, TDbActionsEntry } from "./types";
 /** Log-message prefix for warnings emitted from the actions subsystem. */
 export const WARN_PREFIX = "[moost-db actions]";
 
-/** Method-level metadata key — written by `@DbAction(name, opts)`. */
-export const MOOST_DB_ACTION = "atscript_db_action";
-/** Class-level metadata key — written by `@DbActions` and the level-pinned shortcuts. Stored as an array; decorators accumulate. */
-export const MOOST_DB_ACTIONS = "atscript_db_actions";
-/** Param-level metadata key — written by `@DbActionID()` / `@DbActionIDs()`. Drives level inference. */
-export const MOOST_DB_ACTION_PARAM = "atscript_db_action_param";
-/** Param-level marker keys — written by `@DbActionRow()` / `@DbActionRows()`. */
-export const MOOST_DB_ACTION_ROW = "atscript_db_action_row";
-export const MOOST_DB_ACTION_ROWS = "atscript_db_action_rows";
-/**
- * Param-level metadata key — written by `@InputForm(FormType)`. Carries the
- * compiled `.as` class plus its `.name` so {@link discoverActions} can both
- * emit `inputForm` on `/meta` and register the type in the controller's form
- * registry for `GET /meta/form/:name`.
- */
-export const MOOST_DB_ACTION_INPUT_FORM = "atscript_db_action_input_form";
-/**
- * Generic param-level metadata key — written by `@InputForm(FormType)`
- * alongside {@link MOOST_DB_ACTION_INPUT_FORM}. Holds just the type ref so a
- * generic atscript-aware Moost pipe (installed globally via
- * `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`) can validate the
- * resolved value without knowing about the moost-db-specific key.
- */
-export const MOOST_ATSCRIPT_TYPE = "atscript_type";
-
 type TDbActionRowMarker = true;
 
 /** Stamped by `@InputForm(FormType)` — the compiled `.as` class + the wire name (`FormType.name`). */
@@ -55,15 +30,15 @@ export type TDbActionParamKind = "id" | "ids";
 
 /**
  * Shared method-decorator update used by `@DbAction` and `@DbActionDefault`:
- * read the existing `MOOST_DB_ACTION` slot, merge the patch (later-applied
+ * read the existing `atscript_db_action` slot, merge the patch (later-applied
  * fields win), and write it back. `name` is empty until `@DbAction` provides
  * one — `discoverActions` warns and drops actions with no name.
  */
 export function mergeActionMeta(
-  current: { [MOOST_DB_ACTION]?: TDbActionMeta },
+  current: { atscript_db_action?: TDbActionMeta },
   patch: { name?: string; opts: DbActionOpts },
 ): TDbActionMeta {
-  const existing = current[MOOST_DB_ACTION];
+  const existing = current.atscript_db_action;
   return {
     name: patch.name ?? existing?.name ?? "",
     opts: { ...existing?.opts, ...patch.opts },
@@ -72,17 +47,17 @@ export function mergeActionMeta(
 
 declare module "moost" {
   interface TMoostMetadata {
-    [MOOST_DB_ACTION]?: TDbActionMeta;
-    [MOOST_DB_ACTIONS]?: TDbClassActionMeta[];
-    [MOOST_DB_ACTION_PARAM]?: TDbActionParamKind;
-    [MOOST_DB_ACTION_ROW]?: TDbActionRowMarker;
-    [MOOST_DB_ACTION_ROWS]?: TDbActionRowMarker;
+    atscript_db_action?: TDbActionMeta;
+    atscript_db_actions?: TDbClassActionMeta[];
+    atscript_db_action_param?: TDbActionParamKind;
+    atscript_db_action_row?: TDbActionRowMarker;
+    atscript_db_action_rows?: TDbActionRowMarker;
   }
   interface TMoostParamsMetadata {
-    [MOOST_DB_ACTION_PARAM]?: TDbActionParamKind;
-    [MOOST_DB_ACTION_ROW]?: TDbActionRowMarker;
-    [MOOST_DB_ACTION_ROWS]?: TDbActionRowMarker;
-    [MOOST_DB_ACTION_INPUT_FORM]?: TDbActionInputFormMeta;
-    [MOOST_ATSCRIPT_TYPE]?: TAtscriptAnnotatedType;
+    atscript_db_action_param?: TDbActionParamKind;
+    atscript_db_action_row?: TDbActionRowMarker;
+    atscript_db_action_rows?: TDbActionRowMarker;
+    atscript_db_action_input_form?: TDbActionInputFormMeta;
+    atscript_type?: TAtscriptAnnotatedType;
   }
 }

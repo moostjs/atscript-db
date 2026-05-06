@@ -1,7 +1,8 @@
 import { type EventContext } from "@wooksjs/event-core";
-import { getMoostMate, useControllerContext } from "moost";
+import { useControllerContext } from "moost";
 
-import { MOOST_DB_ACTION, type TDbActionMeta } from "./keys";
+import { getAtscriptDbMate } from "../mate";
+import type { TDbActionMeta } from "./keys";
 
 /** Read the current action's `TDbActionMeta` from the wook context. Returns undefined outside a controller (e.g. direct-wook test paths). */
 export function readCurrentActionMeta(ctx: EventContext): TDbActionMeta | undefined {
@@ -15,8 +16,6 @@ export function readCurrentActionMeta(ctx: EventContext): TDbActionMeta | undefi
     return undefined;
   }
   if (!ctrl || !methodName) return undefined;
-  const meta = getMoostMate().read(ctrl.constructor, methodName) as
-    | { [MOOST_DB_ACTION]?: TDbActionMeta }
-    | undefined;
-  return meta?.[MOOST_DB_ACTION];
+  const meta = getAtscriptDbMate().read(ctrl.constructor, methodName);
+  return meta?.atscript_db_action;
 }

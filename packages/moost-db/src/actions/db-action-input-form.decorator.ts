@@ -3,11 +3,7 @@ import { current } from "@wooksjs/event-core";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { dbActionInputSlot } from "./input-form-cache";
-import {
-  MOOST_ATSCRIPT_TYPE,
-  MOOST_DB_ACTION_INPUT_FORM,
-  type TDbActionInputFormMeta,
-} from "./keys";
+import { type TDbActionInputFormMeta } from "./keys";
 
 /**
  * Parameter decorator that injects the `input` field of the action request
@@ -15,19 +11,19 @@ import {
  *
  * Pairs the resolved value with two pieces of param-level metadata:
  *
- * 1. {@link MOOST_DB_ACTION_INPUT_FORM} — the compiled `.as` class plus its
- *    name, consumed by {@link discoverActions} to:
+ * 1. `atscript_db_action_input_form` — the compiled `.as` class plus its
+ *    name, consumed by `discoverActions` to:
  *    - emit `inputForm: FormType.name` on the action's `/meta` entry, and
  *    - register the type in the controller's form registry so
  *      `GET /meta/form/:name` can serve the serialized schema.
- * 2. {@link MOOST_ATSCRIPT_TYPE} — just the type ref, providing a generic
- *    hook any atscript-aware Moost pipe can read without knowing about the
+ * 2. `atscript_type` — just the type ref, providing a generic hook any
+ *    atscript-aware Moost pipe can read without knowing about the
  *    moost-db-specific key.
  *
  * Validation is intentionally *not* performed here. To validate `input`
  * against `FormType`, install an atscript validator pipe globally
  * (`app.applyGlobalPipes(...)`) or scope it via `@Pipe(...)`. The pipe reads
- * `MOOST_ATSCRIPT_TYPE` off the param and runs `FormType.validator()`.
+ * `atscript_type` off the param and runs `FormType.validator()`.
  *
  * Only one `@InputForm()` per action is supported. To collect multiple
  * structured inputs, compose them into a single `.as` interface and pass an
@@ -42,8 +38,8 @@ export function InputForm<T extends TAtscriptAnnotatedType & { readonly name: st
   const mate = getMoostMate();
   const meta: TDbActionInputFormMeta = { type: formType, name: formType.name };
   return ApplyDecorators(
-    mate.decorate(MOOST_DB_ACTION_INPUT_FORM, meta),
-    mate.decorate(MOOST_ATSCRIPT_TYPE, formType),
+    mate.decorate("atscript_db_action_input_form", meta),
+    mate.decorate("atscript_type", formType),
     Resolve(async () => current().get(dbActionInputSlot), "dbActionInputForm"),
   );
 }

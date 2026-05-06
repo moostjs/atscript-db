@@ -1,17 +1,16 @@
-import { ApplyDecorators, Resolve, getMoostMate } from "moost";
+import { ApplyDecorators, Resolve } from "moost";
 import { current } from "@wooksjs/event-core";
 
+import { getAtscriptDbMate } from "../mate";
 import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
-import { MOOST_DB_ACTION_ROW, MOOST_DB_ACTION_ROWS } from "./keys";
 
 function createRowParamDecorator(
-  metaKey: typeof MOOST_DB_ACTION_ROW | typeof MOOST_DB_ACTION_ROWS,
+  metaKey: "atscript_db_action_row" | "atscript_db_action_rows",
   slot: typeof dbActionRowSlot | typeof dbActionRowsSlot,
   resolverName: string,
 ): ParameterDecorator {
-  const mate = getMoostMate();
   return ApplyDecorators(
-    mate.decorate(metaKey, true),
+    getAtscriptDbMate().decorate(metaKey, true),
     Resolve(async () => current().get(slot), resolverName),
   );
 }
@@ -28,7 +27,7 @@ function createRowParamDecorator(
  * request-body row is not retrievable.
  */
 export function DbActionRow(): ParameterDecorator {
-  return createRowParamDecorator(MOOST_DB_ACTION_ROW, dbActionRowSlot, "dbActionRow");
+  return createRowParamDecorator("atscript_db_action_row", dbActionRowSlot, "dbActionRow");
 }
 
 /**
@@ -40,5 +39,5 @@ export function DbActionRow(): ParameterDecorator {
  * gate's surviving rows.
  */
 export function DbActionRows(): ParameterDecorator {
-  return createRowParamDecorator(MOOST_DB_ACTION_ROWS, dbActionRowsSlot, "dbActionRows");
+  return createRowParamDecorator("atscript_db_action_rows", dbActionRowsSlot, "dbActionRows");
 }

@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vite-plus/test";
-import { Label, getMoostMate } from "moost";
+import { Label } from "moost";
 import { Post } from "@moostjs/event-http";
 
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionID } from "../actions/db-action-id.decorator";
-import { MOOST_DB_ACTION, MOOST_DB_ACTION_PARAM } from "../actions/keys";
+import { getAtscriptDbMate } from "../mate";
 
 /**
  * `@DbAction` writes to its own metadata key — composing it with the
@@ -23,7 +23,7 @@ describe("@DbAction composition with Moost decorators", () => {
         return id;
       }
     }
-    const meta = getMoostMate().read(Ctrl.prototype, "block");
+    const meta = getAtscriptDbMate().read(Ctrl.prototype, "block");
     expect(meta).toBeDefined();
     if (!meta) return;
     // @Post writes a handler entry into `handlers[]`.
@@ -35,13 +35,11 @@ describe("@DbAction composition with Moost decorators", () => {
     // @Label survives.
     expect(meta.label).toBe("Block User");
     // @DbAction wrote the action entry.
-    expect((meta as unknown as Record<string, unknown>)[MOOST_DB_ACTION]).toMatchObject({
+    expect(meta.atscript_db_action).toMatchObject({
       name: "block",
       opts: { icon: "i-as-block" },
     });
     // @DbActionID marked the param.
-    expect((meta.params?.[0] as unknown as Record<string, unknown>)?.[MOOST_DB_ACTION_PARAM]).toBe(
-      "id",
-    );
+    expect(meta.params?.[0]?.atscript_db_action_param).toBe("id");
   });
 });

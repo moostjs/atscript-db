@@ -1,6 +1,5 @@
-import { getMoostMate } from "moost";
-
-import { MOOST_DB_ACTIONS, type TDbClassActionMeta } from "./keys";
+import { getAtscriptDbMate } from "../mate";
+import type { TDbClassActionMeta } from "./keys";
 import type { TDbActionsEntry, ValidatedDict, ValidatedUnpinnedDict } from "./types";
 import type { TDbActionLevel } from "@atscript/db";
 
@@ -54,13 +53,8 @@ function classLevelActions(
     const merged = (forcedLevel ? { ...entry, level: forcedLevel } : entry) as TDbActionsEntry;
     entries.push({ name, entry: merged });
   }
-  const mate = getMoostMate();
-  return mate.decorate((current) => {
-    const meta = current as { [MOOST_DB_ACTIONS]?: TDbClassActionMeta[] };
-    const existing = meta[MOOST_DB_ACTIONS] ?? [];
-    return {
-      ...current,
-      [MOOST_DB_ACTIONS]: [...existing, ...entries],
-    } as typeof current;
-  }) as ClassDecorator;
+  return getAtscriptDbMate().decorate((current) => ({
+    ...current,
+    atscript_db_actions: [...(current.atscript_db_actions ?? []), ...entries],
+  })) as ClassDecorator;
 }
