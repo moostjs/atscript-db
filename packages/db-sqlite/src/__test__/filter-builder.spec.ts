@@ -121,44 +121,106 @@ describe("buildWhere", () => {
 
   it("should convert $regex prefix to LIKE", () => {
     const { sql, params } = buildWhere({ name: { $regex: "^John" } });
-    expect(sql).toBe('"name" LIKE ?');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
     expect(params).toEqual(["John%"]);
   });
 
   it("should convert $regex suffix to LIKE", () => {
     const { sql, params } = buildWhere({ name: { $regex: "son$" } });
-    expect(sql).toBe('"name" LIKE ?');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
     expect(params).toEqual(["%son"]);
   });
 
   it("should convert $regex exact to LIKE", () => {
     const { sql, params } = buildWhere({ name: { $regex: "^John$" } });
-    expect(sql).toBe('"name" LIKE ?');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
     expect(params).toEqual(["John"]);
   });
 
   it("should convert $regex contains to LIKE", () => {
     const { sql, params } = buildWhere({ name: { $regex: "oh" } });
-    expect(sql).toBe('"name" LIKE ?');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
     expect(params).toEqual(["%oh%"]);
   });
 
   it("should parse /pattern/flags format and extract raw pattern", () => {
     const { sql, params } = buildWhere({ name: { $regex: "/^Ali/" } });
-    expect(sql).toBe('"name" LIKE ?');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
     expect(params).toEqual(["Ali%"]);
   });
 
   it("should add COLLATE NOCASE for /pattern/i flag", () => {
     const { sql, params } = buildWhere({ name: { $regex: "/^Ali/i" } });
-    expect(sql).toBe('"name" LIKE ? COLLATE NOCASE');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\' COLLATE NOCASE`);
     expect(params).toEqual(["Ali%"]);
   });
 
   it("should handle RegExp objects with flags", () => {
     const { sql, params } = buildWhere({ name: { $regex: /^Ali/i } });
-    expect(sql).toBe('"name" LIKE ? COLLATE NOCASE');
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\' COLLATE NOCASE`);
     expect(params).toEqual(["Ali%"]);
+  });
+
+  it("should preserve escaped dot as a literal (\\. → .)", () => {
+    const { sql, params } = buildWhere({ email: { $regex: "/@demo\\.test$/i" } });
+    expect(sql).toBe(`"email" LIKE ? ESCAPE '\\' COLLATE NOCASE`);
+    expect(params).toEqual(["%@demo.test"]);
+  });
+
+  it("should escape literal underscore from regex source as \\_", () => {
+    // `_` is not a regex metachar, so escapeRegex doesn't add a backslash.
+    // The translator must still escape it for SQL LIKE so it doesn't act as
+    // a wildcard.
+    const { sql, params } = buildWhere({ name: { $regex: "^a_b$" } });
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
+    expect(params).toEqual([`a\\_b`]);
+  });
+
+  it("should escape literal percent from regex source as \\%", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "^50%$" } });
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
+    expect(params).toEqual([`50\\%`]);
+  });
+
+  it("should preserve escaped backslash (\\\\ → \\\\ in LIKE pattern)", () => {
+    // Regex source `^a\\b$` matches literal "a\b". The SQL LIKE pattern with
+    // ESCAPE '\' encodes a literal backslash as `\\`.
+    const { sql, params } = buildWhere({ name: { $regex: "^a\\\\b$" } });
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
+    expect(params).toEqual([`a\\\\b`]);
+  });
+
+  it("should translate .* to %", () => {
+    const { sql, params } = buildWhere({ name: { $regex: "^J.*n$" } });
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
+    expect(params).toEqual(["J%n"]);
+  });
+
+  it("should treat trailing $ as anchor only when unescaped", () => {
+    // `\$` is a literal dollar at end of string.
+    const { sql, params } = buildWhere({ name: { $regex: "price\\$" } });
+    expect(sql).toBe(`"name" LIKE ? ESCAPE '\\'`);
+    expect(params).toEqual(["%price$%"]);
+  });
+
+  it("should throw on unsupported escape \\d", () => {
+    expect(() => buildWhere({ name: { $regex: "^\\d+$" } })).toThrow(/unsupported regex escape/i);
+  });
+
+  it("should throw on character class", () => {
+    expect(() => buildWhere({ name: { $regex: "^[abc]$" } })).toThrow(/unsupported regex feature/i);
+  });
+
+  it("should throw on alternation", () => {
+    expect(() => buildWhere({ name: { $regex: "^(a|b)$" } })).toThrow(/unsupported regex feature/i);
+  });
+
+  it("should throw on non-.* quantifier", () => {
+    expect(() => buildWhere({ name: { $regex: "^a+$" } })).toThrow(/unsupported regex feature/i);
+  });
+
+  it("should throw on trailing backslash", () => {
+    expect(() => buildWhere({ name: { $regex: "abc\\" } })).toThrow(/trailing backslash/i);
   });
 
   // ── Logical operators ──────────────────────────────────────────────────

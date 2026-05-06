@@ -31,38 +31,104 @@ export function esc(name: string): string {
 // ── SQLite dialect ───────────────────────────────────────────────────────────
 
 /**
- * Basic regex-to-LIKE conversion.
- * - `^abc` → `abc%`
- * - `abc$` → `%abc`
- * - `^abc$` → `abc`
- * - `abc` → `%abc%`
+ * Regex characters whose backslash form means "literal char". The walker emits
+ * the unescaped char (with re-escaping for SQL LIKE wildcards). Anything outside
+ * this set — `\d`, `\w`, `\s`, `\b`, etc. — is rejected as an unsupported feature.
+ */
+const REGEX_LITERAL_ESCAPES = new Set(".^$()[]{}|/+*?-\\");
+
+/**
+ * Unescaped regex metacharacters with no LIKE equivalent. Subset of
+ * {@link REGEX_LITERAL_ESCAPES}: the same chars are rejected unescaped here
+ * but accepted as literals when preceded by `\`.
+ */
+const REGEX_UNSUPPORTED = new Set("()[]{}|*+?");
+
+/**
+ * Re-escape a literal char for SQL LIKE under `ESCAPE '\'`. `%`, `_`, and `\`
+ * are LIKE metachars and need a backslash prefix; everything else passes through.
+ */
+function likeEscape(ch: string): string {
+  return ch === "%" || ch === "_" || ch === "\\" ? `\\${ch}` : ch;
+}
+
+/**
+ * Translates a regex pattern into a SQLite LIKE pattern. The dialect emits the
+ * resulting SQL with `ESCAPE '\'`, so `\%` and `\_` in the output denote literal
+ * `%` / `_`, and `\\` denotes a literal backslash.
+ *
+ * Supported subset:
+ * - anchors `^` and `$` (must appear at the very start / end of the pattern)
+ * - `.` (any single char) and `.*` (any run of chars)
+ * - escaped literals: `\.`, `\^`, `\$`, `\(`, `\)`, `\[`, `\]`, `\{`, `\}`,
+ *   `\|`, `\/`, `\+`, `\*`, `\?`, `\-`, `\\`
+ *
+ * Throws on character classes, alternation, groups, quantifiers other than `.*`,
+ * and shorthand classes (`\d`, `\w`, `\s`, `\b`, …) — these would silently match
+ * the wrong rows under a naive translation, and a Node-side fallback would break
+ * pagination, ordering, and aggregation pushdown.
+ *
+ * `^` and `$` outside the start/end of the pattern are treated as literal chars
+ * (multiline anchors aren't supported).
  */
 function regexToLike(pattern: string): string {
   const hasStart = pattern.startsWith("^");
-  const hasEnd = pattern.endsWith("$");
-  let core = pattern;
-  if (hasStart) {
-    core = core.slice(1);
-  }
-  if (hasEnd) {
-    core = core.slice(0, -1);
+  const hasEnd = endsWithUnescapedDollar(pattern);
+  const start = hasStart ? 1 : 0;
+  const end = hasEnd ? pattern.length - 1 : pattern.length;
+
+  let out = "";
+  for (let i = start; i < end; i++) {
+    const c = pattern[i]!;
+
+    if (c === "\\") {
+      const next = pattern[i + 1];
+      if (next === undefined) {
+        throw new Error(`Trailing backslash in regex pattern: ${pattern}`);
+      }
+      if (!REGEX_LITERAL_ESCAPES.has(next)) {
+        throw new Error(
+          `Unsupported regex escape '\\${next}' in pattern '${pattern}' — only literal-meaning escapes are supported by the SQLite LIKE translation`,
+        );
+      }
+      out += likeEscape(next);
+      i++;
+      continue;
+    }
+
+    if (c === ".") {
+      if (pattern[i + 1] === "*") {
+        out += "%";
+        i++;
+      } else {
+        out += "_";
+      }
+      continue;
+    }
+
+    if (REGEX_UNSUPPORTED.has(c)) {
+      throw new Error(
+        `Unsupported regex feature '${c}' in pattern '${pattern}' — only anchors, '.', '.*', and escaped literals are supported by the SQLite LIKE translation`,
+      );
+    }
+
+    out += likeEscape(c);
   }
 
-  // Escape SQL LIKE special chars in the core
-  core = core.replace(/%/g, "\\%").replace(/_/g, "\\_");
-  // Convert regex . to _ and .* to %
-  core = core.replace(/\.\*/g, "%").replace(/\./g, "_");
+  if (hasStart && hasEnd) return out;
+  if (hasStart) return `${out}%`;
+  if (hasEnd) return `%${out}`;
+  return `%${out}%`;
+}
 
-  if (hasStart && hasEnd) {
-    return core;
-  }
-  if (hasStart) {
-    return `${core}%`;
-  }
-  if (hasEnd) {
-    return `%${core}`;
-  }
-  return `%${core}%`;
+/**
+ * `$` at the end of the pattern is the end-anchor only if it is not preceded by
+ * an odd number of backslashes (i.e. not escaped). `\$` and `\\\$` are literal,
+ * `$` and `\\$` are anchors.
+ */
+function endsWithUnescapedDollar(s: string): boolean {
+  const m = s.match(/(\\*)\$$/);
+  return m !== null && m[1]!.length % 2 === 0;
 }
 
 export const sqliteDialect: SqlDialect = {
@@ -83,8 +149,8 @@ export const sqliteDialect: SqlDialect = {
   regex(quotedCol: string, value: unknown): TSqlFragment {
     const { pattern, flags } = parseRegexString(value);
     const likePattern = regexToLike(pattern);
-    const sql = flags.includes("i") ? `${quotedCol} LIKE ? COLLATE NOCASE` : `${quotedCol} LIKE ?`;
-    return { sql, params: [likePattern] };
+    const collate = flags.includes("i") ? " COLLATE NOCASE" : "";
+    return { sql: `${quotedCol} LIKE ? ESCAPE '\\'${collate}`, params: [likePattern] };
   },
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };

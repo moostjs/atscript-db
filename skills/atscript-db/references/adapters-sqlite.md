@@ -46,6 +46,26 @@ Each `DbSpace` instance owns its adapters; create a new space per test to guaran
 - `search('term', query, indexName)` calls `SELECT rowid FROM <fts> WHERE <fts> MATCH 'term' ORDER BY rank`; the outer query applies `filter` / `$sort` / pagination.
 - `isSearchable()` → `true` when any `@db.index.fulltext` is declared.
 
+## `$regex` translation
+
+SQLite has no native regex operator. The dialect translates a restricted regex subset to `LIKE … ESCAPE '\'` and **throws** on anything outside that subset (silent fallbacks would corrupt pagination / sort / aggregation pushdown).
+
+Supported:
+
+- anchors `^` (start) and `$` (end) — only at the very ends of the pattern
+- `.` (any single char) and `.*` (any run)
+- escaped literals: `\.`, `\^`, `\$`, `\(`, `\)`, `\[`, `\]`, `\{`, `\}`, `\|`, `\/`, `\+`, `\*`, `\?`, `\-`, `\\`
+- the `i` flag → `COLLATE NOCASE` (ASCII-only case-insensitivity)
+
+Throws (`Unsupported regex …`):
+
+- shorthand classes: `\d`, `\D`, `\w`, `\W`, `\s`, `\S`, `\b`, `\B`, `\n`, `\t`, …
+- character classes: `[abc]`, `[^a-z]`
+- alternation / groups: `a|b`, `(abc)`, `(?:abc)`, lookarounds
+- quantifiers other than `.*`: `*`, `+`, `?`, `{n,m}` on anything but `.`
+
+Callers building regex from user input should pass it through `escapeRegex(literal)` before wrapping with anchors / `.*`. Literal `%` and `_` round-trip safely — the translator escapes them for `LIKE`.
+
 ## Pragmas / defaults
 
 - `PRAGMA foreign_keys = ON` — always set so `@db.rel.onDelete` works.

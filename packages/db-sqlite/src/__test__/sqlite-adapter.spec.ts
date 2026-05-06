@@ -267,6 +267,48 @@ describe("SqliteAdapter + AtscriptDbTable", () => {
     });
   });
 
+  describe("findMany with $regex (LIKE end-to-end)", () => {
+    beforeEach(async () => {
+      await table.ensureTable();
+      await table.insertMany([
+        { id: 1, email: "admin@demo.test", name: "admin", createdAt: 1000, status: "active" },
+        { id: 2, email: "alice@demo.test", name: "alice", createdAt: 2000, status: "active" },
+        // `xdemoXtest` would falsely match the buggy LIKE pattern (where `.`
+        // becomes `_` without ESCAPE), so it pins the regression.
+        { id: 3, email: "boguXdemoXtest", name: "bogus", createdAt: 3000, status: "active" },
+      ] as any[]);
+    });
+
+    it("should match by escaped dot (\\. as a literal)", async () => {
+      const results = await table.findMany({
+        filter: { email: { $regex: "/@demo\\.test$/i" } },
+        controls: {},
+      });
+      const ids = (results as Array<{ id: number }>).map((r) => r.id).toSorted((a, b) => a - b);
+      expect(ids).toEqual([1, 2]);
+    });
+
+    it("should not match other characters where the regex had \\.", async () => {
+      // The fixture row `boguXdemoXtest` previously matched because `\.` was
+      // mistranslated to LIKE `_` (single-char wildcard).
+      const results = await table.findMany({
+        filter: { email: { $regex: "/demo\\.test/" } },
+        controls: {},
+      });
+      const ids = (results as Array<{ id: number }>).map((r) => r.id).toSorted((a, b) => a - b);
+      expect(ids).toEqual([1, 2]);
+    });
+
+    it("should treat `.` as a single-char wildcard (any char)", async () => {
+      const results = await table.findMany({
+        filter: { email: { $regex: "/demo.test/" } },
+        controls: {},
+      });
+      // `.` matches any one char, so all three rows match.
+      expect((results as unknown[]).length).toBe(3);
+    });
+  });
+
   describe("count", () => {
     beforeEach(async () => {
       await table.ensureTable();
