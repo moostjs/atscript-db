@@ -79,12 +79,16 @@ declare global {
     "db.search.vector": { dimensions: number, similarity?: string, indexName?: string }
     "db.search.vector.threshold": number
     "db.search.filter": (string)[]
+    "db.amount.currency": string
+    "db.amount.currency.ref": string
+    "db.unit": string
+    "db.unit.ref": string
     "db.mongo.collection": boolean
     "db.mongo.capped": { size: number, max?: number }
     "db.mongo.search.dynamic": { analyzer?: string, fuzzy?: number }
     "db.mongo.search.static": ({ analyzer?: string, fuzzy?: number, indexName?: string })[]
     "db.mongo.search.text": ({ analyzer?: string, indexName?: string })[]
   }
-  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector" | "mongo" | "objectId"
+  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector" | "currencyCode" | "mongo" | "objectId"
 }
 // prettier-ignore-end

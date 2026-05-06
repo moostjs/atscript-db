@@ -277,6 +277,35 @@ export abstract class BaseDbAdapter {
     return false;
   }
 
+  // ── Per-field capability (overridable) ────────────────────────────────────
+
+  /**
+   * Whether this adapter can apply equality/range filters on a given field.
+   * Default: scalar columns yes, JSON-stored columns (arrays, `@db.json`
+   * objects) no — most SQL engines cannot filter into a raw JSON value.
+   *
+   * Adapters that natively understand JSON storage (e.g. MongoDB filters arrays
+   * with implicit `$in` and dot-paths into embedded documents) override to
+   * return `true` for `storage === 'json'`.
+   *
+   * Used by `AsDbReadableController.buildMetaResponse()` to gate the
+   * `filterable` flag exposed to UIs — the adapter's answer is a hard gate
+   * even when the field carries `@db.column.filterable`.
+   */
+  canFilterField(fd: TDbFieldMeta): boolean {
+    return fd.storage !== "json";
+  }
+
+  /**
+   * Whether this adapter can sort by a given field.
+   * Default: scalar columns yes, JSON-stored columns no. Mongo's array sort
+   * (min/max element) is a footgun for generic UI sort headers, so the default
+   * stays conservative even for adapters that technically support it.
+   */
+  canSortField(fd: TDbFieldMeta): boolean {
+    return fd.storage !== "json";
+  }
+
   // ── Relation loading (overridable) ────────────────────────────────────────
 
   /**

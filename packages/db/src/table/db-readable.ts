@@ -619,6 +619,16 @@ export class AtscriptDbReadable<
     return this.adapter.isSearchable();
   }
 
+  /** Whether the adapter can filter on a given field (proxies adapter capability). */
+  public canFilterField(fd: TDbFieldMeta): boolean {
+    return this.adapter.canFilterField(fd);
+  }
+
+  /** Whether the adapter can sort by a given field (proxies adapter capability). */
+  public canSortField(fd: TDbFieldMeta): boolean {
+    return this.adapter.canSortField(fd);
+  }
+
   /** Returns available search indexes from the adapter. */
   public getSearchIndexes(): TSearchIndexInfo[] {
     return this.adapter.getSearchIndexes();

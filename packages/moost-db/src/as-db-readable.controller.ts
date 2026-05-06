@@ -756,9 +756,13 @@ export class AsDbReadableController<
       const annotations = fd.type?.metadata;
       const annotatedFilterable = annotations?.has("db.column.filterable") ?? false;
       const annotatedSortable = annotations?.has("db.column.sortable") ?? false;
+      // Adapter capability is a hard gate — JSON-stored fields on SQL adapters
+      // can't be filtered/sorted no matter what the user annotates.
+      const adapterCanFilter = this.readable.canFilterField(fd);
+      const adapterCanSort = this.readable.canSortField(fd);
       fields[fd.path] = {
-        sortable: sortableMode ? annotatedSortable : !!fd.isIndexed,
-        filterable: filterableMode ? annotatedFilterable : true,
+        sortable: adapterCanSort && (sortableMode ? annotatedSortable : !!fd.isIndexed),
+        filterable: adapterCanFilter && (filterableMode ? annotatedFilterable : true),
       };
     }
 

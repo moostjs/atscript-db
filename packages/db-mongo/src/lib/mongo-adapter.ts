@@ -24,6 +24,7 @@ import {
   type TExistingTableOption,
   type TMetadataOverrides,
   type TableMetadata,
+  type TDbFieldMeta,
   type TFieldOps,
   computeInsights,
 } from "@atscript/db";
@@ -288,6 +289,17 @@ export class MongoAdapter extends BaseDbAdapter {
 
   override getValidatorPlugins(): ReturnType<BaseDbAdapter["getValidatorPlugins"]> {
     return [validateMongoIdPlugin];
+  }
+
+  /**
+   * Mongo can filter on JSON-stored fields natively — arrays via implicit
+   * `$in` and embedded documents via dot-paths — so JSON storage is not a
+   * filterability blocker the way it is for SQL adapters.
+   * `canSortField` keeps the conservative default (no sort on JSON storage):
+   * sort-by-min/max-element on arrays is a footgun for generic UI sort headers.
+   */
+  override canFilterField(_fd: TDbFieldMeta): boolean {
+    return true;
   }
 
   // Uses default 'db.__topLevelArray' tag from base adapter

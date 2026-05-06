@@ -79,6 +79,10 @@ declare global {
     "db.search.vector": { dimensions: number, similarity?: string, indexName?: string }
     "db.search.vector.threshold": number
     "db.search.filter": (string)[]
+    "db.amount.currency": string
+    "db.amount.currency.ref": string
+    "db.unit": string
+    "db.unit.ref": string
     "db.mysql.unsigned": boolean
     "db.mysql.type": string
     "db.mysql.onUpdate": string
@@ -86,6 +90,6 @@ declare global {
     "db.mysql.charset": string
     "db.mysql.collate": string
   }
-  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector"
+  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector" | "currencyCode"
 }
 // prettier-ignore-end

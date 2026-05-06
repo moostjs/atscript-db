@@ -44,6 +44,8 @@ function makeMockTable(rows: Record<string, unknown>[]): ReturnType<typeof Objec
     isView: false,
     isSearchable: vi.fn().mockReturnValue(false),
     isVectorSearchable: vi.fn().mockReturnValue(false),
+    canFilterField: vi.fn().mockReturnValue(true),
+    canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue({ validate: vi.fn().mockReturnValue(true), errors: [] }),
     findMany: vi.fn().mockResolvedValue(rows),

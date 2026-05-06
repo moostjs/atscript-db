@@ -64,6 +64,8 @@ function createMockTable(overrides: Record<string, any> = {}) {
     isView: false,
     isSearchable: vi.fn().mockReturnValue(false),
     isVectorSearchable: vi.fn().mockReturnValue(false),
+    canFilterField: vi.fn().mockReturnValue(true),
+    canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue(mockValidator),
     findMany: vi.fn().mockResolvedValue([{ id: "1", name: "Alice" }]),
