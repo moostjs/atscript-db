@@ -86,16 +86,18 @@ this._table.fieldDescriptors; // pre-built TDbFieldMeta[]
 
 ## Overridable flags
 
-| Method / property                  | Default | Override when…                                                                      |
-| ---------------------------------- | ------- | ----------------------------------------------------------------------------------- |
-| `supportsNativePatch()`            | `false` | You can translate patches directly (e.g. Mongo `$set` pipeline).                    |
-| `nativePatch(filter, patch, ops?)` | throws  | Implement when `supportsNativePatch()` returns `true`.                              |
-| `supportsNestedObjects()`          | `false` | Document stores — the generic layer then skips flattening.                          |
-| `supportsNativeValueDefaults()`    | `false` | SQL engines with `DEFAULT` clauses. Set `true` to let the DB apply static defaults. |
-| `nativeDefaultFns()`               | `{}`    | Set of function defaults the DB handles (`'now'`, `'uuid'`, `'increment'`).         |
-| `supportsNativeForeignKeys()`      | `false` | DB enforces FKs. When `false`, the generic layer runs cascade/setNull.              |
-| `supportsNativeRelations()`        | `false` | Implement `loadRelations()` for JOIN/`$lookup`-based loading.                       |
-| `supportsColumnModify`             | `false` | Engine supports `ALTER COLUMN` type changes in place (MySQL, PG).                   |
+| Method / property                  | Default                 | Override when…                                                                                                        |
+| ---------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `supportsNativePatch()`            | `false`                 | You can translate patches directly (e.g. Mongo `$set` pipeline).                                                      |
+| `nativePatch(filter, patch, ops?)` | throws                  | Implement when `supportsNativePatch()` returns `true`.                                                                |
+| `supportsNestedObjects()`          | `false`                 | Document stores — the generic layer then skips flattening.                                                            |
+| `supportsNativeValueDefaults()`    | `false`                 | SQL engines with `DEFAULT` clauses. Set `true` to let the DB apply static defaults.                                   |
+| `nativeDefaultFns()`               | `{}`                    | Set of function defaults the DB handles (`'now'`, `'uuid'`, `'increment'`).                                           |
+| `supportsNativeForeignKeys()`      | `false`                 | DB enforces FKs. When `false`, the generic layer runs cascade/setNull.                                                |
+| `supportsNativeRelations()`        | `false`                 | Implement `loadRelations()` for JOIN/`$lookup`-based loading.                                                         |
+| `supportsColumnModify`             | `false`                 | Engine supports `ALTER COLUMN` type changes in place (MySQL, PG).                                                     |
+| `canFilterField(fd)`               | `fd.storage !== 'json'` | Adapter natively filters into JSON storage (Mongo dot-paths, arrays). Used by `/meta` to gate `fields[*].filterable`. |
+| `canSortField(fd)`                 | `fd.storage !== 'json'` | Adapter natively sorts JSON storage. Used by `/meta` to gate `fields[*].sortable`.                                    |
 
 ## Adapter hooks (optional)
 

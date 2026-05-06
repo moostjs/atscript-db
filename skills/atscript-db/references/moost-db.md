@@ -130,6 +130,7 @@ export class UsersController extends AsDbController<typeof User> {
 - `@db.table.filterable 'manual'` + `@db.column.filterable` → server rejects any `/query` filter referencing fields lacking the field-level annotation. HTTP 400 with `path` pointing to the offending field.
 - `@db.table.sortable 'manual'` + `@db.column.sortable` → same for sort keys.
 - `/meta` reflects the gate: `fields[<path>].filterable` / `.sortable` mirror what the server will accept.
+- **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` / `canSortField(fd)` defaults to `fd.storage !== 'json'`, so on SQL adapters (sqlite/postgres/mysql) `@db.json` fields and array fields (both `storage: 'json'`) report `{ filterable: false, sortable: false }` regardless of mode — even when explicitly annotated `@db.column.filterable`. MongoAdapter overrides `canFilterField` to `true` (native dot-paths and array filters), so `@db.json` and array fields are filterable on Mongo, but still not sortable (min/max-element sort is a footgun).
 
 ## Errors
 
