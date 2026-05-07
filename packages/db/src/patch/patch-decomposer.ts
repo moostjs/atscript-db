@@ -38,6 +38,7 @@ function flattenPatchPayload(
   table: AtscriptDbTable,
   topLevelArrayTag: string,
 ): void {
+  const meta = table.getMetadata();
   for (const [_key, value] of Object.entries(payload)) {
     const key = prefix ? `${prefix}.${_key}` : _key;
 
@@ -48,24 +49,24 @@ function flattenPatchPayload(
 
     const flatType = table.flatMap.get(key);
     const isTopLevelArray = flatType?.metadata?.get(topLevelArrayTag) as boolean | undefined;
+    const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
 
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      !Array.isArray(value) &&
-      isTopLevelArray &&
-      !flatType?.metadata?.has("db.json")
-    ) {
+    if (isObjectValue && isTopLevelArray && !flatType?.metadata?.has("db.json")) {
       // Top-level array with patch operators (@db.json fields are excluded; plain arrays fall through as $replace)
       decomposeArrayPatch(key, value as Record<string, unknown>, flatType!, update, table);
-    } else if (
-      typeof value === "object" &&
-      value !== null &&
-      !Array.isArray(value) &&
-      flatType?.metadata?.get("db.patch.strategy") === "merge"
-    ) {
-      // Merge strategy: recursively flatten
+    } else if (isObjectValue && flatType?.metadata?.get("db.patch.strategy") === "merge") {
+      // Merge: omitted siblings preserved.
       flattenPatchPayload(value as Record<string, unknown>, key, update, table, topLevelArrayTag);
+    } else if (isObjectValue && meta.flattenedParents.has(key)) {
+      // Replace: required-missing leaves are caught earlier by the strict validator;
+      // null-fill the optional ones so the omission isn't silently lost.
+      flattenPatchPayload(value as Record<string, unknown>, key, update, table, topLevelArrayTag);
+      const optLeaves = meta.optionalLeavesByLogicalParent.get(key);
+      if (optLeaves) {
+        for (const lp of optLeaves) {
+          if (!(lp in update)) update[lp] = null;
+        }
+      }
     } else {
       // Simple field set
       update[key] = value;

@@ -3,6 +3,7 @@
 import type {
   TAtscriptAnnotatedType,
   TAtscriptTypeArray,
+  TAtscriptTypeObject,
   TValidatorOptions,
   Validator,
 } from "@atscript/typescript/utils";
@@ -126,6 +127,16 @@ export class CollectionPatcher {
     this.updatePipeline.push(this.currentSetStage);
   }
 
+  /** Set a leaf, lifting an `$inc`/`$mul` field op into an aggregation expression if present. */
+  private _setLeaf(key: string, value: unknown) {
+    const fieldOp = getDbFieldOp(value);
+    if (fieldOp) {
+      this._set(key, this._fieldOpExpr(key, fieldOp.op, fieldOp.value));
+    } else {
+      this._set(key, value);
+    }
+  }
+
   /**
    * Recursively walk through the patch *payload* and convert it into `$set`/…
    * statements. Top‑level arrays are delegated to {@link parseArrayPatch}.
@@ -140,29 +151,56 @@ export class CollectionPatcher {
       const key = evalKey(_key);
       const flatType = this.collection.flatMap.get(key);
       const topLevelArray = flatType?.metadata?.get("db.__topLevelArray") as boolean | undefined;
-      if (
-        typeof value === "object" &&
-        !Array.isArray(value) &&
-        topLevelArray &&
-        !flatType?.metadata?.has("db.json")
-      ) {
+      const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
+      if (isObjectValue && topLevelArray && !flatType?.metadata?.has("db.json")) {
         this.parseArrayPatch(key, value, flatType!);
-      } else if (
-        typeof value === "object" &&
-        flatType?.metadata?.get("db.patch.strategy") === "merge"
-      ) {
+      } else if (isObjectValue && flatType?.metadata?.get("db.patch.strategy") === "merge") {
         this.flattenPayload(value, key);
+      } else if (
+        isObjectValue &&
+        flatType?.type.kind === "object" &&
+        !flatType.metadata?.has("db.json")
+      ) {
+        this._flattenReplaceObject(value as Record<string, unknown>, key, flatType);
       } else if (key !== "_id") {
-        // Detect nested field ops and convert to aggregation expressions
-        const fieldOp = getDbFieldOp(value);
-        if (fieldOp) {
-          this._set(key, this._fieldOpExpr(key, fieldOp.op, fieldOp.value));
-        } else {
-          this._set(key, value);
-        }
+        this._setLeaf(key, value);
       }
     }
     return this.updatePipeline;
+  }
+
+  /**
+   * Walk the schema's props for a replace-strategy nested object so omitted
+   * optional children become explicit nulls (parity with SQL `column = NULL`).
+   * Required-missing leaves are caught earlier by the strict validator.
+   */
+  private _flattenReplaceObject(
+    value: Record<string, unknown>,
+    prefix: string,
+    flatType: TAtscriptAnnotatedType,
+  ): void {
+    const propsMap = (flatType.type as TAtscriptTypeObject).props;
+    for (const [propKey, propType] of propsMap) {
+      const childKey = `${prefix}.${propKey}`;
+      const childValue = value[propKey];
+      if (childValue === undefined) {
+        if (propType.optional === true) this._set(childKey, null);
+        continue;
+      }
+      const childIsObject =
+        typeof childValue === "object" && childValue !== null && !Array.isArray(childValue);
+      const propIsJson = propType.metadata?.has("db.json");
+      const propIsMerge = propType.metadata?.get("db.patch.strategy") === "merge";
+      if (childIsObject && propType.type.kind === "object" && !propIsJson) {
+        if (propIsMerge) {
+          this.flattenPayload(childValue, childKey);
+        } else {
+          this._flattenReplaceObject(childValue as Record<string, unknown>, childKey, propType);
+        }
+        continue;
+      }
+      this._setLeaf(childKey, childValue);
+    }
   }
 
   /**

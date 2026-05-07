@@ -136,25 +136,56 @@ If you need atomic operations on nested fields, add `@db.patch.strategy 'merge'`
 
 ## Embedded Object Patches
 
-Nested objects stored on a record (not navigation properties) use a strategy-based approach controlled by `@db.patch.strategy`.
+Nested objects stored on a record (not navigation properties) use a strategy-based approach controlled by `@db.patch.strategy`. The mental model is:
+
+- **Default = replace = strict.** Every branch is treated as replace unless explicitly annotated otherwise. The validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit required fields are rejected with a 400 (otherwise a missing required leaf would propagate to the storage layer and fail the underlying NOT NULL constraint).
+- **`@db.patch.strategy 'merge'` is a one-level opt-in.** It applies only to the level it's annotated on; descendants revert to default replace unless they too carry the annotation. Merge does not propagate.
+- **Optional children of a replace branch are null-filled when omitted.** That's what distinguishes replace from merge — replace clears unspecified optional sub-fields, merge preserves them.
+- **`@db.json` is always strict** — the column is an opaque blob; partial sub-shapes can't be decomposed.
 
 ### Replace Strategy (Default)
 
-Without `@db.patch.strategy`, the entire nested object is **overwritten**. Omitted sub-fields are lost:
+Without `@db.patch.strategy`, the nested object is **overwritten**: every required child must be supplied, and any optional child the user omits is explicitly set to `null` so the storage matches the input shape on both SQL (column-decomposed) and MongoDB (sub-document):
 
-```typescript
-// Current: { address: { line1: '123 Main St', line2: 'Apt 4', city: 'Portland' } }
-
-await table.updateOne({ id: 1, address: { city: "Seattle" } });
-// Result: { address: { city: 'Seattle' } }
-// ⚠️ line1 and line2 are gone
+```atscript
+// schema
+address: {
+    line1: string
+    line2?: string         // optional
+    city: string
+    state: string
+    zip: string
+}
 ```
 
-[Field operations](#field-ops) (`$inc`, `$dec`, `$mul`) are **not allowed** inside replace-strategy objects — the validator will reject them. Use `@db.patch.strategy 'merge'` if you need atomic operations on nested fields.
+```typescript
+// Current: { address: { line1: '123 Main St', line2: 'Apt 4', city: 'Portland', state: 'OR', zip: '97201' } }
+
+// ✅ Full required shape — optional line2 omitted, gets null-filled
+await table.updateOne({
+  id: 1,
+  address: { line1: "1 Pike Pl", city: "Seattle", state: "WA", zip: "98101" },
+});
+// Result: address.line1='1 Pike Pl', address.line2=null, address.city='Seattle', …
+
+// ❌ Missing a required child — rejected at the validator
+await table.updateOne({ id: 1, address: { city: "Seattle" } });
+// ValidatorError: address.line1 is required, address.state is required, …
+//   (replace = strict; required children must be supplied)
+```
+
+If you want to update one field of `address` and preserve the rest, switch the parent to merge:
+
+```atscript
+@db.patch.strategy 'merge'
+address: { ... }
+```
+
+[Field operations](#field-ops) (`$inc`, `$dec`, `$mul`) are **not allowed** inside replace-strategy objects — the validator will reject them. Use `@db.patch.strategy 'merge'` if you need atomic operations on nested fields, or to preserve omitted siblings.
 
 ### Merge Strategy
 
-With `@db.patch.strategy 'merge'`, only the provided nested fields are updated — others are preserved:
+With `@db.patch.strategy 'merge'`, only the provided nested fields are updated — others are preserved. The annotation applies to that one level only; nested objects under a merge parent revert to default replace unless they also carry the annotation:
 
 ```atscript
 @db.patch.strategy 'merge'

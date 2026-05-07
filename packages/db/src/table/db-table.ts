@@ -850,7 +850,9 @@ export class AtscriptDbTable<
       return buildDbValidator(this.type, mode, adapterPlugins) as Validator<T, DataType>;
     }
 
-    // bulkUpdate: same as patch but with path-aware partial for merge strategy
+    // bulkUpdate: path-aware partial — root + nav sub-trees + merge branches stay
+    // partial; everything else is strict so a missing required leaf can't reach
+    // the storage layer (it'd surface as a NOT NULL violation).
     if (purpose === "bulkUpdate") {
       const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
       const navFields = this._meta.navFields;

@@ -1532,4 +1532,62 @@ describe("AtscriptDbTable — embedded objects", () => {
       expect(call!.args[2]).toMatchObject({ inc: { price: 5 } });
     });
   });
+
+  describe("patch flattened parent (replace strategy)", () => {
+    let profileTable: AtscriptDbTable;
+
+    beforeEach(() => {
+      profileTable = new AtscriptDbTable(ProfileTable, adapter);
+    });
+
+    it("should flatten full nested sub-shape into __-separated columns", async () => {
+      await profileTable.updateOne({
+        id: 1,
+        contact: { email: "alice@x.com", phone: "555" },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      expect(call!.args[1]).toMatchObject({
+        contact__email: "alice@x.com",
+        contact__phone: "555",
+      });
+      expect(call!.args[1]).not.toHaveProperty("contact");
+    });
+
+    it("should null-fill OPTIONAL omitted children on partial sub-shape", async () => {
+      await profileTable.updateOne({
+        id: 1,
+        contact: { email: "alice@x.com" },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      expect(call!.args[1]).toMatchObject({
+        contact__email: "alice@x.com",
+        contact__phone: null,
+      });
+      expect(call!.args[1]).not.toHaveProperty("contact");
+    });
+
+    it("should reject partial sub-shape that omits a REQUIRED child (strict replace)", async () => {
+      await expect(
+        profileTable.updateOne({
+          id: 1,
+          settings: { notifications: { email: true } },
+        } as any),
+      ).rejects.toThrow();
+    });
+
+    it("should accept full sub-shape at deeper non-merge level", async () => {
+      await profileTable.updateOne({
+        id: 1,
+        settings: { notifications: { email: true, sms: false } },
+      } as any);
+      const call = adapter.calls.find((c) => c.method === "updateOne");
+      expect(call).toBeDefined();
+      expect(call!.args[1]).toMatchObject({
+        settings__notifications__email: true,
+        settings__notifications__sms: false,
+      });
+    });
+  });
 });

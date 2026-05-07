@@ -248,13 +248,14 @@ describe("[mongo] AsCollection with structures", () => {
 
   it("prepares simple patch replacing nested object with replace strategy", async () => {
     const { SimpleCollection } = await import("./fixtures/simple-collection.as");
+    // Required-missing children rejected at validator (else NOT NULL surfaces from storage).
     expect(
       () =>
         prepareUpdate(mongo, SimpleCollection, {
           _id: new ObjectId(),
           address: { line1: "123 Main St" },
         }).updateFilter,
-    ).toThrowError(); // replace strategy is not deep partial
+    ).toThrowError();
     expect(
       prepareUpdate(mongo, SimpleCollection, {
         _id: new ObjectId(),
@@ -267,7 +268,11 @@ describe("[mongo] AsCollection with structures", () => {
         $set: {
           name: "John Doe",
           age: 25,
-          address: { line1: "123 Main St", city: "New York", state: "New York", zip: "12332" },
+          "address.line1": "123 Main St",
+          "address.line2": null,
+          "address.city": "New York",
+          "address.state": "New York",
+          "address.zip": "12332",
         },
       },
     ]);
@@ -287,9 +292,13 @@ describe("[mongo] AsCollection with structures", () => {
         $set: {
           name: "John Doe",
           age: 25,
-          // replacing address
-          address: { line1: "123 Main St", city: "New York", state: "New York", zip: "12332" },
-          // merging contacts
+          // replace: optional line2 null-filled
+          "address.line1": "123 Main St",
+          "address.line2": null,
+          "address.city": "New York",
+          "address.state": "New York",
+          "address.zip": "12332",
+          // merge: sibling preserved
           "contacts.email": "test@email.com",
         },
       },
@@ -308,7 +317,10 @@ describe("[mongo] AsCollection with structures", () => {
     ).toEqual([
       {
         $set: {
-          "nested.nested1": { a: 5 },
+          // nested1: replace inside merge parent — optional siblings null-filled
+          "nested.nested1.a": 5,
+          "nested.nested1.b": null,
+          // nested2: merge — sibling preserved
           "nested.nested2.c": 5,
         },
       },

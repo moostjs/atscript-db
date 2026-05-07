@@ -40,17 +40,41 @@ Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on t
 
 ## `@db.patch.strategy`
 
-Controls how nested objects merge:
+Conceptual model:
 
-- `'replace'` (default): the entire nested object is overwritten.
-- `'merge'`: supplied sub-fields deep-merge into existing values.
+1. **Default = replace = strict.** Every nested branch on a patch is replace unless annotated otherwise. Validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit a required leaf are rejected with a 400 (otherwise a NOT NULL violation would surface from the adapter). **Optional** children that the user omits are null-filled at the storage layer: SQL emits `column = NULL`, Mongo emits dot-paths with explicit `null`. Both adapters report identical observable values.
+2. **`'merge'` is a local one-level opt-in.** The annotation applies to the exact level it's placed on; descendants revert to default replace unless they too carry `@db.patch.strategy 'merge'`. Merge does **not** propagate.
+3. **`@db.json` is always strict.** The column is an opaque blob — no decomposition path for partial sub-shapes.
 
 ```atscript
 interface User {
     @meta.id id: number
     @db.patch.strategy 'merge'
-    profile?: Profile
+    profile?: Profile     // sub-fields preserved on partial patch
+    address: Address      // default replace — required required, optional nulled
 }
+```
+
+Examples (PATCH semantics):
+
+```ts
+// Replace, full required shape — optional fields omitted are null-filled.
+await users.updateOne({
+  id: 1,
+  address: { line1: "1 Pike Pl", city: "Seattle", state: "WA", zip: "98101" },
+  // address.line2 (optional) omitted → stored as null
+});
+
+// Replace, missing a required child — REJECTED.
+await users.updateOne({ id: 1, address: { city: "Seattle" } });
+// ValidatorError: address.line1 is required, address.state is required, ...
+
+// Merge — omitted siblings preserved.
+await users.updateOne({ id: 1, profile: { bio: "..." } });
+
+// Merge does NOT propagate. If profile.address has no merge annotation,
+// it's still replace — partial input on it would be rejected unless every
+// required child is supplied.
 ```
 
 MongoDB offers `@db.mongo.patch.strategy` for per-field override without changing the global shape.

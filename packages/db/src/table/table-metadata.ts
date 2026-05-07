@@ -100,6 +100,8 @@ export class TableMetadata {
   allPhysicalFields: string[] = [];
   /** Precomputed parent path → child physical column names for fast null-setting. */
   childrenByParent = new Map<string, string[]>();
+  /** Precomputed parent path → optional child logical paths (replace-strategy null-fill in the patch decomposer). */
+  optionalLeavesByLogicalParent = new Map<string, string[]>();
   requiresMappings = false;
   /** True when the only mappings needed are simple `@db.column` renames (no nesting/JSON). */
   onlyColumnRenames = false;
@@ -603,17 +605,22 @@ export class TableMetadata {
       this.leafByLogical.set(fd.path, fd);
     }
 
-    // Precompute parent → child physical names for fast null-setting
+    // Precompute parent → child physical names + optional logical paths for fast null-setting
     for (const parentPath of this.flattenedParents) {
       const prefix = `${parentPath}.`;
       const children: string[] = [];
+      const optionalLeaves: string[] = [];
       for (const [path, fd] of this.leafByLogical.entries()) {
         if (path.startsWith(prefix)) {
           children.push(fd.physicalName);
+          if (fd.optional) optionalLeaves.push(path);
         }
       }
       if (children.length > 0) {
         this.childrenByParent.set(parentPath, children);
+      }
+      if (optionalLeaves.length > 0) {
+        this.optionalLeavesByLogicalParent.set(parentPath, optionalLeaves);
       }
     }
   }
