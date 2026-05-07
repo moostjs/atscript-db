@@ -33,7 +33,11 @@ export const validationErrorTransform = () =>
     {
       error: transformValidationError,
     },
-    TInterceptorPriority.CATCH_ERROR,
+    // Priority MUST be BEFORE_ALL so this interceptor's `error` callback is
+    // registered before any higher-priority interceptor's `before` runs (and
+    // potentially throws ValidatorError). Stack-order is by design: a throw
+    // at priority N skips registration of error handlers at priority > N.
+    TInterceptorPriority.BEFORE_ALL,
   );
 
 export const UseValidationErrorTransform = () => Intercept(validationErrorTransform());
