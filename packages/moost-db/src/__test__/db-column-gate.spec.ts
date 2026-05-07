@@ -253,3 +253,63 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     expect(meta.fields.tags).toEqual({ filterable: true, sortable: false });
   });
 });
+
+describe("AsDbController — adapter canFilterField veto at request time", () => {
+  // /query and /pages must mirror /meta's `filterable: false` capability — a
+  // hard gate independent of any `db.table.filterable` user configuration.
+
+  const jsonTable = (extra: Parameters<typeof makeMockTable>[0] = {}) =>
+    makeMockTable({
+      fields: { name: {}, address: {} },
+      fieldStorage: { address: "json" },
+      ...extra,
+    });
+
+  it("SQL adapter: filter on @db.json column is rejected with HTTP 400", async () => {
+    const table = jsonTable();
+    const result = await makeController(table).query("?address=foo");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).message).toContain('"address"');
+    expect((result as HttpError).message).toContain("adapter");
+    expect(table.findMany).not.toHaveBeenCalled();
+  });
+
+  it("SQL adapter: filter on a non-JSON column is accepted", async () => {
+    const table = jsonTable();
+    const result = await makeController(table).query("?name=Alice");
+    expect(result).not.toBeInstanceOf(HttpError);
+    expect(table.findMany).toHaveBeenCalled();
+  });
+
+  it("SQL adapter: explicit @db.column.filterable on @db.json column does NOT bypass the adapter veto", async () => {
+    const table = jsonTable({
+      tableMeta: { "db.table.filterable": "manual" },
+      fields: {
+        name: { "db.column.filterable": true },
+        address: { "db.column.filterable": true },
+      },
+    });
+    const result = await makeController(table).query("?address=foo");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).message).toContain('"address"');
+    expect(table.findMany).not.toHaveBeenCalled();
+  });
+
+  it("Mongo-like adapter: filter on @db.json column IS accepted (adapter can filter)", async () => {
+    const table = jsonTable({ adapterMode: "mongo" });
+    const result = await makeController(table).query("?address=foo");
+    expect(result).not.toBeInstanceOf(HttpError);
+    expect(table.findMany).toHaveBeenCalled();
+  });
+
+  it("manual-mode rejection still references the annotation, not the adapter", async () => {
+    const table = makeMockTable({
+      tableMeta: { "db.table.filterable": "manual" },
+      fields: { email: { "db.column.filterable": true }, name: {} },
+    });
+    const result = await makeController(table).query("?name=Alice");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).message).toContain('"name"');
+    expect((result as HttpError).message).toContain("@db.column.filterable");
+  });
+});

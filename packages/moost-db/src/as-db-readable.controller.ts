@@ -15,6 +15,7 @@ import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/disco
 import { augmentRowsWithActions } from "./actions/list-augmenter";
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
+import { findFilterOffender } from "./gate-utils";
 import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
 
 /**
@@ -37,6 +38,8 @@ export class AsDbReadableController<
   private readonly _overlayIsNoOp: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
+  /** Paths the adapter vetoes for filtering (e.g. JSON storage on SQL). Symmetric with `/meta` `filterable: false`. */
+  private readonly _adapterNonFilterable: ReadonlySet<string>;
 
   constructor(
     @Inject(READABLE_DEF)
@@ -45,6 +48,7 @@ export class AsDbReadableController<
   ) {
     super(readable.type as T, readable.tableName, app, readable.isView ? "view" : "table");
     this.readable = readable;
+    this._adapterNonFilterable = this._collectAdapterNonFilterable();
     this._gates = this._buildGates();
     this._preferredIdSet = new Set(readable.preferredId ?? []);
     this._quantityRefByPath = this._collectQuantityRefs();
@@ -52,6 +56,18 @@ export class AsDbReadableController<
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
+  }
+
+  private _collectAdapterNonFilterable(): Set<string> {
+    const out = new Set<string>();
+    // Guarded for the partial-mock readables in *.spec.ts that omit these.
+    if (!this.readable.fieldDescriptors || typeof this.readable.canFilterField !== "function") {
+      return out;
+    }
+    for (const fd of this.readable.fieldDescriptors) {
+      if (!fd.ignored && !this.readable.canFilterField(fd)) out.add(fd.path);
+    }
+    return out;
   }
 
   private _collectQuantityRefs(): Map<string, string> {
@@ -91,6 +107,28 @@ export class AsDbReadableController<
 
   protected hasField(path: string): boolean {
     return this.readable.flatMap.has(path);
+  }
+
+  /**
+   * Adds an adapter-capability veto on top of the base gate. Distinct from the
+   * `@db.column.filterable` rejection because the message must reference the
+   * adapter, not an annotation the user could add to bypass it. Sort uses
+   * adapter capability differently and is enforced at the SQL builder layer.
+   */
+  protected override checkGates(
+    filter: FilterExpr | undefined,
+    controls: Record<string, unknown>,
+    gates: ReadableGates,
+  ): HttpError | undefined {
+    const baseError = super.checkGates(filter, controls, gates);
+    if (baseError) return baseError;
+    if (this._adapterNonFilterable.size === 0) return undefined;
+    const offender = findFilterOffender(filter, (f) => !this._adapterNonFilterable.has(f));
+    if (!offender) return undefined;
+    return new HttpError(
+      400,
+      `Filtering on field "${offender}" is not permitted — adapter cannot filter on this storage type.`,
+    );
   }
 
   /** Validates $with relations against the readable. */
