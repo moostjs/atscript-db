@@ -143,60 +143,88 @@ After the demo-side fix (committed in atscript-ui), direct curl probes return HT
 
 ---
 
-## 🟡 MEDIUM — Identifier strict-mode validator throw doesn't reach the global error interceptor (3c)
+## 🟡 MEDIUM — Identifier strict-mode validator throw doesn't reach the global error interceptor (3c) — ROOT CAUSE LOCATED
 
 **Discovered:** 2026-05-07, atscript-ui batch L e2e (Scenario 20.17 — identifier strict-mode).
 
-**Originally part of finding 3 (3c). After demo-side fix above, 3a + 3b return 400; 3c still returns 500.** This is a genuine atscript-db issue — the identifier-validation throw mechanism differs from `validatorPipe()`'s.
+**Update 2026-05-07b** (after atscript-db agent's "doesn't reproduce in unit tests" report): the bug DOES reproduce in atscript-ui's demo, and the root cause is a **moost interceptor-registration ordering issue** that only surfaces when a `defineBeforeInterceptor` at priority `< CATCH_ERROR` throws. The agent's isolated unit tests don't reproduce because they don't reproduce moost-db's gate-interceptor path — which IS the throw site for action ID validation in production.
 
-**Symptom:** POST action `ids` payloads that violate moost-db invariant #11 (identifier shape must match exactly one PK or unique-index group):
+### What we ruled out
 
-```
-{ ids: [{ username: "alice", "; DROP TABLE users; --": 1 }] }   # unknown field
-{ ids: [{ id: 5, username: "alice" }] }                          # heterogeneous, no single match
-{ ids: "alice" }                                                  # bare scalar
-```
+- ❌ **Class-identity divergence (off-tree hypothesis 1).** `pnpm -ls` against atscript-ui shows 10 separate `@atscript/typescript@0.1.50` copies under `node_modules/.pnpm/`, each with a different peer-deps suffix. But `readlink` on the actual `@atscript/typescript` symlinks reveals that both `@atscript/moost-db@0.1.68` AND `@atscript/moost-validator@0.1.50` resolve to the **same** copy (`_5f3340f540726e581b2ad93bb59f9692/node_modules/@atscript/typescript`). Same physical path → same module instance → same `ValidatorError` class identity → `instanceof ValidatorError` would correctly match.
 
-All return:
+- ❌ **auditInterceptor / latencyInterceptor swallow (off-tree hypothesis 2).** `auditInterceptor.error(err)` calls `void writeRows(...).catch(logAuditError)` and returns undefined — never calls `reply()`, so it can't preempt validationErrorTransform. `latencyInterceptor` is `defineBeforeInterceptor` (no `error` handler at all). Both ruled out.
 
-```json
-{
-  "statusCode": 500,
-  "message": "[0]: Identifier fields must exactly match one of: [id], [username], [email]",
-  "error": "Internal Server Error"
+### Actual root cause: moost registers `error`/`after` callbacks DURING the same loop that runs `before()`
+
+Inspection of `moost@0.6.8/dist/index.mjs` reveals that `InterceptorHandler.before()` iterates handlers in priority-ascending order and calls `registerDef(def, entry, ci)` for each:
+
+```js
+// moost@0.6.8/dist/index.mjs — registerDef, line 540-554
+registerDef(def, entry, ci) {
+  if (def.after) (this.after ?? (this.after = [])).unshift({ name: entry.name, fn: def.after });
+  if (def.error) (this.onError ?? (this.onError = [])).unshift({ name: entry.name, fn: def.error });
+  if (def.before) {
+    const result = ... def.before(this.getReplyFn());
+    if (isThenable(result)) return result;  // ← async before's pending promise
+  }
+  return void 0;
 }
 ```
 
-The message format with `[0]:` index prefix is a `ValidatorError` thrown from `validateMultiId` / `validateSingleId` in `packages/moost-db/src/actions/id-validation.ts`. It IS a `ValidatorError` (same class identity as 3a/3b — both bundles symlink to the same `@atscript/typescript@0.1.50` copy).
+`registerDef` is called per-handler within the iteration. If a `before()` handler at priority N throws, **only `error` callbacks from interceptors with priority ≤ N have been registered.** Interceptors with priority > N never get their `error` callbacks added to `this.onError`.
 
-**The throw site differs from `validatorPipe()`.** The identifier validation runs from inside a `cached(...)` wook-slot resolved via `defineWook` (`dbActionIdsSlot`/`dbActionIdSlot` consumed by `useDbActionIds`/`useDbActionId`):
+In atscript-ui's demo, the priorities at play are:
 
-```ts
-// packages/moost-db/src/actions/... (relevant excerpts)
-async function resolveValidatedId(ctx, validate) {
-  ...
-  validate(env.ids, table);  // throws ValidatorError on bad shape
-  return env.ids;
-}
-const dbActionIdsSlot = cached(async (ctx) => {
-  return await resolveValidatedId(ctx, validateMultiId);
-});
-const useDbActionIds = defineWook((ctx) => ({ load: () => ctx.get(dbActionIdsSlot) }));
+| interceptor                         | source                      | priority          | has `error`? |
+| ----------------------------------- | --------------------------- | ----------------- | ------------ |
+| `auditInterceptor`                  | demo                        | `BEFORE_ALL = 0`  | ✓            |
+| `latencyInterceptor`                | demo                        | `BEFORE_ALL = 0`  | ✗            |
+| `buildGateInterceptor` (per-action) | `@atscript/moost-db`        | `AFTER_GUARD = 3` | ✗            |
+| `validationErrorTransform()`        | `@atscript/moost-validator` | `CATCH_ERROR = 5` | ✓            |
+
+The gate-interceptor's `before` is `async () => { ... await ctx.get(dbActionIdsSlot); ... }`. When `dbActionIdsSlot`'s factory rejects (via `validateMultiId` throwing `ValidatorError`), the gate's `before` rejects.
+
+**Iteration order:**
+
+1. `auditInterceptor` (0) — registers `audit.error` to `this.onError`. ✓
+2. `latencyInterceptor` (0) — runs `before`, no `error` registered.
+3. **`buildGateInterceptor` (3) — runs `before`, throws `ValidatorError`.** Loop aborts.
+4. `validationErrorTransform` (5) — **NEVER REACHED**, `error` callback NEVER registered.
+
+`fireAfter(error)` then runs against `this.onError = [audit.error]` only. `audit.error` doesn't call `reply()`, so the response stays as the unhandled `ValidatorError`. wooks-http catches it as the route handler's last-chance fallback, logs `"Uncaught route handler exception"`, and returns HTTP 500.
+
+### Direct evidence (atscript-ui server log during e2e Section 20.17)
+
+```
+[wooks-http] ■ Uncaught route handler exception: /api/db/tables/users/actions/suspend
+Validation Error: [0]: Identifier fields must exactly match one of: [id], [username], [email]
+    at validateMultiId (...moost-db/dist/index.mjs:2086:31)
+    at resolveValidatedId (...moost-db/dist/index.mjs:2165:2)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
 ```
 
-When this throw propagates up through Moost's resolver chain, it appears to bypass the global interceptor's `error` callback that `validatorPipe()` throws DO reach. atscript-ui's e2e test 20.17 catches this divergence — 3a/3b return 400, 3c still returns 500.
+The `[wooks-http] ■ Uncaught route handler exception` line is the smoking gun — it's logged ONLY when no Moost interceptor catches the error. If `validationErrorTransform.error` had fired, this log line would be absent and the response would be HTTP 400.
 
-**Where it lives:** `@atscript/moost-db` — the `dbActionIdSlot`/`dbActionIdsSlot` resolution path, OR the `useDbActionId(s)` defineWook integration with Moost's pipe/interceptor stack.
+### Why the agent's isolated tests don't reproduce
 
-**Fix candidates:**
+The agent built "the exact production-mirror scenario (bare controller without class-level `@UseValidationErrorTransform()`, only `validationErrorTransform()` registered globally)". But a **bare** controller doesn't include a `@DbActionRow*` / `@DbActionRows` parameter decorator, so `discoverActions` doesn't wire up the gate-interceptor. Without the gate, identifier validation runs during arg-resolve (`runPipes`) — which fires AFTER all `before` interceptors complete, so by the time the throw happens, all `error` callbacks (including validationErrorTransform's) are registered.
 
-- Wrap the slot's resolution in a try/catch that rethrows as an `HttpError(400)` at the throw site (cosmetic, but loses the structured `_body` shape).
-- Move identifier validation INTO a Moost pipe (`definePipeFn(...)`) so it goes through the same machinery as `validatorPipe()` and reaches the global error interceptor.
-- Investigate why `defineWook`-based resolver throws don't surface to global interceptors when `validatorPipe()` throws do.
+To reproduce in atscript-db's own test suite: declare an action that uses `@DbActionRows()` (or any decorator that triggers `buildGateInterceptor`), register `validationErrorTransform()` globally, POST a bad-shape `ids` payload, observe HTTP 500.
 
-**Fix-when:** convenient. The gate IS enforced (returns non-2xx, blocks the action). Only the envelope is wrong. atscript-ui's 20.17 test asserts a status range `[400, 422, 500]` pending this fix.
+### Fix candidates (in order of preference)
 
-**Reproducer:** any moost-db controller with an action declared via `@DbActionIDs` / `@DbActionID`. POST an envelope where `ids` violates the strict-shape contract. Compare against a `validatorPipe`-stage throw on the same controller (e.g. `@InputForm` payload that's wrong type) — that one returns 400 correctly.
+1. **Two-pass interceptor lifecycle in moost** (correct fix, breaks no contracts): in `InterceptorHandler.before()`, split `registerDef` into two passes — first pass registers all `after`/`error` callbacks across all handlers, second pass runs `before()` calls in priority order. A throw in any `before()` then has the full set of `error` handlers available. Requires a moost release.
+
+2. **Workaround in atscript-db**: bundle a `defineInterceptor({ error: transformValidationError }, BEFORE_ALL)` and register it via `Moost.applyGlobalInterceptors` from `AsDbController` / `AsDbReadableController` setup, so it sits at priority 0 and registers its `error` BEFORE any gate fires. This works without a moost change but means atscript-db ships its own ValidatorError envelope handling rather than relying on moost-validator's.
+
+3. **Workaround in atscript-db**: move identifier shape validation OUT of the gate-interceptor's `before` and INTO a Moost pipe (`definePipeFn(..., TPipePriority.VALIDATE)`) attached to `@DbActionID*` / `@DbActionRow*` parameters. Pipes run during arg-resolve which is AFTER the before-interceptor loop completes — so validationErrorTransform's `error` would already be registered when the pipe throws. The gate-interceptor's `await ctx.get(dbActionIdsSlot)` would then re-read an already-validated value (slot caches the resolved value).
+
+4. **Workaround in atscript-ui** (deferred): catch `ValidatorError` directly in `auditInterceptor.error` and call `reply(new HttpError(400, ...))`. Pollutes a fire-and-forget audit hook with general validator awareness, and only works because audit IS registered before the gate (priority 0 vs 3). Brittle to interceptor ordering changes.
+
+**Recommended:** fix #1 in moost. It's a correctness improvement to the interceptor lifecycle that fixes this and any future class of "before-time throw at priority N misses error handler at priority > N" bugs.
+
+**Atscript-ui workaround:** test 20.17 currently asserts status range `[400, 422, 500]` pending the upstream fix. Tighten to `toBe(400)` once one of the fixes lands.
 
 ---
 
