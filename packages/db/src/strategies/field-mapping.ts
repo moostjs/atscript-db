@@ -179,7 +179,7 @@ export abstract class FieldMappingStrategy {
     const parts = parentPath.split(".");
     let current: Record<string, unknown> = obj;
     for (let i = 0; i < parts.length - 1; i++) {
-      if (current[parts[i]] === undefined) {
+      if (current[parts[i]] === undefined || current[parts[i]] === null) {
         return;
       }
       current = current[parts[i]] as Record<string, unknown>;
