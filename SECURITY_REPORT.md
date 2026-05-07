@@ -36,11 +36,13 @@ GET /api/db/_presets/one/<manager-private-preset-id>?$select=id,user,label
 
 ---
 
-## 🚨 HIGH — Cross-user PATCH `/api/db/_presets` returns HTTP 500 instead of 403
+## 🟡 MEDIUM — `RelationalFieldMapper.reconstructNullParent` null-deref leaks as HTTP 500 on read-during-update
 
 **Discovered:** 2026-05-07, atscript-ui batch L e2e (Scenario 20.7 — preset edit by non-owner).
 
-**Symptom:** When a `viewer` PATCHes another user's preset (`{ id: <manager's preset id>, data: { label: "Hacked" } }`) via Playwright's `APIRequestContext`, the response is HTTP 500 with body:
+**Originally filed as HIGH; downgraded after stack-trace analysis.** The `requireOwner` gate IS reached and rejects correctly when the read succeeds — there is no auth bypass. The 500 happens at the `findOne` step inside `processUpdateRow` BEFORE `requireOwner` runs, so a malicious viewer never reaches row data. It's a wrong envelope (500 instead of 403) caused by a missing null-guard in atscript-db's flattened-parent reconstruction loop.
+
+**Symptom:** PATCH `/api/db/_presets` with `{ id: <existing-row-id>, data: {...} }` returns HTTP 500 with body:
 
 ```json
 {
@@ -50,38 +52,57 @@ GET /api/db/_presets/one/<manager-private-preset-id>?$select=id,user,label
 }
 ```
 
-**The same payload via raw `curl` returns the documented 403 `identity_immutable`.**
+**Stack trace from the live demo:**
 
-The discrepancy depends on the HTTP client. Possibly differences in `Content-Type`, body encoding, or transfer-encoding headers between Playwright's `request.post` and curl trip a path through atscript-db's request parsing or controller dispatch that hits a null-deref before the consumer's `requireOwner()` rule fires.
+```
+TypeError: Cannot read properties of null (reading 'columns')
+    at RelationalFieldMapper.reconstructNullParent
+        (@atscript/db/dist/db-view-B89noqL9.mjs:708:28)
+    at RelationalFieldMapper.reconstructFromRead
+        (@atscript/db/dist/db-view-B89noqL9.mjs:850:56)
+    at AtscriptDbTable.findOne
+        (@atscript/db/dist/db-view-B89noqL9.mjs:1350:33)
+    at async processUpdateRow
+        (moost-ui-presets/dist/index.mjs:181:19)
+```
 
-The null-deref message (`reading 'columns'`) is the same shape as the HIGH finding above — suggests they share a root cause in how atscript-db's base controller materialises the row before invoking the consumer hooks.
+**Note on grep-ability:** searching atscript-db source for the literal string `.columns` won't surface the bug — the `'columns'` in the error message is the runtime value of `lastPart` (the final segment of `parentPath.split('.')` for a path like `"data.content.columns"`). The actual fix-site has no literal `.columns` in source.
 
-**Where it lives:** atscript-db request-handling pipeline before the consumer controller's update hook runs. The owner-check gate in `moost-ui-presets/src/preset-rules.ts#requireOwner` IS server-enforced; but on the Playwright path, the request never reaches that hook — it crashes earlier.
-
-**Fix:** track down the null-deref origin in atscript-db's update path. The robust fix is to make controller dispatch resilient to whatever shape Playwright sends (probably a content-type or body-parser edge case). The cosmetic fix is to wrap the null-deref in a 400/422 envelope so it doesn't leak as 500.
-
-**Reproducer:**
+**Where it lives:** [`packages/db/src/strategies/field-mapping.ts:174`](https://github.com/[upstream]/atscript-db/blob/main/packages/db/src/strategies/field-mapping.ts#L174) — `FieldMappingStrategy.reconstructNullParent`. The walk-the-parent-path loop only guards `=== undefined`, not `=== null`:
 
 ```ts
-// Playwright APIRequestContext
-const res = await viewerCtx.patch("/api/db/_presets", {
-  data: { id: managersPresetId, data: { label: "Hacked" } },
-  headers: { "content-type": "application/json" },
-});
-// → 500 with null-deref message
+protected reconstructNullParent(
+  obj: Record<string, unknown>,
+  parentPath: string,
+  meta: TableMetadata,
+): void {
+  const parts = parentPath.split(".");
+  let current: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (current[parts[i]] === undefined) {     // ← misses null
+      return;
+    }
+    current = current[parts[i]] as Record<string, unknown>;  // ← can become null
+  }
+  const lastPart = parts[parts.length - 1];
+  const parentObj = current[lastPart];          // ← line 708 in bundled output: throws
+  ...
+}
 ```
 
-vs
+When an intermediate segment of `parentPath` is `null` (rather than `undefined`), `current` becomes `null` on the next loop iteration, and the property access on the line after the loop (`current[lastPart]`) throws.
 
-```bash
-curl -X PATCH http://localhost:3200/api/db/_presets \
-  -H 'Content-Type: application/json' \
-  -H "Cookie: demo.sid=<viewer-session>" \
-  -d '{"id":"<manager-preset-id>","data":{"label":"Hacked"}}'
-# → 403 identity_immutable
+**One-line fix:** change the guard to cover both:
+
+```ts
+if (current[parts[i]] == null) return; // covers null AND undefined
 ```
 
-**Atscript-ui workaround:** test 20.7 currently asserts a status range tolerant of both shapes (`[200, 403, 404, 500]` with body-shape diagnostics).
+**Why it surfaces on the e2e path but is hard to repro standalone:** The trigger condition is a flattened-parent map whose intermediate value is exactly `null` rather than `undefined` on a row read. In batch L, the test creates a preset, then PATCHes it as a different user — the `findOne` inside `processUpdateRow` triggers `reconstructFromRead` which iterates over `meta.flattenedParents` calling `reconstructNullParent`. Whichever preset/row state hits this is timing-dependent on prior tests in the suite. (Earlier reports of "curl returns 403, Playwright returns 500" likely reflect different test orderings, not different HTTP-client behavior.)
+
+**Reproducer:** any `findOne` (or any read passing through `reconstructFromRead`) on a row whose flattened-parent chain has a `null` intermediate value. The presets table's `data: @db.json` carrying nested optional structures is one trigger.
+
+**Atscript-ui workaround:** test 20.7 asserts a status range tolerant of both shapes (`[200, 403, 404, 500]`) with a comment documenting the wire-shape divergence pending this fix.
 
 ---
 
