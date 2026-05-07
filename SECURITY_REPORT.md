@@ -106,76 +106,97 @@ if (current[parts[i]] == null) return; // covers null AND undefined
 
 ---
 
-## 🟡 MEDIUM — Validator-error envelope is HTTP 500 instead of 400 on multiple paths
+## ✅ RESOLVED (3a + 3b) — Validator-error envelope was HTTP 500 due to demo-side wiring; not an atscript-db bug
 
-Three related symptoms with the same root cause: `ValidatorError` throws don't always reach the `validationErrorTransform` interceptor, so they bubble as generic 500.
+**Originally filed as one MEDIUM finding with three sub-cases (3a, 3b, 3c).** Re-investigation 2026-05-07 (after atscript-db agent's "doesn't reproduce" report) traced the actual cause of 3a + 3b to an atscript-ui demo-side wiring gap, not atscript-db. **3c is a separate, genuine atscript-db issue and remains open below.**
 
-### 3a. `@db.json` column inner-shape validation returns 500
+### Root cause (3a + 3b)
 
-**Discovered:** 2026-05-07, atscript-ui batch J e2e (Scenario 17.6 — `useAppPrefs` validator rejection).
+The atscript-ui demo applies `validatorPipe()` from `@atscript/moost-validator` globally:
 
-**Symptom:** POST a payload that fails moost-validator on a `@db.json` column's inner shape (e.g. `data: { appearance: 'invalid' }` against an `AppConfData`-typed JSON column whose union doesn't include that string). Server responds:
-
-```json
-{
-  "statusCode": 500,
-  "message": "data: Value does not match any of the allowed types: [object(0)], [object(1)], [object(2)]",
-  "error": "Internal Server Error"
-}
+```ts
+// packages/vue-demo/src/server/main.ts (before fix)
+app.applyGlobalInterceptors(auditInterceptor, latencyInterceptor);
+app.applyGlobalPipes(validatorPipe());
 ```
 
-The message is a real moost-validator throw — but it bubbles as 500, not the 400 that surface-level (top-level field) validation produces.
+`validatorPipe()` runs at `TPipePriority.VALIDATE` during arg-resolve. When it throws `ValidatorError`, the throw happens BEFORE the controller method body executes. The controller-level `@UseValidationErrorTransform()` (on `AsReadableController`) only catches errors thrown FROM controller method bodies — pipe-stage throws propagate past it and surface as generic HTTP 500.
 
-### 3b. Action `@InputForm` payload validation returns 500
+The fix is to ALSO register `moost-validator`'s own `validationErrorTransform()` interceptor globally (it runs at `CATCH_ERROR` priority and DOES catch pipe-stage throws):
 
-**Discovered:** 2026-05-07, atscript-ui batch L e2e (Scenarios 20.4 + 20.17 — InputForm + identifier strict-mode).
+```ts
+// after fix
+import { validatorPipe, validationErrorTransform } from "@atscript/moost-validator";
 
-**Symptom:** POST `/api/db/tables/users/actions/suspend` with an `input` payload that fails `SuspendUsersInput` schema validation:
-
-```
-POST { ids: [{username:"alice"}], input: { reason: 42 } }   # wrong type
-POST { ids: [{username:"alice"}], input: { reason: "x" } }  # below @expect.minLength
-POST { ids: [{username:"alice"}], input: { sneakyAdmin: true } }  # unknown field
+app.applyGlobalInterceptors(validationErrorTransform(), auditInterceptor, latencyInterceptor);
+app.applyGlobalPipes(validatorPipe());
 ```
 
-All three return:
+### Verification
 
-```json
-{
-  "statusCode": 500,
-  "message": "<field>: <ValidatorError message>",
-  "error": "Internal Server Error"
-}
-```
+After the demo-side fix (committed in atscript-ui), direct curl probes return HTTP 400 with structured `_body`:
 
-The `validationErrorTransform` interceptor (which maps `ValidatorError` → HTTP 400 with structured field-errors) lives on `AsReadableController` only. Action endpoints declared via `@Post("actions/<name>")` on subclasses inherit the class-level `@Inherit()` but the validator-pipe error appears to bubble past the catch interceptor.
+- 3a (`@db.json` inner-shape, `appConf.appearance: 'invalid'`) → 400 + `_body` array of nested validation errors ✓
+- 3b (`@InputForm` payload, action `Suspend` with `reason: 42`) → 400 + `_body: [{ path: 'reason', message: 'Expected string, got number' }]` ✓
 
-### 3c. Identifier strict-mode rejection returns 500
+**No atscript-db change needed for 3a + 3b.** The atscript-db agent's regression tests (`packages/moost-db/src/__test__/validation-error-envelope.spec.ts`) at HEAD correctly verify the envelope contract — they pass because they exercise the full Moost pipeline including the global `validationErrorTransform()`. The atscript-ui demo was missing that registration.
+
+---
+
+## 🟡 MEDIUM — Identifier strict-mode validator throw doesn't reach the global error interceptor (3c)
 
 **Discovered:** 2026-05-07, atscript-ui batch L e2e (Scenario 20.17 — identifier strict-mode).
 
-**Symptom:** POST action `ids` payloads that violate moost-db invariant #11:
+**Originally part of finding 3 (3c). After demo-side fix above, 3a + 3b return 400; 3c still returns 500.** This is a genuine atscript-db issue — the identifier-validation throw mechanism differs from `validatorPipe()`'s.
+
+**Symptom:** POST action `ids` payloads that violate moost-db invariant #11 (identifier shape must match exactly one PK or unique-index group):
 
 ```
-{ ids: { username: "alice", "; DROP TABLE users; --": 1 } }   # unknown field
-{ ids: { id: 5, username: "alice" } }                          # heterogeneous, no single match
-{ ids: "alice" }                                                # bare scalar
+{ ids: [{ username: "alice", "; DROP TABLE users; --": 1 }] }   # unknown field
+{ ids: [{ id: 5, username: "alice" }] }                          # heterogeneous, no single match
+{ ids: "alice" }                                                  # bare scalar
 ```
 
-All return 500 with the validator's throw message instead of a structured 400.
+All return:
 
-### Common cause
+```json
+{
+  "statusCode": 500,
+  "message": "[0]: Identifier fields must exactly match one of: [id], [username], [email]",
+  "error": "Internal Server Error"
+}
+```
 
-`validationErrorTransform` registration scope. Outer-shape validation (top-level field constraints) hits the right pipe and returns 400. Inner JSON-column validation (3a), `@InputForm` payload validation (3b), and `ids` envelope validation (3c) all throw raw and get caught by the generic 500 fallback.
+The message format with `[0]:` index prefix is a `ValidatorError` thrown from `validateMultiId` / `validateSingleId` in `packages/moost-db/src/actions/id-validation.ts`. It IS a `ValidatorError` (same class identity as 3a/3b — both bundles symlink to the same `@atscript/typescript@0.1.50` copy).
 
-**Where it lives:** `@atscript/moost-db` — the `validationErrorTransform` interceptor's registration site, OR the validator-pipe's throw type coercion. Either:
+**The throw site differs from `validatorPipe()`.** The identifier validation runs from inside a `cached(...)` wook-slot resolved via `defineWook` (`dbActionIdsSlot`/`dbActionIdSlot` consumed by `useDbActionIds`/`useDbActionId`):
 
-- The interceptor registration needs to wrap a wider scope (action endpoints + JSON-column inner validation)
-- The validator throw needs to be wrapped in a typed error class (`ValidationError`, not generic `Error`) earlier in the pipeline so the catch matches.
+```ts
+// packages/moost-db/src/actions/... (relevant excerpts)
+async function resolveValidatedId(ctx, validate) {
+  ...
+  validate(env.ids, table);  // throws ValidatorError on bad shape
+  return env.ids;
+}
+const dbActionIdsSlot = cached(async (ctx) => {
+  return await resolveValidatedId(ctx, validateMultiId);
+});
+const useDbActionIds = defineWook((ctx) => ({ load: () => ctx.get(dbActionIdsSlot) }));
+```
 
-**Fix-when:** convenient. The gate IS enforced in all three cases — only the response envelope is wrong. atscript-ui tests use status-range tolerance pending fix.
+When this throw propagates up through Moost's resolver chain, it appears to bypass the global interceptor's `error` callback that `validatorPipe()` throws DO reach. atscript-ui's e2e test 20.17 catches this divergence — 3a/3b return 400, 3c still returns 500.
 
-**Reproducer:** any moost-db controller exposing an action with `@InputForm`, OR any controller with a `@db.json` column. Send a payload that violates the inner schema.
+**Where it lives:** `@atscript/moost-db` — the `dbActionIdSlot`/`dbActionIdsSlot` resolution path, OR the `useDbActionId(s)` defineWook integration with Moost's pipe/interceptor stack.
+
+**Fix candidates:**
+
+- Wrap the slot's resolution in a try/catch that rethrows as an `HttpError(400)` at the throw site (cosmetic, but loses the structured `_body` shape).
+- Move identifier validation INTO a Moost pipe (`definePipeFn(...)`) so it goes through the same machinery as `validatorPipe()` and reaches the global error interceptor.
+- Investigate why `defineWook`-based resolver throws don't surface to global interceptors when `validatorPipe()` throws do.
+
+**Fix-when:** convenient. The gate IS enforced (returns non-2xx, blocks the action). Only the envelope is wrong. atscript-ui's 20.17 test asserts a status range `[400, 422, 500]` pending this fix.
+
+**Reproducer:** any moost-db controller with an action declared via `@DbActionIDs` / `@DbActionID`. POST an envelope where `ids` violates the strict-shape contract. Compare against a `validatorPipe`-stage throw on the same controller (e.g. `@InputForm` payload that's wrong type) — that one returns 400 correctly.
 
 ---
 
