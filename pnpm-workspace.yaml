@@ -3,17 +3,17 @@ packages:
   - docs
 
 catalog:
-  "@atscript/core": ^0.1.50
-  "@atscript/typescript": ^0.1.50
+  "@atscript/core": ^0.1.51
+  "@atscript/typescript": ^0.1.51
   "@types/node": ^24
-  "@moostjs/event-http": ^0.6.8
-  "@wooksjs/event-core": ^0.7.10
-  "@wooksjs/event-http": ^0.7.10
-  "@wooksjs/http-body": ^0.7.10
-  moost: ^0.6.8
+  "@moostjs/event-http": ^0.6.9
+  "@wooksjs/event-core": ^0.7.11
+  "@wooksjs/event-http": ^0.7.11
+  "@wooksjs/http-body": ^0.7.11
+  moost: ^0.6.9
   "@uniqu/core": ^0.1.6
   "@uniqu/url": ^0.1.6
-  unplugin-atscript: ^0.1.50
+  unplugin-atscript: ^0.1.51
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest
