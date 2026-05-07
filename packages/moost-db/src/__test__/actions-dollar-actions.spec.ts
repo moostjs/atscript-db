@@ -48,6 +48,10 @@ function makeMockTable(rows: Record<string, unknown>[]): ReturnType<typeof Objec
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue({ validate: vi.fn().mockReturnValue(true), errors: [] }),
+    resolveIdFilter: vi.fn().mockImplementation((id: unknown) => {
+      if (id === null || typeof id !== "object") return { id };
+      return { ...(id as Record<string, unknown>) };
+    }),
     findMany: vi.fn().mockResolvedValue(rows),
     findOne: vi.fn().mockResolvedValue(rows[0]),
     findById: vi.fn().mockResolvedValue(rows[0]),
@@ -341,7 +345,7 @@ describe("$actions — controller pre-widening (single read)", () => {
     expect(result[0].$actions).toEqual(["approve"]);
   });
 
-  it("findById on /one issues a single call with widened select", async () => {
+  it("findOne on /one issues a single call with widened select", async () => {
     const rows = [{ id: "1", name: "Alpha", state: "pending" }];
     const table = makeMockTable(rows);
     const disabled = (r: { state: string }[]) => r.map((x) => x.state !== "pending");
@@ -361,7 +365,8 @@ describe("$actions — controller pre-widening (single read)", () => {
       string,
       unknown
     >;
-    expect(table.findById).toHaveBeenCalledTimes(1);
+    expect(table.findOne).toHaveBeenCalledTimes(1);
+    expect(table.findById).not.toHaveBeenCalled();
     expect(result.id).toBe("1");
     expect(result.$actions).toEqual(["approve"]);
     expect(result).not.toHaveProperty("state");

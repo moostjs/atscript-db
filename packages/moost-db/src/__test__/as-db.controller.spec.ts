@@ -68,6 +68,10 @@ function createMockTable(overrides: Record<string, any> = {}) {
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue(mockValidator),
+    resolveIdFilter: vi.fn().mockImplementation((id: unknown) => {
+      if (id === null || typeof id !== "object") return { id };
+      return { ...(id as Record<string, unknown>) };
+    }),
     findMany: vi.fn().mockResolvedValue([{ id: "1", name: "Alice" }]),
     findOne: vi.fn().mockResolvedValue({ id: "1", name: "Alice" }),
     findById: vi.fn().mockResolvedValue({ id: "1", name: "Alice" }),
@@ -450,15 +454,27 @@ describe("AsDbController", () => {
   // ── GET /one/:id ──────────────────────────────────────────────────
 
   describe("getOne", () => {
-    it("should call table.findById with id", async () => {
+    it("should resolve the id filter and call findOne with it", async () => {
       const result = await controller.getOne("123", "/one/123?");
-      expect(table.findById).toHaveBeenCalledWith("123", expect.any(Object));
+      expect(table.resolveIdFilter).toHaveBeenCalledWith("123");
+      expect(table.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ filter: { id: "123" } }),
+      );
+      expect(table.findById).not.toHaveBeenCalled();
       expect(result).toEqual({ id: "1", name: "Alice" });
     });
 
     it("should return 404 when not found", async () => {
-      table.findById.mockResolvedValue(null);
+      table.findOne.mockResolvedValue(null);
       const result = await controller.getOne("999", "/one/999?");
+      expect(result).toBeInstanceOf(HttpError);
+      expect((result as HttpError).body.statusCode).toBe(404);
+    });
+
+    it("should return 404 when id cannot be resolved (resolveIdFilter → null)", async () => {
+      table.resolveIdFilter.mockReturnValue(null);
+      const result = await controller.getOne("999", "/one/999?");
+      expect(table.findOne).not.toHaveBeenCalled();
       expect(result).toBeInstanceOf(HttpError);
       expect((result as HttpError).body.statusCode).toBe(404);
     });
@@ -473,7 +489,7 @@ describe("AsDbController", () => {
       const ctx = createController({ preferredId: ["slug"] });
       vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue(["name"]);
       await ctx.controller.getOne("alpha", "/one/alpha?$select=name");
-      const call = ctx.table.findById.mock.calls[0][1];
+      const call = ctx.table.findOne.mock.calls[0][0];
       expect(call.controls.$select).toEqual(["name", "slug"]);
     });
   });
@@ -481,20 +497,21 @@ describe("AsDbController", () => {
   // ── GET /one (composite key) ──────────────────────────────────────
 
   describe("getOneComposite", () => {
-    it("should call findById with composite ID object from query", async () => {
+    it("should resolve composite id filter and call findOne", async () => {
       const ctx = createController({ primaryKeys: ["taskId", "tagId"] });
       const result = await ctx.controller.getOneComposite(
         { taskId: "5", tagId: "1" },
         "/one?taskId=5&tagId=1",
       );
-      expect(ctx.table.findById).toHaveBeenCalledWith(
-        { taskId: "5", tagId: "1" },
-        expect.any(Object),
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ taskId: "5", tagId: "1" });
+      expect(ctx.table.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ filter: { taskId: "5", tagId: "1" } }),
       );
+      expect(ctx.table.findById).not.toHaveBeenCalled();
       expect(result).toEqual({ id: "1", name: "Alice" });
     });
 
-    it("should call findById via compound unique index", async () => {
+    it("should resolve compound unique index and call findOne", async () => {
       const ctx = createController({
         indexes: new Map([
           [
@@ -515,10 +532,11 @@ describe("AsDbController", () => {
         { email: "alice", tenantId: "T1" },
         "/one?email=alice&tenantId=T1",
       );
-      expect(ctx.table.findById).toHaveBeenCalledWith(
-        { email: "alice", tenantId: "T1" },
-        expect.any(Object),
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ email: "alice", tenantId: "T1" });
+      expect(ctx.table.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ filter: { email: "alice", tenantId: "T1" } }),
       );
+      expect(ctx.table.findById).not.toHaveBeenCalled();
       expect(result).toEqual({ id: "1", name: "Alice" });
     });
 
@@ -554,14 +572,17 @@ describe("AsDbController", () => {
         { username: "alice" },
         "/one?username=alice",
       );
-      expect(ctx.table.findById).toHaveBeenCalledWith({ username: "alice" }, expect.any(Object));
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ username: "alice" });
+      expect(ctx.table.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ filter: { username: "alice" } }),
+      );
       expect(result).toEqual({ id: "1", name: "Alice" });
     });
 
     it("should return 404 when not found", async () => {
       const ctx = createController({
         primaryKeys: ["taskId", "tagId"],
-        findById: vi.fn().mockResolvedValue(null),
+        findOne: vi.fn().mockResolvedValue(null),
       });
       const result = await ctx.controller.getOneComposite(
         { taskId: "5", tagId: "99" },
@@ -581,7 +602,7 @@ describe("AsDbController", () => {
         { taskId: "5", tagId: "1" },
         "/one?taskId=5&tagId=1&$select=name",
       );
-      const call = ctx.table.findById.mock.calls[0][1];
+      const call = ctx.table.findOne.mock.calls[0][0];
       expect(call.controls.$select).toEqual(["name", "slug"]);
     });
 
@@ -604,7 +625,10 @@ describe("AsDbController", () => {
         { sku: "SKU-00006" },
         "/one?sku=SKU-00006",
       );
-      expect(ctx.table.findById).toHaveBeenCalledWith({ sku: "SKU-00006" }, expect.any(Object));
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ sku: "SKU-00006" });
+      expect(ctx.table.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ filter: { sku: "SKU-00006" } }),
+      );
       expect(result).toEqual({ id: "1", name: "Alice" });
     });
   });

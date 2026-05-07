@@ -140,6 +140,16 @@ export class AsDbReadableController<
   }
 
   /**
+   * Transform filter for the `/one/:id` and `/one?...` endpoints. Defaults to
+   * {@link transformFilter} so any row-level read overlay applied to `/query` /
+   * `/pages` also gates id-based reads (existence is not leaked through
+   * `findById`). Override to scope `/one` differently.
+   */
+  protected transformOne(filter: FilterExpr): FilterExpr | Promise<FilterExpr> {
+    return this.transformFilter(filter);
+  }
+
+  /**
    * Transform projection before querying.
    * May return a Promise for async lookups.
    */
@@ -666,6 +676,8 @@ export class AsDbReadableController<
 
   /**
    * **GET /one/:id** — retrieves a single record by ID or unique property.
+   * The id-filter is AND-combined with {@link transformOne} so row-level
+   * read overlays gate `/one` symmetrically with `/query` / `/pages`.
    */
   @Get("one/:id")
   async getOne(@Param("id") id: string, @Url() url: string): Promise<DataType | HttpError> {
@@ -690,7 +702,8 @@ export class AsDbReadableController<
 
   /**
    * **GET /one?field1=val1&field2=val2** — retrieves a single record by composite key
-   * (composite primary key or compound unique index).
+   * (composite primary key or compound unique index). Same `transformOne`
+   * gating as {@link getOne}.
    */
   @Get("one")
   async getOneComposite(
@@ -721,7 +734,14 @@ export class AsDbReadableController<
     const initialSelect = prep?.widenedSelect ?? select;
     const controls = { ...parsedControls, $select: initialSelect };
 
-    const row = (await this.readable.findById(id as any, { controls } as any)) as DataType | null;
+    const idFilter = this.readable.resolveIdFilter(id);
+    let row: DataType | null = null;
+    if (idFilter) {
+      const overlay = await this.transformOne({} as FilterExpr);
+      const hasOverlay = overlay && Object.keys(overlay).length > 0;
+      const filter = hasOverlay ? ({ $and: [idFilter, overlay] } as FilterExpr) : idFilter;
+      row = (await this.readable.findOne({ filter, controls } as any)) as DataType | null;
+    }
 
     const item = await this.returnOne(Promise.resolve(row));
     if (item instanceof HttpError) return item;

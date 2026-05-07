@@ -795,6 +795,16 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * Resolve an id value (scalar or object) into a {@link FilterExpr} using the
+   * same identification resolution as {@link findById}. Public so callers can
+   * AND-combine the id-filter with a row-level read overlay before issuing
+   * `findOne` (avoiding the existence leak that `findById` would cause).
+   */
+  public resolveIdFilter(id: unknown): FilterExpr | null {
+    return this._resolveIdFilter(id);
+  }
+
+  /**
    * Resolve an id value into a filter expression.
    *
    * When `preferredId` differs from the PK, scalar ids resolve only against
