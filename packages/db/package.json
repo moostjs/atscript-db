@@ -37,19 +37,23 @@
     },
     "./plugin": {
       "types": "./dist/plugin.d.mts",
-      "import": "./dist/plugin.mjs"
+      "import": "./dist/plugin.mjs",
+      "require": "./dist/plugin.cjs"
     },
     "./rel": {
       "types": "./dist/rel.d.mts",
-      "import": "./dist/rel.mjs"
+      "import": "./dist/rel.mjs",
+      "require": "./dist/rel.cjs"
     },
     "./agg": {
       "types": "./dist/agg.d.mts",
-      "import": "./dist/agg.mjs"
+      "import": "./dist/agg.mjs",
+      "require": "./dist/agg.cjs"
     },
     "./shared": {
       "types": "./dist/shared.d.mts",
-      "import": "./dist/shared.mjs"
+      "import": "./dist/shared.mjs",
+      "require": "./dist/shared.cjs"
     },
     "./ops": {
       "types": "./dist/ops.d.mts",
