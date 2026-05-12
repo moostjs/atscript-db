@@ -63,7 +63,7 @@ interface Document {
     @meta.id @db.default.uuid id: string
     title: string
 
-    @db.search.vector 384, 'cosine'
+    @db.search.vector 1536, 'cosine'
     @db.search.vector.threshold 0.7
     embedding: number[]
 
@@ -83,7 +83,7 @@ const db = new DbSpace(
 await syncSchema(db, [Document]);
 
 const docs = db.getTable(Document);
-await docs.insertOne({ title: "ship it", embedding: [0.1, 0.2 /* … 384 dims */], tenant: "acme" });
+await docs.insertOne({ title: "ship it", embedding: [0.1, 0.2 /* … 1536 dims */], tenant: "acme" });
 
 const hits = await docs.vectorSearch(queryVec, {
   filter: { tenant: "acme" }, // partition push-down inside vec0
@@ -96,7 +96,7 @@ const hits = await docs.vectorSearch(queryVec, {
 - Vector field is stored in the main table as `BLOB` (`Float32Array.buffer`). `formatValue` round-trips between JS `number[]` and the BLOB transparently.
 - Each `@db.search.vector` field gets a vec0 shadow virtual table named `<table>__vec__<indexName>` (where `indexName` defaults to the field name).
 - Three AFTER triggers on the main table keep the shadow in lockstep: `__ai` (insert), `__au` (update — delete-then-insert; vec0 has no upsert), `__ad` (delete). Sync is transactional with the parent write.
-- Dimensions must match one of the validator's allowed values (`512`, `768`, `1024`, `1536`, `3072`, `4096`).
+- Dimensions must match one of the validator's allowed values: `256`, `384`, `512`, `768`, `1024`, `1536`, `2048`, `3072`, `4096`, `6144`, `8192`, `16384`. Covers all common embedding models including 384-dim sentence-transformers (`all-MiniLM-L6-v2`, `gte-small`, `bge-small-en`).
 - `similarity` maps to vec0 `distance_metric`: `cosine → cosine`, `euclidean → l2`, `dotProduct → cosine` (sqlite-vec has no native dot product — normalize vectors and use cosine).
 
 ### Search semantics

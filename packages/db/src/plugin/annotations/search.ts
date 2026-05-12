@@ -26,7 +26,20 @@ export const dbSearchAnnotations: TAnnotationsTree = {
             type: "number",
             description:
               "The **number of dimensions in the vector** (must match your embedding model output).",
-            values: ["512", "768", "1024", "1536", "3072", "4096"],
+            values: [
+              "256",
+              "384",
+              "512",
+              "768",
+              "1024",
+              "1536",
+              "2048",
+              "3072",
+              "4096",
+              "6144",
+              "8192",
+              "16384",
+            ],
           },
           {
             optional: true,
