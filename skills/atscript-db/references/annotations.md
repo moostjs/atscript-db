@@ -11,7 +11,7 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 | `@db.table.preferredId.uniqueIndex` | Interface | `name?: string`                     | Pick a `@db.index.unique` group as the row's preferred identifier (UI/wire addressing). Defaults to PK when absent. Optional `name` matches the unique-index name; omitted → first declared. View interfaces rejected. See [actions.md § Preferred row identifier](actions.md#preferred-row-identifier).                                              |
 | `@db.schema`                        | Interface | `name: string`                      | Database schema/namespace.                                                                                                                                                                                                                                                                                                                            |
 | `@db.depth.limit`                   | Interface | `depth: number`                     | Security guard on nested writes (insert / replace / patch). Absent or `0` → server rejects nested payloads (HTTP 400). Unrelated to `/meta` shape.                                                                                                                                                                                                    |
-| `@db.column`                        | Field     | `name: string`                      | Physical column name override. **Has perf cost — activates per-row key remapping for the whole table.**                                                                                                                                                                                                                                               |
+| `@db.column`                        | Field     | `name: string`                      | Physical column name override. **Has perf cost — activates per-row key remapping for the whole table.** Do not use without a hard reason — see [§ `@db.column` — when to use it](#dbcolumn--when-to-use-it).                                                                                                                                          |
 | `@db.column.renamed`                | Field     | `oldName: string`                   | Previous column name — schema sync renames.                                                                                                                                                                                                                                                                                                           |
 | `@db.column.collate`                | Field     | `'binary' \| 'nocase' \| 'unicode'` | Portable collation.                                                                                                                                                                                                                                                                                                                                   |
 | `@db.column.precision`              | Field     | `precision, scale`                  | Decimal precision (e.g. `DECIMAL(10,2)`).                                                                                                                                                                                                                                                                                                             |
@@ -26,6 +26,32 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 | `@db.http.path`                     | Interface | `path: string`                      | Hint for REST route. Overwritten at runtime with the controller's computed prefix (useful for FK value-help URLs).                                                                                                                                                                                                                                    |
 | `@db.sync.method`                   | Interface | `'drop' \| 'recreate'`              | Structural-change strategy: `drop` loses data, `recreate` preserves via copy.                                                                                                                                                                                                                                                                         |
 | `@db.patch.strategy`                | Field     | `'replace' \| 'merge'`              | Nested-object patch semantics. Default = replace = strict: required children must be supplied, optional children the user omits are null-filled at storage. `'merge'` is a local one-level opt-in (does not propagate; deeper objects revert to default unless they too carry the annotation). `@db.json` is always strict. See [patch.md](patch.md). |
+
+## `@db.column` — when to use it
+
+`@db.column` rebinds a `.as` field to a different physical column name. **It is not free.**
+A single use anywhere in the interface flips that whole table onto the per-row key-translation
+path — every read, write, filter, sort, projection, and patch op pays a `Map`-driven
+rename pass per row, instead of handing the row to the driver verbatim. `@db.json` and
+nested-object fields take the same path; mixing them with `@db.column` does not add a second
+penalty, but the first one is enough to matter on hot reads.
+
+**Default: do not use it.** Name your `.as` props the same as the physical column you want
+and the adapter will skip the translation layer entirely.
+
+Legitimate reasons (anything else is overhead for nothing):
+
+1. The desired column name is a SQL reserved word that the dialect can't parameterize cleanly (`order`, `from`, `select`, `group`, `case`, …).
+2. You're integrating with an existing schema you don't own (legacy DB, third-party tables, shared cross-language model).
+3. Strict team convention enforces snake_case at the DB layer AND your TypeScript style enforces camelCase in apps. Pick this once and apply it whole-codebase — don't sprinkle remaps on individual fields.
+
+Not legitimate (these come up often, all of them mean "remove the annotation"):
+
+- "I think `userId` reads better than `user_id` in TypeScript" — pick one, commit to it on both sides.
+- "I want to keep my `.as` clean of snake_case" — same problem; you've just spread the cost across every read instead.
+- "I'm not sure what the column should be called yet" — pick whatever the field is named; rename later via `@db.column.renamed` (which is a one-shot migration directive, not a runtime remap).
+
+`@db.table 'physical_name'` has no per-row cost but follows the same spirit — only override when the desired table name is reserved (`User` is fine; `Order` collides with `ORDER BY` on some dialects) or you're adopting an existing table.
 
 ## Defaults
 
