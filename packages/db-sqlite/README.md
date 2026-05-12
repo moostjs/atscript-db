@@ -20,6 +20,9 @@ SQLite adapter for `@atscript/db` with a swappable driver architecture. Ships wi
 
 ```bash
 pnpm add @atscript/db-sqlite better-sqlite3
+
+# Optional — enables @db.search.vector via the sqlite-vec extension:
+pnpm add sqlite-vec
 ```
 
 ## Quick Start
@@ -37,10 +40,11 @@ await users.insertOne({ name: "John", email: "john@example.com" });
 ## Features
 
 - Swappable driver via `TSqliteDriver` interface (5 methods)
-- Built-in `BetterSqlite3Driver` for immediate use
+- Built-in `BetterSqlite3Driver` for immediate use (with optional `{ vector: true }` and `loadExtensions` hooks)
 - MongoDB-style filter translation to parameterized SQL (no injection risk)
 - Automatic schema management from `@db.*` annotations
 - FTS5 full-text search support
+- Vector similarity search via [`sqlite-vec`](https://github.com/asg017/sqlite-vec) — `vec0` shadow tables with AI/AU/AD sync triggers, KNN with partition push-down, threshold control
 - Embedded object flattening and `@db.json` storage
 - Schema sync via `@atscript/db/sync`
 

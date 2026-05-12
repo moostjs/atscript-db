@@ -1,7 +1,9 @@
+import type { TMetadataMap } from "@atscript/typescript/utils";
 import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import type {
   TDbDeleteResult,
+  TDbFieldMeta,
   TDbIndex,
   TDbInsertManyResult,
   TDbInsertResult,
@@ -10,6 +12,7 @@ import type {
   TColumnDiff,
   TSyncColumnResult,
   TSearchIndexInfo,
+  TValueFormatterPair,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr } from "@atscript/db";
 
@@ -26,7 +29,9 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   esc,
+  similarityToVecMetric,
   sqliteTypeFromDesignType,
+  thresholdToVecDistance,
 } from "./sql-builder";
 import type { TSqliteDriver } from "./types";
 
@@ -50,9 +55,121 @@ export class SqliteAdapter extends BaseDbAdapter {
     return true;
   }
 
+  // ── Vector search state ─────────────────────────────────────────────────
+  /** Whether the SQLite connection has the sqlite-vec extension loaded. */
+  private _supportsVector: boolean | undefined;
+  /** Vector fields: field path → { dimensions, similarity, indexName }. */
+  private _vectorFields = new Map<
+    string,
+    { dimensions: number; similarity: string; indexName: string }
+  >();
+  /** Default similarity thresholds per vector index (from @db.search.vector.threshold). */
+  private _vectorThresholds = new Map<string, number>();
+  /** Partition filter fields per vector index (from @db.search.filter). Field paths. */
+  private _vectorPartitionFields = new Map<string, string[]>();
+
   constructor(protected readonly driver: TSqliteDriver) {
     super();
     this.driver.exec("PRAGMA foreign_keys = ON");
+  }
+
+  override onFieldScanned(
+    field: string,
+    _type: unknown,
+    metadata: TMetadataMap<AtscriptMetadata>,
+  ): void {
+    const vectorMeta = metadata.get("db.search.vector") as
+      | { dimensions: number; similarity?: string; indexName?: string }
+      | undefined;
+    if (vectorMeta) {
+      const indexName = vectorMeta.indexName || field;
+      this._vectorFields.set(field, {
+        dimensions: vectorMeta.dimensions,
+        similarity: vectorMeta.similarity || "cosine",
+        indexName,
+      });
+      const threshold = metadata.get("db.search.vector.threshold") as number | undefined;
+      if (threshold !== undefined) {
+        this._vectorThresholds.set(indexName, threshold);
+      }
+    }
+    // @db.search.filter (generic) — each entry is a plain string (the index name)
+    for (const indexName of metadata.get("db.search.filter") || []) {
+      const list = this._vectorPartitionFields.get(indexName);
+      if (list) {
+        list.push(field);
+      } else {
+        this._vectorPartitionFields.set(indexName, [field]);
+      }
+    }
+  }
+
+  override formatValue(field: TDbFieldMeta): TValueFormatterPair | undefined {
+    if (!this._vectorFields.has(field.path)) {
+      return undefined;
+    }
+    if (this._detectVectorSupport()) {
+      return {
+        toStorage: (value: unknown) =>
+          Array.isArray(value) ? Buffer.from(new Float32Array(value as number[]).buffer) : value,
+        fromStorage: (value: unknown) => {
+          if (value instanceof Buffer || value instanceof Uint8Array) {
+            const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+            const arr = new Float32Array(
+              buf.buffer,
+              buf.byteOffset,
+              Math.floor(buf.byteLength / 4),
+            );
+            return Array.from(arr);
+          }
+          return value;
+        },
+      };
+    }
+    return {
+      toStorage: (value: unknown) => (Array.isArray(value) ? JSON.stringify(value) : value),
+      fromStorage: (value: unknown) => {
+        if (typeof value === "string") {
+          try {
+            return JSON.parse(value);
+          } catch {
+            return value;
+          }
+        }
+        return value;
+      },
+    };
+  }
+
+  override isVectorSearchable(): boolean {
+    if (this._vectorFields.size === 0) {
+      return false;
+    }
+    return this._detectVectorSupport();
+  }
+
+  private _detectVectorSupport(): boolean {
+    if (this._supportsVector !== undefined) {
+      return this._supportsVector;
+    }
+    // Prefer the driver's authoritative capability flag; fall back to a probe for drivers
+    // that don't expose `hasVectorExt`.
+    if (this.driver.hasVectorExt !== undefined) {
+      this._supportsVector = this.driver.hasVectorExt;
+    } else {
+      try {
+        this.driver.get("SELECT vec_version()");
+        this._supportsVector = true;
+      } catch {
+        this._supportsVector = false;
+      }
+    }
+    if (!this._supportsVector && this._vectorFields.size > 0) {
+      this._log(
+        "[atscript-db-sqlite] sqlite-vec extension not available — vector fields will be stored as JSON TEXT (no similarity search).",
+      );
+    }
+    return this._supportsVector;
   }
 
   // ── Transaction primitives ────────────────────────────────────────────────
@@ -263,6 +380,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       this.resolveTableName(),
       this._table.fieldDescriptors,
       this._table.foreignKeys,
+      { typeMapper: (field) => this.typeMapper(field) },
     );
     this._log(sql);
     this.driver.exec(sql);
@@ -351,8 +469,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
     const tempName = `${tableName}__tmp_${Date.now()}`;
 
-    // Drop FTS tables before rebuild — syncIndexes() will recreate them
+    // Drop FTS / vec shadow tables before rebuild — syncIndexes() will recreate them
     this._dropAllFtsTables(tableName);
+    this._dropAllVecTables(tableName);
 
     // Disable FK checks during recreation — referenced tables may be mid-sync
     this.driver.exec("PRAGMA foreign_keys = OFF");
@@ -363,6 +482,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         tempName,
         this._table.fieldDescriptors,
         this._table.foreignKeys,
+        { typeMapper: (field) => this.typeMapper(field) },
       );
       this._log(createSql);
       this.driver.exec(createSql);
@@ -411,6 +531,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   async dropTable(): Promise<void> {
     const tableName = this.resolveTableName();
     this._dropAllFtsTables(tableName);
+    this._dropAllVecTables(tableName);
     const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
     this._log(ddl);
     this.driver.exec(ddl);
@@ -429,6 +550,7 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   async dropTableByName(tableName: string): Promise<void> {
     this._dropAllFtsTables(tableName);
+    this._dropAllVecTables(tableName);
     const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
     this._log(ddl);
     this.driver.exec(ddl);
@@ -447,7 +569,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     this.driver.exec(ddl);
   }
 
-  typeMapper(field: { designType: string; isPrimaryKey: boolean }): string {
+  typeMapper(field: TDbFieldMeta): string {
+    if (this._vectorFields.has(field.path)) {
+      return this._detectVectorSupport() ? "BLOB" : "TEXT";
+    }
     // Numeric primary keys must be INTEGER (not REAL) for SQLite rowid alias
     if (field.isPrimaryKey && (field.designType === "number" || field.designType === "integer")) {
       return "INTEGER";
@@ -500,16 +625,29 @@ export class SqliteAdapter extends BaseDbAdapter {
 
     // Sync FTS5 virtual tables for fulltext indexes
     this._syncFtsIndexes(tableName);
+
+    this._syncVecIndexes(tableName);
   }
 
   // ── FTS5 Full-Text Search ─────────────────────────────────────────────────
 
   override getSearchIndexes(): TSearchIndexInfo[] {
-    return this._getFulltextIndexes().map((idx) => ({
-      name: idx.name,
-      description: `FTS5 index (${idx.fields.map((f) => f.name).join(", ")})`,
-      type: "text" as const,
-    }));
+    const indexes: TSearchIndexInfo[] = [];
+    for (const idx of this._getFulltextIndexes()) {
+      indexes.push({
+        name: idx.name,
+        description: `FTS5 index (${idx.fields.map((f) => f.name).join(", ")})`,
+        type: "text",
+      });
+    }
+    for (const [field, vec] of this._vectorFields) {
+      indexes.push({
+        name: vec.indexName,
+        description: `vec0 index on ${field} (${vec.dimensions}, ${vec.similarity})`,
+        type: "vector",
+      });
+    }
+    return indexes;
   }
 
   override async search(
@@ -728,6 +866,353 @@ export class SqliteAdapter extends BaseDbAdapter {
       .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"));
     for (const { name } of ftsTables) {
       this._dropFtsTable(name);
+    }
+  }
+
+  // ── Vector search ─────────────────────────────────────────────────────────
+
+  // vec0 only filters natively on partition keys; residual filters and the
+  // threshold are applied after the KNN window, so over-fetch candidates to
+  // refill page slots that post-filtering drops. Approximate count carries
+  // the same caveat (mirrors pgvector).
+  private static readonly _RESIDUAL_OVERFETCH = 4;
+
+  override async vectorSearch(
+    vector: number[],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    if (!this._detectVectorSupport()) {
+      throw new Error(
+        "Vector search requires the sqlite-vec extension. Construct BetterSqlite3Driver with { vector: true }.",
+      );
+    }
+    const base = this._buildVectorSearchBase(vector, query, indexName);
+    return this._runVectorSearch(base);
+  }
+
+  override async vectorSearchWithCount(
+    vector: number[],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    if (!this._detectVectorSupport()) {
+      throw new Error(
+        "Vector search requires the sqlite-vec extension. Construct BetterSqlite3Driver with { vector: true }.",
+      );
+    }
+    const base = this._buildVectorSearchBase(vector, query, indexName);
+    const data = this._runVectorSearch(base);
+    const countSql = `SELECT COUNT(*) AS cnt ${base.fromWhere}`;
+    this._log(countSql, base.params);
+    const row = this.driver.get<{ cnt: number }>(countSql, base.params);
+    return { data, count: row?.cnt ?? 0 };
+  }
+
+  private _runVectorSearch(base: {
+    fromWhere: string;
+    params: unknown[];
+    limit: number;
+    skip: number;
+  }): Array<Record<string, unknown>> {
+    let sql = `SELECT * ${base.fromWhere} ORDER BY _distance ASC LIMIT ?`;
+    const params = [...base.params, base.limit];
+    if (base.skip > 0) {
+      sql += ` OFFSET ?`;
+      params.push(base.skip);
+    }
+    this._log(sql, params);
+    return this.driver.all(sql, params);
+  }
+
+  /** Resolves a vector index (by name or first available) and its partition fields. */
+  private _resolveVectorIndex(indexName?: string): {
+    field: string;
+    vec: { dimensions: number; similarity: string; indexName: string };
+    partitionPhysicalNames: Set<string>;
+  } {
+    let entry: [string, { dimensions: number; similarity: string; indexName: string }] | undefined;
+    if (indexName) {
+      for (const [f, v] of this._vectorFields) {
+        if (v.indexName === indexName) {
+          entry = [f, v];
+          break;
+        }
+      }
+      if (!entry) {
+        throw new Error(`Vector index "${indexName}" not found`);
+      }
+    } else {
+      const first = this._vectorFields.entries().next();
+      if (first.done) {
+        throw new Error("No vector fields defined");
+      }
+      entry = first.value;
+    }
+    const [field, vec] = entry;
+    const partitionPhysicalNames = new Set<string>();
+    for (const logicalPath of this._vectorPartitionFields.get(vec.indexName) ?? []) {
+      const descriptor = this._table.fieldDescriptors.find((f) => f.path === logicalPath);
+      partitionPhysicalNames.add(descriptor?.physicalName ?? logicalPath);
+    }
+    return { field, vec, partitionPhysicalNames };
+  }
+
+  /** Query-time `$threshold` overrides the schema-level threshold (mirrors postgres precedence). */
+  private _resolveVectorThreshold(
+    controls: Record<string, unknown>,
+    indexName: string,
+  ): number | undefined {
+    const queryThreshold = controls.$threshold as number | undefined;
+    if (queryThreshold !== undefined) {
+      return queryThreshold;
+    }
+    return this._vectorThresholds.get(indexName);
+  }
+
+  /**
+   * Splits the (already physical-name) filter into partition equality push-down
+   * vs. residual filter. Only top-level primitive equality is pushed down.
+   */
+  private _splitVectorFilter(
+    filter: FilterExpr,
+    partitionPhysicalNames: Set<string>,
+  ): { partition: Array<{ name: string; value: unknown }>; residual: FilterExpr } {
+    const partition: Array<{ name: string; value: unknown }> = [];
+    const residual: Record<string, unknown> = {};
+    if (!filter || typeof filter !== "object") {
+      return { partition, residual: filter };
+    }
+    for (const [key, value] of Object.entries(filter as Record<string, unknown>)) {
+      const isPushable =
+        partitionPhysicalNames.has(key) &&
+        value !== null &&
+        (typeof value === "string" ||
+          typeof value === "number" ||
+          typeof value === "boolean" ||
+          typeof value === "bigint");
+      if (isPushable) {
+        partition.push({ name: key, value });
+      } else {
+        residual[key] = value;
+      }
+    }
+    return { partition, residual: residual as FilterExpr };
+  }
+
+  /**
+   * Builds the shared FROM+WHERE fragment for vec0 KNN queries (without ORDER/LIMIT).
+   * Both `vectorSearch` and `vectorSearchWithCount` reuse this — the former appends
+   * ORDER BY + LIMIT/OFFSET, the latter wraps it in a COUNT(*).
+   */
+  private _buildVectorSearchBase(
+    vector: number[],
+    query: DbQuery,
+    indexName?: string,
+  ): { fromWhere: string; params: unknown[]; limit: number; skip: number } {
+    const { vec, partitionPhysicalNames } = this._resolveVectorIndex(indexName);
+    if (vector.length !== vec.dimensions) {
+      throw new Error(
+        `Vector dimension mismatch: index "${vec.indexName}" expects ${vec.dimensions}, got ${vector.length}`,
+      );
+    }
+    const vecBuf = Buffer.from(new Float32Array(vector).buffer);
+
+    const controls = (query.controls || {}) as Record<string, unknown>;
+    const limit = (controls.$limit as number | undefined) ?? 20;
+    const skip = (controls.$skip as number | undefined) ?? 0;
+    const threshold = this._resolveVectorThreshold(controls, vec.indexName);
+
+    const { partition, residual } = this._splitVectorFilter(query.filter, partitionPhysicalNames);
+    const residualWhere = buildPrefixedWhere("_vs", residual);
+    const hasResidual = residualWhere.sql !== "1=1";
+    const hasThreshold = threshold !== undefined;
+
+    const k =
+      (limit + skip) * (hasResidual || hasThreshold ? SqliteAdapter._RESIDUAL_OVERFETCH : 1);
+
+    const tableName = this.resolveTableName();
+    const vecTable = this._vecTableName(vec.indexName);
+
+    const innerWhereParts = ["v.embedding MATCH ?", "v.k = ?"];
+    const params: unknown[] = [vecBuf, k];
+    for (const p of partition) {
+      innerWhereParts.push(`v."${esc(p.name)}" = ?`);
+      params.push(p.value);
+    }
+
+    const inner = `SELECT t.*, v.distance AS _distance FROM "${esc(vecTable)}" v JOIN "${esc(tableName)}" t ON t.rowid = v.rowid WHERE ${innerWhereParts.join(" AND ")}`;
+    let fromWhere = `FROM (${inner}) _vs`;
+
+    const outerWhereParts: string[] = [];
+    if (hasThreshold) {
+      outerWhereParts.push(`_distance <= ?`);
+      params.push(thresholdToVecDistance(threshold, vec.similarity));
+    }
+    if (hasResidual) {
+      outerWhereParts.push(`(${residualWhere.sql})`);
+      params.push(...residualWhere.params);
+    }
+    if (outerWhereParts.length > 0) {
+      fromWhere += ` WHERE ${outerWhereParts.join(" AND ")}`;
+    }
+
+    return { fromWhere, params, limit, skip };
+  }
+
+  // ── Vector search internals ───────────────────────────────────────────────
+
+  /** Builds vec0 shadow table name from index name: `<table>__vec__<indexName>`. */
+  private _vecTableName(indexName: string): string {
+    return `${this.resolveTableName()}__vec__${indexName}`;
+  }
+
+  /**
+   * Creates/drops vec0 virtual shadow tables and sync triggers to match desired vector fields.
+   */
+  private _syncVecIndexes(tableName: string): void {
+    if (this._vectorFields.size === 0) {
+      return;
+    }
+    if (!this._detectVectorSupport()) {
+      this._log(
+        "[atscript-db-sqlite] sqlite-vec not available, skipping vec0 shadow table sync (vector fields stored as JSON)",
+      );
+      return;
+    }
+
+    const desiredVecTables = new Map<
+      string,
+      { field: string; meta: { dimensions: number; similarity: string; indexName: string } }
+    >();
+    for (const [fieldPath, meta] of this._vectorFields.entries()) {
+      desiredVecTables.set(this._vecTableName(meta.indexName), { field: fieldPath, meta });
+    }
+
+    const existingVec = this.driver
+      .all<{ name: string; sql: string }>(
+        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
+        [`${tableName}__vec__%`],
+      )
+      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
+      .map((r) => r.name);
+
+    for (const name of existingVec) {
+      if (!desiredVecTables.has(name)) {
+        this._dropVecTable(name);
+      }
+    }
+
+    const existingSet = new Set(existingVec);
+    for (const [vecTable, { field, meta }] of desiredVecTables.entries()) {
+      if (!existingSet.has(vecTable)) {
+        this._createVecTable(tableName, vecTable, field, meta);
+      }
+    }
+  }
+
+  /** Creates a vec0 virtual shadow table with sync triggers and seeds it from existing rows. */
+  private _createVecTable(
+    tableName: string,
+    vecTable: string,
+    field: string,
+    vec: { dimensions: number; similarity: string; indexName: string },
+  ): void {
+    const metric = similarityToVecMetric(vec.similarity);
+
+    const embeddingDescriptor = this._table.fieldDescriptors.find((f) => f.path === field);
+    const embeddingCol = embeddingDescriptor?.physicalName ?? field;
+
+    const partitionFieldPaths = this._vectorPartitionFields.get(vec.indexName) ?? [];
+    const partitionCols: Array<{ physicalName: string; sqlType: string }> = [];
+    for (const logicalPath of partitionFieldPaths) {
+      const descriptor = this._table.fieldDescriptors.find((f) => f.path === logicalPath);
+      if (!descriptor) {
+        this._log(
+          `[atscript-db-sqlite] vec0 partition field "${logicalPath}" not found for index "${vec.indexName}", defaulting to TEXT`,
+        );
+        partitionCols.push({ physicalName: logicalPath, sqlType: "TEXT" });
+      } else {
+        partitionCols.push({
+          physicalName: descriptor.physicalName,
+          sqlType: this.typeMapper(descriptor),
+        });
+      }
+    }
+
+    // vec0's DDL parser rejects double-quoted partition column names, so they
+    // must be emitted bare. Validate as a safe identifier here — `@db.column`
+    // accepts arbitrary strings upstream, and bare interpolation would otherwise
+    // open a SQL-injection hole on this one path.
+    for (const c of partitionCols) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(c.physicalName)) {
+        throw new Error(
+          `vec0 partition column name "${c.physicalName}" is not a safe identifier (only [A-Za-z_][A-Za-z0-9_]* is allowed for @db.search.filter fields on SQLite).`,
+        );
+      }
+    }
+    const partitionDefs = partitionCols
+      .map((c) => `${c.physicalName} ${c.sqlType} partition key`)
+      .join(", ");
+    const ddlCols = [partitionDefs, `embedding float[${vec.dimensions}] distance_metric=${metric}`]
+      .filter(Boolean)
+      .join(", ");
+
+    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(vecTable)}" USING vec0(${ddlCols})`;
+    this._log(createSql);
+    this.driver.exec(createSql);
+
+    const partCols = partitionCols.map((c) => `"${esc(c.physicalName)}"`);
+    const embCol = `"${esc(embeddingCol)}"`;
+    const insertCols = ["rowid", ...partCols, "embedding"].join(", ");
+    const insertNewVals = [
+      "new.rowid",
+      ...partitionCols.map((c) => `new."${esc(c.physicalName)}"`),
+      `new.${embCol}`,
+    ].join(", ");
+    const seedColList = ["rowid", ...partCols, embCol].join(", ");
+
+    const ev = esc(vecTable);
+    const et = esc(tableName);
+
+    const aiSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ai")}" AFTER INSERT ON "${et}" WHEN new.${embCol} IS NOT NULL BEGIN INSERT INTO "${ev}"(${insertCols}) VALUES(${insertNewVals}); END`;
+    this._log(aiSql);
+    this.driver.exec(aiSql);
+
+    const adSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ad")}" AFTER DELETE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; END`;
+    this._log(adSql);
+    this.driver.exec(adSql);
+
+    // vec0 lacks upsert, so AFTER UPDATE does delete-then-insert
+    const auSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__au")}" AFTER UPDATE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; INSERT INTO "${ev}"(${insertCols}) SELECT ${insertNewVals} WHERE new.${embCol} IS NOT NULL; END`;
+    this._log(auSql);
+    this.driver.exec(auSql);
+
+    const seedSql = `INSERT INTO "${ev}"(${insertCols}) SELECT ${seedColList} FROM "${et}" WHERE ${embCol} IS NOT NULL`;
+    this._log(seedSql);
+    this.driver.exec(seedSql);
+  }
+
+  /** Drops a vec0 virtual table and its sync triggers. */
+  private _dropVecTable(vecTable: string): void {
+    for (const suffix of ["__ai", "__ad", "__au"]) {
+      this.driver.exec(`DROP TRIGGER IF EXISTS "${esc(vecTable + suffix)}"`);
+    }
+    const sql = `DROP TABLE IF EXISTS "${esc(vecTable)}"`;
+    this._log(sql);
+    this.driver.exec(sql);
+  }
+
+  /** Drops all vec0 virtual shadow tables and triggers for a content table. */
+  private _dropAllVecTables(tableName: string): void {
+    const vecTables = this.driver
+      .all<{ name: string; sql: string }>(
+        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
+        [`${tableName}__vec__%`],
+      )
+      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"));
+    for (const { name } of vecTables) {
+      this._dropVecTable(name);
     }
   }
 }

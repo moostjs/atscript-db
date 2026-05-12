@@ -240,6 +240,33 @@ export function buildAggregateCount(
 // ── SQLite-specific DDL ──────────────────────────────────────────────────────
 
 /**
+ * Converts an Atlas-style similarity score (1 = exact, 0 = orthogonal) to a
+ * vec0 distance threshold.
+ *
+ * - cosine / dotProduct (mapped to cosine in DDL): vec0 distance = 1 - cos_sim,
+ *   normalized score = (1 + cos_sim) / 2, so distance = 2 * (1 - score).
+ * - euclidean (l2): vec0 distance is unbounded; the value is treated as a max
+ *   distance directly (same convention as pgvector).
+ */
+export function thresholdToVecDistance(threshold: number, similarity: string | undefined): number {
+  if (similarity === "euclidean") {
+    return threshold;
+  }
+  return 2 * (1 - threshold);
+}
+
+/**
+ * Maps an Atscript `@db.search.vector` similarity value to a sqlite-vec `vec0` metric.
+ * `dotProduct` falls back to `cosine` because vec0 has no dedicated dot-product metric.
+ */
+export function similarityToVecMetric(s: string | undefined): "cosine" | "l2" | "l1" {
+  if (s === "euclidean") {
+    return "l2";
+  }
+  return "cosine";
+}
+
+/**
  * Maps Atscript design types to SQLite storage types.
  */
 export function sqliteTypeFromDesignType(designType: string): string {
@@ -270,6 +297,7 @@ export function buildCreateTable(
   table: string,
   fields: readonly TDbFieldMeta[],
   foreignKeys?: ReadonlyMap<string, TDbForeignKey>,
+  options?: { typeMapper?: (field: TDbFieldMeta) => string },
 ): string {
   const colDefs: string[] = [];
   const primaryKeys = fields.filter((f) => f.isPrimaryKey);
@@ -281,9 +309,10 @@ export function buildCreateTable(
 
     // Numeric primary keys must be INTEGER (not REAL) for SQLite rowid alias / auto-increment
     const sqlType =
-      field.isPrimaryKey && (field.designType === "number" || field.designType === "integer")
+      options?.typeMapper?.(field) ??
+      (field.isPrimaryKey && (field.designType === "number" || field.designType === "integer")
         ? "INTEGER"
-        : sqliteTypeFromDesignType(field.designType);
+        : sqliteTypeFromDesignType(field.designType));
 
     let def = `"${esc(field.physicalName)}" ${sqlType}`;
     if (field.isPrimaryKey && primaryKeys.length === 1) {

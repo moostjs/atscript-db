@@ -46,4 +46,10 @@ export interface TSqliteDriver {
    * Close the database connection.
    */
   close(): void;
+
+  /**
+   * Whether a vector search extension (e.g., `sqlite-vec`) is loaded.
+   * Consumers gate vec0 virtual tables and KNN queries on this flag.
+   */
+  readonly hasVectorExt?: boolean;
 }

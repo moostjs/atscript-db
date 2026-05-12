@@ -1,6 +1,13 @@
 import { createRequire } from "node:module";
 import type { TSqliteDriver, TSqliteRunResult } from "./types";
 
+export interface TBetterSqlite3DriverOptions extends Record<string, unknown> {
+  /** Load the optional `sqlite-vec` extension. */
+  vector?: boolean;
+  /** Absolute paths to SQLite loadable extensions, passed to `Database.loadExtension`. */
+  loadExtensions?: string[];
+}
+
 /**
  * {@link TSqliteDriver} implementation backed by `better-sqlite3`.
  *
@@ -16,6 +23,9 @@ import type { TSqliteDriver, TSqliteRunResult } from "./types";
  * // File-based database
  * const driver = new BetterSqlite3Driver('./my-data.db')
  *
+ * // With sqlite-vec extension loaded
+ * const driver = new BetterSqlite3Driver('./my-data.db', { vector: true })
+ *
  * // Pre-created instance
  * import Database from 'better-sqlite3'
  * const db = new Database(':memory:', { verbose: console.log })
@@ -26,21 +36,39 @@ import type { TSqliteDriver, TSqliteRunResult } from "./types";
  * ```bash
  * pnpm add better-sqlite3
  * ```
+ *
+ * Vector search support requires the optional `sqlite-vec` package:
+ * ```bash
+ * pnpm add sqlite-vec
+ * ```
  */
 export class BetterSqlite3Driver implements TSqliteDriver {
   private db: import("better-sqlite3").Database;
 
+  readonly hasVectorExt: boolean = false;
+
   constructor(
     pathOrDb: string | import("better-sqlite3").Database,
-    options?: Record<string, unknown>,
+    options?: TBetterSqlite3DriverOptions,
   ) {
+    const { vector, loadExtensions, ...nativeOptions } = options ?? {};
+    const req = createRequire(import.meta.url);
+
     if (typeof pathOrDb === "string") {
-      // Use createRequire to support both CJS and ESM environments
-      const req = createRequire(import.meta.url);
       const Database = req("better-sqlite3") as typeof import("better-sqlite3");
-      this.db = new (Database as any)(pathOrDb, options);
+      this.db = new (Database as any)(pathOrDb, nativeOptions);
     } else {
       this.db = pathOrDb;
+    }
+
+    for (const ext of loadExtensions ?? []) {
+      this.db.loadExtension(ext);
+    }
+
+    if (vector) {
+      const sqliteVec = req("sqlite-vec") as { load(db: unknown): void };
+      sqliteVec.load(this.db);
+      this.hasVectorExt = true;
     }
   }
 

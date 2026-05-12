@@ -11,7 +11,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "  - **MongoDB** → Atlas `$vectorSearch` index\n" +
           "  - **MySQL 9+** → `VECTOR(N)` column + `VEC_DISTANCE_*` functions\n" +
           "  - **PostgreSQL** → pgvector `vector(N)` column + distance operators\n" +
-          "  - **SQLite** → JSON storage (no native vector support)\n\n" +
+          "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)\n\n" +
           "**Example:**\n" +
           "```atscript\n" +
           '@db.search.vector 1536, "cosine"\n' +

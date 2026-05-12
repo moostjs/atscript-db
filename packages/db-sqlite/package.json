@@ -48,6 +48,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@uniqu/core": "catalog:",
     "better-sqlite3": "^12.6.2",
+    "sqlite-vec": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
@@ -62,5 +63,8 @@
     "better-sqlite3": {
       "optional": true
     }
+  },
+  "optionalDependencies": {
+    "sqlite-vec": "catalog:"
   }
 }

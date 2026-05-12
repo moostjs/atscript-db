@@ -11,12 +11,12 @@ pnpm add @atscript/db-sqlite better-sqlite3        # pick exactly one adapter
 
 Adapters and their peer deps:
 
-| Adapter                 | Peer                                      |
-| ----------------------- | ----------------------------------------- |
-| `@atscript/db-sqlite`   | `better-sqlite3`                          |
-| `@atscript/db-postgres` | `pg`, optional `pgvector` extension in DB |
-| `@atscript/db-mysql`    | `mysql2`                                  |
-| `@atscript/db-mongo`    | `mongodb ^6`                              |
+| Adapter                 | Peer                                                      |
+| ----------------------- | --------------------------------------------------------- |
+| `@atscript/db-sqlite`   | `better-sqlite3`, optional `sqlite-vec` for vector search |
+| `@atscript/db-postgres` | `pg`, optional `pgvector` extension in DB                 |
+| `@atscript/db-mysql`    | `mysql2`                                                  |
+| `@atscript/db-mongo`    | `mongodb ^6`                                              |
 
 ## Configure Atscript
 

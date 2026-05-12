@@ -102,7 +102,7 @@ Returns the stored `TTableSnapshot` — useful for deployment guards that diff e
 - `syncIndexesWithDiff({ listExisting, createIndex, dropIndex, prefix?, shouldSkipType? })` is the adapter-facing template.
 - Default prefix: `atscript__`. Indexes not matching the prefix are untouched.
 - MongoDB: `syncIndexes()` only manages indexes whose names start with `atscript__`. Consumer-created indexes with that prefix will be treated as managed and can be dropped on drift.
-- SQLite/Postgres/MySQL: names follow the same convention; FTS5/pgvector/FULLTEXT indexes are created with adapter-specific DDL.
+- SQLite/Postgres/MySQL: names follow the same convention; adapter-specific DDL handles FTS5 / pgvector / FULLTEXT / MySQL VECTOR. SQLite vector indexes additionally provision a `<table>__vec__<indexName>` `vec0` shadow virtual table plus AI/AU/AD triggers — these live outside the `atscript__` prefix scheme and are managed by the adapter, not by `syncIndexesWithDiff`.
 
 ## View sync
 
