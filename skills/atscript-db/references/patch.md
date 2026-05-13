@@ -40,11 +40,14 @@ Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on t
 
 ## `@db.patch.strategy`
 
-Conceptual model:
+Per-field control of nested-object patch semantics. See [validation.md § Validator modes](validation.md#validator-modes-at-a-glance) for the validator-side detail.
 
-1. **Default = replace = strict.** Every nested branch on a patch is replace unless annotated otherwise. Validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit a required leaf are rejected with a 400 (otherwise a NOT NULL violation would surface from the adapter). **Optional** children that the user omits are null-filled at the storage layer: SQL emits `column = NULL`, Mongo emits dot-paths with explicit `null`. Both adapters report identical observable values.
-2. **`'merge'` is a local one-level opt-in.** The annotation applies to the exact level it's placed on; descendants revert to default replace unless they too carry `@db.patch.strategy 'merge'`. Merge does **not** propagate.
-3. **`@db.json` is always strict.** The column is an opaque blob — no decomposition path for partial sub-shapes.
+| Branch                                       | Strategy | Validator behaviour                                     | Storage behaviour                              |
+| -------------------------------------------- | -------- | ------------------------------------------------------- | ---------------------------------------------- |
+| Default (no annotation)                      | replace  | Strict — every required child must be present, else 400 | Optional children user omits → explicit `null` |
+| `@db.patch.strategy 'merge'` (one level)     | merge    | Partial — omitted siblings allowed                      | Omitted siblings preserved                     |
+| Descendant of a merge branch (no annotation) | replace  | Strict again — merge does NOT propagate                 | Same as default                                |
+| `@db.json` field                             | replace  | Always strict — opaque blob, no partial decomposition   | Whole JSON value rewritten                     |
 
 ```atscript
 interface User {

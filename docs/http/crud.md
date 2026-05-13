@@ -153,14 +153,31 @@ Returns table or view metadata for use by UI tooling or client libraries.
 curl http://localhost:3000/todos/meta
 ```
 
-**Response:**
+**Response (abbreviated):**
 
 ```json
 {
   "searchable": true,
   "vectorSearchable": false,
   "searchIndexes": [{ "name": "DEFAULT", "description": "dynamic_text index" }],
-  "type": { "...": "serialized Atscript type definition" }
+  "primaryKeys": ["id"],
+  "preferredId": ["id"],
+  "relations": [{ "name": "comments", "direction": "from", "isArray": true }],
+  "fields": {
+    "id": { "sortable": true, "filterable": true },
+    "title": { "sortable": true, "filterable": true }
+  },
+  "type": { "...": "serialized Atscript type definition" },
+  "actions": [],
+  "crud": {
+    "query": ["filter", "insights", "...", "actions", "groupBy"],
+    "pages": ["filter", "page", "size", "...", "actions"],
+    "one": ["select", "with", "actions"],
+    "insert": [],
+    "update": [],
+    "replace": [],
+    "remove": []
+  }
 }
 ```
 
@@ -169,7 +186,15 @@ curl http://localhost:3000/todos/meta
 | `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                                                                      |
 | `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                                                                        |
 | `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                                                        |
+| `primaryKeys`      | Primary key field names (logical, not column names)                                                                                                                                                                                                                |
+| `preferredId`      | Logical field names of the preferred identifier (PK or `@db.table.preferredId.uniqueIndex` group). See [Preferred row identifier](./actions#preferred-id)                                                                                                          |
+| `relations`        | Available navigation properties                                                                                                                                                                                                                                    |
+| `fields`           | Per-field capability flags (`sortable`, `filterable`)                                                                                                                                                                                                              |
 | `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields ship as shallow refs (`{ id, metadata }`) — enough to resolve the target's URL via `db.http.path`; deeper structure is reachable through the target's own `/meta` (see below) |
+| `actions`          | Declared domain actions — see [Actions](./actions)                                                                                                                                                                                                                 |
+| `crud`             | Built-in CRUD permissions / control whitelists — see [Permissions](./permissions)                                                                                                                                                                                  |
+
+For the full payload shape including `actions[]` entries and complete `crud` whitelists, see [HTTP Client — Metadata](./client#meta).
 
 The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`.
 

@@ -125,24 +125,24 @@ protected async _rollbackTransaction(state: unknown): Promise<void> { /* ... */ 
 
 Adapters using session-style APIs (MongoDB) can override `withTransaction()` directly and use `_runInTransactionContext(state, fn)` to propagate the session.
 
-## Schema sync hooks
+## Schema sync hooks (all optional)
 
-| Method                                                                                                              | Purpose                                                          |
-| ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `getExistingColumns()`                                                                                              | Introspect columns for diffing.                                  |
-| `tableExists()`                                                                                                     | Used when `getExistingColumns` isn't implemented (Mongo).        |
-| `getExistingColumnsForTable(name)`                                                                                  | Introspect a table under its pre-rename name.                    |
-| `syncColumns(diff)`                                                                                                 | Execute the diff (`added`, `dropped`, `typeChanged`, `renamed`). |
-| `renameTable(oldName)`                                                                                              | Handle `@db.table.renamed`.                                      |
-| `dropTable()` / `dropColumns([…])`                                                                                  | Destructive ops (skipped in `safe` mode).                        |
-| `recreateTable()`                                                                                                   | Used by `@db.sync.method 'recreate'`.                            |
-| `syncForeignKeys()`                                                                                                 | Implement FK sync; called after column sync.                     |
-| `dropForeignKeys(fkFieldKeys)`                                                                                      | Drop stale FKs blocking `ALTER COLUMN`.                          |
-| `getDesiredTableOptions()` / `getExistingTableOptions()` / `applyTableOptions(changes)` / `destructiveOptionKeys()` | Table-level options (engine/charset/capped).                     |
+| Method                                                                                                                  | Purpose                                                          |
+| ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `getExistingColumns?()`                                                                                                 | Introspect columns for diffing.                                  |
+| `tableExists?()`                                                                                                        | Used when `getExistingColumns` isn't implemented (Mongo).        |
+| `getExistingColumnsForTable?(name)`                                                                                     | Introspect a table under its pre-rename name.                    |
+| `syncColumns?(diff)`                                                                                                    | Execute the diff (`added`, `dropped`, `typeChanged`, `renamed`). |
+| `renameTable?(oldName)`                                                                                                 | Handle `@db.table.renamed`.                                      |
+| `dropTable?()` / `dropColumns?([…])`                                                                                    | Destructive ops (skipped in `safe` mode).                        |
+| `recreateTable?()`                                                                                                      | Optional hook used by `@db.sync.method 'recreate'`.              |
+| `syncForeignKeys?()`                                                                                                    | FK sync; called after column sync.                               |
+| `dropForeignKeys?(fkFieldKeys)`                                                                                         | Drop stale FKs blocking `ALTER COLUMN`.                          |
+| `getDesiredTableOptions?()` / `getExistingTableOptions?()` / `applyTableOptions?(changes)` / `destructiveOptionKeys?()` | Table-level options (engine/charset/capped).                     |
 
 ## Index sync helper
 
-Reuse the template method:
+Reuse the template method. `prefix` defaults to `'atscript__'` — omit unless overriding.
 
 ```ts
 async syncIndexes(): Promise<void> {
@@ -150,22 +150,43 @@ async syncIndexes(): Promise<void> {
     listExisting: async () => this.driver.all(`PRAGMA index_list(${this._table.tableName})`),
     createIndex:  async (ix) => this.driver.exec(buildCreateIndex(ix)),
     dropIndex:    async (name) => this.driver.exec(`DROP INDEX ${name}`),
-    prefix: 'atscript__',
-    shouldSkipType: (t) => t === 'fulltext',      // handle separately if needed
+    // shouldSkipType: (t) => t === 'vector', // only when a type needs adapter-specific DDL
   })
 }
 ```
 
-## SQL helpers
+Use `shouldSkipType` only for index types your adapter creates outside the standard `CREATE INDEX` path (e.g., a custom virtual table). Don't skip `'fulltext'` on SQLite/MySQL — both build it natively through this helper.
 
-`@atscript/db-sql-tools` provides:
+## SQL helpers (`@atscript/db-sql-tools`)
 
-- `SqlDialect` interface — identifier quoting, boolean/bind-placeholder conventions.
-- `buildSelect/Insert/Update/Delete` — dialect-parameterized builders.
-- `createFilterVisitor(dialect, ctx)` — MongoDB-shape filter → SQL `WHERE` + bind array.
-- `buildAggregate` — `GROUP BY`/`HAVING` with `@db.agg.*`.
+| Export                                                        | Purpose                                                                                   |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `SqlDialect` (type)                                           | Identifier quoting, boolean / bind placeholders.                                          |
+| `TSqlFragment` (type)                                         | `{ sql, params }` fragment shape.                                                         |
+| `buildSelect` / `buildInsert` / `buildUpdate` / `buildDelete` | Dialect-parameterized CRUD SQL builders.                                                  |
+| `buildProjection`                                             | Projection clause for `SELECT`.                                                           |
+| `buildCreateView`                                             | View DDL builder.                                                                         |
+| `buildAggregateSelect` / `buildAggregateCount`                | `GROUP BY` / `HAVING` SQL for `@db.agg.*`.                                                |
+| `AGG_FN_SQL`                                                  | Map of aggregate function → SQL name.                                                     |
+| `createFilterVisitor(dialect)`                                | MongoDB-shape filter → SQL `WHERE` + bind array (visitor for `@uniqu/core` `walkFilter`). |
+| `buildWhere`                                                  | `WHERE` clause builder for a parsed filter.                                               |
+| `queryOpToSql` / `queryNodeToSql`                             | Translate query AST nodes.                                                                |
+| `parseRegexString`                                            | Parse `/pattern/flags` strings for `$regex`.                                              |
+| `defaultValueForType`                                         | Type-driven default literal for SQL DDL.                                                  |
+| `defaultValueToSqlLiteral`                                    | `@db.default.value` → SQL literal.                                                        |
+| `refActionToSql`                                              | `@db.rel.onDelete/onUpdate` → `ON DELETE …` clause.                                       |
+| `sqlStringLiteral`                                            | Escape a JS string into a SQL string literal.                                             |
+| `toSqlValue`                                                  | Coerce JS value for bind/embed.                                                           |
+| `EMPTY_AND` / `EMPTY_OR`                                      | Identity fragments for empty boolean groups.                                              |
+| `finalizeParams`                                              | Renumber bind placeholders for the dialect (e.g. `?` → `$1`).                             |
 
 Implement a `SqlDialect` for your engine, then delegate to the shared builders. **Do not hand-roll filter translation.**
+
+## Optional runtime hooks
+
+- **`prepareId(id, fieldType)`** — transform an inbound ID before driver calls. Override when the storage type differs from the wire type (Mongo: `string` → `ObjectId`; SQL adapters: identity). Used by `findOne`/`insertOne`/`updateOne`/`deleteOne` whenever the PK is hit by value.
+- **`logger` + `_log(...args)`** — `BaseDbAdapter.logger` is set via `registerReadable()` from the table's logger; call `this._log(sql, params)` before every driver call. Defaults to `NoopLogger`. Adapter authors gate verbose logs on `this._verboseLog`.
+- **Constraint-error translation** — wrap each write with an adapter-private helper (e.g. `_wrapConstraintError(fn)` in PostgresAdapter) that catches DB-native error codes (Postgres: `23505` → `CONFLICT`, `23503` → `FK_VIOLATION`) and rethrows as `DbError` from `@atscript/db`. Codes: `CONFLICT` | `FK_VIOLATION` | `NOT_FOUND` | `CASCADE_CYCLE` | `INVALID_QUERY` | `DEPTH_EXCEEDED`. `moost-db` maps `DbError` to the right HTTP status — every adapter MUST surface its constraint errors as `DbError`.
 
 ## Validator plugins
 

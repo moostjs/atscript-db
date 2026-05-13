@@ -52,7 +52,7 @@ npx asc db sync --yes
 
 ### `--force`
 
-Bypasses the [hash-based drift detection](./#hash-based-drift-detection). The command will introspect the database and diff against your `.as` definitions regardless of whether the stored hash matches:
+Bypasses the [hash-based change detection](./#how-it-works). The command will introspect the database and diff against your `.as` definitions regardless of whether the stored hash matches:
 
 ```bash
 npx asc db sync --force
@@ -164,6 +164,15 @@ The CLI exits with a non-zero code when:
 - **Adapter not found** — the specified adapter package is not installed
 
 When errors are detected in the plan, the CLI prints the errors and exits without applying any changes.
+
+### Exit Codes
+
+| Code  | Meaning                                                          |
+| ----- | ---------------------------------------------------------------- |
+| `0`   | Success — sync completed, was up-to-date, or `--dry-run` printed |
+| Non-0 | Schema errors, connection failure, missing config, or user abort |
+
+`asc` exposes `--help` and `--version` from the underlying `@atscript/typescript` CLI; both exit with `0`.
 
 ## Next Steps
 

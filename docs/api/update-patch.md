@@ -4,7 +4,13 @@ outline: deep
 
 # Update & Patch
 
+<!--@include: ../_experimental-warning.md-->
+
 This page covers fine-grained update operations on **single-table data** — embedded objects and embedded arrays stored directly on a record. For patching related records across foreign keys (FROM and VIA navigation properties), see [Relations — Relational Patches](/relations/patches).
+
+::: warning Nested writes need `@db.depth.limit`
+`bulkUpdate`, `bulkReplace`, and `insertMany` validate nested-write depth against [`@db.depth.limit N`](/relations/deep-operations) on the target table. The default — annotation absent — is `0`, which rejects every payload that crosses a `@db.rel.from` / `@db.rel.via` relation. Opt in explicitly when you want the server to accept deep writes.
+:::
 
 ## Simple Updates
 
@@ -138,7 +144,7 @@ If you need atomic operations on nested fields, add `@db.patch.strategy 'merge'`
 
 Nested objects stored on a record (not navigation properties) use a strategy-based approach controlled by `@db.patch.strategy`. The mental model is:
 
-- **Default = replace = strict.** Every branch is treated as replace unless explicitly annotated otherwise. The validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit required fields are rejected with a 400 (otherwise a missing required leaf would propagate to the storage layer and fail the underlying NOT NULL constraint).
+- **Default = replace = strict.** Every branch is treated as replace unless explicitly annotated otherwise. The validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit required fields are rejected with a 400 to keep the database constraint and the API contract aligned.
 - **`@db.patch.strategy 'merge'` is a one-level opt-in.** It applies only to the level it's annotated on; descendants revert to default replace unless they too carry the annotation. Merge does not propagate.
 - **Optional children of a replace branch are null-filled when omitted.** That's what distinguishes replace from merge — replace clears unspecified optional sub-fields, merge preserves them.
 - **`@db.json` is always strict** — the column is an opaque blob; partial sub-shapes can't be decomposed.
@@ -422,6 +428,18 @@ await table.updateOne({
 ```
 
 Operators are always applied in order: **remove → update → upsert → insert**.
+
+## `maxDepth` Option
+
+`bulkUpdate` and `bulkReplace` (and through them, `updateOne` / `replaceOne`) accept an optional second argument that caps how deep the runtime is allowed to recurse into nested relation payloads:
+
+```typescript
+await users.bulkUpdate(payloads, { maxDepth: 5 });
+```
+
+- The default is `3` — enough for typical "user → profile → address" chains.
+- This is a **runtime** cap on recursion; it sits below `@db.depth.limit`, which is the **declarative** server-boundary check. Both have to allow the depth for a deep write to succeed.
+- Setting `maxDepth` lower than your payload's depth raises a `DepthLimitExceededError` (`DEPTH_EXCEEDED`) before any database write.
 
 ## What This Page Does NOT Cover
 

@@ -15,7 +15,7 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 | `@db.column.renamed`                | Field     | `oldName: string`                   | Previous column name — schema sync renames.                                                                                                                                                                                                                                                                                                           |
 | `@db.column.collate`                | Field     | `'binary' \| 'nocase' \| 'unicode'` | Portable collation.                                                                                                                                                                                                                                                                                                                                   |
 | `@db.column.precision`              | Field     | `precision, scale`                  | Decimal precision (e.g. `DECIMAL(10,2)`).                                                                                                                                                                                                                                                                                                             |
-| `@db.column.dimension`              | Field     | —                                   | Dimension — groupable in aggregate queries.                                                                                                                                                                                                                                                                                                           |
+| `@db.column.dimension`              | Field     | —                                   | Dimension — groupable in aggregate queries. **Auto-creates a DB index during schema sync.**                                                                                                                                                                                                                                                           |
 | `@db.column.measure`                | Field     | —                                   | Measure — aggregatable (numeric/decimal only).                                                                                                                                                                                                                                                                                                        |
 | `@db.column.filterable`             | Field     | —                                   | Allow field in `/query` filters when the interface is gated `'manual'`. Adapter capability vetoes the `/meta` `filterable` flag — SQL adapters always report `false` on `@db.json` / array fields, Mongo reports `true`.                                                                                                                              |
 | `@db.column.sortable`               | Field     | —                                   | Allow field in `$sort` when the interface is gated `'manual'`. Adapter capability vetoes the `/meta` `sortable` flag — JSON-stored fields are never sortable on any adapter (min/max-element sort is a footgun).                                                                                                                                      |
@@ -29,29 +29,19 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 
 ## `@db.column` — when to use it
 
-`@db.column` rebinds a `.as` field to a different physical column name. **It is not free.**
-A single use anywhere in the interface flips that whole table onto the per-row key-translation
-path — every read, write, filter, sort, projection, and patch op pays a `Map`-driven
-rename pass per row, instead of handing the row to the driver verbatim. `@db.json` and
-nested-object fields take the same path; mixing them with `@db.column` does not add a second
-penalty, but the first one is enough to matter on hot reads.
+`@db.column` rebinds a `.as` field to a different physical column name. **Not free** — a single use anywhere in the interface flips the whole table onto the per-row key-translation path (every read/write/filter/sort/projection/patch op pays a `Map`-driven rename pass per row). Same path the `@db.json` / nested-object remapper takes; mixing doesn't stack the penalty, but one is enough.
 
-**Default: do not use it.** Name your `.as` props the same as the physical column you want
-and the adapter will skip the translation layer entirely.
+**Default: don't use it.** Name `.as` props the same as the physical column you want, the adapter skips the translation layer.
 
-Legitimate reasons (anything else is overhead for nothing):
+Legitimate:
 
-1. The desired column name is a SQL reserved word that the dialect can't parameterize cleanly (`order`, `from`, `select`, `group`, `case`, …).
-2. You're integrating with an existing schema you don't own (legacy DB, third-party tables, shared cross-language model).
-3. Strict team convention enforces snake_case at the DB layer AND your TypeScript style enforces camelCase in apps. Pick this once and apply it whole-codebase — don't sprinkle remaps on individual fields.
+1. Target name is a SQL reserved word (`order`, `from`, `select`, `group`, …).
+2. Integrating with an existing schema you don't own (legacy / third-party / cross-language).
+3. Hard team convention: snake_case at DB **and** camelCase in TS. Apply repo-wide once — don't sprinkle.
 
-Not legitimate (these come up often, all of them mean "remove the annotation"):
+Not legitimate (all mean "remove the annotation"): "reads better in TS", "keep `.as` clean of snake_case", "not sure what to call it yet" (use `@db.column.renamed` later — it's a one-shot migration directive, not a runtime remap).
 
-- "I think `userId` reads better than `user_id` in TypeScript" — pick one, commit to it on both sides.
-- "I want to keep my `.as` clean of snake_case" — same problem; you've just spread the cost across every read instead.
-- "I'm not sure what the column should be called yet" — pick whatever the field is named; rename later via `@db.column.renamed` (which is a one-shot migration directive, not a runtime remap).
-
-`@db.table 'physical_name'` has no per-row cost but follows the same spirit — only override when the desired table name is reserved (`User` is fine; `Order` collides with `ORDER BY` on some dialects) or you're adopting an existing table.
+`@db.table 'physical_name'` has no per-row cost but follows the same spirit — only override for reserved table names or when adopting an existing table.
 
 ## Defaults
 

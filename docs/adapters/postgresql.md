@@ -86,11 +86,11 @@ export default {
 
 These annotations opt into PostgreSQL-specific behavior. Files using only portable `@db.*` annotations remain adapter-agnostic.
 
-| Annotation                   | Level     | Purpose                                                                   |
-| ---------------------------- | --------- | ------------------------------------------------------------------------- |
-| `@db.pg.type "TYPE"`         | Field     | Override the native column type (e.g., `"CITEXT"`, `"INET"`, `"MACADDR"`) |
-| `@db.pg.schema "name"`       | Interface | Set the database schema (default: `"public"`)                             |
-| `@db.pg.collate "collation"` | Field     | Native PostgreSQL collation override (e.g., `"tr-x-icu"`, `"C"`)          |
+| Annotation                   | Level             | Purpose                                                                   |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------------- |
+| `@db.pg.type "TYPE"`         | Field             | Override the native column type (e.g., `"CITEXT"`, `"INET"`, `"MACADDR"`) |
+| `@db.pg.schema "name"`       | Interface         | Set the database schema (default: `"public"`)                             |
+| `@db.pg.collate "collation"` | Interface / Field | Native PostgreSQL collation override (e.g., `"tr-x-icu"`, `"C"`)          |
 
 Example:
 
@@ -339,6 +339,19 @@ const driver = new PgDriver({
 The pool is initialized lazily — the `pg` module is dynamically imported on first use, so the package works in both ESM and CJS environments without top-level import issues.
 
 To shut down cleanly, call `driver.close()` which ends the pool and all its connections.
+
+### SSL for managed Postgres
+
+Most managed providers (Neon, Supabase, RDS, Heroku, etc.) require TLS. SSL options are passed straight through to `pg.Pool` — see the [node-postgres SSL docs](https://node-postgres.com/features/ssl) for the full option set:
+
+```typescript
+const driver = new PgDriver({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: true },
+});
+```
+
+For providers that require self-signed certs (e.g., RDS with the bundled CA), pass the certificate via `ssl: { ca: fs.readFileSync('./rds-ca.pem') }`. When using a pre-created `pg.Pool`, configure SSL on the pool directly.
 
 ## Error Handling
 

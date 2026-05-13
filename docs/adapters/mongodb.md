@@ -66,17 +66,55 @@ const user = await users.findById(1);
 
 Run `npx asc db sync` to create or update collections and indexes. See [Schema Sync](../sync/) for details.
 
+### Connection recipes
+
+**Local replica set (transactions enabled).** MongoDB transactions require a replica set or sharded topology. The simplest local setup is a single-node replica set:
+
+```typescript
+const client = new MongoClient("mongodb://localhost:27017/myapp?replicaSet=rs0");
+const db = new DbSpace(() => new MongoAdapter(client.db(), client));
+```
+
+**Single-node test container (`directConnection`).** When pointing at a single-instance container that advertises itself under a different hostname (e.g., a Testcontainers MongoDB), set `directConnection=true` to skip topology discovery:
+
+```typescript
+const client = new MongoClient("mongodb://localhost:27017/test?directConnection=true");
+```
+
+**In-process MongoDB for tests (`mongodb-memory-server`).** Spin up an ephemeral MongoDB inside the test process — no Docker required:
+
+```bash
+pnpm add -D mongodb-memory-server
+```
+
+```typescript
+import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoClient } from "mongodb";
+import { DbSpace } from "@atscript/db";
+import { MongoAdapter } from "@atscript/db-mongo";
+
+const mongod = await MongoMemoryServer.create();
+const client = new MongoClient(mongod.getUri());
+const db = new DbSpace(() => new MongoAdapter(client.db("test"), client));
+
+// after tests:
+await client.close();
+await mongod.stop();
+```
+
+For transaction support inside tests, use `MongoMemoryReplSet.create()` instead.
+
 ## MongoDB-Specific Annotations
 
 These annotations are available when the MongoDB plugin is registered. They extend the generic `@db.*` namespace with MongoDB-specific behavior.
 
-| Annotation                                             | Level     | Purpose                                       |
-| ------------------------------------------------------ | --------- | --------------------------------------------- |
-| `@db.mongo.collection`                                 | Interface | Mark as MongoDB collection, auto-inject `_id` |
-| `@db.mongo.capped size, max?`                          | Interface | Capped collection with size limit             |
-| `@db.mongo.search.dynamic analyzer?, fuzzy?`           | Interface | Dynamic Atlas Search index                    |
-| `@db.mongo.search.static analyzer?, fuzzy?, indexName` | Interface | Named static Atlas Search index               |
-| `@db.mongo.search.text analyzer?, indexName`           | Field     | Include field in search index                 |
+| Annotation                                              | Level     | Purpose                                                                                     |
+| ------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------- |
+| `@db.mongo.collection`                                  | Interface | Mark as MongoDB collection, auto-inject `_id`                                               |
+| `@db.mongo.capped size, max?`                           | Interface | Capped collection with size limit                                                           |
+| `@db.mongo.search.dynamic analyzer?, fuzzy?`            | Interface | Dynamic Atlas Search index                                                                  |
+| `@db.mongo.search.static analyzer?, fuzzy?, indexName?` | Interface | Named static Atlas Search index. Repeatable. `indexName?` defaults to `"DEFAULT"`           |
+| `@db.mongo.search.text analyzer?, indexName?`           | Field     | Include field in a search index. Repeatable per field. `indexName?` defaults to `"DEFAULT"` |
 
 All generic `@db.*` annotations (`@db.table`, `@db.index.*`, `@db.default.*`, `@db.rel.*`, `@db.json`, `@db.search.vector`, `@db.search.filter`, etc.) work with MongoDB as well. See the [Annotations Reference](./annotations) for the full list.
 
@@ -290,17 +328,26 @@ Each `@db.mongo.search.text` field can use a different analyzer while belonging 
 
 ### Supported Analyzers
 
-Atlas Search uses Apache Lucene analyzers. The most common:
+Atlas Search uses Apache Lucene analyzers. The plugin whitelists the following values:
 
 | Analyzer            | Description                                               |
 | ------------------- | --------------------------------------------------------- |
 | `lucene.standard`   | General-purpose tokenizer, lowercases, removes stop words |
-| `lucene.english`    | English-specific with stemming ("running" matches "run")  |
 | `lucene.simple`     | Lowercases and splits on non-letter characters            |
-| `lucene.keyword`    | No tokenization — treats the entire field as one token    |
 | `lucene.whitespace` | Splits on whitespace only, no lowercasing                 |
+| `lucene.english`    | English-specific with stemming ("running" matches "run")  |
+| `lucene.french`     | French stemming and stop words                            |
+| `lucene.german`     | German stemming and stop words                            |
+| `lucene.italian`    | Italian stemming and stop words                           |
+| `lucene.portuguese` | Portuguese stemming and stop words                        |
+| `lucene.spanish`    | Spanish stemming and stop words                           |
+| `lucene.chinese`    | Chinese tokenization                                      |
+| `lucene.hindi`      | Hindi tokenization                                        |
+| `lucene.bengali`    | Bengali tokenization                                      |
+| `lucene.russian`    | Russian stemming and stop words                           |
+| `lucene.arabic`     | Arabic stemming and stop words                            |
 
-Language-specific analyzers are also available: `lucene.spanish`, `lucene.french`, `lucene.german`, `lucene.chinese`, `lucene.japanese`, and about 20 more. See the [MongoDB Atlas docs](https://www.mongodb.com/docs/atlas/atlas-search/analyzers/) for the full list.
+See the [MongoDB Atlas docs](https://www.mongodb.com/docs/atlas/atlas-search/analyzers/) for descriptions and tokenization rules.
 
 ### Fuzzy Search
 
@@ -373,7 +420,7 @@ export interface LogEntry {
 }
 ```
 
-The first argument is the maximum size in bytes (10 MB above), and the optional second argument is the maximum number of documents (10,000 above). Changing cap size requires collection recreation. Use `@db.sync.method 'recreate'` to preserve data — sync copies data server-side to a temporary collection via `$out`, drops and recreates with the new options, then copies data back via `$merge`. Use `@db.sync.method 'drop'` if data loss is acceptable (the collection is dropped and recreated empty).
+The first argument is the maximum size in bytes (10 MB above), and the optional second argument is the maximum number of documents (10,000 above). Changing cap size requires collection recreation. Use `@db.sync.method 'recreate'` to preserve data — sync copies the collection server-side into a temporary collection (`<name>__tmp_<timestamp>`) via `$out`, drops the original, recreates it with the new options, then merges the temp data back via `$merge` and drops the temp collection. Use `@db.sync.method 'drop'` if data loss is acceptable (the collection is dropped and recreated empty).
 
 ::: warning
 Capped collections do not support document deletion or updates that increase document size. They are append-only by design.

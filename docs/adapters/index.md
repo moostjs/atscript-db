@@ -20,22 +20,22 @@ Atscript's DB layer is adapter-agnostic. The same `.as` definitions, queries, an
 
 ## Feature Comparison Matrix
 
-| Feature                      | PostgreSQL        | SQLite        | MongoDB              | MySQL          |
-| ---------------------------- | ----------------- | ------------- | -------------------- | -------------- |
-| Native FK constraints        | Yes               | Yes (PRAGMA)  | Emulated             | Yes            |
-| Transactional DDL            | Yes               | No            | N/A                  | No             |
-| Text search                  | GIN + tsvector    | FTS5          | Atlas Search         | FULLTEXT       |
-| Vector search                | pgvector          | No            | Atlas vectorSearch   | VECTOR(N) 9.0+ |
-| JSON storage                 | JSONB             | TEXT          | Native               | JSON           |
-| Boolean type                 | Native            | INTEGER 0/1   | Native               | TINYINT(1)     |
-| UUID generation              | gen_random_uuid() | App-side      | App-side             | App-side       |
-| Nested objects               | Flattened         | Flattened     | Native               | Flattened      |
-| Native patch ops             | No                | No            | Yes ($push/$pull)    | No             |
-| Native relations             | No                | No            | Yes ($lookup)        | No             |
-| In-place column modify       | Yes               | No (recreate) | N/A                  | Yes            |
-| Transactions                 | Full (incl. DDL)  | Yes           | Replica set required | Yes (no DDL)   |
-| Schema namespaces            | Schemas           | No            | No                   | Databases      |
-| Adapter-specific annotations | `@db.pg.*`        | None          | `@db.mongo.*`        | `@db.mysql.*`  |
+| Feature                      | PostgreSQL        | SQLite              | MongoDB              | MySQL          |
+| ---------------------------- | ----------------- | ------------------- | -------------------- | -------------- |
+| Native FK constraints        | Yes               | Yes (PRAGMA)        | Emulated             | Yes            |
+| Transactional DDL            | Yes               | No                  | N/A                  | No             |
+| Text search                  | GIN + tsvector    | FTS5                | Atlas Search         | FULLTEXT       |
+| Vector search                | pgvector          | sqlite-vec (opt-in) | Atlas vectorSearch   | VECTOR(N) 9.0+ |
+| JSON storage                 | JSONB             | TEXT                | Native               | JSON           |
+| Boolean type                 | Native            | INTEGER 0/1         | Native               | TINYINT(1)     |
+| UUID generation              | gen_random_uuid() | App-side            | App-side             | App-side       |
+| Nested objects               | Flattened         | Flattened           | Native               | Flattened      |
+| Native patch ops             | No                | No                  | Yes ($push/$pull)    | No             |
+| Native relations             | No                | No                  | Yes ($lookup)        | No             |
+| In-place column modify       | Yes               | No (recreate)       | N/A                  | Yes            |
+| Transactions                 | Full (incl. DDL)  | Yes                 | Replica set required | Yes (no DDL)   |
+| Schema namespaces            | Schemas           | No                  | No                   | Databases      |
+| Adapter-specific annotations | `@db.pg.*`        | None                | `@db.mongo.*`        | `@db.mysql.*`  |
 
 ## Installation Quick Reference
 

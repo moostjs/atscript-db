@@ -1,6 +1,6 @@
 # adapters-sqlite
 
-`@atscript/db-sqlite` — via `better-sqlite3` (synchronous driver, wrapped in Promises).
+`@atscript/db-sqlite` — synchronous SQLite, wrapped in Promises. Default driver is `BetterSqlite3Driver`; `TSqliteDriver` is pluggable (e.g. `node:sqlite`, `sql.js` via a sync wrapper).
 
 ## Wiring
 
@@ -15,16 +15,16 @@ const db = new DbSpace(() => new SqliteAdapter(new BetterSqlite3Driver("./app.db
 const db2 = createAdapter(":memory:", { verbose: console.log });
 ```
 
-The second arg to `BetterSqlite3Driver` forwards to the `better-sqlite3` constructor (`{ readonly, timeout, verbose, fileMustExist }`), plus two driver-level options:
+`BetterSqlite3Driver` accepts a path or a pre-created `Database` instance. Options: destructures `vector` / `loadExtensions`; everything else forwards to the `better-sqlite3` constructor.
 
-- `vector: true` — load the `sqlite-vec` extension on connect. Required for `@db.search.vector` fields to use a real `vec0` index (otherwise vectors fall back to JSON `TEXT`). Install the optional peer: `pnpm add sqlite-vec`.
-- `loadExtensions: string[]` — load arbitrary SQLite loadable extensions by path.
+- `vector: true` — load `sqlite-vec` on connect. Required for `@db.search.vector` to use a real `vec0` index (else falls back to JSON `TEXT`). Install peer: `pnpm add sqlite-vec`.
+- `loadExtensions: string[]` — paths to loadable SQLite extensions.
 
 ```ts
 const db = createAdapter("./app.db", { vector: true });
 ```
 
-After construction the driver exposes `readonly hasVectorExt: boolean` (`true` only when `sqlite-vec` loaded successfully).
+`hasVectorExt` is optional on `TSqliteDriver`. `BetterSqlite3Driver` always exposes it (true only when `sqlite-vec` loaded). If a custom driver omits it, the adapter probes via `SELECT vec_version()` once at sync.
 
 ## Capabilities
 
@@ -96,7 +96,7 @@ const hits = await docs.vectorSearch(queryVec, {
 - Vector field is stored in the main table as `BLOB` (`Float32Array.buffer`). `formatValue` round-trips between JS `number[]` and the BLOB transparently.
 - Each `@db.search.vector` field gets a vec0 shadow virtual table named `<table>__vec__<indexName>` (where `indexName` defaults to the field name).
 - Three AFTER triggers on the main table keep the shadow in lockstep: `__ai` (insert), `__au` (update — delete-then-insert; vec0 has no upsert), `__ad` (delete). Sync is transactional with the parent write.
-- Dimensions must match one of the validator's allowed values: `256`, `384`, `512`, `768`, `1024`, `1536`, `2048`, `3072`, `4096`, `6144`, `8192`, `16384`. Covers all common embedding models including 384-dim sentence-transformers (`all-MiniLM-L6-v2`, `gte-small`, `bge-small-en`).
+- Dimensions whitelist: see [annotations.md](annotations.md) (`@db.search.vector`).
 - `similarity` maps to vec0 `distance_metric`: `cosine → cosine`, `euclidean → l2`, `dotProduct → cosine` (sqlite-vec has no native dot product — normalize vectors and use cosine).
 
 ### Search semantics
@@ -133,32 +133,23 @@ Throws (`Unsupported regex …`):
 
 Callers building regex from user input should pass it through `escapeRegex(literal)` before wrapping with anchors / `.*`. Literal `%` and `_` round-trip safely — the translator escapes them for `LIKE`.
 
-## Pragmas / defaults
+## Pragmas / concurrency / limits
 
-- `PRAGMA foreign_keys = ON` — always set so `@db.rel.onDelete` works.
-- `PRAGMA journal_mode = WAL` — recommended for production; set explicitly in your driver options if needed.
-- `PRAGMA synchronous = NORMAL` — default for WAL; leave at the driver's default unless tuning.
+- `PRAGMA foreign_keys = ON` (always); set WAL / `synchronous = NORMAL` via your driver options.
+- `better-sqlite3` is single-writer — writes serialize per process. Avoid long `await` inside `withTransaction(fn)`.
+- No `ALTER COLUMN`; type changes need `@db.sync.method 'recreate'` or `'drop'`.
+- No native `CHECK` from annotations — validation is server-side.
+- Vector search requires `sqlite-vec` peer + `{ vector: true }`; without it vectors degrade to `TEXT` and `vectorSearch` throws.
 
-## Concurrency caveats
+## `recreateTable()` (SQLite override)
 
-- `better-sqlite3` is single-writer. Parallel writes serialize at the process level.
-- The `withTransaction(fn)` wrapper is synchronous under the hood; avoid long-running `await` inside to prevent blocking.
-- For horizontal scale, use WAL + accept write contention, or switch to PostgreSQL.
+`@db.sync.method 'recreate'` is overridden in `sqlite-adapter.ts`. Flow (one block per table):
 
-## Migrating data
+1. Drop FTS5 + vec0 shadow tables (`syncIndexes()` recreates them).
+2. `PRAGMA foreign_keys = OFF`; `PRAGMA legacy_alter_table = ON`.
+3. Create temp with new schema: `<table>__tmp_<ts>`.
+4. `INSERT INTO <tmp> (commonCols) SELECT … FROM <table>` — copies the intersection of old × new physical names. Non-optional, non-PK columns use `COALESCE(col, <default>)` (from `@db.default.value` or type default).
+5. Rename old to `<table>__old_<ts>`, rename temp to `<table>`, `DROP TABLE <old>`.
+6. Restore pragmas.
 
-`@db.sync.method 'recreate'` path (generic in `BaseDbAdapter.recreateTable()`):
-
-1. `CREATE TABLE <name>_new (...)`
-2. `INSERT INTO <name>_new SELECT … FROM <name>` (column mapping honors `@db.column.renamed`)
-3. `DROP TABLE <name>`
-4. `ALTER TABLE <name>_new RENAME TO <name>`
-5. Recreate indexes.
-
-Runs in one transaction per table.
-
-## Known limits
-
-- No `ALTER COLUMN` — all type changes go through `recreate` or `drop`.
-- No native `CHECK` constraints from Atscript annotations (validation runs server-side via the Atscript validator).
-- Vector search requires the optional `sqlite-vec` peer dep AND the driver `{ vector: true }` flag. Without it, vector fields degrade to JSON `TEXT` storage and `vectorSearch` throws.
+Column rename (`@db.column.renamed`) is handled in `syncColumns`, not here — `recreateTable` only copies the intersection of physical names.

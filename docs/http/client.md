@@ -55,11 +55,67 @@ const users = new Client<typeof User>("/api/users", {
 });
 ```
 
-| Option    | Type                                                                | Description                             |
-| --------- | ------------------------------------------------------------------- | --------------------------------------- |
-| `baseUrl` | `string`                                                            | Prepended to the path for every request |
-| `headers` | `Record<string, string>` or `() => Promise<Record<string, string>>` | Default headers for every request       |
-| `fetch`   | `typeof fetch`                                                      | Custom fetch implementation             |
+| Option     | Type                                                                | Description                                                                             |
+| ---------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `baseUrl`  | `string`                                                            | Prepended to the path for every request                                                 |
+| `headers`  | `Record<string, string>` or `() => Promise<Record<string, string>>` | Default headers for every request — factory is called **before each request**           |
+| `fetch`    | `typeof fetch`                                                      | Custom fetch implementation                                                             |
+| `navigate` | `(url: string) => void \| Promise<void>`                            | SPA-router hook for `processor: 'navigate'` actions (see [Navigate dispatch](#actions)) |
+
+### SSR and auth — async headers factory {#ssr-auth}
+
+The `headers` option accepts an **async factory** that the client awaits on every request — ideal for token refresh, SSR cookie forwarding, and Authorization rotation.
+
+**Per-request token refresh:**
+
+```typescript
+import { Client } from "@atscript/db-client";
+
+const users = new Client<typeof User>("/api/users", {
+  headers: async () => {
+    const token = await getAccessToken(); // your refresh logic
+    return { Authorization: `Bearer ${token}` };
+  },
+});
+```
+
+`getAccessToken()` runs on every method call (`query`, `insert`, `action`, ...) — keep it cheap or memoize internally. The client never caches the resolved headers.
+
+**SSR cookie forwarding** — on the server, forward the incoming request's cookies to the moost-db endpoint so authenticated session reuse works in-process:
+
+```typescript
+import { Client } from "@atscript/db-client";
+
+function makeServerClient(req: { headers: { cookie?: string } }) {
+  return new Client<typeof User>("/api/users", {
+    headers: async () => ({
+      cookie: req.headers.cookie ?? "",
+    }),
+  });
+}
+```
+
+Moost's `fetch` automatically routes local requests to handlers in-process — the same `Client` instance works on both server and browser; only the `headers` factory needs to change.
+
+**Refreshing on 401** — the client does not implement automatic retry; wrap with a thin helper:
+
+```typescript
+async function withRefresh<R>(call: () => Promise<R>): Promise<R> {
+  try {
+    return await call();
+  } catch (e) {
+    if (e instanceof ClientError && e.status === 401) {
+      await refreshAccessToken(); // your refresh implementation
+      return call(); // headers factory re-runs and picks up the new token
+    }
+    throw e;
+  }
+}
+
+const rows = await withRefresh(() => users.query({ filter: { active: true } }));
+```
+
+Because `headers` is awaited on every call, the retried request automatically picks up the new token — no need to recreate the `Client`.
 
 ## Querying
 
@@ -554,9 +610,9 @@ validator.navFields; // Set of navigation field names
 validator.validate(data, "insert"); // throws on failure
 ```
 
-## Re-exported Types
+## Re-exports
 
-The package re-exports query types from `@uniqu/core` for convenience:
+### Query types (from `@uniqu/core`)
 
 - `Uniquery`, `UniqueryControls` — query and control types
 - `FilterExpr` — filter expression type
@@ -567,19 +623,71 @@ The package re-exports query types from `@uniqu/core` for convenience:
 import type { FilterExpr, Uniquery } from "@atscript/db-client";
 ```
 
+### Wire / shape types (from `@atscript/db`)
+
+- `TDbActionInfo`, `TDbActionLevel`, `TDbActionIntent`, `TDbActionProcessor` — `/meta.actions[]` entry shape
+- `TCrudOp`, `TCrudPermissions` — `/meta.crud` shape (see [Permissions](./permissions))
+- `TDbInsertResult`, `TDbInsertManyResult`, `TDbUpdateResult`, `TDbDeleteResult` — write-method return shapes
+
+### Identifier helpers
+
+Standalone exports of the same logic used internally for navigate `$1` substitution — handy when rendering identifiers outside `Client.action()`:
+
+- `formatIdentifier(id, preferredId)` — raw `/`-joined identifier (no URL encoding)
+- `encodeNavigateId(id, preferredId)` — URL-encoded `/`-joined identifier
+- `formatIdentifierField(value)` — single-value coercion (`null` / `undefined` → `""`)
+
+See [Identifier rendering helpers](#identifier-helpers) for usage.
+
+### Errors
+
+All error classes — generic and action-specific — are exported as runtime values for `instanceof` discrimination:
+
+- `ClientError` — base class for every non-2xx response. `status`, `body`, `errors` accessors.
+- `ActionDisabledError extends ClientError` — HTTP 409 from the server-side action gate. Typed `action`, `id`, `ids` accessors.
+- `ActionNotFoundError` — `Client.action(name)` called with a name not present in `/meta`.
+- `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option.
+- `ClientValidationError` (type) — thrown by client-side validation on `insert` / `update` / `replace` before sending. Type export — the runtime class lives in `@atscript/db-client/validator`.
+
+```typescript
+import {
+  ClientError,
+  ActionDisabledError,
+  ActionNotFoundError,
+  ActionUnsupportedError,
+} from "@atscript/db-client";
+import type { ClientValidationError } from "@atscript/db-client";
+```
+
+### Action error body shape
+
+`ActionDisabledError.body` matches this wire envelope (HTTP 409):
+
+```ts
+{
+  name: "ActionDisabledError";
+  statusCode: 409;
+  message: string;
+  action: string;                          // action name that rejected
+  id?: Record<string, unknown>;            // 'row'-level rejections
+  ids?: Record<string, unknown>[];         // 'rows'-level rejections
+}
+```
+
 ## Method ↔ Endpoint Reference
 
-| Method            | HTTP   | Endpoint                 | Returns                                                 |
-| ----------------- | ------ | ------------------------ | ------------------------------------------------------- |
-| `query()`         | GET    | `/query`                 | `DataOf<T>[]`                                           |
-| `count()`         | GET    | `/query` (`$count`)      | `number`                                                |
-| `aggregate()`     | GET    | `/query` (`$groupBy`)    | `AggregateResult[]`                                     |
-| `pages()`         | GET    | `/pages`                 | `PageResult<DataOf<T>>`                                 |
-| `one()`           | GET    | `/one/:id` or `/one?k=v` | `DataOf<T> \| null`                                     |
-| `insert()`        | POST   | `/`                      | `TDbInsertResult` or `TDbInsertManyResult`              |
-| `update()`        | PATCH  | `/`                      | `TDbUpdateResult`                                       |
-| `replace()`       | PUT    | `/`                      | `TDbUpdateResult`                                       |
-| `remove()`        | DELETE | `/:id` or `/?k=v`        | `TDbDeleteResult`                                       |
-| `meta()`          | GET    | `/meta`                  | `MetaResponse`                                          |
-| `getActionForm()` | GET    | `/meta/form/:name`       | `TAtscriptAnnotatedType \| null`                        |
-| `action()`        | POST   | _resolved from `/meta`_  | `unknown` (server response, or `void` for `'navigate'`) |
+| Method            | HTTP   | Endpoint                    | Returns                                                 |
+| ----------------- | ------ | --------------------------- | ------------------------------------------------------- |
+| `query()`         | GET    | `/query`                    | `DataOf<T>[]`                                           |
+| `count()`         | GET    | `/query` (`$count`)         | `number`                                                |
+| `aggregate()`     | GET    | `/query` (`$groupBy`)       | `AggregateResult[]`                                     |
+| `pages()`         | GET    | `/pages`                    | `PageResult<DataOf<T>>`                                 |
+| `one()`           | GET    | `/one/:id` or `/one?k=v`    | `DataOf<T> \| null`                                     |
+| `insert()`        | POST   | `/`                         | `TDbInsertResult` or `TDbInsertManyResult`              |
+| `update()`        | PATCH  | `/`                         | `TDbUpdateResult`                                       |
+| `replace()`       | PUT    | `/`                         | `TDbUpdateResult`                                       |
+| `remove()`        | DELETE | `/:id` or `/?k=v`           | `TDbDeleteResult`                                       |
+| `meta()`          | GET    | `/meta`                     | `MetaResponse`                                          |
+| `getActionForm()` | GET    | `/meta/form/:name`          | `TAtscriptAnnotatedType \| null`                        |
+| `getValidator()`  | —      | _client-side; uses `/meta`_ | `ClientValidator` (lazy, cached)                        |
+| `action()`        | POST   | _resolved from `/meta`_     | `unknown` (server response, or `void` for `'navigate'`) |

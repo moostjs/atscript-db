@@ -141,6 +141,65 @@ const results = await articles.search("database optimization", {});
 FTS5 uses its own match syntax (e.g., `"exact phrase"`, `term1 AND term2`, `prefix*`). This differs from the simple text search APIs of PostgreSQL or MongoDB. See the [SQLite FTS5 documentation](https://www.sqlite.org/fts5.html) for query syntax details.
 :::
 
+### Vector Search
+
+SQLite supports vector similarity search through the optional [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension. Vector search is **opt-in** — you must install the peer dependency and tell the driver to load the extension.
+
+#### Install and enable
+
+```bash
+pnpm add sqlite-vec
+```
+
+```typescript
+import { BetterSqlite3Driver, SqliteAdapter } from "@atscript/db-sqlite";
+import { DbSpace } from "@atscript/db";
+
+const driver = new BetterSqlite3Driver("./data.db", { vector: true });
+const db = new DbSpace(() => new SqliteAdapter(driver));
+```
+
+When using a custom driver, set `hasVectorExt = true` after the extension is loaded so the adapter skips its capability probe. If the flag is omitted, the adapter runs `SELECT vec_version()` once and caches the result.
+
+#### Declaring a vector field
+
+Use the portable `@db.search.vector` annotation:
+
+```atscript
+@db.table "documents"
+export interface Document {
+  @meta.id
+  id: number
+
+  title: string
+
+  @db.search.vector 1536, "cosine"
+  embedding: number[]
+}
+```
+
+Allowed dimension values (whitelisted by the annotation): `256`, `384`, `512`, `768`, `1024`, `1536`, `2048`, `3072`, `4096`, `6144`, `8192`, `16384`. Similarity options: `cosine` (default), `euclidean`, `dotProduct`.
+
+#### Storage
+
+- **With `sqlite-vec` loaded** — the adapter creates a companion `vec0` virtual table per index (`<table>__vec__<indexName>`) with sync triggers, and routes `vectorSearch()` through KNN queries on that shadow table.
+- **Without the extension** — vector fields are stored as JSON `TEXT` on the main table. The data is preserved, but `vectorSearch()` throws because no indexed similarity search is available.
+
+#### Querying
+
+```typescript
+const results = await documents.vectorSearch(queryEmbedding, {
+  filter: { status: "published" },
+  controls: { $limit: 10, $threshold: 0.8 },
+});
+```
+
+`$threshold` is a normalized similarity score (`0`–`1`) matching MongoDB Atlas semantics; the adapter converts it to the appropriate distance for the chosen metric.
+
+::: tip
+`sqlite-vec` is a native module — make sure your build target matches the platform you deploy to.
+:::
+
 ### Filters
 
 All standard filter operators are supported (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and`, `$or`, `$not`). Regex patterns are converted to SQL `LIKE` expressions:
@@ -194,8 +253,12 @@ interface TSqliteDriver {
   get<T>(sql: string, params?: unknown[]): T | null;
   exec(sql: string): void;
   close(): void;
+  /** Optional — set to `true` if the driver has the `sqlite-vec` extension loaded. */
+  readonly hasVectorExt?: boolean;
 }
 ```
+
+When `hasVectorExt` is omitted, the adapter probes the connection by running `SELECT vec_version()` on first vector access. Set the flag explicitly to skip the probe.
 
 Example using Node.js built-in `node:sqlite`:
 
@@ -242,14 +305,45 @@ const instance = new Database("./data.db", { verbose: console.log });
 const driver = new BetterSqlite3Driver(instance);
 ```
 
-The driver uses `createRequire` internally, so `better-sqlite3` remains an optional dependency — it is only loaded when `BetterSqlite3Driver` is instantiated.
+#### Driver options
+
+The second constructor argument accepts a few extra options on top of the standard `better-sqlite3` `Database` options:
+
+```typescript
+new BetterSqlite3Driver("./data.db", {
+  vector: true, // load the optional `sqlite-vec` extension
+  loadExtensions: ["/path/to/ext1.so"], // pass each path to `Database.loadExtension`
+  // any other `better-sqlite3` Database options are forwarded
+});
+```
+
+The driver uses `createRequire` internally, so `better-sqlite3` (and `sqlite-vec`) remain optional dependencies — they are only loaded when `BetterSqlite3Driver` is instantiated with the corresponding option.
+
+#### WAL mode and pragma tuning
+
+The adapter sets `PRAGMA foreign_keys = ON` at connection time (required for FK enforcement) and toggles `foreign_keys` / `legacy_alter_table` during `recreate`-mode schema sync. It does **not** override journaling, synchronous, or busy-timeout pragmas — configure those on the underlying `better-sqlite3` `Database` before wrapping it:
+
+```typescript
+import Database from "better-sqlite3";
+import { BetterSqlite3Driver, SqliteAdapter } from "@atscript/db-sqlite";
+
+const sqlite = new Database("./data.db");
+sqlite.pragma("journal_mode = WAL");
+sqlite.pragma("synchronous = NORMAL");
+sqlite.pragma("busy_timeout = 5000");
+
+const driver = new BetterSqlite3Driver(sqlite);
+const adapter = new SqliteAdapter(driver);
+```
+
+See the [better-sqlite3 README](https://github.com/WiseLibs/better-sqlite3) for the full list of pragmas.
 
 ## Limitations
 
 - **No ALTER COLUMN type changes** — column type modifications require full table recreation. Use `@db.sync.method 'recreate'` to opt in. See [Schema Sync](/sync/) for details.
 - **FTS5-based fulltext search** — fulltext indexes are managed automatically, but FTS5 uses its own match syntax rather than standard SQL pattern matching.
 - **No database schemas** — the `@db.schema` annotation is ignored (SQLite has no schema namespaces).
-- **No vector search** — no equivalent of pgvector or Atlas vectorSearch.
+- **Vector search is opt-in via `sqlite-vec`** — see [Vector Search](#vector-search). Without the extension, `@db.search.vector` fields are stored as JSON `TEXT` and `vectorSearch()` throws.
 - **No native boolean type** — booleans are stored as `INTEGER` (`0`/`1`).
 - **No native array/JSON operations** — array patch operators (`$push`, `$pull`) use generic read-modify-write instead of native operations.
 - **Synchronous driver** — both `better-sqlite3` and `node:sqlite` are synchronous; the adapter wraps calls in promises for the async `BaseDbAdapter` contract.

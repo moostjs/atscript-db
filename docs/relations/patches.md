@@ -10,6 +10,10 @@ When using `updateOne` or `bulkUpdate` (PATCH), FROM and VIA navigation properti
 
 For single-table patch operations and embedded array patches, see [Update & Patch](/api/update-patch).
 
+::: warning Requires `@db.depth.limit` on the parent table
+Relational patches on `@db.rel.from` and `@db.rel.via` are nested writes — the parent table **must** declare `@db.depth.limit N`. Otherwise the patch is rejected with HTTP 400 (`DEPTH_EXCEEDED`). See [Deep Operations § `@db.depth.limit`](./deep-operations#depth-limit) for the gate, and [§ Depth Control § `maxDepth`](./deep-operations#depth-control) for the runtime cap.
+:::
+
 ## Where Relational Patches Apply
 
 Relational patches work on **navigation properties** — fields declared with `@db.rel.from` or `@db.rel.via`. They translate to real INSERT, UPDATE, and DELETE operations on the related tables and junction rows.

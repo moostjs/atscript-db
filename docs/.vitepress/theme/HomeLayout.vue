@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, nextTick, watch } from "vue";
+import { onMounted, nextTick, ref, watch } from "vue";
 // oxlint-disable-next-line import/named -- vitepress re-exports these
 import { useData, useRoute } from "vitepress";
 import DefaultTheme from "vitepress/theme";
@@ -9,10 +9,60 @@ import SnippetRelations from "./snippets/snippet-relations.md";
 import SnippetView from "./snippets/snippet-view.md";
 import SnippetCrud from "./snippets/snippet-crud.md";
 import SnippetRest from "./snippets/snippet-rest.md";
+import sqliteLogo from "./icons/sqlite.svg?raw";
+import postgresLogo from "./icons/postgres.svg?raw";
+import mysqlLogo from "./icons/mysql.svg?raw";
+import mongodbLogo from "./icons/mongodb.svg?raw";
+
+const adapterEntries = [
+  {
+    href: "/adapters/sqlite",
+    name: "SQLite",
+    note: "Zero-config, embedded",
+    logo: sqliteLogo,
+    color: "#0F80CC",
+  },
+  {
+    href: "/adapters/postgresql",
+    name: "PostgreSQL",
+    note: "Full-featured, production-ready",
+    logo: postgresLogo,
+    color: "#336791",
+  },
+  {
+    href: "/adapters/mysql",
+    name: "MySQL",
+    note: "Widely deployed, familiar",
+    logo: mysqlLogo,
+    color: "#4479A1",
+  },
+  {
+    href: "/adapters/mongodb",
+    name: "MongoDB",
+    note: "Document store, flexible",
+    logo: mongodbLogo,
+    color: "#47A248",
+  },
+];
 
 const { Layout } = DefaultTheme;
 const { frontmatter } = useData();
 const route = useRoute();
+
+const copiedCmd = ref("");
+let copyTimer;
+async function copyCmd(cmd) {
+  try {
+    await navigator.clipboard.writeText(cmd);
+    copiedCmd.value = cmd;
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => {
+      copiedCmd.value = "";
+    }, 1400);
+  } catch {
+    // ignore
+  }
+}
 
 function setupScrollAnimations() {
   nextTick(() => {
@@ -44,6 +94,7 @@ watch(() => route.path, setupScrollAnimations);
     <template #home-hero-before>
       <!-- ═══════════════════ Hero ═══════════════════ -->
       <div class="custom-hero">
+        <div class="hero-dots-bg" aria-hidden="true"></div>
         <div class="hero-inner">
           <div class="hero-main">
             <p class="hero-kicker">
@@ -66,6 +117,68 @@ watch(() => route.path, setupScrollAnimations);
           </div>
           <div class="hero-image">
             <div class="image-container">
+              <div class="constellation" aria-hidden="true">
+                <!-- Schema constellation: FK paths + travelling data pulses -->
+                <svg class="hero-fk-svg" viewBox="0 0 400 400" aria-hidden="true">
+                  <defs>
+                    <path id="fk-top" d="M 80 80 Q 200 110 320 80" />
+                    <path id="fk-bottom" d="M 80 320 Q 200 290 320 320" />
+                    <path id="fk-left" d="M 60 100 Q 30 200 60 300" />
+                    <path id="fk-right" d="M 340 100 Q 370 200 340 300" />
+                  </defs>
+                  <use href="#fk-top" class="fk-path" />
+                  <use href="#fk-bottom" class="fk-path" />
+                  <use href="#fk-left" class="fk-path" />
+                  <use href="#fk-right" class="fk-path" />
+                  <circle class="fk-pulse" r="3.5">
+                    <animateMotion dur="3.6s" repeatCount="indefinite" rotate="auto">
+                      <mpath href="#fk-top" />
+                    </animateMotion>
+                  </circle>
+                  <circle class="fk-pulse" r="3.5">
+                    <animateMotion dur="4.2s" repeatCount="indefinite" rotate="auto" begin="-1.4s">
+                      <mpath href="#fk-bottom" />
+                    </animateMotion>
+                  </circle>
+                  <circle class="fk-pulse" r="3.5">
+                    <animateMotion dur="5s" repeatCount="indefinite" rotate="auto" begin="-2.1s">
+                      <mpath href="#fk-left" />
+                    </animateMotion>
+                  </circle>
+                  <circle class="fk-pulse" r="3.5">
+                    <animateMotion dur="4.6s" repeatCount="indefinite" rotate="auto" begin="-3s">
+                      <mpath href="#fk-right" />
+                    </animateMotion>
+                  </circle>
+                </svg>
+
+                <!-- Mini schema cards (4 tables, fanned around the logo) -->
+                <div class="schema-card schema-card-tl" aria-hidden="true">
+                  <div class="schema-card-head">users</div>
+                  <div class="schema-card-row r-l"></div>
+                  <div class="schema-card-row r-m"></div>
+                  <div class="schema-card-row r-s"></div>
+                </div>
+                <div class="schema-card schema-card-tr" aria-hidden="true">
+                  <div class="schema-card-head">orders</div>
+                  <div class="schema-card-row r-m"></div>
+                  <div class="schema-card-row r-l"></div>
+                  <div class="schema-card-row r-s"></div>
+                </div>
+                <div class="schema-card schema-card-bl" aria-hidden="true">
+                  <div class="schema-card-head">products</div>
+                  <div class="schema-card-row r-s"></div>
+                  <div class="schema-card-row r-l"></div>
+                  <div class="schema-card-row r-m"></div>
+                </div>
+                <div class="schema-card schema-card-br" aria-hidden="true">
+                  <div class="schema-card-head">reviews</div>
+                  <div class="schema-card-row r-l"></div>
+                  <div class="schema-card-row r-s"></div>
+                  <div class="schema-card-row r-m"></div>
+                </div>
+              </div>
+
               <img src="/logo.svg" alt="Atscript DB" class="image-src" />
             </div>
           </div>
@@ -226,18 +339,24 @@ watch(() => route.path, setupScrollAnimations);
                   <div class="terminal-line"><span class="t-prompt">$</span> asc db sync</div>
                   <div class="terminal-line t-muted">Compiling .as files...</div>
                   <div class="terminal-line t-muted">
-                    Schema hash: <span class="t-hash">a7f3c912</span> (changed)
+                    {{ 'Schema hash: <span class="t-hash">a7f3c912</span> (changed)' }}
                   </div>
                   <div class="terminal-line t-muted">Acquiring lock...</div>
                   <div class="terminal-line t-add">
-                    + CREATE TABLE products (id, name, sku, ...)
+                    {{ "+ CREATE TABLE products (id, name, sku, ...)" }}
                   </div>
                   <div class="terminal-line t-add">
-                    + CREATE INDEX search_idx ON products (name)
+                    {{ "+ CREATE INDEX search_idx ON products (name)" }}
                   </div>
-                  <div class="terminal-line t-add">+ CREATE INDEX sku_idx ON products (sku)</div>
-                  <div class="terminal-line t-add">+ CREATE TABLE orders (id, customerId, ...)</div>
-                  <div class="terminal-line t-add">+ CREATE VIEW order_stats AS SELECT ...</div>
+                  <div class="terminal-line t-add">
+                    {{ "+ CREATE INDEX sku_idx ON products (sku)" }}
+                  </div>
+                  <div class="terminal-line t-add">
+                    {{ "+ CREATE TABLE orders (id, customerId, ...)" }}
+                  </div>
+                  <div class="terminal-line t-add">
+                    {{ "+ CREATE VIEW order_stats AS SELECT ..." }}
+                  </div>
                   <div class="terminal-line t-ok">Schema synced. 5 changes applied.</div>
                 </div>
               </div>
@@ -285,33 +404,220 @@ watch(() => route.path, setupScrollAnimations);
       <!-- ═══════════════════ Any Database ═══════════════════ -->
       <section class="section-adapters bg-straight">
         <div class="section-inner">
-          <div class="adapters-block animate-in">
-            <h2 class="section-heading">Any database. Same code.</h2>
-            <p class="story-desc">
+          <div class="adapters-block adapters-block-centered animate-in">
+            <h2 class="section-heading section-heading-center">Any database. Same code.</h2>
+            <p class="story-desc story-desc-center">
               Prototype with SQLite. Ship with PostgreSQL. Switch to MongoDB. Your schema, queries,
               and controllers stay the same — only the adapter changes.
             </p>
             <div class="adapter-grid">
-              <a href="/adapters/sqlite" class="adapter-card">
-                <div class="adapter-name">SQLite</div>
-                <div class="adapter-note">Zero-config, embedded</div>
-              </a>
-              <a href="/adapters/postgresql" class="adapter-card">
-                <div class="adapter-name">PostgreSQL</div>
-                <div class="adapter-note">Full-featured, production-ready</div>
-              </a>
-              <a href="/adapters/mysql" class="adapter-card">
-                <div class="adapter-name">MySQL</div>
-                <div class="adapter-note">Widely deployed, familiar</div>
-              </a>
-              <a href="/adapters/mongodb" class="adapter-card">
-                <div class="adapter-name">MongoDB</div>
-                <div class="adapter-note">Document store, flexible</div>
+              <a
+                v-for="a in adapterEntries"
+                :key="a.href"
+                :href="a.href"
+                class="adapter-card"
+                :style="{ '--adapter-color': a.color }"
+              >
+                <div class="adapter-logo" v-html="a.logo"></div>
+                <div class="adapter-name">{{ a.name }}</div>
+                <div class="adapter-note">{{ a.note }}</div>
               </a>
             </div>
-            <div class="story-links" style="margin-top: 24px">
+            <div class="story-links story-links-center" style="margin-top: 24px">
               <a href="/adapters/" class="story-link">Compare adapters</a>
               <a href="/adapters/creating-adapters" class="story-link">Build your own</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════════ AI Agent Skill ═══════════════════ -->
+      <section class="section-skill">
+        <div class="section-inner">
+          <div class="skill-block animate-in">
+            <div class="skill-head">
+              <span class="skill-eyebrow">AI Agent Skill</span>
+              <h2 class="section-heading section-heading-center">
+                Your AI already speaks Atscript DB.
+              </h2>
+              <p class="story-desc story-desc-center skill-desc">
+                One command teaches Claude Code, Cursor, Windsurf, and Codex the entire DB layer —
+                <code>@db.*</code>, four adapters, schema sync, relations and
+                <code>moost-db</code> REST.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              class="install-card"
+              :class="{ copied: copiedCmd === 'npx skills add moostjs/atscript-db' }"
+              @click="copyCmd('npx skills add moostjs/atscript-db')"
+              aria-label="Copy install command: npx skills add moostjs/atscript-db"
+            >
+              <span class="install-prompt">$</span>
+              <span class="install-cmd">npx skills add <strong>moostjs/atscript-db</strong></span>
+              <span class="install-action" aria-hidden="true">
+                <span class="install-action-icon">
+                  <svg
+                    v-if="copiedCmd !== 'npx skills add moostjs/atscript-db'"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <rect x="9" y="9" width="11" height="11" rx="2" />
+                    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                  </svg>
+                  <svg
+                    v-else
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.6"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M5 12.5l4.5 4.5L19 7.5" />
+                  </svg>
+                </span>
+                <span class="install-action-label">
+                  {{
+                    copiedCmd === "npx skills add moostjs/atscript-db" ? "Copied!" : "Click to copy"
+                  }}
+                </span>
+              </span>
+            </button>
+
+            <ul class="install-bullets">
+              <li><span class="bullet-dot"></span><code>@db.*</code> annotations &amp; types</li>
+              <li>
+                <span class="bullet-dot"></span>SQLite · PostgreSQL · MySQL · MongoDB adapters
+              </li>
+              <li><span class="bullet-dot"></span>schema sync · relations · views</li>
+              <li>
+                <span class="bullet-dot"></span><code>moost-db</code> REST &amp; browser client
+              </li>
+            </ul>
+
+            <div class="skill-companions">
+              <span class="companions-label">Companions</span>
+              <div class="companions-list">
+                <button
+                  type="button"
+                  class="companions-pill"
+                  :class="{ copied: copiedCmd === 'npx skills add moostjs/atscript' }"
+                  @click="copyCmd('npx skills add moostjs/atscript')"
+                  aria-label="Copy: npx skills add moostjs/atscript"
+                >
+                  <span class="pill-tag">DSL</span>
+                  <code>npx skills add moostjs/atscript</code>
+                  <span class="pill-icon" aria-hidden="true">
+                    <svg
+                      v-if="copiedCmd !== 'npx skills add moostjs/atscript'"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <rect x="9" y="9" width="11" height="11" rx="2" />
+                      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                    </svg>
+                    <svg
+                      v-else
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M5 12.5l4.5 4.5L19 7.5" />
+                    </svg>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  class="companions-pill"
+                  :class="{ copied: copiedCmd === 'npx skills add moostjs/atscript-ui' }"
+                  @click="copyCmd('npx skills add moostjs/atscript-ui')"
+                  aria-label="Copy: npx skills add moostjs/atscript-ui"
+                >
+                  <span class="pill-tag">UI</span>
+                  <code>npx skills add moostjs/atscript-ui</code>
+                  <span class="pill-icon" aria-hidden="true">
+                    <svg
+                      v-if="copiedCmd !== 'npx skills add moostjs/atscript-ui'"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <rect x="9" y="9" width="11" height="11" rx="2" />
+                      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                    </svg>
+                    <svg
+                      v-else
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M5 12.5l4.5 4.5L19 7.5" />
+                    </svg>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <a href="https://skills.sh" class="story-link skill-link"
+              >Learn about AI agent skills</a
+            >
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════════ Part of the stack ═══════════════════ -->
+      <section class="section-stack">
+        <div class="section-inner">
+          <div class="stack-block animate-in">
+            <h2 class="section-heading section-heading-center">Part of a model-driven stack.</h2>
+            <p class="story-desc story-desc-center">
+              One <code>.as</code> file powers TypeScript types, runtime validation, DB schema, REST
+              routes, forms and tables. Three sites, one source of truth.
+            </p>
+            <div class="stack-grid">
+              <a href="https://atscript.dev" class="stack-card">
+                <div class="stack-card-tag">DSL</div>
+                <div class="stack-card-name">Atscript</div>
+                <div class="stack-card-note">
+                  Types, metadata and validation from a single <code>.as</code> model.
+                </div>
+                <span class="stack-card-host">atscript.dev →</span>
+              </a>
+              <a href="https://ui.atscript.dev" class="stack-card">
+                <div class="stack-card-tag">ui</div>
+                <div class="stack-card-name">Atscript UI</div>
+                <div class="stack-card-note">
+                  Forms, smart tables and multi-step flows — rendered from <code>.as</code>.
+                </div>
+                <span class="stack-card-host">ui.atscript.dev →</span>
+              </a>
+              <a href="https://moost.org" class="stack-card">
+                <div class="stack-card-tag">runtime</div>
+                <div class="stack-card-name">Moost</div>
+                <div class="stack-card-note">
+                  Decorator-driven framework for HTTP, CLI, WF and WS events.
+                </div>
+                <span class="stack-card-host">moost.org →</span>
+              </a>
             </div>
           </div>
         </div>
@@ -426,6 +732,7 @@ watch(() => route.path, setupScrollAnimations);
   margin: 0 auto;
   width: 320px;
   height: 320px;
+  isolation: isolate;
 }
 @media (min-width: 640px) {
   .image-container {
@@ -449,8 +756,168 @@ watch(() => route.path, setupScrollAnimations);
   left: 50%;
   max-width: 192px;
   transform: translate(-50%, -50%);
+  z-index: 2;
   filter: drop-shadow(0 0 40px rgba(71, 26, 236, 0.35))
     drop-shadow(0 0 80px rgba(71, 26, 236, 0.25)) drop-shadow(0 0 120px rgba(71, 26, 236, 0.15));
+}
+
+/* ════════════════════ Hero dotted grid backdrop ════════════════════ */
+.hero-dots-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(71, 26, 236, 0.18) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  background-position: 0 0;
+  mask-image: radial-gradient(ellipse at 50% 30%, rgba(0, 0, 0, 0.55), transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 30%, rgba(0, 0, 0, 0.55), transparent 75%);
+}
+:global(.dark) .hero-dots-bg {
+  background-image: radial-gradient(rgba(174, 153, 252, 0.22) 1px, transparent 1.4px);
+}
+
+/* ════════════════════ Schema constellation ════════════════════ */
+.constellation {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 320px;
+  height: 320px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 1;
+}
+@media (min-width: 640px) {
+  .constellation {
+    width: 360px;
+    height: 360px;
+  }
+}
+@media (min-width: 960px) {
+  .constellation {
+    width: 380px;
+    height: 380px;
+  }
+}
+.hero-fk-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  overflow: visible;
+  pointer-events: none;
+}
+.fk-path {
+  fill: none;
+  stroke: rgba(71, 26, 236, 0.32);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-dasharray: 3 6;
+}
+:global(.dark) .fk-path {
+  stroke: rgba(174, 153, 252, 0.4);
+}
+.fk-pulse {
+  fill: var(--vp-c-brand-1);
+  filter: drop-shadow(0 0 6px rgba(71, 26, 236, 0.65));
+}
+:global(.dark) .fk-pulse {
+  fill: #ae99fc;
+  filter: drop-shadow(0 0 6px rgba(174, 153, 252, 0.75));
+}
+
+.schema-card {
+  position: absolute;
+  width: 78px;
+  padding: 5px 7px 7px;
+  z-index: 1;
+  border-radius: 7px;
+  background: var(--vp-c-bg);
+  border: 1px solid rgba(71, 26, 236, 0.28);
+  box-shadow:
+    0 4px 16px rgba(71, 26, 236, 0.12),
+    0 1px 0 rgba(255, 255, 255, 0.6) inset;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: card-float 9s ease-in-out infinite;
+}
+:global(.dark) .schema-card {
+  background: rgba(33, 27, 53, 0.92);
+  border-color: rgba(174, 153, 252, 0.35);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.35),
+    0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+.schema-card-head {
+  font-family: var(--vp-font-family-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+  letter-spacing: 0.04em;
+  padding: 2px 0 3px;
+  border-bottom: 1px dashed rgba(71, 26, 236, 0.25);
+  margin-bottom: 2px;
+}
+:global(.dark) .schema-card-head {
+  border-bottom-color: rgba(174, 153, 252, 0.3);
+}
+.schema-card-row {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(71, 26, 236, 0.22), rgba(43, 170, 196, 0.18));
+}
+:global(.dark) .schema-card-row {
+  background: linear-gradient(90deg, rgba(174, 153, 252, 0.32), rgba(43, 170, 196, 0.22));
+}
+.r-s {
+  width: 55%;
+}
+.r-m {
+  width: 78%;
+}
+.r-l {
+  width: 100%;
+}
+
+.schema-card-tl {
+  top: 8%;
+  left: 6%;
+  animation-delay: 0s;
+}
+.schema-card-tr {
+  top: 8%;
+  right: 6%;
+  animation-delay: -2.2s;
+}
+.schema-card-bl {
+  bottom: 8%;
+  left: 6%;
+  animation-delay: -4.5s;
+}
+.schema-card-br {
+  bottom: 8%;
+  right: 6%;
+  animation-delay: -6.7s;
+}
+
+@keyframes card-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(1deg);
+  }
+}
+
+@media (max-width: 639px) {
+  .hero-fk-svg,
+  .schema-card {
+    display: none;
+  }
 }
 :global(.dark) .image-src {
   filter: drop-shadow(0 0 40px rgba(174, 153, 252, 0.5))
@@ -803,6 +1270,13 @@ watch(() => route.path, setupScrollAnimations);
 .adapters-block {
   max-width: 860px;
 }
+.adapters-block-centered {
+  margin: 0 auto;
+  text-align: center;
+}
+.story-links-center {
+  justify-content: center;
+}
 
 .adapter-grid {
   display: grid;
@@ -816,36 +1290,511 @@ watch(() => route.path, setupScrollAnimations);
   }
 }
 .adapter-card {
-  padding: 20px 16px;
+  padding: 22px 16px 18px;
   border-radius: 12px;
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg);
   text-decoration: none;
   color: inherit;
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   transition:
     border-color 0.25s ease,
     transform 0.25s ease,
     box-shadow 0.25s ease;
 }
 .adapter-card:hover {
-  border-color: var(--vp-c-brand-1);
+  border-color: var(--adapter-color, var(--vp-c-brand-1));
   transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(71, 26, 236, 0.1);
+  box-shadow: 0 4px 18px
+    color-mix(in srgb, var(--adapter-color, var(--vp-c-brand-1)) 18%, transparent);
 }
-:global(.dark) .adapter-card:hover {
-  box-shadow: 0 4px 16px rgba(174, 153, 252, 0.12);
+.adapter-logo {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  color: var(--adapter-color, var(--vp-c-brand-1));
+  filter: grayscale(1);
+  opacity: 0.55;
+  transition:
+    transform 0.3s ease,
+    filter 0.3s ease,
+    opacity 0.3s ease;
+}
+.adapter-card:hover .adapter-logo {
+  transform: translateY(-2px) scale(1.05);
+  filter: grayscale(0);
+  opacity: 1;
+}
+.adapter-logo :deep(svg) {
+  width: 100%;
+  height: 100%;
 }
 .adapter-name {
   font-size: 15px;
   font-weight: 700;
-  color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
   font-family: var(--vp-font-family-mono);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+}
+.adapter-card:hover .adapter-name {
+  color: var(--adapter-color, var(--vp-c-brand-1));
 }
 .adapter-note {
   font-size: 12px;
   color: var(--vp-c-text-3);
+}
+
+/* ════════════════════ AI Agent Skill section ════════════════════ */
+.section-skill {
+  position: relative;
+  padding: 64px 24px 72px;
+  background:
+    radial-gradient(
+      ellipse at 50% 0%,
+      color-mix(in srgb, var(--vp-c-brand-1) 8%, transparent),
+      transparent 60%
+    ),
+    var(--vp-c-bg);
+}
+:global(.dark) .section-skill {
+  background:
+    radial-gradient(
+      ellipse at 50% 0%,
+      color-mix(in srgb, var(--vp-c-brand-1) 14%, transparent),
+      transparent 65%
+    ),
+    var(--vp-c-bg);
+}
+@media (min-width: 640px) {
+  .section-skill {
+    padding: 80px 48px 88px;
+  }
+}
+@media (min-width: 960px) {
+  .section-skill {
+    padding: 88px 64px 96px;
+  }
+}
+.skill-block {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.skill-head {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.skill-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.1);
+  padding: 5px 10px;
+  border-radius: 999px;
+  margin-bottom: 14px;
+}
+:global(.dark) .skill-eyebrow {
+  background: rgba(174, 153, 252, 0.16);
+}
+.skill-desc {
+  margin-bottom: 0;
+}
+.skill-desc code {
+  font-size: 13px;
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.08);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: var(--vp-font-family-mono);
+}
+:global(.dark) .skill-desc code {
+  background: rgba(174, 153, 252, 0.14);
+}
+
+/* ── Prominent install command card ── */
+.install-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 520px;
+  padding: 12px 12px 12px 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(71, 26, 236, 0.28);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  cursor: pointer;
+  text-align: left;
+  box-shadow:
+    0 12px 32px rgba(71, 26, 236, 0.12),
+    0 0 0 4px rgba(71, 26, 236, 0.05);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+:global(.dark) .install-card {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(174, 153, 252, 0.32);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.4),
+    0 0 0 4px rgba(174, 153, 252, 0.06);
+}
+.install-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--vp-c-brand-1);
+  box-shadow:
+    0 18px 40px rgba(71, 26, 236, 0.18),
+    0 0 0 4px rgba(71, 26, 236, 0.08);
+}
+.install-card.copied {
+  border-color: #18a674;
+  box-shadow:
+    0 12px 32px rgba(24, 166, 116, 0.18),
+    0 0 0 4px rgba(24, 166, 116, 0.08);
+}
+.install-prompt {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--vp-c-brand-1);
+  line-height: 1;
+}
+.install-cmd {
+  flex: 1;
+  font-size: 14px;
+  letter-spacing: -0.1px;
+  color: var(--vp-c-text-1);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.install-cmd strong {
+  color: var(--vp-c-brand-1);
+  font-weight: 700;
+}
+@media (min-width: 640px) {
+  .install-cmd {
+    font-size: 15px;
+  }
+}
+.install-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 8px;
+  border-radius: 999px;
+  background: rgba(71, 26, 236, 0.08);
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+:global(.dark) .install-action {
+  background: rgba(174, 153, 252, 0.14);
+}
+.install-card.copied .install-action {
+  background: rgba(24, 166, 116, 0.12);
+  color: #18a674;
+}
+.install-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+.install-action-icon svg {
+  width: 13px;
+  height: 13px;
+}
+.install-action {
+  font-size: 11.5px;
+}
+@media (max-width: 520px) {
+  .install-action-label {
+    display: none;
+  }
+}
+
+/* ── Accurate bullet list ── */
+.install-bullets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 22px;
+  margin: 18px 0 6px;
+  padding: 0;
+  list-style: none;
+}
+.install-bullets li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+.install-bullets li code {
+  font-size: 12.5px;
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--vp-font-family-mono);
+}
+:global(.dark) .install-bullets li code {
+  background: rgba(174, 153, 252, 0.14);
+}
+.bullet-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vp-c-brand-1);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* ── Companions ── */
+.skill-companions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 28px 0 8px;
+  width: 100%;
+}
+.companions-label {
+  font-family: var(--vp-font-family-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-3);
+}
+.companions-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+.companions-pill {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.2s ease,
+    color 0.2s ease,
+    background 0.2s ease,
+    transform 0.15s ease;
+}
+.companions-pill:hover {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
+  transform: translateY(-1px);
+}
+.companions-pill:active {
+  transform: translateY(0);
+}
+.companions-pill.copied {
+  border-color: #18a674;
+  background: color-mix(in srgb, #18a674 6%, transparent);
+}
+:global(.dark) .companions-pill {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.pill-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(71, 26, 236, 0.1);
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+:global(.dark) .pill-tag {
+  background: rgba(174, 153, 252, 0.18);
+}
+.companions-pill code {
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  background: transparent;
+  padding: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pill-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--vp-c-text-3);
+  background: transparent;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+.pill-icon svg {
+  width: 14px;
+  height: 14px;
+}
+.companions-pill:hover .pill-icon {
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.08);
+}
+.companions-pill.copied .pill-icon {
+  color: #18a674;
+  background: rgba(24, 166, 116, 0.12);
+}
+
+.skill-link {
+  margin-top: 18px;
+}
+
+/* ════════════════════ Stack (ecosystem) ════════════════════ */
+.section-heading-center {
+  text-align: center;
+}
+.story-desc-center {
+  text-align: center;
+  margin-left: auto;
+  margin-right: auto;
+}
+.section-stack {
+  padding: 64px 24px 96px;
+}
+@media (min-width: 640px) {
+  .section-stack {
+    padding: 80px 48px 112px;
+  }
+}
+@media (min-width: 960px) {
+  .section-stack {
+    padding: 88px 64px 128px;
+  }
+}
+.stack-block {
+  max-width: 960px;
+  margin: 0 auto;
+}
+.stack-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-top: 28px;
+}
+@media (min-width: 720px) {
+  .stack-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.stack-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 22px 22px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color 0.25s ease,
+    transform 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.stack-card:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(71, 26, 236, 0.12);
+}
+:global(.dark) .stack-card {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+:global(.dark) .stack-card:hover {
+  box-shadow: 0 6px 24px rgba(174, 153, 252, 0.16);
+}
+.stack-card-tag {
+  display: inline-block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.08);
+  padding: 3px 8px;
+  border-radius: 999px;
+  width: fit-content;
+}
+:global(.dark) .stack-card-tag {
+  background: rgba(174, 153, 252, 0.14);
+}
+.stack-card-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+}
+.stack-card-note {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--vp-c-text-2);
+}
+.stack-card-note code {
+  font-size: 12px;
+  color: var(--vp-c-brand-1);
+  background: rgba(71, 26, 236, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--vp-font-family-mono);
+}
+:global(.dark) .stack-card-note code {
+  background: rgba(174, 153, 252, 0.12);
+}
+.stack-card-host {
+  margin-top: 6px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
 }
 
 /* ════════════════════ Scroll Animations ════════════════════ */

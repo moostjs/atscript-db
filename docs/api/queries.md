@@ -4,6 +4,8 @@ outline: deep
 
 # Queries & Filters
 
+<!--@include: ../_experimental-warning.md-->
+
 Every query in Atscript's DB layer follows the same shape: a **filter** that selects which records to return, and a **controls** object that determines how they come back (sorting, pagination, projection). This syntax is consistent across all adapters.
 
 ```typescript
@@ -309,6 +311,10 @@ controls: {
 }
 // Includes contact.email, contact.phone, etc.
 ```
+
+::: info Aggregate expressions
+The include array can also contain `AggregateExpr` objects from `@uniqu/core` (`{ $fn: 'sum', $field: 'amount' }` etc.) for computed columns. They are extracted and routed to the adapter's aggregation pipeline. See the [@uniqu/core types](https://github.com/moostjs/uniqu) for the full operator list.
+:::
 
 ::: tip FK Fields Auto-Included
 When using `$select` with relation loading (`$with`), foreign key fields needed for relation resolution (e.g., `assigneeId` for an `assignee` relation) are automatically included even if not listed in `$select`.

@@ -103,11 +103,14 @@ The literal `null` is parsed as a null value, not the string `"null"`.
 
 ### Nested Fields
 
-For embedded objects that are [flattened to columns](/api/tables), use the flattened field name with `__` separator:
+Reference fields inside embedded objects (whether flattened to columns or stored as documents) with **dot notation** — the same logical path you would use in a programmatic filter:
 
 ```bash
-curl "http://localhost:3000/users/query?contact__email=alice@example.com"
+curl "http://localhost:3000/users/query?contact.email=alice@example.com"
+curl "http://localhost:3000/users/query?address.city=Berlin&address.country=DE"
 ```
+
+The path uses the `.as` interface's logical property names, not physical column names. The same dot-notation applies to `$select`, `$sort`, `$groupBy`, and `$with` sub-controls.
 
 ## Logical Operators
 

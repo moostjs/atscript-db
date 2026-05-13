@@ -25,7 +25,7 @@ interface TSyncOptions {
   lockTtlMs?: number; // default: 30_000
   waitTimeoutMs?: number; // default: 60_000
   pollIntervalMs?: number; // default: 500
-  force?: boolean; // default: false — bypass the hash-equal short-circuit
+  force?: boolean; // default: false — when true, runs the full per-table diff regardless of the schema-hash match
   safe?: boolean; // default: false — skip destructive ops (DROP COLUMN, DROP TABLE)
 }
 ```

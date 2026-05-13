@@ -164,8 +164,13 @@ export interface Task {
 
 The `projectId` FK is required (every task must belong to a project) with cascade delete. The `assigneeId` FK is optional and aliased, with set-null on delete. The `ownerId` FK on `Project` is a simple required FK with no explicit referential action.
 
+::: warning Nested writes require `@db.depth.limit`
+If you plan to insert/replace/patch a parent together with its 1:N (`@db.rel.from`) or M:N (`@db.rel.via`) children in a single payload, you must add `@db.depth.limit N` on the parent table. Without it, nested writes are rejected with HTTP 400 (`DEPTH_EXCEEDED`). See [Deep Operations § `@db.depth.limit`](./deep-operations#depth-limit).
+:::
+
 ## Next Steps
 
 - [Navigation Properties](./navigation) — define `@db.rel.to`, `@db.rel.from`, and `@db.rel.via` to traverse relationships
 - [Referential Actions](./referential-actions) — control cascade, restrict, and set-null behavior
 - [Loading Relations](./loading) — query related data with `$with` controls
+- [Deep Operations](./deep-operations) — nested writes and the `@db.depth.limit` gate

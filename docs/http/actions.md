@@ -818,6 +818,63 @@ If the guard rejects the request, the handler body never runs and the auth-failu
 
 The internal gate interceptor (registered automatically when `disabled` or `@DbActionRow*` is present) runs at `AFTER_GUARD` priority — so auth guards run first, the gate runs after, then any custom `INTERCEPTOR`-priority interceptors, then the handler.
 
+### Worked recipe — auth + gate + `requiredFields` {#auth-gate-recipe}
+
+A full row-level action that combines an `@Authenticate` admin guard, a `disabled` predicate gated on row state, `@DbActionRow()` row injection, and audited fields:
+
+```typescript
+import {
+  AsDbController,
+  TableController,
+  DbAction,
+  DbActionID,
+  DbActionRow,
+} from "@atscript/moost-db";
+import { Post, Authenticate } from "@moostjs/event-http";
+import { Order } from "./schema/order.as";
+import { ordersTable } from "./db";
+
+@TableController(ordersTable)
+export class OrdersController extends AsDbController<typeof Order> {
+  @Post("actions/refund")
+  @Authenticate(adminGuard)
+  @DbAction<Order, ["status", "paidAmount"]>("refund", {
+    label: "Refund",
+    intent: "negative",
+    requiredFields: ["status", "paidAmount"],
+    disabled: (orders) => orders.map((o) => o.status !== "paid" || o.paidAmount <= 0),
+    promptText: ["Refund order $1?", "Refund $N orders?"],
+  })
+  async refund(
+    @DbActionID() id: { id: string },
+    @DbActionRow() order: Pick<Order, "id" | "status" | "paidAmount">,
+  ) {
+    // adminGuard passed, the gate already verified status === 'paid'
+    // and paidAmount > 0 against this exact row.
+    await this.processRefund(order);
+    await this.table.updateOne({ id: id.id, status: "refunded" });
+    return { message: `Refunded order ${id.id}` };
+  }
+}
+```
+
+What happens per request:
+
+1. `@Authenticate(adminGuard)` — Moost runs the auth guard. On failure: standard auth-failure response, handler never runs.
+2. `requiredFields` widens the projection used to load the row.
+3. The gate interceptor (`AFTER_GUARD`) loads the row, evaluates `disabled([row])`. On failure: HTTP 409 `ActionDisabledError`.
+4. `@DbActionRow()` injects the gate-loaded row into the handler — no second fetch.
+5. Handler runs.
+
+The same `disabled` predicate also drives:
+
+- **`/meta.actions[].disabled`** — emitted as `fn.toString()` for the UI to grey out the button.
+- **`$actions=true` augmentation** on read endpoints — each row carries `$actions: string[]` listing the actions whose predicate did NOT reject it.
+
+::: tip Keep `disabled` self-contained
+The predicate's source string is shipped to UI clients verbatim. Outer-scope identifiers work server-side but break UI evaluation — see [Closure-emission pitfall](#closure-emission-pitfall).
+:::
+
 ## The `/meta` Surface
 
 The `actions` field of the `/meta` response is an array of `TDbActionInfo`:

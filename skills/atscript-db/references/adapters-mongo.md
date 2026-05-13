@@ -25,17 +25,17 @@ plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.object
 
 ## Capabilities
 
-| Capability              | Notes                                                                                                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Transactions            | `withTransaction(fn)` uses `session.withTransaction()` — requires replica-set (Atlas or local replica).                                                                        |
-| Native FKs              | No (`supportsNativeForeignKeys: false`) — cascade / setNull run in the application integrity strategy.                                                                         |
-| `supportsNestedObjects` | **Yes** — nested objects stored as-is, not flattened.                                                                                                                          |
-| Native patches          | Yes (`supportsNativePatch: true`). `CollectionPatcher` emits `$set` aggregation pipelines.                                                                                     |
-| Native relation loading | Yes (`supportsNativeRelations: true`) — `$lookup` based.                                                                                                                       |
-| Full-text search        | **Atlas Search** (`$search` stage) via `@db.mongo.search.static` + `@db.mongo.search.text`. Legacy `text` indexes via `@db.mongo.index.text` (weight) or `@db.index.fulltext`. |
-| Vector search           | **Atlas Search** (`$vectorSearch` stage) via `@db.search.vector` or `@db.mongo.search.vector`.                                                                                 |
-| Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                                            |
-| JSON / nested           | Native — `@db.json` is a no-op (store as Document).                                                                                                                            |
+| Capability              | Notes                                                                                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transactions            | `withTransaction(fn)` uses `session.withTransaction()` — requires replica-set (Atlas or local replica).                                               |
+| Native FKs              | No (`supportsNativeForeignKeys: false`) — cascade / setNull run in the application integrity strategy.                                                |
+| `supportsNestedObjects` | **Yes** — nested objects stored as-is, not flattened.                                                                                                 |
+| Native patches          | Yes (`supportsNativePatch: true`). `CollectionPatcher` emits `$set` aggregation pipelines.                                                            |
+| Native relation loading | Yes (`supportsNativeRelations: true`) — `$lookup` based.                                                                                              |
+| Full-text search        | **Atlas Search** (`$search` stage) via `@db.mongo.search.static` + `@db.mongo.search.text`. Legacy `text` indexes via `@db.index.fulltext` (generic). |
+| Vector search           | **Atlas Search** (`$vectorSearch` stage) via `@db.search.vector` (generic, core annotation).                                                          |
+| Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                   |
+| JSON / nested           | Native — `@db.json` is a no-op (store as Document).                                                                                                   |
 
 ## Managed index prefix
 
@@ -46,6 +46,25 @@ Implication: do not name a consumer-authored index with the `atscript__` prefix.
 ## `@db.mongo.*` annotations
 
 See [mongo-annotations.md](mongo-annotations.md) for the full table.
+
+Removed (use generic core annotations instead):
+
+| Removed                       | Replaced by                       |
+| ----------------------------- | --------------------------------- |
+| `@db.mongo.index.text`        | `@db.index.fulltext`              |
+| `@db.mongo.search.vector`     | `@db.search.vector`               |
+| `@db.mongo.search.filter`     | `@db.search.filter`               |
+| `@db.mongo.patch.strategy`    | `@db.patch.strategy`              |
+| `@db.mongo.array.uniqueItems` | `@expect.array.uniqueItems`       |
+| `@db.mongo.autoIndexes`       | — (explicit `syncIndexes()` only) |
+| `@mongo.index.plain`          | `@db.index.plain`                 |
+| `@mongo.index.unique`         | `@db.index.unique`                |
+
+Capped collections:
+
+| Annotation         | Args                         | Effect                                                                                                    |
+| ------------------ | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.capped` | `size: number, max?: number` | Creates a capped collection at `ensureTable()`. `size` = bytes. Resize requires `@db.sync.method 'drop'`. |
 
 ## Primitives
 
@@ -86,15 +105,7 @@ embedding: mongo.vector
 
 ## Patch / CollectionPatcher
 
-Every `updateOne`/`updateMany` payload → a single aggregation stage:
-
-```
-[ { $set: <pipeline-object built from patch> } ]
-```
-
-Array operations (`$insert`, `$upsert`, `$update`, `$remove`, `$replace`) map to `$concatArrays` / `$setUnion` / `$setDifference` / `$filter` / `$map` combinations — one round-trip per call regardless of array-op count.
-
-`@db.mongo.array.uniqueItems` turns `$insert` into `$setUnion` so the array stays deduped.
+Every `updateOne`/`updateMany` patch compiles to a single `[ { $set: <pipeline> } ]` aggregation stage — one round-trip regardless of op count. See [patch.md](patch.md).
 
 ## Transactions
 

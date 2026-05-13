@@ -36,6 +36,7 @@ A typical writable controller emits all seven keys:
       "vector",
       "threshold",
       "with",
+      "actions",
       "groupBy"
     ],
     "pages": [
@@ -48,9 +49,10 @@ A typical writable controller emits all seven keys:
       "index",
       "vector",
       "threshold",
-      "with"
+      "with",
+      "actions"
     ],
-    "one": ["select", "with"],
+    "one": ["select", "with", "actions"],
     "insert": [],
     "update": [],
     "replace": [],
@@ -74,11 +76,13 @@ The read-op control whitelists are static per handler. Importable as constants:
 import { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "@atscript/moost-db";
 ```
 
-| Op      | Controls                                                                                              |
-| ------- | ----------------------------------------------------------------------------------------------------- |
-| `query` | `filter, insights, skip, limit, count, sort, select, search, index, vector, threshold, with, groupBy` |
-| `pages` | `filter, page, size, sort, select, search, index, vector, threshold, with`                            |
-| `one`   | `select, with`                                                                                        |
+| Op      | Controls                                                                                                       |
+| ------- | -------------------------------------------------------------------------------------------------------------- |
+| `query` | `filter, insights, skip, limit, count, sort, select, search, index, vector, threshold, with, actions, groupBy` |
+| `pages` | `filter, page, size, sort, select, search, index, vector, threshold, with, actions`                            |
+| `one`   | `select, with, actions`                                                                                        |
+
+`actions` is the URL-control name for [`$actions=true`](./actions#actions-augmentation) — when the caller asks the server to compute per-row action availability.
 
 ## Read-only check
 

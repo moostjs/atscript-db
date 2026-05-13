@@ -322,6 +322,14 @@ export default defineConfig({
       { text: "API & Schema", link: "/api/tables" },
       { text: "Schema Sync", link: "/sync/" },
       { text: "HTTP API", link: "/http/" },
+      {
+        text: "Ecosystem",
+        items: [
+          { text: "Atscript", link: "https://atscript.dev" },
+          { text: "Atscript UI", link: "https://ui.atscript.dev" },
+          { text: "Moost", link: "https://moost.org" },
+        ],
+      },
     ],
 
     sidebar: {

@@ -93,14 +93,14 @@ export default {
 
 These annotations opt into MySQL-specific behavior. Files using only portable `@db.*` annotations remain adapter-agnostic.
 
-| Annotation                      | Level            | Purpose                                                          |
-| ------------------------------- | ---------------- | ---------------------------------------------------------------- |
-| `@db.mysql.engine "ENGINE"`     | Interface        | Storage engine (default: `InnoDB`)                               |
-| `@db.mysql.charset "CHARSET"`   | Interface, Field | Character set (default: `utf8mb4`)                               |
-| `@db.mysql.collate "COLLATION"` | Interface, Field | Native MySQL collation (overrides portable `@db.column.collate`) |
-| `@db.mysql.unsigned`            | Field            | Unsigned integer modifier                                        |
-| `@db.mysql.type "TYPE"`         | Field            | Override the native column type (e.g., `"MEDIUMTEXT"`)           |
-| `@db.mysql.onUpdate "EXPR"`     | Field            | ON UPDATE expression (e.g., `"CURRENT_TIMESTAMP"`)               |
+| Annotation                      | Level            | Purpose                                                                                     |
+| ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `@db.mysql.engine "ENGINE"`     | Interface        | Storage engine (default: `InnoDB`). Allowed: `InnoDB`, `MyISAM`, `MEMORY`, `CSV`, `ARCHIVE` |
+| `@db.mysql.charset "CHARSET"`   | Interface, Field | Character set (default: `utf8mb4`)                                                          |
+| `@db.mysql.collate "COLLATION"` | Interface, Field | Native MySQL collation (overrides portable `@db.column.collate`)                            |
+| `@db.mysql.unsigned`            | Field            | Unsigned integer modifier                                                                   |
+| `@db.mysql.type "TYPE"`         | Field            | Override the native column type (e.g., `"MEDIUMTEXT"`)                                      |
+| `@db.mysql.onUpdate "EXPR"`     | Field            | ON UPDATE expression. Only `"CURRENT_TIMESTAMP"` is accepted                                |
 
 Example:
 
@@ -275,14 +275,16 @@ ALTER TABLE `users` MODIFY COLUMN `age` INT UNSIGNED NOT NULL
 
 This means most schema changes do not require full table recreation. You only need `@db.sync.method 'recreate'` for rare structural changes that MySQL cannot handle in-place (e.g., reordering primary key columns).
 
-## Timestamp Handling
+## Driver Type Casting
 
-The adapter provides transparent timestamp conversion between JavaScript epoch milliseconds and MySQL `TIMESTAMP` columns:
+`Mysql2Driver` installs a custom `typeCast` and a few pool defaults so query results are predictable JS values, not driver-default strings:
 
-- **Writes**: epoch milliseconds are converted to UTC datetime strings (`'YYYY-MM-DD HH:MM:SS'`)
-- **Reads**: `TIMESTAMP`/`DATETIME` values are parsed back to epoch milliseconds
+- **`TIMESTAMP` / `DATETIME` → `number`** (epoch milliseconds). Reads parse the UTC datetime string back to a number; writes accept epoch ms and emit `'YYYY-MM-DD HH:MM:SS'`.
+- **`DECIMAL` / `NEWDECIMAL` → `number`** instead of `string`. Be aware that values outside JS safe-number range may lose precision — keep `decimal` columns within `~15` significant digits if you rely on this.
+- **`timezone: '+00:00'`** is set on the pool so all timestamp operations are UTC.
+- **`supportBigNumbers: true`**, **`bigNumberStrings: false`** — `BIGINT` values within `Number.MAX_SAFE_INTEGER` come back as `number`; out-of-range values come back as **`string`** (preserves full precision without truncation). Coerce to `BigInt` yourself if you need arithmetic on those values.
 
-The driver configures `timezone: '+00:00'` on the connection pool, ensuring all timestamp operations use UTC consistently.
+If you pre-create your own `mysql2/promise` `Pool` and pass it to `Mysql2Driver`, type casting becomes the caller's responsibility — replicate the settings above if you want the same behavior.
 
 Use `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` for auto-updating timestamps:
 
@@ -294,8 +296,6 @@ createdAt: number.timestamp
 @db.mysql.onUpdate "CURRENT_TIMESTAMP"
 updatedAt: number.timestamp
 ```
-
-The driver also applies custom type casting for `DECIMAL`/`NEWDECIMAL` columns, returning JavaScript numbers instead of strings.
 
 ## Foreign Key Sync
 

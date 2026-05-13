@@ -4,6 +4,8 @@ outline: deep
 
 # Transactions
 
+<!--@include: ../_experimental-warning.md-->
+
 Transactions ensure that multiple database operations either all succeed or all roll back together. If any operation within a transaction fails, every change is reverted, leaving your database in a consistent state.
 
 ## Basic Usage

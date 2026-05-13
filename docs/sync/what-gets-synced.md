@@ -20,7 +20,7 @@ Any type annotated with `@db.table` that does not yet exist in the database trig
 @db.table 'products'
 export interface Product {
   @meta.id
-  id: integer
+  id: number
 
   name: string
   price: number
@@ -36,7 +36,7 @@ The `@db.table.renamed` annotation tells sync to rename an existing table instea
 @db.table.renamed 'old_users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   email: string
 }
@@ -68,7 +68,7 @@ New fields in a type generate `ALTER TABLE ADD COLUMN` statements. Added columns
 @db.table 'users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   email: string
 
@@ -86,7 +86,7 @@ The `@db.column.renamed` annotation triggers a column rename instead of a drop-a
 @db.table 'users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   // Rename email_address → email
   @db.column.renamed 'email_address'
@@ -145,7 +145,7 @@ that schema sync shouldn't touch.
 @db.table 'users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   @db.index.unique
   email: string
@@ -170,10 +170,13 @@ New `@db.rel.FK` fields generate foreign key constraints:
 @db.table 'tasks'
 export interface Task {
   @meta.id
-  id: integer
+  id: number
 
-  @db.rel.FK User 'id'
-  user_id: integer
+  // FK target is encoded in the chain reference type (User.id).
+  // The optional string argument is an *alias* (used to pair with @db.rel.to / @db.rel.from
+  // when multiple FKs point to the same target type), NOT the target field.
+  @db.rel.FK
+  user_id: User.id
 }
 ```
 
@@ -229,8 +232,8 @@ The `@db.view.renamed` annotation handles view renames by dropping the old view 
 @db.view.for User
 @db.view.filter `tier = 'premium'`
 export interface PremiumUser {
-  id: integer
-  email: string
+  id: User.id
+  email: User.email
 }
 ```
 
@@ -278,7 +281,7 @@ You must resolve the conflict manually (drop the stale column, or adjust the ann
 @db.table 'users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   @db.column.renamed 'email_address'
   email: string
@@ -292,7 +295,7 @@ After deploying to all environments:
 @db.table 'users'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   email: string
 }
@@ -316,6 +319,22 @@ export interface Session {
 }
 ```
 
+::: tip Recipe: dropping a column safely
+Atscript never auto-rolls-back, so a column you remove in code is removed from the DB on the next sync. Two-step pattern for a live system:
+
+1. **Stop reading/writing the column** — deploy the application change first, leaving the column in the schema (no `.as` change yet).
+2. **Drop the column** — remove the field from the `.as` file and run sync. Use `--safe` in production to require manual approval; pair with `--dry-run` to preview.
+   :::
+
+::: tip Recipe: changing an FK target
+
+1. Add the new FK field (with chain reference to the new target) alongside the old one.
+2. Backfill rows so the new FK is populated.
+3. Drop the old FK field on the next deploy.
+
+Changing the chain-reference type of an existing FK field is a drop+add; do it in two deploys when downtime is not acceptable.
+:::
+
 The table is dropped and recreated from scratch.
 
 ::: danger
@@ -329,10 +348,10 @@ All data in the table is permanently destroyed. Use `'drop'` only for ephemeral 
 @db.sync.method 'recreate'
 export interface User {
   @meta.id
-  id: integer
+  id: number
 
   email: string
-  age: integer  // was: string
+  age: number  // was: string
 }
 ```
 
@@ -361,6 +380,76 @@ Adapters with `supportsColumnModify` (MySQL, PostgreSQL) can handle type, nullab
 | `'drop'`     | **Lost** — table is destroyed and recreated empty              | Caches, sessions, temporary data                                                         |
 | `'recreate'` | **Preserved** — copied to new table where types are compatible | Important data with schema changes                                                       |
 | _(none)_     | **Error** — sync refuses to proceed                            | Default behavior when structural changes are needed on adapters without in-place support |
+
+## Recipes
+
+### Many-to-Many (Junction Table)
+
+Define an explicit junction `@db.table` with one `@db.rel.FK` per side; use `@db.rel.via` on each side to navigate through it:
+
+```atscript
+@db.table 'tags'
+export interface Tag {
+  @meta.id
+  id: number
+
+  label: string
+
+  @db.rel.via PostTag
+  posts: Post[]
+}
+
+@db.table 'posts'
+export interface Post {
+  @meta.id
+  id: number
+
+  title: string
+
+  @db.rel.via PostTag
+  tags: Tag[]
+}
+
+// Junction table — must be its own @db.table with FKs on each side.
+@db.table 'post_tags'
+export interface PostTag {
+  @meta.id
+  id: number
+
+  @db.rel.FK
+  @db.rel.onDelete 'cascade'
+  postId: Post.id
+
+  @db.rel.FK
+  @db.rel.onDelete 'cascade'
+  tagId: Tag.id
+}
+```
+
+The junction must be a `@db.table`. `@db.rel.via` cannot be combined with `@db.rel.to` or `@db.rel.from` — it is self-sufficient. See [Navigation Properties](/relations/navigation#db-rel-via-many-to-many) for the runtime semantics.
+
+### Vector Search
+
+Mark a field with `@db.search.vector <dimensions>, "<similarity>"`. The dimensions must match the embedding model output and must be one of: `256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 16384`.
+
+```atscript
+@db.table 'documents'
+export interface Document {
+  @meta.id
+  id: number
+
+  title: string
+
+  @db.search.vector 1536, "cosine"
+  @db.search.vector.threshold 0.7
+  embedding: db.vector
+
+  @db.search.filter "embedding"
+  category: string
+}
+```
+
+On sync, the adapter provisions its native vector type/index (pgvector for PostgreSQL, Atlas vector index for MongoDB, `VECTOR(N)` for MySQL 9+, `vec0` shadow table for SQLite with `sqlite-vec` loaded). See [Vector Search](/search/vector-search) for the full query API.
 
 ## What Is NOT Synced
 

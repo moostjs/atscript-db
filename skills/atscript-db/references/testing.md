@@ -99,7 +99,9 @@ In SQLite with `:memory:`, closing the driver and creating a new space is the fa
 
 ## Driving `moost-db` controllers from a test harness
 
-Mount the controller in a Moost app with `MoostHttp` on an ephemeral port, then call it with `fetch`:
+`MoostHttp.listen()` returns `Promise<void>`, not a server handle. Two clean in-process options:
+
+### Option A — in-process via `http.request()` (no TCP socket)
 
 ```ts
 import { Moost } from "moost";
@@ -109,34 +111,49 @@ import { AsDbController, TableController } from "@atscript/moost-db";
 @TableController(usersTable)
 class UsersController extends AsDbController<typeof User> {}
 
-async function makeServer() {
+async function makeHarness() {
   const app = new Moost();
   const http = new MoostHttp();
   app.adapter(http);
   app.registerControllers(["users", UsersController]);
   await app.init();
-  const server = await http.listen(0); // random port
-  const port = (server.address() as any).port;
+  // http.request(url, init) runs the full Moost pipeline; no listener needed.
   return {
-    url: `http://127.0.0.1:${port}`,
-    close: () => http.close(),
+    fetch: (path: string, init?: RequestInit) => http.request(path, init),
   };
 }
+
+const { fetch } = await makeHarness();
+const res = await fetch("/users/", {
+  method: "POST",
+  body: JSON.stringify({ name: "Alice" }),
+});
 ```
 
-Then drive via `@atscript/db-client`:
+### Option B — patch `globalThis.fetch` so `Client` works unchanged
 
 ```ts
+import { enableLocalFetch } from "@moostjs/event-http";
 import { Client } from "@atscript/db-client";
 
-const { url, close } = await makeServer();
-const users = new Client<typeof User>(url + "/users");
+const restore = enableLocalFetch(http); // relative-path fetch → in-process Moost
+const users = new Client<typeof User>("/users");
 await users.insert({ name: "Alice" });
-const all = await users.query();
-await close();
+restore(); // teardown
 ```
 
-Or with raw `fetch` when asserting URL shape.
+### Option C — real socket on ephemeral port
+
+```ts
+let resolvedPort: number;
+await http.listen(0, () => {
+  const addr = http.getHttpApp().getServer()?.address();
+  if (addr && typeof addr === "object") resolvedPort = addr.port;
+});
+// teardown: http.getHttpApp().getServer()?.close()
+```
+
+Prefer A or B for unit tests — no port allocation, no async lifecycle.
 
 ## Testing validation
 

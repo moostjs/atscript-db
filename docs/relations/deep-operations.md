@@ -182,24 +182,60 @@ You can combine multiple operators in a single relation field — for example, i
 
 ## Depth Control
 
-By default, deep operations process up to 3 levels of nesting. You can adjust this with the `maxDepth` option:
+Nested writes are gated by **two independent limits**: the `@db.depth.limit` annotation on the parent table (the schema-level gate) and the `maxDepth` runtime option (the per-call cap).
+
+### `@db.depth.limit` — Required to Allow Nested Writes {#depth-limit}
+
+By default, **no nested writes through 1:N (`@db.rel.from`) or M:N (`@db.rel.via`) navigation are allowed**. Any payload containing such nested data on a parent without `@db.depth.limit` is rejected with `DEPTH_EXCEEDED` (HTTP 400):
+
+```atscript
+// No @db.depth.limit — nested writes through `comments` are rejected.
+@db.table 'tasks'
+export interface Task {
+    @meta.id
+    id: number
+    title: string
+
+    @db.rel.from
+    comments: Comment[]
+}
+```
+
+Add `@db.depth.limit N` on the parent table to allow nested writes up to N levels of `@db.rel.from` / `@db.rel.via` chaining:
+
+```atscript
+@db.table 'tasks'
+@db.depth.limit 2     // ← enables nested writes up to 2 levels deep
+export interface Task {
+    @meta.id
+    id: number
+    title: string
+
+    @db.rel.from
+    comments: Comment[]
+}
+```
+
+::: info Why FROM/VIA and not TO?
+Forward references (`@db.rel.to`) point to a single parent record and don't fan out — they aren't subject to the `@db.depth.limit` gate. The gate exists to prevent unbounded child-tree writes from a single payload (e.g. a deeply nested `posts → comments → replies` chain).
+:::
+
+### `maxDepth` — Runtime Per-Call Cap
+
+Independently of `@db.depth.limit`, you can cap the runtime cost of a single nested-write call:
 
 ```typescript
-// Only process one level of related data
-await taskTable.insertOne(data, { maxDepth: 2 });
-
-// Process deeper nesting (e.g., Task → Project → Organization)
 await taskTable.insertOne(data, { maxDepth: 5 });
 ```
 
-If the payload contains navigational data that exceeds `maxDepth`, the operation throws an error rather than silently ignoring the nested data:
+The default is **3**. `maxDepth` only lowers the ceiling for one call — it does **not** override the schema-level `@db.depth.limit` gate. If the payload exceeds `maxDepth`:
 
 ```
 Error: Nested data in 'comments' exceeds maxDepth (1).
 Increase maxDepth or strip nested data before writing.
 ```
 
-This applies to all write operations — `insertOne`, `insertMany`, `replaceOne`, and `updateOne` will fail explicitly if navigational fields are present beyond the allowed depth.
+This applies to all write operations — `insertOne`, `insertMany`, `replaceOne`, and `updateOne` — via both the programmatic API and the HTTP controller.
 
 ## Automatic Transactions
 

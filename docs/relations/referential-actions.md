@@ -63,7 +63,7 @@ In most applications, primary keys don't change after creation. `@db.rel.onUpdat
 When no `@db.rel.onDelete` or `@db.rel.onUpdate` is specified, the behavior depends on the adapter:
 
 - **SQL adapters** (SQLite, MySQL, PostgreSQL) use the database engine's default — typically `'noAction'` or `'restrict'` depending on the engine
-- **MongoDB adapter** applies no action by default — the child FK becomes a dangling reference
+- **MongoDB adapter** also defaults to `'noAction'` — there is no native FK constraint, so unmanaged child documents are left with the now-dangling reference
 
 ::: warning
 Without explicit referential actions, deleting a parent record may leave orphaned FK values in child tables. Always specify `@db.rel.onDelete` for production schemas.

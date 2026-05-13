@@ -133,6 +133,10 @@ Materialized views store precomputed results that need periodic refreshing. Refr
 Materialized view refresh is currently an adapter-level operation — there is no high-level API on `AtscriptDbView`. Consult your adapter's documentation for refresh mechanics.
 :::
 
+## See Also: Ad-Hoc Aggregation
+
+Views are the right tool when the aggregation shape is stable. For dynamic, query-time aggregations against a regular `@db.table`, use `table.aggregate()` — pass `$groupBy` and `$select` (with `$fn: 'sum' | 'avg' | 'min' | 'max' | 'count'`) inline per call. See [Queries & Filters](/api/queries) for the runtime-aggregation API.
+
 ## Next Steps
 
 - [Defining Views](./) — how to define views in `.as` files

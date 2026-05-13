@@ -14,16 +14,18 @@ This page is about **intercepting existing CRUD**. For exposing **new domain ope
 
 All hooks are protected methods with sensible defaults (pass-through or no-op). Override only the ones you need.
 
-| Hook                                   | Available On   | Called When                  | Purpose                                  |
-| -------------------------------------- | -------------- | ---------------------------- | ---------------------------------------- |
-| `transformFilter(filter)`              | Both           | Before every read            | Modify filters (add tenant, soft-delete) |
-| `transformProjection(projection)`      | Both           | Before every read            | Restrict visible fields                  |
-| `validateInsights(insights)`           | Both           | After query parsing          | Field-level access control               |
-| `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present    | Convert text to embedding vector         |
-| `onWrite(action, data)`                | AsDbController | Before insert/replace/update | Transform or reject write data           |
-| `onRemove(id)`                         | AsDbController | Before delete                | Allow or prevent deletion                |
-| `meta()`                               | Both           | On `GET /meta` request       | Enrich the metadata response             |
-| `init()`                               | Both           | On controller construction   | One-time setup                           |
+| Hook                                   | Available On   | Called When                      | Purpose                                                           |
+| -------------------------------------- | -------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `transformFilter(filter)`              | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
+| `transformOne(filter)`                 | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
+| `transformProjection(projection)`      | Both           | Before every read                | Restrict visible fields                                           |
+| `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
+| `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
+| `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data                                    |
+| `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
+| `meta()`                               | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
+| `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
+| `init()`                               | Both           | On controller construction       | One-time setup                                                    |
 
 ## Read Hooks
 
@@ -61,6 +63,20 @@ protected async transformFilter(filter: FilterExpr): Promise<FilterExpr> {
   return { $and: [filter, { tenantId }] }
 }
 ```
+
+### transformOne {#transformone}
+
+Filter overlay applied to `GET /one/:id` and `GET /one?...`. Defaults to calling `transformFilter` so existence is not leaked through id-based reads. Override only when `/one` needs different scoping than `/query` (rare):
+
+```typescript
+protected transformOne(filter: FilterExpr): FilterExpr {
+  // Allow self-lookup by id without the tenant scope `/query` enforces
+  if (this.isCurrentUser()) return filter
+  return this.transformFilter(filter)
+}
+```
+
+If you only need to scope BOTH `/query` and `/one` the same way (the common case), override `transformFilter` alone — `transformOne` will pick it up automatically.
 
 ### transformProjection {#transformprojection}
 
@@ -197,14 +213,58 @@ protected async onRemove(id: unknown) {
 
 **Soft delete (replace DELETE with UPDATE):**
 
+::: warning Returning `undefined` from `onRemove` produces HTTP 500
+The abort path always emits HTTP `500 "Not deleted"` to the client — there is no "soft success" return slot. If you simply soft-delete in `onRemove` and `return undefined`, the row is marked deleted but the client sees a 500 and may retry. Prefer one of the patterns below.
+:::
+
+**Recommended pattern A — intercept DELETE with a custom route**, hide the generated one behind a guard, and expose your own soft-delete handler:
+
 ```typescript
-protected async onRemove(id: unknown) {
-  await this.table.updateOne({ id, deletedAt: Date.now() } as any)
-  return undefined  // prevent actual deletion
+import { Delete, Param } from "@moostjs/event-http";
+
+@TableController(todosTable)
+export class TodoController extends AsDbController<typeof Todo> {
+  // Returning undefined here aborts the built-in DELETE with HTTP 500;
+  // route DELETEs through a sibling endpoint instead.
+  protected onRemove() {
+    return undefined;
+  }
+
+  @Delete(":id/soft")
+  async softDelete(@Param("id") id: string) {
+    await this.table.updateOne({ id, deletedAt: Date.now() } as any);
+    return { deletedCount: 1 };
+  }
 }
 ```
 
-When `onRemove` returns `undefined`, the controller aborts the DELETE operation and returns HTTP `500`. Combine with `transformFilter` to exclude soft-deleted records from reads.
+**Recommended pattern B — model soft-delete as a `'row'`-level [action](./actions)**, which gives you a typed `client.action('archive', { id })`, server-side `disabled` gating, and `/meta`-driven UI buttons:
+
+```typescript
+@Post("actions/archive")
+@DbAction<Todo, ["deletedAt"]>("archive", {
+  label: "Archive",
+  intent: "negative",
+  requiredFields: ["deletedAt"],
+  disabled: (rows) => rows.map((r) => r.deletedAt != null),
+})
+async archive(@DbActionID() id: { id: string }) {
+  await this.table.updateOne({ id: id.id, deletedAt: Date.now() } as any)
+  return { message: "Archived" }
+}
+```
+
+In either case, combine with `transformFilter` to exclude soft-deleted records from reads:
+
+```typescript
+protected transformFilter(filter: FilterExpr): FilterExpr {
+  return { $and: [filter, { deletedAt: { $exists: false } }] }
+}
+```
+
+::: tip Why not just `return undefined` from `onRemove`?
+The original "soft delete inside `onRemove`, return `undefined`" recipe still succeeds at the DB level — the row IS soft-deleted — but the HTTP response is `500 "Not deleted"`. Clients (including `@atscript/db-client`) treat that as a server error and may surface a generic failure toast. Use one of the patterns above to keep the wire response consistent with the actual outcome.
+:::
 
 ## Metadata Hook
 
@@ -219,7 +279,41 @@ protected async meta() {
 }
 ```
 
-The base implementation caches its own result. Subclasses overriding with async enrichment should cache their own computation if they need per-request dedup.
+The base implementation caches its own result. Subclasses overriding with async enrichment should cache their own computation if they need per-request dedup. Use `meta()` for **static** enrichment that is the same for every caller. For **per-principal** filtering of `crud` / `actions`, override `applyMetaOverlay()` instead — it runs after caching, on every request.
+
+### applyMetaOverlay {#applymetaoverlay}
+
+Runs on every `GET /meta` request, **after** `meta()` has resolved (and the result has been cached). Use it to prune `crud` keys, narrow `crud[op]` control whitelists, or filter the `actions[]` array based on the current request principal (user role, tenant, etc.).
+
+```typescript
+protected applyMetaOverlay(meta: TMetaResponse): TMetaResponse {
+  const user = this.getCurrentUser()
+  if (user?.isAdmin) return meta
+
+  // Shallow clone — DO NOT mutate the cached envelope.
+  const out: TMetaResponse = { ...meta, crud: { ...meta.crud } }
+
+  // Hide write operations from non-admin users.
+  delete out.crud.insert
+  delete out.crud.update
+  delete out.crud.replace
+  delete out.crud.remove
+
+  // Drop the "Delete All" table-level action from this principal.
+  out.actions = meta.actions.filter((a) => a.name !== "deleteAll")
+  return out
+}
+```
+
+::: warning Always return a shallow clone — never mutate `meta`
+The argument is the cached envelope shared across all requests. Mutating it leaks the per-request overlay to every subsequent caller. Spread (`{ ...meta }`) and re-spread nested objects you modify (`crud: { ...meta.crud }`, `actions: meta.actions.filter(...)`).
+:::
+
+::: warning Discoverability, not security
+`applyMetaOverlay` controls what the UI **renders**. It does NOT stop a client from hitting the underlying route — for real per-principal route enforcement, use Moost auth guards (`@Authenticate`) and the [server-side action gate](./actions#server-side-gate). See [Permissions](./permissions) for the broader contract.
+:::
+
+May return a `Promise`. The hook is invoked even when other meta-derived endpoints (`/meta/form/:name`, `$actions=true` augmentation) consult the meta envelope.
 
 ## Initialization
 
@@ -334,9 +428,17 @@ export class ProductController extends AsDbController<typeof Product> {
     };
   }
 
-  protected async onRemove(id: unknown) {
+  // Block the built-in DELETE — soft delete is exposed via a custom route
+  // below. Returning undefined here produces HTTP 500 if a client still hits
+  // DELETE /:id, which is the desired outcome.
+  protected onRemove() {
+    return undefined;
+  }
+
+  @Delete(":id/soft")
+  async softDelete(@Param("id") id: string) {
     await this.table.updateOne({ id, deletedAt: Date.now() } as any);
-    return undefined; // soft delete
+    return { deletedCount: 1 };
   }
 
   protected validateInsights(insights: Map<string, unknown>): string | undefined {
@@ -352,6 +454,61 @@ export class ProductController extends AsDbController<typeof Product> {
   }
 }
 ```
+
+## Multi-Tenant Route Recipe {#multi-tenant}
+
+A common pattern: mount the same controller under a `/tenant/:tenantId/...` prefix and scope every read/write to the URL-supplied tenant. The route prefix is supplied at registration time; the tenant scope is enforced in `transformFilter` / `transformOne` / `onWrite`.
+
+**Read the tenant from the route param via Moost composables** — the table API knows nothing about routing, so the hooks bridge them:
+
+```typescript
+import { useRouteParams } from "@wooksjs/event-core";
+import { HttpError } from "@moostjs/event-http";
+import { AsDbController, TableController, type FilterExpr } from "@atscript/moost-db";
+import { Todo } from "./schema/todo.as";
+import { todosTable } from "./db";
+
+@TableController(todosTable)
+export class TenantTodoController extends AsDbController<typeof Todo> {
+  private getTenantId(): string {
+    const { tenantId } = useRouteParams<{ tenantId: string }>().get();
+    if (!tenantId) throw new HttpError(400, "tenantId route param missing");
+    return tenantId;
+  }
+
+  protected transformFilter(filter: FilterExpr): FilterExpr {
+    return { $and: [filter, { tenantId: this.getTenantId() }] };
+  }
+
+  // No override needed for `/one` — `transformOne` falls through to `transformFilter`.
+
+  protected onWrite(_action: string, data: unknown) {
+    const record = data as Record<string, unknown>;
+    return { ...record, tenantId: this.getTenantId() };
+  }
+}
+```
+
+Register under a nested route prefix at app boot:
+
+```typescript
+app.registerControllers(["tenant/:tenantId/todos", TenantTodoController]);
+await app.init();
+```
+
+The generated endpoints become:
+
+- `GET    /tenant/acme/todos/query`
+- `GET    /tenant/acme/todos/one/42`
+- `POST   /tenant/acme/todos/`
+- `PATCH  /tenant/acme/todos/`
+- ...
+
+Every operation is automatically scoped to `tenantId = "acme"`. Cross-tenant access through the API is not possible because the filter overlay is applied unconditionally — even direct PK lookups like `GET /tenant/acme/todos/one/42` are rejected with 404 if record `42` belongs to a different tenant.
+
+::: tip Combine with `transformOne` for asymmetric scoping
+If `/one` should bypass the tenant scope (e.g. when an admin can address any row by PK), override `transformOne` separately and leave `transformFilter` strict.
+:::
 
 ## Next Steps
 

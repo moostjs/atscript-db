@@ -106,6 +106,9 @@ export class UsersController extends AsDbController<typeof User> {
   protected transformFilter(filter) {
     return { ...filter, tenantId: useTenant() };
   }
+  protected transformOne(filter) {
+    return this.transformFilter(filter);
+  } // defaults to transformFilter
   protected transformProjection(sel) {
     return sel;
   }
@@ -121,7 +124,9 @@ export class UsersController extends AsDbController<typeof User> {
 }
 ```
 
-- `transformFilter` / `transformProjection` may be async (session / ACL lookups). The framework unions `preferredId` into the projection AFTER `transformProjection()` resolves — overrides cannot suppress preferred-id fields (see § Read-response baseline).
+- `transformFilter` / `transformOne` / `transformProjection` may be async (session / ACL lookups).
+- `transformOne(filter)` — gates `/one/:id` and `/one?…` reads. Defaults to `transformFilter`, so any row-level read overlay also applies to id-based reads (existence not leaked via `findById`). Override to scope `/one` differently.
+- The framework unions `preferredId` into the projection AFTER `transformProjection()` resolves — overrides cannot suppress preferred-id fields (see § Read-response baseline). Quantity-ref projection (`@db.amount.currency.ref` / `@db.unit.ref`) also auto-widens `$select` so currency/unit ref fields are present.
 - `onWrite` / `onRemove` returning `undefined` aborts with HTTP 500 (override to throw a richer error).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
 
@@ -155,18 +160,24 @@ Status-code mapping (`validation-interceptor.ts`):
 
 ## Value-help controllers
 
-`AsReadableController`, `AsValueHelpController`, and `AsJsonValueHelpController` back non-DB `@db.rel.FK` sources (enums, static lists, JSON documents) so forms can resolve picker URLs from `@db.http.path` regardless of whether the target is a table. Typical wiring:
+`AsReadableController`, `AsValueHelpController`, and `AsJsonValueHelpController` back non-DB `@db.rel.FK` sources (enums, static lists, JSON documents) so forms can resolve picker URLs from `@db.http.path` regardless of whether the target is a table.
+
+- `AsValueHelpController` — **abstract**. `query()` and `getOne()` are abstract; subclass must implement them (`as-value-help.controller.ts:105,111`).
+- `AsJsonValueHelpController` — **the only concrete subclass shipped**. Loads entries from a JSON file at startup.
 
 ```ts
 import { AsValueHelpController, ReadableController } from "@atscript/moost-db";
 
 @ReadableController(RolesDictionary) // an interface with @db.rel.FK target fields
 export class RolesController extends AsValueHelpController<typeof RolesDictionary> {
-  // Override source(): returns the in-memory list.
+  protected async query(controls) {
+    /* impl */
+  }
+  protected async getOne(id) {
+    /* impl */
+  }
 }
 ```
-
-`AsJsonValueHelpController` loads entries from a JSON file at startup.
 
 ## Meta endpoint shape
 
@@ -213,13 +224,8 @@ before pruning; mutating the cached envelope leaks per-request state.
 
 ### Pitfalls
 
-- Overlay filtering is informational only — hiding a `crud` key or `actions[]`
-  entry does NOT block the underlying route. Custom `applyMetaOverlay()`
-  overrides are discoverability hints, not access control; per-principal
-  request enforcement is a separate concern.
-- `client.meta()` caches per `Client` instance. SSR setups that share a Client
-  across users will pin the first principal's overlay; instantiate a Client
-  per request when running per-principal overlays server-side.
+- Overlay filtering is informational only — hiding a `crud` key or `actions[]` entry does NOT block the underlying route. Per-principal enforcement is a separate concern.
+- `client.meta()` caches per `Client` instance — instantiate per request for per-principal overlays in SSR.
 - `actions[].disabled` is the stringified predicate (`fn.toString()`) — UI mirror only. Server enforcement on POST is the gate interceptor; per-row availability on read endpoints is `$actions=true` (see [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability)). `requiredFields` is server-internal and never on the wire.
 
 Consumed by `@atscript/db-client` to build a client-side validator matching the server's.

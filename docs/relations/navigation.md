@@ -363,7 +363,7 @@ const projects = await projectTable.findMany({
 });
 ```
 
-This loads all projects, each with its `owner` record, and each project's `tasks` loaded with their `assignee` and `tags`. The query is translated into efficient database operations — joins for SQL adapters, `$lookup` stages for MongoDB.
+This loads all projects, each with its `owner` record, and each project's `tasks` loaded with their `assignee` and `tags`. The loader runs relations in parallel within each `$with` level. The execution strategy is adapter-specific: SQL adapters issue a separate batched query per relation (no JOINs); MongoDB executes a `$lookup` aggregation pipeline per relation. See [Loading Relations § How It Works Internally](./loading#how-it-works-internally) for the full picture.
 
 ## Next Steps
 

@@ -49,6 +49,7 @@ These are defined in `@atscript/ui` (one-time server-agnostic import) and surfac
 ```ts
 import { AsJsonValueHelpController } from "@atscript/moost-db";
 import { Controller } from "moost";
+import { Moost } from "moost";
 
 import { StatusDict } from "./value-help/status-dict.as";
 
@@ -60,11 +61,15 @@ const STATUSES = [
 
 @Controller("/api/dicts/status")
 export class StatusDictController extends AsJsonValueHelpController<typeof StatusDict> {
-  constructor(app) {
-    super(StatusDict, STATUSES, app);
+  constructor(app: Moost) {
+    // `'status'` is the controller name — used for `db.http.path` stamping and
+    // diagnostics. Required unless the bound type carries a `@db.table` annotation.
+    super(StatusDict, STATUSES, app, "status");
   }
 }
 ```
+
+`AsJsonValueHelpController` already carries an `@Inherit()` decorator on the base class, so subclasses **do not** need to repeat it. The constructor signature is `(boundType, rows, app, controllerName?)`. The fourth argument is optional — when omitted, the controller falls back to `boundType.metadata.get('db.table')` and finally to the literal `"value-help"`. If your bound interface is a plain dictionary (no `@db.table`), pass an explicit `controllerName` so the stamped `db.http.path` is meaningful.
 
 On the Atscript side:
 

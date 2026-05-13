@@ -57,14 +57,14 @@ const sync = new SchemaSync(db, console);
 
 Options for both `syncSchema()` and `sync.run()`:
 
-| Option           | Type      | Default     | Description                                                                   |
-| ---------------- | --------- | ----------- | ----------------------------------------------------------------------------- |
-| `force`          | `boolean` | `false`     | Ignore hash check, always introspect the database                             |
-| `safe`           | `boolean` | `false`     | Skip destructive operations (column drops, table drops)                       |
-| `podId`          | `string`  | Random UUID | Identifier for distributed locking                                            |
-| `lockTtlMs`      | `number`  | `30000`     | Lock time-to-live in milliseconds. A heartbeat extends the lock every `ttl/3` |
-| `waitTimeoutMs`  | `number`  | `60000`     | Max wait time for another pod's lock                                          |
-| `pollIntervalMs` | `number`  | `500`       | Poll interval when waiting for lock release                                   |
+| Option           | Type      | Default     | Description                                                       |
+| ---------------- | --------- | ----------- | ----------------------------------------------------------------- |
+| `force`          | `boolean` | `false`     | Ignore hash check, always introspect the database                 |
+| `safe`           | `boolean` | `false`     | Skip destructive operations (column drops, table drops)           |
+| `podId`          | `string`  | Random UUID | Identifier for distributed locking                                |
+| `lockTtlMs`      | `number`  | `30000`     | Lock time-to-live in milliseconds (auto-extended while sync runs) |
+| `waitTimeoutMs`  | `number`  | `60000`     | Max wait time for another pod's lock                              |
+| `pollIntervalMs` | `number`  | `500`       | Poll interval when waiting for lock release                       |
 
 The `plan()` method accepts only `force` and `safe`.
 
@@ -199,8 +199,8 @@ try {
     // Lock acquisition failed after waiting
   }
   if (error.message.includes("lock was stolen")) {
-    // Another pod took the lock during sync (e.g., after a network partition)
-    // The heartbeat detected the ownership change and aborted
+    // Another pod took over the lock mid-sync — the current sync aborted safely.
+    // Usually transient (network partition recovery). Retry or rely on `synced-by-peer`.
   }
   // Other errors: DB connection issues, DDL failures
 }
@@ -208,25 +208,32 @@ try {
 
 Schema-level errors (rename conflicts, type changes without sync method) don't throw — they appear as entries with `status: 'error'` and populated `errors` arrays.
 
+## Printing the Plan
+
+`SyncEntry` instances render themselves to coloured terminal output via `entry.print(mode, colors?)` — `mode` is `'plan'` (preview) or `'result'` (after `run()`). It returns an array of lines you can `console.log` directly:
+
+```typescript
+const plan = await sync.plan(types);
+for (const entry of plan.entries) {
+  for (const line of entry.print("plan")) {
+    console.log(line);
+  }
+}
+```
+
+Pass a colour adapter (matching the `TSyncColors` shape — `green/red/cyan/yellow/bold/dim/underline`) as the second argument to control styling. Omit it for plain text output suitable for logs.
+
 ## Exported Utilities
 
-The `@atscript/db/sync` sub-entry exports additional utilities for advanced use cases:
+The `@atscript/db/sync` sub-entry exports the building blocks used by the CLI:
 
-| Export                        | Description                                           |
-| ----------------------------- | ----------------------------------------------------- |
-| `SchemaSync`                  | Full sync class with `plan()` and `run()`             |
-| `SyncEntry`                   | Entry class with computed properties                  |
-| `syncSchema()`                | One-liner convenience function                        |
-| `readStoredSnapshot()`        | Read a table's stored snapshot from the control table |
-| `computeColumnDiff()`         | Compute column diff between desired and existing      |
-| `computeTableOptionDiff()`    | Compute table option diff                             |
-| `computeSchemaHash()`         | Compute FNV-1a hash from snapshots                    |
-| `computeTableSnapshot()`      | Build a snapshot from a table's metadata              |
-| `computeViewSnapshot()`       | Build a snapshot from a view's metadata               |
-| `computeForeignKeyDiff()`     | Compute FK diff between desired and stored            |
-| `snapshotToExistingColumns()` | Convert a stored snapshot to existing column format   |
+| Export         | Purpose                                                |
+| -------------- | ------------------------------------------------------ |
+| `SchemaSync`   | Full sync class with `plan()` and `run()`              |
+| `SyncEntry`    | Plan/result entry with `print()` and computed flags    |
+| `syncSchema()` | One-liner convenience: `new SchemaSync(db).run(types)` |
 
-These are primarily useful for building custom sync UIs, debugging, or extending the sync system.
+Lower-level diff/snapshot helpers are also exported for building custom dashboards or sync UIs — consult the package source if you need them.
 
 ## Next Steps
 

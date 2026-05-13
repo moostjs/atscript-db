@@ -85,16 +85,11 @@ import { DbSpace } from "@atscript/db";
 import { SqliteAdapter, BetterSqlite3Driver } from "@atscript/db-sqlite";
 import { Todo } from "./todo.as";
 
-const driver = new BetterSqlite3Driver("./app.db"); // or ':memory:' for tests
+const driver = new BetterSqlite3Driver("./app.db"); // or ':memory:' in test envs
 const db = new DbSpace(() => new SqliteAdapter(driver)); // factory runs once per table
 ```
 
-One-liner helpers exist on each SQL adapter package:
-
-```ts
-import { createAdapter } from "@atscript/db-sqlite";
-const db = createAdapter(":memory:");
-```
+Each SQL adapter package also exports a `createAdapter(connection)` one-liner — convenient for scripts; see [testing.md](testing.md) for the `:memory:` test-harness pattern.
 
 ## Sync the schema
 

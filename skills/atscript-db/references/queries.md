@@ -73,17 +73,42 @@ r[0].content; // still there — only nav props are stripped/added
 
 ## Aggregation
 
+`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery`, not a `Uniquery`. `$groupBy` on `aggregate()` is **required**; on `findMany`'s `UniqueryControls` it is technically declared but only `aggregate()` interprets it, so always route group-by reads through `aggregate()`.
+
 ```ts
 await orders.aggregate({
   filter: { status: "paid" },
   controls: {
     $groupBy: ["category"],
-    $select: ["category", { $fn: "sum", $field: "amount" }, { $fn: "count" }],
+    $select: ["category", { $fn: "sum", $field: "amount" }, { $fn: "count", $field: "*" }],
   },
 });
 ```
 
-Groups over fields marked `@db.column.dimension`; aggregates over fields marked `@db.column.measure` (or via `@db.agg.*` on view fields).
+```ts
+interface AggregateQuery<T> {
+  filter?: FilterExpr<T>;
+  controls: AggregateControls<T>; // required (unlike Uniquery.controls)
+  insights?: UniqueryInsights;
+}
+interface AggregateControls<T> {
+  $groupBy: string[]; // required
+  $select?: (string | AggregateExpr)[]; // strings must appear in $groupBy
+  $having?: FilterExpr; // post-aggregation filter (operates on aliases + dimensions)
+  $sort?: Record<string, 1 | -1>;
+  $skip?: number;
+  $limit?: number;
+  $count?: boolean;
+}
+interface AggregateExpr {
+  $fn: "sum" | "count" | "avg" | "min" | "max" | string;
+  $field: string;
+  $as?: string;
+}
+// No $with on aggregate queries.
+```
+
+Groups over fields marked `@db.column.dimension`; aggregates over fields marked `@db.column.measure` (or view fields with `@db.agg.*`). `count` accepts `$field: '*'` for `COUNT(*)`.
 
 ## Insights
 

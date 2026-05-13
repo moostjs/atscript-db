@@ -6,6 +6,12 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
+::: warning Advanced / contributor reference
+This page is for authors writing a **new** Atscript DB adapter for a database that does not have one yet. If you are building an application on top of an existing adapter (PostgreSQL, SQLite, MongoDB, MySQL), **you do not need this page** — start with the relevant adapter page and the [CRUD docs](/api/crud) instead.
+
+The interfaces and hooks documented below are not part of the consumer-facing public API: they are stable enough to write adapters against, but they describe how to extend the generic layer, not how to use it.
+:::
+
 You can create adapters for any database by extending `BaseDbAdapter` from `@atscript/db`. This guide covers the full interface — every abstract method you must implement, every optional hook you can override, and how your adapter plugs into the rest of the system.
 
 ## Architecture

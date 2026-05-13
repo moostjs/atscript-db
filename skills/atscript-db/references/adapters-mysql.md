@@ -7,15 +7,32 @@
 ```ts
 import { MysqlAdapter, Mysql2Driver, createAdapter } from "@atscript/db-mysql";
 
-// Manual
-const driver = new Mysql2Driver({ uri: "mysql://root:@localhost:3306/app" });
+// URI string
+const driver = new Mysql2Driver("mysql://root:@localhost:3306/app");
+
+// PoolOptions
+const driver2 = new Mysql2Driver({ host: "localhost", database: "app", connectionLimit: 10 });
+
+// Pre-created mysql2/promise Pool (you must install typeCast yourself for cross-adapter consistency)
+import mysql from "mysql2/promise";
+const pool = mysql.createPool({ host: "localhost", database: "app" });
+const driver3 = new Mysql2Driver(pool);
+
 const db = new DbSpace(() => new MysqlAdapter(driver));
 
-// Or the one-liner
+// One-liner
 const db2 = createAdapter("mysql://root:@localhost:3306/app", { connectionLimit: 20 });
 ```
 
-Options pass through to `mysql2.createPool`.
+### Pool defaults
+
+When `Mysql2Driver` creates the pool itself it sets:
+
+- `timezone: "+00:00"` — write/read in UTC.
+- `supportBigNumbers: true`, `bigNumberStrings: false`.
+- `typeCast`: `TIMESTAMP` / `DATETIME` → epoch ms `number` (via `utcDatetimeToEpochMs`); `DECIMAL` / `NEWDECIMAL` → `number`.
+
+Pre-created pools bypass these — install equivalents yourself for cross-adapter consistency.
 
 ## Register the plugin
 
@@ -36,17 +53,18 @@ plugins: [ts(), dbPlugin(), MysqlPlugin()]; // unlocks @db.mysql.*
 | Column modify                            | Yes — `ALTER TABLE MODIFY COLUMN …` in place.                                                               |
 | Schemas                                  | Not supported — one schema per connection (database). `@db.schema` is ignored at runtime.                   |
 | JSON                                     | `@db.json` → `JSON` (MySQL 5.7+).                                                                           |
+| Native defaults                          | `supportsNativeValueDefaults: true` — DB emits `DEFAULT` clauses for static defaults.                       |
 
 ## `@db.mysql.*` annotations
 
-| Annotation           | Target            | Args                 | Effect                                                                    |
-| -------------------- | ----------------- | -------------------- | ------------------------------------------------------------------------- |
-| `@db.mysql.engine`   | Interface         | `engine: string`     | Storage engine (default `InnoDB`).                                        |
-| `@db.mysql.charset`  | Interface / Field | `charset: string`    | Character set (default `utf8mb4`).                                        |
-| `@db.mysql.collate`  | Interface / Field | `collation: string`  | Native collation (overrides `@db.column.collate`).                        |
-| `@db.mysql.unsigned` | Field             | —                    | `UNSIGNED` modifier on integer columns.                                   |
-| `@db.mysql.type`     | Field             | `type: string`       | Column type override: `MEDIUMTEXT`, `TINYTEXT`, `ENUM(...)`, `VECTOR(N)`. |
-| `@db.mysql.onUpdate` | Field             | `expression: string` | `ON UPDATE` clause (e.g. `CURRENT_TIMESTAMP`).                            |
+| Annotation           | Target            | Args                  | Effect                                                                                                                                                     |
+| -------------------- | ----------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mysql.engine`   | Interface         | `engine: string`      | Storage engine (default `InnoDB`).                                                                                                                         |
+| `@db.mysql.charset`  | Interface / Field | `charset: string`     | Character set (default `utf8mb4`).                                                                                                                         |
+| `@db.mysql.collate`  | Interface / Field | `collation: string`   | Native collation (overrides `@db.column.collate`).                                                                                                         |
+| `@db.mysql.unsigned` | Field             | —                     | `UNSIGNED` modifier on integer columns.                                                                                                                    |
+| `@db.mysql.type`     | Field             | `type: string`        | Column type override (e.g. `MEDIUMTEXT`, `TINYTEXT`). Do **not** use for vectors — the adapter auto-emits `VECTOR(N)` for `@db.search.vector` on MySQL 9+. |
+| `@db.mysql.onUpdate` | Field             | `'CURRENT_TIMESTAMP'` | `ON UPDATE` clause. Whitelist of exactly one value — `CURRENT_TIMESTAMP`.                                                                                  |
 
 ## utf8mb4 default
 

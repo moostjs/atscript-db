@@ -289,45 +289,31 @@ For `'navigate'` actions, `$1` is substituted with the row's `preferredId` field
 
 ## Server-side gate
 
-`disabled` predicate enforced via Moost interceptor at `AFTER_GUARD` priority (auth → gate → handler). Wire emits `fn.toString()` for UI mirroring. Server is authoritative.
+`disabled` predicate — Moost interceptor at `AFTER_GUARD` priority (auth → gate → handler). Server is authoritative. Wire ships `fn.toString()` for UI mirror.
 
-### Batch contract — sync `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`
-
-Runs **once per request**:
+**Signature:** sync `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`. Runs **once per request**. `Promise<boolean[]>` not permitted.
 
 | Level    | Gate calls                                    |
 | -------- | --------------------------------------------- |
 | `'row'`  | `disabled([row])` → reads `verdicts[0]`       |
 | `'rows'` | `disabled(survivorRows)` (existing rows only) |
 
-Verdicts MUST be **parallel by index** to the input. Length mismatch → HTTP 500 (gate can't map verdicts back). `Promise<boolean[]>` not permitted.
+Verdicts MUST be parallel by index. Length mismatch → HTTP 500.
 
-Same predicate runs in three places (gate enforcement → `@DbActionRow*` injection sees survivors only; `$actions` augmentation on read endpoints; UI mirroring via `fn.toString()`).
+Same predicate runs in three places: gate enforcement on POST, `$actions` augmentation on reads, and UI mirror via wire string.
 
-### Missing-row handling (`'rows'` level)
+**Missing rows (`'rows'` level):** unresolved identifiers fail without invoking `disabled` against `undefined`. Surviving rows are batched into one call.
 
-Per-identifier `(id, row | undefined)` pairs are walked in original request order. If the row didn't resolve (no DB match), the identifier is treated as failing without invoking `disabled` against `undefined`. Surviving rows are passed in one batched `disabled` call.
+**Batch mode (`'rows'`):**
 
-### Batch mode (`'rows'` only)
+| `onDisabledRows`     | On any failure                                                        | Handler runs with |
+| -------------------- | --------------------------------------------------------------------- | ----------------- |
+| `'reject'` (default) | throws `ActionDisabledError` listing all failing IDs in request order | n/a               |
+| `'skip'`             | filters to passing-only; throws if zero survivors                     | survivors only    |
 
-| `onDisabledRows`     | On any failure                                                            | Handler runs with                                  |
-| -------------------- | ------------------------------------------------------------------------- | -------------------------------------------------- |
-| `'reject'` (default) | throws `ActionDisabledError` listing **all** failing IDs in request order | n/a                                                |
-| `'skip'`             | filters cached IDs/rows to passing-only; throws if zero survivors         | survivors only (parallel-aligned `ids` and `rows`) |
+Cached identifier slot holds the original submitted object references; skip-mode filtering preserves reference equality.
 
-Reject mode preserves request order across both failure types (missing-row + predicate-rejected). The cached identifier slot stores **the original submitted object references** — skip-mode filtering preserves reference equality.
-
-### Closure-emission rule
-
-`disabled` body must reference only the rows arg. Outer-scope captures (`this`, `const`s, imports) work server-side but break UI eval (`ReferenceError`).
-
-```ts
-// ✅ self-contained
-disabled: (orders) => orders.map((o) => o.status !== "processing");
-// ❌ captures SHIPPED — server runs, UI breaks
-const SHIPPED = "shipped";
-disabled: (orders) => orders.map((o) => o.status === SHIPPED);
-```
+**Closure-emission rule:** `disabled` body must reference only the rows arg — outer-scope captures (`this`, imports, `const`s) work server-side but break UI eval (`ReferenceError`).
 
 ### `ActionDisabledError` (HTTP 409)
 
@@ -509,6 +495,8 @@ interface TDbActionInfo {
 - Missing label (no `opts.label`, no `@Label`).
 - `'navigate'` / `'backend'` class entry with empty/missing `value`.
 - `'custom'` class entry supplying `value`.
+- Class-level dict entry missing `level` (use `@DbTableActions`/`@DbRowActions`/`@DbRowsActions` or set `level` explicitly).
+- Class-level dict entry missing `label`.
 - Two `default: true` at same `(controller × level)` — first wins, second demoted.
 - `'table'`-level action with `disabled` (no row scope; gate via auth/arbac).
 - Gate / `@DbActionRow*` on plain controller without `opts.table`.
@@ -633,3 +621,7 @@ Companion type exports for typing your own helpers:
 | `TDbClassActionMeta`     | Class-level dict entry written by `@DbActions` and the level-pinned shortcuts.                      |
 
 Typical use cases: writing a custom Moost pipe that consumes `atscript_type` for validation, building tooling that introspects the `actions[]` surface without going through `/meta`, or composing a downstream decorator that needs to read what the action decorators wrote.
+
+## Advanced internals (re-exports)
+
+Low-level slot/cache primitives backing the composables — exported from `@atscript/moost-db` for advanced integrations (custom pipes, alternate body readers): `dbActionBodySlot`, `dbActionInputSlot`, type `DbActionEnvelope` (`actions/index.ts:13-18`). Use the composables (`useDbAction*`) by default; reach for these only when bypassing the standard envelope path.

@@ -7,15 +7,32 @@
 ```ts
 import { PostgresAdapter, PgDriver, createAdapter } from "@atscript/db-postgres";
 
-// Manual
-const driver = new PgDriver({ connectionString: "postgresql://user@localhost:5432/app" });
+// URI string
+const driver = new PgDriver("postgresql://user@localhost:5432/app");
+
+// PoolConfig object
+const driver2 = new PgDriver({ host: "localhost", database: "app", max: 10 });
+
+// Pre-created pg.Pool (type parsers become the caller's responsibility)
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: "..." });
+const driver3 = new PgDriver(pool);
+
 const db = new DbSpace(() => new PostgresAdapter(driver));
 
-// Or the one-liner
+// One-liner
 const db2 = createAdapter("postgresql://user@localhost:5432/app", { max: 20 });
 ```
 
-Options passed to `PgDriver` forward to `pg.Pool`: `max`, `idleTimeoutMillis`, `connectionTimeoutMillis`, `ssl`, etc.
+### Type parsers
+
+`PgDriver` installs per-pool custom type parsers (does not mutate global `pg.types`):
+
+- `TIMESTAMP` / `TIMESTAMPTZ` → epoch ms `number` (not `Date`)
+- `NUMERIC` → `number` (not `string`)
+- `INT8` / `BIGINT` → `number` when in safe-integer range, else `string`
+
+Cross-adapter consistency: epoch-ms numbers, `number` decimals. When you pass a pre-created `pg.Pool`, install equivalents yourself.
 
 ## Register the plugin
 
@@ -38,6 +55,7 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // unlocks @db.pg.*
 | Column modify                            | Yes (`supportsColumnModify: true`) — `ALTER TABLE ALTER COLUMN … TYPE …` in place.                                                                                            |
 | Schemas                                  | `@db.schema 'auth'` (portable) or `@db.pg.schema 'auth'` (native override).                                                                                                   |
 | JSON                                     | `@db.json` → `JSONB`.                                                                                                                                                         |
+| Native defaults                          | `supportsNativeValueDefaults: true`. `nativeDefaultFns`: `now`, `uuid`, `increment` — DB emits `DEFAULT` clauses for these.                                                   |
 
 ## `@db.pg.*` annotations
 
@@ -61,10 +79,17 @@ interface Document {
 }
 ```
 
-- The adapter creates an HNSW index: `CREATE INDEX atscript__doc_vec ON documents USING hnsw (embedding vector_cosine_ops)`.
-- `vectorSearch(vec, query, 'doc_vec')` uses `<=>` (cosine), `<->` (euclidean), `<#>` (inner product).
+- HNSW index: `CREATE INDEX atscript__doc_vec ON documents USING hnsw (embedding vector_cosine_ops)`.
+- Distance ops (`postgres-adapter.ts:thresholdToDistance` / `similarityToPgOp`):
+
+  | `similarity` | Operator | Threshold conversion          |
+  | ------------ | -------- | ----------------------------- |
+  | `cosine`     | `<=>`    | `distance = 2 * (1 - score)`  |
+  | `euclidean`  | `<->`    | `distance = score` (raw max)  |
+  | `dotProduct` | `<#>`    | `distance = -score` (negated) |
+
 - Pre-filter fields (`@db.search.filter 'doc_vec'`) are added to the SQL `WHERE` before the vector op.
-- Requires the extension: `CREATE EXTENSION IF NOT EXISTS vector;`.
+- Requires `CREATE EXTENSION IF NOT EXISTS vector;`.
 
 ## tsvector FTS
 
@@ -73,6 +98,6 @@ interface Document {
 
 ## Known limits
 
-- `ensureTable()` creates schemas via `CREATE SCHEMA IF NOT EXISTS` when `@db.schema` / `@db.pg.schema` is set.
+- Schemas must exist before sync — the adapter does NOT auto-create them. `ensureTable()` only provisions the `citext` extension (when `@db.collate 'nocase'` is used).
 - `pgvector` extension must be enabled per database.
-- `CITEXT` extension must be enabled per database.
+- `CITEXT` extension is auto-provisioned for `@db.collate 'nocase'`; manual install required for explicit `@db.pg.type 'CITEXT'`.

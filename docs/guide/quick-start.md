@@ -112,6 +112,10 @@ export default defineConfig({
 
 The `db` section tells the CLI which adapter to use for schema sync and where to find your database.
 
+::: warning Runtime build setup required
+`.as` files are compiled by your bundler at runtime — TypeScript on its own cannot import them. Install and wire up [`unplugin-atscript`](https://atscript.dev/packages/typescript/build-setup) for Vite, Webpack, Rollup, esbuild, or your runner of choice before running the code below. Without it, `import { Todo } from "./schema/todo.as"` will fail at module load.
+:::
+
 ## 3. Define Your Schema
 
 Create `src/schema/todo.as`:

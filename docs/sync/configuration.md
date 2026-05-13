@@ -132,17 +132,16 @@ For production deployments, consider using the [programmatic API](./programmatic
 
 ## Lock Configuration
 
-The distributed lock parameters (`lockTtlMs`, `waitTimeoutMs`, `pollIntervalMs`) are not available in the config file — they use sensible defaults (30s TTL, 60s wait, 500ms poll). A background heartbeat automatically extends the lock every `ttl/3` while sync is in progress, so you do not need to set `lockTtlMs` high enough to cover the worst-case sync duration — only high enough to survive a few missed heartbeat cycles.
-
-To customize lock parameters, use the [programmatic API](./programmatic):
+Distributed-lock parameters are not exposed in the config file — defaults are sane for most setups (30s TTL, 60s wait, 500ms poll). To tune them, use the [programmatic API](./programmatic):
 
 ```typescript
 import { syncSchema } from "@atscript/db/sync";
 
 await syncSchema(db, types, {
-  lockTtlMs: 60_000, // 60s lock TTL — heartbeat extends every 20s
-  waitTimeoutMs: 120_000, // 2 minute wait
-  pollIntervalMs: 1000, // 1s poll interval
+  podId: process.env.HOSTNAME, // identifiable in logs
+  lockTtlMs: 60_000,
+  waitTimeoutMs: 120_000,
+  pollIntervalMs: 1000,
 });
 ```
 

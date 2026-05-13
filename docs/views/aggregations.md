@@ -67,10 +67,10 @@ Maximum value of a source column:
 
 ```atscript
 @db.agg.max "createdAt"
-latestOrder: number
+latestOrder: number.timestamp
 ```
 
-Accepts any comparable type.
+Accepts any comparable type. Annotate the result field with the source column's primitive (here `number.timestamp`) so the view's TypeScript output preserves type fidelity.
 
 ## The GROUP BY Pattern
 
@@ -126,9 +126,11 @@ When **all** fields are aggregated (no plain fields), there is no `GROUP BY` —
 
 Atscript validates type compatibility at build time — annotating a `string` field with `@db.agg.sum` produces a compile error.
 
-## Quantity Dimensions
+## Runtime Aggregation: Quantity Dimensions
 
-When the source column carries `@db.amount.currency.ref` or `@db.unit.ref` (see [Annotations § Quantity Tagging](../adapters/annotations#quantity-tagging-currency-unit)), the runtime rejects ad-hoc aggregations that don't include the referenced dimension in `$groupBy`. Summing rows that mix currencies — or kg with lb — is meaningless, and the guard catches it before it reaches the database.
+The annotations above define **view-time** aggregations: shape baked into the schema. For **ad-hoc** aggregations via `table.aggregate()` at runtime, see [Queries & Filters § Runtime Aggregation](/api/queries).
+
+One constraint worth knowing here, because it surfaces the same way against view aggregates: when the source column carries `@db.amount.currency.ref` or `@db.unit.ref` (see [Annotations § Quantity Tagging](../adapters/annotations#quantity-tagging-currency-unit)), the runtime rejects ad-hoc aggregations that don't include the referenced dimension in `$groupBy`. Summing rows that mix currencies — or kg with lb — is meaningless, and the guard catches it before it reaches the database.
 
 ```ts
 // Schema: amount carries @db.amount.currency.ref 'currency'

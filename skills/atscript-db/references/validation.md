@@ -18,26 +18,14 @@ type ValidatorMode = "insert" | "patch" | "replace";
 
 ## Server-side
 
-`AtscriptDbTable` builds one validator per mode lazily — consumers don't call this directly. For custom write pipelines:
+`AtscriptDbTable` builds one validator per mode lazily. For custom write pipelines:
 
 ```ts
 const validator = buildDbValidator(UsersType, "insert", adapter.getValidatorPlugins());
 validator.validate(data); // throws ValidatorError on failure
 ```
 
-`buildDbValidator(type, mode, extraPlugins?)`:
-
-- `mode === 'insert'` → full-shape validation; auto-generated and defaulted fields may be omitted.
-- `mode === 'replace'` → full-shape validation; every non-optional non-defaulted field required.
-- `mode === 'patch'` → top-level partial. `AtscriptDbTable.bulkUpdate` swaps in a path-aware partial callback (returned by `_buildValidator('bulkUpdate')`):
-  - root → **partial** (top-level fields of the patch payload are optional — that's how patch works);
-  - paths inside a navigation relation → **partial** (whole sub-tree — nav targets are patched);
-  - field annotated `@db.patch.strategy 'merge'` → **partial** (one level only — does not propagate);
-  - everything else (replace, including `@db.json` and any nested non-merge object) → **strict** — every required child must be present.
-- `replace: forceNavNonOptional` — nav relations are non-optional so the plugin can flag missing nav props vs genuine `null`.
-- `extraPlugins` prepend — adapters return these from `getValidatorPlugins()` (e.g. Mongo's `validateMongoIdPlugin` for `mongo.objectId` primitives).
-
-Strict-replace + storage null-fill cooperate: required children must be supplied (validator catches missing ones early with a 400), optional children that the user omits are explicitly nulled by the patch decomposer (`packages/db/src/patch/patch-decomposer.ts`) and Mongo `CollectionPatcher`. This keeps "replace = whole object overwritten" observable on both adapters, and prevents a silent NOT NULL violation reaching the database.
+`extraPlugins` are prepended — adapters surface these via `getValidatorPlugins()` (e.g. Mongo's `validateMongoIdPlugin`). See the modes table below for behaviour per mode.
 
 ## Client-side
 

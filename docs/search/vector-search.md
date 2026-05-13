@@ -33,6 +33,14 @@ The annotation takes up to three arguments:
 | `similarity` | string | No       | Distance metric: `"cosine"` (default), `"euclidean"`, or `"dotProduct"`                               |
 | `indexName`  | string | No       | Index name — defaults to the field name                                                               |
 
+::: tip Allowed dimensions
+`dimensions` must be one of the whitelisted sizes that real-world embedding models actually emit:
+
+`256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 16384`
+
+Any other value is rejected at compile time. Common choices: 384 (Sentence-Transformers MiniLM), 768 (BERT, Cohere `embed-multilingual-v3.0`), 1024 (Cohere `embed-english-v3.0`), 1536 (OpenAI `text-embedding-3-small`, `text-embedding-ada-002`), 3072 (OpenAI `text-embedding-3-large`).
+:::
+
 The field type can be `db.vector` (a semantic alias for `number[]`) or `number[]` directly.
 
 ::: tip
@@ -244,15 +252,17 @@ Cosine similarity is the default and works well for most text embedding models (
 
 ## Adapter Support
 
-| Adapter        | Column type              | Index type            | Notes                                                                      |
-| -------------- | ------------------------ | --------------------- | -------------------------------------------------------------------------- |
-| **PostgreSQL** | `vector(N)` via pgvector | HNSW index            | Auto-provisions pgvector extension, distance operators `<->`, `<#>`, `<=>` |
-| **MongoDB**    | Embedded array           | Atlas `$vectorSearch` | Requires Atlas M10+ cluster                                                |
-| **MySQL**      | `VECTOR(N)`              | Native (9.0+)         | `VEC_DISTANCE_*` functions                                                 |
-| **SQLite**     | JSON array               | None                  | Stores vectors as JSON — **no vector search support**                      |
+| Adapter        | Column type                                                     | Index type            | Notes                                                                      |
+| -------------- | --------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------- |
+| **PostgreSQL** | `vector(N)` via pgvector                                        | HNSW index            | Auto-provisions pgvector extension; distance operators `<->`, `<#>`, `<=>` |
+| **MongoDB**    | Embedded array                                                  | Atlas `$vectorSearch` | Requires Atlas M10+ cluster                                                |
+| **MySQL**      | `VECTOR(N)`                                                     | Native (9.0+)         | `VEC_DISTANCE_*` functions                                                 |
+| **SQLite**     | `BLOB` (`vec0`) when `sqlite-vec` loaded; JSON `TEXT` otherwise | `vec0` virtual table  | Requires the `sqlite-vec` extension; falls back to JSON storage without it |
 
-::: warning
-SQLite stores vector fields as JSON arrays but does **not** support vector search. Calling `vectorSearch()` on a SQLite adapter throws an error. If you need vector search, use PostgreSQL (pgvector), MongoDB (Atlas), or MySQL 9.0+.
+::: warning SQLite vector search requires `sqlite-vec`
+SQLite supports vector search only when the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension is loaded. Construct the driver with `new BetterSqlite3Driver(path, { vector: true })` and ensure the extension is installed.
+
+Without `sqlite-vec`, vectors are stored as JSON text and `vectorSearch()` throws — schema sync, inserts, and reads still work, but similarity queries are unavailable.
 :::
 
 ## Next Steps

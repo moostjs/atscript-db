@@ -16,21 +16,28 @@ TDbDeleteResult     = { deletedCount: number }
 ```ts
 await users.insertOne({ name: "Alice", email: "a@e.com" });
 await users.insertMany([{ name: "A" }, { name: "B" }]);
+await users.insertMany(rows, { maxDepth: 5 }); // override nested-write recursion budget
 ```
 
 - Server validates with mode `'insert'` (optional + required, plus `@db.rel.FK` existence check via the application integrity layer or native DB constraint).
 - Defaults from `@db.default*` are applied when the adapter doesn't do so natively (see `base-adapter.ts:nativeDefaultFns`).
 - Nested writes (insert / replace / patch into `@db.rel.from` arrays) are rejected unless `@db.depth.limit N` is set for the right depth; `@db.depth.limit 0` rejects any nesting with HTTP 400.
+- **`opts?: { maxDepth?: number }`** on `insertMany` / `bulkUpdate` / `bulkReplace` caps recursive nested-write depth at this call (default `3`). `@db.depth.limit` is the server-side acceptance gate; `maxDepth` is the in-call recursion budget for the table's own batch processing.
 
 ## Replaces (full-record)
 
 ```ts
-await users.replaceOne({ id: 1, name: 'Alice', email: '...' })    // PK required in payload
-await users.replaceMany({ role: 'guest' }, { status: 'archived' })// FilterExpr + full record
+await users.replaceOne({ id: 1, name: 'Alice', email: 'a@e.com', role: 'admin' })    // PK + full record
+// replaceMany: filter + FULL replacement record (every non-optional non-defaulted field required)
+await users.replaceMany(
+  { role: 'guest' },
+  { name: 'Archived User', email: 'archived@e.com', role: 'archived', active: false }
+)
 await users.bulkReplace([{ id: 1, ... }, { id: 2, ... }])
+await users.bulkReplace(rows, { maxDepth: 5 })                    // nested-write recursion override
 ```
 
-Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present.
+Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. Replace is FULL — omitted optional fields end up `null` in storage.
 
 ## Updates / patches
 
@@ -41,6 +48,7 @@ await users.bulkUpdate([
   { id: 1, stock: $dec(2) },
   { id: 2, stock: $dec(3) },
 ]);
+await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion override
 ```
 
 - Mode `'patch'`: only supplied fields validated (partial).

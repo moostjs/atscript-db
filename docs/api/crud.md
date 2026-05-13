@@ -34,6 +34,10 @@ const result = await users.insertOne({
 
 Fields with `@db.default.*` annotations (`@db.default.increment`, `@db.default.uuid`, `@db.default.now`, or `@db.default 'value'`) are applied automatically — you can omit them from the input.
 
+::: info `insertedId` typing
+`insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`.
+:::
+
 ### Insert Many
 
 Insert multiple records in a single transaction:
@@ -64,10 +68,10 @@ const user = await users.findById(1);
 
 `findById` is flexible — it accepts:
 
-- A single primary key value
-- An object with composite key fields
-- A value matching a single-field unique index
-- An object matching a compound unique index
+- A scalar — tried against the primary key and every single-field unique index
+- An object with primary-key fields, or with all fields of a compound unique index
+
+Add [`@db.table.preferredId.uniqueIndex`](/api/tables#preferred-identifier) to a table to make a non-PK unique index the canonical id (e.g., `slug`). Scalar ids then resolve **only** against that index — no PK fallback — which keeps URLs and external references deterministic.
 
 ### Find One
 
@@ -207,6 +211,31 @@ const result = await users.deleteMany({
 When a deleted record is referenced by other tables via foreign keys, cascade and set-null behaviors are handled automatically based on `@db.rel.onDelete` annotations. See [Relations](/relations/deep-operations) for details.
 :::
 
+## Bulk Operations
+
+For batched writes that apply different changes to each record (vs. `updateMany`, which applies the same change to many rows), use `bulkUpdate` and `bulkReplace`. Both accept an array of payloads (each identified by its primary key) and an optional `{ maxDepth }` option, and they participate in the surrounding transaction.
+
+```typescript
+import { $dec } from "@atscript/db/ops";
+
+await products.bulkUpdate([
+  { id: 1, stock: $dec(2) },
+  { id: 2, stock: $dec(5) },
+  { id: 3, stock: $dec(1) },
+]);
+
+await users.bulkReplace([
+  { id: 1, email: "alice.new@example.com", name: "Alice" /* …all fields */ },
+  { id: 2, email: "bob.new@example.com", name: "Bob" /* …all fields */ },
+]);
+```
+
+See [Update & Patch](/api/update-patch) for the full operator catalog and per-payload options.
+
+::: warning Nested writes need `@db.depth.limit`
+Insert / replace / patch payloads that nest into `@db.rel.from` or `@db.rel.via` children are rejected at the validator boundary unless the table declares [`@db.depth.limit N`](/relations/deep-operations) with `N >= 1`. The default — annotation absent — is `0`, which blocks every nested write. See [Relations — Deep Operations](/relations/deep-operations).
+:::
+
 ## Validation
 
 Tables automatically validate data on every write operation using constraints from your `.as` definitions (`@expect.*` annotations). Validation is purpose-aware:
@@ -216,7 +245,9 @@ Tables automatically validate data on every write operation using constraints fr
 | `'insert'`      | `insertOne`, `insertMany`   | PK, defaulted, and FK fields become optional                                                      |
 | `'bulkUpdate'`  | `updateOne`, `bulkUpdate`   | Top level is partial; merge-strategy objects partial, replace-strategy objects require all fields |
 | `'bulkReplace'` | `replaceOne`, `bulkReplace` | All non-optional fields required                                                                  |
-| `'patch'`       | `updateMany`                | Fully partial                                                                                     |
+| `'patch'`       | Available for manual checks | Fully partial; useful when you need to validate a partial payload yourself                        |
+
+`updateMany` does **not** run a validator on the data payload — only foreign-key references are checked. If you want strict validation of a partial update, build a `'patch'` validator and run it yourself before calling `updateMany`.
 
 You can access validators directly for manual checks:
 
@@ -233,13 +264,14 @@ if (!validator.validate(data, true)) {
 
 Database operations throw `DbError` with a `code` property indicating the error type:
 
-| Code            | Meaning                         |
-| --------------- | ------------------------------- |
-| `CONFLICT`      | Unique constraint violation     |
-| `FK_VIOLATION`  | Foreign key constraint violated |
-| `NOT_FOUND`     | Record not found                |
-| `CASCADE_CYCLE` | Circular cascade detected       |
-| `INVALID_QUERY` | Malformed query or filter       |
+| Code             | Meaning                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `CONFLICT`       | Unique constraint violation                                                             |
+| `FK_VIOLATION`   | Foreign key constraint violated                                                         |
+| `NOT_FOUND`      | Record not found                                                                        |
+| `CASCADE_CYCLE`  | Circular cascade detected                                                               |
+| `INVALID_QUERY`  | Malformed query or filter                                                               |
+| `DEPTH_EXCEEDED` | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`) |
 
 Handle errors by checking the code:
 

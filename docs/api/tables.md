@@ -51,7 +51,9 @@ export interface Task {
 }
 ```
 
-The `@meta.id` annotation takes no arguments. Every table should have at least one primary key field. When a `number` field is used as a primary key, SQLite maps it to `INTEGER` (rather than the default `REAL`), enabling auto-increment behavior.
+The `@meta.id` annotation takes no arguments. Every table should have at least one primary key field. `@meta.id` only marks the field as the primary key — it does **not** generate values on its own. Add `@db.default.increment` (numeric, auto-incrementing) or `@db.default.uuid` (random UUID string) when you want the database to populate the key for you. See [Defaults & Generated Values](/api/defaults).
+
+When a `number` field is the primary key, SQLite stores it as `INTEGER` rather than the default `REAL` so it can act as the table's row id.
 
 ## Composite Primary Keys
 
@@ -100,14 +102,14 @@ See the [HTTP CRUD endpoints](/http/crud#get-one) for how composite keys map to 
 
 Atscript types map to database column types automatically:
 
-| Atscript Type  | SQLite                | PostgreSQL                       | MySQL                    | MongoDB       |
-| -------------- | --------------------- | -------------------------------- | ------------------------ | ------------- |
-| `string`       | TEXT                  | TEXT / VARCHAR                   | VARCHAR / TEXT           | string        |
-| `number`       | REAL (INTEGER for PK) | DOUBLE PRECISION (BIGINT for PK) | DOUBLE (INT for PK)      | number        |
-| `decimal`      | REAL                  | NUMERIC(p,s)                     | DECIMAL(p,s)             | string        |
-| `boolean`      | INTEGER (0/1)         | BOOLEAN                          | TINYINT(1)               | boolean       |
-| Arrays         | TEXT (JSON)           | JSONB                            | JSON                     | native array  |
-| Nested objects | Flattened columns     | Flattened columns / JSONB        | Flattened columns / JSON | native object |
+| Atscript Type  | SQLite                | PostgreSQL                                                      | MySQL                    | MongoDB       |
+| -------------- | --------------------- | --------------------------------------------------------------- | ------------------------ | ------------- |
+| `string`       | TEXT                  | TEXT / VARCHAR                                                  | VARCHAR / TEXT           | string        |
+| `number`       | REAL (INTEGER for PK) | DOUBLE PRECISION (BIGINT with `@db.default.increment` / `.now`) | DOUBLE (INT for PK)      | number        |
+| `decimal`      | REAL                  | NUMERIC(p,s)                                                    | DECIMAL(p,s)             | string        |
+| `boolean`      | INTEGER (0/1)         | BOOLEAN                                                         | TINYINT(1)               | boolean       |
+| Arrays         | TEXT (JSON)           | JSONB                                                           | JSON                     | native array  |
+| Nested objects | Flattened columns     | Flattened columns / JSONB                                       | Flattened columns / JSON | native object |
 
 Semantic subtypes like `string.email`, `number.int`, and `number.timestamp` map to the same base column types. They carry meaning for validation and code generation, but the storage type follows the base type.
 
@@ -126,10 +128,8 @@ email: string
 // Field in code: email
 ```
 
-::: warning Performance impact
-Only use `@db.column` when you have a genuine reason — such as mapping to a legacy schema or meeting an external naming convention you cannot change. When a table has no `@db.column`, nested objects, or `@db.json` fields, the read, filter, and patch paths take a zero-allocation fast path that skips key translation entirely. Adding even one `@db.column` activates per-row key remapping on every read, write, filter, and patch operation for that table. In high-throughput scenarios this overhead is measurable.
-
-If you control the database schema, prefer naming your Atscript fields to match the desired column names directly.
+::: tip When to use `@db.column`
+Reach for `@db.column` when you need a custom physical name — typically to map to a legacy schema or to satisfy an external naming convention. If you control the schema, prefer naming your Atscript fields to match the desired column names so no remapping is needed.
 :::
 
 For nested objects that are flattened, the parent prefix is prepended automatically. If you rename a parent field, all its flattened children reflect the new prefix.
@@ -153,6 +153,55 @@ export interface User {
 ```
 
 An ignored field cannot also be a primary key — `@db.ignore` and `@meta.id` on the same field is an error.
+
+## Preferred Identifier
+
+By default, `findById` and `deleteOne` resolve scalar ids against the primary key and every **single-field** unique index, and object ids against the primary key plus compound unique indexes. If you want a non-PK unique index (such as `slug` or `email`) to be the canonical "id" for a table, add `@db.table.preferredId.uniqueIndex`:
+
+```atscript
+@db.table 'posts'
+@db.table.preferredId.uniqueIndex 'by_slug'
+export interface Post {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.index.unique 'by_slug'
+    slug: string
+
+    title: string
+}
+```
+
+```typescript
+await posts.findById("hello-world"); // resolves against slug
+await posts.findById({ id: 42 }); // PK still works
+```
+
+With an explicit preferred identifier, scalar ids are routed **only** to the preferred field (deterministic) — they no longer fall back to other single-field unique indexes. Pass the argument-less form when the table has a single unique index group; the name is required only when there are multiple.
+
+## Filter & Sort Gating
+
+By default every column can be filtered or sorted via the auto-generated REST controller. To lock that down, switch the table to manual mode and opt fields in explicitly:
+
+```atscript
+@db.table 'users'
+@db.table.filterable 'manual'
+@db.table.sortable 'manual'
+export interface User {
+    @meta.id
+    id: number
+
+    @db.column.filterable
+    @db.column.sortable
+    email: string
+
+    // not exposed to ?filter= / ?sort=
+    passwordHash: string
+}
+```
+
+The HTTP layer rejects any filter or sort against a non-allowed column with `400`. This is purely a controller-level concern — the programmatic table API is unaffected.
 
 ## Database Schemas
 

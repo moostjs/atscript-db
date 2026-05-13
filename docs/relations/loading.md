@@ -111,7 +111,7 @@ const tasks = await taskTable.findMany({
 // tasks[0].tags      → Tag[] (may be empty)
 ```
 
-All relations in a single `$with` array are loaded **in parallel** — the queries for `project`, `assignee`, and `tags` run concurrently, not sequentially.
+All relations in a single `$with` array are loaded **in parallel** — the queries for `project`, `assignee`, and `tags` run concurrently, not sequentially. The strategy is adapter-specific: SQL adapters issue a separate batched follow-up query per relation (no JOINs emitted by the loader); MongoDB executes a single `$lookup` aggregation pipeline per relation. See [How It Works Internally](#how-it-works-internally) below.
 
 ## Nested (Deep) Loading
 
@@ -136,7 +136,7 @@ const projects = await projectTable.findMany({
 // projects[0].tasks[0].tags       → Tag[]
 ```
 
-There is no hard limit on nesting depth. Each level of nesting adds one or more queries, so keep depth reasonable for performance.
+There is no hard limit on nesting depth for reads. Each level of nesting adds one or more batched queries, so keep depth reasonable for performance. (Nested **writes** are a separate concern — see [Deep Operations § Depth Control](./deep-operations#depth-control).)
 
 ## Per-Relation Controls
 
@@ -264,7 +264,12 @@ Setting an FK to a non-existent ID results in a foreign key violation error. Via
 
 ## How It Works Internally
 
-Under the hood, relations are loaded via **separate batched queries** — not JOINs. Each relation in `$with` triggers one additional query (or two for VIA). Understanding this strategy helps explain why `$with` scales well.
+Under the hood, relation loading is adapter-specific:
+
+- **SQL adapters** (SQLite / PostgreSQL / MySQL) — **separate batched queries**. Each relation in `$with` triggers one additional query (two for VIA). No JOINs are emitted by the loader.
+- **MongoDB** — a single `$lookup` aggregation pipeline per relation (the adapter overrides `supportsNativeRelations()`). VIA relations chain two `$lookup` stages.
+
+The descriptions below cover the SQL batching strategy. MongoDB's `$lookup` follows the same logical shape — same FK direction semantics, same composite-key support — but executes server-side.
 
 ### TO relations
 

@@ -6,6 +6,10 @@ outline: deep
 
 This page is the canonical setup reference for Atscript's DB layer. It covers package installation, plugin registration, adapter configuration, and how to create a `DbSpace` — the entry point for all database operations.
 
+::: warning Runtime build setup required
+Application code that imports compiled `.as` files (`import { User } from "./schema/user.as"`) needs [`unplugin-atscript`](https://atscript.dev/packages/typescript/build-setup) wired into your bundler / dev server (Vite, Webpack, Rollup, esbuild, Node loader, etc.). The CLI generates type declarations only — the runtime code is produced by the plugin.
+:::
+
 ## Installing Packages
 
 Every project needs the core trio plus one adapter package for your database:
@@ -161,7 +165,7 @@ db: () => createCustomDbSpace();
 import { DbSpace } from "@atscript/db";
 ```
 
-The constructor takes an **adapter factory** — a function that returns a new `BaseDbAdapter` instance. Each table and view gets its own adapter instance (1:1), because adapters store per-table state (metadata, column maps, type mappings).
+The constructor takes an **adapter factory** — a function that returns a new `BaseDbAdapter` instance. Share the driver / client across the factory so all tables in the space talk to the same connection.
 
 ::: code-group
 
@@ -183,9 +187,12 @@ const db = new DbSpace(() => new PostgresAdapter(driver));
 import { MongoAdapter } from "@atscript/db-mongo";
 import { MongoClient } from "mongodb";
 
-const client = new MongoClient("mongodb://localhost:27017/mydb");
-const db = new DbSpace(() => new MongoAdapter(client.db(), client));
+const client = new MongoClient("mongodb://localhost:27017");
+await client.connect();
+const db = new DbSpace(() => new MongoAdapter(client.db("mydb"), client));
 ```
+
+Pick the DB name explicitly via `client.db("name")` — calling `client.db()` without an argument returns the default DB from the URI, which is easy to forget when the URI is built dynamically.
 
 ```typescript [MySQL]
 import { MysqlAdapter, Mysql2Driver } from "@atscript/db-mysql";
@@ -234,6 +241,21 @@ const readable = db.get(SomeType); // table or view, auto-detected
 ```
 
 All three methods are **lazy** — the table/view and its adapter are created on first access and cached (via `WeakMap`) for subsequent calls.
+
+## Accessing the Adapter
+
+Use `db.getAdapter(Type)` when you need the underlying adapter — for example, to start a [transaction](/api/transactions) or call adapter-specific helpers:
+
+```typescript
+import { User } from "./schema/user.as";
+
+const adapter = db.getAdapter(User);
+await adapter.withTransaction(async () => {
+  // ...
+});
+```
+
+`table.getAdapter()` returns the same instance. Any adapter in the space can drive a transaction — all tables in the same async context automatically join it.
 
 ## Next Steps
 

@@ -208,6 +208,8 @@ interface Article {
 
 Similarity options: `'cosine'` (default), `'euclidean'`, `'dotProduct'`. Each adapter maps to its native vector type — see [Text Search](../search/) and [Vector Search](../search/vector-search).
 
+Allowed `dimensions` values (whitelisted at compile time): `256`, `384`, `512`, `768`, `1024`, `1536`, `2048`, `3072`, `4096`, `6144`, `8192`, `16384`.
+
 ```atscript
 @db.table
 interface Document {

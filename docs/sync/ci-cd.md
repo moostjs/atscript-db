@@ -12,7 +12,7 @@ Schema sync integrates into deployment pipelines at multiple levels — from aut
 
 ### Development — Auto-Sync on Startup
 
-In development, sync on every application start. The [hash-based drift detection](./#hash-based-drift-detection) makes this effectively free when nothing has changed:
+In development, sync on every application start. The [hash-based change detection](./#how-it-works) makes this effectively free when nothing has changed:
 
 ```typescript
 if (process.env.NODE_ENV === "development") {
@@ -89,7 +89,7 @@ When multiple pods start simultaneously (Kubernetes rolling deploys, serverless 
 3. First pod completes sync, stores the new hash, releases the lock
 4. Waiting pods see the updated hash → `synced-by-peer`, skip sync
 
-See [Distributed Locking](./#distributed-locking) for the full protocol, heartbeat mechanics, and lock safety guarantees.
+See [Distributed Locking](./#distributed-locking) for the full flow.
 
 ### Tuning lock parameters
 

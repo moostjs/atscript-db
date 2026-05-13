@@ -1,6 +1,6 @@
 # http-query-syntax
 
-URL query strings accepted by `/query`, `/pages`, and `/one`. Parsed by `@uniqu/url` into `Uniquery`, then executed identically by every adapter.
+URL query strings accepted by `/query`, `/pages`, and `/one`. Parsed by `@uniqu/url` into `Uniquery`, then executed identically by every adapter. Canonical doc: `docs/http/query-syntax.md`.
 
 Three components:
 
@@ -12,7 +12,7 @@ Three components:
 
 ```
 ?status=active                        # AND (implicit when multiple)
-?status=active&priority=high
+?status=active&priority=high          # explicit AND
 ?status!=done
 ```
 
@@ -25,7 +25,7 @@ Three components:
 ## Set (IN / NOT IN)
 
 ```
-?role{admin,editor}        # IN
+?role{admin,editor}        # IN — comma INSIDE {…} is structural
 ?status!{draft,deleted}    # NOT IN
 ```
 
@@ -34,58 +34,76 @@ Three components:
 ```
 ?25<age<35          # exclusive
 ?25<=age<=35        # inclusive
-?age>=18,age<=65    # AND of two conditions
+?age>=18&age<=65    # two conditions — use `&` (AND) at top level, not comma
 ```
 
 ## Pattern / regex
 
+Only `~=` regex form. No `*` wildcard in URL grammar — use regex anchors:
+
 ```
 ?name~=/^Al/i       # regex with flags
-?slug=foo-*         # prefix (LIKE-style — `*` wildcard)
-?slug=*-v2          # suffix
+?slug~=/^foo-/      # prefix (use ^ anchor)
+?slug~=/-v2$/       # suffix (use $ anchor)
 ```
 
-## Null / exists
+## Null
 
 ```
 ?deletedAt=null
 ?deletedAt!=null
 ```
 
-## Logical grouping
+## $exists / $!exists controls
 
-Parentheses and `|` for OR:
+`$`-prefixed; field list is comma-separated. NOT a filter operator — they are controls.
 
 ```
-?(role=admin|createdAt>2026-01-01)&active=true
+?$exists=phone,email     # phone AND email must both be non-null
+?$!exists=deletedAt      # deletedAt must be null
 ```
+
+## Logical operators
+
+| Op   | Meaning | Example                                          |
+| ---- | ------- | ------------------------------------------------ |
+| `&`  | AND     | `?status=open&priority=high`                     |
+| `^`  | OR      | `?status=done^priority=low`                      |
+| `!`  | NOT     | `?!(status=done)` — wrap expression in `(…)`     |
+| `()` | group   | `?(role=admin^createdAt>2026-01-01)&active=true` |
+
+**Precedence:** `&` binds tighter than `^`. So `status=done^priority=high&role=admin` parses as `status=done OR (priority=high AND role=admin)`. Use `(…)` to override.
 
 ## Nested field paths
 
-Dot-notation for nested objects / joined view fields:
+Dot notation works for both nav-prop access and embedded / flattened own-props — the URL parser doesn't distinguish. Use the same `parent.child` form everywhere.
 
 ```
-?profile.country=US
-?author.name=Alice
+?author.name=Alice         # nav-prop / relation
+?contact.email=a@e.com     # embedded / flattened own-prop
 ```
 
 ## Controls
 
-| Key        | Syntax                                                              | Notes                                                                                                                                                                                                             |
-| ---------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$sort`    | `$sort=field,-field2`                                               | Leading `-` = DESC.                                                                                                                                                                                               |
-| `$select`  | `$select=id,name,author.name`                                       | Include-list (paths).                                                                                                                                                                                             |
-| `$skip`    | `$skip=20`                                                          |                                                                                                                                                                                                                   |
-| `$limit`   | `$limit=10`                                                         |                                                                                                                                                                                                                   |
-| `$page`    | `$page=2`                                                           | Alternative to `$skip` (with `$size`).                                                                                                                                                                            |
-| `$size`    | `$size=20`                                                          | Page size.                                                                                                                                                                                                        |
-| `$count`   | `$count=1`                                                          | Returns a number.                                                                                                                                                                                                 |
-| `$with`    | `$with=author,comments`                                             | Load nav relations.                                                                                                                                                                                               |
-| `$with`    | `$with=author($select=id,name),comments($sort=-createdAt&$limit=5)` | Sub-query per relation — same URL grammar recursively (filter + `$`-controls, incl. nested `$with`).                                                                                                              |
-| `$groupBy` | `$groupBy=category,region`                                          | Aggregate query.                                                                                                                                                                                                  |
-| `$search`  | `$search=quick+brown`                                               | FTS — adapter must support.                                                                                                                                                                                       |
-| `$vector`  | `$vector=embed-this-text`                                           | Controller's `computeEmbedding()`.                                                                                                                                                                                |
-| `$actions` | `$actions=true` (or `1`)                                            | Augment each row with `$actions: string[]` — server-evaluated row/rows-level action availability. Stripped on `$count` / `$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
+| Key          | Syntax                                                              | Notes                                                                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$sort`      | `$sort=field,-field2`                                               | Leading `-` = DESC.                                                                                                                                                                                               |
+| `$select`    | `$select=id,name,author.name`                                       | Include-list (paths). See § Read-response baseline below.                                                                                                                                                         |
+| `$skip`      | `$skip=20`                                                          |                                                                                                                                                                                                                   |
+| `$limit`     | `$limit=10`                                                         | **Defaults to `1000` when absent** on `/query` (`as-db-readable.controller.ts:596`).                                                                                                                              |
+| `$page`      | `$page=2`                                                           | `/pages` only. 1-based. Default `1`.                                                                                                                                                                              |
+| `$size`      | `$size=20`                                                          | `/pages` only. Default `10`.                                                                                                                                                                                      |
+| `$count`     | `$count=1`                                                          | Returns a number.                                                                                                                                                                                                 |
+| `$with`      | `$with=author,comments`                                             | Load nav relations.                                                                                                                                                                                               |
+| `$with`      | `$with=author($select=id,name),comments($sort=-createdAt&$limit=5)` | Sub-query per relation — same URL grammar recursively (filter + `$`-controls, incl. nested `$with`).                                                                                                              |
+| `$groupBy`   | `$groupBy=category,region`                                          | Aggregate query.                                                                                                                                                                                                  |
+| `$search`    | `$search=quick+brown`                                               | FTS — adapter must support.                                                                                                                                                                                       |
+| `$index`     | `$index=product_search`                                             | Pick a specific FTS/vector index by name. Pairs with `$search` / `$vector`.                                                                                                                                       |
+| `$vector`    | `$vector=embed-this-text`                                           | Controller's `computeEmbedding()`.                                                                                                                                                                                |
+| `$threshold` | `$threshold=0.8`                                                    | Vector similarity cutoff (adapter-specific).                                                                                                                                                                      |
+| `$exists`    | `$exists=phone,email`                                               | All listed fields must be non-null (AND).                                                                                                                                                                         |
+| `$!exists`   | `$!exists=deletedAt`                                                | All listed fields must be null.                                                                                                                                                                                   |
+| `$actions`   | `$actions=true` (or `1`)                                            | Augment each row with `$actions: string[]` — server-evaluated row/rows-level action availability. Stripped on `$count` / `$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
 
 ## Examples
 

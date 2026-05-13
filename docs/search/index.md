@@ -119,12 +119,12 @@ See [HTTP — Advanced](/http/advanced) for the full URL query syntax.
 
 Each adapter maps `@db.index.fulltext` to its native full-text search engine:
 
-| Adapter        | Index type                                              | Search mechanism                       | Weighted?           |
-| -------------- | ------------------------------------------------------- | -------------------------------------- | ------------------- |
-| **PostgreSQL** | GIN index on `to_tsvector()`                            | `plainto_tsquery()`                    | Yes — `setweight()` |
-| **MongoDB**    | Text index (all deployments), Atlas Search (Atlas only) | `$text` / `$search`                    | Yes — field weights |
-| **SQLite**     | FTS5 virtual table                                      | `MATCH`                                | No                  |
-| **MySQL**      | `FULLTEXT` index                                        | `MATCH ... AGAINST` (natural language) | No                  |
+| Adapter        | Index type                                              | Search mechanism                       | Per-field weights?                               |
+| -------------- | ------------------------------------------------------- | -------------------------------------- | ------------------------------------------------ |
+| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`              | `plainto_tsquery()`                    | No — weights in `@db.index.fulltext` are ignored |
+| **MongoDB**    | Text index (all deployments), Atlas Search (Atlas only) | `$text` / `$search`                    | Yes — field weights                              |
+| **SQLite**     | FTS5 virtual table                                      | `MATCH`                                | No                                               |
+| **MySQL**      | `FULLTEXT` index                                        | `MATCH ... AGAINST` (natural language) | No                                               |
 
 ::: info
 All adapters expose the same `search()` and `searchWithCount()` API — engine differences are handled internally. See individual adapter pages for engine-specific details and configuration options.

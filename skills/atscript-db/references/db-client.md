@@ -19,8 +19,8 @@ const users = new Client<typeof User>("/api/users");
 await users.query(); // GET /api/users/query
 await users.query({ filter: { active: true } });
 await users.pages({ controls: { $sort: { name: 1 } } }, 1, 20);
-await users.one(42); // GET /api/users/one/42 — by PK or single-field unique index
-await users.one({ username: "admin" }); // single-field unique idx → GET /api/users/one?username=admin (deterministic, no field-shape ambiguity)
+await users.one(42); // GET /api/users/one/42 — server calls `resolveIdFilter(id)` which matches the PK or any primary identification (configurable via `@db.table.preferredId.uniqueIndex`)
+await users.one({ username: "admin" }); // single-field unique idx → GET /api/users/one?username=admin (deterministic field-shape, no ambiguity)
 await users.one({ orderId: 1, productId: 2 }); // composite key → GET /api/users/one?orderId=1&productId=2
 await users.count({ filter: { active: true } }); // GET /api/users/query?$count=1
 await users.aggregate({ controls: { $groupBy: ["role"], $select: [...] } });
@@ -159,27 +159,17 @@ For `'rows'` / `'table'` navigate, `value` is sent verbatim (no substitution).
 
 ### Identifier rendering helpers
 
-The same logic the client uses for `$1` substitution is exported for consumers that need to render identifiers outside `Client.action()` (prompt text, log lines, deep-link copy):
+Same logic `Client.action()` uses for `$1` substitution, exported for consumers rendering identifiers elsewhere (prompt text, log lines, deep-link copy). `undefined` / `null` → `""` (never literal `"undefined"`); `bigint` → string; objects → JSON.
 
 ```ts
 import { formatIdentifier, encodeNavigateId, formatIdentifierField } from "@atscript/db-client";
-
-formatIdentifier({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
-// → "acme/co/jane"  (raw, no encoding — for prompt text / error messages)
-
-encodeNavigateId({ tenantId: "acme/co", userId: "jane" }, ["tenantId", "userId"]);
-// → "acme%2Fco/jane"  (URL-encoded — same logic Client.action() applies internally)
-
-formatIdentifierField(undefined); // "" (NOT "undefined")
-formatIdentifierField(123n); // "123"
-formatIdentifierField({ a: 1 }); // '{"a":1}'
 ```
 
-When to use which:
-
-- **`formatIdentifier`** — human-readable contexts: prompt text (`Delete user $1?`), error messages, log lines, dialog titles. Raw form, no encoding.
-- **`encodeNavigateId`** — only for navigate-URL templates. The `Client` uses it internally for `$1`; consumers reach for it directly only when building deep links outside the action API.
-- **`formatIdentifierField`** — single-value coercion. Useful when you have an individual identifier value (not the whole object) and want the same `null`/`undefined` → `""` semantics.
+| Export                  | Use for                                                                  | Output for `{ tenantId: "acme/co", userId: "jane" }`, `["tenantId","userId"]` |
+| ----------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `formatIdentifier`      | Human-readable (prompts, error messages, dialog titles). Raw, no encode. | `"acme/co/jane"`                                                              |
+| `encodeNavigateId`      | Building deep-link URL templates outside `Client.action()`.              | `"acme%2Fco/jane"`                                                            |
+| `formatIdentifierField` | Single-value coercion (one field, not whole object).                     | n/a — scalar in, string out                                                   |
 
 ### Errors
 
