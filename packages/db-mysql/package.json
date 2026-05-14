@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-mysql",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "description": "MySQL adapter for @atscript/db with mysql2 driver support.",
   "keywords": [
     "atscript",
