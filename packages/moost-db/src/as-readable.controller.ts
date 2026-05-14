@@ -212,6 +212,14 @@ export abstract class AsReadableController<
     controls: Record<string, unknown>,
     type: "query" | "pages" | "getOne",
   ): string | undefined {
+    // Aggregate queries (presence of `$groupBy`) bypass the base DTO check —
+    // `$groupBy` and aggregate-mode `$select` (carrying `AggregateExpr` objects)
+    // don't match `QueryControlsDto`; the adapter aggregate builder validates
+    // them downstream. Subclass overrides still fire, since this is the hook
+    // for per-control authorization (e.g. `$groupBy: false`).
+    if (type === "query" && controls.$groupBy !== undefined) {
+      return undefined;
+    }
     const v =
       type === "query"
         ? this.queryControlsValidator

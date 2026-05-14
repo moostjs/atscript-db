@@ -34,7 +34,10 @@ export const TABLE_DEF = READABLE_DEF;
  * export class UsersController extends AsDbController<typeof UserModel> {}
  * ```
  */
-export const TableController = (table: AtscriptDbTable, prefix?: string) => {
+export const TableController = <Table extends AtscriptDbTable<any, any, any, any, any, any, any>>(
+  table: Table,
+  prefix?: string,
+) => {
   const resolvedPath = prefix || (table.type.metadata.get("db.http.path") as string | undefined);
   return ApplyDecorators(
     Provide(TABLE_DEF, () => table),
@@ -56,7 +59,12 @@ export const TableController = (table: AtscriptDbTable, prefix?: string) => {
  * export class ActiveTasksController extends AsDbReadableController<typeof ActiveTasks> {}
  * ```
  */
-export const ReadableController = (readable: AtscriptDbReadable, prefix?: string) => {
+export const ReadableController = <
+  Readable extends AtscriptDbReadable<any, any, any, any, any, any, any>,
+>(
+  readable: Readable,
+  prefix?: string,
+) => {
   const resolvedPath = prefix || (readable.type.metadata.get("db.http.path") as string | undefined);
   return ApplyDecorators(
     Provide(READABLE_DEF, () => readable),

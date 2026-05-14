@@ -534,27 +534,15 @@ export class AsDbReadableController<
     const controls = parsed.controls;
     this._coerceActionsControl(controls as Record<string, unknown>);
 
-    // ── Aggregate path (before DTO validation — $groupBy is not in QueryControlsDto) ──
     const groupBy = controls.$groupBy as string[] | undefined;
-    if (groupBy?.length) {
-      if ((controls.$with as unknown[])?.length) {
-        return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
-      }
-      if (parsed.insights) {
-        const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
-        if (insightsError) {
-          return new HttpError(400, insightsError);
-        }
-      }
-      const filter = await this.transformFilter(parsed.filter);
-      return this.readable.aggregate({
-        filter,
-        controls: controls as any,
-        insights: parsed.insights,
-      }) as Promise<any>;
+    if (groupBy?.length && (controls.$with as unknown[])?.length) {
+      return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
     }
 
-    // ── Regular query path ──────────────────────────────────────────
+    // Aggregate and regular paths share validation: subclass `validateControls`
+    // overrides (per-control auth) and `checkGates` (field-level gates) must
+    // apply to both. The base `validateControls` bypasses the DTO check when
+    // `$groupBy` is present (aggregate `$select` shape doesn't fit the DTO).
     const error = this.validateParsed(parsed, "query");
     if (error) {
       return error;
@@ -568,6 +556,18 @@ export class AsDbReadableController<
     if (gateError) {
       return gateError;
     }
+
+    // ── Aggregate path ──────────────────────────────────────────────
+    if (groupBy?.length) {
+      const filter = await this.transformFilter(parsed.filter);
+      return this.readable.aggregate({
+        filter,
+        controls: controls as any,
+        insights: parsed.insights,
+      }) as Promise<any>;
+    }
+
+    // ── Regular query path ──────────────────────────────────────────
 
     const [filter, rawSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
