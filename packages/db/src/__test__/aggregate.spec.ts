@@ -69,6 +69,23 @@ describe("UniquSelect with AggregateExpr", () => {
     expect(sel.asArray).toEqual(["a", "b", "c"]);
     expect(sel.aggregates).toBeUndefined();
   });
+
+  // Exclude-mode inversion — depends on `allFields` being a clean physical-
+  // column list (no nav paths), since the result feeds straight into SELECT.
+  it("asArray inverts exclude-mode {field: 0} against allFields", () => {
+    const sel = new UniquSelect({ tenantId: 0 } as any, ["id", "tenantId", "name"]);
+    expect(sel.asArray).toEqual(["id", "name"]);
+  });
+
+  it("asArray returns undefined for exclude-mode with no allFields", () => {
+    const sel = new UniquSelect({ tenantId: 0 } as any);
+    expect(sel.asArray).toBeUndefined();
+  });
+
+  it("asArray inversion drops every excluded field, preserving allFields order", () => {
+    const sel = new UniquSelect({ b: 0, d: 0 } as any, ["a", "b", "c", "d", "e"]);
+    expect(sel.asArray).toEqual(["a", "c", "e"]);
+  });
 });
 
 // ── resolveAlias ─────────────────────────────────────────────────────────────

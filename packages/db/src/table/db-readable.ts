@@ -377,6 +377,12 @@ export class AtscriptDbReadable<
     return this._meta.navFields;
   }
 
+  /** Physical field names used to invert exclude-mode `$select` into a SELECT list. */
+  public get allPhysicalFields(): readonly string[] {
+    this._ensureBuilt();
+    return this._meta.allPhysicalFields;
+  }
+
   /** Single-field unique index properties. */
   public get uniqueProps(): ReadonlySet<string> {
     this._ensureBuilt();

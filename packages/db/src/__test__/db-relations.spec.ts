@@ -208,6 +208,44 @@ describe("AtscriptDbTable — Relations", () => {
       expect(postTable.defaults.has("status")).toBe(true);
       expect(postTable.defaults.has("createdAt")).toBe(true);
     });
+
+    // Regression: nav-descendant paths (e.g. `post__id`) must never appear in
+    // `allPhysicalFields`, because that list is used by UniquSelect to invert
+    // exclude-mode `$select` into a SELECT list. Leaking nav paths produced
+    // SQL referencing non-existent columns on $with inner reads.
+    it("Author.allPhysicalFields excludes nav-descendant paths (posts.*)", () => {
+      for (const physical of table.allPhysicalFields) {
+        expect(physical.startsWith("posts__")).toBe(false);
+        expect(physical).not.toBe("posts");
+      }
+      expect([...table.allPhysicalFields]).toEqual(
+        expect.arrayContaining(["id", "name", "createdAt"]),
+      );
+    });
+
+    it("Comment.allPhysicalFields excludes nav-descendant paths (post.*)", () => {
+      const commentTable = new AtscriptDbTable(Comment, new InMemoryAdapter());
+      for (const physical of commentTable.allPhysicalFields) {
+        expect(physical.startsWith("post__")).toBe(false);
+        expect(physical).not.toBe("post");
+      }
+      expect([...commentTable.allPhysicalFields]).toEqual(
+        expect.arrayContaining(["id", "body", "postId", "authorId", "createdAt"]),
+      );
+    });
+
+    it("Post.allPhysicalFields excludes nav-descendant paths (author.*, comments.*)", () => {
+      const postTable = new AtscriptDbTable(Post, new InMemoryAdapter());
+      for (const physical of postTable.allPhysicalFields) {
+        expect(physical.startsWith("author__")).toBe(false);
+        expect(physical.startsWith("comments__")).toBe(false);
+        expect(physical).not.toBe("author");
+        expect(physical).not.toBe("comments");
+      }
+      expect([...postTable.allPhysicalFields]).toEqual(
+        expect.arrayContaining(["id", "title", "status", "authorId", "createdAt"]),
+      );
+    });
   });
 
   // ── FK metadata ───────────────────────────────────────────────────────

@@ -233,15 +233,24 @@ export class TableMetadata {
 
     adapter.onAfterFlatten?.();
 
-    // Build physical field list for UniquSelect exclusion inversion
+    // Build physical field list for UniquSelect exclusion inversion.
+    // Skip nav-relation fields and their descendants — they aren't selectable
+    // columns on this table, so they must not appear in an inverted SELECT list.
     if (this.nestedObjects && this.flatMap) {
       for (const path of this.flatMap.keys()) {
-        if (path && !this.ignoredFields.has(path)) {
+        if (
+          path &&
+          !this.ignoredFields.has(path) &&
+          !this.navFields.has(path) &&
+          findAncestorInSet(path, this.navFields) === undefined
+        ) {
           this.allPhysicalFields.push(path);
         }
       }
     } else {
-      for (const physical of this.pathToPhysical.values()) {
+      for (const [path, physical] of this.pathToPhysical) {
+        if (this.navFields.has(path)) continue;
+        if (findAncestorInSet(path, this.navFields) !== undefined) continue;
         this.allPhysicalFields.push(physical);
       }
     }
