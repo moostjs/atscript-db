@@ -65,6 +65,10 @@ Your application code talks to the Table API. The adapter handles SQL generation
 | `@atscript/db-mysql`    | MySQL adapter                                                      |
 | `@atscript/moost-db`    | REST API controller for the [Moost](https://moost.org) framework   |
 
+::: tip Used in production
+[**Aooth**](https://aooth.moost.org) — auth + RBAC for the Moost / atscript ecosystem — uses `@atscript/db` for credential storage and session tokens. Ships ready-to-use `.as` models you can extend with your own application fields.
+:::
+
 ## Feature Highlights
 
 - **[Relations](/relations/)** — TO (foreign key), FROM (reverse 1:N), and VIA (M:N junction table) with explicit `$with` loading
