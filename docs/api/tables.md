@@ -180,6 +180,10 @@ await posts.findById({ id: 42 }); // PK still works
 
 With an explicit preferred identifier, scalar ids are routed **only** to the preferred field (deterministic) — they no longer fall back to other single-field unique indexes. Pass the argument-less form when the table has a single unique index group; the name is required only when there are multiple.
 
+::: warning Same-interface constraint
+The `@db.index.unique` group MUST be declared on a property of **this** interface, not inherited. `asc` walks the local property list only; if the only matching unique index lives on an `extends`-parent you get `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.` Declare both annotations on the same interface (the one carrying `@db.table`), or keep the PK as the preferred id for action addressing.
+:::
+
 ## Filter & Sort Gating
 
 By default every column can be filtered or sorted via the auto-generated REST controller. To lock that down, switch the table to manual mode and opt fields in explicitly:

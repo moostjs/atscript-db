@@ -45,6 +45,10 @@ const db = new DbSpace(() => new MongoAdapter(mongoDb, client));
 
 The second constructor argument (`client`) enables transaction support. If you do not need transactions, `new MongoAdapter(mongoDb)` without the client is sufficient.
 
+::: tip Optional `mongodb` peer deps
+The `mongodb` driver declares several optional peers (e.g. `aws4` for `MONGODB-AWS`, `kerberos`, `mongodb-client-encryption`) that pnpm won't install for you. If you hit `MongoMissingDependencyError` in production but not locally, see the [mongodb optional dependencies docs](https://www.mongodb.com/docs/drivers/node/current/get-started/installation/) — this is upstream, not an atscript-db concern.
+:::
+
 Or use the convenience helper:
 
 ```typescript
