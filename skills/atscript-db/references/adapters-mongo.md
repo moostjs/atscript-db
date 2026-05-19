@@ -16,6 +16,8 @@ const db = new DbSpace(() => new MongoAdapter(client.db(), client));
 
 Second `MongoAdapter` arg (the client) is only required for transactions — `session.withTransaction()` needs the client handle, not just the `Db`.
 
+> The `mongodb` driver has optional peer deps (e.g. `aws4` for `MONGODB-AWS`, `kerberos`, `mongodb-client-encryption`) that pnpm won't install. If you hit `MongoMissingDependencyError` only in prod, see the [mongodb optional dependencies docs](https://www.mongodb.com/docs/drivers/node/current/get-started/installation/) — this is not an atscript-db concern.
+
 ## Register the plugin
 
 ```ts

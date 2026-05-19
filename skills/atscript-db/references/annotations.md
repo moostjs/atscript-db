@@ -158,6 +158,12 @@ interface User {
 
 `meta.preferredId` ships `["slug"]` instead of `["id"]`; UI URLs, list keys, and action invocations route by `slug`. PK still works for action addressing (precedence: PK first), but the UI default is the slug.
 
+> **The `@db.index.unique` group MUST be declared on a prop of _this_ interface, not inherited.** `asc` walks only the local prop list (`collectUniqueIndexGroups` in `@atscript/db/plugin`). If the unique index lives on a `extends`-parent, you get:
+>
+> > `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.`
+>
+> Declare both the unique index AND the `@db.table.preferredId.uniqueIndex` on the same interface — the one that carries `@db.table`. For shipped base interfaces whose unique-index field you want as the preferred id, fall back to the default PK (`@meta.id`) for action addressing; the inherited field is still queryable, just not the preferredId.
+
 ## Array helpers for patches
 
 `@expect.array.key` marks the key field used to match elements during `$upsert`/`$update`/`$remove` array ops. `@expect.array.uniqueItems` enforces set-semantics on `$insert`. Both come from `@atscript/typescript` (the core skill), but the DB patch layer depends on them.
