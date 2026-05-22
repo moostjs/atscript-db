@@ -350,11 +350,15 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     patch: unknown,
     ops?: TFieldOps,
-    _expectedVersion?: number,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
-    const mongoFilter = buildMongoFilter(filter);
-    const patcher = new CollectionPatcher(this.getPatcherContext(), patch, ops);
+    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "nativePatch");
+    const versionColumn = this._table.versionColumn;
+    // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
+    // aggregation expression alongside any user-supplied $inc / $mul ops.
+    const effectiveOps =
+      versionColumn !== undefined ? { ...ops, inc: { ...ops?.inc, [versionColumn]: 1 } } : ops;
+    const patcher = new CollectionPatcher(this.getPatcherContext(), patch, effectiveOps);
     const { updateFilter, updateOptions } = patcher.preparePatch();
     this._log("updateOne (patch)", mongoFilter, updateFilter);
     const result = await this.collection.updateOne(mongoFilter, updateFilter, {
@@ -676,6 +680,27 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   /**
+   * Builds a Mongo filter for CAS-aware writes. Throws when `expectedVersion`
+   * is supplied for a non-versioned table — fail loud at the adapter boundary
+   * rather than silently dropping the CAS predicate.
+   */
+  private _buildCasFilter(
+    filter: FilterExpr,
+    expectedVersion: number | undefined,
+    op: string,
+  ): Record<string, unknown> {
+    const versionColumn = this._table.versionColumn;
+    if (expectedVersion !== undefined && versionColumn === undefined) {
+      throw new Error(`${op}: expectedVersion requires versionColumn`);
+    }
+    const mongoFilter = buildMongoFilter(filter) as Record<string, unknown>;
+    if (expectedVersion !== undefined && versionColumn !== undefined) {
+      mongoFilter[versionColumn] = expectedVersion;
+    }
+    return mongoFilter;
+  }
+
+  /**
    * Wraps an async operation to catch MongoDB duplicate key errors
    * (code 11000) and rethrow as structured `DbError`.
    */
@@ -694,6 +719,12 @@ export class MongoAdapter extends BaseDbAdapter {
   // ── CRUD implementation ──────────────────────────────────────────────────
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
+    // §4.6 — Mongo has no DDL DEFAULT; the adapter fills in version=0 at insert
+    // time when missing so OCC stays consistent with the SQL adapters.
+    const versionColumn = this._table.versionColumn;
+    if (versionColumn !== undefined && !(versionColumn in data)) {
+      data[versionColumn] = 0;
+    }
     if (this._incrementFields.size > 0) {
       const fields = this._fieldsNeedingIncrement(data);
       if (fields.length > 0) {
@@ -711,6 +742,15 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
+    // §4.6 — version default per item (parity with SQL DDL DEFAULT 0).
+    const versionColumn = this._table.versionColumn;
+    if (versionColumn !== undefined) {
+      for (const item of data) {
+        if (!(versionColumn in item)) {
+          item[versionColumn] = 0;
+        }
+      }
+    }
     if (this._incrementFields.size > 0) {
       // Collect all increment fields that any item needs
       const allFields = new Set<string>();
@@ -769,11 +809,10 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
-    _expectedVersion?: number,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
-    const mongoFilter = buildMongoFilter(filter);
-    const updateDoc = buildMongoUpdateDoc(data, ops);
+    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "updateOne");
+    const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumn);
     this._log("updateOne", mongoFilter, updateDoc);
     const result = await this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts());
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
@@ -782,14 +821,32 @@ export class MongoAdapter extends BaseDbAdapter {
   async replaceOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
-    _expectedVersion?: number,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
-    const mongoFilter = buildMongoFilter(filter);
+    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "replaceOne");
+    const versionColumn = this._table.versionColumn;
     this._log("replaceOne", mongoFilter, data);
-    const result = await this._wrapDuplicateKeyError(() =>
-      this.collection.replaceOne(mongoFilter, data, this._getSessionOpts()),
-    );
+    let result: { matchedCount: number; modifiedCount: number };
+    if (versionColumn !== undefined) {
+      // Mongo's plain replaceOne doesn't accept $inc, so use an aggregation
+      // pipeline update via $replaceWith — the replacement document is rebuilt
+      // with `version` set to `$<col> + 1`, evaluated atomically server-side.
+      const pipeline = [
+        {
+          $replaceWith: {
+            ...data,
+            [versionColumn]: { $add: [`$${versionColumn}`, 1] },
+          },
+        },
+      ];
+      result = await this._wrapDuplicateKeyError(() =>
+        this.collection.updateOne(mongoFilter, pipeline, this._getSessionOpts()),
+      );
+    } else {
+      result = await this._wrapDuplicateKeyError(() =>
+        this.collection.replaceOne(mongoFilter, data, this._getSessionOpts()),
+      );
+    }
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
@@ -805,22 +862,22 @@ export class MongoAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
+    // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps.
+    const versionColumn = this._table.versionColumn;
     const mongoFilter = buildMongoFilter(filter);
-    const updateDoc = buildMongoUpdateDoc(data, ops);
+    const updateDoc = buildMongoUpdateDoc(data, ops, versionColumn);
     this._log("updateMany", mongoFilter, updateDoc);
     const result = await this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts());
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    // MongoDB has no native replaceMany; use updateMany with $set
+    // MongoDB has no native replaceMany; use updateMany with $set (+ auto-bump
+    // version when this table is versioned — sibling of updateMany, no CAS).
     const mongoFilter = buildMongoFilter(filter);
-    this._log("replaceMany", mongoFilter, { $set: data });
-    const result = await this.collection.updateMany(
-      mongoFilter,
-      { $set: data },
-      this._getSessionOpts(),
-    );
+    const updateDoc = buildMongoUpdateDoc(data, undefined, this._table.versionColumn);
+    this._log("replaceMany", mongoFilter, updateDoc);
+    const result = await this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts());
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
@@ -1097,11 +1154,14 @@ export class MongoAdapter extends BaseDbAdapter {
 /**
  * Builds a MongoDB update document from a data object that may contain
  * field ops (`{ $inc: N }`, `{ $dec: N }`, `{ $mul: N }`).
- * Regular fields go into `$set`, ops go into `$inc` / `$mul`.
+ * Regular fields go into `$set`, ops go into `$inc` / `$mul`. When
+ * `versionColumn` is supplied, an auto-bump (`$inc: { <col>: 1 }`) is merged
+ * in so versioned tables increment monotonically on every successful update.
  */
 function buildMongoUpdateDoc(
   data: Record<string, unknown>,
   ops?: TFieldOps,
+  versionColumn?: string,
 ): Record<string, unknown> {
   const updateDoc: Record<string, unknown> = {};
   let hasData = false;
@@ -1110,7 +1170,16 @@ function buildMongoUpdateDoc(
     break;
   }
   if (hasData) updateDoc.$set = data;
-  if (ops?.inc) updateDoc.$inc = ops.inc;
+  // Clone ops.inc so we can safely merge the auto-bump without mutating the caller's object.
+  if (ops?.inc || versionColumn !== undefined) {
+    const inc: Record<string, number> = { ...ops?.inc };
+    if (versionColumn !== undefined) {
+      // Step 2's patch decomposer already rejects $inc on the version column;
+      // overwrite defensively so any future leak still produces +1 (never +N).
+      inc[versionColumn] = 1;
+    }
+    updateDoc.$inc = inc;
+  }
   if (ops?.mul) updateDoc.$mul = ops.mul;
   return updateDoc;
 }

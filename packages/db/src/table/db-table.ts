@@ -713,7 +713,13 @@ export class AtscriptDbTable<
   protected _applyDefaults(data: Record<string, unknown>): Record<string, unknown> {
     const nativeValues = this.adapter.supportsNativeValueDefaults();
     const nativeFns = this.adapter.nativeDefaultFns();
+    const versionField = this._meta.versionField;
     for (const [field, def] of this._meta.defaults.entries()) {
+      // The version column is adapter-managed (auto-bumped on every write, and
+      // initialized at insert time by the adapter when the engine has no DDL
+      // DEFAULT). Skipping it here keeps `assertNoVersionWrites` happy on the
+      // update/replace paths where the field MUST stay absent from the payload.
+      if (field === versionField) continue;
       if (data[field] === undefined) {
         if (def.kind === "value" && !nativeValues) {
           const fieldType = this._meta.flatMap?.get(field);
