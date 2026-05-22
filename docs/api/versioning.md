@@ -304,6 +304,24 @@ Two concurrent `consumeBackupCode` calls with the same code: exactly one returns
 
 When using [`@atscript/moost-db`](/http/crud#occ-over-http), HTTP clients get OCC for free: round-trip the `version` field in your PATCH / PUT body and the controller auto-lifts it to `$cas`. Mismatches surface as `409 Conflict`; missing rows surface as `404 Not Found`. See [CRUD Endpoints — OCC over HTTP](/http/crud#occ-over-http).
 
+### Handling 409 in `@atscript/db-client` {#handling-409}
+
+Since `@atscript/db-client` 0.1.84, the client throws a typed `VersionMismatchError` subclass automatically whenever the server response carries `kind: "version_mismatch"` — no manual body inspection required:
+
+```ts
+import { VersionMismatchError } from "@atscript/db-client";
+
+try {
+  await users.update({ id, name: "X", version: row.version });
+} catch (e) {
+  if (e instanceof VersionMismatchError) {
+    // e.currentVersion is the row's now-stored version — refresh + retry.
+  }
+}
+```
+
+`instanceof VersionMismatchError` is the recommended discriminator. On older db-client releases (pre-0.1.84), fall back to inspecting `err.body?.kind === "version_mismatch"` and reading `err.body.currentVersion` directly — the wire shape is unchanged, only the typed marker is new.
+
 ## Alternatives Considered
 
 These are intentionally **not** supported in v1 — listed so you know they were considered and rejected:

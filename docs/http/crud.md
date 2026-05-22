@@ -379,6 +379,8 @@ The proposal called for `{ error: "version_mismatch", currentVersion: N }`. The 
 Clients should test `kind === "version_mismatch"` and read `currentVersion` to refresh their view of the row, then retry.
 :::
 
+Clients using `@atscript/db-client` get a typed `VersionMismatchError` subclass thrown automatically — no need to inspect `body.kind`. See the [client doc](./client#writes) for the pattern.
+
 Clients on `409` typically:
 
 1. Re-read the row via `GET /one/:id` (or use `currentVersion` directly if they have the rest of the row cached).

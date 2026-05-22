@@ -260,20 +260,24 @@ Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$d
 For tables with `@db.column.version`, round-trip the `version` field — the server auto-lifts it to `$cas` and returns `409` on conflict. See [OCC over HTTP](./crud#occ-over-http) and the [versioning guide](/api/versioning).
 
 ```typescript
+import { VersionMismatchError, ClientError } from "@atscript/db-client";
+
 const row = await users.one("abc");
 
 try {
   await users.update({ id: "abc", name: "Updated", version: row.version });
 } catch (err) {
-  if (err.statusCode === 409 && err.body?.kind === "version_mismatch") {
-    // Row moved on; re-read and retry. err.body.currentVersion is the new version.
-  } else if (err.statusCode === 404) {
+  if (err instanceof VersionMismatchError) {
+    // Row moved on; re-read and retry. err.currentVersion is the new version.
+  } else if (err instanceof ClientError && err.status === 404) {
     // Row was deleted.
   } else {
     throw err;
   }
 }
 ```
+
+The client throws `VersionMismatchError` (a `ClientError` subclass) automatically whenever the server response carries `kind: "version_mismatch"` — `instanceof` is the recommended discriminator since `@atscript/db-client` 0.1.84. On older versions, inspect `err.body?.kind === "version_mismatch"` and `err.body.currentVersion` directly.
 
 ### replace {#replace}
 
@@ -291,7 +295,7 @@ await users.replace({
 await users.replace([...]);
 ```
 
-`replace` accepts the same `version` round-trip as `update` — same 409 behavior, same `$cas` semantics.
+`replace` accepts the same `version` round-trip as `update` — same 409 behavior, same `$cas` semantics. Catch conflicts with `instanceof VersionMismatchError` exactly as shown above.
 
 ### remove {#remove}
 
