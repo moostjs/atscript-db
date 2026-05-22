@@ -178,7 +178,8 @@ Throws:
 - `ActionNotFoundError` — unknown name (not in `/meta`).
 - `ActionUnsupportedError` — `'custom'` processor (UI dispatches the event itself); or `'navigate'` with no browser + no `navigate` option.
 - `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.id` / `e.ids` accessors. See [actions.md § Server-side gate](actions.md#server-side-gate).
-- `ClientError` — server non-2xx (other). `ActionDisabledError extends ClientError`, so a generic catch still works.
+- `VersionMismatchError` — HTTP 409 from OCC `$cas` mismatch. `extends ClientError`; adds typed `e.currentVersion: number` accessor. Auto-dispatched when the server response body has `kind: "version_mismatch"`. See [versioning.md § Handling 409](versioning.md#handling-409).
+- `ClientError` — server non-2xx (other). `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works.
 - `TypeError` — client-side shape validation (non-object on row, non-array on rows).
 
 ## Typed filters
@@ -212,7 +213,7 @@ Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$
 ## Error handling
 
 ```ts
-import { ClientError, ActionDisabledError } from "@atscript/db-client";
+import { ClientError, ActionDisabledError, VersionMismatchError } from "@atscript/db-client";
 
 try {
   await users.insert({ email: "bad" });
@@ -222,6 +223,9 @@ try {
     e.action; // the @DbAction name that rejected
     e.id; // row-level rejection — Record<string, unknown> (the submitted identifier object)
     e.ids; // rows-level rejection — Record<string, unknown>[]
+  } else if (e instanceof VersionMismatchError) {
+    // HTTP 409 from OCC $cas mismatch (PATCH/PUT with `version` in body).
+    e.currentVersion; // row's now-stored version — refresh + retry
   } else if (e instanceof ClientError) {
     e.status; // HTTP status
     e.body; // parsed JSON body from the server (includes `errors[]`)

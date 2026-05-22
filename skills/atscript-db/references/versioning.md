@@ -185,6 +185,39 @@ When CAS misses, the controller does a single disambiguation `findOne(id)`:
 
 Standard usage from a client: catch 409, re-GET the row, re-apply changes, retry the PATCH with the fresh `version`.
 
+### Handling 409
+
+With `@atscript/db-client`, catch the typed `VersionMismatchError` subclass — the client auto-dispatches it when the response body has `kind: "version_mismatch"`:
+
+```ts
+import { VersionMismatchError } from "@atscript/db-client";
+
+try {
+  await users.update({ id, name: "X", version: row.version });
+} catch (e) {
+  if (e instanceof VersionMismatchError) {
+    // e.currentVersion is the row's now-stored version — refresh + retry
+  } else {
+    throw e;
+  }
+}
+```
+
+Without the typed client (older `@atscript/db-client`, raw `fetch`, non-JS clients), discriminate manually on the wire body:
+
+```ts
+try {
+  await users.update({ id, name: "X", version: row.version });
+} catch (e) {
+  const err = e as { status?: number; body?: { kind?: string; currentVersion?: number } };
+  if (err.status === 409 && err.body?.kind === "version_mismatch") {
+    const current = err.body.currentVersion; // refresh + retry against this
+  } else {
+    throw e;
+  }
+}
+```
+
 ### Bulk PATCH / PUT
 
 Each item in an array body carries its own optional `version`. Mismatches are **silently skipped**; the response is the aggregate `{ matchedCount, modifiedCount }` shape:
