@@ -350,7 +350,9 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     patch: unknown,
     ops?: TFieldOps,
+    _expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
+    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
     const mongoFilter = buildMongoFilter(filter);
     const patcher = new CollectionPatcher(this.getPatcherContext(), patch, ops);
     const { updateFilter, updateOptions } = patcher.preparePatch();
@@ -767,7 +769,9 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    _expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
+    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
     const mongoFilter = buildMongoFilter(filter);
     const updateDoc = buildMongoUpdateDoc(data, ops);
     this._log("updateOne", mongoFilter, updateDoc);
@@ -775,7 +779,12 @@ export class MongoAdapter extends BaseDbAdapter {
     return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
   }
 
-  async replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async replaceOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    _expectedVersion?: number,
+  ): Promise<TDbUpdateResult> {
+    // TODO: OCC (Phase 2) — accept and apply expectedVersion via $cas semantics on the Mongo side
     const mongoFilter = buildMongoFilter(filter);
     this._log("replaceOne", mongoFilter, data);
     const result = await this._wrapDuplicateKeyError(() =>

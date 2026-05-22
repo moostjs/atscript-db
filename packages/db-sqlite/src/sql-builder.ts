@@ -187,8 +187,19 @@ export function buildUpdate(
   data: Record<string, unknown>,
   where: TSqlFragment,
   ops?: TFieldOps,
+  versionColumn?: string,
+  expectedVersion?: number,
 ): TSqlFragment {
-  return _buildUpdate(sqliteDialect, table, data, where, undefined, ops);
+  return _buildUpdate(
+    sqliteDialect,
+    table,
+    data,
+    where,
+    undefined,
+    ops,
+    versionColumn,
+    expectedVersion,
+  );
 }
 
 /**

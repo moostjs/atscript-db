@@ -148,8 +148,10 @@ export function buildUpdate(
   where: TSqlFragment,
   limit?: number,
   ops?: TFieldOps,
+  versionColumn?: string,
+  expectedVersion?: number,
 ): TSqlFragment {
-  return _buildUpdate(pgDialect, table, data, where, limit, ops);
+  return _buildUpdate(pgDialect, table, data, where, limit, ops, versionColumn, expectedVersion);
 }
 
 export function buildDelete(table: string, where: TSqlFragment, limit?: number): TSqlFragment {

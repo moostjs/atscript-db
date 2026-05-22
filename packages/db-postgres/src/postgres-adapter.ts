@@ -437,6 +437,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     // PostgreSQL does not support UPDATE ... LIMIT 1.
     // Re-key the outer UPDATE on the primary key (a stable column) via a subquery.
@@ -463,7 +464,16 @@ export class PostgresAdapter extends BaseDbAdapter {
       sql: `${keyExpr} ${op} (SELECT ${colList} FROM ${quotedTable} WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
     };
-    const { sql, params } = buildUpdate(tableName, data, limitedWhere, undefined, ops);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      tableName,
+      data,
+      limitedWhere,
+      undefined,
+      ops,
+      versionColumn,
+      expectedVersion,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.affectedRows };
@@ -475,7 +485,15 @@ export class PostgresAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, undefined, ops);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      undefined,
+      ops,
+      versionColumn,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.affectedRows };
@@ -483,9 +501,13 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── CRUD: Replace ─────────────────────────────────────────────────────────
 
-  async replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async replaceOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    expectedVersion?: number,
+  ): Promise<TDbUpdateResult> {
     // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
-    return this.updateOne(filter, data);
+    return this.updateOne(filter, data, undefined, expectedVersion);
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {

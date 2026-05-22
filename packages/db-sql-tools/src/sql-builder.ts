@@ -64,6 +64,17 @@ export function buildSelect(
 
 /**
  * Builds an UPDATE ... SET ... WHERE statement with optional LIMIT.
+ *
+ * Optimistic concurrency control (OCC) hooks:
+ * - `versionColumn` — when supplied, the builder appends
+ *   `<col> = <col> + 1` to the SET list. The bump is **mandatory** whenever
+ *   `versionColumn` is set, regardless of whether `expectedVersion` is
+ *   supplied. If the version column doesn't auto-increment on every write,
+ *   OCC silently degrades to no protection.
+ * - `expectedVersion` — when supplied, the builder appends
+ *   `AND <col> = ?` to the WHERE clause and pushes the value. Requires
+ *   `versionColumn` (CAS targets that column); supplying `expectedVersion`
+ *   without `versionColumn` is a programmer error and throws.
  */
 export function buildUpdate(
   dialect: SqlDialect,
@@ -72,6 +83,8 @@ export function buildUpdate(
   where: TSqlFragment,
   limit?: number,
   ops?: TFieldOps,
+  versionColumn?: string,
+  expectedVersion?: number,
 ): TSqlFragment {
   const setClauses: string[] = [];
   const params: unknown[] = [];
@@ -97,14 +110,35 @@ export function buildUpdate(
     }
   }
 
-  let sql = `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${where.sql}`;
+  // Programmer-error guard: CAS targets the version column, so it's meaningless without one.
+  if (expectedVersion !== undefined && versionColumn === undefined) {
+    throw new Error("buildUpdate: expectedVersion requires versionColumn");
+  }
+
+  let whereSql = where.sql;
+  const whereParams: unknown[] = [];
+
+  if (versionColumn !== undefined) {
+    const vcol = dialect.quoteIdentifier(versionColumn);
+    // OCC: auto-bump goes at the end of the SET list so it's grouped visually
+    // after user data and field ops in logs.
+    setClauses.push(`${vcol} = ${vcol} + 1`);
+    // OCC: CAS predicate. If the row's stored version doesn't match, the
+    // driver reports zero affected rows.
+    if (expectedVersion !== undefined) {
+      whereSql += ` AND ${vcol} = ?`;
+      whereParams.push(expectedVersion);
+    }
+  }
+
+  let sql = `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${whereSql}`;
   if (limit !== undefined) {
     sql += ` LIMIT ${limit}`;
   }
 
   return finalizeParams(dialect, {
     sql,
-    params: [...params, ...where.params],
+    params: [...params, ...where.params, ...whereParams],
   });
 }
 

@@ -478,10 +478,20 @@ export class MysqlAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     // MySQL supports native UPDATE ... LIMIT 1
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, 1, ops);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      1,
+      ops,
+      versionColumn,
+      expectedVersion,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
@@ -493,7 +503,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, undefined, ops);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      undefined,
+      ops,
+      versionColumn,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
@@ -501,10 +519,23 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── CRUD: Replace ─────────────────────────────────────────────────────────
 
-  async replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async replaceOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    expectedVersion?: number,
+  ): Promise<TDbUpdateResult> {
     // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, 1);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      1,
+      undefined,
+      versionColumn,
+      expectedVersion,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
@@ -512,7 +543,15 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      undefined,
+      undefined,
+      versionColumn,
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };

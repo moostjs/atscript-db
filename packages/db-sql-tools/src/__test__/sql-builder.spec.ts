@@ -125,6 +125,128 @@ describe("buildUpdate", () => {
     const result = buildUpdate(mockDialect, "items", { active: false, meta: { x: 1 } }, where);
     expect(result.params).toEqual([0, '{"x":1}', 1]);
   });
+
+  // ── OCC: auto-bump + CAS ───────────────────────────────────────────────
+
+  // WHY: the auto-bump is the load-bearing invariant. If a future refactor
+  // drops it, OCC silently degrades to no protection (§4.3) — every write
+  // would still "succeed" but the version stops moving and concurrent
+  // writers stop seeing conflicts.
+  it("auto-bumps the version column when versionColumn is provided", () => {
+    const result = buildUpdate(
+      mockDialect,
+      "users",
+      { name: "Bob" },
+      where,
+      undefined,
+      undefined,
+      "version",
+    );
+    expect(result.sql).toBe(
+      "UPDATE [users] SET [name] = ?, [version] = [version] + 1 WHERE [id] = ?",
+    );
+    expect(result.params).toEqual(["Bob", 1]);
+  });
+
+  // WHY: the CAS predicate is what actually makes the write conditional.
+  // Without `AND <vcol> = ?`, the UPDATE matches the filter unconditionally
+  // and the auto-bump becomes a write that can't ever be rejected.
+  it("appends CAS predicate when expectedVersion is provided", () => {
+    const result = buildUpdate(
+      mockDialect,
+      "users",
+      { name: "Bob" },
+      where,
+      undefined,
+      undefined,
+      "version",
+      7,
+    );
+    expect(result.sql).toBe(
+      "UPDATE [users] SET [name] = ?, [version] = [version] + 1 WHERE [id] = ? AND [version] = ?",
+    );
+    expect(result.params).toEqual(["Bob", 1, 7]);
+  });
+
+  // WHY: programmer-error guard. expectedVersion targets a specific column;
+  // supplying it with no `versionColumn` is meaningless and would silently
+  // produce a SQL syntax error at execute time. Fail fast at build time.
+  it("throws when expectedVersion is supplied without versionColumn", () => {
+    expect(() =>
+      buildUpdate(mockDialect, "users", { name: "Bob" }, where, undefined, undefined, undefined, 7),
+    ).toThrow(/versionColumn/);
+  });
+
+  // WHY: regression guard. Non-versioned tables must not see any new SQL —
+  // every byte of the generated statement should match today's output when
+  // neither OCC param is supplied.
+  it("emits today's SQL when neither versionColumn nor expectedVersion is set", () => {
+    const result = buildUpdate(mockDialect, "users", { name: "Bob" }, where, 1, {
+      inc: { hits: 5 },
+    });
+    expect(result.sql).toBe(
+      "UPDATE [users] SET [name] = ?, [hits] = [hits] + ? WHERE [id] = ? LIMIT 1",
+    );
+    expect(result.params).toEqual(["Bob", 5, 1]);
+  });
+
+  // WHY: §9.1 "Field ops + CAS" — both must coexist atomically in a single
+  // statement. Order matters for log readability: user data, then ops, then
+  // the auto-bump at the end of SET.
+  it("composes with ops.inc, ops.mul, and CAS in a single statement", () => {
+    const result = buildUpdate(
+      mockDialect,
+      "users",
+      { status: "active" },
+      where,
+      undefined,
+      { inc: { hits: 5 }, mul: { score: 2 } },
+      "version",
+      7,
+    );
+    expect(result.sql).toBe(
+      "UPDATE [users] SET [status] = ?, [hits] = [hits] + ?, [score] = [score] * ?, [version] = [version] + 1 WHERE [id] = ? AND [version] = ?",
+    );
+    expect(result.params).toEqual(["active", 5, 2, 1, 7]);
+  });
+
+  // WHY: the column name `version` collides with the SQL `VERSION()`
+  // function in MySQL — lack of quoting would silently misparse the SET
+  // clause. Each dialect must apply its own quoting style to the version
+  // column the same way it does for every other identifier.
+  it("respects dialect identifier quoting on the version column", () => {
+    const pgLike: SqlDialect = {
+      ...mockDialect,
+      quoteIdentifier: (n) => `"${n}"`,
+      quoteTable: (n) => `"${n}"`,
+    };
+    const mysqlLike: SqlDialect = {
+      ...mockDialect,
+      quoteIdentifier: (n) => `\`${n}\``,
+      quoteTable: (n) => `\`${n}\``,
+    };
+
+    const w: TSqlFragment = { sql: "id = ?", params: [1] };
+
+    const pgResult = buildUpdate(pgLike, "users", { name: "Bob" }, w, undefined, undefined, "v", 3);
+    expect(pgResult.sql).toBe(
+      'UPDATE "users" SET "name" = ?, "v" = "v" + 1 WHERE id = ? AND "v" = ?',
+    );
+
+    const mysqlResult = buildUpdate(
+      mysqlLike,
+      "users",
+      { name: "Bob" },
+      w,
+      undefined,
+      undefined,
+      "v",
+      3,
+    );
+    expect(mysqlResult.sql).toBe(
+      "UPDATE `users` SET `name` = ?, `v` = `v` + 1 WHERE id = ? AND `v` = ?",
+    );
+  });
 });
 
 describe("buildDelete", () => {

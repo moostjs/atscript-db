@@ -301,14 +301,23 @@ export class SqliteAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
+    const versionColumn = this._table.versionColumn;
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
     };
-    const { sql, params } = buildUpdate(tableName, data, limitedWhere, ops);
+    const { sql, params } = buildUpdate(
+      tableName,
+      data,
+      limitedWhere,
+      ops,
+      versionColumn,
+      expectedVersion,
+    );
     this._log(sql, params);
     const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };
@@ -320,7 +329,8 @@ export class SqliteAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
     const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };
@@ -328,15 +338,27 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   // ── CRUD: Replace ──────────────────────────────────────────────────────────
 
-  async replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+  async replaceOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    expectedVersion?: number,
+  ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
+    const versionColumn = this._table.versionColumn;
     // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
     };
-    const { sql, params } = buildUpdate(tableName, data, limitedWhere);
+    const { sql, params } = buildUpdate(
+      tableName,
+      data,
+      limitedWhere,
+      undefined,
+      versionColumn,
+      expectedVersion,
+    );
     this._log(sql, params);
     const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };
@@ -345,7 +367,14 @@ export class SqliteAdapter extends BaseDbAdapter {
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     // For replaceMany we do a full UPDATE (set all columns)
     const where = buildWhere(filter);
-    const { sql, params } = buildUpdate(this.resolveTableName(), data, where);
+    const versionColumn = this._table.versionColumn;
+    const { sql, params } = buildUpdate(
+      this.resolveTableName(),
+      data,
+      where,
+      undefined,
+      versionColumn,
+    );
     this._log(sql, params);
     const result = this._wrapConstraintError(() => this.driver.run(sql, params));
     return { matchedCount: result.changes, modifiedCount: result.changes };

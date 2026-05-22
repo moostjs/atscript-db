@@ -358,6 +358,7 @@ export abstract class BaseDbAdapter {
     _filter: FilterExpr,
     _patch: unknown,
     _ops?: TFieldOps,
+    _expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     throw new Error("Native patch not supported by this adapter");
   }
@@ -607,11 +608,16 @@ export abstract class BaseDbAdapter {
 
   abstract insertOne(data: Record<string, unknown>): Promise<TDbInsertResult>;
   abstract insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult>;
-  abstract replaceOne(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
+  abstract replaceOne(
+    filter: FilterExpr,
+    data: Record<string, unknown>,
+    expectedVersion?: number,
+  ): Promise<TDbUpdateResult>;
   abstract updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    expectedVersion?: number,
   ): Promise<TDbUpdateResult>;
   abstract deleteOne(filter: FilterExpr): Promise<TDbDeleteResult>;
   abstract findOne(query: DbQuery): Promise<Record<string, unknown> | null>;
