@@ -7,7 +7,8 @@ description: >-
   filters, patch/field/array ops, relations, views, schema sync, engine-specific
   capabilities, BaseDbAdapter subclassing, moost-db REST routes, declarative
   actions, @InputForm structured input, URL query syntax, browser Client,
-  client.action(), client.getActionForm(), and DB validation.
+  client.action(), client.getActionForm(), DB validation, and optimistic
+  concurrency control via @db.column.version + $cas + withOptimisticRetry.
   Scope is DB only; use the atscript skill for .as syntax, @meta.*, @expect.*, asc,
   unplugin, or VSCode.
 ---
@@ -104,6 +105,8 @@ import { DbSpace, AtscriptDbTable, AtscriptDbView, BaseDbAdapter, DbError } from
 import { syncSchema, SchemaSync, readStoredSnapshot } from "@atscript/db/sync";
 import { dbPlugin } from "@atscript/db/plugin";
 import { $inc, $dec, $mul, $replace, $insert, $upsert, $update, $remove } from "@atscript/db/ops";
+// Optimistic concurrency — see references/versioning.md
+import { withOptimisticRetry, CasExhaustedError } from "@atscript/db";
 
 // Adapters (pick one)
 import {
@@ -150,6 +153,7 @@ import { Client } from "@atscript/db-client";
 | URL query syntax     | [http-query-syntax.md](references/http-query-syntax.md) | URL filter encoding (`field=v`, `!=`, `>`, `<`, `{v1,v2}`, `~=/re/i`, ranges), `$sort`, `$select`, `$with`, `$page`, `$size`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Browser client       | [db-client.md](references/db-client.md)                 | `Client<T extends AtscriptClientShape>`, typed CRUD methods with `$with` response narrowing (`ClientResponse<T, Q>`), `client.action<R>(name, id?, input?)` envelope-shaped contract, `client.getActionForm(name)` lazy form-schema fetch, filter construction, auth headers, `ClientError` / `ActionDisabledError`, meta + validator caching, preferred-id-driven navigate URLs                                                                                                                                                                                                                                                   |
 | Validation           | [validation.md](references/validation.md)               | `createDbValidatorPlugin`, `buildDbValidator`, server+client validator, error shape over HTTP, `ValidatorMode`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| App-side testing     | [testing.md](references/testing.md)                     | In-memory SQLite (`:memory:`), MongoDB in-memory server, fixture seeding, resetting schema, driving controllers from a test harness                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Versioning / OCC     | [versioning.md](references/versioning.md)               | `@db.column.version` annotation, `$cas` operator, mandatory auto-bump, `withOptimisticRetry` helper, `CasExhaustedError`, `updateMany` exclusion, direct-write rejection (`DbError("VERSION_COLUMN_WRITE")`), HTTP auto-lift + 409 `kind: "version_mismatch"` body + 404 disambiguation, `versionColumn` in `/meta`, bulk aggregate response, limitations (no per-item conflict status, no renamed version columns)                                                                                                                                                                                                                |
+| App-side testing     | [testing.md](references/testing.md)                     | In-memory SQLite (`:memory:`), MongoDB in-memory server, fixture seeding, resetting schema, driving controllers from a test harness, testing CAS hit/miss                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 Reference docs: https://db.atscript.dev.

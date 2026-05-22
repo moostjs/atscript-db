@@ -130,6 +130,73 @@ export class UsersController extends AsDbController<typeof User> {
 - `onWrite` / `onRemove` returning `undefined` aborts with HTTP 500 (override to throw a richer error).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
 
+## Optimistic concurrency over HTTP
+
+Tables annotated with `@db.column.version` get auto-lifted CAS on PATCH and PUT. The full SDK side lives in [versioning.md](versioning.md); this section covers the wire contract.
+
+### `/meta` exposes `versionColumn`
+
+```jsonc
+// Versioned table
+{ "primaryKeys": ["id"], "versionColumn": "version", "fields": { … }, … }
+
+// Non-versioned table — key omitted
+{ "primaryKeys": ["id"], "fields": { … }, … }
+```
+
+Clients use this pointer to decide whether to round-trip `version`. UI generators may render the version field as read-only.
+
+### Auto-lift on PATCH / PUT
+
+- `version` present in the body → stripped from SET, lifted to `$cas: { version: N }`, dispatched to `updateOne` / `replaceOne`.
+- `version` absent → write goes through with no `$cas` (last-write-wins; client opted out).
+
+Presence-based policy. No 428 "Precondition Required" gate.
+
+### 409 Conflict body shape
+
+When CAS misses on a row that exists, the controller does a disambiguation `findOne(id)` and returns:
+
+```jsonc
+{
+  "statusCode": 409,
+  "error": "Conflict", // overridden by Wooks framework — DO NOT discriminate on this
+  "message": "version_mismatch",
+  "kind": "version_mismatch", // ← discriminator
+  "currentVersion": 6, // ← row's current version
+}
+```
+
+Discriminate on `kind === "version_mismatch"` plus `currentVersion`. The Wooks framework owns the `error` field and overrides whatever the controller sets — that's why the discriminator lives on `kind`.
+
+### 404 disambiguation
+
+CAS-bearing PATCH / PUT on a row that doesn't exist returns `404 Not Found`, NOT `409`. The post-mismatch `findOne` is what tells the two states apart. The extra read fires only on the conflict path, never on the happy path.
+
+### Bulk PATCH / PUT
+
+Array bodies carry one optional `version` per item. Mismatches are silently skipped. The response is the aggregate shape:
+
+```
+PATCH /users/
+Body: [
+  { "id": "u1", "name": "a", "version": 5 },  // applies
+  { "id": "u2", "name": "b", "version": 9 },  // stale → skipped
+  { "id": "u3", "name": "c" }                 // no $cas → applies
+]
+Response: 200 OK { "matchedCount": 2, "modifiedCount": 2 }
+```
+
+Detect partial failure with `matchedCount < items.length`. **Per-item conflict status (e.g. 207 Multi-Status with per-row `version_mismatch` entries) is deferred** — see [versioning.md § Limitations](versioning.md#limitations).
+
+### Status-code summary
+
+| Code  | When                                                             | Body                                            |
+| ----- | ---------------------------------------------------------------- | ----------------------------------------------- |
+| `200` | PATCH/PUT success (CAS hit or no CAS)                            | usual write response                            |
+| `404` | CAS-bearing single-row PATCH/PUT on a missing row                | usual 404                                       |
+| `409` | CAS-bearing single-row PATCH/PUT on a row whose version moved on | `kind: "version_mismatch"`, `currentVersion: N` |
+
 ## Gate mode
 
 - `@db.table.filterable 'manual'` + `@db.column.filterable` → server rejects any `/query` filter referencing fields lacking the field-level annotation. HTTP 400 with `path` pointing to the offending field.
@@ -151,12 +218,13 @@ Write endpoints run the server validator for the matching mode (`insert` / `patc
 
 Status-code mapping (`validation-interceptor.ts`):
 
-| Source                                                                                                     | HTTP |
-| ---------------------------------------------------------------------------------------------------------- | ---- |
-| `ValidatorError`                                                                                           | 400  |
-| `DbError` code `CONFLICT`                                                                                  | 409  |
-| `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`) | 400  |
-| `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                   | 409  |
+| Source                                                                                                                             | HTTP                                                                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ValidatorError`                                                                                                                   | 400                                                                                                               |
+| `DbError` code `CONFLICT`                                                                                                          | 409                                                                                                               |
+| `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`, `VERSION_COLUMN_WRITE`) | 400                                                                                                               |
+| CAS version mismatch on PATCH/PUT (`@db.column.version` table)                                                                     | 409 with `kind: "version_mismatch"` — see [§ Optimistic concurrency over HTTP](#optimistic-concurrency-over-http) |
+| `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                                           | 409                                                                                                               |
 
 ## Value-help controllers
 
@@ -191,6 +259,7 @@ interface TMetaResponse {
   searchIndexes: { name; description?; type? }[];
   primaryKeys: string[];
   preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
+  versionColumn?: string; // logical field name of the `@db.column.version` field; omitted when none. See versioning.md.
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<string, { sortable; filterable }>;
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)

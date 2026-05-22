@@ -55,6 +55,47 @@ await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion overrid
 - Field ops `$inc/$dec/$mul` atomic at DB level (see `patch.md`).
 - Array ops `$insert/$upsert/$update/$remove/$replace` decompose per-adapter.
 
+## Optimistic concurrency
+
+Tables annotated with `@db.column.version` get first-class OCC. The adapter auto-bumps the version on every successful write. Opt into conflict detection per call via the inline `$cas` operator on `updateOne` / `replaceOne` / `bulkUpdate`:
+
+```ts
+const row = await users.findOne({ filter: { id } });
+
+const result = await users.updateOne({
+  id,
+  status: "active",
+  $cas: { version: row.version }, // opt-in CAS predicate
+});
+
+if (result.matchedCount === 0) {
+  // Row missing OR another writer bumped the version. Retry or surface 409.
+}
+```
+
+Locked behaviors:
+
+- **Auto-bump is mandatory.** Every write to a versioned table bumps the version column, whether or not `$cas` was supplied. The bump is not opt-in.
+- **CAS predicate is opt-in via `$cas`.** Without it, writes apply as last-write-wins (today's semantics).
+- **`matchedCount === 0` is the stale-detection signal.** No exception is thrown on mismatch. Treat "row missing" and "version mismatch" the same in retry loops, or follow up with `findOne` to disambiguate.
+- **`updateMany` never CAS-checks.** Passing `$cas` to `updateMany` throws. Use `bulkUpdate` with per-item `$cas` for per-row version locking.
+- **Direct writes to the version column throw `DbError("VERSION_COLUMN_WRITE")`.** Plain SET, `$inc`, or `$mul` targeting the version field is rejected at the patch-decomposer layer on every write path.
+- **Composition with `$inc` / `$mul` is atomic.** `{ counter: $inc(1), $cas: { version: N } }` runs as one statement (`SET counter = counter + 1, version = version + 1 WHERE id = ? AND version = N`).
+
+Per-row CAS in bulk:
+
+```ts
+await users.bulkUpdate([
+  { id: "u1", status: "active", $cas: { version: 7 } }, // applies if v=7
+  { id: "u2", status: "active", $cas: { version: 3 } }, // skipped if stale
+  { id: "u3", status: "active" }, // no $cas → wins
+]);
+```
+
+`replaceOne` accepts `$cas` with identical semantics. `bulkReplace` threads `$cas` per item.
+
+For read-modify-write loops use `withOptimisticRetry` ([versioning.md](versioning.md#withoptimisticretry--the-retry-helper)) — it handles the re-read + retry + `CasExhaustedError` story. Full reference: [versioning.md](versioning.md).
+
 ## Deletes
 
 ```ts

@@ -75,6 +75,10 @@ Moost HTTP transforms both into:
 
 `isDbFieldOp(value)` returns `true` for `{ $inc: n }` / `{ $dec: n }` / `{ $mul: n }`. The validator accepts field-op shapes on numeric fields in patch mode; rejects them in insert/replace modes.
 
+## Version column
+
+Tables with `@db.column.version` reject any direct write to the version field (plain SET, `$inc`, or `$mul`) at the patch-decomposer layer with `DbError("VERSION_COLUMN_WRITE")` (HTTP 400). The column is server-managed; clients read it and round-trip it via `$cas` only. The moost-db controller auto-lifts `version` in a PATCH/PUT body to `$cas` before the decomposer runs, so REST clients never trip this rejection. See [versioning.md](versioning.md).
+
 ## Custom validators per adapter
 
 ```ts

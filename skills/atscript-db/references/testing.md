@@ -194,6 +194,46 @@ MongoDB requires a replica-set test server for this to work.
 
 Assert cascades end-to-end by seeding parent + child, deleting the parent, and checking the child state. Don't mock the integrity layer — the whole point is exercising it.
 
+## Testing OCC
+
+Versioned tables (`@db.column.version`) have three observable behaviors worth covering. See [versioning.md](versioning.md) for the feature reference.
+
+```ts
+// Auto-bump on every write
+await users.insertOne({ id: "u1", name: "Ada" });
+let row = await users.findOne({ filter: { id: "u1" } });
+expect(row.version).toBe(0);
+await users.updateOne({ id: "u1", name: "Ada L." });
+row = await users.findOne({ filter: { id: "u1" } });
+expect(row.version).toBe(1);
+
+// CAS hit
+const ok = await users.updateOne({ id: "u1", name: "x", $cas: { version: 1 } });
+expect(ok.matchedCount).toBe(1);
+
+// CAS miss — matchedCount = 0, no throw, row unchanged
+const stale = await users.updateOne({ id: "u1", name: "y", $cas: { version: 1 } });
+expect(stale.matchedCount).toBe(0);
+
+// Direct write to version column throws DbError("VERSION_COLUMN_WRITE")
+await expect(users.updateOne({ id: "u1", version: 99 })).rejects.toThrow();
+```
+
+For HTTP-level conflict shape, discriminate on `kind === "version_mismatch"` (NOT `error` — that's overridden by Wooks):
+
+```ts
+const res = await fetch(url + "/users/", {
+  method: "PATCH",
+  body: JSON.stringify({ id: "u1", name: "z", version: 0 /* stale */ }),
+});
+expect(res.status).toBe(409);
+const body = await res.json();
+expect(body.kind).toBe("version_mismatch");
+expect(typeof body.currentVersion).toBe("number");
+```
+
+For the concurrent-race scenario, fire two PATCH calls in parallel against the running harness with the same `version`. Exactly one should return 200 and the other 409. Useful for guarding the "single-use credential" pattern (backup codes, magic links). Avoid asserting on adapter-internal SQL — assert only on the observable `matchedCount` / HTTP status.
+
 ## Parallel test runs
 
 - SQLite `:memory:` + one `DbSpace` per spec → parallel-safe.

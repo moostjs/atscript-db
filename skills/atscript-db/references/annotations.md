@@ -16,6 +16,7 @@ Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. En
 | `@db.column.collate`                | Field     | `'binary' \| 'nocase' \| 'unicode'` | Portable collation.                                                                                                                                                                                                                                                                                                                                   |
 | `@db.column.precision`              | Field     | `precision, scale`                  | Decimal precision (e.g. `DECIMAL(10,2)`).                                                                                                                                                                                                                                                                                                             |
 | `@db.column.dimension`              | Field     | —                                   | Dimension — groupable in aggregate queries. **Auto-creates a DB index during schema sync.**                                                                                                                                                                                                                                                           |
+| `@db.column.version`                | Field     | —                                   | Mark the field as the row's optimistic-concurrency version. Field must resolve to non-optional `int`. At most one per table. Server-managed: adapter sets `0` on insert and bumps by 1 on every successful write. Direct writes throw `DbError("VERSION_COLUMN_WRITE")`. Opt-in CAS via inline `$cas`. See [versioning.md](versioning.md).            |
 | `@db.column.measure`                | Field     | —                                   | Measure — aggregatable (numeric/decimal only).                                                                                                                                                                                                                                                                                                        |
 | `@db.column.filterable`             | Field     | —                                   | Allow field in `/query` filters when the interface is gated `'manual'`. Adapter capability vetoes the `/meta` `filterable` flag — SQL adapters always report `false` on `@db.json` / array fields, Mongo reports `true`.                                                                                                                              |
 | `@db.column.sortable`               | Field     | —                                   | Allow field in `$sort` when the interface is gated `'manual'`. Adapter capability vetoes the `/meta` `sortable` flag — JSON-stored fields are never sortable on any adapter (min/max-element sort is a footgun).                                                                                                                                      |
@@ -42,6 +43,30 @@ Legitimate:
 Not legitimate (all mean "remove the annotation"): "reads better in TS", "keep `.as` clean of snake_case", "not sure what to call it yet" (use `@db.column.renamed` later — it's a one-shot migration directive, not a runtime remap).
 
 `@db.table 'physical_name'` has no per-row cost but follows the same spirit — only override for reserved table names or when adopting an existing table.
+
+## `@db.column.version` — optimistic concurrency
+
+```atscript
+@db.table 'users'
+interface User {
+    @meta.id @db.default.uuid
+    id: string
+    name: string
+    status: 'active' | 'archived'
+    @db.column.version
+    version: int                // server-managed; do not write directly
+}
+```
+
+Rules:
+
+- Field type MUST be `int` (non-optional). String / timestamp / hash versioning is not supported.
+- At most one version column per table.
+- Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically.
+- Writes that target this column (plain SET, `$inc`, `$mul`) throw `DbError("VERSION_COLUMN_WRITE")`.
+- Pair with the `$cas` operator on `updateOne` / `replaceOne` / `bulkUpdate` to enable conflict detection.
+
+Renaming the column via `@db.column 'v'` is not recommended at this time — see [versioning.md § Limitations](versioning.md#limitations). Full usage in [versioning.md](versioning.md).
 
 ## Defaults
 
