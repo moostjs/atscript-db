@@ -77,6 +77,21 @@ createdAt?: number
 
 :::
 
+## Version Defaults
+
+The [`@db.column.version`](/api/versioning) annotation implies a `0` default — you don't need to add `@db.default '0'` (and you shouldn't try to write the column directly anyway; see [Direct-write rejection](/api/versioning#direct-write-rejection)):
+
+```atscript
+@db.column.version
+version: int
+// Inserted rows get version = 0 automatically.
+// SQL adapters emit DDL with NOT NULL DEFAULT 0 — ALTER TABLE backfills
+// existing rows when the column is added later.
+// Mongo writers inject version: 0 at insert when the field is missing.
+```
+
+Every successful write thereafter increments the column by `1`, server-side. See [Optimistic Concurrency (Row Versioning)](/api/versioning) for the full feature.
+
 ## How Defaults Interact with Inserts
 
 Understanding when defaults apply:

@@ -228,6 +228,7 @@ const schemaApiSidebar = [
       { text: "CRUD Operations", link: "/api/crud" },
       { text: "Queries & Filters", link: "/api/queries" },
       { text: "Update & Patch", link: "/api/update-patch" },
+      { text: "Optimistic Concurrency", link: "/api/versioning" },
       { text: "Transactions", link: "/api/transactions" },
       { text: "Loading Relations", link: "/relations/loading" },
       { text: "Deep Operations", link: "/relations/deep-operations" },

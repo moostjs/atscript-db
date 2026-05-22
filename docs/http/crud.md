@@ -188,6 +188,7 @@ curl http://localhost:3000/todos/meta
 | `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                                                        |
 | `primaryKeys`      | Primary key field names (logical, not column names)                                                                                                                                                                                                                |
 | `preferredId`      | Logical field names of the preferred identifier (PK or `@db.table.preferredId.uniqueIndex` group). See [Preferred row identifier](./actions#preferred-id)                                                                                                          |
+| `versionColumn`    | Logical field name of the `@db.column.version` column, if the table declares one. **Absent** (undefined) otherwise. See [OCC over HTTP](#occ-over-http)                                                                                                            |
 | `relations`        | Available navigation properties                                                                                                                                                                                                                                    |
 | `fields`           | Per-field capability flags (`sortable`, `filterable`)                                                                                                                                                                                                              |
 | `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields ship as shallow refs (`{ id, metadata }`) — enough to resolve the target's URL via `db.http.path`; deeper structure is reachable through the target's own `/meta` (see below) |
@@ -332,6 +333,104 @@ curl -X PATCH http://localhost:3000/products/ \
 
 Also supports [array patch operators](/api/update-patch#embedded-array-patches). See [Update & Patch](/api/update-patch) for the full programmatic API.
 
+## OCC over HTTP {#occ-over-http}
+
+Tables that declare [`@db.column.version`](/api/versioning) get optimistic concurrency control over HTTP automatically. Clients **round-trip the `version` field** — read the row, send it back as-is on PATCH or PUT, and the controller auto-lifts `version` from the body into `$cas`. No special headers, no special endpoints.
+
+### Auto-lift policy
+
+The controller intercepts every write payload on a table whose `/meta` exposes a `versionColumn`:
+
+- **If `version` is present in the body:** it is **stripped** from the SET payload and lifted to `$cas: { version: N }`. The auto-bump still applies — the stored row ends up at `N + 1`, never at the value the client sent.
+- **If `version` is absent:** the write proceeds with no `$cas` — last-write-wins semantics (client opted out by stripping it).
+
+Policy is **presence-based**, not enforced. There is no `428 Precondition Required` gate.
+
+```bash
+# Read the row — version comes back.
+curl http://localhost:3000/tasks/one/1
+# → { "id": 1, "title": "Bake bread", "status": "open", "version": 4 }
+
+# Send it back. version: 4 is auto-lifted to $cas: { version: 4 }.
+curl -X PATCH http://localhost:3000/tasks/ \
+  -H "Content-Type: application/json" \
+  -d '{"id": 1, "status": "done", "version": 4}'
+# → 200 OK  { "matchedCount": 1, "modifiedCount": 1 }
+# Row is now { …, status: "done", version: 5 }.
+```
+
+### 409 Conflict — version mismatch
+
+When the row's stored version no longer matches what the client submitted, the controller returns `409 Conflict`:
+
+```jsonc
+{
+  "statusCode": 409,
+  "error": "Conflict",
+  "message": "version_mismatch",
+  "kind": "version_mismatch",
+  "currentVersion": 6,
+}
+```
+
+::: warning Discriminate on `kind`, not `error`
+The proposal called for `{ error: "version_mismatch", currentVersion: N }`. The actual response carries `error: "Conflict"` — the Wooks framework that powers Moost overrides the `error` field with the standard HTTP reason phrase, and `@atscript/moost-db` cannot reclaim it. The OCC discriminator lives in **`kind`** instead, and `currentVersion` is preserved at the top level.
+
+Clients should test `kind === "version_mismatch"` and read `currentVersion` to refresh their view of the row, then retry.
+:::
+
+Clients on `409` typically:
+
+1. Re-read the row via `GET /one/:id` (or use `currentVersion` directly if they have the rest of the row cached).
+2. Re-apply their changes against the refreshed state.
+3. Retry the PATCH / PUT.
+
+### 404 Not Found — missing row
+
+A CAS-bearing write on a row that does **not** exist returns `404`, not `409`. The controller disambiguates by issuing a single `findOne(id)` after the adapter reports `matchedCount === 0`:
+
+- Row missing → `404 Not Found`.
+- Row present → `409 Conflict` with the body above.
+
+The extra `findOne` is paid only on the conflict path, never on the happy path.
+
+### PUT (replace) — same contract
+
+PUT behaves identically to PATCH at this layer: round-trip `version` → `$cas`, mismatch → `409` with `kind: "version_mismatch"` + `currentVersion`, missing row → `404`.
+
+### Bulk PATCH / PUT — per-item CAS
+
+Each item in an array body carries its own optional `version`. Behavior:
+
+- Items with `version` get per-row CAS.
+- Items without `version` are last-write-wins.
+- Mismatches are **silently skipped**, not failed — never "fail all on first conflict".
+- Response is the aggregate shape: `{ matchedCount, modifiedCount }`. Detect partial failure via `matchedCount < items.length`.
+
+```bash
+curl -X PATCH http://localhost:3000/tasks/ \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"id": 1, "title": "a", "version": 5},
+    {"id": 2, "title": "b", "version": 9},
+    {"id": 3, "title": "c"}
+  ]'
+# → 200 OK  { "matchedCount": 2, "modifiedCount": 2 }
+# Item 2 was silently skipped (its stored version was not 9).
+```
+
+::: warning Per-item conflict status is deferred
+v1 returns aggregate `{ matchedCount, modifiedCount }` only. Per-item 207 Multi-Status responses — which would tell the client exactly which items conflicted — are not yet implemented. Clients that need to know which items lost the race must re-read affected rows after a partial result.
+:::
+
+### Non-versioned tables — no change
+
+Tables without `@db.column.version` are unaffected. `/meta` omits the `versionColumn` field; the auto-lift short-circuits when `versionColumn` is undefined; PATCH / PUT behave exactly as before.
+
+A `version` field on a non-versioned table's payload is treated like any other field — passed through to the validator, which accepts it if the field exists on the type and rejects it as unknown otherwise. The OCC path is never engaged.
+
+See the [Versioning reference](/api/versioning) for the SDK-level API, error codes, and the `withOptimisticRetry` helper.
+
 ## Deleting Records
 
 ### DELETE /:id {#delete}
@@ -364,12 +463,13 @@ curl -X DELETE "http://localhost:3000/task-tags/?taskId=1&tagId=2"
 
 The controller automatically transforms errors into appropriate HTTP responses:
 
-| Error                | HTTP Status | Response Body                                          |
-| -------------------- | ----------- | ------------------------------------------------------ |
-| `ValidatorError`     | 400         | `{ message, statusCode, errors: [{ path, message }] }` |
-| `DbError` (CONFLICT) | 409         | `{ message, statusCode, errors }`                      |
-| `DbError` (other)    | 400         | `{ message, statusCode, errors }`                      |
-| Not found            | 404         | Standard 404                                           |
+| Error                  | HTTP Status | Response Body                                                                                                    |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ValidatorError`       | 400         | `{ message, statusCode, errors: [{ path, message }] }`                                                           |
+| `DbError` (CONFLICT)   | 409         | `{ message, statusCode, errors }`                                                                                |
+| `DbError` (other)      | 400         | `{ message, statusCode, errors }`                                                                                |
+| Version mismatch (OCC) | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http) |
+| Not found              | 404         | Standard 404                                                                                                     |
 
 **Validation error example:**
 

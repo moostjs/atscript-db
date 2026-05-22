@@ -148,6 +148,21 @@ const result = await users.updateOne({
 For atomic increments/decrements (`$inc`, `$dec`, `$mul`) and embedded array patch operators (`$insert`, `$remove`, etc.), see [Update & Patch](/api/update-patch).
 :::
 
+::: tip Optimistic concurrency
+For tables that declare [`@db.column.version`](/api/versioning), add `$cas` to make the update conditional on the current row version:
+
+```typescript
+const ok = await users.updateOne({
+  id: 1,
+  status: "active",
+  $cas: { version: row.version },
+});
+// ok.matchedCount === 0 on stale-read OR missing row — caller retries.
+```
+
+See [Optimistic Concurrency (Row Versioning)](/api/versioning) for the full reference.
+:::
+
 ### Update Many
 
 Update all records matching a filter:
@@ -182,6 +197,8 @@ const result = await users.replaceOne({
 - **`updateOne`** — sends only the fields you want to change (partial)
 - **`replaceOne`** — replaces the entire record with new data (full)
   :::
+
+`replaceOne` also supports `$cas` on [versioned tables](/api/versioning) — same semantics as `updateOne`.
 
 ## Deleting Records
 
@@ -264,14 +281,16 @@ if (!validator.validate(data, true)) {
 
 Database operations throw `DbError` with a `code` property indicating the error type:
 
-| Code             | Meaning                                                                                 |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| `CONFLICT`       | Unique constraint violation                                                             |
-| `FK_VIOLATION`   | Foreign key constraint violated                                                         |
-| `NOT_FOUND`      | Record not found                                                                        |
-| `CASCADE_CYCLE`  | Circular cascade detected                                                               |
-| `INVALID_QUERY`  | Malformed query or filter                                                               |
-| `DEPTH_EXCEEDED` | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`) |
+| Code                   | Meaning                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `CONFLICT`             | Unique constraint violation                                                                                                     |
+| `FK_VIOLATION`         | Foreign key constraint violated                                                                                                 |
+| `NOT_FOUND`            | Record not found                                                                                                                |
+| `CASCADE_CYCLE`        | Circular cascade detected                                                                                                       |
+| `INVALID_QUERY`        | Malformed query or filter                                                                                                       |
+| `DEPTH_EXCEEDED`       | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                         |
+| `VERSION_COLUMN_WRITE` | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)    |
+| `CAS_EXHAUSTED`        | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror) |
 
 Handle errors by checking the code:
 

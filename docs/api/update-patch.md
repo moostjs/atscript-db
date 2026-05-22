@@ -93,6 +93,28 @@ await products.bulkUpdate([
 The helpers return plain JSON objects (`$inc(5)` → `{ $inc: 5 }`), so they serialize naturally. See the [HTTP PATCH endpoint](/http/crud#patch-update) for REST examples.
 :::
 
+## `$cas` — Optimistic Concurrency {#cas-operator}
+
+`$cas` is a top-level payload operator (sibling to plain SET fields and the field ops above) that turns any `updateOne`, `replaceOne`, or per-item `bulkUpdate` into a **conditional** write. It is the opt-in surface for optimistic concurrency control on tables that declare a [`@db.column.version`](./versioning#the-db-column-version-annotation) column.
+
+```typescript
+const ok = await tasks.updateOne({
+  id: 1,
+  status: "done",
+  $cas: { version: row.version }, // ← only commits if the row is still at this version
+});
+
+if (ok.matchedCount === 0) {
+  // Either the row doesn't exist OR another writer touched it. Retry.
+}
+```
+
+On a mismatch the call returns `{ matchedCount: 0, modifiedCount: 0 }` — no exception, no partial write. `$cas` composes atomically with `$inc` / `$dec` / `$mul` in the same payload (single statement on SQL, single `findOneAndUpdate` on Mongo).
+
+`$cas` is **not** supported on `updateMany` (a single `expectedVersion` cannot sensibly match N rows). Per-row version locking goes through `bulkUpdate` where each payload carries its own `$cas`.
+
+See [Optimistic Concurrency (Row Versioning)](./versioning) for the full reference — annotation constraints, the `withOptimisticRetry` helper, `CasExhaustedError`, direct-write rejection, and the [HTTP wire contract](/http/crud#occ-over-http).
+
 ### Operation Helpers
 
 The `@atscript/db/ops` module also exports helpers for [array patch operators](#embedded-array-patches):

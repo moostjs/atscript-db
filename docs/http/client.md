@@ -257,6 +257,24 @@ await users.update([
 
 Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$dec`, `$mul`.
 
+For tables with `@db.column.version`, round-trip the `version` field — the server auto-lifts it to `$cas` and returns `409` on conflict. See [OCC over HTTP](./crud#occ-over-http) and the [versioning guide](/api/versioning).
+
+```typescript
+const row = await users.one("abc");
+
+try {
+  await users.update({ id: "abc", name: "Updated", version: row.version });
+} catch (err) {
+  if (err.statusCode === 409 && err.body?.kind === "version_mismatch") {
+    // Row moved on; re-read and retry. err.body.currentVersion is the new version.
+  } else if (err.statusCode === 404) {
+    // Row was deleted.
+  } else {
+    throw err;
+  }
+}
+```
+
 ### replace {#replace}
 
 `PUT /` — full document replace. All required fields must be present. See [CRUD — PUT /](./crud#put-replace).
@@ -272,6 +290,8 @@ await users.replace({
 // Bulk
 await users.replace([...]);
 ```
+
+`replace` accepts the same `version` round-trip as `update` — same 409 behavior, same `$cas` semantics.
 
 ### remove {#remove}
 
