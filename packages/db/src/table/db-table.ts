@@ -13,10 +13,10 @@ import type { FilterExpr } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
-import { separateFieldOps, type TFieldOps } from "../ops";
+import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import type { TableMetadata } from "./table-metadata";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
-import { decomposePatch } from "../patch/patch-decomposer";
+import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
 import { AtscriptDbReadable } from "./db-readable";
 import { enrichFkViolation, remapDeleteFkViolation } from "./error-utils";
 import {
@@ -312,8 +312,18 @@ export class AtscriptDbTable<
 
     return enrichFkViolation(this._meta, () =>
       this.adapter.withTransaction(async () => {
-        // Phase 0: Setup — clone + defaults, validate full payload (including nav fields)
-        const items = payloads.map((p) => this._applyDefaults({ ...p }));
+        // Phase 0: Setup — extract $cas FIRST (on raw payload clones) so OCC state
+        // never leaks into _applyDefaults, then apply defaults, then validate.
+        // Hoist versionColumn — constant per table; one lookup serves the whole batch.
+        const versionColumn = this.versionColumn;
+        const expectedVersions: Array<number | undefined> = Array.from({
+          length: payloads.length,
+        });
+        const items = payloads.map((p, i) => {
+          const clone = { ...p } as Record<string, unknown>;
+          expectedVersions[i] = separateCas(clone, versionColumn);
+          return this._applyDefaults(clone);
+        });
         const originals = canNest ? payloads.map((p) => ({ ...p })) : [];
 
         const validator = this.getValidator("bulkReplace");
@@ -341,18 +351,24 @@ export class AtscriptDbTable<
           await preValidateNestedFrom(host, originals);
         }
 
-        // Phase 2: Main replace — strip nav fields, prepare, replace each
+        // Phase 2: Main replace — strip nav fields, reject direct version writes,
+        // prepare, replace each (with per-item expectedVersion when supplied).
         let matchedCount = 0;
         let modifiedCount = 0;
-        for (const data of items) {
+        for (let i = 0; i < items.length; i++) {
+          const data = items[i]!;
           for (const navField of this._meta.navFields) {
             delete data[navField];
+          }
+          if (versionColumn !== undefined) {
+            assertNoVersionWrites(data, versionColumn);
           }
           const filter = this._extractRecordFilter(data);
           const prepared = this._fieldMapper.prepareForWrite(data, this._meta, this.adapter);
           const result = await this.adapter.replaceOne(
             this._fieldMapper.translateFilter(filter, this._meta),
             prepared,
+            expectedVersions[i],
           );
           matchedCount += result.matchedCount;
           modifiedCount += result.modifiedCount;
@@ -405,6 +421,22 @@ export class AtscriptDbTable<
 
     return enrichFkViolation(this._meta, () =>
       this.adapter.withTransaction(async () => {
+        // OCC: extract $cas from each payload BEFORE validation. The strict
+        // validator would otherwise reject $cas as an unknown top-level key
+        // (it's not part of the schema). Hoist versionColumn once — constant
+        // per table; per-payload lookups in a hot loop would waste cycles.
+        // Work on a local `cloned` array so the caller's payload array (and
+        // payload objects) are never mutated.
+        const versionColumn = this.versionColumn;
+        const expectedVersions: Array<number | undefined> = Array.from({
+          length: payloads.length,
+        });
+        const cloned: Array<Record<string, unknown>> = payloads.map((p, i) => {
+          const c = { ...p } as Record<string, unknown>;
+          expectedVersions[i] = separateCas(c, versionColumn);
+          return c;
+        });
+
         // Phase 0: Setup — validate full payload (plugin checks nav field constraints)
         const validator = this.getValidator("bulkUpdate");
         const ctx: DbValidationContext = {
@@ -413,36 +445,35 @@ export class AtscriptDbTable<
           navFields: this._meta.navFields,
         };
         this._applyDepthCtx(ctx, depth);
-        validateBatch(validator, payloads as Array<Record<string, unknown>>, ctx);
+        validateBatch(validator, cloned, ctx);
 
         // Preserve originals for FROM/VIA phase (nav fields are stripped in Phase 2)
-        const originals = canNest ? payloads.map((p) => ({ ...p }) as Record<string, unknown>) : [];
+        const originals = canNest ? cloned.map((p) => ({ ...p })) : [];
 
         const host = this as any as TNestedWriterHost;
 
         // Phase 1: TO relation patches
         if (canNest) {
-          await batchPatchNestedTo(
-            host,
-            payloads as Array<Record<string, unknown>>,
-            maxDepth,
-            depth,
-          );
+          await batchPatchNestedTo(host, cloned, maxDepth, depth);
         }
 
         // Validate FK references (application-level, for adapters without native FK support)
         await this._integrity.validateForeignKeys(
-          payloads as Array<Record<string, unknown>>,
+          cloned,
           this._meta,
           this._fkLookupResolver,
           this._writeTableResolver,
           true,
         );
 
-        // Phase 2: Main patch — strip nav fields, separate ops, decompose, update each
+        // Phase 2: Main patch — strip nav fields, separate ops, decompose, update each.
+        // $cas has already been stripped above; direct-write rejection still runs
+        // here so the version column never reaches the SET path.
         let matchedCount = 0;
         let modifiedCount = 0;
-        for (const payload of payloads) {
+        for (let i = 0; i < cloned.length; i++) {
+          const payload = cloned[i]!;
+          const expectedVersion = expectedVersions[i];
           const data = { ...payload } as Record<string, unknown>;
           for (const navField of this._meta.navFields) {
             delete data[navField];
@@ -452,6 +483,11 @@ export class AtscriptDbTable<
           // Strip filter keys from data — they identify the record, not in the SET clause
           for (const key of Object.keys(filter)) {
             delete data[key];
+          }
+
+          // Reject direct writes to the version column (server-managed).
+          if (versionColumn !== undefined) {
+            assertNoVersionWrites(data, versionColumn);
           }
 
           // Skip if nothing left to update (e.g. only nav props + PK in payload)
@@ -472,6 +508,7 @@ export class AtscriptDbTable<
               translatedFilter,
               translatedData,
               translatedOps,
+              expectedVersion,
             );
           } else {
             // Decompose flattens nested objects into dot-paths, preserving field ops verbatim.
@@ -489,12 +526,18 @@ export class AtscriptDbTable<
                 controls: {},
               })) as Record<string, unknown> | null;
               const resolved = resolveArrayOps(translatedUpdate, current, this as AtscriptDbTable);
-              result = await this.adapter.updateOne(translatedFilter, resolved, translatedOps);
+              result = await this.adapter.updateOne(
+                translatedFilter,
+                resolved,
+                translatedOps,
+                expectedVersion,
+              );
             } else {
               result = await this.adapter.updateOne(
                 translatedFilter,
                 translatedUpdate,
                 translatedOps,
+                expectedVersion,
               );
             }
           }
@@ -565,6 +608,25 @@ export class AtscriptDbTable<
       true,
     );
     const dataCopy = { ...data } as Record<string, unknown>;
+    // updateMany never CAS-checks (locked decision row 2): a single
+    // expectedVersion cannot sensibly match N rows with different versions
+    // — use bulkUpdate with per-row $cas instead. The auto-bump still
+    // happens inside the adapter on every versioned UPDATE. Reject $cas
+    // here so callers fail loud instead of silently losing the predicate.
+    const versionColumn = this.versionColumn;
+    if ("$cas" in dataCopy) {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$cas",
+          message:
+            "$cas is not supported on updateMany — use bulkUpdate with per-row $cas " +
+            "for version-locked batch updates",
+        },
+      ]);
+    }
+    if (versionColumn !== undefined) {
+      assertNoVersionWrites(dataCopy, versionColumn);
+    }
     // Decompose flattens nested merge-strategy objects into dot-paths so that
     // separateFieldOps catches nested ops like { account: { failedLoginAttempts: { $inc: 1 } } }.
     const update = decomposePatch(dataCopy, this as AtscriptDbTable);
@@ -844,9 +906,30 @@ export class AtscriptDbTable<
   protected _buildValidator(purpose: string): Validator<T, DataType> {
     const adapterPlugins = this.adapter.getValidatorPlugins();
 
-    // Standard modes use the shared builder
+    // Standard modes use the shared builder. The version column is
+    // server-managed — make it optional in insert/replace so callers don't
+    // have to supply a meaningless value (the adapter auto-sets/auto-bumps).
     if (purpose === "insert" || purpose === "patch" || purpose === "bulkReplace") {
       const mode: ValidatorMode = purpose === "bulkReplace" ? "replace" : purpose;
+      const versionField = this._meta.versionField;
+      if (versionField !== undefined) {
+        const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
+        return this.createValidator({
+          plugins,
+          partial: mode === "patch",
+          // Make the version field optional in the type tree (server-managed:
+          // the adapter sets it on insert and auto-bumps on update; callers
+          // must NOT supply it). The replace callback fires per def node and
+          // the validator caches the result.
+          replace: (def, path) => {
+            const transformed = forceNavNonOptional(def);
+            if (path === versionField && !transformed.optional) {
+              return { ...transformed, optional: true };
+            }
+            return transformed;
+          },
+        });
+      }
       return buildDbValidator(this.type, mode, adapterPlugins) as Validator<T, DataType>;
     }
 

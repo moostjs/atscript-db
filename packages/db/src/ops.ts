@@ -196,6 +196,7 @@ export function separateFieldOps(data: Record<string, unknown>): TFieldOps | und
  * - `$cas` value is non-numeric / non-integer
  * - `$cas` has more than one entry (v1 single-column constraint)
  * - `$cas` key does not match `versionColumn` (when provided)
+ * - `$cas` is present on a non-versioned table (`versionColumn === undefined`)
  *
  * Zero-allocation on the no-op (no `$cas`) path.
  */
@@ -204,6 +205,19 @@ export function separateCas(
   versionColumn?: string,
 ): number | undefined {
   if (!("$cas" in data)) return undefined;
+
+  // Strict: $cas on a non-versioned table is a programmer error — the caller
+  // thinks they have OCC but the table has no version column. Surface loudly
+  // (Rule 12) at the single source of truth instead of duplicating the guard
+  // in every write-path caller.
+  if (versionColumn === undefined) {
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: "$cas",
+        message: "$cas operator: table has no @db.column.version; cannot use $cas",
+      },
+    ]);
+  }
 
   const raw = data.$cas;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {

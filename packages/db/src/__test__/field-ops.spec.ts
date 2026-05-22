@@ -181,29 +181,35 @@ describe("separateCas", () => {
   // WHY: defensive boundary — malformed payloads must surface loudly,
   // not silently no-op (Rule 12 / fail loud).
   it("throws DbError when $cas is not a plain object", () => {
-    expect(() => separateCas({ $cas: null as unknown as Record<string, number> })).toThrow(DbError);
-    expect(() => separateCas({ $cas: [1] as unknown as Record<string, number> })).toThrow(DbError);
-    expect(() => separateCas({ $cas: "bad" as unknown as Record<string, number> })).toThrow(
-      DbError,
-    );
+    expect(() =>
+      separateCas({ $cas: null as unknown as Record<string, number> }, "version"),
+    ).toThrow(DbError);
+    expect(() =>
+      separateCas({ $cas: [1] as unknown as Record<string, number> }, "version"),
+    ).toThrow(DbError);
+    expect(() =>
+      separateCas({ $cas: "bad" as unknown as Record<string, number> }, "version"),
+    ).toThrow(DbError);
   });
 
   // WHY: v1 single-column constraint per locked decision §4.1.
   it("throws DbError when $cas map is empty", () => {
-    expect(() => separateCas({ $cas: {} })).toThrow(DbError);
+    expect(() => separateCas({ $cas: {} }, "version")).toThrow(DbError);
   });
 
   // WHY: v1 single-column constraint per locked decision §4.1.
   it("throws DbError when $cas map has more than one entry", () => {
-    expect(() => separateCas({ $cas: { version: 1, other: 2 } })).toThrow(DbError);
+    expect(() => separateCas({ $cas: { version: 1, other: 2 } }, "version")).toThrow(DbError);
   });
 
   // WHY: prevents float / NaN sneaking into the WHERE predicate where they
   // would compare as never-equal and silently drop the update.
   it("throws DbError when $cas value is non-numeric or non-integer", () => {
-    expect(() => separateCas({ $cas: { version: "4" as unknown as number } })).toThrow(DbError);
-    expect(() => separateCas({ $cas: { version: 1.5 } })).toThrow(DbError);
-    expect(() => separateCas({ $cas: { version: Number.NaN } })).toThrow(DbError);
+    expect(() => separateCas({ $cas: { version: "4" as unknown as number } }, "version")).toThrow(
+      DbError,
+    );
+    expect(() => separateCas({ $cas: { version: 1.5 } }, "version")).toThrow(DbError);
+    expect(() => separateCas({ $cas: { version: Number.NaN } }, "version")).toThrow(DbError);
   });
 
   // WHY: catches caller bugs (typoed column name) at the SDK boundary,
@@ -212,11 +218,18 @@ describe("separateCas", () => {
     expect(() => separateCas({ $cas: { revision: 1 } }, "version")).toThrow(DbError);
   });
 
-  // WHY: moost-db auto-lift (Phase 4) calls separateCas without knowing
-  // the column name — validation deferred to the version-aware caller.
-  it("accepts any single-entry shape when versionColumn is omitted", () => {
-    const data: Record<string, unknown> = { $cas: { revision: 9 } };
-    expect(separateCas(data)).toBe(9);
-    expect(data).toEqual({});
+  // WHY: $cas on a non-versioned table is a programmer error — the caller
+  // thinks they have OCC but the table has no version column. Single source
+  // of truth (Rule 12) so every write-path doesn't duplicate the guard.
+  it("throws DbError when $cas is present and versionColumn is omitted", () => {
+    expect(() => separateCas({ $cas: { version: 1 } })).toThrow(DbError);
+  });
+
+  // WHY: the no-op path stays free for non-versioned tables — only the
+  // *presence* of $cas triggers the stricter error.
+  it("returns undefined when $cas absent and versionColumn is omitted", () => {
+    const data: Record<string, unknown> = { a: 1 };
+    expect(separateCas(data)).toBeUndefined();
+    expect(data).toEqual({ a: 1 });
   });
 });
