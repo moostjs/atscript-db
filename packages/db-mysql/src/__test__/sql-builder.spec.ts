@@ -704,6 +704,21 @@ describe("buildCreateTable", () => {
     expect(sql).toContain("`bio` TEXT");
     expect(sql).not.toMatch(/`bio` TEXT NOT NULL/);
   });
+
+  // WHY: §4.6 / Step 5 — versioned columns must materialize as
+  // NOT NULL DEFAULT 0 so ALTER TABLE backfills are automatic and inserts
+  // that omit `version` land at 0. MySQL backtick quoting + INT type.
+  it("should emit NOT NULL DEFAULT 0 for a versioned column", () => {
+    const sql = buildCreateTable("users", [
+      field({ physicalName: "id", designType: "integer", isPrimaryKey: true }),
+      field({
+        physicalName: "version",
+        designType: "integer",
+        defaultValue: { kind: "value", value: "0" },
+      }),
+    ]);
+    expect(sql).toContain("`version` INT NOT NULL DEFAULT 0");
+  });
 });
 
 // ── Default value for type ──────────────────────────────────────────────

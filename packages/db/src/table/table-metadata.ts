@@ -472,6 +472,13 @@ export class TableMetadata {
         );
       } else {
         this.versionField = fieldName;
+        // Implicit `default 0`: schema sync emits NOT NULL DEFAULT 0 so
+        // existing rows backfill at ALTER TABLE time and new inserts get a
+        // usable starting value (§4.6 of VERSION_PROPOSAL.md). An explicit
+        // `@db.default` on the same field wins via the guard below.
+        if (!this.defaults.has(fieldName)) {
+          this.defaults.set(fieldName, { kind: "value", value: "0" });
+        }
       }
     }
   }

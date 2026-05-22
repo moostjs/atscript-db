@@ -12,6 +12,7 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 let VersionedUser: any;
 let VersionedOrder: any;
 let PlainWidget: any;
+let VersionedWithExplicitDefault: any;
 
 beforeAll(async () => {
   await prepareFixtures();
@@ -19,6 +20,7 @@ beforeAll(async () => {
   VersionedUser = mod.VersionedUser;
   VersionedOrder = mod.VersionedOrder;
   PlainWidget = mod.PlainWidget;
+  VersionedWithExplicitDefault = mod.VersionedWithExplicitDefault;
 });
 
 // ── Metadata wiring ─────────────────────────────────────────────────────────
@@ -53,6 +55,42 @@ describe("@db.column.version → table.versionColumn", () => {
   });
 });
 
+// ── Implicit DEFAULT 0 wiring (Step 5) ──────────────────────────────────────
+
+describe("@db.column.version → implicit DEFAULT 0", () => {
+  // WHY: without this wiring, schema-sync DDL omits DEFAULT 0, ADD COLUMN on
+  // an existing table fails (NOT NULL with no default), and new inserts that
+  // omit `version` blow up. The whole §4.6 contract rides on this single
+  // assignment.
+  it("seeds defaultValue { kind: 'value', value: '0' } on the version field descriptor", () => {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(VersionedUser, adapter);
+    const fd = table.fieldDescriptors.find((f) => f.path === "version");
+    expect(fd?.defaultValue).toEqual({ kind: "value", value: "0" });
+  });
+
+  // WHY: the other half of NOT NULL DEFAULT 0 — if the version field were
+  // optional, the DDL would emit a nullable column and `NULL + 1 = NULL`
+  // would silently break the auto-bump invariant. The validator rejects
+  // optional version fields (see compile-time block) so this must hold.
+  it("marks the version field descriptor as non-optional", () => {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(VersionedUser, adapter);
+    const fd = table.fieldDescriptors.find((f) => f.path === "version");
+    expect(fd?.optional).toBe(false);
+  });
+
+  // WHY: precedence guard — a caller who explicitly sets @db.default on a
+  // versioned column has opted out of the implicit 0. Honor their value
+  // (consistent with existing per-annotation precedence; no surprises).
+  it("respects an explicit @db.default on a versioned column instead of the implicit 0", () => {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(VersionedWithExplicitDefault, adapter);
+    const fd = table.fieldDescriptors.find((f) => f.path === "version");
+    expect(fd?.defaultValue).toEqual({ kind: "value", value: "7" });
+  });
+});
+
 // ── Compile-time validation ─────────────────────────────────────────────────
 
 describe("@db.column.version compile-time validation", () => {
@@ -75,6 +113,25 @@ describe("@db.column.version compile-time validation", () => {
     `);
     expect(
       messages.some((m) => m.includes("@db.column.version") && m.includes("At most one")),
+    ).toBe(true);
+  });
+
+  // WHY: optional + version is incoherent — a nullable column would emit
+  // DDL without NOT NULL, leaving rows where `NULL + 1 = NULL` silently
+  // breaks the auto-bump invariant. Catch at compile time, not run time.
+  it("rejects @db.column.version on an optional field", async () => {
+    const messages = await diagnosticsFor(`
+      @db.table 'bad'
+      export interface VersionOptional {
+        @meta.id
+        id: number
+
+        @db.column.version
+        version?: number
+      }
+    `);
+    expect(
+      messages.some((m) => m.includes("@db.column.version") && m.includes("non-optional")),
     ).toBe(true);
   });
 

@@ -31,3 +31,14 @@ export interface PlainWidget {
 
     name: string
 }
+
+@db.table "versioned_with_explicit_default"
+export interface VersionedWithExplicitDefault {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.column.version
+    @db.default "7"
+    version: number
+}

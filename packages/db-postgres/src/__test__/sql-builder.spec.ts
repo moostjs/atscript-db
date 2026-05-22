@@ -344,6 +344,33 @@ describe("buildCreateTable", () => {
     expect(sql).not.toContain("DEFAULT 0");
   });
 
+  // WHY: §4.6 / Step 5 — versioned columns must materialize as
+  // NOT NULL DEFAULT 0 so ALTER TABLE backfills are automatic and inserts
+  // that omit `version` land at 0. PG-specific identifier quoting.
+  it("emits NOT NULL DEFAULT 0 for a versioned column", () => {
+    const fields: TDbFieldMeta[] = [
+      {
+        path: "id",
+        physicalName: "id",
+        designType: "number",
+        optional: false,
+        isPrimaryKey: true,
+        ignored: false,
+      } as TDbFieldMeta,
+      {
+        path: "version",
+        physicalName: "version",
+        designType: "integer",
+        optional: false,
+        isPrimaryKey: false,
+        ignored: false,
+        defaultValue: { kind: "value", value: "0" },
+      } as TDbFieldMeta,
+    ];
+    const sql = buildCreateTable("users", fields);
+    expect(sql).toMatch(/"version"\s+\S+\s+NOT NULL DEFAULT 0/);
+  });
+
   it("generates no ENGINE/CHARSET/COLLATE suffix", () => {
     const fields: TDbFieldMeta[] = [
       {

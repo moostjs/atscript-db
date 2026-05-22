@@ -10,7 +10,7 @@ export interface VersionedUserTable {
     counter: number
 
     @db.column.version
-    version: number
+    version: number.int
 }
 
 @db.table 'plain_widgets'

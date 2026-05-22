@@ -200,6 +200,19 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       validate(token, _args, doc) {
         const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
 
+        // Reject optional version fields — the column is server-managed and
+        // always populated (DEFAULT 0); a nullable version column would let
+        // `NULL + 1` produce `NULL` and silently break the auto-bump invariant.
+        const field = token.parentNode!;
+        if (field.has("optional")) {
+          errors.push({
+            message:
+              "@db.column.version requires a non-optional field — version columns are always populated (default 0)",
+            severity: 1,
+            range: token.range,
+          });
+        }
+
         // Cross-field uniqueness: at most one @db.column.version per struct.
         const struct = getParentStruct(token);
         if (struct) {

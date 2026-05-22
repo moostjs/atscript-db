@@ -3,6 +3,7 @@ import { AtscriptDbTable, DbError } from "@atscript/db";
 
 import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
+import { buildCreateTable } from "../sql-builder";
 
 import { prepareFixtures } from "./test-utils";
 
@@ -38,11 +39,12 @@ describe("OCC ($cas + auto-bump) end-to-end via SqliteAdapter + AtscriptDbTable"
     driver.close();
   });
 
-  // WHY: confirms the version column lands in the row with a known starting
-  // value so subsequent tests can reason about expected post-update versions.
-  // TODO: rely on DEFAULT 0 after Step 5 lands schema DDL for version columns.
-  it("inserts the row at version=0 when supplied explicitly", async () => {
-    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0, version: 0 } as any);
+  // WHY: §4.6 — versioned columns are server-managed; schema sync emits
+  // NOT NULL DEFAULT 0 so an insert that omits `version` still lands with
+  // version=0. Confirms the DDL default is wired end-to-end through the
+  // table layer (no caller has to know about the bookkeeping column).
+  it("DDL default initializes version to 0 on insert", async () => {
+    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0 } as any);
     const row = (await users.findOne({ filter: { id: 1 }, controls: {} })) as any;
     expect(row.version).toBe(0);
   });
@@ -205,5 +207,14 @@ describe("OCC ($cas + auto-bump) end-to-end via SqliteAdapter + AtscriptDbTable"
     const row = (await users.findOne({ filter: { id: 1 }, controls: {} })) as any;
     expect(row.counter).toBe(5);
     expect(row.version).toBe(1);
+  });
+
+  // WHY: regression guard — the metadata-layer change (Step 5) must surface
+  // in CREATE TABLE DDL as NOT NULL DEFAULT 0. If this drifts, ADD COLUMN
+  // backfills break and inserts that omit `version` reject at the DB layer.
+  it("emits NOT NULL DEFAULT 0 in CREATE TABLE DDL for the version column", () => {
+    const table = new AtscriptDbTable(VersionedUserTable, new SqliteAdapter(driver));
+    const sql = buildCreateTable(table.tableName, table.fieldDescriptors, table.foreignKeys);
+    expect(sql).toMatch(/"version"\s+\S+\s+NOT NULL DEFAULT 0/);
   });
 });
