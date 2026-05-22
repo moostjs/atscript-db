@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType, TAtscriptTypeArray } from "@atscript/typescript/utils";
 
+import { DbError } from "../db-error";
 import type { AtscriptDbTable } from "../table/db-table";
 import { getKeyProps } from "./patch-types";
 
@@ -131,4 +132,41 @@ function decomposeArrayPatch(
   ) {
     update[`${key}.__$keys`] = [...keyProps];
   }
+}
+
+/**
+ * Throws if the payload attempts to write the version column directly.
+ *
+ * The version column is server-managed: the adapter auto-increments it
+ * on every update. Direct writes (plain SET, `$inc`, `$mul`) would
+ * either silently no-op (overwritten by the auto-bump) or corrupt the
+ * OCC invariant. Reject them at the patch layer so the failure is
+ * loud and adapter-agnostic.
+ *
+ * Inspects the payload AFTER `separateCas` has stripped `$cas` (so
+ * that the legitimate `$cas` → expectedVersion path is not flagged).
+ *
+ * The check is intentionally narrow: only the physical column name at
+ * the top level of the (already-decomposed) payload. Nested objects
+ * cannot reach the version column through dot-paths because the
+ * decomposer flattens those into top-level dot-keys; the version
+ * column, being a scalar at the root, cannot be nested.
+ *
+ * Zero-allocation when the version column is not present.
+ *
+ * @throws {DbError} with code `VERSION_COLUMN_WRITE` when the version
+ *   column appears as a top-level key in `data` or as the target of a
+ *   `$inc`/`$mul` field op.
+ */
+export function assertNoVersionWrites(data: Record<string, unknown>, versionColumn: string): void {
+  if (!(versionColumn in data)) return;
+
+  throw new DbError("VERSION_COLUMN_WRITE", [
+    {
+      path: versionColumn,
+      message:
+        `Cannot write to version column "${versionColumn}" directly; ` +
+        `omit it from the payload or use $cas for conflict detection`,
+    },
+  ]);
 }

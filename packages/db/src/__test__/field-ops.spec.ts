@@ -1,6 +1,16 @@
 import { describe, it, expect } from "vite-plus/test";
 
-import { $inc, $dec, $mul, isDbFieldOp, getDbFieldOp, separateFieldOps } from "../ops";
+import { DbError } from "../db-error";
+import {
+  $inc,
+  $dec,
+  $mul,
+  $cas,
+  isDbFieldOp,
+  getDbFieldOp,
+  separateFieldOps,
+  separateCas,
+} from "../ops";
 
 describe("field ops helpers", () => {
   it("$inc returns { $inc: N }", () => {
@@ -138,5 +148,75 @@ describe("separateFieldOps", () => {
     const ops = separateFieldOps(data);
     expect(ops).toBeUndefined();
     expect(data).toEqual({ a: null, b: 42, c: "hello", d: true, e: [1, 2, 3] });
+  });
+});
+
+describe("$cas", () => {
+  // WHY: type-clean inline ergonomics — consumers spread the helper into a
+  // payload and the resulting object must serialize as a single $cas entry.
+  it("returns a { $cas: { [col]: N } } wrapper", () => {
+    expect($cas("version", 7)).toEqual({ $cas: { version: 7 } });
+  });
+});
+
+describe("separateCas", () => {
+  // WHY: pure-function contract — the table layer relies on the mutation
+  // + return shape to forward `expectedVersion` to the adapter.
+  it("strips $cas from payload and returns its value", () => {
+    const data: Record<string, unknown> = { a: 1, $cas: { version: 4 } };
+    const v = separateCas(data, "version");
+    expect(v).toBe(4);
+    expect(data).toEqual({ a: 1 });
+  });
+
+  // WHY: no-op path must be allocation-free; OCC-unaware writes pay nothing.
+  it("returns undefined and does not mutate when $cas absent", () => {
+    const data: Record<string, unknown> = { a: 1, b: "x" };
+    const before = { ...data };
+    const v = separateCas(data, "version");
+    expect(v).toBeUndefined();
+    expect(data).toEqual(before);
+  });
+
+  // WHY: defensive boundary — malformed payloads must surface loudly,
+  // not silently no-op (Rule 12 / fail loud).
+  it("throws DbError when $cas is not a plain object", () => {
+    expect(() => separateCas({ $cas: null as unknown as Record<string, number> })).toThrow(DbError);
+    expect(() => separateCas({ $cas: [1] as unknown as Record<string, number> })).toThrow(DbError);
+    expect(() => separateCas({ $cas: "bad" as unknown as Record<string, number> })).toThrow(
+      DbError,
+    );
+  });
+
+  // WHY: v1 single-column constraint per locked decision §4.1.
+  it("throws DbError when $cas map is empty", () => {
+    expect(() => separateCas({ $cas: {} })).toThrow(DbError);
+  });
+
+  // WHY: v1 single-column constraint per locked decision §4.1.
+  it("throws DbError when $cas map has more than one entry", () => {
+    expect(() => separateCas({ $cas: { version: 1, other: 2 } })).toThrow(DbError);
+  });
+
+  // WHY: prevents float / NaN sneaking into the WHERE predicate where they
+  // would compare as never-equal and silently drop the update.
+  it("throws DbError when $cas value is non-numeric or non-integer", () => {
+    expect(() => separateCas({ $cas: { version: "4" as unknown as number } })).toThrow(DbError);
+    expect(() => separateCas({ $cas: { version: 1.5 } })).toThrow(DbError);
+    expect(() => separateCas({ $cas: { version: Number.NaN } })).toThrow(DbError);
+  });
+
+  // WHY: catches caller bugs (typoed column name) at the SDK boundary,
+  // not at the DB where the predicate would silently never match.
+  it("throws DbError when versionColumn is provided and key does not match", () => {
+    expect(() => separateCas({ $cas: { revision: 1 } }, "version")).toThrow(DbError);
+  });
+
+  // WHY: moost-db auto-lift (Phase 4) calls separateCas without knowing
+  // the column name — validation deferred to the version-aware caller.
+  it("accepts any single-entry shape when versionColumn is omitted", () => {
+    const data: Record<string, unknown> = { $cas: { revision: 9 } };
+    expect(separateCas(data)).toBe(9);
+    expect(data).toEqual({});
   });
 });

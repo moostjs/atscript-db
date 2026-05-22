@@ -18,6 +18,7 @@ export {
   $inc,
   $dec,
   $mul,
+  $cas,
   $replace,
   $insert,
   $upsert,
@@ -29,12 +30,13 @@ export type {
   ValidatorMode,
   ValidationContext,
   TDbFieldOp,
+  TDbCas,
   TArrayPatch,
   TDbPatch,
 } from "./validator";
 
 // ── Server-only ops (not in ./validator) ────────────────────────────────────
-export { getDbFieldOp, separateFieldOps } from "./ops";
+export { getDbFieldOp, separateFieldOps, separateCas } from "./ops";
 export type { TFieldOps } from "./ops";
 
 export type { DbResponse } from "./table/db-readable";
@@ -45,7 +47,7 @@ export { BaseDbAdapter } from "./base-adapter";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
-export { decomposePatch } from "./patch/patch-decomposer";
+export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { translateQueryTree } from "./query/query-tree";
 export type {
   TViewPlan,

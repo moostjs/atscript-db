@@ -1,12 +1,12 @@
 export { createDbValidatorPlugin } from "./db-validator-plugin";
 export type { DbValidationContext } from "./db-validator-plugin";
 export { isDbFieldOp } from "./ops";
-export type { TDbFieldOp } from "./ops";
+export type { TDbFieldOp, TDbCas } from "./ops";
 export { getKeyProps } from "./patch/patch-types";
 export type { TArrayPatch, TDbPatch } from "./patch/patch-types";
 
 // Re-export field & array op helpers (browser-safe convenience)
-export { $inc, $dec, $mul, $replace, $insert, $upsert, $update, $remove } from "./ops";
+export { $inc, $dec, $mul, $cas, $replace, $insert, $upsert, $update, $remove } from "./ops";
 
 import {
   flattenAnnotatedType,

@@ -4,7 +4,8 @@ export type DbErrorCode =
   | "NOT_FOUND"
   | "CASCADE_CYCLE"
   | "INVALID_QUERY"
-  | "DEPTH_EXCEEDED";
+  | "DEPTH_EXCEEDED"
+  | "VERSION_COLUMN_WRITE";
 
 export class DbError extends Error {
   name = "DbError";

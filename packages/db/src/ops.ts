@@ -1,3 +1,5 @@
+import { DbError } from "./db-error";
+
 // ── Field operation helpers ──────────────────────────────────────────────────
 // Pure functions returning JSON-serializable objects.
 // Safe for frontend use — zero runtime dependencies.
@@ -7,6 +9,19 @@ export interface TDbFieldOp {
   $inc?: number;
   $dec?: number;
   $mul?: number;
+}
+
+/**
+ * A compare-and-set assertion: the update applies only if the version
+ * column currently equals `value`. Used inline in update payloads:
+ *
+ *   { ...patch, $cas: { version: 4 } }
+ *
+ * The map shape is forward-compatible with multi-field CAS; v1 has
+ * exactly one entry keyed by the table's version column name.
+ */
+export interface TDbCas {
+  [versionColumn: string]: number;
 }
 
 /** Increment a numeric field by `value` (default 1). */
@@ -22,6 +37,20 @@ export function $dec(value: number = 1): TDbFieldOp {
 /** Multiply a numeric field by `value`. */
 export function $mul(value: number): TDbFieldOp {
   return { $mul: value };
+}
+
+/**
+ * Build a CAS marker for an inline payload.
+ *
+ * Use as a sibling to plain SET fields in an update payload:
+ *
+ *   await users.updateOne({ id, status: 'active', ...$cas('version', 4) })
+ *
+ * The wrapped object can be spread directly so the marker stays a
+ * single, type-safe top-level entry.
+ */
+export function $cas(versionColumn: string, value: number): { $cas: TDbCas } {
+  return { $cas: { [versionColumn]: value } };
 }
 
 // ── Array operation helpers ─────────────────────────────────────────────────
@@ -148,4 +177,80 @@ export function separateFieldOps(data: Record<string, unknown>): TFieldOps | und
   }
 
   return ops;
+}
+
+/**
+ * Strips the top-level `$cas` operator from a write payload.
+ *
+ * Mutates `data` (deletes `$cas`) and returns the extracted expected
+ * version, or `undefined` if no `$cas` was present.
+ *
+ * The caller is expected to know the table's version column name and
+ * either trust the lookup or pass it explicitly for validation. v1
+ * accepts a single-entry `$cas` map; the returned number is the value
+ * of that entry.
+ *
+ * Errors (all thrown as {@link DbError}):
+ * - `$cas` is not a plain object → `"$cas operator: ..."`
+ * - `$cas` map is empty
+ * - `$cas` value is non-numeric / non-integer
+ * - `$cas` has more than one entry (v1 single-column constraint)
+ * - `$cas` key does not match `versionColumn` (when provided)
+ *
+ * Zero-allocation on the no-op (no `$cas`) path.
+ */
+export function separateCas(
+  data: Record<string, unknown>,
+  versionColumn?: string,
+): number | undefined {
+  if (!("$cas" in data)) return undefined;
+
+  const raw = data.$cas;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new DbError("INVALID_QUERY", [
+      { path: "$cas", message: "$cas operator: must be a plain object" },
+    ]);
+  }
+
+  const map = raw as Record<string, unknown>;
+  let foundKey: string | undefined;
+  for (const k in map) {
+    if (foundKey !== undefined) {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$cas",
+          message: "$cas operator: expected exactly one entry (v1 single-column CAS)",
+        },
+      ]);
+    }
+    foundKey = k;
+  }
+
+  if (foundKey === undefined) {
+    throw new DbError("INVALID_QUERY", [
+      { path: "$cas", message: "$cas operator: must contain a single version entry" },
+    ]);
+  }
+
+  if (versionColumn !== undefined && foundKey !== versionColumn) {
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: `$cas.${foundKey}`,
+        message: `$cas operator: key "${foundKey}" does not match version column "${versionColumn}"`,
+      },
+    ]);
+  }
+
+  const foundValue = map[foundKey];
+  if (typeof foundValue !== "number" || !Number.isInteger(foundValue)) {
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: `$cas.${foundKey}`,
+        message: `$cas operator: value for "${foundKey}" must be an integer`,
+      },
+    ]);
+  }
+
+  delete data.$cas;
+  return foundValue;
 }
