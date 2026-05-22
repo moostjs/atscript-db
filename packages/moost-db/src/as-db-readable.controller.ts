@@ -835,6 +835,10 @@ export class AsDbReadableController<
       type: this.getSerializedType(),
       actions: this.buildActions(),
       crud: this.buildCrud(),
+      // OCC pointer (§6.1 of VERSION_PROPOSAL.md). `undefined` for tables
+      // without `@db.column.version` — clients use this to decide whether
+      // to round-trip the version field and how to render it.
+      versionColumn: this.readable.versionColumn,
     };
   }
 
