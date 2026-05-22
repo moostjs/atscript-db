@@ -85,6 +85,8 @@ export class TableMetadata {
   columnMap = new Map<string, string>();
   dimensions: string[] = [];
   measures: string[] = [];
+  /** Logical field name annotated with `@db.column.version`, if any. */
+  versionField?: string;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   quantityRefByField = new Map<string, string>();
 
@@ -460,6 +462,17 @@ export class TableMetadata {
     // @db.column.measure → mark as measure (aggregatable in aggregate queries)
     if (metadata.has("db.column.measure")) {
       this.measures.push(fieldName);
+    }
+
+    // @db.column.version → version column for OCC (at most one per table)
+    if (metadata.has("db.column.version")) {
+      if (this.versionField !== undefined) {
+        logger.warn(
+          `@db.column.version declared on multiple fields ("${this.versionField}" and "${fieldName}") — only one is allowed; using "${this.versionField}"`,
+        );
+      } else {
+        this.versionField = fieldName;
+      }
     }
   }
 

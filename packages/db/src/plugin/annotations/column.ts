@@ -2,7 +2,11 @@ import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isRef, isStructure, isPrimitive } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
-import { getDbTableOwner, validateFieldBaseType } from "../../shared/annotation-utils";
+import {
+  getDbTableOwner,
+  getParentStruct,
+  validateFieldBaseType,
+} from "../../shared/annotation-utils";
 
 export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
@@ -176,6 +180,44 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     filterable: columnCapability("filterable", "filtering"),
 
     sortable: columnCapability("sortable", "sorting"),
+
+    version: new AnnotationSpec({
+      description:
+        "Marks a numeric column as the row's version for optimistic concurrency control (OCC). " +
+        "The adapter auto-increments this column on every UPDATE, and callers may pass " +
+        "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
+        "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected." +
+        "\n\n**Constraints:**\n" +
+        "- At most one version column per table.\n" +
+        "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
+        "- Default value on insert is `0`.\n" +
+        "\n**Example:**\n" +
+        "```atscript\n" +
+        "@db.column.version\n" +
+        "version: int\n" +
+        "```\n",
+      nodeType: ["prop"],
+      validate(token, _args, doc) {
+        const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
+
+        // Cross-field uniqueness: at most one @db.column.version per struct.
+        const struct = getParentStruct(token);
+        if (struct) {
+          let count = 0;
+          for (const [, prop] of struct.props) {
+            if (prop.countAnnotations("db.column.version") > 0) count++;
+          }
+          if (count > 1) {
+            errors.push({
+              message: "At most one @db.column.version per table",
+              severity: 1,
+              range: token.range,
+            });
+          }
+        }
+        return errors;
+      },
+    }),
   },
 
   default: {

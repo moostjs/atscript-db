@@ -336,6 +336,18 @@ export class AtscriptDbReadable<
     return this._metaIdPhysical;
   }
 
+  /**
+   * Physical column name of the field annotated with `@db.column.version`, or
+   * `undefined` when the table has no version column. Used by adapters and the
+   * REST integration to drive optimistic concurrency control (OCC).
+   */
+  public get versionColumn(): string | undefined {
+    this._ensureBuilt();
+    const field = this._meta.versionField;
+    if (field === undefined) return undefined;
+    return this._meta.columnMap.get(field) ?? field;
+  }
+
   /** Dimension fields from `@db.column.dimension`. */
   public get dimensions(): readonly string[] {
     this._ensureBuilt();

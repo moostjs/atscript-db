@@ -93,6 +93,12 @@ export interface TMetaResponse {
   type: TSerializedAnnotatedType;
   actions: TDbActionInfo[];
   crud: TCrudPermissions;
+  /**
+   * Physical column name annotated with `@db.column.version`, when the table
+   * opts into optimistic concurrency control (OCC). Absent for tables without
+   * the annotation, i.e. last-write-wins (default) behavior.
+   */
+  versionColumn?: string;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────
