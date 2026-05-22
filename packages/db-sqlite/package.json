@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-sqlite",
-  "version": "0.1.84",
+  "version": "0.1.85",
   "description": "SQLite adapter for @atscript/db with swappable driver support.",
   "keywords": [
     "atscript",
