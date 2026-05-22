@@ -4,8 +4,10 @@ export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-ma
 export { RelationalFieldMapper } from "./strategies/relational-field-mapper";
 export { IntegrityStrategy, NativeIntegrity } from "./strategies/integrity";
 export { ApplicationIntegrity } from "./strategies/application-integrity";
-export { DbError } from "./db-error";
+export { DbError, CasExhaustedError } from "./db-error";
 export type { DbErrorCode } from "./db-error";
+export { withOptimisticRetry } from "./with-optimistic-retry";
+export type { WithOptimisticRetryOptions } from "./with-optimistic-retry";
 // ── Shared validator entry (used by both server and @atscript/db-client) ────
 export {
   createDbValidatorPlugin,
