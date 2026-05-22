@@ -62,6 +62,34 @@ export class ActionDisabledError extends ClientError {
   }
 }
 
+/**
+ * Wire-body shape for 409 OCC `version_mismatch` responses. Extends the base
+ * `ServerError` envelope with a `kind` discriminator and the row's current
+ * server-side version. The bridge between `@atscript/moost-db`'s server-side
+ * `_disambiguateMismatch` and this typed client-side subclass is the wire
+ * JSON body — neither package depends on the other.
+ */
+export interface VersionMismatchErrorBody extends ServerError {
+  kind: "version_mismatch";
+  currentVersion: number;
+}
+
+/**
+ * Typed marker thrown by `Client._send` when the server response body's
+ * `kind === 'version_mismatch'`. The transport / status / base body are
+ * identical to a generic `ClientError`; this subclass adds a typed
+ * `currentVersion` accessor so consumers can write
+ * `catch (e) { if (e instanceof VersionMismatchError) … }` without casting.
+ */
+export class VersionMismatchError extends ClientError {
+  override name = "VersionMismatchError";
+
+  /** Row's current server-side version — clients refresh + retry against it. */
+  get currentVersion(): number {
+    return (this.body as VersionMismatchErrorBody).currentVersion;
+  }
+}
+
 /** Thrown by `Client.action()` when the action name is not present in `/meta`. */
 export class ActionNotFoundError extends Error {
   override name = "ActionNotFoundError";

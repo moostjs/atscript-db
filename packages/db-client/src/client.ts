@@ -15,10 +15,12 @@ import type {
 
 import {
   ActionDisabledError,
+  VersionMismatchError,
   ActionNotFoundError,
   ActionUnsupportedError,
   ClientError,
   type ActionDisabledErrorBody,
+  type VersionMismatchErrorBody,
 } from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
 import type {
@@ -507,6 +509,12 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       }
       if (errorBody.name === "ActionDisabledError") {
         throw new ActionDisabledError(res.status, errorBody as unknown as ActionDisabledErrorBody);
+      }
+      if (errorBody.kind === "version_mismatch") {
+        throw new VersionMismatchError(
+          res.status,
+          errorBody as unknown as VersionMismatchErrorBody,
+        );
       }
       throw new ClientError(res.status, errorBody as never);
     }

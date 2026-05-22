@@ -4,8 +4,9 @@ export {
   ActionNotFoundError,
   ActionUnsupportedError,
   ActionDisabledError,
+  VersionMismatchError,
 } from "./client-error";
-export type { ActionDisabledErrorBody } from "./client-error";
+export type { ActionDisabledErrorBody, VersionMismatchErrorBody } from "./client-error";
 
 // Re-exported from @atscript/db so consumers building UIs over /meta have a
 // single import point for the action + CRUD permission wire types.
