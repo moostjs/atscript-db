@@ -106,6 +106,11 @@ export class AsDbReadableController<
   }
 
   protected hasField(path: string): boolean {
+    // Guarded for the partial-mock readables in *.spec.ts that omit
+    // isValidFieldPath. Real AtscriptDbReadable instances always have it.
+    if (typeof this.readable.isValidFieldPath === "function") {
+      return this.readable.isValidFieldPath(path);
+    }
     return this.readable.flatMap.has(path);
   }
 

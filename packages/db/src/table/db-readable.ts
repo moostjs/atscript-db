@@ -455,6 +455,50 @@ export class AtscriptDbReadable<
     return this._meta.fieldDescriptors;
   }
 
+  /**
+   * Resolves whether `path` references a real field — directly via `flatMap`
+   * or transitively through a nav relation by recursing into the target
+   * table. Defense-in-depth for query-path validation: `flattenAnnotatedType`
+   * still truncates real self-referential cycles, so paths like
+   * `parent.parent.name` on a self-ref schema would miss `flatMap.has` but
+   * remain valid field references on the target.
+   *
+   * Cycle-safe via a visited set keyed on `<tableName>:<navField>`.
+   */
+  public isValidFieldPath(path: string, _visited?: Set<string>): boolean {
+    if (this.flatMap.has(path)) {
+      return true;
+    }
+    const dotIdx = path.indexOf(".");
+    if (dotIdx === -1) {
+      return false;
+    }
+    const head = path.slice(0, dotIdx);
+    const tail = path.slice(dotIdx + 1);
+    if (!this.navFields.has(head)) {
+      return false;
+    }
+    const relation = this._meta.relations.get(head);
+    if (!relation) {
+      return false;
+    }
+    const targetType = relation.targetType();
+    if (!targetType || !this._tableResolver) {
+      return false;
+    }
+    const targetTable = this._tableResolver(targetType);
+    if (!targetTable || typeof targetTable.isValidFieldPath !== "function") {
+      return false;
+    }
+    const visited = _visited ?? new Set<string>();
+    const cycleKey = `${this.tableName}:${head}`;
+    if (visited.has(cycleKey)) {
+      return false;
+    }
+    visited.add(cycleKey);
+    return targetTable.isValidFieldPath(tail, visited);
+  }
+
   // ── Validation ────────────────────────────────────────────────────────────
 
   /**

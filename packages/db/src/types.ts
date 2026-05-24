@@ -417,7 +417,13 @@ export type TTableResolver = (
 ) =>
   | Pick<
       AtscriptDbTableLike,
-      "findMany" | "loadRelations" | "primaryKeys" | "preferredId" | "relations" | "foreignKeys"
+      | "findMany"
+      | "loadRelations"
+      | "primaryKeys"
+      | "preferredId"
+      | "relations"
+      | "foreignKeys"
+      | "isValidFieldPath"
     >
   | undefined;
 
@@ -430,6 +436,7 @@ export interface AtscriptDbTableLike {
   relations: ReadonlyMap<string, TDbRelation>;
   foreignKeys: ReadonlyMap<string, TDbForeignKey>;
   getMetadata(): TableMetadata;
+  isValidFieldPath(path: string, visited?: Set<string>): boolean;
 }
 
 // ── Write Table Resolver ─────────────────────────────────────────────────
