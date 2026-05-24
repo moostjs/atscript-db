@@ -4,6 +4,7 @@ import type { FilterExpr } from "@uniqu/core";
 import { AtscriptDbTable } from "../table/db-table";
 import { DbSpace } from "../table/db-space";
 import { BaseDbAdapter } from "../base-adapter";
+import { ensureSelectIncludesFields } from "../rel/relation-loader";
 import { prepareFixtures } from "./test-utils";
 import type {
   DbQuery,
@@ -649,6 +650,84 @@ describe("AtscriptDbTable — Relations", () => {
       expect(results).toHaveLength(3);
       expect(results[0]).not.toHaveProperty("author");
       expect(results[0]).not.toHaveProperty("comments");
+    });
+
+    // ── Object-form $select FK safety on $with (FK_ISSUE.md repro) ─────
+
+    it("should populate rel.from with object-form $select missing the FK", async () => {
+      const postTable = db.getTable(Post);
+      const results = (await postTable.findMany({
+        filter: { id: 1 },
+        controls: {
+          $with: [withRel("comments", { controls: { $select: { id: 1, body: 1 } as any } })],
+        },
+      })) as any[];
+      expect(results).toHaveLength(1);
+      expect(results[0].comments).toHaveLength(2);
+      // What the user asked for must survive.
+      expect(results[0].comments[0].body).toBeDefined();
+    });
+
+    it("should populate rel.from with object-form $select containing the FK", async () => {
+      const postTable = db.getTable(Post);
+      const results = (await postTable.findMany({
+        filter: { id: 1 },
+        controls: {
+          $with: [
+            withRel("comments", {
+              controls: { $select: { id: 1, body: 1, postId: 1 } as any },
+            }),
+          ],
+        },
+      })) as any[];
+      expect(results[0].comments).toHaveLength(2);
+    });
+
+    it("should populate rel.from with exclude-mode object-form $select not listing the FK", async () => {
+      const postTable = db.getTable(Post);
+      const results = (await postTable.findMany({
+        filter: { id: 1 },
+        controls: {
+          $with: [withRel("comments", { controls: { $select: { createdAt: 0 } as any } })],
+        },
+      })) as any[];
+      expect(results[0].comments).toHaveLength(2);
+    });
+
+    it("should throw when exclude-mode object-form $select excludes the FK", async () => {
+      const postTable = db.getTable(Post);
+      await expect(
+        postTable.findMany({
+          filter: { id: 1 },
+          controls: {
+            $with: [withRel("comments", { controls: { $select: { postId: 0 } as any } })],
+          },
+        }),
+      ).rejects.toThrow(/postId/);
+    });
+
+    it("should populate rel.to with object-form $select missing the target PK", async () => {
+      const postTable = db.getTable(Post);
+      const results = (await postTable.findMany({
+        filter: { id: 1 },
+        controls: {
+          $with: [withRel("author", { controls: { $select: { name: 1 } as any } })],
+        },
+      })) as any[];
+      expect(results[0].author).toBeDefined();
+      expect(results[0].author.name).toBe("Alice");
+    });
+
+    it("should throw when exclude-mode object-form $select excludes target PK on rel.to", async () => {
+      const postTable = db.getTable(Post);
+      await expect(
+        postTable.findMany({
+          filter: { id: 1 },
+          controls: {
+            $with: [withRel("author", { controls: { $select: { id: 0 } as any } })],
+          },
+        }),
+      ).rejects.toThrow(/id/);
     });
   });
 
@@ -1803,5 +1882,76 @@ describe("AtscriptDbTable — Relations", () => {
       expect(replacedTag).toBeDefined();
       expect(junctions[0].tagId).toBe(replacedTag!.id);
     });
+  });
+});
+
+describe("ensureSelectIncludesFields", () => {
+  it("returns undefined controls unchanged — nothing to augment", () => {
+    expect(ensureSelectIncludesFields(undefined, ["fk"])).toBeUndefined();
+  });
+
+  it("returns controls without $select unchanged — no projection to touch", () => {
+    const controls = { $limit: 5 };
+    expect(ensureSelectIncludesFields(controls as any, ["fk"])).toEqual({ $limit: 5 });
+  });
+
+  it("augments array $select missing FK — legacy array behavior preserved", () => {
+    const result = ensureSelectIncludesFields({ $select: ["a"] } as any, ["fk"]);
+    expect(result?.$select).toEqual(expect.arrayContaining(["a", "fk"]));
+  });
+
+  it("leaves array $select that already contains FK unchanged — no duplicate", () => {
+    const result = ensureSelectIncludesFields({ $select: ["a", "fk"] } as any, ["fk"]);
+    expect(result?.$select).toEqual(["a", "fk"]);
+  });
+
+  it("adds FK to include-mode object $select missing it — the primary bug case", () => {
+    const result = ensureSelectIncludesFields({ $select: { a: 1, b: 1 } } as any, ["fk"]);
+    const sel = result?.$select as Record<string, unknown>;
+    expect(sel.fk).toBe(1);
+    expect(sel.a).toBe(1);
+    expect(sel.b).toBe(1);
+  });
+
+  it("leaves include-mode object $select that contains FK unchanged — idempotent", () => {
+    const result = ensureSelectIncludesFields({ $select: { a: 1, fk: 1 } } as any, ["fk"]);
+    expect(result?.$select).toEqual({ a: 1, fk: 1 });
+  });
+
+  it("leaves exclude-mode object $select that does not list FK unchanged — FK survives by default", () => {
+    const result = ensureSelectIncludesFields({ $select: { other: 0 } } as any, ["fk"]);
+    expect(result?.$select).toEqual({ other: 0 });
+  });
+
+  it("throws when exclude-mode object $select explicitly excludes FK — fail loud, not silent override", () => {
+    expect(() => ensureSelectIncludesFields({ $select: { fk: 0 } } as any, ["fk"])).toThrow(/fk/);
+  });
+
+  it("treats empty object $select as include-mode and adds FK — empty include still needs FK", () => {
+    const result = ensureSelectIncludesFields({ $select: {} } as any, ["fk"]);
+    expect(result).toBeDefined();
+    expect((result!.$select as Record<string, unknown>).fk).toBe(1);
+  });
+
+  it("augments object $select with multiple FK fields — composite-FK safety", () => {
+    const result = ensureSelectIncludesFields({ $select: { a: 1 } } as any, ["fk1", "fk2"]);
+    const sel = result?.$select as Record<string, unknown>;
+    expect(sel.fk1).toBe(1);
+    expect(sel.fk2).toBe(1);
+  });
+
+  it("preserves sibling controls (e.g. $limit, $sort) when augmenting — don't drop the rest of the projection bundle", () => {
+    const result = ensureSelectIncludesFields(
+      {
+        $select: { a: 1 },
+        $limit: 5,
+        $sort: [["x", "asc"]],
+      } as any,
+      ["fk"],
+    );
+    expect(result).toBeDefined();
+    expect(result!.$limit).toBe(5);
+    expect(result!.$sort).toEqual([["x", "asc"]]);
+    expect((result!.$select as Record<string, unknown>).fk).toBe(1);
   });
 });

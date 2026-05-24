@@ -534,9 +534,10 @@ async function loadViaCompositeKey(
   const finalFilter = relQuery.filter
     ? { $and: [targetBaseFilter, relQuery.filter] }
     : targetBaseFilter;
+  const controls = ensureSelectIncludesFields(relQuery.controls, targetPKFields);
   const targetRows = await targetTable.findMany({
     filter: finalFilter,
-    controls: relQuery.controls,
+    controls,
   });
 
   // Index targets
@@ -572,10 +573,17 @@ async function loadViaCompositeKey(
 // ── Private helpers ──────────────────────────────────────────────────────────
 
 /**
- * If controls include an array-style $select, ensure the given join fields
- * are present so that FK matching works after the query returns.
+ * Ensure the given join fields survive the user's $select on a $with relation
+ * read. Without this, the JS-side join would key off undefined and silently
+ * return empty relations.
+ *
+ * - Array $select: append missing FK fields.
+ * - Include-mode object $select (any value is 1/true, or empty object): set
+ *   missing FK fields to 1.
+ * - Exclude-mode object $select: leave alone — FK survives by default. If the
+ *   FK is explicitly excluded, throw rather than silently override user intent.
  */
-function ensureSelectIncludesFields(
+export function ensureSelectIncludesFields(
   controls: Record<string, unknown> | undefined,
   fields: string[],
 ): Record<string, unknown> | undefined {
@@ -583,16 +591,37 @@ function ensureSelectIncludesFields(
     return controls;
   }
   const sel = controls.$select;
-  if (!Array.isArray(sel)) {
+  if (sel === undefined || sel === null) {
     return controls;
   }
-  const augmented = [...sel];
-  for (const f of fields) {
-    if (!augmented.includes(f)) {
-      augmented.push(f);
+  if (Array.isArray(sel)) {
+    const augmented = [...sel];
+    for (const f of fields) {
+      if (!augmented.includes(f)) {
+        augmented.push(f);
+      }
     }
+    return { ...controls, $select: augmented };
   }
-  return { ...controls, $select: augmented };
+  if (typeof sel === "object") {
+    const selObj = sel as Record<string, unknown>;
+    const isInclude =
+      Object.keys(selObj).length === 0 || Object.values(selObj).some((v) => v === 1 || v === true);
+    const augmented = { ...selObj };
+    let mutated = false;
+    for (const f of fields) {
+      const v = augmented[f];
+      if (v === 0 || v === false) {
+        throw new Error(`Cannot exclude join column "${f}" from $select on $with relation`);
+      }
+      if (v === undefined && isInclude) {
+        augmented[f] = 1;
+        mutated = true;
+      }
+    }
+    return mutated ? { ...controls, $select: augmented } : controls;
+  }
+  return controls;
 }
 
 function compositeKey(fields: string[], obj: Record<string, unknown>): string {
@@ -695,5 +724,6 @@ function queryCompositeFK(
   const baseFilter = orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
   const targetFilter = relQuery.filter ? { $and: [baseFilter, relQuery.filter] } : baseFilter;
 
-  return targetTable.findMany({ filter: targetFilter, controls: relQuery.controls });
+  const controls = ensureSelectIncludesFields(relQuery.controls, targetFields);
+  return targetTable.findMany({ filter: targetFilter, controls });
 }
