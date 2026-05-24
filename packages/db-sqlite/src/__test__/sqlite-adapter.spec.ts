@@ -3,6 +3,7 @@ import { AtscriptDbTable } from "@atscript/db";
 
 import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
+import type { TSqliteDriver } from "../types";
 
 import { prepareFixtures } from "./test-utils";
 
@@ -394,20 +395,20 @@ describe("SqliteAdapter + AtscriptDbTable", () => {
       const innerDriver = new BetterSqlite3Driver(":memory:");
       const calls: string[] = [];
 
-      const customDriver = {
-        run(sql: string, params?: unknown[]) {
+      const customDriver: TSqliteDriver = {
+        run(sql, params) {
           calls.push(`run: ${sql.slice(0, 30)}`);
           return innerDriver.run(sql, params);
         },
-        all<T>(sql: string, params?: unknown[]): T[] {
+        all(sql, params) {
           calls.push(`all: ${sql.slice(0, 30)}`);
-          return innerDriver.all<T>(sql, params);
+          return innerDriver.all(sql, params);
         },
-        get<T>(sql: string, params?: unknown[]): T | null {
+        get(sql, params) {
           calls.push(`get: ${sql.slice(0, 30)}`);
-          return innerDriver.get<T>(sql, params);
+          return innerDriver.get(sql, params);
         },
-        exec(sql: string) {
+        exec(sql) {
           calls.push(`exec: ${sql.slice(0, 30)}`);
           return innerDriver.exec(sql);
         },

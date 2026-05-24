@@ -37,6 +37,8 @@ function bumpVersion(version, type) {
       return `${major}.${minor + 1}.0`;
     case "patch":
       return `${major}.${minor}.${patch + 1}`;
+    default:
+      throw new Error(`Unknown bump type "${type}" (expected major | minor | patch)`);
   }
 }
 
