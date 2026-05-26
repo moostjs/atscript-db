@@ -1,6 +1,8 @@
 import type { Collection, Db, Document } from "mongodb";
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   AtscriptDbView,
+  resolveDesignType,
   type TColumnDiff,
   type TSyncColumnResult,
   type TDbFieldMeta,
@@ -33,6 +35,7 @@ export interface TMongoSchemaSyncHost {
         fields: ReadonlyArray<{ name: string; weight?: number }>;
       }
     >;
+    readonly flatMap: ReadonlyMap<string, TAtscriptAnnotatedType>;
     readonly isExternal?: boolean;
   };
   readonly _mongoIndexes: ReadonlyMap<string, TMongoIndex>;
@@ -443,23 +446,42 @@ export async function syncColumnsImpl(
   const added: string[] = [];
   const update: Record<string, Record<string, unknown>> = {};
 
-  // Renames — use $rename operator
+  // Renames — use $rename operator. $rename does not support array-positional
+  // operators; fields crossing an array boundary need a separate aggregation-
+  // pipeline update. Fall back to a flat $rename for non-array paths and skip
+  // (with a log) anything that would cross an array — Mongo would reject it.
   if (diff.renamed.length > 0) {
     const renameSpec: Record<string, string> = {};
     for (const r of diff.renamed) {
+      if (pathCrossesArray(host, r.field.path)) {
+        host._log(
+          "syncColumns: skipping $rename for array-element field",
+          r.oldName,
+          "→",
+          r.field.physicalName,
+          "(Mongo $rename cannot traverse arrays)",
+        );
+        continue;
+      }
       renameSpec[r.oldName] = r.field.physicalName;
       renamed.push(r.field.physicalName);
     }
-    update.$rename = renameSpec;
+    if (Object.keys(renameSpec).length > 0) {
+      update.$rename = renameSpec;
+    }
   }
 
-  // Adds — use $set with default values
+  // Adds — use $set with default values. Optional fields with no @db.default.*
+  // get no backfill (the field stays absent on existing docs, which is exactly
+  // what "optional" means in Mongo). For fields crossing an array boundary,
+  // rewrite the path to use $[] so the $set walks every existing element and
+  // is a no-op on empty arrays (Mongo would otherwise reject with code 28).
   if (diff.added.length > 0) {
     const setSpec: Record<string, unknown> = {};
     for (const field of diff.added) {
       const defaultVal = resolveSyncDefault(field);
       if (defaultVal !== undefined) {
-        setSpec[field.physicalName] = defaultVal;
+        setSpec[arraySafePath(host, field.physicalName, field.path)] = defaultVal;
       }
       added.push(field.physicalName);
     }
@@ -484,18 +506,85 @@ export async function dropColumnsImpl(
   }
   const unsetSpec: Record<string, ""> = {};
   for (const col of columns) {
-    unsetSpec[col] = "";
+    // The dropped leaf is gone from flatMap, but its array ancestors usually
+    // remain (we're dropping a sub-field, not the parent array). Passing the
+    // column name as both args lets arraySafePath probe those ancestors and
+    // emit $[] where needed.
+    unsetSpec[arraySafePath(host, col, col)] = "";
   }
   await host.collection.updateMany({}, { $unset: unsetSpec }, host._getSessionOpts());
+}
+
+/**
+ * Rewrites a dotted physical path to use Mongo's all-positional $[] operator
+ * at every segment that's typed as an array in the table's flatMap. Returns
+ * the input unchanged when no segment crosses an array boundary.
+ *
+ * `logicalPath` drives the array-boundary walk (flatMap is keyed by logical
+ * path); the leaf of `physicalPath` is preserved so any `@db.column` rename
+ * on the leaf still applies.
+ */
+function arraySafePath(
+  host: TMongoSchemaSyncHost,
+  physicalPath: string,
+  logicalPath: string,
+): string {
+  const logicalSegments = logicalPath.split(".");
+  if (logicalSegments.length < 2) {
+    return physicalPath;
+  }
+  const physicalSegments = physicalPath.split(".");
+  const physicalLeaf = physicalSegments[physicalSegments.length - 1]!;
+  const out: string[] = [];
+  let prefix = "";
+  for (let i = 0; i < logicalSegments.length; i++) {
+    const isLeaf = i === logicalSegments.length - 1;
+    out.push(isLeaf ? physicalLeaf : logicalSegments[i]!);
+    prefix = prefix ? `${prefix}.${logicalSegments[i]!}` : logicalSegments[i]!;
+    if (!isLeaf) {
+      const type = host._table.flatMap.get(prefix);
+      if (type && resolveDesignType(type) === "array") {
+        out.push("$[]");
+      }
+    }
+  }
+  return out.join(".");
+}
+
+/** Returns true if any non-leaf segment of the path is typed as an array. */
+function pathCrossesArray(host: TMongoSchemaSyncHost, logicalPath: string): boolean {
+  const segments = logicalPath.split(".");
+  if (segments.length < 2) {
+    return false;
+  }
+  let prefix = "";
+  for (let i = 0; i < segments.length - 1; i++) {
+    prefix = prefix ? `${prefix}.${segments[i]!}` : segments[i]!;
+    const type = host._table.flatMap.get(prefix);
+    if (type && resolveDesignType(type) === "array") {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Resolves a field's default value for bulk $set during column sync. */
 function resolveSyncDefault(field: TDbFieldMeta): unknown {
   if (!field.defaultValue) {
-    return field.optional ? null : undefined;
+    // No @db.default.* — leave existing docs alone. For optional fields this
+    // matches Mongo's "missing = absent" semantics; for required fields the
+    // missing value will be caught by validation on next write rather than
+    // silently backfilled with null.
+    return undefined;
   }
   if (field.defaultValue.kind === "value") {
-    return field.defaultValue.value;
+    // `@db.default '<literal>'` is always declared as a string in the .as
+    // syntax; the adapter is responsible for coercing it to the column's
+    // runtime type before writing. Mirrors the insert-path coercion in
+    // db-table.ts so backfilled values match what new inserts would produce.
+    return field.designType === "string"
+      ? field.defaultValue.value
+      : JSON.parse(field.defaultValue.value);
   }
   // Function defaults (increment, uuid, now) can't be bulk-applied retroactively
   return undefined;
