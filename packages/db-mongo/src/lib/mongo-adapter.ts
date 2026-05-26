@@ -38,6 +38,7 @@ import type {
   MongoClient,
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
+import { dedupeProjection } from "./projection-dedupe";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
 import { buildMongoFilter } from "./mongo-filter";
 import {
@@ -1063,7 +1064,8 @@ export class MongoAdapter extends BaseDbAdapter {
       opts.skip = controls.$skip;
     }
     if (controls.$select) {
-      opts.projection = controls.$select.asProjection;
+      const projection = controls.$select.asProjection;
+      if (projection) opts.projection = dedupeProjection(projection);
     }
     return opts;
   }

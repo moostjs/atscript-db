@@ -1,6 +1,7 @@
 import type { Collection, Document } from "mongodb";
 import type { TDbRelation, TDbForeignKey, TTableResolver, WithRelation } from "@atscript/db";
 import { buildMongoFilter } from "./mongo-filter";
+import { dedupeProjection } from "./projection-dedupe";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -385,7 +386,7 @@ function buildLookupInnerPipeline(withRel: WithRelation, requiredFields: string[
     if (!select.includes("_id") && !requiredFields.includes("_id")) {
       projection["_id"] = 0;
     }
-    pipeline.push({ $project: projection });
+    pipeline.push({ $project: dedupeProjection(projection) });
   }
 
   return pipeline;
