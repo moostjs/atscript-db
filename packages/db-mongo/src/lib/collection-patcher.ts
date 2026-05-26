@@ -12,6 +12,23 @@ import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
 
 /**
+ * True when a user value contains a `$`-prefixed string or object key — the
+ * shapes aggregation `$set` would evaluate as field paths / operators instead
+ * of treating as literal data. Caller must wrap such values in `{ $literal }`.
+ */
+function containsAggregationExpr(v: unknown): boolean {
+  if (typeof v === "string") return v.startsWith("$");
+  if (Array.isArray(v)) return v.some(containsAggregationExpr);
+  if (v !== null && typeof v === "object") {
+    for (const k of Object.keys(v)) {
+      if (k.startsWith("$")) return true;
+      if (containsAggregationExpr((v as Record<string, unknown>)[k])) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Context interface for CollectionPatcher.
  * Decouples the patcher from AsCollection, allowing MongoAdapter to provide this.
  */
@@ -132,6 +149,10 @@ export class CollectionPatcher {
     const fieldOp = getDbFieldOp(value);
     if (fieldOp) {
       this._set(key, this._fieldOpExpr(key, fieldOp.op, fieldOp.value));
+    } else if (containsAggregationExpr(value)) {
+      // Aggregation `$set` would read `$`-prefixed strings as field paths and
+      // drop the target when the path is missing (e.g. password hashes).
+      this._set(key, { $literal: value });
     } else {
       this._set(key, value);
     }
