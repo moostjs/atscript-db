@@ -2,6 +2,8 @@ import type { Collection, Document } from "mongodb";
 import type { DbControls, DbQuery, TSearchIndexInfo } from "@atscript/db";
 import type { TMongoIndex, TSearchIndex } from "./mongo-types";
 import { buildMongoFilter } from "./mongo-filter";
+import { dedupeProjection } from "./projection-dedupe";
+import { wrapInvalidQuery } from "./mongo-errors";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -220,11 +222,14 @@ async function runSearchPipeline(
     pipeline.push({ $limit: 1000 });
   }
   if (controls.$select) {
-    pipeline.push({ $project: controls.$select.asProjection });
+    const projection = controls.$select.asProjection;
+    if (projection) pipeline.push({ $project: dedupeProjection(projection) });
   }
 
   host._log(`aggregate (${label})`, pipeline);
-  return host.collection.aggregate(pipeline, host._getSessionOpts()).toArray();
+  return wrapInvalidQuery(() =>
+    host.collection.aggregate(pipeline, host._getSessionOpts()).toArray(),
+  );
 }
 
 /** Runs a search/vector pipeline with $facet for count. Shared by searchWithCount + vectorSearchWithCount. */
@@ -255,7 +260,8 @@ async function runSearchWithCountPipeline(
     dataStages.push({ $limit: controls.$limit });
   }
   if (controls.$select) {
-    dataStages.push({ $project: controls.$select.asProjection });
+    const projection = controls.$select.asProjection;
+    if (projection) dataStages.push({ $project: dedupeProjection(projection) });
   }
 
   const pipeline: Document[] = [
@@ -271,7 +277,9 @@ async function runSearchWithCountPipeline(
   ];
 
   host._log(`aggregate (${label})`, pipeline);
-  const result = await host.collection.aggregate(pipeline, host._getSessionOpts()).toArray();
+  const result = await wrapInvalidQuery(() =>
+    host.collection.aggregate(pipeline, host._getSessionOpts()).toArray(),
+  );
   return {
     data: result[0]?.data || [],
     count: result[0]?.meta[0]?.count || 0,

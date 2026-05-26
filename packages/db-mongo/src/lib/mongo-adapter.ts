@@ -39,6 +39,7 @@ import type {
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
 import { dedupeProjection } from "./projection-dedupe";
+import { wrapInvalidQuery } from "./mongo-errors";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
 import { buildMongoFilter } from "./mongo-filter";
 import {
@@ -219,13 +220,13 @@ export class MongoAdapter extends BaseDbAdapter {
     if (query.controls?.$count) {
       const pipeline = buildCountPipeline(query);
       this._log("aggregate (count)", pipeline);
-      const result = await this.aggregatePipeline(pipeline).toArray();
+      const result = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
       return result.length > 0 ? result : [{ count: 0 }];
     }
 
     const pipeline = buildAggregatePipeline(query);
     this._log("aggregate", pipeline);
-    return this.aggregatePipeline(pipeline).toArray();
+    return wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
   }
 
   // ── ID handling ──────────────────────────────────────────────────────────
@@ -637,7 +638,8 @@ export class MongoAdapter extends BaseDbAdapter {
       dataStages.push({ $limit: controls.$limit });
     }
     if (controls.$select) {
-      dataStages.push({ $project: controls.$select.asProjection });
+      const projection = controls.$select.asProjection;
+      if (projection) dataStages.push({ $project: dedupeProjection(projection) });
     }
 
     const pipeline: Document[] = [
@@ -646,9 +648,11 @@ export class MongoAdapter extends BaseDbAdapter {
     ];
 
     this._log("aggregate (findManyWithCount)", pipeline);
-    const result = await this.collection
-      .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
-      .toArray();
+    const result = await wrapInvalidQuery(() =>
+      this.collection
+        .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
+        .toArray(),
+    );
     return {
       data: result[0]?.data || [],
       count: result[0]?.meta[0]?.count || 0,
@@ -780,21 +784,25 @@ export class MongoAdapter extends BaseDbAdapter {
     const filter = buildMongoFilter(query.filter);
     const opts = this._buildFindOptions(query.controls);
     this._log("findOne", filter, opts);
-    return this.collection.findOne(filter, {
-      ...opts,
-      ...this._getCollationOpts(query),
-      ...this._getSessionOpts(),
-    });
+    return wrapInvalidQuery(() =>
+      this.collection.findOne(filter, {
+        ...opts,
+        ...this._getCollationOpts(query),
+        ...this._getSessionOpts(),
+      }),
+    );
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const filter = buildMongoFilter(query.filter);
     const opts = this._buildFindOptions(query.controls);
     this._log("findMany", filter, opts);
-    // eslint-disable-next-line unicorn/no-array-method-this-argument -- MongoDB Collection.find, not Array.find
-    return this.collection
-      .find(filter, { ...opts, ...this._getCollationOpts(query), ...this._getSessionOpts() })
-      .toArray();
+    return wrapInvalidQuery(() =>
+      // eslint-disable-next-line unicorn/no-array-method-this-argument -- MongoDB Collection.find, not Array.find
+      this.collection
+        .find(filter, { ...opts, ...this._getCollationOpts(query), ...this._getSessionOpts() })
+        .toArray(),
+    );
   }
 
   async count(query: DbQuery): Promise<number> {
