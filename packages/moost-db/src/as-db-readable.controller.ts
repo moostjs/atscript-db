@@ -816,6 +816,9 @@ export class AsDbReadableController<
     const fields: TMetaResponse["fields"] = {};
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
+      // Skip non-JSON nested-object parents — Mongo `$project` rejects parent+leaf
+      // pairs with code 31249 (Path collision), and parents render as `[object Object]`.
+      if (fd.designType === "object") continue;
       const annotations = fd.type?.metadata;
       const annotatedFilterable = annotations?.has("db.column.filterable") ?? false;
       const annotatedSortable = annotations?.has("db.column.sortable") ?? false;
