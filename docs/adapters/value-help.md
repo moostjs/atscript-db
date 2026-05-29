@@ -1,3 +1,9 @@
+---
+outline: deep
+---
+
+<!--@include: ../_experimental-warning.md-->
+
 # Value-Help Controllers
 
 Value help is the dropdown/autocomplete/row-picker UI that renders on FK fields. The source can be a DB table, a static JSON array, a read-only view of a legacy system, or any custom source — as long as it implements the small wire contract defined by `AsReadableController`.

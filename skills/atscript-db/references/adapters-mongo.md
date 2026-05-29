@@ -22,7 +22,7 @@ Second `MongoAdapter` arg (the client) is only required for transactions — `se
 
 ```ts
 import { MongoPlugin } from "@atscript/db-mongo/plugin"; // subpath, not the package root
-plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.objectId, mongo.vector
+plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.objectId
 ```
 
 ## Capabilities
@@ -73,7 +73,8 @@ Capped collections:
 | Primitive        | Constraint                               |
 | ---------------- | ---------------------------------------- |
 | `mongo.objectId` | `string` matching `/^[a-fA-F0-9]{24}$/`. |
-| `mongo.vector`   | `number[]`.                              |
+
+The Mongo plugin provides only `mongo.objectId`. Vector fields use the core `db.vector` primitive (from `dbPlugin()`), not a Mongo-specific one.
 
 On `insertOne`/`updateOne`/`findOne` with a `mongo.objectId`-typed PK, the adapter's `prepareId()` converts `string` to `ObjectId` before the driver call, and returns the user-supplied string as `insertedId`.
 
@@ -100,7 +101,7 @@ Vector:
 
 ```atscript
 @db.search.vector 1536, 'cosine', 'doc_vec'
-embedding: mongo.vector
+embedding: db.vector
 ```
 
 `vectorSearch(vec, query, 'doc_vec')` uses `$vectorSearch`.

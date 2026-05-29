@@ -9,8 +9,8 @@ description: >-
   actions, @InputForm structured input, URL query syntax, browser Client,
   client.action(), client.getActionForm(), DB validation, and optimistic
   concurrency control via @db.column.version + $cas + withOptimisticRetry.
-  Scope is DB only; use the atscript skill for .as syntax, @meta.*, @expect.*, asc,
-  unplugin, or VSCode.
+  Scope is DB only. Out of scope (use the moostjs/atscript skill): .as syntax,
+  @meta.*, @expect.*, asc, unplugin, VSCode.
 ---
 
 # atscript-db

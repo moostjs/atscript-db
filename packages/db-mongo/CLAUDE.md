@@ -9,8 +9,8 @@ src/
   index.ts                    - Package entry: re-exports MongoPlugin, MongoAdapter
   plugin/
     index.ts                  - MongoPlugin factory (TAtscriptPlugin with name, primitives, annotations)
-    annotations.ts            - All db.mongo.* annotation definitions (collection, index, search, patch, array)
-    primitives.ts             - Custom primitives: mongo.objectId (string /^[a-fA-F0-9]{24}$/), mongo.vector (number[])
+    annotations.ts            - All db.mongo.* annotation definitions (collection, capped, search)
+    primitives.ts             - Custom primitive: mongo.objectId (string /^[a-fA-F0-9]{24}$/)
   lib/
     index.ts                  - Re-exports MongoAdapter, createAdapter
     mongo-adapter.ts          - MongoAdapter class: MongoDB adapter for DbSpace (CRUD, indexes, transactions)
@@ -38,39 +38,44 @@ The second argument (`client`) is optional — only needed for transaction suppo
 
 Mongo-specific annotations live under the `db.mongo.*` namespace. Generic database annotations (`@db.table`, `@db.index.*`) come from core.
 
-### Collection-level
+### Collection-level (`db.mongo.*`)
 
 | Annotation                                               | Description                                          |
 | -------------------------------------------------------- | ---------------------------------------------------- |
 | `@db.table "name"` (core)                                | Names the collection/table                           |
 | `@db.mongo.collection`                                   | Optional; auto-adds `_id: mongo.objectId` if missing |
-| `@db.mongo.autoIndexes true/false`                       | Toggle automatic index creation (default: true)      |
+| `@db.mongo.capped size, max?`                            | Capped collection (size in bytes, optional max docs) |
 | `@db.mongo.search.dynamic "analyzer", fuzzy`             | Dynamic Atlas Search index                           |
 | `@db.mongo.search.static "analyzer", fuzzy, "indexName"` | Named static Atlas Search index                      |
 
-### Field-level indexes
+### Field-level (`db.mongo.*`)
 
-| Annotation                                                      | Description                                                      |
-| --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `@db.index.plain "indexName"` (core)                            | Standard index (compound when name shared)                       |
-| `@db.index.unique "indexName"` (core)                           | Unique index                                                     |
-| `@db.mongo.index.text weight`                                   | Text index with optional weight (mongo-specific, has weight arg) |
-| `@db.index.fulltext "indexName"` (core)                         | Generic fulltext index (weight always 1)                         |
-| `@db.mongo.search.text "analyzer", "indexName"`                 | Atlas Search text field                                          |
-| `@db.mongo.search.vector dimensions, "similarity", "indexName"` | Vector search index                                              |
-| `@db.mongo.search.filter "indexName"`                           | Pre-filter for vector search                                     |
+| Annotation                                      | Description             |
+| ----------------------------------------------- | ----------------------- |
+| `@db.mongo.search.text "analyzer", "indexName"` | Atlas Search text field |
 
-### Patch and array behavior
+Generic indexes use core annotations: `@db.index.plain`, `@db.index.unique`, `@db.index.fulltext`. Vector search uses core `@db.search.vector` / `@db.search.filter`.
 
-| Annotation                                    | Description                        |
-| --------------------------------------------- | ---------------------------------- |
-| `@db.mongo.patch.strategy "replace"\|"merge"` | Controls update behavior           |
-| `@db.mongo.array.uniqueItems`                 | Enforce set-semantics on `$insert` |
+### Removed (migrated to core)
+
+These `@db.mongo.*` annotations no longer exist — see the header comment in `plugin/annotations.ts`. Do not reintroduce them:
+
+| Removed                       | Replacement                            |
+| ----------------------------- | -------------------------------------- |
+| `@mongo.index.plain`          | `@db.index.plain`                      |
+| `@mongo.index.unique`         | `@db.index.unique`                     |
+| `@db.mongo.index.text`        | `@db.index.fulltext` (weight arg)      |
+| `@db.mongo.patch.strategy`    | `@db.patch.strategy`                   |
+| `@db.mongo.array.uniqueItems` | `@expect.array.uniqueItems`            |
+| `@db.mongo.search.vector`     | `@db.search.vector`                    |
+| `@db.mongo.search.filter`     | `@db.search.filter`                    |
+| `@db.mongo.autoIndexes`       | removed — use explicit `syncIndexes()` |
 
 ## Primitives
 
 - **`mongo.objectId`** -- String type constrained to `/^[a-fA-F0-9]{24}$/`.
-- **`mongo.vector`** -- Alias for `number[]`.
+
+Vector fields use the core `db.vector` primitive (`number[]`, from `dbPlugin()`) — there is no Mongo-specific vector primitive.
 
 ## CollectionPatcher
 

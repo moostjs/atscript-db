@@ -16,7 +16,7 @@
 
 MongoDB adapter for `@atscript/db`. Translates Atscript's portable query model into native MongoDB operations with support for Atlas Search, vector search, aggregation pipelines, capped collections, and the Convenient Transaction API.
 
-Includes `MongoPlugin` for `@db.mongo.*` annotations and custom primitives (`mongo.objectId`, `mongo.vector`).
+Includes `MongoPlugin` for `@db.mongo.*` annotations and the `mongo.objectId` primitive (vectors use the core `db.vector` primitive).
 
 ## Installation
 

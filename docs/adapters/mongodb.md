@@ -137,13 +137,13 @@ export interface User {
 }
 ```
 
-### `mongo.vector`
+### `db.vector`
 
-An alias for `number[]`, used as a semantic marker for embedding fields. Paired with `@db.search.vector` to declare vector search indexes.
+Vector embedding fields use the core `db.vector` primitive (`number[]`, registered by `dbPlugin()`) — there is no Mongo-specific vector primitive. Pair it with `@db.search.vector` to declare a vector search index.
 
 ```atscript
 @db.search.vector 1536, 'dotProduct', 'embeddings_idx'
-embedding: mongo.vector
+embedding: db.vector
 ```
 
 ## Primary Keys & \_id
@@ -383,11 +383,11 @@ const results = await table.search("query", {}, "product_search");
 
 ## Vector Search
 
-MongoDB supports vector similarity search via Atlas `$vectorSearch`. Use the generic `@db.search.vector` annotation with the `mongo.vector` primitive:
+MongoDB supports vector similarity search via Atlas `$vectorSearch`. Use the generic `@db.search.vector` annotation with the `db.vector` primitive:
 
 ```atscript
 @db.search.vector 1536, 'cosine', 'doc_vectors'
-embedding: mongo.vector
+embedding: db.vector
 
 @db.search.filter 'doc_vectors'
 category: string
