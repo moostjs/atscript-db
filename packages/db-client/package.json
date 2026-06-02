@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-client",
-  "version": "0.1.94",
+  "version": "0.1.95",
   "description": "Browser-compatible HTTP client for @atscript/moost-db REST endpoints.",
   "keywords": [
     "atscript",
