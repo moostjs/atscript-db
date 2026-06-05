@@ -34,9 +34,8 @@ docs/.vitepress/dist
 
 TODO.md
 
-.claude/skills
-.claude/commands
-.agents/skills
+.claude
+.agents
 
 # MemPalace per-project files (issue #185)
 mempalace.yaml
