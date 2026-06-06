@@ -32,7 +32,12 @@ export interface TMongoSchemaSyncHost {
         key: string;
         name: string;
         type: string;
-        fields: ReadonlyArray<{ name: string; weight?: number }>;
+        fields: ReadonlyArray<{
+          name: string;
+          weight?: number;
+          optional?: boolean;
+          designType?: string;
+        }>;
       }
     >;
     readonly flatMap: ReadonlyMap<string, TAtscriptAnnotatedType>;
@@ -65,6 +70,10 @@ interface TRemoteMongoIndex {
   weights?: Record<string, number>;
   default_language?: string;
   textIndexVersion: number;
+  /** Surfaced from listIndexes() so reconciliation can detect option drift. */
+  unique?: boolean;
+  /** Surfaced from listIndexes() so a plain→present-only change is migrated. */
+  partialFilterExpression?: Record<string, unknown>;
 }
 
 interface TRemoteMongoSearchIndex {
@@ -617,7 +626,20 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         fields[f.name] = 1;
       }
     }
-    allIndexes.set(key, { key, name: index.name, type: mongoType, fields, weights });
+    // A unique index on optional field(s) becomes a *partial* unique index so
+    // many value-less rows coexist (matching SQL's NULLS DISTINCT default);
+    // present values stay unique. Plain unique indexes (all fields required)
+    // and non-unique indexes get no filter.
+    const partialFilterExpression =
+      index.type === "unique" ? buildPresentOnlyFilter(index.fields) : undefined;
+    allIndexes.set(key, {
+      key,
+      name: index.name,
+      type: mongoType,
+      fields,
+      weights,
+      ...(partialFilterExpression ? { partialFilterExpression } : {}),
+    });
   }
 
   // Add MongoDB-specific indexes (search, vector, text from adapter scanning)
@@ -651,10 +673,19 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         case "plain":
         case "unique":
         case "text": {
-          if (
-            (local.type === "text" || objMatch(local.fields, remote.key)) &&
-            objMatch(local.weights || {}, remote.weights || {})
-          ) {
+          const fieldsMatch = local.type === "text" || objMatch(local.fields, remote.key);
+          const weightsMatch = objMatch(local.weights || {}, remote.weights || {});
+          // A matching key is NOT sufficient for plain/unique indexes: a change
+          // to the unique flag or the present-only partial filter (same fields,
+          // different options) must drop + recreate. Without this, an existing
+          // plain unique index would never migrate to a partial unique index —
+          // listIndexes() reports the same { field: 1 } key, so the old index
+          // would be silently kept and the new options never applied.
+          const optionsMatch =
+            local.type === "text" ||
+            ((local.type === "unique") === (remote.unique === true) &&
+              partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression));
+          if (fieldsMatch && weightsMatch && optionsMatch) {
             indexesToCreate.delete(remote.name);
           } else {
             host._log("dropIndex", remote.name);
@@ -685,8 +716,14 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         if (!indexesToCreate.has(key)) {
           continue;
         }
-        host._log("createIndex (unique)", key, value.fields);
-        await host.collection.createIndex(value.fields, { name: key, unique: true });
+        host._log("createIndex (unique)", key, value.fields, value.partialFilterExpression);
+        await host.collection.createIndex(value.fields, {
+          name: key,
+          unique: true,
+          ...(value.partialFilterExpression
+            ? { partialFilterExpression: value.partialFilterExpression }
+            : {}),
+        });
         break;
       }
       case "text": {
@@ -775,6 +812,108 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────
+
+/**
+ * Maps an engine-agnostic design type to the MongoDB BSON `$type` alias(es)
+ * meaning "a present value of this type". Using `$type` (rather than a bare
+ * `sparse: true` or `$exists: true`) excludes BOTH absent and explicit-null
+ * values, so a row whose optional field was written as `null` — e.g. by a
+ * replace-strategy patch — is still tolerated by the unique constraint.
+ */
+function bsonPresentTypes(designType?: string): string | string[] {
+  switch (designType) {
+    case "string":
+      return "string";
+    case "objectId":
+      // mongo.objectId is declared as a string primitive, but a value may be
+      // persisted as a 24-hex string (the typed contract) OR a native BSON
+      // ObjectId. Match both so neither representation escapes the constraint.
+      return ["objectId", "string"];
+    case "number":
+    case "decimal":
+      // The "number" alias matches int, long, double, and decimal.
+      return "number";
+    case "boolean":
+      return "bool";
+    default:
+      // Unknown / union / object / array: match any present non-null BSON type.
+      return [
+        "double",
+        "string",
+        "object",
+        "array",
+        "binData",
+        "objectId",
+        "bool",
+        "date",
+        "regex",
+        "int",
+        "timestamp",
+        "long",
+        "decimal",
+      ];
+  }
+}
+
+/**
+ * Builds a `partialFilterExpression` restricting a unique index to rows where
+ * every OPTIONAL field is present. Returns undefined when no field is optional
+ * (a plain unique index — no nulls possible — needs no filter).
+ *
+ * Filtering on the optional fields (not the required ones) matches SQL's NULLS
+ * DISTINCT: a composite unique row is exempt as soon as any nullable column is
+ * null, so many value-less rows coexist while fully populated rows stay unique.
+ */
+function buildPresentOnlyFilter(
+  indexFields: ReadonlyArray<{ name: string; optional?: boolean; designType?: string }>,
+): Record<string, unknown> | undefined {
+  const optional = indexFields.filter((f) => f.optional);
+  if (optional.length === 0) {
+    return undefined;
+  }
+  // Sort clauses by field name so a pure field-order change in the model does
+  // not alter the stored filter and trigger a needless drop+recreate on sync.
+  const clauses = optional
+    .map((f) => ({ name: f.name, clause: { [f.name]: { $type: bsonPresentTypes(f.designType) } } }))
+    .toSorted((a, b) => a.name.localeCompare(b.name))
+    .map((c) => c.clause);
+  return clauses.length === 1 ? clauses[0]! : { $and: clauses };
+}
+
+/**
+ * Deep structural equality for `partialFilterExpression` objects, used to detect
+ * when a unique index's present-only filter has changed. Object keys compare
+ * order-insensitively; arrays (`$and`, `$type` lists) are order-sensitive,
+ * matching this module's deterministic emission. A missing filter (undefined)
+ * and an explicit `null` both mean "no filter" and compare equal.
+ */
+function partialFilterEqual(a: unknown, b: unknown): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a == null || b == null) {
+    return a == null && b == null;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    return a.every((item, i) => partialFilterEqual(item, b[i]));
+  }
+  if (typeof a === "object" && typeof b === "object") {
+    const ka = Object.keys(a as object);
+    const kb = Object.keys(b as object);
+    if (ka.length !== kb.length) {
+      return false;
+    }
+    return ka.every(
+      (k) =>
+        Object.prototype.hasOwnProperty.call(b, k) &&
+        partialFilterEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+    );
+  }
+  return false;
+}
 
 function objMatch(
   o1: Record<string, number | string>,

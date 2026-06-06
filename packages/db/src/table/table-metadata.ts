@@ -862,6 +862,18 @@ export class TableMetadata {
 
     for (const index of this.indexes.values()) {
       for (const field of index.fields) {
+        // Resolve optionality + design type from the logical path (flatMap is
+        // keyed by logical path) BEFORE rewriting the name to physical. Adapters
+        // use these to make a unique index present-only on optional fields.
+        const ftype = this.flatMap.get(field.name);
+        if (ftype) {
+          field.optional = ftype.optional === true;
+          // Carry an `objectId` design type distinct from its string base so a
+          // present-only filter can match both representations (24-hex string or
+          // native BSON ObjectId). The tag is a no-op for non-Mongo adapters.
+          const tags = (ftype.type as { tags?: ReadonlySet<string> }).tags;
+          field.designType = tags?.has("objectId") ? "objectId" : resolveDesignType(ftype);
+        }
         field.name =
           this.pathToPhysical.get(field.name) ?? this.columnMap.get(field.name) ?? field.name;
       }

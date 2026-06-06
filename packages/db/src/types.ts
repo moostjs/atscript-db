@@ -209,6 +209,21 @@ export interface TDbIndexField {
   name: string;
   sort: "asc" | "desc";
   weight?: number;
+  /**
+   * Whether the indexed field is optional (declared `field?:` in the model).
+   * Resolved during index finalization. Adapters use this to make a unique
+   * index "present-only" so multiple value-less rows are tolerated — matching
+   * SQL's `NULLS DISTINCT` default. SQL adapters get this for free and ignore
+   * the flag; MongoDB needs it to emit a partial unique index.
+   */
+  optional?: boolean;
+  /**
+   * Resolved design type of the field ('string', 'number', 'boolean', …).
+   * Carried alongside {@link optional} so adapters can derive a type-correct
+   * present-only filter (e.g. Mongo's `partialFilterExpression`) without
+   * re-resolving the field type. Undefined when the field cannot be resolved.
+   */
+  designType?: string;
 }
 
 export interface TDbIndex {

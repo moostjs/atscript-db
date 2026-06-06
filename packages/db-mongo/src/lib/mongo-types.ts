@@ -12,6 +12,14 @@ export interface TPlainIndex {
   type: "plain" | "unique" | "text";
   fields: Record<string, 1 | "text">;
   weights: Record<string, number>;
+  /**
+   * For "present-only" unique indexes on optional fields: a MongoDB
+   * `partialFilterExpression` restricting the index to rows where the optional
+   * field(s) are present. This lets multiple value-less rows coexist (matching
+   * SQL's `NULLS DISTINCT`) while present values stay unique. Absent for plain
+   * unique indexes (all fields required) and non-unique indexes.
+   */
+  partialFilterExpression?: Record<string, unknown>;
 }
 
 export interface TSearchIndex {

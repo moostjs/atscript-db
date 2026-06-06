@@ -220,7 +220,9 @@ describe("AtscriptDbTable", () => {
       const emailIdx = indexes.find((i) => i.name === "email_idx");
       expect(emailIdx).toBeDefined();
       expect(emailIdx!.type).toBe("unique");
-      expect(emailIdx!.fields).toEqual([{ name: "email_address", sort: "asc" }]);
+      expect(emailIdx!.fields).toEqual([
+        { name: "email_address", sort: "asc", optional: false, designType: "string" },
+      ]);
     });
 
     it("should create composite plain index when fields share a name", () => {
@@ -245,7 +247,9 @@ describe("AtscriptDbTable", () => {
       const searchIdx = indexes.find((i) => i.name === "search_idx");
       expect(searchIdx).toBeDefined();
       expect(searchIdx!.type).toBe("fulltext");
-      expect(searchIdx!.fields).toEqual([{ name: "bio", sort: "asc" }]);
+      expect(searchIdx!.fields).toEqual([
+        { name: "bio", sort: "asc", optional: true, designType: "string" },
+      ]);
     });
   });
 
