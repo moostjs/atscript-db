@@ -425,12 +425,13 @@ export class MongoAdapter extends BaseDbAdapter {
         typeof startValue === "number" ? startValue : undefined,
       );
     }
-    // @db.index.fulltext → MongoDB text index (adapter-level, with weight)
-    for (const index of metadata.get("db.index.fulltext") || []) {
-      const name = typeof index === "object" ? index.name || "" : "";
-      const weight = typeof index === "object" ? index.weight || 1 : 1;
-      this._addMongoIndexField("text", name, field, weight);
-    }
+    // @db.index.fulltext is registered ONLY by core (`_addIndexField("fulltext", …)`),
+    // which `syncIndexesImpl` converts to the single `atscript__fulltext__<name>`
+    // text index. Re-scanning it here into `_mongoIndexes` as a separate
+    // `atscript__text__<name>` index produced a SECOND text index — MongoDB allows
+    // only one per collection, so sync threw IndexOptionsConflict (code 85).
+    // Search dispatch derives the default text index from `table.indexes`, not
+    // `_mongoIndexes`, so no adapter-level registration is needed.
     // @db.mongo.search.text
     for (const index of metadata.get("db.mongo.search.text") || []) {
       this._addFieldToSearchIndex("search_text", index.indexName, field, index.analyzer);

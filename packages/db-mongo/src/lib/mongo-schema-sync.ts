@@ -616,9 +616,11 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
       mongoType = "text";
       for (const f of index.fields) {
         fields[f.name] = "text";
-        if (f.weight) {
-          weights[f.name] = f.weight;
-        }
+        // Default every field's weight to 1 (MongoDB's implicit default). This
+        // keeps re-sync idempotent: listIndexes() reports unweighted fields as
+        // weight 1, so omitting them here would make objMatch() churn the index
+        // on every sync.
+        weights[f.name] = f.weight ?? 1;
       }
     } else {
       mongoType = index.type as "plain" | "unique";
