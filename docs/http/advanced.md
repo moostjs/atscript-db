@@ -127,7 +127,7 @@ When using `$select` alongside `$with`, foreign key fields needed for joining ar
 
 For the programmatic equivalent, see [Relations — Loading](/relations/loading).
 
-## Text Search ($search, $index) {#text-search}
+## Text Search ($search, $index, $fuzzy) {#text-search}
 
 Perform full-text search on fields annotated with `@db.index.fulltext` or similar search indexes.
 
@@ -150,11 +150,23 @@ curl "http://localhost:3000/articles/query?\$search=mongodb+tutorial"
 
 ### Named Search Index
 
-Target a specific search index:
+Target a specific search index with `$index`:
 
 ```bash
 curl "http://localhost:3000/products/query?\$search=wireless+headphones&\$index=product_search"
 ```
+
+On MongoDB this is also how you pick a search **variant** — when the same field is indexed both ways (e.g. word match vs typeahead), `$index` selects which behavior runs. See [MongoDB → Search Variants](/adapters/mongodb#search-variants).
+
+### Fuzzy Tolerance (MongoDB Atlas)
+
+`$fuzzy` overrides the index's declared typo tolerance for a single request — `1` or `2` edits, or `0` to disable:
+
+```bash
+curl "http://localhost:3000/users/query?\$search=mngo&\$fuzzy=1"
+```
+
+The default comes from the index annotation (`@db.mongo.search.static`/`.dynamic`); see [MongoDB → Fuzzy Search](/adapters/mongodb#fuzzy-search).
 
 ### Combining with Filters
 

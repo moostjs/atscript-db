@@ -95,7 +95,7 @@ interface Article {
 }
 ```
 
-`search('quick brown', query, 'main')` uses `$search: { index: 'main', text: { query: 'quick brown', path: ... } }` as the first pipeline stage.
+`search('quick brown', query, 'main')` emits an Atlas `$search` first stage. The operator shape depends on the index's fields + `strategy`: a plain `text` operator (word match), an `autocomplete` operator (prefix/typeahead), or a `compound.should` of both. Declared/`$fuzzy` typo tolerance is attached to the operator at query time. For `@db.mongo.search.autocomplete`, `strategy`, query-time `fuzzy`/`$fuzzy`, and the multi-index `$index` variant pattern, see [mongo-annotations.md](./mongo-annotations.md).
 
 Vector:
 

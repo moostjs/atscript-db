@@ -27,6 +27,22 @@ export interface TSearchIndex {
   name: string;
   type: "dynamic_text" | "search_text" | "vector";
   definition: TMongoSearchIndexDefinition;
+  /**
+   * Query-time fuzzy (typo tolerance) declared via `@db.mongo.search.dynamic` /
+   * `@db.mongo.search.static`. Carried as index metadata — NOT part of the Atlas
+   * index `definition` (Atlas applies fuzzy at query time on the `text`/
+   * `autocomplete` operator, not in the index schema). `buildSearchStage` reads
+   * this and attaches it to the emitted operator.
+   */
+  fuzzy?: { maxEdits: number };
+  /**
+   * The match strategy declared via `@db.mongo.search.static`, locking this
+   * index's query shape. `buildSearchStage` reads it; undefined → `"compound"`.
+   * - `compound` — wildcard `text` + per-field `autocomplete` (exact ranks above prefix).
+   * - `autocomplete` — autocomplete fields only (pure typeahead, no word clause).
+   * - `text` — single `text` operator over all string-mapped fields.
+   */
+  strategy?: "compound" | "autocomplete" | "text";
 }
 
 export type TMongoIndex = TPlainIndex | TSearchIndex;
@@ -43,10 +59,25 @@ export function mongoIndexKey(type: TMongoIndex["type"], name: string) {
 
 type TVectorSimilarity = "cosine" | "euclidean" | "dotProduct";
 
+/**
+ * One Atlas Search field-type mapping. `type: "string"` is plain word matching;
+ * `type: "autocomplete"` enables prefix/typeahead (edgeGram) or substring (nGram).
+ * A field may carry several mappings at once (an array of these) — e.g. an
+ * autocomplete field double-mapped as `string` so exact-word hits still rank.
+ */
+export interface TSearchFieldMapping {
+  type: string;
+  analyzer?: string;
+  tokenization?: "edgeGram" | "rightEdgeGram" | "nGram";
+  minGrams?: number;
+  maxGrams?: number;
+  foldDiacritics?: boolean;
+}
+
 export interface TMongoSearchIndexDefinition {
   mappings?: {
     dynamic?: boolean;
-    fields?: Record<string, { type: string; analyzer?: string }>;
+    fields?: Record<string, TSearchFieldMapping | TSearchFieldMapping[]>;
   };
   fields?: Array<{
     path: string;
@@ -55,5 +86,4 @@ export interface TMongoSearchIndexDefinition {
     numDimensions?: number;
   }>;
   analyzer?: string;
-  text?: { fuzzy?: { maxEdits: number } };
 }

@@ -49,6 +49,7 @@ import {
   type TSearchIndex,
   type TMongoIndex,
   type TMongoSearchIndexDefinition,
+  type TSearchFieldMapping,
 } from "./mongo-types";
 import type { TMongoRelationHost } from "./mongo-relations";
 import { loadRelationsImpl } from "./mongo-relations";
@@ -384,18 +385,23 @@ export class MongoAdapter extends BaseDbAdapter {
 
     const dynamicText = typeMeta.get("db.mongo.search.dynamic");
     if (dynamicText) {
-      this._setSearchIndex("dynamic_text", "_", {
-        mappings: { dynamic: true },
-        analyzer: dynamicText.analyzer,
-        text: { fuzzy: { maxEdits: dynamicText.fuzzy || 0 } },
-      });
+      this._setSearchIndex(
+        "dynamic_text",
+        "_",
+        { mappings: { dynamic: true }, analyzer: dynamicText.analyzer },
+        { fuzzy: normalizeSearchFuzzy(dynamicText.fuzzy) },
+      );
     }
     for (const textSearch of typeMeta.get("db.mongo.search.static") || []) {
-      this._setSearchIndex("search_text", textSearch.indexName, {
-        mappings: { fields: {} },
-        analyzer: textSearch.analyzer,
-        text: { fuzzy: { maxEdits: textSearch.fuzzy || 0 } },
-      });
+      this._setSearchIndex(
+        "search_text",
+        textSearch.indexName,
+        { mappings: { fields: {} }, analyzer: textSearch.analyzer },
+        {
+          fuzzy: normalizeSearchFuzzy(textSearch.fuzzy),
+          strategy: normalizeSearchStrategy(textSearch.strategy),
+        },
+      );
     }
   }
 
@@ -432,9 +438,26 @@ export class MongoAdapter extends BaseDbAdapter {
     // only one per collection, so sync threw IndexOptionsConflict (code 85).
     // Search dispatch derives the default text index from `table.indexes`, not
     // `_mongoIndexes`, so no adapter-level registration is needed.
-    // @db.mongo.search.text
+    // @db.mongo.search.text — plain word matching (string mapping)
     for (const index of metadata.get("db.mongo.search.text") || []) {
-      this._addFieldToSearchIndex("search_text", index.indexName, field, index.analyzer);
+      this._addFieldToSearchIndex("search_text", index.indexName, field, [
+        index.analyzer ? { type: "string", analyzer: index.analyzer } : { type: "string" },
+      ]);
+    }
+    // @db.mongo.search.autocomplete — prefix/typeahead, double-mapped as string
+    // so exact-word hits still rank.
+    for (const ac of metadata.get("db.mongo.search.autocomplete") || []) {
+      const autocomplete: TSearchFieldMapping = {
+        type: "autocomplete",
+        tokenization: (ac.tokenization as TSearchFieldMapping["tokenization"]) || "edgeGram",
+        minGrams: ac.minGrams ?? 2,
+        maxGrams: ac.maxGrams ?? 15,
+        foldDiacritics: ac.foldDiacritics ?? true,
+      };
+      const companion: TSearchFieldMapping = ac.analyzer
+        ? { type: "string", analyzer: ac.analyzer }
+        : { type: "string" };
+      this._addFieldToSearchIndex("search_text", ac.indexName, field, [autocomplete, companion]);
     }
     // @db.search.vector (generic)
     const vectorIndex = metadata.get("db.search.vector");
@@ -1126,41 +1149,86 @@ export class MongoAdapter extends BaseDbAdapter {
     type: TSearchIndex["type"],
     name: string | undefined,
     definition: TMongoSearchIndexDefinition,
-  ) {
+    meta?: { fuzzy?: { maxEdits: number }; strategy?: TSearchIndex["strategy"] },
+  ): TSearchIndex {
     const key = mongoIndexKey(type, name || DEFAULT_INDEX_NAME);
-    this._mongoIndexes.set(key, {
+    const index: TSearchIndex = {
       key,
       name: name || DEFAULT_INDEX_NAME,
       type,
       definition,
-    });
+      fuzzy: meta?.fuzzy,
+      strategy: meta?.strategy,
+    };
+    this._mongoIndexes.set(key, index);
+    return index;
   }
 
+  /**
+   * Adds (and merges, by mapping `type`) one or more Atlas field-type mappings to
+   * a `search_text` index. Multiple annotations on the same field — e.g.
+   * `@db.mongo.search.text` (string) plus `@db.mongo.search.autocomplete`
+   * (autocomplete + string) — accumulate into a single multi-type mapping
+   * instead of overwriting one another.
+   */
   protected _addFieldToSearchIndex(
     type: TSearchIndex["type"],
     _name: string | undefined,
     fieldName: string,
-    analyzer?: string,
+    mappings: TSearchFieldMapping[],
   ) {
     const name = _name || DEFAULT_INDEX_NAME;
     let index = this._mongoIndexes.get(mongoIndexKey(type, name)) as TSearchIndex | undefined;
     if (!index && type === "search_text") {
-      this._setSearchIndex(type, name, {
-        mappings: { fields: {} },
-        text: { fuzzy: { maxEdits: 0 } },
-      });
-      index = this._mongoIndexes.get(mongoIndexKey(type, name)) as TSearchIndex | undefined;
+      index = this._setSearchIndex(type, name, { mappings: { fields: {} } });
     }
     if (index) {
-      index.definition.mappings!.fields![fieldName] = { type: "string" };
-      if (analyzer) {
-        index.definition.mappings!.fields![fieldName].analyzer = analyzer;
-      }
+      const fields = index.definition.mappings!.fields!;
+      fields[fieldName] = mergeFieldMappings(fields[fieldName], mappings);
     }
   }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Normalizes a declared `fuzzy` arg (`0-2`) into the query-time metadata Atlas
+ * accepts. Atlas only honors an edit distance of `1` or `2`; `0`/undefined means
+ * "no fuzzy", returned as `undefined` so no `fuzzy` clause is ever emitted.
+ */
+function normalizeSearchFuzzy(fuzzy?: number): { maxEdits: number } | undefined {
+  return fuzzy === 1 || fuzzy === 2 ? { maxEdits: fuzzy } : undefined;
+}
+
+/** Narrows the declared `strategy` arg to a known value (undefined → query layer defaults to "compound"). */
+function normalizeSearchStrategy(strategy?: string): TSearchIndex["strategy"] | undefined {
+  return strategy === "compound" || strategy === "autocomplete" || strategy === "text"
+    ? strategy
+    : undefined;
+}
+
+/**
+ * Merges incoming Atlas field-type mappings into a field's existing mapping,
+ * keyed by `type` (a later mapping of the same type replaces the earlier one).
+ * Collapses to a single object when one type remains, else an array (Atlas's
+ * multi-type field form).
+ */
+function mergeFieldMappings(
+  existing: TSearchFieldMapping | TSearchFieldMapping[] | undefined,
+  incoming: TSearchFieldMapping[],
+): TSearchFieldMapping | TSearchFieldMapping[] {
+  const byType = new Map<string, TSearchFieldMapping>();
+  const order: string[] = [];
+  const add = (m: TSearchFieldMapping) => {
+    if (!byType.has(m.type)) order.push(m.type);
+    byType.set(m.type, m);
+  };
+  if (Array.isArray(existing)) existing.forEach(add);
+  else if (existing) add(existing);
+  incoming.forEach(add);
+  const merged = order.map((t) => byType.get(t)!);
+  return merged.length === 1 ? merged[0] : merged;
+}
 
 /**
  * Builds a MongoDB update document from a data object that may contain

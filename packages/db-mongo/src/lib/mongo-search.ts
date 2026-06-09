@@ -48,7 +48,7 @@ export async function searchImpl(
   query: DbQuery,
   indexName?: string,
 ): Promise<Array<Record<string, unknown>>> {
-  const plan = buildSearchStage(host, text, indexName);
+  const plan = buildSearchStage(host, text, indexName, query.controls);
   if (!plan) {
     throw new Error(
       indexName ? `Search index "${indexName}" not found` : "No search index available",
@@ -64,7 +64,7 @@ export async function searchWithCountImpl(
   query: DbQuery,
   indexName?: string,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-  const plan = buildSearchStage(host, text, indexName);
+  const plan = buildSearchStage(host, text, indexName, query.controls);
   if (!plan) {
     throw new Error(
       indexName ? `Search index "${indexName}" not found` : "No search index available",
@@ -151,6 +151,7 @@ function buildSearchStage(
   host: TMongoSearchHost,
   text: string,
   indexName?: string,
+  controls?: DbControls,
 ): { stage: Document; classicText: boolean } | undefined {
   const index = host.getMongoSearchIndex(indexName);
   if (!index) {
@@ -164,11 +165,65 @@ function buildSearchStage(
     // the first pipeline stage, which the runners guarantee.
     return { stage: { $match: { $text: { $search: text } } }, classicText: true };
   }
-  // Atlas Search (search_text / dynamic_text).
-  return {
-    stage: { $search: { index: index.key, text: { query: text, path: { wildcard: "*" } } } },
-    classicText: false,
-  };
+  // Atlas Search (search_text / dynamic_text). The index's declared `strategy`
+  // locks the query shape — there is no query-time mode switching.
+  const searchIndex = index as TSearchIndex;
+  const fuzzy = resolveSearchFuzzy(searchIndex, controls);
+  const strategy = searchIndex.strategy ?? "compound";
+  const autocompletePaths = autocompleteFieldPaths(searchIndex);
+
+  const textClause = (): Document => ({
+    text: { query: text, path: { wildcard: "*" }, ...(fuzzy ? { fuzzy } : {}) },
+  });
+  const autocompleteClause = (path: string): Document => ({
+    autocomplete: { query: text, path, ...(fuzzy ? { fuzzy } : {}) },
+  });
+
+  let body: Document;
+  if (strategy === "text" || autocompletePaths.length === 0) {
+    // Word matching only — also the natural fallback when the index maps no
+    // autocomplete field (so `compound`/`autocomplete` degrade gracefully).
+    body = textClause();
+  } else if (strategy === "autocomplete") {
+    // Prefix/typeahead only — query the autocomplete fields, no word-match clause.
+    const clauses = autocompletePaths.map(autocompleteClause);
+    body =
+      clauses.length === 1 ? clauses[0] : { compound: { should: clauses, minimumShouldMatch: 1 } };
+  } else {
+    // compound (default): rank exact-word hits above prefix hits. The autocomplete
+    // operator can't use a wildcard path, so each field gets its own clause.
+    const should: Document[] = [textClause(), ...autocompletePaths.map(autocompleteClause)];
+    body = { compound: { should, minimumShouldMatch: 1 } };
+  }
+  return { stage: { $search: { index: index.key, ...body } }, classicText: false };
+}
+
+/**
+ * Resolves query-time fuzzy (typo tolerance): the `$fuzzy` request control
+ * overrides the schema-declared `@db.mongo.search.*` fuzzy. Only an edit distance
+ * of 1 or 2 is emitted (Atlas rejects 0) — anything else means "no fuzzy".
+ */
+function resolveSearchFuzzy(
+  index: TSearchIndex,
+  controls?: DbControls,
+): { maxEdits: number } | undefined {
+  const override = (controls as Record<string, unknown> | undefined)?.$fuzzy;
+  const maxEdits = override === undefined ? index.fuzzy?.maxEdits : Number(override);
+  return maxEdits === 1 || maxEdits === 2 ? { maxEdits } : undefined;
+}
+
+/** Field paths in this index that carry an `autocomplete` mapping. */
+function autocompleteFieldPaths(index: TSearchIndex): string[] {
+  const fields = index.definition.mappings?.fields;
+  if (!fields) return [];
+  const paths: string[] = [];
+  for (const [path, mapping] of Object.entries(fields)) {
+    const list = Array.isArray(mapping) ? mapping : [mapping];
+    if (list.some((m) => m.type === "autocomplete")) {
+      paths.push(path);
+    }
+  }
+  return paths;
 }
 
 /** Builds a $vectorSearch aggregation stage from a pre-computed vector. */

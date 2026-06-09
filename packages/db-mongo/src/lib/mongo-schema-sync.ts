@@ -17,6 +17,7 @@ import {
   type TMongoIndex,
   type TPlainIndex,
   type TMongoSearchIndexDefinition,
+  type TSearchFieldMapping,
 } from "./mongo-types";
 
 // ── Host interface ───────────────────────────────────────────────────────────
@@ -935,8 +936,8 @@ function objMatch(
 }
 
 function fieldsMatch(
-  left: Record<string, { type: string; analyzer?: string }> | undefined,
-  right: Record<string, { type: string; analyzer?: string }> | undefined,
+  left: Record<string, TSearchFieldMapping | TSearchFieldMapping[]> | undefined,
+  right: Record<string, TSearchFieldMapping | TSearchFieldMapping[]> | undefined,
 ): boolean {
   if (!left || !right) {
     return left === right;
@@ -950,11 +951,47 @@ function fieldsMatch(
     if (!(key in right)) {
       return false;
     }
-    if (left[key].type !== right[key].type || left[key].analyzer !== right[key].analyzer) {
+    if (!fieldMappingEqual(left[key], right[key])) {
       return false;
     }
   }
   return true;
+}
+
+/** Order-independent structural compare of a field's Atlas type mapping(s). */
+function fieldMappingEqual(
+  a: TSearchFieldMapping | TSearchFieldMapping[],
+  b: TSearchFieldMapping | TSearchFieldMapping[],
+): boolean {
+  const am = mappingsByType(a);
+  const bm = mappingsByType(b);
+  if (am.size !== bm.size) {
+    return false;
+  }
+  for (const [type, av] of am) {
+    const bv = bm.get(type);
+    if (
+      !bv ||
+      av.analyzer !== bv.analyzer ||
+      av.tokenization !== bv.tokenization ||
+      av.minGrams !== bv.minGrams ||
+      av.maxGrams !== bv.maxGrams ||
+      av.foldDiacritics !== bv.foldDiacritics
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function mappingsByType(
+  m: TSearchFieldMapping | TSearchFieldMapping[],
+): Map<string, TSearchFieldMapping> {
+  const map = new Map<string, TSearchFieldMapping>();
+  for (const x of Array.isArray(m) ? m : [m]) {
+    map.set(x.type, x);
+  }
+  return map;
 }
 
 function vectorFieldsMatch(

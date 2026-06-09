@@ -112,13 +112,14 @@ For transaction support inside tests, use `MongoMemoryReplSet.create()` instead.
 
 These annotations are available when the MongoDB plugin is registered. They extend the generic `@db.*` namespace with MongoDB-specific behavior.
 
-| Annotation                                              | Level     | Purpose                                                                                     |
-| ------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------- |
-| `@db.mongo.collection`                                  | Interface | Mark as MongoDB collection, auto-inject `_id`                                               |
-| `@db.mongo.capped size, max?`                           | Interface | Capped collection with size limit                                                           |
-| `@db.mongo.search.dynamic analyzer?, fuzzy?`            | Interface | Dynamic Atlas Search index                                                                  |
-| `@db.mongo.search.static analyzer?, fuzzy?, indexName?` | Interface | Named static Atlas Search index. Repeatable. `indexName?` defaults to `"DEFAULT"`           |
-| `@db.mongo.search.text analyzer?, indexName?`           | Field     | Include field in a search index. Repeatable per field. `indexName?` defaults to `"DEFAULT"` |
+| Annotation                                                                                                  | Level     | Purpose                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.collection`                                                                                      | Interface | Mark as MongoDB collection, auto-inject `_id`                                                                                    |
+| `@db.mongo.capped size, max?`                                                                               | Interface | Capped collection with size limit                                                                                                |
+| `@db.mongo.search.dynamic analyzer?, fuzzy?`                                                                | Interface | Dynamic Atlas Search index                                                                                                       |
+| `@db.mongo.search.static analyzer?, fuzzy?, indexName?, strategy?`                                          | Interface | Named static Atlas Search index. Repeatable. `indexName?` defaults to `"DEFAULT"`. `strategy?`: `compound`/`autocomplete`/`text` |
+| `@db.mongo.search.text analyzer?, indexName?`                                                               | Field     | Include field in a search index as a **word-matched** field. Repeatable. `indexName?` defaults to `"DEFAULT"`                    |
+| `@db.mongo.search.autocomplete indexName?, tokenization?, minGrams?, maxGrams?, foldDiacritics?, analyzer?` | Field     | Include field as a **prefix/typeahead** field (double-mapped as `string`)                                                        |
 
 All generic `@db.*` annotations (`@db.table`, `@db.index.*`, `@db.default.*`, `@db.rel.*`, `@db.json`, `@db.search.vector`, `@db.search.filter`, etc.) work with MongoDB as well. See the [Annotations Reference](./annotations) for the full list.
 
@@ -325,10 +326,75 @@ export interface Product {
 Arguments for `@db.mongo.search.static`:
 
 1. **Default analyzer** — fallback analyzer for the index
-2. **Fuzzy level** — typo tolerance
-3. **Index name** — identifies the index for queries
+2. **Fuzzy level** — query-time typo tolerance (see [Fuzzy Search](#fuzzy-search))
+3. **Index name** — identifies the index for queries (the `$index` control)
+4. **Strategy** — the query shape: `compound` (default), `autocomplete`, or `text` (see [Match Strategy](#match-strategy))
 
 Each `@db.mongo.search.text` field can use a different analyzer while belonging to the same named index.
+
+### Autocomplete & Typeahead
+
+A plain search index matches whole words — `"art"` will not match `"Artem"`. For **as-you-type** matching, annotate the field with `@db.mongo.search.autocomplete`:
+
+```atscript
+@db.table 'users'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 0, 'people'
+export interface User {
+    @meta.id _id: mongo.objectId
+
+    @db.mongo.search.autocomplete 'people'
+    username: string
+}
+```
+
+This indexes the field as an Atlas `autocomplete` type **and** double-maps it as a plain `string`, so exact-word hits still rank. Now `?$search=art` matches `"Artem"` as you type.
+
+The `tokenization` argument picks how partial matching works:
+
+| `tokenization`       | Matches                       | Example               |
+| -------------------- | ----------------------------- | --------------------- |
+| `edgeGram` (default) | **prefix** — start of a word  | `"art"` → `"Artem"`   |
+| `nGram`              | **substring** — inside a word | `"tem"` → `"Artem"`   |
+| `rightEdgeGram`      | **suffix** — end of a word    | `"sev"` → `"Maltsev"` |
+
+`edgeGram` (prefix) covers the typical search-box case at the lowest index cost; reach for `nGram` only when you need true mid-word matching (larger index, slower builds). Other arguments default to `minGrams: 2`, `maxGrams: 15`, `foldDiacritics: true` (so `"cafe"` matches `"café"`).
+
+### Match Strategy
+
+The `strategy` argument on `@db.mongo.search.static` locks how a term is matched against the index — there is no per-query mode switching:
+
+| `strategy`           | Query shape                                                                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compound` (default) | Word match **and** prefix — exact-word hits rank above prefix hits. Falls back to plain word match when the index has no autocomplete field (so unset behaves like before). |
+| `autocomplete`       | Prefix/typeahead **only** — no word-match clause.                                                                                                                           |
+| `text`               | Word matching **only** — ignores autocomplete tokenization.                                                                                                                 |
+
+```atscript
+@db.mongo.search.static 'lucene.english', 0, 'people_prefix', 'autocomplete'
+```
+
+`strategy` affects only the query — the Atlas index definition is identical regardless.
+
+### Search Variants
+
+Each index encodes one behavior. To match the **same field** different ways, declare a second index and select it per request with `$index` — one field can join several indexes:
+
+```atscript
+@db.table 'users'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 0, 'users_exact'                    // word match
+@db.mongo.search.static 'lucene.english', 1, 'users_prefix', 'autocomplete'   // typeahead + fuzzy
+export interface User {
+    @meta.id _id: mongo.objectId
+
+    @db.mongo.search.text 'lucene.english', 'users_exact'
+    @db.mongo.search.autocomplete 'users_prefix'
+    username: string
+}
+```
+
+`?$search=art` → the first-declared index (`users_exact`, word match). `?$search=art&$index=users_prefix` → the typeahead variant. Same data, two locked behaviors, no query-time modes.
 
 ### Supported Analyzers
 
@@ -355,13 +421,15 @@ See the [MongoDB Atlas docs](https://www.mongodb.com/docs/atlas/atlas-search/ana
 
 ### Fuzzy Search
 
-The fuzzy parameter controls typo tolerance using Levenshtein distance:
+The fuzzy parameter controls typo tolerance using Levenshtein edit distance, applied **at query time** to the search operator. Declare it on the index (`@db.mongo.search.static`/`.dynamic`) and it applies to every `$search` automatically:
 
-- **`0`** — exact match only, no typos allowed
-- **`1`** — one character difference allowed (e.g., "mongo" matches "mango")
-- **`2`** — two character differences allowed (e.g., "search" matches "saerch")
+- **`0`** (default) — no fuzzy, exact tokens only
+- **`1`** — one edit allowed (e.g., "mango" matches "mongo")
+- **`2`** — two edits allowed (e.g., "saerch" matches "search")
 
-Higher values increase recall at the cost of precision. For most use cases, `1` is a good default.
+Atlas only honors an edit distance of `1` or `2`; `0` simply disables it. Higher values increase recall at the cost of precision — `1` is a good default.
+
+Callers can override the declared value per request with the `$fuzzy` control: `?$search=mongo&$fuzzy=2` widens tolerance, `?$search=mongo&$fuzzy=0` disables it for that one request. See [HTTP — Relations & Search](/http/advanced#text-search).
 
 ### Searching at Runtime
 

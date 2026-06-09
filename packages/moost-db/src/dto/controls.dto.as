@@ -6,6 +6,7 @@ export interface QueryControlsDto {
     $select?: SelectControlDto | string[]
     $search?: string
     $index?: string
+    $fuzzy?: string
     $vector?: string
     $threshold?: string
     $with?: WithRelationDto[]
@@ -21,6 +22,7 @@ export interface PagesControlsDto {
     $select?: SelectControlDto | string[]
     $search?: string
     $index?: string
+    $fuzzy?: string
     $vector?: string
     $threshold?: string
     $with?: WithRelationDto[]

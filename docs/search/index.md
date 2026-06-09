@@ -130,6 +130,8 @@ Each adapter maps `@db.index.fulltext` to its native full-text search engine:
 All adapters expose the same `search()` and `searchWithCount()` API — engine differences are handled internally. See individual adapter pages for engine-specific details and configuration options.
 :::
 
+MongoDB Atlas goes beyond word matching with **autocomplete/typeahead**, query-time **fuzzy** tolerance, and a per-index **match strategy** — see [MongoDB → Atlas Search](/adapters/mongodb#atlas-search).
+
 ## Next Steps
 
 - [Vector Search](./vector-search) — similarity search with embedding vectors

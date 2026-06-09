@@ -9,18 +9,50 @@ plugins: [ts(), dbPlugin(), MongoPlugin()];
 
 ## Collection-level
 
-| Annotation                 | Args                                                    | Effect                                                                                             |
-| -------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `@db.mongo.collection`     | —                                                       | Mark as Mongo collection. Auto-injects `_id: mongo.objectId` when the interface has no `@meta.id`. |
-| `@db.mongo.capped`         | `size: number, max?: number`                            | Capped collection (bytes; optional doc limit).                                                     |
-| `@db.mongo.search.dynamic` | `analyzer?: string, fuzzy?: number`                     | Dynamic Atlas Search index (indexes all string fields).                                            |
-| `@db.mongo.search.static`  | `analyzer?: string, fuzzy?: number, indexName?: string` | Named static Atlas Search index. Combine with `@db.mongo.search.text` on individual fields.        |
+| Annotation                 | Args                                                                       | Effect                                                                                                                                           |
+| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@db.mongo.collection`     | —                                                                          | Mark as Mongo collection. Auto-injects `_id: mongo.objectId` when the interface has no `@meta.id`.                                               |
+| `@db.mongo.capped`         | `size: number, max?: number`                                               | Capped collection (bytes; optional doc limit).                                                                                                   |
+| `@db.mongo.search.dynamic` | `analyzer?: string, fuzzy?: number`                                        | Dynamic Atlas Search index (indexes all string fields).                                                                                          |
+| `@db.mongo.search.static`  | `analyzer?: string, fuzzy?: number, indexName?: string, strategy?: string` | Named static Atlas Search index. Combine with `@db.mongo.search.text` / `.autocomplete` on fields. `strategy` locks the query shape (see below). |
 
 ## Field-level
 
-| Annotation              | Args                                    | Effect                                              |
-| ----------------------- | --------------------------------------- | --------------------------------------------------- |
-| `@db.mongo.search.text` | `analyzer?: string, indexName?: string` | Include field in a named static Atlas Search index. |
+| Annotation                      | Args                                                                                                                           | Effect                                                                                                                                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.search.text`         | `analyzer?: string, indexName?: string`                                                                                        | Include field in a named static Atlas Search index as a **word-matched** (`string`) field.                                                                                                                              |
+| `@db.mongo.search.autocomplete` | `indexName?: string, tokenization?: string, minGrams?: number, maxGrams?: number, foldDiacritics?: boolean, analyzer?: string` | Include field as a **prefix/typeahead** (`autocomplete`) field, double-mapped as `string` so exact-word hits still rank. `tokenization`: `edgeGram` (prefix, default) / `nGram` (substring) / `rightEdgeGram` (suffix). |
+
+### Search behavior is declared, not query-time
+
+The index's matching behavior is **locked in the annotation** — that is how Atlas itself works (the tokenization/analyzer/fuzzy are baked into the index at build time). A `$search` request just sends a term; the index runs the behavior you declared:
+
+- `fuzzy` (`0`/off · `1` · `2`) on `@db.mongo.search.static`/`.dynamic` is **query-time typo tolerance** applied to the emitted operator (not stored in the index definition). Override per request with the `$fuzzy` control.
+- `strategy` on `@db.mongo.search.static` fixes the query shape:
+  - `compound` (default) → wildcard `text` clause **plus** one `autocomplete` clause per autocomplete field (exact ranks above prefix). Degrades to plain `text` when the index has no autocomplete field — so unset behaves like before.
+  - `autocomplete` → **prefix/typeahead only** (autocomplete fields, no word-match clause). A single autocomplete field emits one `autocomplete` operator; several emit a `compound.should` of them.
+  - `text` → **word matching only** — a single `text` operator over all string-mapped fields (autocomplete fields match via their companion `string` mapping).
+
+### Variants: one index per behavior, picked by `$index`
+
+To use the **same data matched differently**, do not parameterize the query — define each behavior as its own central index and select per request with `$index`. One field can join several indexes:
+
+```atscript
+@db.table 'users'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 0, 'users_exact'    # word match, no fuzzy
+@db.mongo.search.static 'lucene.english', 1, 'users_prefix'   # typeahead + fuzzy
+export interface User {
+    @meta.id
+    _id: mongo.objectId
+
+    @db.mongo.search.text 'lucene.english', 'users_exact'
+    @db.mongo.search.autocomplete 'users_prefix'
+    username: string
+}
+```
+
+`GET /query?$search=art` → first-declared index (`users_exact`, word match). `GET /query?$search=art&$index=users_prefix` → the typeahead variant. Same field, two locked behaviors, no query-time modes.
 
 ## Replaced / removed (use the generic core annotation instead)
 

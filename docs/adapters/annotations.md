@@ -478,13 +478,14 @@ interface Event {
 
 These annotations require the `@atscript/db-mongo` plugin. See [MongoDB adapter](./mongodb).
 
-| Annotation                 | Applies To | Arguments                                                      | Description                                                 |
-| -------------------------- | ---------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `@db.mongo.collection`     | Interface  | —                                                              | Mark as MongoDB collection (auto-injects `_id`)             |
-| `@db.mongo.capped`         | Interface  | `size` (number), `max?` (number)                               | Capped collection with max byte size and optional doc limit |
-| `@db.mongo.search.dynamic` | Interface  | `analyzer?` (string), `fuzzy?` (number)                        | Dynamic Atlas Search index                                  |
-| `@db.mongo.search.static`  | Interface  | `analyzer?` (string), `fuzzy?` (number), `indexName?` (string) | Named static Atlas Search index                             |
-| `@db.mongo.search.text`    | Field      | `analyzer?` (string), `indexName?` (string)                    | Include field in a search index                             |
+| Annotation                      | Applies To | Arguments                                                                                                                                      | Description                                                                                                                                       |
+| ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.collection`          | Interface  | —                                                                                                                                              | Mark as MongoDB collection (auto-injects `_id`)                                                                                                   |
+| `@db.mongo.capped`              | Interface  | `size` (number), `max?` (number)                                                                                                               | Capped collection with max byte size and optional doc limit                                                                                       |
+| `@db.mongo.search.dynamic`      | Interface  | `analyzer?` (string), `fuzzy?` (number)                                                                                                        | Dynamic Atlas Search index                                                                                                                        |
+| `@db.mongo.search.static`       | Interface  | `analyzer?` (string), `fuzzy?` (number), `indexName?` (string), `strategy?` (string)                                                           | Named static Atlas Search index. `strategy`: `compound` (default) / `autocomplete` / `text`                                                       |
+| `@db.mongo.search.text`         | Field      | `analyzer?` (string), `indexName?` (string)                                                                                                    | Include field in a search index (word match)                                                                                                      |
+| `@db.mongo.search.autocomplete` | Field      | `indexName?` (string), `tokenization?` (string), `minGrams?` (number), `maxGrams?` (number), `foldDiacritics?` (boolean), `analyzer?` (string) | Prefix/typeahead field (double-mapped as `string`). `tokenization`: `edgeGram` (prefix, default) / `nGram` (substring) / `rightEdgeGram` (suffix) |
 
 ```atscript
 use '@atscript/db-mongo'

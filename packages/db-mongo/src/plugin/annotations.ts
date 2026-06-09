@@ -18,6 +18,25 @@ const analyzers = [
   "lucene.arabic",
 ];
 
+const tokenizations = ["edgeGram", "rightEdgeGram", "nGram"];
+
+const searchStrategies = ["compound", "autocomplete", "text"];
+
+const strategyDescription =
+  "How `search()` matches a term against this index. Locks the query shape into the index — there is no query-time mode switching.\n\n" +
+  "- `compound` (default) → rank exact-word hits above prefix hits: a wildcard `text` clause **plus** one `autocomplete` clause per autocomplete field. Degrades to plain `text` when the index has no autocomplete field.\n" +
+  "- `autocomplete` → **prefix/typeahead only** — query just the autocomplete fields, no word-match ranking clause.\n" +
+  "- `text` → **word matching only** — a single `text` operator over all string-mapped fields (autocomplete fields are matched via their companion `string` mapping).\n\n" +
+  "To use the same data with a different strategy, declare a second index and select it per request with `$index`.";
+
+const fuzzyDescription =
+  "Maximum typo tolerance, applied **at query time** to the search operator.\n\n" +
+  "- `0` (default) → no fuzzy matching (exact tokens).\n" +
+  '- `1` → allows small typos (e.g., `"mongo"` ≈ `"mango"`).\n' +
+  '- `2` → more typo tolerance (e.g., `"mongodb"` ≈ `"mangodb"`).\n\n' +
+  "Atlas only accepts an edit distance of `1` or `2`; `0` simply disables fuzzy. " +
+  "Can be overridden per request via the `$fuzzy` query control.";
+
 /**
  * MongoDB-specific annotations.
  *
@@ -166,11 +185,7 @@ export const annotations: TAnnotationsTree = {
           optional: true,
           name: "fuzzy",
           type: "number",
-          description:
-            "Maximum typo tolerance (`0-2`). Defaults to `0` (no fuzzy search).\n\n" +
-            "- `0` → Exact match required.\n" +
-            '- `1` → Allows small typos (e.g., `"mongo"` ≈ `"mango"`).\n' +
-            '- `2` → More typo tolerance (e.g., `"mongodb"` ≈ `"mangodb"`).',
+          description: fuzzyDescription,
         },
       ],
     }),
@@ -202,18 +217,21 @@ export const annotations: TAnnotationsTree = {
           optional: true,
           name: "fuzzy",
           type: "number",
-          description:
-            "Maximum typo tolerance (`0-2`). **Defaults to `0` (no fuzzy matching).**\n\n" +
-            "- `0` → No typos allowed (exact match required).\n" +
-            '- `1` → Allows small typos (e.g., "mongo" ≈ "mango").\n' +
-            '- `2` → More typo tolerance (e.g., "mongodb" ≈ "mangodb").',
+          description: fuzzyDescription,
         },
         {
           optional: true,
           name: "indexName",
           type: "string",
           description:
-            'The name of the search index. Fields must reference this name using `@db.mongo.search.text`. If not set, defaults to `"DEFAULT"`.',
+            'The name of the search index. Fields must reference this name using `@db.mongo.search.text` or `@db.mongo.search.autocomplete`. If not set, defaults to `"DEFAULT"`.',
+        },
+        {
+          optional: true,
+          name: "strategy",
+          type: "string",
+          description: strategyDescription,
+          values: searchStrategies,
         },
       ],
     }),
@@ -246,6 +264,69 @@ export const annotations: TAnnotationsTree = {
           type: "string",
           description:
             'The **name of the search index** defined in `@db.mongo.search.static`. This links the field to the correct index. If not set, defaults to `"DEFAULT"`.',
+        },
+      ],
+    }),
+
+    autocomplete: new AnnotationSpec({
+      description:
+        "Marks a field for **prefix / typeahead (as-you-type)** matching in a MongoDB Atlas Search Index.\n\n" +
+        "- Indexes the field as the Atlas **`autocomplete`** type, **and** double-maps it as `string` so exact-word hits still rank.\n" +
+        '- Lets `search()` match partial words: with the default `edgeGram` tokenization, `"art"` matches `"Artem"` **as you type** (no whole word required).\n' +
+        "- Use `nGram` tokenization for true mid-word (infix/substring) matching at higher index cost.\n" +
+        "- Like `@db.mongo.search.text`, the field joins the index named by `indexName` (or the default index).\n\n" +
+        "**Example:**\n" +
+        "```atscript\n" +
+        '@db.mongo.search.autocomplete "users"\n' +
+        "username: string\n" +
+        "```\n",
+      nodeType: ["prop"],
+      multiple: true,
+      argument: [
+        {
+          optional: true,
+          name: "indexName",
+          type: "string",
+          description:
+            'The **name of the search index** (defined by `@db.mongo.search.static`) this field joins. If not set, defaults to `"DEFAULT"`.',
+        },
+        {
+          optional: true,
+          name: "tokenization",
+          type: "string",
+          description:
+            "How the field is tokenized for partial matching:\n\n" +
+            '- `"edgeGram"` (default) → **prefix** matching from the start of each word (`"art"` → `"Artem"`).\n' +
+            '- `"nGram"` → **substring/infix** matching anywhere inside a word (`"tem"` → `"Artem"`); larger index, slower builds.\n' +
+            '- `"rightEdgeGram"` → **suffix** matching from the end of each word.',
+          values: tokenizations,
+        },
+        {
+          optional: true,
+          name: "minGrams",
+          type: "number",
+          description: "Minimum number of characters per indexed sequence. Defaults to `2`.",
+        },
+        {
+          optional: true,
+          name: "maxGrams",
+          type: "number",
+          description: "Maximum number of characters per indexed sequence. Defaults to `15`.",
+        },
+        {
+          optional: true,
+          name: "foldDiacritics",
+          type: "boolean",
+          description:
+            'Whether to fold (ignore) diacritics so `"café"` matches `"cafe"`. Defaults to `true`.',
+        },
+        {
+          optional: true,
+          name: "analyzer",
+          type: "string",
+          description:
+            'The text analyzer for the companion `string` mapping. Defaults to `"lucene.standard"`.',
+          values: analyzers,
         },
       ],
     }),

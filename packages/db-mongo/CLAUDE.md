@@ -40,19 +40,30 @@ Mongo-specific annotations live under the `db.mongo.*` namespace. Generic databa
 
 ### Collection-level (`db.mongo.*`)
 
-| Annotation                                               | Description                                          |
-| -------------------------------------------------------- | ---------------------------------------------------- |
-| `@db.table "name"` (core)                                | Names the collection/table                           |
-| `@db.mongo.collection`                                   | Optional; auto-adds `_id: mongo.objectId` if missing |
-| `@db.mongo.capped size, max?`                            | Capped collection (size in bytes, optional max docs) |
-| `@db.mongo.search.dynamic "analyzer", fuzzy`             | Dynamic Atlas Search index                           |
-| `@db.mongo.search.static "analyzer", fuzzy, "indexName"` | Named static Atlas Search index                      |
+| Annotation                                                           | Description                                          |
+| -------------------------------------------------------------------- | ---------------------------------------------------- |
+| `@db.table "name"` (core)                                            | Names the collection/table                           |
+| `@db.mongo.collection`                                               | Optional; auto-adds `_id: mongo.objectId` if missing |
+| `@db.mongo.capped size, max?`                                        | Capped collection (size in bytes, optional max docs) |
+| `@db.mongo.search.dynamic "analyzer", fuzzy`                         | Dynamic Atlas Search index                           |
+| `@db.mongo.search.static "analyzer", fuzzy, "indexName", "strategy"` | Named static Atlas Search index                      |
+
+`fuzzy` (`0`/off, `1`, `2`) is **query-time** typo tolerance: it is carried as index metadata (`TSearchIndex.fuzzy`), NOT written into the Atlas index definition, and `buildSearchStage` attaches it to the emitted `text`/`autocomplete` operator. Per-request override via the `$fuzzy` query control.
 
 ### Field-level (`db.mongo.*`)
 
-| Annotation                                      | Description             |
-| ----------------------------------------------- | ----------------------- |
-| `@db.mongo.search.text "analyzer", "indexName"` | Atlas Search text field |
+| Annotation                                                                                | Description                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.search.text "analyzer", "indexName"`                                           | Atlas Search text field (word matching, `string` mapping)                                                                                                           |
+| `@db.mongo.search.autocomplete "indexName", "tokenization", minG, maxG, fold, "analyzer"` | Prefix/typeahead field — double-mapped as `autocomplete` + `string`. `tokenization`: `edgeGram` (prefix, default) / `nGram` (substring) / `rightEdgeGram` (suffix). |
+
+The index's `strategy` (carried as `TSearchIndex.strategy`, read by `buildSearchStage`; unset → `compound`) fixes the query shape:
+
+- `compound` (default) — wildcard `text` clause + one `autocomplete` clause per autocomplete field (the `autocomplete` operator can't use a wildcard path). Degrades to a single `text` operator when the index maps no autocomplete field, so unset == prior behavior.
+- `autocomplete` — autocomplete fields only (single field → one `autocomplete` op; several → `compound.should` of them); no word-match clause.
+- `text` — a single `text` operator over all string-mapped fields.
+
+**Search behavior is declared, never query-time.** An index's matching behavior is fixed by its annotation (this mirrors Atlas: tokenization/analyzer are baked into the index at build time). The query just sends a term. To match the **same field differently**, declare it in **two indexes** and let the consumer pick with `$index` — `@db.mongo.search.static` and the field annotations are `multiple: true`, so one field can join several indexes (e.g. word-matched in `members_exact`, prefix in `members_prefix`). This is the blessed "variant" pattern — do NOT add query-time mode switching. See `search-collection.as` (`Member`) + `autocomplete-fuzzy-search.spec.ts`.
 
 Generic indexes use core annotations: `@db.index.plain`, `@db.index.unique`, `@db.index.fulltext`. Vector search uses core `@db.search.vector` / `@db.search.filter`.
 
