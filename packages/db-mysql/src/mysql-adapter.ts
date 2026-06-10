@@ -829,6 +829,10 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   typeMapper(field: TDbFieldMeta): string {
+    if (field.encrypted) {
+      // Ciphertext envelope: unbounded text, plaintext-length-dependent.
+      return "TEXT";
+    }
     // Vector fields → VECTOR(N) on MySQL 9+, JSON otherwise
     if (this._vectorFields.has(field.path)) {
       const vec = this._vectorFields.get(field.path)!;
@@ -842,6 +846,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   async syncIndexes(): Promise<void> {
     const tableName = this._table.tableName;
     const schema = this._schema;
+
     // Pre-build lookup for string fields (O(1) per index field instead of linear scan)
     const stringFields = new Set(
       this._table.fieldDescriptors
@@ -879,7 +884,10 @@ export class MysqlAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
-      // MySQL supports FULLTEXT indexes natively — don't skip them
+      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
+      // models stay portable; sync warns and skips instead of erroring.
+      // (MySQL supports FULLTEXT indexes natively — don't skip them.)
+      warnUnsupportedTypes: { adapter: "mysql", types: ["geo"] },
     });
   }
 

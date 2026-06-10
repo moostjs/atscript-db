@@ -53,6 +53,17 @@ The weight defaults to `1` when omitted. Weighted full-text search is supported 
 `@db.index.fulltext` sets up the index in the database. For search usage (querying against full-text indexes), see [Text Search](/search/).
 :::
 
+## Geospatial Index
+
+Mark a `db.geoPoint` field with `@db.index.geo` to enable distance-ranked search (`geoSearch()`) and accelerate `$geoWithin` radius filters:
+
+```atscript
+@db.index.geo
+geo: db.geoPoint
+```
+
+MongoDB-only in v1 (SQL adapters skip it with a warning). Annotation rules, the query API, and the `GET /geo` endpoint are covered in [Geo Search](/search/geo-search).
+
 ## Composite Indexes
 
 When multiple fields share the same index name, they form a **composite index**. This is useful for queries that filter or sort on multiple columns together:

@@ -45,19 +45,20 @@ export class ActiveTasksController extends AsDbReadableController<typeof ActiveT
 
 ## Generated routes
 
-| Method | Path               | Purpose                                                                                    | Class                    |
-| ------ | ------------------ | ------------------------------------------------------------------------------------------ | ------------------------ |
-| GET    | `/query`           | Query rows (or `$count`, or `$groupBy` aggregate).                                         | `AsDbReadableController` |
-| GET    | `/pages`           | Paginated query. Returns `{ data, page, itemsPerPage, pages, count }`.                     | `AsDbReadableController` |
-| GET    | `/one/:id`         | Single row by scalar PK.                                                                   | `AsDbReadableController` |
-| GET    | `/one?a=1&b=2`     | Single row by composite PK / compound unique.                                              | `AsDbReadableController` |
-| GET    | `/meta`            | Serialized type + relations + field capability map.                                        | `AsDbReadableController` |
-| GET    | `/meta/form/:name` | Serialized `TSerializedAnnotatedType` of an action's `@InputForm` form (404 unknown name). | `AsDbReadableController` |
-| POST   | `/`                | Insert one or many (array body → `insertMany`).                                            | `AsDbController`         |
-| PUT    | `/`                | Replace one or many by PK.                                                                 | `AsDbController`         |
-| PATCH  | `/`                | Update one or many by PK.                                                                  | `AsDbController`         |
-| DELETE | `/:id`             | Delete by scalar PK.                                                                       | `AsDbController`         |
-| DELETE | `/?a=1&b=2`        | Delete by composite PK / compound unique.                                                  | `AsDbController`         |
+| Method | Path               | Purpose                                                                                                                                                                | Class                    |
+| ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| GET    | `/query`           | Query rows (or `$count`, or `$groupBy` aggregate).                                                                                                                     | `AsDbReadableController` |
+| GET    | `/pages`           | Paginated query. Returns `{ data, page, itemsPerPage, pages, count }`.                                                                                                 | `AsDbReadableController` |
+| GET    | `/one/:id`         | Single row by scalar PK.                                                                                                                                               | `AsDbReadableController` |
+| GET    | `/one?a=1&b=2`     | Single row by composite PK / compound unique.                                                                                                                          | `AsDbReadableController` |
+| GET    | `/geo`             | Distance-ranked geo search (`$center=lng,lat` required; `$maxDistance`/`$minDistance` meters; rows carry `$distance`). Mongo-only v1 → [geo-search.md](geo-search.md). | `AsDbReadableController` |
+| GET    | `/meta`            | Serialized type + relations + field capability map.                                                                                                                    | `AsDbReadableController` |
+| GET    | `/meta/form/:name` | Serialized `TSerializedAnnotatedType` of an action's `@InputForm` form (404 unknown name).                                                                             | `AsDbReadableController` |
+| POST   | `/`                | Insert one or many (array body → `insertMany`).                                                                                                                        | `AsDbController`         |
+| PUT    | `/`                | Replace one or many by PK.                                                                                                                                             | `AsDbController`         |
+| PATCH  | `/`                | Update one or many by PK.                                                                                                                                              | `AsDbController`         |
+| DELETE | `/:id`             | Delete by scalar PK.                                                                                                                                                   | `AsDbController`         |
+| DELETE | `/?a=1&b=2`        | Delete by composite PK / compound unique.                                                                                                                              | `AsDbController`         |
 
 `ViewController` is an alias for `ReadableController` — same behaviour, different label.
 

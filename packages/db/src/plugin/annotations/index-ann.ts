@@ -84,5 +84,24 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         },
       ],
     }),
+
+    geo: new AnnotationSpec({
+      description:
+        "Geospatial index on a `db.geoPoint` field. " +
+        "Enables `geoSearch()` (distance-ranked) and accelerates `$geoWithin` filters." +
+        "\n\n**Example:**\n" +
+        "```atscript\n" +
+        "@db.index.geo\n" +
+        "geo: db.geoPoint\n" +
+        "```\n",
+      nodeType: ["prop"],
+      multiple: false,
+      argument: {
+        optional: true,
+        name: "name",
+        type: "string",
+        description: "Index name. Defaults to the field name.",
+      },
+    }),
   },
 };

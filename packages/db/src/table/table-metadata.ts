@@ -52,6 +52,32 @@ function isNavRelation(metadata: TMetadataMap<AtscriptMetadata>): boolean {
   return metadata.has("db.rel.to") || metadata.has("db.rel.from") || metadata.has("db.rel.via");
 }
 
+/** Returns true if the annotated type IS the `db.geoPoint` primitive (tag-based). */
+export function isGeoPointType(fieldType: TAtscriptAnnotatedType): boolean {
+  const tags = (fieldType.type as { tags?: ReadonlySet<string> }).tags;
+  return tags?.has("geoPoint") === true;
+}
+
+/**
+ * Returns true if the annotated type is acceptable for `@db.index.geo`:
+ * the `db.geoPoint` primitive or a structurally identical `number[]`
+ * (excluding `db.vector`, which is semantically an embedding).
+ */
+export function isGeoIndexableType(fieldType: TAtscriptAnnotatedType): boolean {
+  if (isGeoPointType(fieldType)) {
+    return true;
+  }
+  const tags = (fieldType.type as { tags?: ReadonlySet<string> }).tags;
+  if (tags?.has("vector")) {
+    return false;
+  }
+  if (fieldType.type.kind === "array") {
+    const of = (fieldType.type as unknown as { of?: TAtscriptAnnotatedType }).of;
+    return !!of && resolveDesignType(of) === "number";
+  }
+  return false;
+}
+
 /**
  * Computed metadata for a database table or view.
  *
@@ -89,6 +115,8 @@ export class TableMetadata {
   versionField?: string;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   quantityRefByField = new Map<string, string>();
+  /** Logical paths annotated with `@db.encrypted` — stored as one opaque ciphertext column. */
+  encryptedFields = new Set<string>();
 
   // ── Hot-path lookup indexes — derived during build() ─────────────────────
 
@@ -193,6 +221,14 @@ export class TableMetadata {
       }
       this._scanGenericAnnotations(entry.path, entry.type, entry.metadata, logger);
       adapter.onFieldScanned?.(entry.path, entry.type, entry.metadata);
+    }
+
+    // Drop encrypted entries nested under another encrypted field — the
+    // ancestor's single ciphertext column already covers them.
+    for (const path of this.encryptedFields) {
+      if (findAncestorInSet(path, this.encryptedFields) !== undefined) {
+        this.encryptedFields.delete(path);
+      }
     }
 
     // Classify fields and build path maps (before finalizing indexes)
@@ -428,6 +464,20 @@ export class TableMetadata {
       this._addIndexField("fulltext", name, fieldName, { weight });
     }
 
+    // @db.index.geo (arg: name?) — geospatial index on a db.geoPoint field
+    if (metadata.has("db.index.geo")) {
+      const raw = metadata.get("db.index.geo");
+      const name = typeof raw === "string" && raw ? raw : fieldName;
+      this._validateGeoIndexField(fieldName, fieldType, metadata);
+      this._addIndexField("geo", name, fieldName);
+    }
+
+    // @db.encrypted — encrypted-at-rest field (single opaque text column)
+    if (metadata.has("db.encrypted")) {
+      this._validateEncryptedField(fieldName, metadata);
+      this.encryptedFields.add(fieldName);
+    }
+
     // @db.column.collate → collation (intermediate, consumed by _buildFieldDescriptors)
     const collate = metadata.get("db.column.collate") as TDbCollation | undefined;
     if (collate) {
@@ -483,6 +533,89 @@ export class TableMetadata {
     }
   }
 
+  // ── Private: encrypted / geo build-time constraints ──────────────────────
+
+  /**
+   * Build-time diagnostics for `@db.encrypted` (§6 of the field-encryption
+   * spec). Mirrors the compile-time AnnotationSpec validation so models built
+   * from pre-compiled types still fail fast.
+   */
+  private _validateEncryptedField(
+    fieldName: string,
+    metadata: TMetadataMap<AtscriptMetadata>,
+  ): void {
+    const reject = (what: string, why: string) => {
+      throw new Error(`@db.encrypted on "${fieldName}" cannot coexist with ${what} — ${why}`);
+    };
+    if (metadata.has("meta.id")) {
+      reject("@meta.id", "the primary key must be addressable");
+    }
+    if (metadata.has("db.rel.FK")) {
+      reject("@db.rel.FK", "joins are impossible over ciphertext");
+    }
+    if (
+      metadata.has("db.index.plain") ||
+      metadata.has("db.index.unique") ||
+      metadata.has("db.index.fulltext") ||
+      metadata.has("db.index.geo")
+    ) {
+      reject("@db.index.*", "indexes over ciphertext are meaningless");
+    }
+    if (metadata.has("db.search.vector") || metadata.has("db.search.filter")) {
+      reject("@db.search.*", "search over ciphertext is impossible");
+    }
+    if (metadata.has("db.mongo.search.text") || metadata.has("db.mongo.search.autocomplete")) {
+      reject("@db.mongo.search.*", "Atlas Search over ciphertext is impossible");
+    }
+    if (metadata.has("db.column.version")) {
+      reject("@db.column.version", "the OCC filter needs cleartext equality");
+    }
+    if (metadata.has("db.default.increment") || metadata.has("db.default.now")) {
+      reject(
+        "@db.default.increment / @db.default.now",
+        "engine-side defaults bypass the encryption transform",
+      );
+    }
+    if (metadata.get("db.patch.strategy") === "merge") {
+      reject(
+        '@db.patch.strategy "merge"',
+        "ciphertext is opaque — partial merges would silently drop omitted keys",
+      );
+    }
+  }
+
+  /** Build-time diagnostics for `@db.index.geo` (§3 of the geo-index spec). */
+  private _validateGeoIndexField(
+    fieldName: string,
+    fieldType: TAtscriptAnnotatedType,
+    metadata: TMetadataMap<AtscriptMetadata>,
+  ): void {
+    const reject = (why: string) => {
+      throw new Error(`@db.index.geo on "${fieldName}": ${why}`);
+    };
+    if (!isGeoIndexableType(fieldType)) {
+      reject("the field type must resolve to db.geoPoint (a [lng, lat] number tuple)");
+    }
+    if (fieldName.includes(".")) {
+      reject("geo indexes are only supported on top-level fields in v1");
+    }
+    if (metadata.has("db.encrypted")) {
+      reject("@db.index.geo is mutually exclusive with @db.encrypted");
+    }
+    if (metadata.has("db.json")) {
+      reject("@db.index.geo is mutually exclusive with @db.json");
+    }
+    if (metadata.has("meta.id")) {
+      reject("geo fields cannot be part of the primary key");
+    }
+    if (metadata.has("db.index.unique")) {
+      reject("geo fields cannot be part of a unique index");
+    }
+    if (metadata.has("db.rel.FK")) {
+      reject("geo fields cannot be foreign keys");
+    }
+  }
+
   // ── Private: index helpers ───────────────────────────────────────────────
 
   private _addIndexField(
@@ -518,6 +651,13 @@ export class TableMetadata {
   private _classifyFields(): void {
     for (const [path, type] of this.flatMap.entries()) {
       if (!path) {
+        continue;
+      }
+
+      // Encrypted fields are always ONE opaque text column — never flattened
+      // into child columns, never JSON-stored. Their descendants are skipped
+      // entirely (the ciphertext envelope covers the whole subtree).
+      if (this.encryptedFields.has(path) || findAncestorInSet(path, this.encryptedFields)) {
         continue;
       }
 
@@ -568,6 +708,9 @@ export class TableMetadata {
       if (findAncestorInSet(path, this.jsonFields) !== undefined) {
         continue;
       }
+      if (findAncestorInSet(path, this.encryptedFields) !== undefined) {
+        continue;
+      }
 
       const isFlattened = findAncestorInSet(path, this.flattenedParents) !== undefined;
       const columnOverride = this.columnMap.get(path);
@@ -583,7 +726,7 @@ export class TableMetadata {
       this.physicalToPath.set(physicalName, path);
 
       const fieldType = this.flatMap.get(path);
-      if (fieldType) {
+      if (fieldType && !this.encryptedFields.has(path)) {
         const dt = resolveDesignType(fieldType);
         if (dt === "boolean") {
           this.booleanFields.add(physicalName);
@@ -686,14 +829,27 @@ export class TableMetadata {
         continue;
       }
 
+      const isEncrypted = this.encryptedFields.has(path);
+      const underEncrypted = findAncestorInSet(path, this.encryptedFields) !== undefined;
+      // Descendants of an encrypted field have no storage of their own — the
+      // ancestor's ciphertext column covers the subtree. Relational adapters
+      // skip them entirely; document adapters keep them (declared-type shape
+      // for /meta and validation) but inherit the encrypted veto.
+      if (!skipFlattening && underEncrypted) {
+        continue;
+      }
+
       const isJson = this.jsonFields.has(path);
       const isFlattened =
         !skipFlattening && findAncestorInSet(path, this.flattenedParents) !== undefined;
-      const designType = isJson ? "json" : resolveDesignType(type);
+      // Encrypted values are stored as an opaque ASCII envelope — always text.
+      const designType = isEncrypted ? "string" : isJson ? "json" : resolveDesignType(type);
 
       let storage: TDbStorageType;
       if (skipFlattening) {
         storage = "column";
+      } else if (isEncrypted) {
+        storage = isFlattened ? "flattened" : "column";
       } else if (isJson) {
         storage = "json";
       } else if (isFlattened) {
@@ -740,6 +896,8 @@ export class TableMetadata {
         currencyRefField,
         unitCode,
         unitRefField,
+        encrypted: isEncrypted || underEncrypted || undefined,
+        isGeoPoint: isGeoPointType(type) || undefined,
       });
     }
 
@@ -836,6 +994,11 @@ export class TableMetadata {
       }
 
       const targetMetadata = targetFieldType.metadata;
+      if (targetMetadata?.has("db.encrypted")) {
+        throw new Error(
+          `FK field "${descriptor.path}" references encrypted field "${target.targetField}" — joins are impossible over ciphertext`,
+        );
+      }
       descriptor.fkTargetField = {
         path: target.targetField,
         type: targetFieldType,

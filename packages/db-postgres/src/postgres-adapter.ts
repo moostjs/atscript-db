@@ -986,6 +986,10 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   typeMapper(field: TDbFieldMeta): string {
+    if (field.encrypted) {
+      // Ciphertext envelope: unbounded text, plaintext-length-dependent.
+      return "TEXT";
+    }
     // Vector fields → vector(N) when pgvector is available, JSONB otherwise
     if (this._vectorFields.has(field.path)) {
       const vec = this._vectorFields.get(field.path)!;
@@ -1031,6 +1035,9 @@ export class PostgresAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
+      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
+      // models stay portable; sync warns and skips instead of erroring.
+      warnUnsupportedTypes: { adapter: "postgres", types: ["geo"] },
     });
 
     // Create HNSW vector indexes when pgvector is available

@@ -6,7 +6,20 @@ export type DbErrorCode =
   | "INVALID_QUERY"
   | "DEPTH_EXCEEDED"
   | "VERSION_COLUMN_WRITE"
-  | "CAS_EXHAUSTED";
+  | "CAS_EXHAUSTED"
+  // ── Field-level encryption (@db.encrypted) ──
+  | "ENC_CONFIG_MISSING"
+  | "ENC_KEY_INVALID"
+  | "ENC_NOT_ENCRYPTED"
+  | "ENC_DECRYPT_FAILED"
+  | "ENC_FIELD_FILTER"
+  | "ENC_FIELD_SORT"
+  | "ENC_FIELD_AGG"
+  | "ENC_FIELD_PATCH_OP"
+  // ── Geo (db.geoPoint / @db.index.geo) ──
+  | "GEO_INDEX_MISSING"
+  | "GEO_NOT_SUPPORTED"
+  | "FILTER_TYPE_MISMATCH";
 
 export class DbError extends Error {
   name = "DbError";

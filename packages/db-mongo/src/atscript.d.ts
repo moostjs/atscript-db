@@ -40,6 +40,7 @@ declare global {
     "db.index.plain": ({ name?: string, sort?: string })[]
     "db.index.unique": (string | true)[]
     "db.index.fulltext": ({ name?: string, weight?: number })[]
+    "db.index.geo": string | true
     "db.column": string
     "db.column.renamed": string
     "db.column.collate": string
@@ -55,6 +56,7 @@ declare global {
     "db.default.now": boolean
     "db.json": boolean
     "db.ignore": boolean
+    "db.encrypted": boolean
     "db.http.path": string
     "db.sync.method": string
     "db.depth.limit": number
@@ -91,6 +93,6 @@ declare global {
     "db.mongo.search.text": ({ analyzer?: string, indexName?: string })[]
     "db.mongo.search.autocomplete": ({ indexName?: string, tokenization?: string, minGrams?: number, maxGrams?: number, foldDiacritics?: boolean, analyzer?: string })[]
   }
-  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector" | "currencyCode" | "mongo" | "objectId"
+  type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "phantom" | "db" | "vector" | "geoPoint" | "currencyCode" | "mongo" | "objectId"
 }
 // prettier-ignore-end

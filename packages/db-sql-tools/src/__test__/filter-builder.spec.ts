@@ -37,6 +37,19 @@ describe("createFilterVisitor", () => {
       expect(result).toEqual({ sql: "[name] = ?", params: ["Alice"] });
     });
 
+    it("rejects $geoWithin with GEO_NOT_SUPPORTED (geo is MongoDB-only in v1)", () => {
+      expect(() =>
+        visitor.comparison(
+          "geo",
+          "$geoWithin" as never,
+          {
+            center: [0, 0],
+            radius: 10,
+          } as never,
+        ),
+      ).toThrow(expect.objectContaining({ code: "GEO_NOT_SUPPORTED" }));
+    });
+
     it("handles $eq with null", () => {
       const result = visitor.comparison("name", "$eq", null);
       expect(result).toEqual({ sql: "[name] IS NULL", params: [] });

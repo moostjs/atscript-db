@@ -268,5 +268,6 @@ Without `sqlite-vec`, vectors are stored as JSON text and `vectorSearch()` throw
 ## Next Steps
 
 - [Text Search](./) — full-text search with ranked results and field weighting
+- [Geo Search](./geo-search) — distance-ranked search over coordinates (same API shape)
 - [HTTP — Advanced](/http/advanced) — vector search URL parameters
 - [Indexes & Constraints](/api/indexes) — other index types

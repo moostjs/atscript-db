@@ -1,4 +1,5 @@
 import { walkFilter, type FilterExpr, type FilterVisitor } from "@uniqu/core";
+import { DbError } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { EMPTY_AND, EMPTY_OR } from "./dialect";
@@ -9,6 +10,13 @@ import { EMPTY_AND, EMPTY_OR } from "./dialect";
 export function createFilterVisitor(dialect: SqlDialect): FilterVisitor<TSqlFragment> {
   return {
     comparison(field, op, value) {
+      if ((op as string) === "$geoWithin") {
+        // Geo is MongoDB-only in v1 (geo-index spec §5.2) — loud failure,
+        // never a silent full scan with wrong semantics.
+        throw new DbError("GEO_NOT_SUPPORTED", [
+          { path: field, message: "$geoWithin is not supported by this adapter" },
+        ]);
+      }
       const col = dialect.quoteIdentifier(field);
       const v = dialect.toParam(value);
 

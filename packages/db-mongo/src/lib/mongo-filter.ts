@@ -16,6 +16,12 @@ function parseRegexString(value: unknown): { pattern: string; flags: string } {
   return { pattern: str, flags: "" };
 }
 
+/**
+ * Earth radius in meters used by MongoDB's `$centerSphere` radians conversion
+ * (Mongo documents dividing by 6378.1 km).
+ */
+const EARTH_RADIUS_M = 6_378_100;
+
 const mongoVisitor: FilterVisitor<Filter<any>> = {
   comparison(field: string, op: string, value: unknown): Filter<any> {
     if (op === "$eq") {
@@ -26,6 +32,12 @@ const mongoVisitor: FilterVisitor<Filter<any>> = {
       return flags
         ? { [field]: { $regex: pattern, $options: flags } }
         : { [field]: { $regex: pattern } };
+    }
+    if (op === "$geoWithin") {
+      // Circle predicate (core-validated shape: { center: [lng, lat], radius: meters }).
+      // $centerSphere takes radians — meters / earth radius. Works without an index.
+      const { center, radius } = value as { center: [number, number]; radius: number };
+      return { [field]: { $geoWithin: { $centerSphere: [center, radius / EARTH_RADIUS_M] } } };
     }
     return { [field]: { [op]: value } };
   },

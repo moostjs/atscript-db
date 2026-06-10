@@ -365,6 +365,50 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       return errors;
     },
   }),
+
+  encrypted: new AnnotationSpec({
+    description:
+      "Encrypts this field at rest. Values are AES-256-GCM encrypted by the core layer " +
+      "before reaching the database and decrypted on read — transparent to application code.\n\n" +
+      "Constraints: the field cannot be filtered, sorted, indexed, used as PK/FK, " +
+      "patched with arithmetic ops, or referenced by search/vector/geo features.\n\n" +
+      "**Example:**\n" +
+      "```atscript\n" +
+      "@db.encrypted\n" +
+      "apiToken?: string\n" +
+      "```\n",
+    nodeType: ["prop"],
+    multiple: false,
+    validate(token, _args, _doc) {
+      const errors = [] as TMessages;
+      const field = token.parentNode!;
+      const incompatible: Array<[string, string]> = [
+        ["meta.id", "the primary key must be addressable"],
+        ["db.rel.FK", "joins are impossible over ciphertext"],
+        ["db.index.plain", "indexes over ciphertext are meaningless"],
+        ["db.index.unique", "indexes over ciphertext are meaningless"],
+        ["db.index.fulltext", "indexes over ciphertext are meaningless"],
+        ["db.index.geo", "geo indexes over ciphertext are meaningless"],
+        ["db.search.vector", "vector search over ciphertext is impossible"],
+        ["db.search.filter", "search filters need cleartext equality"],
+        ["db.column.version", "the OCC filter needs cleartext equality"],
+        ["db.default.increment", "engine-side defaults bypass the encryption transform"],
+        ["db.default.now", "engine-side defaults bypass the encryption transform"],
+        ["db.mongo.search.text", "Atlas Search over ciphertext is impossible"],
+        ["db.mongo.search.autocomplete", "Atlas Search over ciphertext is impossible"],
+      ];
+      for (const [name, why] of incompatible) {
+        if (field.countAnnotations(name) > 0) {
+          errors.push({
+            message: `@db.encrypted cannot coexist with @${name} — ${why}`,
+            severity: 1,
+            range: token.range,
+          });
+        }
+      }
+      return errors;
+    },
+  }),
 };
 
 function columnCapability(capability: "filterable" | "sortable", verb: string): AnnotationSpec {

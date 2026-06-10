@@ -221,8 +221,9 @@ export abstract class FieldMappingStrategy {
       return value;
     }
 
-    // Direct value: { field: 123 }
-    if (typeof value !== "object") {
+    // Direct value: { field: 123 } — arrays are direct values too
+    // (e.g. a geoPoint tuple equality filter), not operator objects.
+    if (typeof value !== "object" || Array.isArray(value)) {
       return fmt(value);
     }
 

@@ -164,4 +164,5 @@ You can filter on `dimensions.width` (it's a real column), but querying inside `
 
 - [Defaults & Generated Values](/api/defaults) — auto-generated values and static defaults
 - [Indexes & Constraints](/api/indexes) — database indexes, precision, and collation
+- [Field Encryption](/api/encryption) — `@db.encrypted` fields bypass these modes and store as one opaque text column
 - [Tables & Fields](/api/tables) — declaring tables, primary keys, and field types

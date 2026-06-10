@@ -141,6 +141,42 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     } as Uniquery) as Promise<PageResult<Response<T, Q>>>;
   }
 
+  // ── GET /geo ───────────────────────────────────────────────────────────────
+
+  /**
+   * `GET /geo` — distance-ranked geospatial search (tables with `@db.index.geo`).
+   *
+   * `point` is `[lng, lat]` (GeoJSON order). Rows come back ordered by distance
+   * ascending, each carrying a computed `$distance` (meters from `point`).
+   * `$maxDistance` / `$minDistance` (meters) and `$index` (geo index name) ride
+   * in `query.controls`; filter / `$select` / `$with` / `$skip` / `$limit`
+   * compose as usual.
+   */
+  async geoSearch<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+    point: [number, number],
+    query?: Q,
+  ): Promise<Array<Response<T, Q> & { $distance: number }>> {
+    return this._get("geo", {
+      ...query,
+      controls: { ...query?.controls, $center: point.join(",") },
+    } as Uniquery) as Promise<Array<Response<T, Q> & { $distance: number }>>;
+  }
+
+  /**
+   * `GET /geo` with `$page` / `$size` — paginated distance-ranked search.
+   */
+  async geoPages<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+    point: [number, number],
+    query?: Q,
+    page = 1,
+    size = 10,
+  ): Promise<PageResult<Response<T, Q> & { $distance: number }>> {
+    return this._get("geo", {
+      ...query,
+      controls: { ...query?.controls, $center: point.join(","), $page: page, $size: size },
+    } as Uniquery) as Promise<PageResult<Response<T, Q> & { $distance: number }>>;
+  }
+
   // ── GET /one/:id ───────────────────────────────────────────────────────────
 
   /**

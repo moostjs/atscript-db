@@ -24,6 +24,7 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
           default: dbColumnAnnotations.default,
           json: dbColumnAnnotations.json,
           ignore: dbColumnAnnotations.ignore,
+          encrypted: dbColumnAnnotations.encrypted,
           http: dbTableAnnotations.http,
           sync: dbTableAnnotations.sync,
           depth: dbTableAnnotations.depth,
@@ -52,6 +53,24 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
                 "```atscript\n" +
                 '@db.search.vector 1536, "cosine"\n' +
                 "embedding: db.vector\n" +
+                "```\n",
+            },
+            geoPoint: {
+              type: { kind: "array", of: "number" },
+              documentation:
+                "Represents a **geographic point** as a `[longitude, latitude]` tuple " +
+                "(GeoJSON coordinate order).\n\n" +
+                "- Equivalent to `number[]` of length 2, but explicitly marks the field as a geo point.\n" +
+                "- **Coordinate order is GeoJSON order: longitude first.**\n" +
+                "- Each adapter maps this to its native storage:\n" +
+                "  - **MongoDB** → GeoJSON `{ type: 'Point', coordinates: [lng, lat] }`\n" +
+                "  - **PostgreSQL** → PostGIS `geography(Point,4326)` (Phase 2)\n" +
+                "  - **MySQL** → `POINT` SRID 4326 (Phase 2)\n" +
+                "  - **SQLite** → JSON `TEXT` (Phase 2)\n\n" +
+                "**Example:**\n" +
+                "```atscript\n" +
+                "@db.index.geo\n" +
+                "geo: db.geoPoint\n" +
                 "```\n",
             },
             currencyCode: {

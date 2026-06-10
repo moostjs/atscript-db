@@ -84,6 +84,7 @@ Renaming the column via `@db.column 'v'` is not recommended at this time — see
 | `@db.index.plain`    | `name?: string, sort?: 'asc'\|'desc'` | Standard index. Share the same `name` across fields for composite.                                                                                                    |
 | `@db.index.unique`   | `name?: string`                       | Unique constraint index. On optional fields uniqueness applies to present values only (SQL `NULLS DISTINCT`; Mongo partial index) — many value-less rows may coexist. |
 | `@db.index.fulltext` | `name?: string, weight?: number`      | Full-text search index. Translates per-adapter: SQLite FTS5, PG tsvector, MySQL FULLTEXT, Mongo text.                                                                 |
+| `@db.index.geo`      | `name?: string`                       | Geospatial index on a top-level `db.geoPoint` field. MongoDB-only v1 (2dsphere); SQL adapters warn + skip. Full rules → [geo-search.md](./geo-search.md).             |
 
 ## Relations
 
@@ -151,6 +152,15 @@ interface Order {
 | `@db.search.vector`           | `dimensions: number, similarity?: string, indexName?: string` | Vector-indexed field. `similarity`: `'cosine'` (default), `'euclidean'`, `'dotProduct'`. |
 | `@db.search.vector.threshold` | `value: number`                                               | Default min similarity (0–1).                                                            |
 | `@db.search.filter`           | `indexName: string`                                           | Pre-filter field for a specific vector index.                                            |
+
+## Encryption & geo
+
+| Annotation      | Args            | Effect                                                                                                                                                                                   |
+| --------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.encrypted` | none            | AES-256-GCM encryption at rest (core-layer, all adapters). Requires `DbSpace` `encryption` options. No filter/sort/index/agg/arith-patch. Full rules → [encryption.md](./encryption.md). |
+| `@db.index.geo` | `name?: string` | See [Indexes](#indexes) above; full rules → [geo-search.md](./geo-search.md).                                                                                                            |
+
+Primitives: `db.geoPoint` = `[lng, lat]` tuple (longitude FIRST, range-validated on write); `db.vector` = `number[]` embedding; `db.currencyCode` = uppercase code string.
 
 ## PK marker
 

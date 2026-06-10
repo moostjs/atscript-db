@@ -241,6 +241,17 @@ Vector search via HTTP requires the `computeEmbedding()` hook to convert the sea
 
 For annotations and programmatic API, see [Vector Search](/search/vector-search).
 
+## Geo Search ($center, $maxDistance, $minDistance) {#geo-search}
+
+Tables with a [`@db.index.geo`](/search/geo-search) field expose a dedicated `GET /geo` endpoint for distance-ranked queries (MongoDB-only in v1):
+
+```bash
+curl "http://localhost:3000/listings/geo?\$center=-122.42,37.77&\$maxDistance=50000&status=ACTIVE"
+curl "http://localhost:3000/listings/geo?\$center=-122.42,37.77&\$page=1&\$size=20"
+```
+
+`$center` (required) is `lng,lat`; `$maxDistance`/`$minDistance` are meters. Rows come back distance-ordered, each carrying `$distance` (meters); with `$page`/`$size` the response uses the `/pages` envelope. Standard filters, `$select`, and `$with` compose normally. See [Geo Search](/search/geo-search) for the annotation, the programmatic `geoSearch()` API, the `$geoWithin` filter operator, and per-adapter support.
+
 ## Aggregation ($groupBy) {#groupby}
 
 Group records and compute aggregate values using `$groupBy`.

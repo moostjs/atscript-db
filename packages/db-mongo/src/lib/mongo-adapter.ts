@@ -53,12 +53,14 @@ import {
 } from "./mongo-types";
 import type { TMongoRelationHost } from "./mongo-relations";
 import { loadRelationsImpl } from "./mongo-relations";
-import type { TMongoSearchHost } from "./mongo-search";
+import type { TMongoGeoHost, TMongoSearchHost } from "./mongo-search";
 import {
   searchImpl,
   searchWithCountImpl,
   vectorSearchImpl,
   vectorSearchWithCountImpl,
+  geoSearchImpl,
+  geoSearchWithCountImpl,
   getSearchIndexesImpl,
   isVectorSearchableImpl,
 } from "./mongo-search";
@@ -300,9 +302,39 @@ export class MongoAdapter extends BaseDbAdapter {
    * filterability blocker the way it is for SQL adapters.
    * `canSortField` keeps the conservative default (no sort on JSON storage):
    * sort-by-min/max-element on arrays is a footgun for generic UI sort headers.
+   *
+   * The `@db.encrypted` veto is core-supplied and absolute: ciphertext
+   * envelopes cannot be filtered, no matter how permissive Mongo is.
    */
-  override canFilterField(_fd: TDbFieldMeta): boolean {
-    return true;
+  override canFilterField(fd: TDbFieldMeta): boolean {
+    return !fd.encrypted;
+  }
+
+  /**
+   * Converts `db.geoPoint` tuples to/from GeoJSON Point storage:
+   * write `[lng, lat]` → `{ type: 'Point', coordinates: [lng, lat] }`,
+   * unwrap back to the tuple on read. Non-tuple values (e.g. `$geoWithin`
+   * operator objects flowing through filter translation) pass through.
+   */
+  override formatValue(field: TDbFieldMeta) {
+    if (!field.isGeoPoint) {
+      return undefined;
+    }
+    return {
+      toStorage: (value: unknown) =>
+        Array.isArray(value) &&
+        value.length === 2 &&
+        typeof value[0] === "number" &&
+        typeof value[1] === "number"
+          ? { type: "Point", coordinates: value }
+          : value,
+      fromStorage: (value: unknown) => {
+        const v = value as { type?: string; coordinates?: unknown } | null;
+        return v && typeof v === "object" && v.type === "Point" && Array.isArray(v.coordinates)
+          ? v.coordinates
+          : value;
+      },
+    };
   }
 
   // Uses default 'db.__topLevelArray' tag from base adapter
@@ -643,6 +675,18 @@ export class MongoAdapter extends BaseDbAdapter {
   }
   override async vectorSearchWithCount(vector: number[], query: DbQuery, indexName?: string) {
     return vectorSearchWithCountImpl(this as any as TMongoSearchHost, vector, query, indexName);
+  }
+
+  // ── Geo search ───────────────────────────────────────────────────────────
+
+  override isGeoSearchable(): boolean {
+    return true;
+  }
+  override async geoSearch(point: [number, number], query: DbQuery, indexName?: string) {
+    return geoSearchImpl(this as any as TMongoGeoHost, point, query, indexName);
+  }
+  override async geoSearchWithCount(point: [number, number], query: DbQuery, indexName?: string) {
+    return geoSearchWithCountImpl(this as any as TMongoGeoHost, point, query, indexName);
   }
 
   override async findManyWithCount(

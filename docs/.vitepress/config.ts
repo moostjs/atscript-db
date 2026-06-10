@@ -211,6 +211,7 @@ const schemaApiSidebar = [
       { text: "Storage & Nested Objects", link: "/api/storage" },
       { text: "Defaults & Generated Values", link: "/api/defaults" },
       { text: "Indexes & Constraints", link: "/api/indexes" },
+      { text: "Field Encryption", link: "/api/encryption" },
       { text: "Foreign Keys", link: "/relations/" },
       { text: "Navigation Properties", link: "/relations/navigation" },
       { text: "Referential Actions", link: "/relations/referential-actions" },
@@ -220,6 +221,7 @@ const schemaApiSidebar = [
       { text: "Aggregation Views", link: "/views/aggregation-views" },
       { text: "Text Search", link: "/search/" },
       { text: "Vector Search", link: "/search/vector-search" },
+      { text: "Geo Search", link: "/search/geo-search" },
     ],
   },
   {

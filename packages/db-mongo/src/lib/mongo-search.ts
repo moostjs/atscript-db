@@ -1,5 +1,6 @@
 import type { Collection, Document } from "mongodb";
-import type { DbControls, DbQuery, TSearchIndexInfo } from "@atscript/db";
+import { DbError } from "@atscript/db";
+import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/db";
 import type { TMongoIndex, TSearchIndex } from "./mongo-types";
 import { buildMongoFilter } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
@@ -12,6 +13,14 @@ export interface TMongoSearchHost {
   getMongoSearchIndex(name?: string): TMongoIndex | undefined;
   getMongoSearchIndexes(): Map<string, TMongoIndex>;
   getVectorThreshold(indexKey?: string): number | undefined;
+  _getSessionOpts(): Record<string, unknown>;
+  _log(...args: unknown[]): void;
+}
+
+/** Host interface for geo search — needs the table's generic index map. */
+export interface TMongoGeoHost {
+  readonly collection: Collection<any>;
+  readonly _table: { indexes: Map<string, TDbIndex>; tableName: string };
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
 }
@@ -114,6 +123,140 @@ export async function vectorSearchWithCountImpl(
   );
   const threshold = resolveThreshold(host, controls, indexName);
   return runSearchWithCountPipeline(host, stage, query, "vectorSearchWithCount", threshold);
+}
+
+// ── Geo search ($geoNear) ────────────────────────────────────────────────────
+
+/**
+ * Field name `$geoNear` writes the computed distance into. Renamed to the
+ * public `$distance` pseudo-field after fetch — Mongo field paths cannot
+ * start with `$`, so the public name can't be used as `distanceField`.
+ */
+const DISTANCE_FIELD = "__atscript_distance";
+
+/** Distance-ranked geo search via a leading `$geoNear` aggregation stage. */
+export async function geoSearchImpl(
+  host: TMongoGeoHost,
+  point: [number, number],
+  query: DbQuery,
+  indexName?: string,
+): Promise<Array<Record<string, unknown>>> {
+  const controls = (query.controls || {}) as Record<string, unknown>;
+  // $geoNear MUST be the first pipeline stage (hard MongoDB requirement) —
+  // it absorbs the filter via its `query` option.
+  const pipeline: Document[] = [buildGeoNearStage(host, point, query, indexName)];
+  if (controls.$skip) {
+    pipeline.push({ $skip: controls.$skip });
+  }
+  pipeline.push({ $limit: (controls.$limit as number) || 1000 });
+  pushGeoProjection(pipeline, query.controls);
+
+  host._log("aggregate (geoSearch)", pipeline);
+  const rows = await wrapInvalidQuery(() =>
+    host.collection.aggregate(pipeline, host._getSessionOpts()).toArray(),
+  );
+  return rows.map((row) => renameDistance(row));
+}
+
+/** Geo search with faceted count (rows within the distance window). */
+export async function geoSearchWithCountImpl(
+  host: TMongoGeoHost,
+  point: [number, number],
+  query: DbQuery,
+  indexName?: string,
+): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+  const controls = (query.controls || {}) as Record<string, unknown>;
+  const dataStages: Document[] = [];
+  if (controls.$skip) {
+    dataStages.push({ $skip: controls.$skip });
+  }
+  if (controls.$limit) {
+    dataStages.push({ $limit: controls.$limit });
+  }
+  pushGeoProjection(dataStages, query.controls);
+
+  const pipeline: Document[] = [
+    buildGeoNearStage(host, point, query, indexName),
+    { $facet: { data: dataStages, meta: [{ $count: "count" }] } },
+  ];
+
+  host._log("aggregate (geoSearchWithCount)", pipeline);
+  const result = await wrapInvalidQuery(() =>
+    host.collection.aggregate(pipeline, host._getSessionOpts()).toArray(),
+  );
+  return {
+    data: ((result[0]?.data as Array<Record<string, unknown>>) || []).map((row) =>
+      renameDistance(row),
+    ),
+    count: (result[0]?.meta?.[0]?.count as number) || 0,
+  };
+}
+
+/** Builds the leading `$geoNear` stage; the filter rides in its `query` option. */
+function buildGeoNearStage(
+  host: TMongoGeoHost,
+  point: [number, number],
+  query: DbQuery,
+  indexName?: string,
+): Document {
+  const controls = (query.controls || {}) as Record<string, unknown>;
+  const geoNear: Document = {
+    near: { type: "Point", coordinates: point },
+    distanceField: DISTANCE_FIELD,
+    spherical: true,
+    // `key` pins the 2dsphere index — required when several geo indexes exist.
+    key: resolveGeoKeyPath(host, indexName),
+    query: buildMongoFilter(query.filter),
+  };
+  if (typeof controls.$maxDistance === "number") {
+    geoNear.maxDistance = controls.$maxDistance;
+  }
+  if (typeof controls.$minDistance === "number") {
+    geoNear.minDistance = controls.$minDistance;
+  }
+  return { $geoNear: geoNear };
+}
+
+/** Resolves the physical field path of the targeted geo index. */
+function resolveGeoKeyPath(host: TMongoGeoHost, indexName?: string): string {
+  const geoIndexes = [...host._table.indexes.values()].filter((index) => index.type === "geo");
+  const index = indexName
+    ? geoIndexes.find((candidate) => candidate.name === indexName)
+    : geoIndexes[0];
+  const field = index?.fields[0]?.name;
+  if (!field) {
+    // The core layer guards this before delegating; defensive for direct adapter use.
+    throw new DbError("GEO_INDEX_MISSING", [
+      {
+        path: indexName ?? "",
+        message: `No geo index${indexName ? ` "${indexName}"` : ""} on "${host._table.tableName}"`,
+      },
+    ]);
+  }
+  return field;
+}
+
+/** Appends a `$project` stage, keeping the computed distance in inclusion mode. */
+function pushGeoProjection(stages: Document[], controls: DbControls | undefined): void {
+  const projection = controls?.$select?.asProjection;
+  if (!projection) {
+    return;
+  }
+  const deduped = dedupeProjection(projection) as Record<string, 0 | 1>;
+  const isInclusion = Object.values(deduped).some((v) => v === 1);
+  if (isInclusion) {
+    deduped[DISTANCE_FIELD] = 1;
+  }
+  stages.push({ $project: deduped });
+}
+
+/** Renames the internal distance field to the public `$distance` pseudo-field. */
+function renameDistance(row: Record<string, unknown>): Record<string, unknown> {
+  if (DISTANCE_FIELD in row) {
+    row.$distance = row[DISTANCE_FIELD];
+    delete row[DISTANCE_FIELD];
+  }
+  return row;
 }
 
 /** Resolves the effective threshold: query-time $threshold > schema-level @db.search.vector.threshold. */

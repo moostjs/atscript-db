@@ -158,6 +158,17 @@ export interface User {
 Adding `@db.index.*` creates the matching managed index; removing the
 annotation drops it.
 
+Two annotation-driven special cases participate in the schema hash like any
+other change:
+
+- [`@db.index.geo`](/search/geo-search) syncs to a managed `2dsphere` index on
+  MongoDB; SQL adapters log a warning and skip it (no index created, no drift
+  churn when switching adapters).
+- Toggling [`@db.encrypted`](/api/encryption) changes the field's storage type
+  (ciphertext is unbounded text), so sync runs — but sync **never**
+  encrypts/decrypts existing data, and key material is never written to the
+  database.
+
 ## Foreign Keys
 
 Foreign key changes are detected by `computeForeignKeyDiff()`, which compares the desired FK constraints (from `@db.rel.FK` annotations) against a stored snapshot. Three change types are tracked:

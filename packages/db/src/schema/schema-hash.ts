@@ -19,6 +19,8 @@ export interface TFieldSnapshot {
   defaultValue?: TDbDefaultValue;
   /** Adapter-specific mapped type (e.g., "VARCHAR(255)", "INTEGER"). */
   mappedType?: string;
+  /** `@db.encrypted` — toggling encryption changes the snapshot hash on every adapter. */
+  encrypted?: boolean;
 }
 
 interface TIndexSnapshot {
@@ -76,6 +78,9 @@ function extractFieldSnapshots(
       }
       if (typeMapper) {
         snap.mappedType = typeMapper(f);
+      }
+      if (f.encrypted) {
+        snap.encrypted = true;
       }
       return snap;
     })

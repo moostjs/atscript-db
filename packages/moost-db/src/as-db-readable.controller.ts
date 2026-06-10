@@ -16,7 +16,12 @@ import { augmentRowsWithActions } from "./actions/list-augmenter";
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
 import { READABLE_DEF } from "./decorators";
 import { findFilterOffender } from "./gate-utils";
-import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
+import {
+  GEO_CONTROLS,
+  ONE_CONTROLS,
+  PAGES_CONTROLS,
+  QUERY_CONTROLS,
+} from "./permissions/crud-controls";
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -718,6 +723,135 @@ export class AsDbReadableController<
   }
 
   /**
+   * **GET /geo** — distance-ranked geospatial search (mirrors the search /
+   * vector read endpoints; geo-index spec §7).
+   *
+   * URL controls: `$center=lng,lat` (required), `$maxDistance` / `$minDistance`
+   * (meters), `$index` (geo index name), plus the standard filter / `$select` /
+   * `$with` / pagination syntax. Each row carries a computed `$distance`
+   * (meters). With `$page` / `$size` the response is the `/pages` envelope;
+   * otherwise a plain row array (`$skip` / `$limit` compose).
+   */
+  @Get("geo")
+  async geo(
+    @Url() url: string,
+  ): Promise<
+    | DataType[]
+    | { data: DataType[]; page: number; itemsPerPage: number; pages: number; count: number }
+    | HttpError
+  > {
+    const parsed = this.parseQueryString(url);
+    const controls = parsed.controls as Record<string, unknown>;
+    this._coerceActionsControl(controls);
+
+    const point = this._parseGeoCenter(controls.$center);
+    if (point instanceof HttpError) {
+      return point;
+    }
+    for (const key of ["$maxDistance", "$minDistance"] as const) {
+      if (controls[key] !== undefined) {
+        const num = Number(controls[key]);
+        if (!Number.isFinite(num) || num < 0) {
+          return new HttpError(400, `${key} must be a non-negative number of meters`);
+        }
+        controls[key] = num;
+      }
+    }
+    const indexName = typeof controls.$index === "string" ? controls.$index : undefined;
+
+    if (parsed.insights) {
+      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
+      if (insightsError) {
+        return new HttpError(400, insightsError);
+      }
+    }
+    const gateError = this.checkGates(parsed.filter, controls, this._gates);
+    if (gateError) {
+      return gateError;
+    }
+
+    const [filter, rawSelect] = await Promise.all([
+      this.transformFilter(parsed.filter),
+      this.transformProjection(controls.$select as UniqueryControls["$select"]),
+    ]);
+    const select = this.widenPreferredIdProjection(rawSelect);
+    if (select instanceof HttpError) {
+      return select;
+    }
+
+    const paginated = controls.$page !== undefined || controls.$size !== undefined;
+    const page = Math.max(Number(controls.$page || 1), 1);
+    const size = Math.max(Number(controls.$size || 10), 1);
+
+    const queryObj = {
+      filter,
+      controls: {
+        ...controls,
+        $center: undefined,
+        $index: undefined,
+        $select: select,
+        ...(paginated
+          ? { $skip: (page - 1) * size, $limit: size }
+          : { $limit: controls.$limit || 1000 }),
+      },
+    } as Uniquery<any, any>;
+
+    if (paginated) {
+      const result = await this._runReadWithActions(
+        queryObj,
+        controls,
+        select,
+        async (q): Promise<{ data: DataType[]; count: number }> =>
+          (indexName
+            ? this.readable.geoSearchWithCount(indexName, point, q)
+            : this.readable.geoSearchWithCount(point, q)) as Promise<{
+            data: DataType[];
+            count: number;
+          }>,
+      );
+      return {
+        data: result.data,
+        page,
+        itemsPerPage: size,
+        pages: Math.ceil(result.count / size),
+        count: result.count,
+      };
+    }
+
+    const wrapped = await this._runReadWithActions(
+      queryObj,
+      controls,
+      select,
+      async (q): Promise<{ data: DataType[] }> => ({
+        data: (await (indexName
+          ? this.readable.geoSearch(indexName, point, q)
+          : this.readable.geoSearch(point, q))) as DataType[],
+      }),
+    );
+    return wrapped.data;
+  }
+
+  /** Parses the `$center` control: `"lng,lat"` string (or tuple) → `[number, number]`. */
+  private _parseGeoCenter(raw: unknown): [number, number] | HttpError {
+    let lng: number | undefined;
+    let lat: number | undefined;
+    if (typeof raw === "string") {
+      const parts = raw.split(",");
+      if (parts.length === 2) {
+        lng = Number(parts[0]);
+        lat = Number(parts[1]);
+      }
+    } else if (Array.isArray(raw) && raw.length === 2) {
+      lng = Number(raw[0]);
+      lat = Number(raw[1]);
+    }
+    if (lng === undefined || lat === undefined || !Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return new HttpError(400, "$center is required: $center=lng,lat (GeoJSON order)");
+    }
+    return [lng, lat];
+  }
+
+  /**
    * **GET /one/:id** — retrieves a single record by ID or unique property.
    * The id-filter is AND-combined with {@link transformOne} so row-level
    * read overlays gate `/one` symmetrically with `/query` / `/pages`.
@@ -813,6 +947,16 @@ export class AsDbReadableController<
     const filterableMode = this.readable.type.metadata.get("db.table.filterable") === "manual";
     const sortableMode = this.readable.type.metadata.get("db.table.sortable") === "manual";
 
+    // Physical column names carrying a @db.index.geo index → `geo: true` flag.
+    const geoIndexedPhysical = new Set<string>();
+    if (this.readable.indexes instanceof Map) {
+      for (const index of this.readable.indexes.values()) {
+        if (index.type === "geo") {
+          for (const f of index.fields) geoIndexedPhysical.add(f.name);
+        }
+      }
+    }
+
     const fields: TMetaResponse["fields"] = {};
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
@@ -830,11 +974,20 @@ export class AsDbReadableController<
         sortable: adapterCanSort && (sortableMode ? annotatedSortable : !!fd.isIndexed),
         filterable: adapterCanFilter && (filterableMode ? annotatedFilterable : true),
       };
+      if (fd.encrypted) {
+        // At-rest protection marker: filterable/sortable are already vetoed
+        // by the adapter gate above; UIs use this to render a lock indicator.
+        fields[fd.path].encrypted = true;
+      }
+      if (geoIndexedPhysical.has(fd.physicalName)) {
+        fields[fd.path].geo = true;
+      }
     }
 
     return {
       searchable: this.readable.isSearchable(),
       vectorSearchable: this.readable.isVectorSearchable(),
+      geoSearchable: this._isGeoSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),
       primaryKeys: [...this.readable.primaryKeys],
       preferredId: [...this.readable.preferredId],
@@ -856,7 +1009,22 @@ export class AsDbReadableController<
       query: [...QUERY_CONTROLS],
       pages: [...PAGES_CONTROLS],
       one: [...ONE_CONTROLS],
+      ...(this._isGeoSearchable() ? { geo: [...GEO_CONTROLS] } : {}),
     };
+  }
+
+  /** Adapter supports geo search AND the table declares at least one geo index. */
+  private _isGeoSearchable(): boolean {
+    if (typeof this.readable.isGeoSearchable !== "function" || !this.readable.isGeoSearchable()) {
+      return false;
+    }
+    if (!(this.readable.indexes instanceof Map)) {
+      return false;
+    }
+    for (const index of this.readable.indexes.values()) {
+      if (index.type === "geo") return true;
+    }
+    return false;
   }
 }
 

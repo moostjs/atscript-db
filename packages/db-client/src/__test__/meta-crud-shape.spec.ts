@@ -5,7 +5,7 @@ import type { MetaResponse, TCrudOp, TCrudPermissions } from "../index";
 describe("MetaResponse — crud shape", () => {
   it("re-exports TCrudOp and TCrudPermissions", () => {
     expectTypeOf<TCrudOp>().toEqualTypeOf<
-      "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove"
+      "query" | "pages" | "one" | "geo" | "insert" | "update" | "replace" | "remove"
     >();
     expectTypeOf<TCrudPermissions>().toEqualTypeOf<Partial<Record<TCrudOp, string[]>>>();
   });

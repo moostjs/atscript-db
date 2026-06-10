@@ -68,10 +68,22 @@ export interface TRelationInfo {
 export interface TFieldMeta {
   sortable: boolean;
   filterable: boolean;
+  /** Present (true) when the field is `@db.encrypted` — stored as ciphertext at rest. */
+  encrypted?: boolean;
+  /** Present (true) when the field carries a `@db.index.geo` geospatial index. */
+  geo?: boolean;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
-export type TCrudOp = "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove";
+export type TCrudOp =
+  | "query"
+  | "pages"
+  | "one"
+  | "geo"
+  | "insert"
+  | "update"
+  | "replace"
+  | "remove";
 
 /**
  * CRUD permissions advertised in `/meta`. Key absent → operation is denied or
@@ -85,6 +97,8 @@ export type TCrudPermissions = Partial<Record<TCrudOp, string[]>>;
 export interface TMetaResponse {
   searchable: boolean;
   vectorSearchable: boolean;
+  /** Whether the adapter supports `geoSearch()` AND the table declares a geo index. */
+  geoSearchable?: boolean;
   searchIndexes: TSearchIndexInfo[];
   primaryKeys: string[];
   preferredId: string[];
@@ -203,7 +217,7 @@ export interface TDbDeleteResult {
 
 // ── Index Types ─────────────────────────────────────────────────────────────
 
-export type TDbIndexType = "plain" | "unique" | "fulltext";
+export type TDbIndexType = "plain" | "unique" | "fulltext" | "geo";
 
 export interface TDbIndexField {
   name: string;
@@ -321,6 +335,19 @@ export interface TDbFieldMeta {
    * Undefined for non-FK fields or when the target cannot be resolved.
    */
   fkTargetField?: TDbFieldMeta;
+  /**
+   * `@db.encrypted` — the value is AES-256-GCM encrypted by the core layer
+   * before reaching the adapter. Adapters must map the column to an unbounded
+   * text type and veto filtering/sorting (`canFilterField`/`canSortField`).
+   * The descriptor's `designType` is forced to `'string'` (ciphertext envelope);
+   * the declared type stays available via `type` for validation.
+   */
+  encrypted?: boolean;
+  /**
+   * The field's declared type is the `db.geoPoint` primitive (`[lng, lat]` tuple).
+   * Adapters map this to their native geo storage (e.g. MongoDB GeoJSON Point).
+   */
+  isGeoPoint?: boolean;
 }
 
 // ── Value Formatters ─────────────────────────────────────────────────────

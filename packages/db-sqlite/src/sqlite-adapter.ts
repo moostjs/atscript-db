@@ -599,6 +599,10 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   typeMapper(field: TDbFieldMeta): string {
+    if (field.encrypted) {
+      // Ciphertext envelope: unbounded text, plaintext-length-dependent.
+      return "TEXT";
+    }
     if (this._vectorFields.has(field.path)) {
       return this._detectVectorSupport() ? "BLOB" : "TEXT";
     }
@@ -650,6 +654,9 @@ export class SqliteAdapter extends BaseDbAdapter {
         this.driver.exec(sql);
       },
       shouldSkipType: (type) => type === "fulltext",
+      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
+      // models stay portable; sync warns and skips instead of erroring.
+      warnUnsupportedTypes: { adapter: "sqlite", types: ["geo"] },
     });
 
     // Sync FTS5 virtual tables for fulltext indexes

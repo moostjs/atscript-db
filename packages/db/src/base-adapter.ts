@@ -8,6 +8,8 @@ import type {
 
 import type { FilterExpr } from "@uniqu/core";
 
+import { DbError } from "./db-error";
+
 import type {
   DbQuery,
   TDbIndex,
@@ -293,6 +295,11 @@ export abstract class BaseDbAdapter {
    * even when the field carries `@db.column.filterable`.
    */
   canFilterField(fd: TDbFieldMeta): boolean {
+    if (fd.encrypted) {
+      // Core-supplied veto (field-encryption spec §6): equality/range over
+      // ciphertext is meaningless. Adapter overrides MUST respect this flag.
+      return false;
+    }
     return fd.storage !== "json";
   }
 
@@ -303,6 +310,11 @@ export abstract class BaseDbAdapter {
    * stays conservative even for adapters that technically support it.
    */
   canSortField(fd: TDbFieldMeta): boolean {
+    if (fd.encrypted || fd.isGeoPoint) {
+      // Encrypted: ciphertext order is meaningless. Geo: distance sort goes
+      // through geoSearch(), never $sort.
+      return false;
+    }
     return fd.storage !== "json";
   }
 
@@ -459,6 +471,11 @@ export abstract class BaseDbAdapter {
     dropIndex(name: string): Promise<void>;
     prefix?: string;
     shouldSkipType?(type: TDbIndex["type"]): boolean;
+    /**
+     * Index types declared on the model but not supported by this adapter —
+     * warns and skips (models stay portable; sync never errors on these).
+     */
+    warnUnsupportedTypes?: { adapter: string; types: ReadonlyArray<TDbIndex["type"]> };
   }): Promise<void> {
     const prefix = opts.prefix ?? "atscript__";
 
@@ -472,6 +489,12 @@ export abstract class BaseDbAdapter {
 
     // Create missing indexes
     for (const index of this._table.indexes.values()) {
+      if (opts.warnUnsupportedTypes?.types.includes(index.type)) {
+        this.logger.warn(
+          `[${opts.warnUnsupportedTypes.adapter}] ${index.type} index "${index.name}" declared but not supported by this adapter — skipped`,
+        );
+        continue;
+      }
       if (opts.shouldSkipType?.(index.type)) {
         continue;
       }
@@ -579,6 +602,52 @@ export abstract class BaseDbAdapter {
     _indexName?: string,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
     throw new Error("Vector search not supported by this adapter");
+  }
+
+  // ── Geo Search ────────────────────────────────────────────────────────
+
+  /**
+   * Whether this adapter supports geospatial search (`geoSearch()` and the
+   * `$geoWithin` filter operator). Override in adapters that do (MongoDB in v1).
+   */
+  isGeoSearchable(): boolean {
+    return false;
+  }
+
+  /**
+   * Distance-ranked geospatial search. Results sorted by distance ascending;
+   * each row carries a `$distance` field (meters from the query point).
+   * `$maxDistance` / `$minDistance` (meters) ride in `query.controls`.
+   *
+   * @param point - `[lng, lat]` query point (GeoJSON coordinate order).
+   * @param query - Filter, select, skip/limit, $maxDistance/$minDistance.
+   * @param indexName - Optional geo index to target (multi-geo documents).
+   */
+  async geoSearch(
+    _point: [number, number],
+    _query: DbQuery,
+    _indexName?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    throw new DbError("GEO_NOT_SUPPORTED", [
+      { path: "", message: "Geo search not supported by this adapter" },
+    ]);
+  }
+
+  /**
+   * Distance-ranked geospatial search with count (for paginated results).
+   *
+   * @param point - `[lng, lat]` query point (GeoJSON coordinate order).
+   * @param query - Filter, select, skip/limit, $maxDistance/$minDistance.
+   * @param indexName - Optional geo index to target (multi-geo documents).
+   */
+  async geoSearchWithCount(
+    _point: [number, number],
+    _query: DbQuery,
+    _indexName?: string,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    throw new DbError("GEO_NOT_SUPPORTED", [
+      { path: "", message: "Geo search not supported by this adapter" },
+    ]);
   }
 
   // ── Optimized pagination ──────────────────────────────────────────────

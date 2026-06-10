@@ -50,7 +50,22 @@ import type {
   TWriteTableResolver,
 } from "../types";
 
+import { guardFilter } from "../query/query-guards";
+
 export { resolveDesignType } from "./db-readable";
+
+/** Returns true when `value` is a plain object carrying any `$`-prefixed key (an operator object). */
+function _hasOperatorKeys(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  for (const key in value) {
+    if (key.startsWith("$")) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Generic database table abstraction driven by Atscript `@db.*` annotations.
@@ -219,6 +234,9 @@ export class AtscriptDbTable<
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
 
+        // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
+        await this._encryptItems(items, "write");
+
         // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
         const host = this as any as TNestedWriterHost;
         if (canNest) {
@@ -330,6 +348,9 @@ export class AtscriptDbTable<
         const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
+
+        // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
+        await this._encryptItems(items, "write");
 
         const host = this as any as TNestedWriterHost;
 
@@ -449,6 +470,10 @@ export class AtscriptDbTable<
 
         // Preserve originals for FROM/VIA phase (nav fields are stripped in Phase 2)
         const originals = canNest ? cloned.map((p) => ({ ...p })) : [];
+
+        // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
+        // Patch mode also rejects operator objects on encrypted fields (ENC_FIELD_PATCH_OP).
+        await this._encryptItems(cloned, "patch");
 
         const host = this as any as TNestedWriterHost;
 
@@ -600,6 +625,7 @@ export class AtscriptDbTable<
     data: Partial<DataType> & Record<string, unknown>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
+    this._guardMutationFilter(filter as FilterExpr);
     await this._integrity.validateForeignKeys(
       [data as Record<string, unknown>],
       this._meta,
@@ -627,6 +653,9 @@ export class AtscriptDbTable<
     if (versionColumn !== undefined) {
       assertNoVersionWrites(dataCopy, versionColumn);
     }
+    // Encrypt @db.encrypted fields BEFORE decomposition so the patch carries
+    // envelope strings; operator objects on encrypted fields are rejected.
+    await this._encryptItems([dataCopy], "patch");
     // Decompose flattens nested merge-strategy objects into dot-paths so that
     // separateFieldOps catches nested ops like { account: { failedLoginAttempts: { $inc: 1 } } }.
     const update = decomposePatch(dataCopy, this as AtscriptDbTable);
@@ -647,22 +676,26 @@ export class AtscriptDbTable<
     data: Record<string, unknown>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
+    this._guardMutationFilter(filter as FilterExpr);
     await this._integrity.validateForeignKeys(
       [data],
       this._meta,
       this._fkLookupResolver,
       this._writeTableResolver,
     );
+    const dataCopy = { ...data };
+    await this._encryptItems([dataCopy], "write");
     return enrichFkViolation(this._meta, () =>
       this.adapter.replaceMany(
         this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
-        this._fieldMapper.prepareForWrite({ ...data }, this._meta, this.adapter),
+        this._fieldMapper.prepareForWrite(dataCopy, this._meta, this.adapter),
       ),
     );
   }
 
   public async deleteMany(filter: FilterExpr<FlatType>): Promise<TDbDeleteResult> {
     this._ensureBuilt();
+    this._guardMutationFilter(filter as FilterExpr);
     if (this._integrity.needsCascade(this._cascadeResolver)) {
       return remapDeleteFkViolation(this.tableName, () =>
         this.adapter.withTransaction(async () => {
@@ -704,6 +737,56 @@ export class AtscriptDbTable<
   }
 
   // ── Internal: write preparation ───────────────────────────────────────────
+
+  /** Engine-agnostic guard for user-supplied mutation filters (updateMany/deleteMany/…). */
+  protected _guardMutationFilter(filter: FilterExpr): void {
+    guardFilter(this._meta, this.adapter, filter);
+  }
+
+  /**
+   * Encrypts `@db.encrypted` field values in place on (already validated)
+   * write payloads — between validation and `prepareForWrite`, so adapters
+   * only ever see envelope strings.
+   *
+   * Parent objects along an encrypted path are shallow-cloned before
+   * mutation so caller-shared nested objects are never modified.
+   *
+   * In `patch` mode, operator objects (`$inc`, `$insert`, …) targeting an
+   * encrypted field are rejected with `ENC_FIELD_PATCH_OP` — ciphertext is
+   * opaque; only plain re-assignment (which re-encrypts) is allowed.
+   */
+  protected async _encryptItems(
+    items: Array<Record<string, unknown>>,
+    mode: "write" | "patch",
+  ): Promise<void> {
+    const enc = this._encryption;
+    if (this._meta.encryptedFields.size === 0 || !enc) {
+      return;
+    }
+    for (const item of items) {
+      for (const { path, segments, leaf } of this._encryptedPaths) {
+        const parent = this._walkToLeafParent(item, segments, true);
+        if (!parent) {
+          continue;
+        }
+        const value = parent[leaf];
+        if (value === undefined || value === null) {
+          continue;
+        }
+        if (mode === "patch" && _hasOperatorKeys(value)) {
+          throw new DbError("ENC_FIELD_PATCH_OP", [
+            {
+              path,
+              message:
+                `Operator patch ops are not allowed on encrypted field "${path}" — ` +
+                `assign a plain value instead (it re-encrypts)`,
+            },
+          ]);
+        }
+        parent[leaf] = await enc.encrypt(value);
+      }
+    }
+  }
 
   /**
    * Applies default values for fields that are missing from the payload.

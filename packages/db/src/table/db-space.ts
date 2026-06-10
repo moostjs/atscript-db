@@ -4,6 +4,7 @@ import { AtscriptDbTable } from "./db-table";
 import { AtscriptDbView } from "./db-view";
 import type { AtscriptDbReadable } from "./db-readable";
 import type { BaseDbAdapter } from "../base-adapter";
+import { DbEncryption, type TDbEncryptionOptions } from "../encryption";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type { TCascadeTarget, TFkLookupTarget } from "../types";
@@ -13,6 +14,14 @@ import type { TCascadeTarget, TFkLookupTarget } from "../types";
  * Each readable gets its own adapter (1:1 relationship required by BaseDbAdapter).
  */
 export type TAdapterFactory = () => BaseDbAdapter;
+
+/** Options bag for {@link DbSpace} (second constructor argument). */
+export interface TDbSpaceOptions {
+  /** Logger shared by all tables/views in the space. */
+  logger?: TGenericLogger;
+  /** Field-level encryption configuration for `@db.encrypted` fields. */
+  encryption?: TDbEncryptionOptions;
+}
 
 interface TWeakMapOf<V> {
   has(key: TAtscriptAnnotatedType): boolean;
@@ -47,10 +56,30 @@ export class DbSpace {
   /** Lazily created adapter for administrative ops (drop table/view) that don't need a registered readable. */
   private _adminAdapter?: BaseDbAdapter;
 
+  protected readonly logger: TGenericLogger;
+
+  /** Encryption service for `@db.encrypted` fields — validated eagerly at construction. */
+  protected readonly _encryption?: DbEncryption;
+
+  /**
+   * @param adapterFactory - Creates a fresh adapter per table/view.
+   * @param loggerOrOptions - Either a logger (legacy signature) or a
+   *   {@link TDbSpaceOptions} bag carrying `logger` and/or `encryption`.
+   */
   constructor(
     protected readonly adapterFactory: TAdapterFactory,
-    protected readonly logger: TGenericLogger = NoopLogger,
-  ) {}
+    loggerOrOptions?: TGenericLogger | TDbSpaceOptions,
+  ) {
+    if (loggerOrOptions && typeof (loggerOrOptions as TGenericLogger).error === "function") {
+      this.logger = loggerOrOptions as TGenericLogger;
+    } else {
+      const options = (loggerOrOptions ?? {}) as TDbSpaceOptions;
+      this.logger = options.logger ?? NoopLogger;
+      if (options.encryption) {
+        this._encryption = new DbEncryption(options.encryption);
+      }
+    }
+  }
 
   /**
    * Auto-detects whether the type is a table or view and returns the
@@ -84,6 +113,7 @@ export class DbSpace {
       this._allTables.add(readable as AtscriptDbTable);
       readable.setCascadeResolver((tableName) => this._getCascadeTargets(tableName));
       readable.setFkLookupResolver((tableName) => this._getFkLookupTarget(tableName));
+      readable.setEncryption(this._encryption);
       this._readables.set(type, readable as AtscriptDbReadable);
     }
     return readable as AtscriptDbTable<T>;
@@ -103,6 +133,7 @@ export class DbSpace {
         logger || this.logger,
         (t) => this.get(t) as any,
       );
+      readable.setEncryption(this._encryption);
       this._readables.set(type, readable as AtscriptDbReadable);
     }
     return readable as AtscriptDbView<T>;

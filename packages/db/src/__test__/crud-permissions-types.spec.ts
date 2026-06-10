@@ -5,7 +5,7 @@ import type { TCrudOp, TCrudPermissions, TMetaResponse } from "../index";
 describe("crud permissions types", () => {
   it("TCrudOp is the documented union", () => {
     expectTypeOf<TCrudOp>().toEqualTypeOf<
-      "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove"
+      "query" | "pages" | "one" | "geo" | "insert" | "update" | "replace" | "remove"
     >();
   });
 

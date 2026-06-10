@@ -135,5 +135,6 @@ MongoDB Atlas goes beyond word matching with **autocomplete/typeahead**, query-t
 ## Next Steps
 
 - [Vector Search](./vector-search) — similarity search with embedding vectors
+- [Geo Search](./geo-search) — distance-ranked search over coordinates
 - [Indexes & Constraints](/api/indexes) — other index types (plain, unique)
 - [HTTP — Advanced](/http/advanced) — search and vector search URL parameters

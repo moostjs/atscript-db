@@ -610,7 +610,7 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
 
   // Convert generic table indexes to MongoDB format
   for (const [key, index] of host._table.indexes.entries()) {
-    const fields: Record<string, 1 | "text"> = {};
+    const fields: Record<string, 1 | "text" | "2dsphere"> = {};
     const weights: Record<string, number> = {};
     let mongoType: TPlainIndex["type"];
     if (index.type === "fulltext") {
@@ -622,6 +622,12 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         // weight 1, so omitting them here would make objMatch() churn the index
         // on every sync.
         weights[f.name] = f.weight ?? 1;
+      }
+    } else if (index.type === "geo") {
+      // @db.index.geo → 2dsphere over the GeoJSON-stored field.
+      mongoType = "2dsphere";
+      for (const f of index.fields) {
+        fields[f.name] = "2dsphere";
       }
     } else {
       mongoType = index.type as "plain" | "unique";
@@ -675,7 +681,8 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
       switch (local.type) {
         case "plain":
         case "unique":
-        case "text": {
+        case "text":
+        case "2dsphere": {
           const fieldsMatch = local.type === "text" || objMatch(local.fields, remote.key);
           const weightsMatch = objMatch(local.weights || {}, remote.weights || {});
           // A matching key is NOT sufficient for plain/unique indexes: a change
@@ -735,6 +742,14 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         }
         host._log("createIndex (text)", key, value.fields);
         await host.collection.createIndex(value.fields, { weights: value.weights, name: key });
+        break;
+      }
+      case "2dsphere": {
+        if (!indexesToCreate.has(key)) {
+          continue;
+        }
+        host._log("createIndex (2dsphere)", key, value.fields);
+        await host.collection.createIndex(value.fields, { name: key });
         break;
       }
       default:

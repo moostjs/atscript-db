@@ -9,8 +9,8 @@ export const JOINED_PREFIX = "__joined_";
 export interface TPlainIndex {
   key: string;
   name: string;
-  type: "plain" | "unique" | "text";
-  fields: Record<string, 1 | "text">;
+  type: "plain" | "unique" | "text" | "2dsphere";
+  fields: Record<string, 1 | "text" | "2dsphere">;
   weights: Record<string, number>;
   /**
    * For "present-only" unique indexes on optional fields: a MongoDB

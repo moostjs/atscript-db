@@ -41,6 +41,8 @@ import { type FieldMappingStrategy, DocumentFieldMapper } from "../strategies/fi
 import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
 import type { TRelationLoaderHost } from "../rel/relation-loader";
 import { findFKForRelation, findRemoteFK } from "../rel/relation-helpers";
+import type { DbEncryption } from "../encryption";
+import { assertGeoPoint, guardAggregate, guardQuery } from "../query/query-guards";
 
 /**
  * Extracts nav prop names from a query's `$with` array.
@@ -200,6 +202,9 @@ export class AtscriptDbReadable<
 
   protected _writeTableResolver?: TWriteTableResolver;
 
+  /** Encryption service for `@db.encrypted` fields — set by `DbSpace` from its options. */
+  protected _encryption?: DbEncryption;
+
   private _metaIdPhysical: string | null | undefined;
 
   constructor(
@@ -240,10 +245,32 @@ export class AtscriptDbReadable<
     adapter.registerReadable(this, logger);
   }
 
+  /**
+   * Sets the encryption service used for `@db.encrypted` fields.
+   * Called by `DbSpace` after table/view creation when the space was
+   * configured with an `encryption` options block.
+   */
+  public setEncryption(encryption: DbEncryption | undefined): void {
+    this._encryption = encryption;
+  }
+
   /** Ensures metadata is built. Called before any metadata access. */
   protected _ensureBuilt(): void {
     if (!this._meta.isBuilt) {
       this._meta.build(this.type, this.adapter, this.logger);
+    }
+    if (this._meta.encryptedFields.size > 0 && !this._encryption) {
+      // Never silently store/read plaintext on a model that declares
+      // @db.encrypted — fail fast at the first table use / schema sync.
+      throw new DbError("ENC_CONFIG_MISSING", [
+        {
+          path: "",
+          message:
+            `Table "${this.tableName}" declares @db.encrypted fields but the DbSpace ` +
+            `has no encryption configuration — pass { encryption: { defaultKeyId, keys } } ` +
+            `to the DbSpace options`,
+        },
+      ]);
     }
   }
 
@@ -265,6 +292,86 @@ export class AtscriptDbReadable<
           message: `Table "${this.tableName}" has no search indexes defined`,
         },
       ]);
+    }
+  }
+
+  /** Engine-agnostic query-time guards (encrypted-field refs, $geoWithin shape). */
+  protected _guardQuery(query: Uniquery | undefined): void {
+    guardQuery(this._meta, this.adapter, query as Parameters<typeof guardQuery>[2]);
+  }
+
+  private _encryptedPathsCache?: Array<{ path: string; segments: string[]; leaf: string }>;
+
+  /** Pre-split `encryptedFields` paths — computed once, reused on every read/write. */
+  protected get _encryptedPaths(): Array<{ path: string; segments: string[]; leaf: string }> {
+    return (this._encryptedPathsCache ??= [...this._meta.encryptedFields].map((path) => {
+      const segments = path.split(".");
+      return { path, segments, leaf: segments[segments.length - 1]! };
+    }));
+  }
+
+  /**
+   * Walks all but the last of `segments` down from `root`, returning the
+   * object holding the leaf — or `undefined` when the path is unreachable
+   * (a missing, non-object, or array step). With `cloneParents`, every
+   * traversed object is shallow-cloned and re-linked so caller-shared
+   * nested objects are never mutated.
+   */
+  protected _walkToLeafParent(
+    root: Record<string, unknown>,
+    segments: string[],
+    cloneParents: boolean,
+  ): Record<string, unknown> | undefined {
+    let parent: Record<string, unknown> = root;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const next: unknown = parent[segments[i]!];
+      if (next === null || typeof next !== "object" || Array.isArray(next)) {
+        return undefined;
+      }
+      let child = next as Record<string, unknown>;
+      if (cloneParents) {
+        child = { ...child };
+        parent[segments[i]!] = child;
+      }
+      parent = child;
+    }
+    return parent;
+  }
+
+  /**
+   * Decrypts `@db.encrypted` fields on reconstructed rows (in place).
+   * Non-envelope stored values follow the configured `onUnencrypted` policy.
+   */
+  protected async _decryptRows(rows: Array<Record<string, unknown>>): Promise<void> {
+    const enc = this._encryption;
+    if (this._meta.encryptedFields.size === 0 || rows.length === 0 || !enc) {
+      return;
+    }
+    for (const row of rows) {
+      for (const { path, segments, leaf } of this._encryptedPaths) {
+        const parent = this._walkToLeafParent(row, segments, false);
+        if (!parent) {
+          continue;
+        }
+        const value = parent[leaf];
+        if (value === undefined || value === null) {
+          continue;
+        }
+        if (enc.isEnvelope(value)) {
+          parent[leaf] = await enc.decrypt(value, { table: this.tableName, field: path });
+        } else if (enc.onUnencrypted === "error") {
+          throw new DbError("ENC_NOT_ENCRYPTED", [
+            {
+              path,
+              message:
+                `Field "${path}" on "${this.tableName}" holds a non-encrypted value while ` +
+                `@db.encrypted is declared — set encryption.onUnencrypted: 'passthrough' ` +
+                `to read legacy plaintext during a migration window`,
+            },
+          ]);
+        }
+        // 'passthrough' → return the raw value as-is; it re-encrypts on its next write.
+      }
     }
   }
 
@@ -519,6 +626,7 @@ export class AtscriptDbReadable<
     query: Q,
   ): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
+    this._guardQuery(query as Uniquery);
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translatedQuery = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.findOne(translatedQuery);
@@ -526,6 +634,7 @@ export class AtscriptDbReadable<
       return null;
     }
     const row = this._fieldMapper.reconstructFromRead(result, this._meta);
+    await this._decryptRows([row]);
     if (withRelations?.length) {
       await this.loadRelations([row], withRelations);
     }
@@ -541,10 +650,12 @@ export class AtscriptDbReadable<
     query: Q,
   ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
     this._ensureBuilt();
+    this._guardQuery(query as Uniquery);
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translatedQuery = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const results = await this.adapter.findMany(translatedQuery);
     const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -557,6 +668,7 @@ export class AtscriptDbReadable<
   public async count(query?: Uniquery<OwnProps, NavType>): Promise<number> {
     this._ensureBuilt();
     query ??= { filter: {}, controls: {} } as Uniquery<OwnProps, NavType>;
+    this._guardQuery(query as Uniquery);
     return this.adapter.count(this._fieldMapper.translateQuery(query as Uniquery, this._meta));
   }
 
@@ -567,10 +679,12 @@ export class AtscriptDbReadable<
     query: Q,
   ): Promise<{ data: Array<DbResponse<DataType, NavType, Q>>; count: number }> {
     this._ensureBuilt();
+    this._guardQuery(query as Uniquery);
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.findManyWithCount(translated);
     const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -658,6 +772,9 @@ export class AtscriptDbReadable<
       }
     }
 
+    // Encrypted-field guards: $groupBy / aggregate refs / $having / filter
+    guardAggregate(this._meta, this.adapter, query);
+
     // Translate and delegate
     const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta);
     const results = await this.adapter.aggregate(dbQuery);
@@ -706,10 +823,12 @@ export class AtscriptDbReadable<
   ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
     this._ensureBuilt();
     this._ensureSearchable();
+    this._guardQuery(query as Uniquery);
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const results = await this.adapter.search(text, translated, indexName);
     const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -726,10 +845,12 @@ export class AtscriptDbReadable<
   ): Promise<{ data: Array<DbResponse<DataType, NavType, Q>>; count: number }> {
     this._ensureBuilt();
     this._ensureSearchable();
+    this._guardQuery(query as Uniquery);
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.searchWithCount(text, translated, indexName);
     const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -764,12 +885,14 @@ export class AtscriptDbReadable<
       maybeQuery,
     );
     this._ensureBuilt();
+    this._guardQuery(query as Uniquery | undefined);
     const withRelations = (query?.controls as UniqueryControls)?.$with as
       | WithRelation[]
       | undefined;
     const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
     const results = await this.adapter.vectorSearch(vector, translated, indexName);
     const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -794,12 +917,14 @@ export class AtscriptDbReadable<
       maybeQuery,
     );
     this._ensureBuilt();
+    this._guardQuery(query as Uniquery | undefined);
     const withRelations = (query?.controls as UniqueryControls)?.$with as
       | WithRelation[]
       | undefined;
     const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
     const result = await this.adapter.vectorSearchWithCount(vector, translated, indexName);
     const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
     }
@@ -825,6 +950,159 @@ export class AtscriptDbReadable<
     }
     // vectorSearch(indexName, vector, query?)
     return { vector: maybeVectorOrQuery as number[], query: maybeQuery, indexName: vectorOrIndex };
+  }
+
+  // ── Geo Search ────────────────────────────────────────────────────────
+
+  /** Whether the underlying adapter supports geospatial search. */
+  public isGeoSearchable(): boolean {
+    return this.adapter.isGeoSearchable();
+  }
+
+  /**
+   * Distance-ranked geospatial search (mirrors {@link vectorSearch}).
+   * Results are sorted by distance ascending; each row carries a computed
+   * `$distance` field (meters from the query point). `$maxDistance` /
+   * `$minDistance` (meters) ride in `query.controls`; user `$sort` is rejected.
+   *
+   * Overloads:
+   * - `geoSearch(point, query?)` — uses the table's only geo index
+   * - `geoSearch(indexName, point, query?)` — targets a specific geo index
+   */
+  public async geoSearch<Q extends Uniquery<OwnProps, NavType>>(
+    pointOrIndex: [number, number] | string,
+    maybePointOrQuery?: [number, number] | Q,
+    maybeQuery?: Q,
+  ): Promise<Array<DbResponse<DataType, NavType, Q> & { $distance: number }>> {
+    const { point, query, indexName } = this._resolveGeoSearchArgs<Q>(
+      pointOrIndex,
+      maybePointOrQuery,
+      maybeQuery,
+    );
+    const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
+    const results = await this.adapter.geoSearch(point, translated, indexName);
+    const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
+    if (withRelations?.length) {
+      await this.loadRelations(rows, withRelations);
+    }
+    return rows as Array<DbResponse<DataType, NavType, Q> & { $distance: number }>;
+  }
+
+  /**
+   * Distance-ranked geospatial search with count for paginated results.
+   *
+   * Overloads:
+   * - `geoSearchWithCount(point, query?)` — uses the table's only geo index
+   * - `geoSearchWithCount(indexName, point, query?)` — targets a specific geo index
+   */
+  public async geoSearchWithCount<Q extends Uniquery<OwnProps, NavType>>(
+    pointOrIndex: [number, number] | string,
+    maybePointOrQuery?: [number, number] | Q,
+    maybeQuery?: Q,
+  ): Promise<{
+    data: Array<DbResponse<DataType, NavType, Q> & { $distance: number }>;
+    count: number;
+  }> {
+    const { point, query, indexName } = this._resolveGeoSearchArgs<Q>(
+      pointOrIndex,
+      maybePointOrQuery,
+      maybeQuery,
+    );
+    const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
+    const result = await this.adapter.geoSearchWithCount(point, translated, indexName);
+    const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    await this._decryptRows(rows);
+    if (withRelations?.length) {
+      await this.loadRelations(rows, withRelations);
+    }
+    return {
+      data: rows as Array<DbResponse<DataType, NavType, Q> & { $distance: number }>,
+      count: result.count,
+    };
+  }
+
+  /** Resolves overloaded geo search arguments into canonical form. */
+  private _resolveGeoSearchArgs<Q>(
+    pointOrIndex: [number, number] | string,
+    maybePointOrQuery?: [number, number] | Q,
+    maybeQuery?: Q,
+  ): { point: [number, number]; query: Q | undefined; indexName: string | undefined } {
+    if (Array.isArray(pointOrIndex)) {
+      // geoSearch(point, query?)
+      return {
+        point: pointOrIndex,
+        query: maybePointOrQuery as Q | undefined,
+        indexName: undefined,
+      };
+    }
+    // geoSearch(indexName, point, query?)
+    return {
+      point: maybePointOrQuery as [number, number],
+      query: maybeQuery,
+      indexName: pointOrIndex,
+    };
+  }
+
+  /** Shared geoSearch validation + query translation. */
+  private _prepareGeoSearch(
+    point: [number, number],
+    query: Uniquery | undefined,
+    indexName: string | undefined,
+  ): {
+    translated: ReturnType<FieldMappingStrategy["translateQuery"]>;
+    withRelations?: WithRelation[];
+  } {
+    this._ensureBuilt();
+    if (!this.adapter.isGeoSearchable()) {
+      throw new DbError("GEO_NOT_SUPPORTED", [
+        {
+          path: "",
+          message: `Geo search is not supported by the adapter behind table "${this.tableName}"`,
+        },
+      ]);
+    }
+    const geoIndexes = [...this._meta.indexes.values()].filter((index) => index.type === "geo");
+    if (geoIndexes.length === 0) {
+      throw new DbError("GEO_INDEX_MISSING", [
+        {
+          path: "",
+          message: `Table "${this.tableName}" declares no @db.index.geo — geoSearch requires a geo index`,
+        },
+      ]);
+    }
+    if (indexName !== undefined && !geoIndexes.some((index) => index.name === indexName)) {
+      throw new DbError("GEO_INDEX_MISSING", [
+        {
+          path: indexName,
+          message: `Geo index "${indexName}" not found on table "${this.tableName}"`,
+        },
+      ]);
+    }
+    assertGeoPoint(point, "$center");
+    const controls = (query?.controls ?? {}) as Record<string, unknown>;
+    if (controls.$sort) {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$sort",
+          message: "geoSearch results are distance-ordered — $sort is not allowed on this path",
+        },
+      ]);
+    }
+    for (const key of ["$maxDistance", "$minDistance"] as const) {
+      const v = controls[key];
+      if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
+        throw new DbError("INVALID_QUERY", [
+          { path: key, message: `${key} must be a non-negative number of meters` },
+        ]);
+      }
+    }
+    this._guardQuery(query);
+    const withRelations = (query?.controls as UniqueryControls)?.$with as
+      | WithRelation[]
+      | undefined;
+    const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
+    return { translated, withRelations };
   }
 
   // ── Find by ID ──────────────────────────────────────────────────────────

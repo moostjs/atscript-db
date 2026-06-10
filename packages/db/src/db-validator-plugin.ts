@@ -63,6 +63,32 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       return undefined;
     }
 
+    // ── db.geoPoint range validation ─────────────────────────────────────────
+    // [lng, lat] in GeoJSON order: longitude first. Enforced on every write.
+    const typeTags = (def.type as { tags?: ReadonlySet<string> }).tags;
+    if (typeTags?.has("geoPoint") && value !== undefined && value !== null) {
+      if (
+        !Array.isArray(value) ||
+        value.length !== 2 ||
+        typeof value[0] !== "number" ||
+        typeof value[1] !== "number" ||
+        !Number.isFinite(value[0]) ||
+        !Number.isFinite(value[1])
+      ) {
+        ctx.error("Expected a [lng, lat] tuple of two finite numbers (GeoJSON order)");
+        return false;
+      }
+      if (value[0] < -180 || value[0] > 180) {
+        ctx.error(`Longitude ${value[0]} out of range [-180, 180] (geo points are [lng, lat])`);
+        return false;
+      }
+      if (value[1] < -90 || value[1] > 90) {
+        ctx.error(`Latitude ${value[1]} out of range [-90, 90] (geo points are [lng, lat])`);
+        return false;
+      }
+      return true;
+    }
+
     // ── Nav field handling ──────────────────────────────────────────────────
     const isTo = def.metadata.has("db.rel.to");
     const isFrom = def.metadata.has("db.rel.from");
