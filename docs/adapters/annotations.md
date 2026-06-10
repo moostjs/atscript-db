@@ -487,6 +487,8 @@ These annotations require the `@atscript/db-mongo` plugin. See [MongoDB adapter]
 | `@db.mongo.search.text`         | Field      | `analyzer?` (string), `indexName?` (string)                                                                                                    | Include field in a search index (word match)                                                                                                      |
 | `@db.mongo.search.autocomplete` | Field      | `indexName?` (string), `tokenization?` (string), `minGrams?` (number), `maxGrams?` (number), `foldDiacritics?` (boolean), `analyzer?` (string) | Prefix/typeahead field (double-mapped as `string`). `tokenization`: `edgeGram` (prefix, default) / `nGram` (substring) / `rightEdgeGram` (suffix) |
 
+When `indexName` is omitted it defaults to `"DEFAULT"` — interface-level and field-level annotations referencing the same name are merged into one Atlas Search index. See [MongoDB adapter — Atlas Search](./mongodb#atlas-search).
+
 ```atscript
 use '@atscript/db-mongo'
 

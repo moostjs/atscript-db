@@ -94,14 +94,13 @@ interface ActiveTask {
 
 ## Aggregate views
 
-Combine `@db.column.dimension` (group keys) + `@db.agg.*` (measures):
+Plain (non-aggregated) fields become `GROUP BY` keys automatically; `@db.agg.*` fields are the measures. Do NOT add `@db.column.dimension` here — that annotation marks table fields for runtime `aggregate()`/`$groupBy`, not view definitions:
 
 ```atscript
 @db.view
 @db.view.for Order
 @db.view.having `totalRevenue > 100`
 interface CategoryStats {
-    @db.column.dimension
     category: Order.category
     @db.agg.sum 'amount'
     totalRevenue: number

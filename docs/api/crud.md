@@ -200,6 +200,20 @@ const result = await users.replaceOne({
 
 `replaceOne` also supports `$cas` on [versioned tables](/api/versioning) — same semantics as `updateOne`.
 
+### Replace Many
+
+Replace every record matching a filter with the **same** full payload — the replace counterpart of `updateMany`. As with `replaceOne`, all required fields must be provided; omitted optional fields are not preserved:
+
+```typescript
+const result = await users.replaceMany(
+  { status: "inactive" },
+  { email: "archived@example.com", name: "Archived User", status: "archived" },
+);
+// result: { matchedCount, modifiedCount }
+```
+
+For replacing many records with **different** payloads (each identified by its primary key), use [`bulkReplace`](#bulk-operations) instead.
+
 ## Deleting Records
 
 ### Delete One

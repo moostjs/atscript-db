@@ -130,20 +130,19 @@ await posts.updateOne({ id: 1, tags: $remove(["draft"]) });
 
 Field operations require that the target field maps to its own database column (or document key) so the database engine can apply the arithmetic atomically. This means:
 
-| Context                                        | Works? | Why                                                                        |
-| ---------------------------------------------- | ------ | -------------------------------------------------------------------------- |
-| Top-level numeric field                        | Yes    | Maps directly to a column / document key                                   |
-| Nested field with `@db.patch.strategy 'merge'` | Yes    | Each sub-field is stored as its own column (SQL) or dot-path key (MongoDB) |
-| Inside a navigation property (relation)        | Yes    | The related table's `bulkUpdate` handles ops on its own fields             |
-| `updateMany` — top-level fields                | Yes    | Same as `updateOne`                                                        |
+| Context                                        | Works? | Why                                                                                  |
+| ---------------------------------------------- | ------ | ------------------------------------------------------------------------------------ |
+| Top-level numeric field                        | Yes    | Maps directly to a column / document key                                             |
+| Nested field with `@db.patch.strategy 'merge'` | Yes    | Each sub-field is stored as its own column (SQL) or dot-path key (MongoDB)           |
+| Inside a navigation property (relation)        | Yes    | The related table's `bulkUpdate` handles ops on its own fields                       |
+| `updateMany` — same contexts as `updateOne`    | Yes    | The patch is decomposed the same way — nested merge-strategy ops become dot-path ops |
 
 ### Where Field Ops Do NOT Work
 
-| Context                                                         | Result                          | Why                                                                                                   |
-| --------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Inside a `@db.json` field                                       | **Validation error**            | JSON fields are stored as an opaque blob — the database cannot reach inside to increment a single key |
-| Inside a nested object **without** `@db.patch.strategy 'merge'` | **Validation error**            | Without merge strategy the entire object is replaced — there is no individual column to increment     |
-| `updateMany` — nested fields inside merge-strategy objects      | **Ignored** (stored as literal) | `updateMany` does not decompose nested objects — only top-level ops are detected                      |
+| Context                                                         | Result               | Why                                                                                                   |
+| --------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------- |
+| Inside a `@db.json` field                                       | **Validation error** | JSON fields are stored as an opaque blob — the database cannot reach inside to increment a single key |
+| Inside a nested object **without** `@db.patch.strategy 'merge'` | **Validation error** | Without merge strategy the entire object is replaced — there is no individual column to increment     |
 
 ```typescript
 import { $inc } from "@atscript/db/ops";

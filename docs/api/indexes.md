@@ -31,6 +31,10 @@ email: string
 
 Any attempt to insert a duplicate value will result in a constraint violation error.
 
+::: info Unique indexes on optional fields
+When a unique-indexed field is **optional** (`email?: string`), uniqueness is enforced only among records where the value is present — any number of records may omit it. SQL adapters get this from the engine's `NULLS DISTINCT` default; MongoDB emits a partial index scoped to present values (see [MongoDB — Schema Sync Notes](/adapters/mongodb#schema-sync-notes)). For composite unique indexes a record is exempt as soon as any of its optional indexed fields is missing.
+:::
+
 ## Full-Text Search Index
 
 Mark fields for full-text search with `@db.index.fulltext`. An optional second argument sets the field's **weight** — higher weight means greater relevance in search results:

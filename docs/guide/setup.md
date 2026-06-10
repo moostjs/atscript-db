@@ -57,10 +57,11 @@ export default defineConfig({
 ```
 
 ::: info Adapter-Specific Plugins
-PostgreSQL and MySQL ship their own plugins for adapter-specific annotations:
+PostgreSQL, MySQL, and MongoDB ship their own plugins for adapter-specific annotations:
 
 - **PostgreSQL**: `PostgresPlugin()` from `@atscript/db-postgres` — registers `@db.pg.*` annotations
 - **MySQL**: `MysqlPlugin()` from `@atscript/db-mysql` — registers `@db.mysql.*` annotations
+- **MongoDB**: `MongoPlugin()` from `@atscript/db-mongo` — registers `@db.mongo.*` annotations and the `mongo.objectId` primitive
 
 Add them alongside `dbPlugin()` if you use adapter-specific features.
 :::
@@ -108,10 +109,11 @@ export default defineConfig({
 import { defineConfig } from "@atscript/core";
 import ts from "@atscript/typescript";
 import { dbPlugin } from "@atscript/db/plugin";
+import { MongoPlugin } from "@atscript/db-mongo";
 
 export default defineConfig({
   rootDir: "src",
-  plugins: [ts(), dbPlugin()],
+  plugins: [ts(), dbPlugin(), MongoPlugin()],
   format: "dts",
   db: {
     adapter: "@atscript/db-mongo",

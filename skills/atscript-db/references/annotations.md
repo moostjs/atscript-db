@@ -79,11 +79,11 @@ Renaming the column via `@db.column 'v'` is not recommended at this time — see
 
 ## Indexes
 
-| Annotation           | Args                                  | Effect                                                                                                |
-| -------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `@db.index.plain`    | `name?: string, sort?: 'asc'\|'desc'` | Standard index. Share the same `name` across fields for composite.                                    |
-| `@db.index.unique`   | `name?: string`                       | Unique constraint index.                                                                              |
-| `@db.index.fulltext` | `name?: string, weight?: number`      | Full-text search index. Translates per-adapter: SQLite FTS5, PG tsvector, MySQL FULLTEXT, Mongo text. |
+| Annotation           | Args                                  | Effect                                                                                                                                                                |
+| -------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.index.plain`    | `name?: string, sort?: 'asc'\|'desc'` | Standard index. Share the same `name` across fields for composite.                                                                                                    |
+| `@db.index.unique`   | `name?: string`                       | Unique constraint index. On optional fields uniqueness applies to present values only (SQL `NULLS DISTINCT`; Mongo partial index) — many value-less rows may coexist. |
+| `@db.index.fulltext` | `name?: string, weight?: number`      | Full-text search index. Translates per-adapter: SQLite FTS5, PG tsvector, MySQL FULLTEXT, Mongo text.                                                                 |
 
 ## Relations
 

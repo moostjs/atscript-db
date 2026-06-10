@@ -21,29 +21,33 @@ Second `MongoAdapter` arg (the client) is only required for transactions — `se
 ## Register the plugin
 
 ```ts
-import { MongoPlugin } from "@atscript/db-mongo/plugin"; // subpath, not the package root
+import { MongoPlugin } from "@atscript/db-mongo"; // also available at the /plugin subpath
 plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.objectId
 ```
 
 ## Capabilities
 
-| Capability              | Notes                                                                                                                                                 |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Transactions            | `withTransaction(fn)` uses `session.withTransaction()` — requires replica-set (Atlas or local replica).                                               |
-| Native FKs              | No (`supportsNativeForeignKeys: false`) — cascade / setNull run in the application integrity strategy.                                                |
-| `supportsNestedObjects` | **Yes** — nested objects stored as-is, not flattened.                                                                                                 |
-| Native patches          | Yes (`supportsNativePatch: true`). `CollectionPatcher` emits `$set` aggregation pipelines.                                                            |
-| Native relation loading | Yes (`supportsNativeRelations: true`) — `$lookup` based.                                                                                              |
-| Full-text search        | **Atlas Search** (`$search` stage) via `@db.mongo.search.static` + `@db.mongo.search.text`. Legacy `text` indexes via `@db.index.fulltext` (generic). |
-| Vector search           | **Atlas Search** (`$vectorSearch` stage) via `@db.search.vector` (generic, core annotation).                                                          |
-| Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                   |
-| JSON / nested           | Native — `@db.json` is a no-op (store as Document).                                                                                                   |
+| Capability              | Notes                                                                                                                                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transactions            | `withTransaction(fn)` uses `session.withTransaction()` — requires replica-set (Atlas or local replica).                                                                                                     |
+| Native FKs              | No (`supportsNativeForeignKeys: false`) — cascade / setNull run in the application integrity strategy.                                                                                                      |
+| `supportsNestedObjects` | **Yes** — nested objects stored as-is, not flattened.                                                                                                                                                       |
+| Native patches          | Yes (`supportsNativePatch: true`). `CollectionPatcher` emits `$set` aggregation pipelines.                                                                                                                  |
+| Native relation loading | Yes (`supportsNativeRelations: true`) — `$lookup` based.                                                                                                                                                    |
+| Full-text search        | **Atlas Search** (`$search` stage) via `@db.mongo.search.static` + `@db.mongo.search.text` — Atlas only. Generic `@db.index.fulltext` → classic `text` index queried via `$text` — works on any deployment. |
+| Vector search           | **Atlas Search** (`$vectorSearch` stage) via `@db.search.vector` (generic, core annotation).                                                                                                                |
+| Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                                                                         |
+| JSON / nested           | Native — `@db.json` is a no-op (store as Document).                                                                                                                                                         |
 
 ## Managed index prefix
 
 **All indexes created by `syncIndexes()` start with `atscript__`.** Indexes not matching the prefix are left alone. Indexes matching the prefix that aren't in the desired set are dropped on drift.
 
 Implication: do not name a consumer-authored index with the `atscript__` prefix.
+
+## Unique indexes on optional fields are partial
+
+A `@db.index.unique` that includes an optional field is emitted with a `partialFilterExpression` restricting it to documents where the optional field is present — many docs may lack the field while present values stay unique (matches SQL `NULLS DISTINCT`). Composite unique: a doc is exempt as soon as any optional indexed field is missing. Changing a field's optionality changes the filter → index drop+recreate on next sync.
 
 ## `@db.mongo.*` annotations
 

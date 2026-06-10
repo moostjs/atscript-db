@@ -35,7 +35,7 @@ export interface ActiveTask {
 Managed views are the most common type. Schema sync tracks changes to the view definition and recreates the view when it detects a difference.
 
 ::: tip
-Use `@db.view.renamed` to rename a view without dropping and recreating it — see [Schema Sync Behavior](#schema-sync-behavior) below.
+Use `@db.view.renamed` when renaming a view so sync maps the old name to the new one and cleans up the old view — see [Schema Sync Behavior](#schema-sync-behavior) below.
 :::
 
 ## Materialized Views
@@ -102,7 +102,7 @@ Schema sync manages the lifecycle of managed and materialized views:
 
 - **Creation** — managed views are created as `CREATE VIEW` statements during sync
 - **Updates** — views are dropped and recreated when their definition changes (there is no `ALTER VIEW`)
-- **Renames** — track view renames with `@db.view.renamed` so sync renames rather than drops and recreates:
+- **Renames** — track view renames with `@db.view.renamed` so sync drops the view under its old name and creates it under the new one (instead of leaving the old view behind):
 
 ```atscript
 @db.view 'premium_users'

@@ -232,12 +232,13 @@ Returns a plain number (e.g., `5`) instead of an array.
 | `$count`     | boolean | query             | —       | `$count`                   |
 | `$search`    | string  | query, pages      | —       | `$search=mongodb tutorial` |
 | `$index`     | string  | query, pages      | —       | `$index=product_search`    |
+| `$fuzzy`     | string  | query, pages      | —       | `$fuzzy=1`                 |
 | `$vector`    | string  | query, pages      | —       | `$vector=embedding`        |
 | `$threshold` | string  | query, pages      | —       | `$threshold=0.8`           |
 | `$with`      | string  | query, pages, one | —       | `$with=author,comments`    |
 | `$groupBy`   | string  | query             | —       | `$groupBy=status`          |
 
-See [Relations & Search in URLs](./advanced) for details on `$with`, `$search`, `$vector`, and `$groupBy`.
+See [Relations & Search in URLs](./advanced) for details on `$with`, `$search`, `$fuzzy`, `$vector`, and `$groupBy`.
 
 ## Type Coercion
 

@@ -20,10 +20,10 @@ Register the MongoDB plugin in your `atscript.config.mts` to enable `@db.mongo.*
 import { defineConfig } from "@atscript/core";
 import ts from "@atscript/typescript";
 import { dbPlugin } from "@atscript/db/plugin";
-import mongo from "@atscript/db-mongo/plugin";
+import { MongoPlugin } from "@atscript/db-mongo";
 
 export default defineConfig({
-  plugins: [ts(), dbPlugin(), mongo()],
+  plugins: [ts(), dbPlugin(), MongoPlugin()],
 });
 ```
 
@@ -511,6 +511,7 @@ MongoDB uses **snapshot-based** schema sync (Path B — no column introspection)
 - Capped collection option drift (size/max changes) is detected and flagged
 - Standard indexes use the `atscript__` prefix so sync only touches managed indexes
 - Atlas Search indexes are managed separately from standard MongoDB indexes
+- **Unique indexes over optional fields are partial.** A `@db.index.unique` that includes an optional field gets a `partialFilterExpression` restricting it to documents where the optional field is present — so many documents may lack the field while present values stay unique, matching SQL's `NULLS DISTINCT` behavior. Changing a field's optionality changes the filter, which drops and recreates the index on the next sync.
 
 See [Schema Sync](../sync/) for the full sync workflow.
 

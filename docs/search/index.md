@@ -119,18 +119,18 @@ See [HTTP — Advanced](/http/advanced) for the full URL query syntax.
 
 Each adapter maps `@db.index.fulltext` to its native full-text search engine:
 
-| Adapter        | Index type                                              | Search mechanism                       | Per-field weights?                               |
-| -------------- | ------------------------------------------------------- | -------------------------------------- | ------------------------------------------------ |
-| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`              | `plainto_tsquery()`                    | No — weights in `@db.index.fulltext` are ignored |
-| **MongoDB**    | Text index (all deployments), Atlas Search (Atlas only) | `$text` / `$search`                    | Yes — field weights                              |
-| **SQLite**     | FTS5 virtual table                                      | `MATCH`                                | No                                               |
-| **MySQL**      | `FULLTEXT` index                                        | `MATCH ... AGAINST` (natural language) | No                                               |
+| Adapter        | Index type                                    | Search mechanism                       | Per-field weights?                               |
+| -------------- | --------------------------------------------- | -------------------------------------- | ------------------------------------------------ |
+| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`    | `plainto_tsquery()`                    | No — weights in `@db.index.fulltext` are ignored |
+| **MongoDB**    | Classic text index (works on all deployments) | `$text`                                | Yes — field weights                              |
+| **SQLite**     | FTS5 virtual table                            | `MATCH`                                | No                                               |
+| **MySQL**      | `FULLTEXT` index                              | `MATCH ... AGAINST` (natural language) | No                                               |
 
 ::: info
 All adapters expose the same `search()` and `searchWithCount()` API — engine differences are handled internally. See individual adapter pages for engine-specific details and configuration options.
 :::
 
-MongoDB Atlas goes beyond word matching with **autocomplete/typeahead**, query-time **fuzzy** tolerance, and a per-index **match strategy** — see [MongoDB → Atlas Search](/adapters/mongodb#atlas-search).
+MongoDB Atlas goes beyond word matching with **autocomplete/typeahead**, query-time **fuzzy** tolerance, and a per-index **match strategy** — declared with the `@db.mongo.search.*` annotations (separate from `@db.index.fulltext`, Atlas-only, queried via `$search`). See [MongoDB → Atlas Search](/adapters/mongodb#atlas-search).
 
 ## Next Steps
 

@@ -44,7 +44,7 @@ Adapter-specific plugins extend the annotation surface:
 ```ts
 import { PostgresPlugin } from "@atscript/db-postgres";
 import { MysqlPlugin } from "@atscript/db-mysql";
-import { MongoPlugin } from "@atscript/db-mongo/plugin"; // note: /plugin subpath
+import { MongoPlugin } from "@atscript/db-mongo";
 
 plugins: [ts(), dbPlugin(), PostgresPlugin()]; // adds @db.pg.*
 ```

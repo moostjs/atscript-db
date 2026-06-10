@@ -1,9 +1,9 @@
 # mongo-annotations
 
-Requires the Mongo plugin in `atscript.config` (note the `/plugin` subpath):
+Requires the Mongo plugin in `atscript.config`:
 
 ```ts
-import { MongoPlugin } from "@atscript/db-mongo/plugin";
+import { MongoPlugin } from "@atscript/db-mongo";
 plugins: [ts(), dbPlugin(), MongoPlugin()];
 ```
 
