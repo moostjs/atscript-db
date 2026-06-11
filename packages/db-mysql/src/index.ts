@@ -5,7 +5,12 @@ import { Mysql2Driver } from "./mysql2-driver";
 
 export { MysqlAdapter } from "./mysql-adapter";
 export { Mysql2Driver } from "./mysql2-driver";
-export { MysqlPlugin } from "./plugin/index";
+// NOTE: the build-time plugin (MysqlPlugin) is deliberately NOT re-exported here.
+// It lives on the dedicated './plugin' subpath only: the plugin imports
+// @atscript/core (the compiler, which carries rolldown + its native binding),
+// so re-exporting it from this RUNTIME entry drags the whole compiler into
+// every consumer's server bundle — and crashes prod containers that lack the
+// platform-specific @rolldown/binding-* package at runtime.
 export { buildWhere } from "./filter-builder";
 export type { TSqlFragment } from "./filter-builder";
 export type { TMysqlDriver, TMysqlRunResult, TMysqlConnection } from "./types";
