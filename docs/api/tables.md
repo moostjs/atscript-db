@@ -224,6 +224,8 @@ export interface User {
 
 This is useful for organizing tables into logical groups, particularly with databases that support schemas natively (like PostgreSQL). SQLite adapters typically prefix the table name.
 
+On PostgreSQL, schema sync creates the namespace automatically (`CREATE SCHEMA IF NOT EXISTS`) before creating the table — a fresh database needs no manual schema provisioning.
+
 ## Rename Tracking
 
 When you rename a table or column, the schema sync system needs to know the old name to perform a rename migration rather than dropping and recreating:

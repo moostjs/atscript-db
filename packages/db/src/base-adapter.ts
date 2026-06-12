@@ -466,7 +466,13 @@ export abstract class BaseDbAdapter {
    * ```
    */
   protected async syncIndexesWithDiff(opts: {
-    listExisting(): Promise<Array<{ name: string }>>;
+    /**
+     * Existing indexes. When `columns` is provided (ordered column names),
+     * plain/unique indexes whose definition no longer matches the model are
+     * dropped and recreated — a name match alone is not enough (e.g. a
+     * composite index that gained or lost a member keeps its name).
+     */
+    listExisting(): Promise<Array<{ name: string; columns?: string[] }>>;
     createIndex(index: TDbIndex): Promise<void>;
     dropIndex(name: string): Promise<void>;
     prefix?: string;
@@ -481,13 +487,15 @@ export abstract class BaseDbAdapter {
 
     // List existing indexes, filter to managed ones
     const existing = await opts.listExisting();
-    const existingNames = new Set(
-      existing.filter((i) => i.name.startsWith(prefix)).map((i) => i.name),
+    const managed = existing.filter((i) => i.name.startsWith(prefix));
+    const existingNames = new Set(managed.map((i) => i.name));
+    const existingColumns = new Map(
+      managed.filter((i) => i.columns).map((i) => [i.name, i.columns!]),
     );
 
     const desiredNames = new Set<string>();
 
-    // Create missing indexes
+    // Create missing indexes, rebuild definition-drifted ones
     for (const index of this._table.indexes.values()) {
       if (opts.warnUnsupportedTypes?.types.includes(index.type)) {
         this.logger.warn(
@@ -503,6 +511,22 @@ export abstract class BaseDbAdapter {
 
       if (!existingNames.has(index.key)) {
         await opts.createIndex(index);
+        continue;
+      }
+
+      // Definition drift check — only for column-list index types; fulltext
+      // and other expression-backed indexes don't introspect to plain columns
+      if (index.type === "plain" || index.type === "unique") {
+        const liveColumns = existingColumns.get(index.key);
+        const desiredColumns = index.fields.map((f) => f.name);
+        if (
+          liveColumns &&
+          (liveColumns.length !== desiredColumns.length ||
+            liveColumns.some((c, i) => c !== desiredColumns[i]))
+        ) {
+          await opts.dropIndex(index.key);
+          await opts.createIndex(index);
+        }
       }
     }
 
@@ -824,6 +848,16 @@ export abstract class BaseDbAdapter {
   dropColumns?(columns: string[]): Promise<void>;
 
   /**
+   * Drops managed (`atscript__`-prefixed) indexes that reference any of the
+   * given columns. Called by schema sync BEFORE {@link dropColumns} — engines
+   * like SQLite refuse to drop a column while an index still references it,
+   * and a composite index that survives by name must be rebuilt without the
+   * removed column (recreated later by {@link syncIndexes}).
+   * Optional — only relational adapters implement this.
+   */
+  dropIndexesForColumns?(columns: string[]): Promise<void>;
+
+  /**
    * Drops a table by name (without needing a registered readable).
    * Used by schema sync to remove tables no longer in the schema.
    * Optional — only relational adapters implement this.
@@ -859,6 +893,14 @@ export abstract class BaseDbAdapter {
    * Optional — adapters that don't implement this skip type change detection.
    */
   typeMapper?(field: TDbFieldMeta): string;
+
+  /**
+   * Resolves any runtime state {@link typeMapper} depends on (e.g. detecting
+   * pgvector/VECTOR support). Schema sync calls this BEFORE hashing the
+   * desired schema — a type mapping that changes between hash time and DDL
+   * time would make the stored hash never match and re-sync on every run.
+   */
+  prepareTypeMapper?(): Promise<void>;
 
   /**
    * Returns a value formatter for a field, or undefined if no formatting is needed.

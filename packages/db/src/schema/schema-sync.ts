@@ -23,8 +23,11 @@ import { SyncEntry, type TSyncEntryInit, type TSyncEntryStatus } from "./sync-en
 import {
   executeSyncTable,
   executeSyncView,
+  planViewSync,
+  dropOutdatedView,
   viewDefinitionChanged,
   type TSyncExecutorDeps,
+  type TViewSyncPlan,
 } from "./sync-executor";
 
 export {
@@ -132,16 +135,24 @@ export class SchemaSync {
     }
     const allReadables = [...tables, ...views, ...externalViews];
 
-    const snapshots = allReadables.map((r) => {
+    const snapshots = [];
+    for (const r of allReadables) {
       if (r.isView) {
-        return computeViewSnapshot(r as AtscriptDbView);
+        snapshots.push(computeViewSnapshot(r as AtscriptDbView));
+        continue;
       }
+      // Access fieldDescriptors FIRST to trigger lazy metadata build — adapter
+      // hooks (onAfterFlatten) populate state that both prepareTypeMapper()
+      // (e.g. which fields are vectors) and getDesiredTableOptions() depend on.
+      void r.fieldDescriptors;
+      // Let the adapter resolve typeMapper-affecting state (e.g. vector
+      // support detection) before hashing — the hash must be deterministic
+      // across runs or sync re-runs forever.
+      await r.dbAdapter.prepareTypeMapper?.();
       const tm = r.dbAdapter.typeMapper?.bind(r.dbAdapter);
-      // Access fieldDescriptors to trigger lazy metadata build — adapter hooks
-      // (onAfterFlatten) populate state that getDesiredTableOptions() depends on.
-      const opts = (r.fieldDescriptors, r.dbAdapter.getDesiredTableOptions?.());
-      return computeTableSnapshot(r, tm, opts);
-    });
+      const opts = r.dbAdapter.getDesiredTableOptions?.();
+      snapshots.push(computeTableSnapshot(r, tm, opts));
+    }
     const hash = computeSchemaHash(snapshots);
 
     return { tables, views, externalViews, hash };
@@ -344,6 +355,20 @@ export class SchemaSync {
       const trackedNames = new Set(previouslyTracked.map((e) => e.name));
 
       const deps = this.buildExecutorDeps();
+
+      // Drop tracked views whose definition changed (or that are being renamed)
+      // BEFORE table ops — their old definitions may reference columns the table
+      // sync is about to drop (SQLite and Postgres refuse DROP COLUMN while a
+      // view depends on the column). The view phase below recreates them,
+      // reusing these plans instead of recomputing.
+      const viewPlans = new Map<string, TViewSyncPlan>();
+      for (const readable of views) {
+        const view = readable as AtscriptDbView;
+        const plan = await planViewSync(view, trackedNames, this.store);
+        viewPlans.set(view.tableName, plan);
+        await dropOutdatedView(view, plan, this.space);
+      }
+
       const entries: SyncEntry[] = [];
       for (const readable of tables) {
         this.assertLockHeld(heartbeat.getAbortReason);
@@ -356,7 +381,14 @@ export class SchemaSync {
 
       for (const readable of views) {
         this.assertLockHeld(heartbeat.getAbortReason);
-        entries.push(await executeSyncView(readable as AtscriptDbView, trackedNames, deps));
+        entries.push(
+          await executeSyncView(
+            readable as AtscriptDbView,
+            trackedNames,
+            deps,
+            viewPlans.get(readable.tableName),
+          ),
+        );
       }
 
       // Check external views
@@ -381,9 +413,20 @@ export class SchemaSync {
         entries.push(...removed.filter((e) => e.viewType !== "E"));
       }
 
-      // Store per-table snapshots
+      // Store per-table snapshots — but never for errored entries: their DB
+      // state does not match the desired schema, and recording the desired
+      // snapshot would make the next run believe the failed DDL succeeded.
       this.assertLockHeld(heartbeat.getAbortReason);
+      // External views (viewType "E") are exempt: their check is advisory
+      // (sync owns no DDL for them), so a missing external view must not
+      // block hash persistence or wedge re-runs.
+      const erroredNames = new Set(
+        entries.filter((e) => e.status === "error" && e.viewType !== "E").map((e) => e.name),
+      );
       for (const readable of allReadables) {
+        if (erroredNames.has(readable.tableName)) {
+          continue;
+        }
         const adapter = readable.dbAdapter;
         const tm = adapter.typeMapper?.bind(adapter);
         const opts = adapter.getDesiredTableOptions?.();
@@ -411,7 +454,13 @@ export class SchemaSync {
       }
 
       await this.store.writeTrackedList(allReadables);
-      await this.store.writeHash(hash);
+
+      // Persist the schema hash only when every entry succeeded — an error
+      // entry means the DB does not match the desired schema, and a stored
+      // hash would make the next boot skip the retry as "up-to-date".
+      if (erroredNames.size === 0) {
+        await this.store.writeHash(hash);
+      }
 
       return { status: "synced", schemaHash: hash, entries };
     } finally {

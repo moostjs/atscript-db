@@ -166,17 +166,26 @@ export async function executeSyncTable(
     }
   }
 
-  // Sync indexes
-  await adapter.syncIndexes();
+  // Sync indexes and foreign keys. DDL here can fail on data conflicts
+  // (e.g. CREATE UNIQUE INDEX over duplicate rows) — surface that as an
+  // error entry instead of an unhandled throw, so the run completes and
+  // the schema hash is not persisted (the next boot retries).
+  try {
+    await adapter.syncIndexes();
 
-  // Sync foreign keys
-  if (adapter.syncForeignKeys) {
-    await adapter.syncForeignKeys();
-  }
+    if (adapter.syncForeignKeys) {
+      await adapter.syncForeignKeys();
+    }
 
-  // Post-sync finalization (e.g., reset identity sequences after data migration)
-  if (adapter.afterSyncTable) {
-    await adapter.afterSyncTable();
+    // Post-sync finalization (e.g., reset identity sequences after data migration)
+    if (adapter.afterSyncTable) {
+      await adapter.afterSyncTable();
+    }
+  } catch (error) {
+    const msg = `Index/FK sync failed on ${name}: ${(error as Error).message}`;
+    deps.logger.error?.(`[schema-sync] ${msg}`);
+    init.errors = [...(init.errors ?? []), msg];
+    init.status = "error";
   }
 
   return new SyncEntry(init);
@@ -184,27 +193,50 @@ export async function executeSyncTable(
 
 // ── View sync ────────────────────────────────────────────────────────────
 
+export interface TViewSyncPlan {
+  isRenamed: boolean;
+  definitionChanged: boolean;
+}
+
+/** Determines whether a view's predecessor (on rename) or stale definition must be dropped. */
+export async function planViewSync(
+  view: AtscriptDbView,
+  trackedNames: Set<string>,
+  store: SyncStore,
+): Promise<TViewSyncPlan> {
+  const isRenamed = !!(view.renamedFrom && trackedNames.has(view.renamedFrom));
+  const definitionChanged =
+    !isRenamed && trackedNames.has(view.tableName) && (await viewDefinitionChanged(view, store));
+  return { isRenamed, definitionChanged };
+}
+
+/** Drops the stale view a plan identified — views don't support ALTER VIEW. */
+export async function dropOutdatedView(
+  view: AtscriptDbView,
+  plan: TViewSyncPlan,
+  space: DbSpace,
+): Promise<void> {
+  if (plan.isRenamed) {
+    await space.dropViewByName(view.renamedFrom!);
+  } else if (plan.definitionChanged) {
+    await space.dropViewByName(view.tableName);
+  }
+}
+
 export async function executeSyncView(
   view: AtscriptDbView,
   trackedNames: Set<string>,
   deps: TSyncExecutorDeps,
+  plan?: TViewSyncPlan,
 ): Promise<SyncEntry> {
-  const renamedFrom = view.renamedFrom;
-  const isRenamed = renamedFrom && trackedNames.has(renamedFrom);
-
-  // Drop old view if renamed (views don't support ALTER VIEW)
-  if (isRenamed) {
-    await deps.space.dropViewByName(renamedFrom);
+  // A precomputed plan means the caller already dropped the stale view
+  // (SchemaSync.run() pre-drops changed views before table ops); otherwise
+  // compute and drop here.
+  if (!plan) {
+    plan = await planViewSync(view, trackedNames, deps.store);
+    await dropOutdatedView(view, plan, deps.space);
   }
-
-  // Check if view definition changed via snapshot comparison
-  let definitionChanged = false;
-  if (!isRenamed && trackedNames.has(view.tableName)) {
-    definitionChanged = await viewDefinitionChanged(view, deps.store);
-    if (definitionChanged) {
-      await deps.space.dropViewByName(view.tableName);
-    }
-  }
+  const { isRenamed, definitionChanged } = plan;
 
   await view.dbAdapter.ensureTable();
 
@@ -222,7 +254,7 @@ export async function executeSyncView(
     name: view.tableName,
     status,
     viewType,
-    renamedFrom: isRenamed ? renamedFrom : undefined,
+    renamedFrom: isRenamed ? view.renamedFrom : undefined,
     recreated: definitionChanged || undefined,
   });
 }
@@ -338,6 +370,9 @@ async function applyColumnDiff(
     adapter.dropColumns
   ) {
     const colNames = diff.removed.map((c) => c.name);
+    if (adapter.dropIndexesForColumns) {
+      await adapter.dropIndexesForColumns(colNames);
+    }
     await adapter.dropColumns(colNames);
     init.columnsDropped = colNames;
     init.status = "alter";

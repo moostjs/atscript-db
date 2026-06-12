@@ -127,18 +127,20 @@ Adapters using session-style APIs (MongoDB) can override `withTransaction()` dir
 
 ## Schema sync hooks (all optional)
 
-| Method                                                                                                                  | Purpose                                                          |
-| ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `getExistingColumns?()`                                                                                                 | Introspect columns for diffing.                                  |
-| `tableExists?()`                                                                                                        | Used when `getExistingColumns` isn't implemented (Mongo).        |
-| `getExistingColumnsForTable?(name)`                                                                                     | Introspect a table under its pre-rename name.                    |
-| `syncColumns?(diff)`                                                                                                    | Execute the diff (`added`, `dropped`, `typeChanged`, `renamed`). |
-| `renameTable?(oldName)`                                                                                                 | Handle `@db.table.renamed`.                                      |
-| `dropTable?()` / `dropColumns?([…])`                                                                                    | Destructive ops (skipped in `safe` mode).                        |
-| `recreateTable?()`                                                                                                      | Optional hook used by `@db.sync.method 'recreate'`.              |
-| `syncForeignKeys?()`                                                                                                    | FK sync; called after column sync.                               |
-| `dropForeignKeys?(fkFieldKeys)`                                                                                         | Drop stale FKs blocking `ALTER COLUMN`.                          |
-| `getDesiredTableOptions?()` / `getExistingTableOptions?()` / `applyTableOptions?(changes)` / `destructiveOptionKeys?()` | Table-level options (engine/charset/capped).                     |
+| Method                                                                                                                  | Purpose                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getExistingColumns?()`                                                                                                 | Introspect columns for diffing.                                                                                                                   |
+| `tableExists?()`                                                                                                        | Used when `getExistingColumns` isn't implemented (Mongo).                                                                                         |
+| `getExistingColumnsForTable?(name)`                                                                                     | Introspect a table under its pre-rename name.                                                                                                     |
+| `syncColumns?(diff)`                                                                                                    | Execute the diff (`added`, `dropped`, `typeChanged`, `renamed`).                                                                                  |
+| `renameTable?(oldName)`                                                                                                 | Handle `@db.table.renamed`.                                                                                                                       |
+| `dropTable?()` / `dropColumns?([…])`                                                                                    | Destructive ops (skipped in `safe` mode).                                                                                                         |
+| `dropIndexesForColumns?([…])`                                                                                           | Drop managed indexes referencing the columns; called BEFORE `dropColumns` (engines like SQLite refuse `DROP COLUMN` under a live index).          |
+| `prepareTypeMapper?()`                                                                                                  | Resolve lazily-detected state `typeMapper` depends on (e.g. vector support) — called before hashing; output must be stable hash-time vs DDL-time. |
+| `recreateTable?()`                                                                                                      | Optional hook used by `@db.sync.method 'recreate'`.                                                                                               |
+| `syncForeignKeys?()`                                                                                                    | FK sync; called after column sync.                                                                                                                |
+| `dropForeignKeys?(fkFieldKeys)`                                                                                         | Drop stale FKs blocking `ALTER COLUMN`.                                                                                                           |
+| `getDesiredTableOptions?()` / `getExistingTableOptions?()` / `applyTableOptions?(changes)` / `destructiveOptionKeys?()` | Table-level options (engine/charset/capped).                                                                                                      |
 
 ## Index sync helper
 

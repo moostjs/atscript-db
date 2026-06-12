@@ -206,7 +206,18 @@ try {
 }
 ```
 
-Schema-level errors (rename conflicts, type changes without sync method) don't throw — they appear as entries with `status: 'error'` and populated `errors` arrays.
+Schema-level errors don't throw — they appear as entries with `status: 'error'` and populated `errors` arrays. This covers rename conflicts, type changes without a sync method, and index/FK DDL failures (e.g. adding a unique index over duplicate data).
+
+Error entries have retry semantics: the schema hash and the errored table's snapshot are **not** persisted, so the next `run()` (or application boot) attempts the same changes again instead of reporting `'up-to-date'` over a diverged schema. Once the underlying conflict is resolved (data cleaned up, annotation fixed), the retry converges and the hash settles:
+
+```typescript
+const result = await syncSchema(db, types);
+const failed = result.entries.filter((e) => e.hasErrors);
+for (const entry of failed) {
+  console.error(`${entry.name}: ${entry.errors.join("; ")}`);
+}
+// failed entries re-attempt on every subsequent run until they succeed
+```
 
 ## Printing the Plan
 

@@ -72,7 +72,7 @@ describe("[sqlite] @db.encrypted + @db.index.geo (v1 posture)", () => {
       credentials: { user: "u", pwd: "p" },
     });
 
-    const raw = driver.all<Record<string, unknown>>(`SELECT * FROM "geo_enc_places"`)[0]!;
+    const raw = driver.all(`SELECT * FROM "geo_enc_places"`)[0]!;
     expect(raw.apiToken).toMatch(ENVELOPE_RE);
     expect(raw.credentials).toMatch(ENVELOPE_RE);
     expect(JSON.stringify(raw)).not.toContain("secret-token");

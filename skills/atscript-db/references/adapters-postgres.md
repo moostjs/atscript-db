@@ -53,7 +53,7 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // unlocks @db.pg.*
 | Collation                                | Portable: `@db.column.collate` → `binary: "C"`, `nocase: CITEXT column type` (no collation clause), `unicode: "und-x-icu"`. Override with native `@db.pg.collate 'tr-x-icu'`. |
 | CITEXT                                   | `@db.pg.type 'CITEXT'` → case-insensitive text (requires `CREATE EXTENSION citext`).                                                                                          |
 | Column modify                            | Yes (`supportsColumnModify: true`) — `ALTER TABLE ALTER COLUMN … TYPE …` in place.                                                                                            |
-| Schemas                                  | `@db.schema 'auth'` (portable) or `@db.pg.schema 'auth'` (native override).                                                                                                   |
+| Schemas                                  | `@db.schema 'auth'` (portable) or `@db.pg.schema 'auth'` (native override). Sync auto-creates the namespace on fresh DBs.                                                     |
 | JSON                                     | `@db.json` → `JSONB`.                                                                                                                                                         |
 | Native defaults                          | `supportsNativeValueDefaults: true`. `nativeDefaultFns`: `now`, `uuid`, `increment` — DB emits `DEFAULT` clauses for these.                                                   |
 
@@ -98,6 +98,6 @@ interface Document {
 
 ## Known limits
 
-- Schemas must exist before sync — the adapter does NOT auto-create them. `ensureTable()` only provisions the `citext` extension (when `@db.collate 'nocase'` is used).
+- Schemas are auto-created by sync (`CREATE SCHEMA IF NOT EXISTS` in `ensureTable()`); the role needs `CREATE` privilege on the database.
 - `pgvector` extension must be enabled per database.
 - `CITEXT` extension is auto-provisioned for `@db.collate 'nocase'`; manual install required for explicit `@db.pg.type 'CITEXT'`.

@@ -578,11 +578,15 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── Schema ────────────────────────────────────────────────────────────────
 
-  async ensureTable(): Promise<void> {
-    // Detect vector support lazily on first schema operation
+  async prepareTypeMapper(): Promise<void> {
     if (this._supportsVector === undefined && this._vectorFields.size > 0) {
       await this._detectVectorSupport();
     }
+  }
+
+  async ensureTable(): Promise<void> {
+    // Detect vector support lazily on first schema operation
+    await this.prepareTypeMapper();
     if (this._table instanceof AtscriptDbView) {
       return this._ensureView();
     }
@@ -802,6 +806,21 @@ export class MysqlAdapter extends BaseDbAdapter {
     await this._exec().exec(ddl);
   }
 
+  async dropIndexesForColumns(columns: string[]): Promise<void> {
+    const placeholders = columns.map(() => "?").join(", ");
+    const rows = await this._exec().all<{ name: string }>(
+      `SELECT DISTINCT INDEX_NAME AS name FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
+         AND INDEX_NAME LIKE 'atscript\\_\\_%' AND COLUMN_NAME IN (${placeholders})`,
+      [this._table.tableName, this._schema, ...columns],
+    );
+    for (const row of rows) {
+      const sql = `DROP INDEX ${qi(row.name)} ON ${quoteTableName(this.resolveTableName())}`;
+      this._log(sql);
+      await this._exec().exec(sql);
+    }
+  }
+
   async dropTableByName(tableName: string): Promise<void> {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
@@ -855,12 +874,20 @@ export class MysqlAdapter extends BaseDbAdapter {
     );
 
     await this.syncIndexesWithDiff({
-      listExisting: async () =>
-        this._exec().all<{ name: string }>(
-          `SELECT DISTINCT INDEX_NAME as name FROM INFORMATION_SCHEMA.STATISTICS
-           WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())`,
+      listExisting: async () => {
+        const rows = await this._exec().all<{ name: string; columns: string | null }>(
+          `SELECT INDEX_NAME AS name,
+                  GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS columns
+           FROM INFORMATION_SCHEMA.STATISTICS
+           WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
+           GROUP BY INDEX_NAME`,
           [tableName, schema],
-        ),
+        );
+        return rows.map((r) => ({
+          name: r.name,
+          columns: r.columns ? r.columns.split(",") : undefined,
+        }));
+      },
       createIndex: async (index: TDbIndex) => {
         const unique = index.type === "unique" ? "UNIQUE " : "";
         const fulltext = index.type === "fulltext" ? "FULLTEXT " : "";

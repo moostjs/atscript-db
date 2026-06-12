@@ -326,6 +326,10 @@ Drop a table by name, without needing a registered readable. Used by schema sync
 
 Drop specific columns from the table. Used by schema sync to remove stale columns no longer in the Atscript definitions.
 
+#### `dropIndexesForColumns(columns)`
+
+Drop managed (`atscript__`-prefixed) indexes that reference any of the given columns. Called by schema sync **before** `dropColumns` — engines like SQLite refuse to drop a column while an index still references it, and a composite index that survives by name must be rebuilt without the removed column (`syncIndexes` recreates it afterwards). Implement this if your engine does not cascade index drops on `DROP COLUMN`.
+
 ### Views
 
 #### `ensureView(view)`
@@ -351,6 +355,10 @@ Drop FK constraints identified by their canonical local column key (sorted local
 #### `typeMapper(field)`
 
 Map a field's metadata to the adapter's native column type string. Receives the full field descriptor (`TDbFieldMeta` with design type, annotations, PK status, etc.) for context-aware type decisions — e.g., `VARCHAR(255)` from `maxLength`, `SERIAL` for numeric PKs, `JSONB` for `@db.json` fields. Used by schema sync to detect column type changes (comparing the desired type from `typeMapper` against the existing type from `getExistingColumns`).
+
+#### `prepareTypeMapper()`
+
+Resolve any runtime state `typeMapper` depends on — e.g. detecting whether a vector extension is installed. Schema sync calls this **before** hashing the desired schema. The contract: `typeMapper` must return the same string at hash time and at DDL time; if its output can change based on lazily-detected capabilities, perform that detection here, or the stored hash will never match and sync will re-run on every boot.
 
 #### `formatValue(field)`
 
@@ -385,7 +393,9 @@ This avoids per-value method dispatch — only fields that need formatting get a
 async syncIndexes(): Promise<void> {
   await this.syncIndexesWithDiff({
     listExisting: async () => {
-      // Return existing indexes as [{ name: string }]
+      // Return existing indexes as [{ name: string, columns?: string[] }].
+      // Include the ordered column list so the helper can detect definition
+      // drift (e.g. a composite index that gained a member keeps its name).
       return this.pool.query(
         'SELECT indexname AS name FROM pg_indexes WHERE tablename = $1',
         [this._table.tableName]
@@ -413,7 +423,8 @@ The helper:
 1. Lists existing indexes via `listExisting`
 2. Filters to managed ones (those with the `atscript__` prefix)
 3. Creates missing indexes via `createIndex`
-4. Drops stale indexes via `dropIndex`
+4. Rebuilds plain/unique indexes whose column list no longer matches the model (only when `listExisting` provides `columns`)
+5. Drops stale indexes via `dropIndex`
 
 You can override the prefix via the `prefix` option (defaults to `'atscript__'`).
 

@@ -541,6 +541,12 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── Schema ────────────────────────────────────────────────────────────────
 
+  async prepareTypeMapper(): Promise<void> {
+    if (this._supportsVector === undefined && this._vectorFields.size > 0) {
+      await this._detectVectorSupport();
+    }
+  }
+
   async ensureTable(): Promise<void> {
     // Provision citext extension for @db.collate 'nocase' columns (once per instance)
     if (this._nocaseColumns.size > 0 && !this._citextProvisioned) {
@@ -556,8 +562,11 @@ export class PostgresAdapter extends BaseDbAdapter {
         );
       }
     }
-    if (this._supportsVector === undefined && this._vectorFields.size > 0) {
-      await this._detectVectorSupport();
+    await this.prepareTypeMapper();
+    // @db.schema targets a named schema — sync owns DDL, so it must also
+    // ensure the namespace exists (fresh databases have only "public")
+    if (this._schema) {
+      await this._exec().exec(`CREATE SCHEMA IF NOT EXISTS ${qi(this._schema)}`);
     }
     if (this._table instanceof AtscriptDbView) {
       return this._ensureView();
@@ -966,6 +975,27 @@ export class PostgresAdapter extends BaseDbAdapter {
     await this._exec().exec(ddl);
   }
 
+  async dropIndexesForColumns(columns: string[]): Promise<void> {
+    const tableName = this._table.tableName;
+    const schema = this._schema;
+    const rows = await this._exec().all<{ name: string }>(
+      `SELECT DISTINCT i.relname AS name
+       FROM pg_index x
+       JOIN pg_class t ON t.oid = x.indrelid
+       JOIN pg_class i ON i.oid = x.indexrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(x.indkey)
+       WHERE t.relname = $1 AND n.nspname = COALESCE($2, 'public')
+         AND i.relname LIKE 'atscript__%' AND a.attname = ANY($3)`,
+      [tableName, schema, columns],
+    );
+    for (const row of rows) {
+      const sql = `DROP INDEX IF EXISTS ${schema ? `${qi(schema)}.` : ""}${qi(row.name)}`;
+      this._log(sql);
+      await this._exec().exec(sql);
+    }
+  }
+
   async dropTableByName(tableName: string): Promise<void> {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)} CASCADE`;
     this._log(ddl);
@@ -1005,12 +1035,22 @@ export class PostgresAdapter extends BaseDbAdapter {
     const schema = this._schema;
 
     await this.syncIndexesWithDiff({
-      listExisting: async () =>
-        this._exec().all<{ name: string }>(
-          `SELECT indexname AS name FROM pg_indexes
-           WHERE tablename = $1 AND schemaname = COALESCE($2, 'public')`,
+      listExisting: async () => {
+        const rows = await this._exec().all<{ name: string; columns: string[] | null }>(
+          `SELECT i.relname AS name,
+                  (SELECT array_agg(a.attname ORDER BY k.ord)
+                   FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
+                   JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                   WHERE k.attnum > 0) AS columns
+           FROM pg_index x
+           JOIN pg_class t ON t.oid = x.indrelid
+           JOIN pg_class i ON i.oid = x.indexrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+           WHERE t.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
           [tableName, schema],
-        ),
+        );
+        return rows.map((r) => ({ name: r.name, columns: r.columns ?? undefined }));
+      },
       createIndex: async (index: TDbIndex) => {
         if (index.type === "fulltext") {
           // GIN index on tsvector expression

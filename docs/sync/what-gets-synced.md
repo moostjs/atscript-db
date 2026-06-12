@@ -158,6 +158,31 @@ export interface User {
 Adding `@db.index.*` creates the matching managed index; removing the
 annotation drops it.
 
+### Definition Changes
+
+Index identity is the index name, but sync compares the **definition** too:
+if a named index's column list changed — a composite index gained or lost a
+member, or the column order changed — the index is dropped and recreated to
+match the model. Renaming the index (changing the annotation argument) also
+drops the old index and creates the new one.
+
+### Dropping Indexed Columns
+
+When a column is removed, sync drops the managed indexes that reference it
+**before** dropping the column (engines like SQLite refuse `DROP COLUMN`
+while an index still references it). A composite index that loses one member
+this way is recreated afterwards with only the surviving columns. On SQLite
+the same pre-drop cleanup covers FTS5 fulltext artifacts and `vec0` vector
+shadow tables whose triggers reference the column.
+
+### Index Creation Failures
+
+Index DDL can fail on data conflicts — most commonly adding
+`@db.index.unique` to a column that already contains duplicate values. Sync
+does not throw: the table's entry reports `status: 'error'`, the data is left
+untouched, and the schema hash is **not** persisted — so the next sync run
+retries automatically. Clean up the conflicting data and re-run.
+
 Two annotation-driven special cases participate in the schema hash like any
 other change:
 
@@ -231,7 +256,14 @@ Schema sync manages views according to their type (see [View Types](/views/view-
 
 - **Managed views** — created, dropped, and recreated by sync when the definition changes. Since most databases do not support `ALTER VIEW`, changes trigger a drop + recreate.
 - **Materialized views** — same lifecycle as managed views, but created with the materialized flag where supported.
-- **External views** — validated only (existence + column check). Never created, modified, or dropped by sync.
+- **External views** — validated only (existence + column check). Never created, modified, or dropped by sync. A failed check reports an `'error'` entry but is advisory — it does not block hash persistence or wedge re-runs.
+
+Views whose definition changed (or that are being renamed) are dropped
+**before** table changes apply and recreated after. This matters when a sync
+both drops a column and updates a view that referenced it: without the early
+drop, SQLite and PostgreSQL would refuse the column drop while the old view
+definition still depends on it. Update the view definition in the same deploy
+that removes the column.
 
 ### View Renames
 

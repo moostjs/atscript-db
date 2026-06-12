@@ -577,6 +577,49 @@ export class SqliteAdapter extends BaseDbAdapter {
     });
   }
 
+  async dropIndexesForColumns(columns: string[]): Promise<void> {
+    const tableName = this.resolveTableName();
+    const dropped = new Set(columns);
+    const indexes = this.driver
+      .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
+      .filter((i) => i.name.startsWith("atscript__"));
+    for (const index of indexes) {
+      const cols = this.driver.all<{ name: string | null }>(
+        `PRAGMA index_info("${esc(index.name)}")`,
+      );
+      if (cols.some((c) => c.name !== null && dropped.has(c.name))) {
+        const sql = `DROP INDEX IF EXISTS "${esc(index.name)}"`;
+        this._log(sql);
+        this.driver.exec(sql);
+      }
+    }
+
+    // FTS5 shadow tables: their sync triggers reference indexed columns as
+    // new."col"/old."col", which makes SQLite reject the column drop. Drop
+    // any FTS artifacts touching a dropped column — _syncFtsIndexes recreates
+    // (and rebuilds) whatever the model still declares.
+    for (const name of this._listShadowTables(tableName, "fts")) {
+      const cols = this.driver.all<{ name: string }>(`PRAGMA table_info("${esc(name)}")`);
+      if (cols.some((c) => dropped.has(c.name))) {
+        this._dropFtsTable(name);
+      }
+    }
+
+    // vec0 shadow tables: same trigger problem. The source column appears only
+    // in the trigger SQL (the vec table's own column is always "embedding"),
+    // so match against the AFTER INSERT trigger body.
+    for (const name of this._listShadowTables(tableName, "vec")) {
+      const trigger = this.driver.all<{ sql: string }>(
+        `SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`,
+        [`${name}__ai`],
+      );
+      const triggerSql = trigger[0]?.sql ?? "";
+      if (columns.some((c) => triggerSql.includes(`"${esc(c)}"`))) {
+        this._dropVecTable(name);
+      }
+    }
+  }
+
   async dropTableByName(tableName: string): Promise<void> {
     this._dropAllFtsTables(tableName);
     this._dropAllVecTables(tableName);
@@ -637,7 +680,14 @@ export class SqliteAdapter extends BaseDbAdapter {
       listExisting: async () =>
         this.driver
           .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
-          .filter((i) => !i.name.startsWith("sqlite_")),
+          .filter((i) => !i.name.startsWith("sqlite_"))
+          .map((i) => ({
+            name: i.name,
+            columns: this.driver
+              .all<{ name: string | null }>(`PRAGMA index_info("${esc(i.name)}")`)
+              .map((c) => c.name)
+              .filter((n): n is string => n !== null),
+          })),
       createIndex: async (index: TDbIndex) => {
         const unique = index.type === "unique" ? "UNIQUE " : "";
         // Field names are already resolved to physical names by the generic layer
@@ -892,15 +942,20 @@ export class SqliteAdapter extends BaseDbAdapter {
     this.driver.exec(sql);
   }
 
-  /** Drops all FTS virtual tables and triggers for a content table. */
-  private _dropAllFtsTables(tableName: string): void {
-    const ftsTables = this.driver
+  /** Lists FTS5/vec0 shadow virtual tables for a content table. */
+  private _listShadowTables(tableName: string, kind: "fts" | "vec"): string[] {
+    return this.driver
       .all<{ name: string; sql: string }>(
         `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
-        [`${tableName}__fts__%`],
+        [`${tableName}__${kind}__%`],
       )
-      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"));
-    for (const { name } of ftsTables) {
+      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
+      .map((r) => r.name);
+  }
+
+  /** Drops all FTS virtual tables and triggers for a content table. */
+  private _dropAllFtsTables(tableName: string): void {
+    for (const name of this._listShadowTables(tableName, "fts")) {
       this._dropFtsTable(name);
     }
   }
@@ -1241,13 +1296,7 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   /** Drops all vec0 virtual shadow tables and triggers for a content table. */
   private _dropAllVecTables(tableName: string): void {
-    const vecTables = this.driver
-      .all<{ name: string; sql: string }>(
-        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
-        [`${tableName}__vec__%`],
-      )
-      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"));
-    for (const { name } of vecTables) {
+    for (const name of this._listShadowTables(tableName, "vec")) {
       this._dropVecTable(name);
     }
   }
