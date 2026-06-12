@@ -15,6 +15,12 @@ import type {
   TValueFormatterPair,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr } from "@atscript/db";
+import {
+  buildGeoSearchCount,
+  buildGeoSearchSelect,
+  geoWindowFromControls,
+  renameGeoDistance,
+} from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
 import {
@@ -29,7 +35,9 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   esc,
+  haversineDistanceExpr,
   similarityToVecMetric,
+  sqliteDialect,
   sqliteTypeFromDesignType,
   thresholdToVecDistance,
 } from "./sql-builder";
@@ -58,6 +66,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the SQLite connection has the sqlite-vec extension loaded. */
   private _supportsVector: boolean | undefined;
+  /** Whether SQLite math functions (radians/asin/...) are available — geo search. */
+  private _supportsMathFns: boolean | undefined;
   /** Vector fields: field path → { dimensions, similarity, indexName }. */
   private _vectorFields = new Map<
     string,
@@ -703,10 +713,9 @@ export class SqliteAdapter extends BaseDbAdapter {
         this._log(sql);
         this.driver.exec(sql);
       },
-      shouldSkipType: (type) => type === "fulltext",
-      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
-      // models stay portable; sync warns and skips instead of erroring.
-      warnUnsupportedTypes: { adapter: "sqlite", types: ["geo"] },
+      // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
+      // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
+      shouldSkipType: (type) => type === "fulltext" || type === "geo",
     });
 
     // Sync FTS5 virtual tables for fulltext indexes
@@ -1149,6 +1158,98 @@ export class SqliteAdapter extends BaseDbAdapter {
     }
 
     return { fromWhere, params, limit, skip };
+  }
+
+  // ── Geo search ───────────────────────────────────────────────────────────
+
+  /**
+   * Geo search is available when SQLite has math functions
+   * (`SQLITE_ENABLE_MATH_FUNCTIONS` — on by default in better-sqlite3 builds).
+   * Distance is computed per row via haversine; declared geo indexes have no
+   * physical artifact on SQLite.
+   */
+  override isGeoSearchable(): boolean {
+    return this._detectMathFns();
+  }
+
+  private _detectMathFns(): boolean {
+    if (this._supportsMathFns === undefined) {
+      try {
+        this.driver.get("SELECT radians(0) AS r");
+        this._supportsMathFns = true;
+      } catch {
+        this._supportsMathFns = false;
+        this._log(
+          "[atscript-db-sqlite] SQLite math functions unavailable — geo search disabled (rebuild SQLite with SQLITE_ENABLE_MATH_FUNCTIONS).",
+        );
+      }
+    }
+    return this._supportsMathFns;
+  }
+
+  override async geoSearch(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const { sql, params } = this._buildGeoSearchSelect(
+      this._prepareGeoSearch(point, query, indexName),
+    );
+    this._log(sql, params);
+    const rows = this.driver.all(sql, params);
+    return rows.map((row) => renameGeoDistance(row));
+  }
+
+  override async geoSearchWithCount(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    const ctx = this._prepareGeoSearch(point, query, indexName);
+    const { sql, params } = this._buildGeoSearchSelect(ctx);
+    const countFrag = buildGeoSearchCount(
+      sqliteDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+    );
+    this._log(sql, params);
+    this._log(countFrag.sql, countFrag.params);
+    const rows = this.driver.all(sql, params);
+    const countRow = this.driver.get<{ cnt: number }>(countFrag.sql, countFrag.params);
+    return {
+      data: rows.map((row) => renameGeoDistance(row)),
+      count: countRow?.cnt ?? 0,
+    };
+  }
+
+  /** Resolves the shared parts of a geo search once (column, filter, distance, window). */
+  private _prepareGeoSearch(point: [number, number], query: DbQuery, indexName?: string) {
+    if (!this._detectMathFns()) {
+      throw new DbError("GEO_NOT_SUPPORTED", [
+        { path: "", message: "Geo search requires SQLite math functions" },
+      ]);
+    }
+    const column = this._resolveGeoColumn(indexName);
+    const controls = (query.controls ?? {}) as Record<string, unknown>;
+    return {
+      tableName: this.resolveTableName(),
+      where: buildWhere(query.filter),
+      dist: haversineDistanceExpr(`"${esc(column)}"`, point),
+      window: geoWindowFromControls(controls),
+      controls,
+    };
+  }
+
+  private _buildGeoSearchSelect(ctx: ReturnType<SqliteAdapter["_prepareGeoSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
+    return buildGeoSearchSelect(sqliteDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
+      $limit: ctx.controls.$limit as number | undefined,
+      $skip: ctx.controls.$skip as number | undefined,
+    });
   }
 
   // ── Vector search internals ───────────────────────────────────────────────

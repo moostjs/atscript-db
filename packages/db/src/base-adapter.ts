@@ -632,10 +632,35 @@ export abstract class BaseDbAdapter {
 
   /**
    * Whether this adapter supports geospatial search (`geoSearch()` and the
-   * `$geoWithin` filter operator). Override in adapters that do (MongoDB in v1).
+   * `$geoWithin` filter operator). Override in adapters that do
+   * (MongoDB, PostgreSQL with PostGIS, MySQL, SQLite).
    */
   isGeoSearchable(): boolean {
     return false;
+  }
+
+  /**
+   * Resolves the targeted geo index (or the table's only one) and returns the
+   * physical column it covers. Shared by SQL adapters; MongoDB resolves field
+   * paths separately.
+   *
+   * @param indexName - Optional geo index name (multi-geo tables).
+   */
+  protected _resolveGeoColumn(indexName?: string): string {
+    const geoIndexes = [...this._table.indexes.values()].filter((index) => index.type === "geo");
+    const index = indexName
+      ? geoIndexes.find((candidate) => candidate.name === indexName)
+      : geoIndexes[0];
+    const column = index?.fields[0]?.name;
+    if (!column) {
+      throw new DbError("GEO_INDEX_MISSING", [
+        {
+          path: indexName ?? "",
+          message: `No geo index${indexName ? ` "${indexName}"` : ""} on "${this._table.tableName}"`,
+        },
+      ]);
+    }
+    return column;
   }
 
   /**

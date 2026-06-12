@@ -57,15 +57,16 @@ SQLite has **no adapter-specific annotations**. All generic `@db.*` annotations 
 
 Atscript types map to SQLite column types as follows:
 
-| Atscript Type     | SQLite Type       | Notes                                        |
-| ----------------- | ----------------- | -------------------------------------------- |
-| `string`          | `TEXT`            |                                              |
-| `number`          | `REAL`            | `INTEGER` for primary keys (aliases `rowid`) |
-| `decimal`         | `REAL`            | Runtime value is string; coerced on read     |
-| `boolean`         | `INTEGER`         | Stored as `0` / `1`                          |
-| arrays            | `TEXT`            | JSON-serialized                              |
-| nested objects    | flattened columns | `parent__child` naming convention            |
-| `@db.json` fields | `TEXT`            | JSON-serialized                              |
+| Atscript Type     | SQLite Type       | Notes                                                               |
+| ----------------- | ----------------- | ------------------------------------------------------------------- |
+| `string`          | `TEXT`            |                                                                     |
+| `number`          | `REAL`            | `INTEGER` for primary keys (aliases `rowid`)                        |
+| `decimal`         | `REAL`            | Runtime value is string; coerced on read                            |
+| `boolean`         | `INTEGER`         | Stored as `0` / `1`                                                 |
+| arrays            | `TEXT`            | JSON-serialized                                                     |
+| nested objects    | flattened columns | `parent__child` naming convention                                   |
+| `@db.json` fields | `TEXT`            | JSON-serialized                                                     |
+| `db.geoPoint`     | `TEXT`            | JSON `[lng, lat]`; haversine-based [geo search](/search/geo-search) |
 
 ## Features
 

@@ -6,7 +6,7 @@ export interface GeoEncPlace {
     name: string
 
     @db.index.geo
-    geo: db.geoPoint
+    geo?: db.geoPoint
 
     @db.encrypted
     apiToken?: string

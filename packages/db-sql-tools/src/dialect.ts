@@ -3,6 +3,12 @@ export interface TSqlFragment {
   params: unknown[];
 }
 
+/** `$geoWithin` circle: `[lng, lat]` center + radius in meters (core-validated). */
+export interface TGeoCircle {
+  center: [number, number];
+  radius: number;
+}
+
 export interface SqlDialect {
   /** Quotes a column/table name */
   quoteIdentifier(name: string): string;
@@ -16,6 +22,13 @@ export interface SqlDialect {
   toParam(value: unknown): unknown;
   /** Handle $regex filter */
   regex(quotedCol: string, value: unknown): TSqlFragment;
+  /**
+   * Handle `$geoWithin` filter — circle search on a `db.geoPoint` column.
+   * The circle is pre-validated by the core layer (`center` is a `[lng, lat]`
+   * tuple, `radius` a positive number of meters). Dialects without native geo
+   * support omit this; the filter visitor then throws `GEO_NOT_SUPPORTED`.
+   */
+  geoWithin?(quotedCol: string, circle: TGeoCircle): TSqlFragment;
   /** e.g. 'CREATE VIEW IF NOT EXISTS' or 'CREATE OR REPLACE VIEW' */
   createViewPrefix: string;
   /** Returns a parameter placeholder for the given 1-based index. When absent, '?' is used. */

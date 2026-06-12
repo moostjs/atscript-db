@@ -161,26 +161,29 @@ Use `shouldSkipType` only for index types your adapter creates outside the stand
 
 ## SQL helpers (`@atscript/db-sql-tools`)
 
-| Export                                                        | Purpose                                                                                   |
-| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `SqlDialect` (type)                                           | Identifier quoting, boolean / bind placeholders.                                          |
-| `TSqlFragment` (type)                                         | `{ sql, params }` fragment shape.                                                         |
-| `buildSelect` / `buildInsert` / `buildUpdate` / `buildDelete` | Dialect-parameterized CRUD SQL builders.                                                  |
-| `buildProjection`                                             | Projection clause for `SELECT`.                                                           |
-| `buildCreateView`                                             | View DDL builder.                                                                         |
-| `buildAggregateSelect` / `buildAggregateCount`                | `GROUP BY` / `HAVING` SQL for `@db.agg.*`.                                                |
-| `AGG_FN_SQL`                                                  | Map of aggregate function → SQL name.                                                     |
-| `createFilterVisitor(dialect)`                                | MongoDB-shape filter → SQL `WHERE` + bind array (visitor for `@uniqu/core` `walkFilter`). |
-| `buildWhere`                                                  | `WHERE` clause builder for a parsed filter.                                               |
-| `queryOpToSql` / `queryNodeToSql`                             | Translate query AST nodes.                                                                |
-| `parseRegexString`                                            | Parse `/pattern/flags` strings for `$regex`.                                              |
-| `defaultValueForType`                                         | Type-driven default literal for SQL DDL.                                                  |
-| `defaultValueToSqlLiteral`                                    | `@db.default.value` → SQL literal.                                                        |
-| `refActionToSql`                                              | `@db.rel.onDelete/onUpdate` → `ON DELETE …` clause.                                       |
-| `sqlStringLiteral`                                            | Escape a JS string into a SQL string literal.                                             |
-| `toSqlValue`                                                  | Coerce JS value for bind/embed.                                                           |
-| `EMPTY_AND` / `EMPTY_OR`                                      | Identity fragments for empty boolean groups.                                              |
-| `finalizeParams`                                              | Renumber bind placeholders for the dialect (e.g. `?` → `$1`).                             |
+| Export                                                                   | Purpose                                                                                                   |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `SqlDialect` (type)                                                      | Identifier quoting, boolean / bind placeholders.                                                          |
+| `TSqlFragment` (type)                                                    | `{ sql, params }` fragment shape.                                                                         |
+| `buildSelect` / `buildInsert` / `buildUpdate` / `buildDelete`            | Dialect-parameterized CRUD SQL builders.                                                                  |
+| `buildProjection`                                                        | Projection clause for `SELECT`.                                                                           |
+| `buildCreateView`                                                        | View DDL builder.                                                                                         |
+| `buildAggregateSelect` / `buildAggregateCount`                           | `GROUP BY` / `HAVING` SQL for `@db.agg.*`.                                                                |
+| `AGG_FN_SQL`                                                             | Map of aggregate function → SQL name.                                                                     |
+| `createFilterVisitor(dialect)`                                           | MongoDB-shape filter → SQL `WHERE` + bind array (visitor for `@uniqu/core` `walkFilter`).                 |
+| `buildWhere`                                                             | `WHERE` clause builder for a parsed filter.                                                               |
+| `queryOpToSql` / `queryNodeToSql`                                        | Translate query AST nodes.                                                                                |
+| `buildGeoSearchSelect` / `buildGeoSearchCount`                           | Distance-ranked geo search SQL (subquery + `__atscript_distance` alias + window/paging).                  |
+| `renameGeoDistance` / `geoWindowFromControls` / `normalizeGeoPointValue` | Geo post-fetch `$distance` rename, `$maxDistance`/`$minDistance` extraction, tuple/JSON-string normalize. |
+| `SqlDialect.geoWithin?(col, circle)`                                     | Optional dialect hook for `$geoWithin`; absent → visitor throws `GEO_NOT_SUPPORTED`.                      |
+| `parseRegexString`                                                       | Parse `/pattern/flags` strings for `$regex`.                                                              |
+| `defaultValueForType`                                                    | Type-driven default literal for SQL DDL.                                                                  |
+| `defaultValueToSqlLiteral`                                               | `@db.default.value` → SQL literal.                                                                        |
+| `refActionToSql`                                                         | `@db.rel.onDelete/onUpdate` → `ON DELETE …` clause.                                                       |
+| `sqlStringLiteral`                                                       | Escape a JS string into a SQL string literal.                                                             |
+| `toSqlValue`                                                             | Coerce JS value for bind/embed.                                                                           |
+| `EMPTY_AND` / `EMPTY_OR`                                                 | Identity fragments for empty boolean groups.                                                              |
+| `finalizeParams`                                                         | Renumber bind placeholders for the dialect (e.g. `?` → `$1`).                                             |
 
 Implement a `SqlDialect` for your engine, then delegate to the shared builders. **Do not hand-roll filter translation.**
 

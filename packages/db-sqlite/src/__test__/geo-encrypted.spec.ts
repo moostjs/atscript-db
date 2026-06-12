@@ -7,9 +7,9 @@ import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 import { prepareFixtures } from "./test-utils";
 
-// SQL adapters in v1 (geo-index spec §5.2): geo declarations stay portable —
-// the same .as file syncs everywhere — but the index is skipped with a warning
-// and geo queries fail loudly. Encrypted fields map to unbounded TEXT.
+// SQLite geo posture (phase 2): geoPoint tuples stay JSON TEXT, geoSearch and
+// $geoWithin run a haversine scan (SQLite math functions), and declared geo
+// indexes have no physical artifact. Encrypted fields map to unbounded TEXT.
 
 let GeoEncPlace: any;
 
@@ -53,12 +53,12 @@ describe("[sqlite] @db.encrypted + @db.index.geo (v1 posture)", () => {
     expect(byName.has("credentials__user")).toBe(false);
   });
 
-  it("skips the geo index with a warning (no index created, no drift churn)", async () => {
+  it("creates no physical geo index (haversine is scan-based, no drift churn)", async () => {
     await table.ensureTable();
     await table.syncIndexes();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("geo index"));
     const indexes = driver.all<{ name: string }>(`PRAGMA index_list("geo_enc_places")`);
     expect(indexes.some((i) => i.name.startsWith("atscript__geo"))).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("stores envelopes at rest and decrypts on read (full sqlite round-trip)", async () => {
@@ -83,18 +83,48 @@ describe("[sqlite] @db.encrypted + @db.index.geo (v1 posture)", () => {
     expect(row.geo).toEqual([-122.42, 37.77]);
   });
 
-  it("geoSearch fails loudly with GEO_NOT_SUPPORTED", async () => {
+  it("geoSearch returns distance-ranked rows with $distance (haversine)", async () => {
     await table.ensureTable();
-    await expect(table.geoSearch([0, 0])).rejects.toMatchObject({ code: "GEO_NOT_SUPPORTED" });
+    // SF, LA, NYC — query from SF
+    await table.insertOne({ id: "sf", name: "SF", geo: [-122.42, 37.77], apiToken: "t" });
+    await table.insertOne({ id: "la", name: "LA", geo: [-118.24, 34.05], apiToken: "t" });
+    await table.insertOne({ id: "nyc", name: "NYC", geo: [-74.006, 40.71], apiToken: "t" });
+    await table.insertOne({ id: "nowhere", name: "no geo", apiToken: "t" });
+
+    const rows = await table.geoSearch([-122.42, 37.77]);
+    expect(rows.map((r: any) => r.id)).toEqual(["sf", "la", "nyc"]);
+    expect(rows[0].$distance).toBeCloseTo(0, 0);
+    // SF→LA great-circle ≈ 559 km; haversine on a sphere within ~1%
+    expect(rows[1].$distance).toBeGreaterThan(550_000);
+    expect(rows[1].$distance).toBeLessThan(570_000);
+    // geo tuple round-trips alongside the computed distance
+    expect(rows[1].geo).toEqual([-118.24, 34.05]);
   });
 
-  it("$geoWithin fails loudly with GEO_NOT_SUPPORTED (never a silent scan)", async () => {
+  it("$geoWithin filters by haversine circle (no silent full scan semantics)", async () => {
     await table.ensureTable();
-    await expect(
-      table.findMany({
-        filter: { geo: { $geoWithin: { center: [0, 0], radius: 1000 } } },
-        controls: {},
-      }),
-    ).rejects.toMatchObject({ code: "GEO_NOT_SUPPORTED" });
+    await table.insertOne({ id: "sf", name: "SF", geo: [-122.42, 37.77], apiToken: "t" });
+    await table.insertOne({ id: "la", name: "LA", geo: [-118.24, 34.05], apiToken: "t" });
+    await table.insertOne({ id: "nowhere", name: "no geo", apiToken: "t" });
+
+    const rows = await table.findMany({
+      filter: { geo: { $geoWithin: { center: [-122.42, 37.77], radius: 600_000 } } },
+      controls: {},
+    });
+    expect(rows.map((r: any) => r.id).toSorted()).toEqual(["la", "sf"]);
+  });
+
+  it("geoSearchWithCount honors $maxDistance and counts the window", async () => {
+    await table.ensureTable();
+    await table.insertOne({ id: "sf", name: "SF", geo: [-122.42, 37.77], apiToken: "t" });
+    await table.insertOne({ id: "la", name: "LA", geo: [-118.24, 34.05], apiToken: "t" });
+    await table.insertOne({ id: "nyc", name: "NYC", geo: [-74.006, 40.71], apiToken: "t" });
+
+    const result = await table.geoSearchWithCount([-122.42, 37.77], {
+      controls: { $maxDistance: 600_000, $limit: 1 },
+    });
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0].id).toBe("sf");
+    expect(result.count).toBe(2);
   });
 });

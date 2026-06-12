@@ -17,6 +17,13 @@ import type {
   TFieldOps,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import {
+  buildGeoSearchCount,
+  buildGeoSearchSelect,
+  geoWindowFromControls,
+  normalizeGeoPointValue,
+  renameGeoDistance,
+} from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
 import {
@@ -30,6 +37,9 @@ import {
   buildAggregateCount,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  geoPointToMysqlInternal,
+  mysqlGeoDistanceExpr,
+  mysqlGeoValueToPoint,
   mysqlTypeFromField,
   qi,
   quoteTableName,
@@ -320,6 +330,17 @@ export class MysqlAdapter extends BaseDbAdapter {
         toStorage: (value: unknown) =>
           typeof value === "number" ? epochMsToUtcDatetime(value) : value,
         fromStorage: utcDatetimeToEpochMs,
+      };
+    }
+    // geoPoint ↔ POINT SRID 4326: internal-format binary in, `{x, y}` out.
+    // Non-point shapes (e.g. `$geoWithin` circle objects) pass through.
+    if (field.isGeoPoint && !field.encrypted) {
+      return {
+        toStorage: (value: unknown) => {
+          const point = normalizeGeoPointValue(value);
+          return point ? geoPointToMysqlInternal(point) : value;
+        },
+        fromStorage: (value: unknown) => mysqlGeoValueToPoint(value) ?? value,
       };
     }
     return undefined;
@@ -631,8 +652,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       IS_NULLABLE: string;
       COLUMN_KEY: string;
       COLUMN_DEFAULT: string | null;
+      SRS_ID: number | null;
     }>(
-      `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT
+      `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, SRS_ID
        FROM INFORMATION_SCHEMA.COLUMNS
        WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
        ORDER BY ORDINAL_POSITION`,
@@ -640,7 +662,12 @@ export class MysqlAdapter extends BaseDbAdapter {
     );
     return rows.map((r) => ({
       name: r.COLUMN_NAME,
-      type: r.COLUMN_TYPE.toUpperCase(),
+      // Geometry columns report SRID separately (COLUMN_TYPE is just "point") —
+      // fold it back in to match `mysqlTypeFromField` ("POINT SRID 4326").
+      type:
+        r.SRS_ID == null
+          ? r.COLUMN_TYPE.toUpperCase()
+          : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
       notnull: r.IS_NULLABLE === "NO",
       pk: r.COLUMN_KEY === "PRI",
       dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT),
@@ -670,7 +697,11 @@ export class MysqlAdapter extends BaseDbAdapter {
       if (field.defaultValue?.kind === "value") {
         ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
       } else if (!field.optional && !field.isPrimaryKey) {
-        ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
+        // Geometry columns reject plain literals — use an expression default
+        ddl +=
+          field.isGeoPoint && !field.encrypted
+            ? ` DEFAULT (ST_SRID(POINT(0, 0), 4326))`
+            : ` DEFAULT ${defaultValueForType(field.designType)}`;
       }
       if (field.collate) {
         const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
@@ -684,6 +715,12 @@ export class MysqlAdapter extends BaseDbAdapter {
     // Type changes — MySQL supports ALTER TABLE MODIFY COLUMN natively
     for (const { field } of diff.typeChanged ?? []) {
       const sqlType = this.typeMapper(field);
+      if (field.isGeoPoint && !field.encrypted && sqlType.startsWith("POINT")) {
+        // v1 JSON '[lng, lat]' → native POINT SRID 4326. MODIFY can't convert
+        // JSON to geometry — go through a temp column, preserving NULLs.
+        await this._migrateJsonColumnToPoint(tableName, field);
+        continue;
+      }
       let ddl = `ALTER TABLE ${quoteTableName(tableName)} MODIFY COLUMN ${qi(field.physicalName)} ${sqlType}`;
       if (!field.optional && !field.isPrimaryKey) {
         ddl += " NOT NULL";
@@ -889,6 +926,23 @@ export class MysqlAdapter extends BaseDbAdapter {
         }));
       },
       createIndex: async (index: TDbIndex) => {
+        if (index.type === "geo") {
+          // MySQL requires NOT NULL columns for SPATIAL indexes. Optional
+          // geoPoint fields stay searchable (scan-based) — warn and skip.
+          const fieldMeta = this._table.fieldDescriptors.find(
+            (f) => f.physicalName === index.fields[0]?.name,
+          );
+          if (fieldMeta?.optional) {
+            this.logger.warn(
+              `[mysql] geo index "${index.name}" skipped — SPATIAL indexes require a NOT NULL column; make "${fieldMeta.path}" required to index it`,
+            );
+            return;
+          }
+          const sql = `CREATE SPATIAL INDEX ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} (${qi(index.fields[0].name)})`;
+          this._log(sql);
+          await this._exec().exec(sql);
+          return;
+        }
         const unique = index.type === "unique" ? "UNIQUE " : "";
         const fulltext = index.type === "fulltext" ? "FULLTEXT " : "";
         // FULLTEXT indexes accept TEXT columns; others need a key length prefix
@@ -911,10 +965,6 @@ export class MysqlAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
-      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
-      // models stay portable; sync warns and skips instead of erroring.
-      // (MySQL supports FULLTEXT indexes natively — don't skip them.)
-      warnUnsupportedTypes: { adapter: "mysql", types: ["geo"] },
     });
   }
 
@@ -1262,6 +1312,98 @@ export class MysqlAdapter extends BaseDbAdapter {
       return queryThreshold;
     }
     return this._vectorThresholds.get(indexName);
+  }
+
+  // ── Geo search ───────────────────────────────────────────────────────────
+
+  /** Native POINT SRID 4326 + ST_Distance_Sphere — available on MySQL 8.0+. */
+  override isGeoSearchable(): boolean {
+    return true;
+  }
+
+  override async geoSearch(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const { sql, params } = this._buildGeoSearchSelect(
+      this._prepareGeoSearch(point, query, indexName),
+    );
+    this._log(sql, params);
+    const rows = await this._exec().all(sql, params);
+    return rows.map((row) => renameGeoDistance(row));
+  }
+
+  override async geoSearchWithCount(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    const ctx = this._prepareGeoSearch(point, query, indexName);
+    const { sql, params } = this._buildGeoSearchSelect(ctx);
+    const countFrag = buildGeoSearchCount(
+      mysqlDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+    );
+    this._log(sql, params);
+    this._log(countFrag.sql, countFrag.params);
+    const [rows, countRow] = await Promise.all([
+      this._exec().all(sql, params),
+      this._exec().get<{ cnt: number }>(countFrag.sql, countFrag.params),
+    ]);
+    return {
+      data: rows.map((row) => renameGeoDistance(row)),
+      count: Number(countRow?.cnt ?? 0),
+    };
+  }
+
+  /** Resolves the shared parts of a geo search once (column, filter, distance, window). */
+  private _prepareGeoSearch(point: [number, number], query: DbQuery, indexName?: string) {
+    const column = this._resolveGeoColumn(indexName);
+    const controls = (query.controls ?? {}) as Record<string, unknown>;
+    return {
+      tableName: this.resolveTableName(),
+      where: buildWhere(query.filter),
+      dist: mysqlGeoDistanceExpr(qi(column), point),
+      window: geoWindowFromControls(controls),
+      controls,
+    };
+  }
+
+  private _buildGeoSearchSelect(ctx: ReturnType<MysqlAdapter["_prepareGeoSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
+    return buildGeoSearchSelect(mysqlDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
+      $limit: ctx.controls.$limit as number | undefined,
+      $skip: ctx.controls.$skip as number | undefined,
+    });
+  }
+
+  /**
+   * Migrates a v1 JSON `[lng, lat]` column to native `POINT SRID 4326` via a
+   * temp column (MySQL has no JSON→geometry cast for MODIFY COLUMN).
+   */
+  private async _migrateJsonColumnToPoint(tableName: string, field: TDbFieldMeta): Promise<void> {
+    const col = qi(field.physicalName);
+    const tmp = qi(`${field.physicalName}__geo_mig`);
+    const quotedTable = quoteTableName(tableName);
+    const steps = [
+      `ALTER TABLE ${quotedTable} ADD COLUMN ${tmp} POINT SRID 4326 NULL`,
+      `UPDATE ${quotedTable} SET ${tmp} = ST_SRID(POINT(CAST(${col}->>'$[0]' AS DOUBLE), CAST(${col}->>'$[1]' AS DOUBLE)), 4326) WHERE ${col} IS NOT NULL`,
+      `ALTER TABLE ${quotedTable} DROP COLUMN ${col}`,
+      `ALTER TABLE ${quotedTable} RENAME COLUMN ${tmp} TO ${col}`,
+      ...(field.optional || field.isPrimaryKey
+        ? []
+        : [`ALTER TABLE ${quotedTable} MODIFY COLUMN ${col} POINT SRID 4326 NOT NULL`]),
+    ];
+    for (const ddl of steps) {
+      this._log(ddl);
+      await this._exec().exec(ddl);
+    }
   }
 }
 

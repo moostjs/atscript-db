@@ -1,7 +1,7 @@
 import type { TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
-import type { SqlDialect, TSqlFragment } from "@atscript/db-sql-tools";
+import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
   buildSelect as _buildSelect,
@@ -152,8 +152,35 @@ export const sqliteDialect: SqlDialect = {
     const collate = flags.includes("i") ? " COLLATE NOCASE" : "";
     return { sql: `${quotedCol} LIKE ? ESCAPE '\\'${collate}`, params: [likePattern] };
   },
+  // Haversine circle search over the JSON-stored `[lng, lat]` tuple.
+  // Requires SQLite built with math functions (default in better-sqlite3).
+  geoWithin(quotedCol: string, circle: TGeoCircle): TSqlFragment {
+    const dist = haversineDistanceExpr(quotedCol, circle.center);
+    return { sql: `${dist.sql} <= ?`, params: [...dist.params, circle.radius] };
+  },
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
+
+// ── Geo helpers (haversine over JSON-stored tuples) ─────────────────────────
+
+/**
+ * Great-circle distance in meters from a JSON-stored `[lng, lat]` column to a
+ * query point, via the haversine formula (mean earth radius 6 371 000 m).
+ * NULL columns yield NULL — geo search excludes them, matching `$geoNear`.
+ * Needs SQLite math functions (`SQLITE_ENABLE_MATH_FUNCTIONS`, on by default
+ * in better-sqlite3 builds).
+ */
+export function haversineDistanceExpr(quotedCol: string, point: [number, number]): TSqlFragment {
+  const lat = `radians(json_extract(${quotedCol}, '$[1]'))`;
+  const lng = `radians(json_extract(${quotedCol}, '$[0]'))`;
+  // 2 * R * asin(sqrt(a)); min() guards asin's domain against float rounding
+  const sql =
+    `12742000.0 * asin(min(1.0, sqrt(` +
+    `pow(sin((${lat} - radians(?)) / 2.0), 2) + ` +
+    `cos(radians(?)) * cos(${lat}) * pow(sin((${lng} - radians(?)) / 2.0), 2)` +
+    `)))`;
+  return { sql, params: [point[1], point[1], point[0]] };
+}
 
 // ── Pre-bound DML builders ──────────────────────────────────────────────────
 

@@ -79,12 +79,12 @@ Renaming the column via `@db.column 'v'` is not recommended at this time — see
 
 ## Indexes
 
-| Annotation           | Args                                  | Effect                                                                                                                                                                |
-| -------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.index.plain`    | `name?: string, sort?: 'asc'\|'desc'` | Standard index. Share the same `name` across fields for composite.                                                                                                    |
-| `@db.index.unique`   | `name?: string`                       | Unique constraint index. On optional fields uniqueness applies to present values only (SQL `NULLS DISTINCT`; Mongo partial index) — many value-less rows may coexist. |
-| `@db.index.fulltext` | `name?: string, weight?: number`      | Full-text search index. Translates per-adapter: SQLite FTS5, PG tsvector, MySQL FULLTEXT, Mongo text.                                                                 |
-| `@db.index.geo`      | `name?: string`                       | Geospatial index on a top-level `db.geoPoint` field. MongoDB-only v1 (2dsphere); SQL adapters warn + skip. Full rules → [geo-search.md](./geo-search.md).             |
+| Annotation           | Args                                  | Effect                                                                                                                                                                                                                  |
+| -------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.index.plain`    | `name?: string, sort?: 'asc'\|'desc'` | Standard index. Share the same `name` across fields for composite.                                                                                                                                                      |
+| `@db.index.unique`   | `name?: string`                       | Unique constraint index. On optional fields uniqueness applies to present values only (SQL `NULLS DISTINCT`; Mongo partial index) — many value-less rows may coexist.                                                   |
+| `@db.index.fulltext` | `name?: string, weight?: number`      | Full-text search index. Translates per-adapter: SQLite FTS5, PG tsvector, MySQL FULLTEXT, Mongo text.                                                                                                                   |
+| `@db.index.geo`      | `name?: string`                       | Geospatial index on a top-level `db.geoPoint` field. Native on all adapters: Mongo 2dsphere, PG GiST (PostGIS), MySQL SPATIAL (required fields only), SQLite scan-based. Full rules → [geo-search.md](./geo-search.md). |
 
 ## Relations
 

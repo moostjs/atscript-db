@@ -19,7 +19,7 @@ const users = new Client<typeof User>("/api/users");
 await users.query(); // GET /api/users/query
 await users.query({ filter: { active: true } });
 await users.pages({ controls: { $sort: { name: 1 } } }, 1, 20);
-// Geo (tables with @db.index.geo; Mongo-only v1 → geo-search.md):
+// Geo (tables with @db.index.geo; all adapters → geo-search.md):
 await listings.geoSearch([-122.42, 37.77], { controls: { $maxDistance: 50_000 } }); // rows + $distance
 await listings.geoPages([-122.42, 37.77], {}, 1, 20);
 await users.one(42); // GET /api/users/one/42 — server calls `resolveIdFilter(id)` which matches the PK or any primary identification (configurable via `@db.table.preferredId.uniqueIndex`)

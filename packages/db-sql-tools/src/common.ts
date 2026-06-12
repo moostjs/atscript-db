@@ -14,6 +14,11 @@ export function toSqlValue(value: unknown): unknown {
   if (value === null) {
     return null;
   }
+  if (value instanceof Uint8Array) {
+    // Binary param (BLOB / geometry / vector) — pass through to the driver,
+    // JSON.stringify would mangle it into '{"type":"Buffer",...}'.
+    return value;
+  }
   if (typeof value === "object") {
     return JSON.stringify(value);
   }

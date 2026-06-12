@@ -8,7 +8,7 @@ outline: deep
 
 Geo search enables "find things near me" queries: declare a coordinate field with `db.geoPoint`, index it with `@db.index.geo`, then run distance-ranked searches with `geoSearch()` or radius predicates with the `$geoWithin` filter operator.
 
-The contract is portable — the same `.as` model compiles, validates, and syncs on every adapter — but **the v1 implementation is MongoDB-only**. SQL adapters skip the index with a warning and reject geo queries loudly (never a silent table scan). This mirrors how `search()`/`vectorSearch()` work: adapters opt in via capability flags.
+The contract is portable **and runs natively on every adapter**: MongoDB stores GeoJSON `Point` with a `2dsphere` index, PostgreSQL uses PostGIS `geography(Point,4326)` with a GiST index, MySQL uses `POINT SRID 4326`, and SQLite computes haversine distances over the JSON-stored tuple. Your application always reads and writes plain `[lng, lat]` tuples — each adapter converts at the storage boundary. Adapters report availability via capability flags (only PostgreSQL without the PostGIS extension degrades to a non-searchable JSONB fallback).
 
 ## Defining a Geo Field
 
@@ -93,7 +93,7 @@ await rides.geoSearch("dropoff", [-122.42, 37.77], { filter: {}, controls: {} })
 ### Capability Checks & Errors
 
 ```typescript
-listings.isGeoSearchable(); // true on MongoDB, false elsewhere (v1)
+listings.isGeoSearchable(); // true everywhere except PostgreSQL without PostGIS
 ```
 
 | Error code             | When                                                                     |
@@ -155,16 +155,29 @@ const page = await client.geoPages([-122.42, 37.77], {}, 1, 20);
 
 ## Adapter Support
 
-| Adapter        | v1 behavior                                                                                                                                                          |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **MongoDB**    | ✅ Full support — stores GeoJSON `Point`, syncs a managed `2dsphere` index (`atscript__` prefix), `$geoNear`-backed `geoSearch`, `$centerSphere`-backed `$geoWithin` |
-| **PostgreSQL** | Index skipped with a warning; `geoSearch`/`$geoWithin` → `GEO_NOT_SUPPORTED` (PostGIS planned)                                                                       |
-| **MySQL**      | Index skipped with a warning; `geoSearch`/`$geoWithin` → `GEO_NOT_SUPPORTED` (`POINT SRID 4326` planned)                                                             |
-| **SQLite**     | Index skipped with a warning; `geoSearch`/`$geoWithin` → `GEO_NOT_SUPPORTED` (haversine fallback planned)                                                            |
+| Adapter        | Storage                                          | Index                                         | Distance engine                               |
+| -------------- | ------------------------------------------------ | --------------------------------------------- | --------------------------------------------- |
+| **MongoDB**    | GeoJSON `Point`                                  | Managed `2dsphere`                            | `$geoNear` / `$centerSphere` (sphere)         |
+| **PostgreSQL** | PostGIS `geography(Point,4326)` (JSONB fallback) | Managed GiST                                  | `ST_Distance` / `ST_DWithin` (WGS84 spheroid) |
+| **MySQL**      | `POINT SRID 4326`                                | Managed `SPATIAL` (requires a required field) | `ST_Distance_Sphere` (sphere)                 |
+| **SQLite**     | JSON `[lng, lat]` text                           | None (scan-based)                             | Haversine in SQL (sphere, R = 6 371 km)       |
 
-Models stay portable: an app whose test suite runs on `:memory:` SQLite can sync the same `.as` file everywhere — only geo _queries_ require MongoDB in v1. On MongoDB the application never sees GeoJSON wrappers: you write and read plain `[lng, lat]` tuples; the adapter converts at the storage boundary.
+Adapter notes:
 
-Schema sync notes: adding/removing `@db.index.geo` changes the schema hash and triggers a sync. On MongoDB the `2dsphere` index is created/dropped via the managed-index drift correction; on SQL adapters it contributes to the hash but syncs to a no-op + warning, so switching adapters doesn't thrash. See [What Gets Synced](/sync/what-gets-synced).
+- **PostgreSQL** — the adapter runs `CREATE EXTENSION IF NOT EXISTS postgis` during sync. If the extension can't be enabled (no superuser, not installed), `db.geoPoint` columns fall back to JSONB, the index is skipped with a warning, and geo queries fail with `GEO_NOT_SUPPORTED` — never a silent scan. Distances use the WGS84 spheroid (PostGIS default), so they can differ from the spherical engines by up to ~0.5%.
+- **MySQL** — `SPATIAL` indexes require `NOT NULL` columns. On an optional `geo?: db.geoPoint` field the index is skipped with a warning; `geoSearch`/`$geoWithin` still work (scan-based). Make the field required to get the index.
+- **SQLite** — needs SQLite math functions (`SQLITE_ENABLE_MATH_FUNCTIONS`; on by default in `better-sqlite3` builds). Declared geo indexes have no physical artifact; every geo query computes haversine per row — perfect for tests and small datasets.
+- **Distance values** — `$distance` and `$maxDistance`/`radius` are always meters, but each engine uses its own earth model (see table). Don't assert exact cross-adapter equality; allow ~0.5% tolerance.
+
+### Migrating from v1 (JSON storage)
+
+Tables created before native geo support stored `db.geoPoint` as JSON. Schema sync detects the type drift and migrates the column **in place, preserving data**:
+
+- **PostgreSQL** — `ALTER COLUMN ... TYPE geography(Point,4326) USING ST_SetSRID(ST_MakePoint(...), 4326)` built from the JSONB tuple (NULLs preserved).
+- **MySQL** — a temp `POINT SRID 4326` column is added, populated from the JSON tuple, then swapped in for the original column.
+- **SQLite** — no change; storage was already the final form.
+
+Schema sync notes: adding/removing `@db.index.geo` changes the schema hash and triggers a sync; the managed index (`atscript__geo__*`) is created/dropped via drift correction on every adapter that materializes one. See [What Gets Synced](/sync/what-gets-synced).
 
 ## Next Steps
 

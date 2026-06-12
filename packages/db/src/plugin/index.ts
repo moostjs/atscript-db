@@ -64,9 +64,9 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
                 "- **Coordinate order is GeoJSON order: longitude first.**\n" +
                 "- Each adapter maps this to its native storage:\n" +
                 "  - **MongoDB** → GeoJSON `{ type: 'Point', coordinates: [lng, lat] }`\n" +
-                "  - **PostgreSQL** → PostGIS `geography(Point,4326)` (Phase 2)\n" +
-                "  - **MySQL** → `POINT` SRID 4326 (Phase 2)\n" +
-                "  - **SQLite** → JSON `TEXT` (Phase 2)\n\n" +
+                "  - **PostgreSQL** → PostGIS `geography(Point,4326)` (JSONB without PostGIS)\n" +
+                "  - **MySQL** → `POINT SRID 4326`\n" +
+                "  - **SQLite** → JSON `TEXT` (haversine-based search)\n\n" +
                 "**Example:**\n" +
                 "```atscript\n" +
                 "@db.index.geo\n" +

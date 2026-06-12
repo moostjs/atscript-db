@@ -62,7 +62,7 @@ Mark a `db.geoPoint` field with `@db.index.geo` to enable distance-ranked search
 geo: db.geoPoint
 ```
 
-MongoDB-only in v1 (SQL adapters skip it with a warning). Annotation rules, the query API, and the `GET /geo` endpoint are covered in [Geo Search](/search/geo-search).
+Runs natively on every adapter (2dsphere on MongoDB, GiST/PostGIS on PostgreSQL, SPATIAL on MySQL for required fields, scan-based haversine on SQLite). Annotation rules, the query API, and the `GET /geo` endpoint are covered in [Geo Search](/search/geo-search).
 
 ## Composite Indexes
 

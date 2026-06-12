@@ -1,6 +1,15 @@
-export type { TSqlFragment, SqlDialect } from "./dialect";
+export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
 export { EMPTY_AND, EMPTY_OR, finalizeParams } from "./dialect";
 export { createFilterVisitor, buildWhere } from "./filter-builder";
+export type { TGeoWindow } from "./geo";
+export {
+  GEO_DISTANCE_ALIAS,
+  buildGeoSearchSelect,
+  buildGeoSearchCount,
+  geoWindowFromControls,
+  normalizeGeoPointValue,
+  renameGeoDistance,
+} from "./geo";
 export {
   buildInsert,
   buildSelect,

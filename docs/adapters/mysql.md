@@ -148,6 +148,7 @@ export interface User {
 | Arrays                                | `JSON`                                    |                                                                                               |
 | `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`                                               |
 | `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                            |
+| `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                 |
 
 ### Unsigned Integers
 

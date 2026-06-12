@@ -452,6 +452,20 @@ Vector similarity search. Receives a pre-computed embedding vector (`number[]`),
 
 Same as `vectorSearch()` but also returns the total count. Returns `{ data, count }`.
 
+### Geo Search
+
+#### `geoSearch(point, query, indexName?)` / `geoSearchWithCount(...)`
+
+Distance-ranked geospatial search. Receives a `[lng, lat]` query point; must return rows sorted by distance ascending, each carrying a `$distance` field in meters. `$maxDistance`/`$minDistance` arrive in `query.controls`. The default implementations throw `GEO_NOT_SUPPORTED`. SQL adapters can build the query with the shared helpers from `@atscript/db-sql-tools` (`buildGeoSearchSelect`, `buildGeoSearchCount`, `renameGeoDistance`) plus a dialect-specific distance expression; `_resolveGeoColumn(indexName?)` (protected, on `BaseDbAdapter`) resolves the geo index to its physical column.
+
+#### `isGeoSearchable()`
+
+Whether the adapter supports `geoSearch()` and the `$geoWithin` filter operator. Defaults to `false`. The core query guards consult this before translating `$geoWithin`, so a dialect without a `geoWithin` hook never sees the operator.
+
+#### `SqlDialect.geoWithin(quotedCol, circle)` (db-sql-tools)
+
+Optional dialect hook translating `$geoWithin: { center, radius }` into a SQL predicate fragment. Dialects without it cause the shared filter visitor to throw `GEO_NOT_SUPPORTED` — never a silent scan.
+
 ### Search Metadata
 
 #### `isSearchable()`

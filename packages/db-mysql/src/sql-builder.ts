@@ -1,7 +1,7 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
-import type { SqlDialect, TSqlFragment } from "@atscript/db-sql-tools";
+import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
   buildSelect as _buildSelect,
@@ -78,8 +78,70 @@ export const mysqlDialect: SqlDialect = {
     const { pattern } = parseRegexString(value);
     return { sql: `${quotedCol} REGEXP ?`, params: [pattern] };
   },
+  // Spherical circle search on a POINT SRID 4326 column. POINT(x, y) builds
+  // the query point in MySQL's internal axis order (x=lng, y=lat — the SRS
+  // lat-lng axis order applies only to WKT/WKB import/export).
+  geoWithin(quotedCol: string, circle: TGeoCircle): TSqlFragment {
+    const dist = mysqlGeoDistanceExpr(quotedCol, circle.center);
+    return { sql: `${dist.sql} <= ?`, params: [...dist.params, circle.radius] };
+  },
   createViewPrefix: "CREATE OR REPLACE VIEW",
 };
+
+// ── Geo helpers (native POINT SRID 4326) ────────────────────────────────────
+
+/**
+ * Spherical distance in meters from a POINT column to a query point.
+ * Used as the `distExpr` of the shared geo search builder.
+ */
+export function mysqlGeoDistanceExpr(quotedCol: string, point: [number, number]): TSqlFragment {
+  return {
+    sql: `ST_Distance_Sphere(${quotedCol}, ST_SRID(POINT(?, ?), 4326))`,
+    params: [point[0], point[1]],
+  };
+}
+
+/**
+ * Encodes a `[lng, lat]` tuple in MySQL's internal geometry format
+ * (4-byte SRID LE + WKB point) — geometry columns accept it directly as a
+ * binary parameter, bypassing the WKT/WKB axis-order pitfalls entirely.
+ */
+export function geoPointToMysqlInternal(point: [number, number]): Buffer {
+  const buf = Buffer.alloc(25);
+  buf.writeUInt32LE(4326, 0);
+  buf.writeUInt8(1, 4); // little-endian flag
+  buf.writeUInt32LE(1, 5); // geometry type: point
+  buf.writeDoubleLE(point[0], 9); // x = longitude (internal storage order)
+  buf.writeDoubleLE(point[1], 17); // y = latitude
+  return buf;
+}
+
+/**
+ * Decodes a geo read value back to `[lng, lat]`. The mysql2 driver parses
+ * POINT columns to `{x, y}` objects (internal order: x=lng, y=lat); raw
+ * internal-format buffers are handled for drivers that don't.
+ */
+export function mysqlGeoValueToPoint(value: unknown): [number, number] | undefined {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { x?: unknown }).x === "number" &&
+    typeof (value as { y?: unknown }).y === "number"
+  ) {
+    return [(value as { x: number }).x, (value as { y: number }).y];
+  }
+  if (value instanceof Uint8Array && value.length >= 25) {
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    const littleEndian = buf.readUInt8(4) === 1;
+    const type = littleEndian ? buf.readUInt32LE(5) : buf.readUInt32BE(5);
+    if ((type & 0xff) === 1) {
+      const x = littleEndian ? buf.readDoubleLE(9) : buf.readDoubleBE(9);
+      const y = littleEndian ? buf.readDoubleLE(17) : buf.readDoubleBE(17);
+      return [x, y];
+    }
+  }
+  return undefined;
+}
 
 // ── Pre-bound DML builders ──────────────────────────────────────────────────
 
@@ -230,6 +292,11 @@ export function mysqlTypeFromField(field: TDbFieldMeta): string {
   const mysqlTypeOverride = metadata?.get("db.mysql.type") as string | undefined;
   if (mysqlTypeOverride) {
     return mysqlTypeOverride;
+  }
+
+  // db.geoPoint → native geographic point (encrypted geo keeps its envelope type)
+  if (field.isGeoPoint && !field.encrypted) {
+    return "POINT SRID 4326";
   }
 
   // Unsigned modifier: @db.mysql.unsigned

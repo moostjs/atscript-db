@@ -15,6 +15,13 @@ import type {
   TValueFormatterPair,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import {
+  buildGeoSearchCount,
+  buildGeoSearchSelect,
+  geoWindowFromControls,
+  normalizeGeoPointValue,
+  renameGeoDistance,
+} from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
 import {
@@ -28,6 +35,9 @@ import {
   buildAggregateCount,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  geoPointToEwkt,
+  parseEwkbPointHex,
+  pgGeoDistanceExpr,
   pgTypeFromField,
   qi,
   quoteTableName,
@@ -84,6 +94,10 @@ export class PostgresAdapter extends BaseDbAdapter {
   private _nocaseColumns = new Set<string>();
   /** Whether citext extension has been provisioned (avoids redundant round-trips). */
   private _citextProvisioned = false;
+
+  // ── Geo search state ────────────────────────────────────────────────────
+  /** Whether the connected PostgreSQL instance has the PostGIS extension. */
+  private _supportsGeo: boolean | undefined;
 
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the connected PostgreSQL instance has the pgvector extension. */
@@ -231,13 +245,37 @@ export class PostgresAdapter extends BaseDbAdapter {
    * invalid for the pgvector `vector` type — it expects bracket-delimited `[1,2,3]`.
    */
   override formatValue(field: TDbFieldMeta): TValueFormatterPair | undefined {
-    if (!this._vectorFields.has(field.path)) {
-      return undefined;
+    if (this._vectorFields.has(field.path)) {
+      return {
+        toStorage: (value: unknown) => (Array.isArray(value) ? `[${value.join(",")}]` : value),
+        fromStorage: (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value),
+      };
     }
-    return {
-      toStorage: (value: unknown) => (Array.isArray(value) ? `[${value.join(",")}]` : value),
-      fromStorage: (value: unknown) => (typeof value === "string" ? JSON.parse(value) : value),
-    };
+    // geoPoint ↔ geography(Point,4326): EWKT text in, hex-EWKB parsed out.
+    // Branches at call time — PostGIS support is detected during sync, after
+    // formatters are built. In JSONB-fallback mode values pass through
+    // untouched (the relational mapper's JSON handling already round-trips).
+    if (field.isGeoPoint && !field.encrypted) {
+      return {
+        toStorage: (value: unknown) => {
+          if (!this._supportsGeo) {
+            return value;
+          }
+          const point = normalizeGeoPointValue(value);
+          return point ? geoPointToEwkt(point) : value;
+        },
+        fromStorage: (value: unknown) => {
+          if (typeof value === "string") {
+            const point = parseEwkbPointHex(value);
+            if (point) {
+              return point;
+            }
+          }
+          return value;
+        },
+      };
+    }
+    return undefined;
   }
 
   // ── Error mapping ─────────────────────────────────────────────────────────
@@ -545,6 +583,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (this._supportsVector === undefined && this._vectorFields.size > 0) {
       await this._detectVectorSupport();
     }
+    if (this._supportsGeo === undefined && this._hasGeoPointFields()) {
+      await this._detectGeoSupport();
+    }
+  }
+
+  /** Whether the table declares any `db.geoPoint` fields (unencrypted). */
+  private _hasGeoPointFields(): boolean {
+    return this._table.fieldDescriptors.some((fd) => fd.isGeoPoint && !fd.encrypted);
   }
 
   async ensureTable(): Promise<void> {
@@ -716,7 +762,17 @@ export class PostgresAdapter extends BaseDbAdapter {
     for (const { field } of diff.typeChanged ?? []) {
       const sqlType = this.typeMapper(field);
       const col = qi(field.physicalName);
-      const ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${col}::text::${sqlType}`;
+      let ddl: string;
+      if (field.isGeoPoint && sqlType.startsWith("geography")) {
+        // v1 JSONB '[lng, lat]' → native geography(Point,4326). The generic
+        // ::text double-cast can't parse a JSON tuple as WKT — build the
+        // point explicitly, preserving NULLs.
+        ddl =
+          `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} ` +
+          `USING CASE WHEN ${col} IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((${col}->>0)::float8, (${col}->>1)::float8), 4326)::geography END`;
+      } else {
+        ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${col}::text::${sqlType}`;
+      }
       this._log(ddl);
       await this._exec().exec(ddl);
     }
@@ -1025,6 +1081,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       const vec = this._vectorFields.get(field.path)!;
       return this._supportsVector ? `vector(${vec.dimensions})` : "JSONB";
     }
+    // geoPoint → geography(Point,4326) when PostGIS is available, JSONB otherwise
+    if (field.isGeoPoint) {
+      return this._supportsGeo ? "geography(Point,4326)" : pgTypeFromField(field);
+    }
     return pgTypeFromField(field);
   }
 
@@ -1033,12 +1093,17 @@ export class PostgresAdapter extends BaseDbAdapter {
   async syncIndexes(): Promise<void> {
     const tableName = this._table.tableName;
     const schema = this._schema;
+    // Resolve PostGIS availability before index DDL (idempotent; usually
+    // already resolved by ensureTable/schema sync).
+    await this.prepareTypeMapper();
 
     await this.syncIndexesWithDiff({
       listExisting: async () => {
+        // ::text cast — pg has no parser for name[], it would arrive as the
+        // string "{col1,col2}" and wrongly trip the definition-drift rebuild.
         const rows = await this._exec().all<{ name: string; columns: string[] | null }>(
           `SELECT i.relname AS name,
-                  (SELECT array_agg(a.attname ORDER BY k.ord)
+                  (SELECT array_agg(a.attname::text ORDER BY k.ord)
                    FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
                    WHERE k.attnum > 0) AS columns
@@ -1060,6 +1125,18 @@ export class PostgresAdapter extends BaseDbAdapter {
           await this._exec().exec(sql);
           return;
         }
+        if (index.type === "geo") {
+          if (!this._supportsGeo) {
+            this.logger.warn(
+              `[postgres] geo index "${index.name}" declared but PostGIS is not available — skipped`,
+            );
+            return;
+          }
+          const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gist (${qi(index.fields[0].name)})`;
+          this._log(sql);
+          await this._exec().exec(sql);
+          return;
+        }
 
         const unique = index.type === "unique" ? "UNIQUE " : "";
         const cols = index.fields
@@ -1075,9 +1152,6 @@ export class PostgresAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
-      // Geo indexes are MongoDB-only in v1 (geo-index spec §5.2) — declared
-      // models stay portable; sync warns and skips instead of erroring.
-      warnUnsupportedTypes: { adapter: "postgres", types: ["geo"] },
     });
 
     // Create HNSW vector indexes when pgvector is available
@@ -1446,6 +1520,101 @@ export class PostgresAdapter extends BaseDbAdapter {
     }
     return this._vectorThresholds.get(indexName);
   }
+
+  // ── Geo search ───────────────────────────────────────────────────────────
+
+  /**
+   * Detects PostGIS support by attempting to enable the extension.
+   * Idempotent — safe to call multiple times.
+   */
+  private async _detectGeoSupport(): Promise<boolean> {
+    if (this._supportsGeo !== undefined) {
+      return this._supportsGeo;
+    }
+    try {
+      await this._exec().exec("CREATE EXTENSION IF NOT EXISTS postgis");
+      this._supportsGeo = true;
+    } catch {
+      this._supportsGeo = false;
+      this.logger.warn(
+        "[postgres] PostGIS extension not available — db.geoPoint fields are stored as JSONB (no geo search).",
+      );
+    }
+    return this._supportsGeo;
+  }
+
+  override isGeoSearchable(): boolean {
+    return this._supportsGeo === true;
+  }
+
+  override async geoSearch(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    await this._detectGeoSupport();
+    const { sql, params } = this._buildGeoSearchSelect(
+      this._prepareGeoSearch(point, query, indexName),
+    );
+    this._log(sql, params);
+    const rows = await this._exec().all(sql, params);
+    return rows.map((row) => renameGeoDistance(row));
+  }
+
+  override async geoSearchWithCount(
+    point: [number, number],
+    query: DbQuery,
+    indexName?: string,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    await this._detectGeoSupport();
+    const ctx = this._prepareGeoSearch(point, query, indexName);
+    const { sql, params } = this._buildGeoSearchSelect(ctx);
+    const countFrag = buildGeoSearchCount(
+      pgDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+    );
+    this._log(sql, params);
+    this._log(countFrag.sql, countFrag.params);
+    const [rows, countRow] = await Promise.all([
+      this._exec().all(sql, params),
+      this._exec().get<{ cnt: number | string }>(countFrag.sql, countFrag.params),
+    ]);
+    return {
+      data: rows.map((row) => renameGeoDistance(row)),
+      count: parseCount(countRow?.cnt),
+    };
+  }
+
+  /** Resolves the shared parts of a geo search once (column, filter, distance, window). */
+  private _prepareGeoSearch(point: [number, number], query: DbQuery, indexName?: string) {
+    if (!this._supportsGeo) {
+      throw new DbError("GEO_NOT_SUPPORTED", [
+        { path: "", message: "Geo search requires the PostGIS extension" },
+      ]);
+    }
+    const column = this._resolveGeoColumn(indexName);
+    const controls = (query.controls ?? {}) as Record<string, unknown>;
+    return {
+      tableName: this.resolveTableName(),
+      where: buildWhere(query.filter),
+      dist: pgGeoDistanceExpr(qi(column), point),
+      window: geoWindowFromControls(controls),
+      controls,
+    };
+  }
+
+  private _buildGeoSearchSelect(ctx: ReturnType<PostgresAdapter["_prepareGeoSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
+    return buildGeoSearchSelect(pgDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
+      $limit: ctx.controls.$limit as number | undefined,
+      $skip: ctx.controls.$skip as number | undefined,
+    });
+  }
 }
 
 /**
@@ -1500,6 +1669,10 @@ function normalizePgType(
       // CITEXT extension for @db.collate 'nocase'
       if (udtName === "citext") {
         return "CITEXT";
+      }
+      // PostGIS geography for db.geoPoint (e.g. "geography(Point,4326)")
+      if (udtName === "geography") {
+        return formattedType;
       }
       return udtName?.toUpperCase() ?? "USER-DEFINED";
     }

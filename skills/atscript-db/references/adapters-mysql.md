@@ -43,17 +43,18 @@ plugins: [ts(), dbPlugin(), MysqlPlugin()]; // unlocks @db.mysql.*
 
 ## Capabilities
 
-| Capability                               | Notes                                                                                                       |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Transactions                             | Native. InnoDB required (default).                                                                          |
-| Native FKs (`supportsNativeForeignKeys`) | Yes. Referential actions pushed to `FOREIGN KEY (…) REFERENCES … ON DELETE …`.                              |
-| Full-text search                         | `FULLTEXT` indexes for `@db.index.fulltext`. `search()` uses `MATCH … AGAINST` with mode `IN BOOLEAN MODE`. |
-| Vector search                            | MySQL 9+ `VECTOR` type. `@db.search.vector N, 'cosine', 'idx'` → `VECTOR(N)` column.                        |
-| Collation                                | Portable: `@db.column.collate`. Native: `@db.mysql.collate 'utf8mb4_unicode_ci'`.                           |
-| Column modify                            | Yes — `ALTER TABLE MODIFY COLUMN …` in place.                                                               |
-| Schemas                                  | Not supported — one schema per connection (database). `@db.schema` is ignored at runtime.                   |
-| JSON                                     | `@db.json` → `JSON` (MySQL 5.7+).                                                                           |
-| Native defaults                          | `supportsNativeValueDefaults: true` — DB emits `DEFAULT` clauses for static defaults.                       |
+| Capability                               | Notes                                                                                                                                                                                                                                     |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transactions                             | Native. InnoDB required (default).                                                                                                                                                                                                        |
+| Native FKs (`supportsNativeForeignKeys`) | Yes. Referential actions pushed to `FOREIGN KEY (…) REFERENCES … ON DELETE …`.                                                                                                                                                            |
+| Full-text search                         | `FULLTEXT` indexes for `@db.index.fulltext`. `search()` uses `MATCH … AGAINST` with mode `IN BOOLEAN MODE`.                                                                                                                               |
+| Vector search                            | MySQL 9+ `VECTOR` type. `@db.search.vector N, 'cosine', 'idx'` → `VECTOR(N)` column.                                                                                                                                                      |
+| Geo search                               | Native. `db.geoPoint` → `POINT SRID 4326` (internal-format binary IO); `ST_Distance_Sphere`. SPATIAL index only on **required** fields (NOT NULL rule); optional fields warn+skip but stay searchable. → [geo-search.md](./geo-search.md) |
+| Collation                                | Portable: `@db.column.collate`. Native: `@db.mysql.collate 'utf8mb4_unicode_ci'`.                                                                                                                                                         |
+| Column modify                            | Yes — `ALTER TABLE MODIFY COLUMN …` in place.                                                                                                                                                                                             |
+| Schemas                                  | Not supported — one schema per connection (database). `@db.schema` is ignored at runtime.                                                                                                                                                 |
+| JSON                                     | `@db.json` → `JSON` (MySQL 5.7+).                                                                                                                                                                                                         |
+| Native defaults                          | `supportsNativeValueDefaults: true` — DB emits `DEFAULT` clauses for static defaults.                                                                                                                                                     |
 
 ## `@db.mysql.*` annotations
 

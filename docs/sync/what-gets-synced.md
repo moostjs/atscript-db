@@ -187,8 +187,12 @@ Two annotation-driven special cases participate in the schema hash like any
 other change:
 
 - [`@db.index.geo`](/search/geo-search) syncs to a managed `2dsphere` index on
-  MongoDB; SQL adapters log a warning and skip it (no index created, no drift
-  churn when switching adapters).
+  MongoDB and a GiST index on PostgreSQL (PostGIS). MySQL creates a `SPATIAL`
+  index only for required fields (`NOT NULL` rule — optional fields warn and
+  skip); SQLite creates no physical index (haversine search is scan-based).
+  Tables that stored `db.geoPoint` as JSON before native geo support are
+  migrated in place on the next sync (PostgreSQL `ALTER ... USING`, MySQL
+  temp-column swap), preserving data and NULLs.
 - Toggling [`@db.encrypted`](/api/encryption) changes the field's storage type
   (ciphertext is unbounded text), so sync runs — but sync **never**
   encrypts/decrypts existing data, and key material is never written to the

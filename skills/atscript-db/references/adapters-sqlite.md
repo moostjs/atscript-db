@@ -28,16 +28,17 @@ const db = createAdapter("./app.db", { vector: true });
 
 ## Capabilities
 
-| Capability                                      | Status                                                                                                                                                   |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Transactions                                    | Native `BEGIN` / `COMMIT` / `ROLLBACK`.                                                                                                                  |
-| Foreign keys (`supportsNativeForeignKeys`)      | Yes — `PRAGMA foreign_keys = ON` at connect. Referential actions enforced by SQLite.                                                                     |
-| Full-text search                                | **FTS5** virtual tables for `@db.index.fulltext`. `search()` uses `MATCH` with ranking.                                                                  |
-| Collation (`@db.column.collate`)                | `'binary'` → `BINARY`, `'nocase'` → `NOCASE`, `'unicode'` → `unicode61` tokenizer for FTS. Applied in `WHERE` via `COLLATE`.                             |
-| JSON columns (`@db.json`)                       | Stored as `TEXT`, read/written with `JSON()`/`json_extract`.                                                                                             |
-| Vector search                                   | **sqlite-vec extension** — `vec0` virtual shadow table per `@db.search.vector` field. KNN with cosine / l2; partition push-down via `@db.search.filter`. |
-| Decimal precision                               | SQLite has no native DECIMAL — stored as `NUMERIC`; precision is advisory.                                                                               |
-| Column modify in place (`supportsColumnModify`) | No — use `@db.sync.method 'recreate'` for type changes.                                                                                                  |
+| Capability                                      | Status                                                                                                                                                                  |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transactions                                    | Native `BEGIN` / `COMMIT` / `ROLLBACK`.                                                                                                                                 |
+| Foreign keys (`supportsNativeForeignKeys`)      | Yes — `PRAGMA foreign_keys = ON` at connect. Referential actions enforced by SQLite.                                                                                    |
+| Full-text search                                | **FTS5** virtual tables for `@db.index.fulltext`. `search()` uses `MATCH` with ranking.                                                                                 |
+| Collation (`@db.column.collate`)                | `'binary'` → `BINARY`, `'nocase'` → `NOCASE`, `'unicode'` → `unicode61` tokenizer for FTS. Applied in `WHERE` via `COLLATE`.                                            |
+| JSON columns (`@db.json`)                       | Stored as `TEXT`, read/written with `JSON()`/`json_extract`.                                                                                                            |
+| Vector search                                   | **sqlite-vec extension** — `vec0` virtual shadow table per `@db.search.vector` field. KNN with cosine / l2; partition push-down via `@db.search.filter`.                |
+| Geo search                                      | Haversine in SQL over the JSON `[lng, lat]` tuple (needs math functions — default in better-sqlite3). No physical index; scan-based. → [geo-search.md](./geo-search.md) |
+| Decimal precision                               | SQLite has no native DECIMAL — stored as `NUMERIC`; precision is advisory.                                                                                              |
+| Column modify in place (`supportsColumnModify`) | No — use `@db.sync.method 'recreate'` for type changes.                                                                                                                 |
 
 ## In-memory for tests
 

@@ -243,7 +243,7 @@ For annotations and programmatic API, see [Vector Search](/search/vector-search)
 
 ## Geo Search ($center, $maxDistance, $minDistance) {#geo-search}
 
-Tables with a [`@db.index.geo`](/search/geo-search) field expose a dedicated `GET /geo` endpoint for distance-ranked queries (MongoDB-only in v1):
+Tables with a [`@db.index.geo`](/search/geo-search) field expose a dedicated `GET /geo` endpoint for distance-ranked queries (available on every adapter):
 
 ```bash
 curl "http://localhost:3000/listings/geo?\$center=-122.42,37.77&\$maxDistance=50000&status=ACTIVE"

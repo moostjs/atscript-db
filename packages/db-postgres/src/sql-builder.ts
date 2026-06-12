@@ -1,7 +1,7 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
-import type { SqlDialect, TSqlFragment } from "@atscript/db-sql-tools";
+import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
   buildSelect as _buildSelect,
@@ -122,11 +122,64 @@ export const pgDialect: SqlDialect = {
     const op = flags.includes("i") ? "~*" : "~";
     return { sql: `${quotedCol} ${op} ?`, params: [pattern] };
   },
+  // PostGIS circle search on a geography(Point,4326) column. Only reachable
+  // when the adapter reports isGeoSearchable() (PostGIS present) — the core
+  // query guards throw GEO_NOT_SUPPORTED before translation otherwise.
+  geoWithin(quotedCol: string, circle: TGeoCircle): TSqlFragment {
+    return {
+      sql: `ST_DWithin(${quotedCol}, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ?)`,
+      params: [circle.center[0], circle.center[1], circle.radius],
+    };
+  },
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {
     return `$${index}`;
   },
 };
+
+// ── Geo helpers (PostGIS) ────────────────────────────────────────────────────
+
+/**
+ * Distance-in-meters expression from a geography column to a query point.
+ * Used as the `distExpr` of the shared geo search builder.
+ */
+export function pgGeoDistanceExpr(quotedCol: string, point: [number, number]): TSqlFragment {
+  return {
+    sql: `ST_Distance(${quotedCol}, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography)`,
+    params: [point[0], point[1]],
+  };
+}
+
+/** Formats a `[lng, lat]` tuple as EWKT — the text input format for geography params. */
+export function geoPointToEwkt(point: [number, number]): string {
+  return `SRID=4326;POINT(${point[0]} ${point[1]})`;
+}
+
+/**
+ * Parses a hex-encoded (E)WKB point — the raw wire format the pg driver
+ * returns for geography columns — back to a `[lng, lat]` tuple.
+ * Returns `undefined` for anything that isn't a WKB point.
+ */
+export function parseEwkbPointHex(hex: string): [number, number] | undefined {
+  if (hex.length < 42 || !/^[0-9A-Fa-f]+$/.test(hex)) {
+    return undefined;
+  }
+  const buf = Buffer.from(hex, "hex");
+  const littleEndian = buf.readUInt8(0) === 1;
+  const type = littleEndian ? buf.readUInt32LE(1) : buf.readUInt32BE(1);
+  if ((type & 0xff) !== 1) {
+    // Not a point geometry
+    return undefined;
+  }
+  const hasSrid = (type & 0x20_00_00_00) !== 0;
+  const offset = hasSrid ? 9 : 5;
+  if (buf.length < offset + 16) {
+    return undefined;
+  }
+  const x = littleEndian ? buf.readDoubleLE(offset) : buf.readDoubleBE(offset);
+  const y = littleEndian ? buf.readDoubleLE(offset + 8) : buf.readDoubleBE(offset + 8);
+  return [x, y];
+}
 
 // ── Pre-bound DML builders ──────────────────────────────────────────────────
 
