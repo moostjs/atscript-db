@@ -90,10 +90,10 @@ describe("@db.encrypted — transparent write/read round-trip", () => {
       id: "p1",
       legalName: "Acme",
       apiToken: "secret-token",
-      creditCredentials: { user: "u1", pwd: "p4ss" },
+      creditCredentials: { user: "cardholder-bravo", pwd: "passphrase-charlie" },
       pinCode: 1234,
       isVip: true,
-      tags: ["gold", "eu"],
+      tags: ["gold-tier-delta", "eu-region-echo"],
     });
 
     // Raw storage assertion — read through the adapter store, bypassing the table.
@@ -101,8 +101,18 @@ describe("@db.encrypted — transparent write/read round-trip", () => {
     for (const field of ["apiToken", "creditCredentials", "pinCode", "isVip", "tags"]) {
       expect(raw[field], field).toMatch(ENVELOPE_RE);
     }
+    // Sentinels must be long enough that they can't collide with the random
+    // base64url ciphertext by chance (a 2–4 char token like "u1"/"1234" hits
+    // ~1-in-4 runs). pinCode/isVip are numeric/boolean — their encryption is
+    // already proven by the ENVELOPE_RE check above and the round-trip below.
     const serialized = JSON.stringify(raw);
-    for (const plaintext of ["secret-token", "p4ss", "u1", "gold", "1234"]) {
+    for (const plaintext of [
+      "secret-token",
+      "passphrase-charlie",
+      "cardholder-bravo",
+      "gold-tier-delta",
+      "eu-region-echo",
+    ]) {
       expect(serialized).not.toContain(plaintext);
     }
     expect(raw.legalName).toBe("Acme");
@@ -110,10 +120,10 @@ describe("@db.encrypted — transparent write/read round-trip", () => {
     // Transparent decryption on read — type-exact round-trip.
     const row = await table.findOne({ filter: { id: "p1" }, controls: {} });
     expect(row.apiToken).toBe("secret-token");
-    expect(row.creditCredentials).toEqual({ user: "u1", pwd: "p4ss" });
+    expect(row.creditCredentials).toEqual({ user: "cardholder-bravo", pwd: "passphrase-charlie" });
     expect(row.pinCode).toBe(1234);
     expect(row.isVip).toBe(true);
-    expect(row.tags).toEqual(["gold", "eu"]);
+    expect(row.tags).toEqual(["gold-tier-delta", "eu-region-echo"]);
   });
 
   it("keeps absent optional encrypted props absent", async () => {
