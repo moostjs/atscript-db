@@ -19,6 +19,7 @@ import {
   type TMongoSearchIndexDefinition,
   type TSearchFieldMapping,
 } from "./mongo-types";
+import { hasAncestorIn } from "./path-utils";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -514,8 +515,17 @@ export async function dropColumnsImpl(
   if (columns.length === 0) {
     return;
   }
+  // When an embedded object (or array-of-objects) is removed wholesale, flatMap
+  // tracks both the container path and its descendant leaves, so all of them
+  // arrive here (e.g. `groupContact` plus `groupContact.email`). Mongo rejects an
+  // update that touches a path and its descendant together ("would create a
+  // conflict", code 40), so keep only the shallowest dropped paths — unsetting a
+  // parent already removes its whole subtree. Array-leaf drops whose parent array
+  // stays are untouched (the parent isn't in the set), so $[] handling still applies.
+  const dropped = new Set(columns);
+  const minimal = columns.filter((col) => !hasAncestorIn(col, dropped));
   const unsetSpec: Record<string, ""> = {};
-  for (const col of columns) {
+  for (const col of minimal) {
     // The dropped leaf is gone from flatMap, but its array ancestors usually
     // remain (we're dropping a sub-field, not the parent array). Passing the
     // column name as both args lets arraySafePath probe those ancestors and

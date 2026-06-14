@@ -172,3 +172,40 @@ describe("[mongo] dropColumnsImpl — array-of-objects sub-fields", () => {
     expect(update).toEqual({ $unset: { "withoutKey.$[].attribute": "" } });
   });
 });
+
+describe("[mongo] dropColumnsImpl — parent/child overlap collapse", () => {
+  // Bug: an embedded object is tracked in flatMap as BOTH the container path
+  // and its leaves, so removing the whole field puts the parent and every
+  // descendant into the drop set. Emitting one $unset key per column yields
+  // { groupContact: '', 'groupContact.email': '', ... }, which Mongo rejects
+  // ("would create a conflict at 'groupContact'", code 40). The fix keeps only
+  // the shallowest dropped paths — the parent's $unset removes the subtree.
+  it("collapses a dropped embedded object to a single parent $unset (no descendant keys)", async () => {
+    await dropColumnsImpl(adapter as any, [
+      "groupContact",
+      "groupContact.name",
+      "groupContact.title",
+      "groupContact.email",
+      "groupContact.phone",
+    ]);
+    const [, update] = mockCol.updateMany.mock.calls[0]!;
+    expect(update).toEqual({ $unset: { groupContact: "" } });
+  });
+
+  // When the whole array-of-objects is dropped (parent + its leaf together),
+  // collapsing to the array parent also avoids a latent conflict: unsetting
+  // both `withoutKey` and `withoutKey.$[].attribute` would itself be code 40.
+  it("collapses a dropped array-of-objects to the array parent (no $[] leaf key)", async () => {
+    await dropColumnsImpl(adapter as any, ["withoutKey", "withoutKey.attribute"]);
+    const [, update] = mockCol.updateMany.mock.calls[0]!;
+    expect(update).toEqual({ $unset: { withoutKey: "" } });
+  });
+
+  // A leaf drop whose parent array stays in the schema must be untouched by the
+  // collapse (the parent isn't in the drop set) so $[] handling still applies.
+  it("leaves an array-leaf drop alone when the parent array is not dropped", async () => {
+    await dropColumnsImpl(adapter as any, ["withoutKey.attribute"]);
+    const [, update] = mockCol.updateMany.mock.calls[0]!;
+    expect(update).toEqual({ $unset: { "withoutKey.$[].attribute": "" } });
+  });
+});
