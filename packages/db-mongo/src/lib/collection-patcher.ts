@@ -10,6 +10,7 @@ import type {
 import { getKeyProps, getDbFieldOp } from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
+import { joinPath } from "./path-utils";
 
 /**
  * True when a user value contains a `$`-prefixed string or object key — the
@@ -167,7 +168,7 @@ export class CollectionPatcher {
    * @private
    */
   private flattenPayload(payload: any, prefix = ""): UpdateFilter<any> {
-    const evalKey = (k: string) => (prefix ? `${prefix}.${k}` : k) as string;
+    const evalKey = (k: string) => joinPath(prefix, k);
     for (const [_key, value] of Object.entries(payload)) {
       const key = evalKey(_key);
       const flatType = this.collection.flatMap.get(key);

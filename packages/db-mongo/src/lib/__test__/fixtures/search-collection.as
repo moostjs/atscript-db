@@ -114,3 +114,98 @@ export interface Label {
     @db.mongo.search.autocomplete 'labels'
     name: string
 }
+
+// SINGLE embedded object: the searchable fields live one level deep under
+// `identity`. Atlas needs a nested `document` mapping node — a flattened
+// "identity.name" key would match nothing. Queried with plain operators.
+@db.table 'dealerGroups'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 1, 'dg_search'
+export interface DealerGroup {
+    @meta.id
+    _id: string
+
+    identity: {
+        @db.mongo.search.autocomplete 'dg_search'
+        name: string
+
+        @db.mongo.search.text 'lucene.english', 'dg_search'
+        tagline: string
+    }
+}
+
+// ARRAY of embedded objects: `dealers.name` requires an `embeddedDocuments`
+// mapping node and must be queried via the `embeddedDocument` operator (the
+// wildcard `text` operator does not reach array-of-object fields).
+@db.table 'dealerLists'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 1, 'dl_search'
+export interface DealerList {
+    @meta.id
+    _id: string
+
+    dealers: {
+        @db.mongo.search.autocomplete 'dl_search'
+        name: string
+
+        @db.mongo.search.text 'lucene.english', 'dl_search'
+        bio: string
+    }[]
+}
+
+// MIXED nesting: array of objects, each with a single embedded object.
+// `dealers.identity.name` → embeddedDocuments(dealers) > document(identity) > name.
+@db.table 'dealerMixed'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 1, 'dm_search'
+export interface DealerMixed {
+    @meta.id
+    _id: string
+
+    dealers: {
+        identity: {
+            @db.mongo.search.autocomplete 'dm_search'
+            name: string
+        }
+    }[]
+}
+
+// DOUBLY-nested arrays: an array of objects, each holding another array of objects.
+// `regions.outlets.name` → embeddedDocuments(regions) > embeddedDocuments(regions.outlets)
+// > name. The query needs one `embeddedDocument` operator per array level (nested).
+@db.table 'dealerDeep'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 1, 'dd_search'
+export interface DealerDeep {
+    @meta.id
+    _id: string
+
+    regions: {
+        outlets: {
+            @db.mongo.search.autocomplete 'dd_search'
+            name: string
+        }[]
+    }[]
+}
+
+// @db.column renames: MongoDB renames only the TOP-LEVEL document key, so the
+// search mapping/query key must follow. `username`→`handle` (top-level field),
+// and the embedded container `profile`→`prof` (top-level object); the nested
+// leaf `bio` keeps its logical name (nested keys are stored as-is).
+@db.table 'renamedSearch'
+@db.mongo.collection
+@db.mongo.search.static 'lucene.english', 1, 'rn_search'
+export interface RenamedSearch {
+    @meta.id
+    _id: string
+
+    @db.column 'handle'
+    @db.mongo.search.autocomplete 'rn_search'
+    username: string
+
+    @db.column 'prof'
+    profile: {
+        @db.mongo.search.text 'lucene.english', 'rn_search'
+        bio: string
+    }
+}

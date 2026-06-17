@@ -1,10 +1,11 @@
 import type { Collection, Document } from "mongodb";
 import { DbError } from "@atscript/db";
 import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/db";
-import type { TMongoIndex, TSearchIndex } from "./mongo-types";
+import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
 import { buildMongoFilter } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
 import { wrapInvalidQuery } from "./mongo-errors";
+import { joinPath } from "./path-utils";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -313,30 +314,67 @@ function buildSearchStage(
   const searchIndex = index as TSearchIndex;
   const fuzzy = resolveSearchFuzzy(searchIndex, controls);
   const strategy = searchIndex.strategy ?? "compound";
-  const autocompletePaths = autocompleteFieldPaths(searchIndex);
+  const paths = collectSearchPathsCached(searchIndex);
 
-  const textClause = (): Document => ({
-    text: { query: text, path: { wildcard: "*" }, ...(fuzzy ? { fuzzy } : {}) },
+  const fuzzyOpt = fuzzy ? { fuzzy } : {};
+  // Shared operator payloads so the flat and `embeddedDocument`-wrapped variants
+  // can't drift if the payload shape changes. `text` accepts a single path, an
+  // array of paths, or a wildcard; `autocomplete` takes one path.
+  const textOp = (path: string | string[] | { wildcard: string }): Document => ({
+    text: { query: text, path, ...fuzzyOpt },
   });
-  const autocompleteClause = (path: string): Document => ({
-    autocomplete: { query: text, path, ...(fuzzy ? { fuzzy } : {}) },
+  const autocompleteOp = (path: string): Document => ({
+    autocomplete: { query: text, path, ...fuzzyOpt },
   });
+  // Wildcard word match — reaches top-level and `document`-nested string fields,
+  // but NOT `embeddedDocuments` (array-of-object) fields.
+  const textClause = (): Document => textOp({ wildcard: "*" });
+  // Array-of-object fields are only reachable through the `embeddedDocument`
+  // operator. `wrapEmbedded` nests one operator per array level on the path
+  // (outermost last, so `a` wraps `a.b`); the innermost operator uses the full
+  // dotted path.
+  const wrapEmbedded = (chain: string[], operator: Document): Document => {
+    let wrapped = operator;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      wrapped = { embeddedDocument: { path: chain[i], operator: wrapped } };
+    }
+    return wrapped;
+  };
+  const embeddedTextClause = (chain: string[], leaves: string[]): Document =>
+    wrapEmbedded(chain, textOp(leaves.length === 1 ? leaves[0] : leaves));
+  const embeddedAutocompleteClause = (chain: string[], leaf: string): Document =>
+    wrapEmbedded(chain, autocompleteOp(leaf));
 
+  const wantWord = strategy === "text" || strategy === "compound";
+  const wantAutocomplete = strategy === "autocomplete" || strategy === "compound";
+
+  const clauses: Document[] = [];
+  if (wantWord) {
+    clauses.push(textClause());
+    for (const group of paths.arrayGroups) {
+      if (group.textLeaves.length > 0) {
+        clauses.push(embeddedTextClause(group.chain, group.textLeaves));
+      }
+    }
+  }
+  if (wantAutocomplete) {
+    for (const path of paths.autocompleteOutside) {
+      clauses.push(autocompleteOp(path));
+    }
+    for (const group of paths.arrayGroups) {
+      for (const leaf of group.autocompleteLeaves) {
+        clauses.push(embeddedAutocompleteClause(group.chain, leaf));
+      }
+    }
+  }
+
+  // Collapse a lone clause (e.g. a `text`-strategy index, or a `compound` index
+  // that maps no autocomplete/array field) so it degrades to the prior shape.
   let body: Document;
-  if (strategy === "text" || autocompletePaths.length === 0) {
-    // Word matching only — also the natural fallback when the index maps no
-    // autocomplete field (so `compound`/`autocomplete` degrade gracefully).
-    body = textClause();
-  } else if (strategy === "autocomplete") {
-    // Prefix/typeahead only — query the autocomplete fields, no word-match clause.
-    const clauses = autocompletePaths.map(autocompleteClause);
-    body =
-      clauses.length === 1 ? clauses[0] : { compound: { should: clauses, minimumShouldMatch: 1 } };
+  if (clauses.length <= 1) {
+    body = clauses[0] ?? textClause();
   } else {
-    // compound (default): rank exact-word hits above prefix hits. The autocomplete
-    // operator can't use a wildcard path, so each field gets its own clause.
-    const should: Document[] = [textClause(), ...autocompletePaths.map(autocompleteClause)];
-    body = { compound: { should, minimumShouldMatch: 1 } };
+    body = { compound: { should: clauses, minimumShouldMatch: 1 } };
   }
   return { stage: { $search: { index: index.key, ...body } }, classicText: false };
 }
@@ -355,18 +393,92 @@ function resolveSearchFuzzy(
   return maxEdits === 1 || maxEdits === 2 ? { maxEdits } : undefined;
 }
 
-/** Field paths in this index that carry an `autocomplete` mapping. */
-function autocompleteFieldPaths(index: TSearchIndex): string[] {
-  const fields = index.definition.mappings?.fields;
-  if (!fields) return [];
-  const paths: string[] = [];
-  for (const [path, mapping] of Object.entries(fields)) {
-    const list = Array.isArray(mapping) ? mapping : [mapping];
-    if (list.some((m) => m.type === "autocomplete")) {
-      paths.push(path);
-    }
+/**
+ * Searchable leaves sharing one chain of `embeddedDocuments` array ancestors
+ * (outermost → innermost). A leaf `a.b.c` where both `a` and `a.b` are arrays has
+ * `chain: ["a", "a.b"]`; a leaf under a single array `x.y` has `chain: ["x"]`.
+ * Each chain entry becomes one nested `embeddedDocument` wrapper at query time.
+ */
+interface TArrayLeafGroup {
+  chain: string[];
+  textLeaves: string[];
+  autocompleteLeaves: string[];
+}
+
+interface TCollectedSearchPaths {
+  /** Autocomplete leaf paths NOT inside any array (top-level or `document`-nested). */
+  autocompleteOutside: string[];
+  /** Searchable leaves under `embeddedDocuments` arrays, grouped by array chain. */
+  arrayGroups: TArrayLeafGroup[];
+}
+
+/**
+ * An index's mapping tree is immutable once schema sync builds it, and the index
+ * object is cached for the adapter's lifetime — so the walk runs once per index,
+ * not once per query (`buildSearchStage` is on the search hot path).
+ */
+const searchPathsCache = new WeakMap<TSearchIndex, TCollectedSearchPaths>();
+
+function collectSearchPathsCached(index: TSearchIndex): TCollectedSearchPaths {
+  let cached = searchPathsCache.get(index);
+  if (!cached) {
+    cached = collectSearchPaths(index.definition.mappings?.fields);
+    searchPathsCache.set(index, cached);
   }
-  return paths;
+  return cached;
+}
+
+/**
+ * Walks an index's nested mapping tree, classifying each searchable leaf by how
+ * it must be queried: a plain dotted path (top-level / `document`-nested) vs.
+ * scoped under an `embeddedDocuments` array root (queried via `embeddedDocument`).
+ * Word-matching for non-array fields rides the wildcard `text` clause, so only
+ * autocomplete leaves are tracked outside arrays.
+ */
+function collectSearchPaths(
+  fields: Record<string, TSearchFieldMapping | TSearchFieldMapping[]> | undefined,
+): TCollectedSearchPaths {
+  const out: TCollectedSearchPaths = { autocompleteOutside: [], arrayGroups: [] };
+  const byChain = new Map<string, TArrayLeafGroup>();
+  const walk = (
+    map: Record<string, TSearchFieldMapping | TSearchFieldMapping[]> | undefined,
+    prefix: string,
+    chain: string[],
+  ): void => {
+    if (!map) return;
+    for (const [key, mapping] of Object.entries(map)) {
+      const path = joinPath(prefix, key);
+      const list = Array.isArray(mapping) ? mapping : [mapping];
+      const embedded = list.find((m) => m.type === "embeddedDocuments");
+      const document = list.find((m) => m.type === "document");
+      if (embedded?.fields) {
+        // Crossing an array boundary — append this array root so a deeper leaf
+        // gets one `embeddedDocument` wrapper per array level on its path.
+        walk(embedded.fields, path, [...chain, path]);
+      } else if (document?.fields) {
+        // Single object — same array scope, chain unchanged.
+        walk(document.fields, path, chain);
+      } else {
+        const isAutocomplete = list.some((m) => m.type === "autocomplete");
+        const isText = list.some((m) => m.type === "string");
+        if (chain.length > 0) {
+          const chainKey = chain.join(">");
+          let group = byChain.get(chainKey);
+          if (!group) {
+            group = { chain, textLeaves: [], autocompleteLeaves: [] };
+            byChain.set(chainKey, group);
+            out.arrayGroups.push(group);
+          }
+          if (isText) group.textLeaves.push(path);
+          if (isAutocomplete) group.autocompleteLeaves.push(path);
+        } else if (isAutocomplete) {
+          out.autocompleteOutside.push(path);
+        }
+      }
+    }
+  };
+  walk(fields, "", []);
+  return out;
 }
 
 /** Builds a $vectorSearch aggregation stage from a pre-computed vector. */

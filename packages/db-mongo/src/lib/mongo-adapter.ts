@@ -39,6 +39,7 @@ import type {
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
 import { dedupeProjection } from "./projection-dedupe";
+import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
 import { buildMongoFilter } from "./mongo-filter";
@@ -105,6 +106,19 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Cached search index lookup. */
   protected _searchIndexesMap?: Map<string, TMongoIndex>;
+
+  /**
+   * Search-field mappings recorded during `onFieldScanned`, applied in
+   * `onAfterFlatten`. Deferred because resolving a nested field's container
+   * shape (`document` vs `embeddedDocuments`) needs `this._table.flatMap`, which
+   * is only safe to read once the metadata build is marked complete — i.e. in
+   * `onAfterFlatten`, not mid-scan (the `flatMap` getter would re-enter `build`).
+   */
+  protected _pendingSearchFields: Array<{
+    indexName: string | undefined;
+    field: string;
+    mappings: TSearchFieldMapping[];
+  }> = [];
 
   /** Physical field names with @db.default.increment → optional start value. */
   protected _incrementFields = new Map<string, number | undefined>();
@@ -470,11 +484,16 @@ export class MongoAdapter extends BaseDbAdapter {
     // only one per collection, so sync threw IndexOptionsConflict (code 85).
     // Search dispatch derives the default text index from `table.indexes`, not
     // `_mongoIndexes`, so no adapter-level registration is needed.
-    // @db.mongo.search.text — plain word matching (string mapping)
+    // @db.mongo.search.text — plain word matching (string mapping). Recorded
+    // now, applied in onAfterFlatten (nested fields need a complete flatMap).
     for (const index of metadata.get("db.mongo.search.text") || []) {
-      this._addFieldToSearchIndex("search_text", index.indexName, field, [
-        index.analyzer ? { type: "string", analyzer: index.analyzer } : { type: "string" },
-      ]);
+      this._pendingSearchFields.push({
+        indexName: index.indexName,
+        field,
+        mappings: [
+          index.analyzer ? { type: "string", analyzer: index.analyzer } : { type: "string" },
+        ],
+      });
     }
     // @db.mongo.search.autocomplete — prefix/typeahead, double-mapped as string
     // so exact-word hits still rank.
@@ -489,7 +508,11 @@ export class MongoAdapter extends BaseDbAdapter {
       const companion: TSearchFieldMapping = ac.analyzer
         ? { type: "string", analyzer: ac.analyzer }
         : { type: "string" };
-      this._addFieldToSearchIndex("search_text", ac.indexName, field, [autocomplete, companion]);
+      this._pendingSearchFields.push({
+        indexName: ac.indexName,
+        field,
+        mappings: [autocomplete, companion],
+      });
     }
     // @db.search.vector (generic)
     const vectorIndex = metadata.get("db.search.vector");
@@ -561,6 +584,19 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   override onAfterFlatten(): void {
+    // Apply deferred search-field mappings now that flatMap is complete and
+    // safe to read (build is marked done before this hook runs). Nested fields
+    // are resolved into `document` / `embeddedDocuments` container nodes here.
+    for (const pending of this._pendingSearchFields) {
+      this._addFieldToSearchIndex(
+        "search_text",
+        pending.indexName,
+        pending.field,
+        pending.mappings,
+      );
+    }
+    this._pendingSearchFields = [];
+
     // Associate vector filter fields with their vector indexes
     for (const [key, value] of this._vectorFilters.entries()) {
       const index = this._mongoIndexes.get(key);
@@ -1226,10 +1262,75 @@ export class MongoAdapter extends BaseDbAdapter {
     if (!index && type === "search_text") {
       index = this._setSearchIndex(type, name, { mappings: { fields: {} } });
     }
-    if (index) {
-      const fields = index.definition.mappings!.fields!;
-      fields[fieldName] = mergeFieldMappings(fields[fieldName], mappings);
+    if (!index) {
+      return;
     }
+    const rootFields = index.definition.mappings!.fields!;
+    // MongoDB's DocumentFieldMapper renames ONLY the top-level document key
+    // (`@db.column`); nested object keys are stored as-is. Mirror that so the
+    // Atlas mapping/query key matches the stored field — resolve the first
+    // segment via columnMap, keep deeper segments (and the leaf) logical.
+    const segments = fieldName.split(".");
+    const topKey = this._table.columnMap.get(segments[0]) ?? segments[0];
+    // Top-level field — plain key.
+    if (segments.length === 1) {
+      rootFields[topKey] = mergeFieldMappings(rootFields[topKey], mappings);
+      return;
+    }
+    // Nested field — Atlas rejects a dotted mapping key, so build a container
+    // node per parent segment: an array-of-objects parent → `embeddedDocuments`,
+    // a single-object parent → `document`. The leaf carries the actual mappings.
+    let cursor = rootFields;
+    let prefix = "";
+    for (let i = 0; i < segments.length - 1; i++) {
+      const segment = segments[i];
+      // The logical path drives array detection (flatMap is keyed logically);
+      // only the first segment's mapping KEY is physically renamed.
+      prefix = joinPath(prefix, segment);
+      const nodeType = isArrayPath(this._table.flatMap, prefix) ? "embeddedDocuments" : "document";
+      cursor = this._descendSearchNode(cursor, i === 0 ? topKey : segment, nodeType, fieldName);
+    }
+    const leaf = segments[segments.length - 1];
+    cursor[leaf] = mergeFieldMappings(cursor[leaf], mappings);
+  }
+
+  /**
+   * Returns (creating if needed) the nested `fields` map of the container node
+   * at `segment`, reusing a same-typed sibling node so multiple searchable
+   * fields under one parent (e.g. `identity.name` + `identity.tagline`) merge
+   * instead of clobbering.
+   */
+  private _descendSearchNode(
+    fields: Record<string, TSearchFieldMapping | TSearchFieldMapping[]>,
+    segment: string,
+    nodeType: "document" | "embeddedDocuments",
+    fullPath: string,
+  ): Record<string, TSearchFieldMapping | TSearchFieldMapping[]> {
+    const existing = fields[segment];
+    if (
+      existing &&
+      !Array.isArray(existing) &&
+      (existing.type === "document" || existing.type === "embeddedDocuments")
+    ) {
+      if (existing.type !== nodeType) {
+        // A path cannot be both an array and a single object — would only happen
+        // on an inconsistent schema. Keep the first shape and warn.
+        this._log(
+          `search index: conflicting container type for "${fullPath}" ` +
+            `(${existing.type} vs ${nodeType}); keeping ${existing.type}`,
+        );
+      }
+      existing.fields ??= {};
+      return existing.fields;
+    }
+    if (existing) {
+      // A leaf mapping already sits where a container is needed — pathological
+      // (same path annotated as both a value and a parent). Warn and override.
+      this._log(`search index: field "${segment}" used as both value and parent in "${fullPath}"`);
+    }
+    const node: TSearchFieldMapping = { type: nodeType, fields: {} };
+    fields[segment] = node;
+    return node.fields!;
   }
 }
 

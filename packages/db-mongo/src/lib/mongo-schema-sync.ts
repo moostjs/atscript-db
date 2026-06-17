@@ -2,7 +2,6 @@ import type { Collection, Db, Document } from "mongodb";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   AtscriptDbView,
-  resolveDesignType,
   type TColumnDiff,
   type TSyncColumnResult,
   type TDbFieldMeta,
@@ -19,7 +18,7 @@ import {
   type TMongoSearchIndexDefinition,
   type TSearchFieldMapping,
 } from "./mongo-types";
-import { hasAncestorIn } from "./path-utils";
+import { hasAncestorIn, isArrayPath, joinPath } from "./path-utils";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -560,12 +559,9 @@ function arraySafePath(
   for (let i = 0; i < logicalSegments.length; i++) {
     const isLeaf = i === logicalSegments.length - 1;
     out.push(isLeaf ? physicalLeaf : logicalSegments[i]!);
-    prefix = prefix ? `${prefix}.${logicalSegments[i]!}` : logicalSegments[i]!;
-    if (!isLeaf) {
-      const type = host._table.flatMap.get(prefix);
-      if (type && resolveDesignType(type) === "array") {
-        out.push("$[]");
-      }
+    prefix = joinPath(prefix, logicalSegments[i]!);
+    if (!isLeaf && isArrayPath(host._table.flatMap, prefix)) {
+      out.push("$[]");
     }
   }
   return out.join(".");
@@ -579,9 +575,8 @@ function pathCrossesArray(host: TMongoSchemaSyncHost, logicalPath: string): bool
   }
   let prefix = "";
   for (let i = 0; i < segments.length - 1; i++) {
-    prefix = prefix ? `${prefix}.${segments[i]!}` : segments[i]!;
-    const type = host._table.flatMap.get(prefix);
-    if (type && resolveDesignType(type) === "array") {
+    prefix = joinPath(prefix, segments[i]!);
+    if (isArrayPath(host._table.flatMap, prefix)) {
       return true;
     }
   }
@@ -1003,6 +998,12 @@ function fieldMappingEqual(
       av.maxGrams !== bv.maxGrams ||
       av.foldDiacritics !== bv.foldDiacritics
     ) {
+      return false;
+    }
+    // Recurse into `document` / `embeddedDocuments` container nodes so drift on a
+    // nested leaf (or a changed container shape) is detected. `fieldsMatch`
+    // treats both-absent as equal and absent-vs-present as drift.
+    if (!fieldsMatch(av.fields, bv.fields)) {
       return false;
     }
   }

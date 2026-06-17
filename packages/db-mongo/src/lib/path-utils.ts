@@ -1,3 +1,25 @@
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+import { resolveDesignType } from "@atscript/db";
+
+// Appends `segment` to a dotted path, omitting the leading dot when `prefix` is
+// empty — the accumulator step shared by every segment walk over dotted schema
+// paths (schema sync, search-index mapping, mapping-tree traversal).
+export function joinPath(prefix: string, segment: string): string {
+  return prefix ? `${prefix}.${segment}` : segment;
+}
+
+// True when `path` resolves to an array type in the flattened schema. Used to
+// decide where a path crosses an array boundary (Mongo `$[]` positional, Atlas
+// `embeddedDocuments` container) — the lookup + `resolveDesignType` check that
+// schema sync and search-index mapping all share.
+export function isArrayPath(
+  flatMap: ReadonlyMap<string, TAtscriptAnnotatedType>,
+  path: string,
+): boolean {
+  const type = flatMap.get(path);
+  return type !== undefined && resolveDesignType(type) === "array";
+}
+
 // True when any dot-boundary ancestor of `path` is present in `set` — e.g.
 // `a.b.c` has ancestors `a` and `a.b`. Mongo rejects an operation that names
 // both an ancestor and its descendant (a $project with {parent: 1, "parent.x": 1}

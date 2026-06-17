@@ -64,6 +64,16 @@ type TVectorSimilarity = "cosine" | "euclidean" | "dotProduct";
  * `type: "autocomplete"` enables prefix/typeahead (edgeGram) or substring (nGram).
  * A field may carry several mappings at once (an array of these) — e.g. an
  * autocomplete field double-mapped as `string` so exact-word hits still rank.
+ *
+ * Container nodes carry `fields` instead of leaf attributes:
+ * - `type: "document"` — a single embedded object (`identity: Identity`). Atlas
+ *   does NOT accept a dotted mapping key, so each parent object on a nested path
+ *   must be its own `document` node. Nested fields are reachable by the dotted
+ *   query path and by a `{ wildcard: "*" }` `text` operator.
+ * - `type: "embeddedDocuments"` — an array of objects (`items: Item[]`). Atlas
+ *   cannot index array-of-object fields under a `document` node; they MUST use
+ *   `embeddedDocuments` and be queried via the `embeddedDocument` operator
+ *   (the wildcard `text` operator does not reach them).
  */
 export interface TSearchFieldMapping {
   type: string;
@@ -72,6 +82,8 @@ export interface TSearchFieldMapping {
   minGrams?: number;
   maxGrams?: number;
   foldDiacritics?: boolean;
+  /** Nested mappings for `document` / `embeddedDocuments` container nodes. */
+  fields?: Record<string, TSearchFieldMapping | TSearchFieldMapping[]>;
 }
 
 export interface TMongoSearchIndexDefinition {
