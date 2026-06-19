@@ -15,6 +15,7 @@ import { augmentRowsWithActions } from "../actions/list-augmenter";
 function fakeEnvelope(opts: {
   name: string;
   level?: "row" | "rows" | "table";
+  processor?: TDbActionEnvelope["info"]["processor"];
   raw?: Record<string, unknown>;
 }): TDbActionEnvelope {
   return {
@@ -22,7 +23,7 @@ function fakeEnvelope(opts: {
       name: opts.name,
       label: opts.name,
       level: opts.level ?? "row",
-      processor: "backend",
+      processor: opts.processor ?? "backend",
       value: `/x/${opts.name}`,
     },
     raw: (opts.raw ?? {}) as never,
@@ -227,6 +228,52 @@ describe("augmentRowsWithActions — `'rows'`-level per-row availability", () =>
     expect(out[0].$actions).toEqual(["archive"]);
     expect(out[1].$actions).toEqual([]);
     expect(disabled).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("augmentRowsWithActions — processor-agnostic gating (vue-table client gate contract)", () => {
+  // The augmenter keys candidacy on LEVEL only; `processor` must never change
+  // the verdict. @atscript/vue-table now gates `navigate`/`custom` row/rows
+  // actions by `$actions` exactly like `backend` ones (only the
+  // client-synthesised `__remove` is exempt), so this contract is load-bearing
+  // across the two repos: a gated custom/navigate action MUST appear in
+  // `$actions` iff enabled, identically to a backend action.
+  it("emits identical per-row $actions for a gated action regardless of processor", () => {
+    const gate = (rows: { archived: boolean }[]) => rows.map((r) => r.archived);
+    const mk = (name: string, processor: TDbActionEnvelope["info"]["processor"]) =>
+      fakeEnvelope({
+        name,
+        level: "row",
+        processor,
+        raw: { requiredFields: ["archived"], disabled: gate },
+      });
+    const out = augmentRowsWithActions({
+      envelopes: [
+        mk("backendAct", "backend"),
+        mk("navigateAct", "navigate"),
+        mk("customAct", "custom"),
+      ],
+      rows: [
+        { id: 1, archived: false }, // enabled for all three
+        { id: 2, archived: true }, // disabled for all three
+      ],
+      resolvedProjection: null,
+    });
+    expect(out[0].$actions).toEqual(["backendAct", "navigateAct", "customAct"]);
+    expect(out[1].$actions).toEqual([]);
+  });
+
+  it("includes an ungated navigate/custom action unconditionally (no disabled → always present)", () => {
+    const out = augmentRowsWithActions({
+      envelopes: [
+        fakeEnvelope({ name: "open", level: "row", processor: "navigate" }),
+        fakeEnvelope({ name: "exportCsv", level: "rows", processor: "custom" }),
+      ],
+      rows: [{ id: 1 }, { id: 2 }],
+      resolvedProjection: ["id"],
+    });
+    expect(out[0].$actions).toEqual(["open", "exportCsv"]);
+    expect(out[1].$actions).toEqual(["open", "exportCsv"]);
   });
 });
 
