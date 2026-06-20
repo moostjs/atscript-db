@@ -376,6 +376,39 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
     });
   });
 
+  describe("fieldDescriptors.isIndexed for _id / @meta.id fields", () => {
+    it("MinimalCollection: _id (primary key) is reported as indexed", async () => {
+      const { MinimalCollection } = await import("./fixtures/simple-collection.as");
+      const table = mongo.getTable(MinimalCollection);
+      const idDesc = table.fieldDescriptors.find((d) => d.path === "_id")!;
+      expect(idDesc).toBeDefined();
+      expect(idDesc.isPrimaryKey).toBe(true);
+      // _id has no explicit @db.index, but it is the PK → must be indexed so
+      // /meta advertises it as sortable (the bug: it used to report undefined).
+      expect(idDesc.isIndexed).toBe(true);
+    });
+
+    it("TodoCollection: @meta.id unique field (id) is reported as indexed", async () => {
+      const { TodoCollection } = await import("./fixtures/meta-id-collection.as");
+      const table = mongo.getTable(TodoCollection);
+      const idDesc = table.fieldDescriptors.find((d) => d.path === "id")!;
+      expect(idDesc).toBeDefined();
+      expect(idDesc.isIndexed).toBe(true);
+    });
+
+    it("UserNoMongo: synthetic _id (unique, not a PK) is reported as indexed", async () => {
+      const { UserNoMongo } = await import("./fixtures/no-mongo-collection.as");
+      const table = mongo.getTable(UserNoMongo);
+      const idDesc = table.fieldDescriptors.find((d) => d.path === "_id")!;
+      expect(idDesc).toBeDefined();
+      // Synthetic _id is a unique field, NOT a primary key (the @meta.id field
+      // is the PK). It must still be indexed — this is exactly the case a
+      // PK-only fix would miss.
+      expect(idDesc.isPrimaryKey).toBe(false);
+      expect(idDesc.isIndexed).toBe(true);
+    });
+  });
+
   describe("buildMongoFilter with ObjectId", () => {
     it("should preserve ObjectId as leaf value in equality filter", () => {
       const oid = new ObjectId(HEX_A);

@@ -85,7 +85,16 @@ Semantics:
 - The two gates are independent: a table can opt into strict filtering while leaving sort open, or vice versa.
 - Without the annotation, behaviour is unchanged from previous releases — all columns are filterable/sortable.
 
-The `/meta` endpoint reflects the gate: `fields[<path>].filterable` and `.sortable` mirror the permissions that the server will enforce, so clients can hide controls for restricted columns.
+The `/meta` endpoint exposes a per-field capability hint in `fields[<path>]` so clients can show or hide query controls per column:
+
+- **`filterable`** — in `'auto'` mode, `true` for every adapter-capable field; in `'manual'` mode, only fields carrying `@db.column.filterable`.
+- **`sortable`** — in `'auto'` mode, `true` only for **index-backed** fields: those in an explicit `@db.index*`, **primary keys**, and **unique** fields. (A primary key or unique column is index-backed on every adapter — Mongo `_id`, SQL PK/unique constraints — so it is sortable without an explicit `@db.index`.) In `'manual'` mode, only fields carrying `@db.column.sortable`.
+
+Both flags are additionally gated by adapter capability — `@db.json` and array columns are never sortable on SQL adapters regardless of mode (see the [moost-db gate mode](../http/crud)).
+
+::: tip Auto-mode sort is open at the query layer
+In `'auto'` mode there is no sort gate, so the server still _accepts_ a `$sort` on any adapter-capable column — `sortable: false` in `/meta` is an advertisement (steering UIs toward indexed sort keys), not an enforced restriction. Opt into `@db.table.sortable 'manual'` if you need sort keys rejected with HTTP 400.
+:::
 
 ## HTTP
 

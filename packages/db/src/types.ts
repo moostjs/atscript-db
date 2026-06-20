@@ -318,7 +318,12 @@ export interface TDbFieldMeta {
   renamedFrom?: string;
   /** Collation from @db.column.collate (e.g. 'nocase', 'binary', 'unicode'). */
   collate?: TDbCollation;
-  /** Whether this field participates in any index (@db.index.plain, @db.index.unique, @db.index.fulltext). */
+  /**
+   * Whether this field is index-backed: it participates in an explicit index
+   * (@db.index.plain, @db.index.unique, @db.index.fulltext) OR is a primary key
+   * or unique field (which are always index-backed — Mongo `_id`, SQL PK/unique
+   * constraints — even without an explicit `@db.index*`).
+   */
   isIndexed?: boolean;
   /** Literal currency code from `@db.amount.currency 'EUR'`. */
   currencyCode?: string;

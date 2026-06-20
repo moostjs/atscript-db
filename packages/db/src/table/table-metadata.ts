@@ -808,8 +808,13 @@ export class TableMetadata {
     const descriptors: TDbFieldMeta[] = [];
     const skipFlattening = this.nestedObjects;
 
-    // Collect all field names that participate in any index
-    const indexedFields = new Set<string>();
+    // Collect all field names that participate in any index. Primary keys and
+    // unique fields are index-backed on every supported adapter (Mongo `_id`,
+    // SQL PK/unique constraints) even when no explicit `@db.index*` declares
+    // them — so seed them in too, otherwise `isIndexed` is factually wrong for
+    // those fields and consumers (e.g. the `/meta` sortable hint) mis-report a
+    // PK/unique column as non-sortable.
+    const indexedFields = new Set<string>([...this.primaryKeys, ...this.uniqueProps]);
     for (const index of this.indexes.values()) {
       for (const f of index.fields) {
         indexedFields.add(f.name);

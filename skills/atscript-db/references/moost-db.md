@@ -202,7 +202,10 @@ Detect partial failure with `matchedCount < items.length`. **Per-item conflict s
 
 - `@db.table.filterable 'manual'` + `@db.column.filterable` → server rejects any `/query` filter referencing fields lacking the field-level annotation. HTTP 400 with `path` pointing to the offending field.
 - `@db.table.sortable 'manual'` + `@db.column.sortable` → same for sort keys.
-- `/meta` reflects the gate: `fields[<path>].filterable` / `.sortable` mirror what the server will accept.
+- **Auto mode has NO sort/filter query gate** — the server accepts `$sort`/filter on any adapter-capable field. Only `'manual'` mode 400s a disallowed key. So `/meta` `sortable: false` in auto mode is an advisory UI hint, **not** an enforced restriction (the divergence: a `$sort` on a non-advertised field still succeeds in auto mode).
+- `/meta` `fields[<path>]` capability hint per mode:
+  - `filterable` — auto: every adapter-capable field (`true`); manual: only `@db.column.filterable` fields.
+  - `sortable` — auto: only **index-backed** fields = in an explicit `@db.index*` **OR** a primary key **OR** a unique field (`TDbFieldMeta.isIndexed`, which now folds in PK + unique — so Mongo `_id` and SQL PK/unique columns advertise `sortable: true` without an explicit `@db.index`); manual: only `@db.column.sortable` fields.
 - **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` / `canSortField(fd)` defaults to `fd.storage !== 'json'`, so on SQL adapters (sqlite/postgres/mysql) `@db.json` fields and array fields (both `storage: 'json'`) report `{ filterable: false, sortable: false }` regardless of mode — even when explicitly annotated `@db.column.filterable`. MongoAdapter overrides `canFilterField` to `true` (native dot-paths and array filters), so `@db.json` and array fields are filterable on Mongo, but still not sortable (min/max-element sort is a footgun).
 
 ## Errors

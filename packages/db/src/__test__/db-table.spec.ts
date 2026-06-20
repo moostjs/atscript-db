@@ -253,6 +253,33 @@ describe("AtscriptDbTable", () => {
     });
   });
 
+  // ── isIndexed reflects PK + unique (not just explicit @db.index) ─────────
+
+  describe("fieldDescriptors.isIndexed", () => {
+    const find = (path: string) => table.fieldDescriptors.find((d) => d.path === path)!;
+
+    it("marks the primary key as indexed even without an explicit @db.index", () => {
+      // `id` is @meta.id with no @db.index — PKs are index-backed on every
+      // adapter, so isIndexed must be true (so /meta advertises it sortable).
+      const id = find("id");
+      expect(id.isPrimaryKey).toBe(true);
+      expect(id.isIndexed).toBe(true);
+    });
+
+    it("marks unique fields as indexed", () => {
+      // `email` is @db.index.unique (logical name, physically renamed) — unique
+      // constraints are always index-backed.
+      const email = find("email");
+      expect(email.isIndexed).toBe(true);
+    });
+
+    it("does not mark plain non-key, non-indexed fields as indexed", () => {
+      const status = find("status");
+      expect(status.isPrimaryKey).toBe(false);
+      expect(status.isIndexed).toBeUndefined();
+    });
+  });
+
   // ── CRUD ──────────────────────────────────────────────────────────────
 
   describe("CRUD operations", () => {
