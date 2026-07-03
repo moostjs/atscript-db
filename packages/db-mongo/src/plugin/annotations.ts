@@ -247,6 +247,7 @@ export const annotations: TAnnotationsTree = {
         "firstName: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       argument: [
         {
@@ -281,6 +282,7 @@ export const annotations: TAnnotationsTree = {
         "username: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       argument: [
         {

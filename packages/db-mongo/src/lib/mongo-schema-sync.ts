@@ -1,7 +1,8 @@
-import type { Collection, Db, Document } from "mongodb";
+import type { Collection, CreateIndexesOptions, Db, Document } from "mongodb";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   AtscriptDbView,
+  createFailureCollector,
   type TColumnDiff,
   type TSyncColumnResult,
   type TDbFieldMeta,
@@ -13,6 +14,7 @@ import {
 import {
   INDEX_PREFIX,
   JOINED_PREFIX,
+  isPlainIndex,
   type TMongoIndex,
   type TPlainIndex,
   type TMongoSearchIndexDefinition,
@@ -677,88 +679,85 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
 
   const indexesToCreate = new Map(allIndexes);
 
+  // Per-index error isolation: a failing createIndex/dropIndex (e.g. a unique
+  // index over duplicate data) must not abort the remaining index maintenance
+  // for this collection.
+  const { attempt, throwIfAny } = createFailureCollector("index sync");
+
   for (const remote of existingIndexes) {
     if (!remote.name.startsWith(INDEX_PREFIX)) {
       continue;
     }
     if (indexesToCreate.has(remote.name)) {
       const local = indexesToCreate.get(remote.name)!;
-      switch (local.type) {
-        case "plain":
-        case "unique":
-        case "text":
-        case "2dsphere": {
-          const fieldsMatch = local.type === "text" || objMatch(local.fields, remote.key);
-          const weightsMatch = objMatch(local.weights || {}, remote.weights || {});
-          // A matching key is NOT sufficient for plain/unique indexes: a change
-          // to the unique flag or the present-only partial filter (same fields,
-          // different options) must drop + recreate. Without this, an existing
-          // plain unique index would never migrate to a partial unique index —
-          // listIndexes() reports the same { field: 1 } key, so the old index
-          // would be silently kept and the new options never applied.
-          const optionsMatch =
-            local.type === "text" ||
-            ((local.type === "unique") === (remote.unique === true) &&
-              partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression));
-          if (fieldsMatch && weightsMatch && optionsMatch) {
-            indexesToCreate.delete(remote.name);
-          } else {
-            host._log("dropIndex", remote.name);
-            await host.collection.dropIndex(remote.name);
-          }
-          break;
+      if (isPlainIndex(local)) {
+        const fieldsMatch = local.type === "text" || objMatch(local.fields, remote.key);
+        const weightsMatch = objMatch(local.weights || {}, remote.weights || {});
+        // A matching key is NOT sufficient for plain/unique indexes: a change
+        // to the unique flag or the present-only partial filter (same fields,
+        // different options) must drop + recreate. Without this, an existing
+        // plain unique index would never migrate to a partial unique index —
+        // listIndexes() reports the same { field: 1 } key, so the old index
+        // would be silently kept and the new options never applied.
+        const optionsMatch =
+          local.type === "text" ||
+          ((local.type === "unique") === (remote.unique === true) &&
+            partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression));
+        if (fieldsMatch && weightsMatch && optionsMatch) {
+          indexesToCreate.delete(remote.name);
+        } else {
+          host._log("dropIndex", remote.name);
+          await attempt(`drop index "${remote.name}"`, () =>
+            host.collection.dropIndex(remote.name),
+          );
         }
-        default:
       }
     } else {
       host._log("dropIndex", remote.name);
-      await host.collection.dropIndex(remote.name);
+      await attempt(`drop index "${remote.name}"`, () => host.collection.dropIndex(remote.name));
     }
   }
 
   // ── Create / update regular indexes ─────────────────────────────
   for (const [key, value] of allIndexes.entries()) {
+    if (!isPlainIndex(value) || !indexesToCreate.has(key)) {
+      continue;
+    }
+    let label: string;
+    let indexOptions: CreateIndexesOptions;
     switch (value.type) {
       case "plain": {
-        if (!indexesToCreate.has(key)) {
-          continue;
-        }
         host._log("createIndex", key, value.fields);
-        await host.collection.createIndex(value.fields, { name: key });
+        label = `create index "${key}"`;
+        indexOptions = { name: key };
         break;
       }
       case "unique": {
-        if (!indexesToCreate.has(key)) {
-          continue;
-        }
         host._log("createIndex (unique)", key, value.fields, value.partialFilterExpression);
-        await host.collection.createIndex(value.fields, {
+        label = `create unique index "${key}"`;
+        indexOptions = {
           name: key,
           unique: true,
           ...(value.partialFilterExpression
             ? { partialFilterExpression: value.partialFilterExpression }
             : {}),
-        });
+        };
         break;
       }
       case "text": {
-        if (!indexesToCreate.has(key)) {
-          continue;
-        }
         host._log("createIndex (text)", key, value.fields);
-        await host.collection.createIndex(value.fields, { weights: value.weights, name: key });
+        label = `create text index "${key}"`;
+        indexOptions = { weights: value.weights, name: key };
         break;
       }
       case "2dsphere": {
-        if (!indexesToCreate.has(key)) {
-          continue;
-        }
         host._log("createIndex (2dsphere)", key, value.fields);
-        await host.collection.createIndex(value.fields, { name: key });
+        label = `create 2dsphere index "${key}"`;
+        indexOptions = { name: key };
         break;
       }
-      default:
     }
+    await attempt(label, () => host.collection.createIndex(value.fields, indexOptions));
   }
 
   // ── Sync search indexes (Atlas-only, gracefully skipped on standalone) ──
@@ -832,6 +831,8 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
     // listSearchIndexes / createSearchIndex / updateSearchIndex are
     // Atlas-only — silently skip on standalone or in-memory MongoDB.
   }
+
+  throwIfAny();
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────

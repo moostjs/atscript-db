@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
-import { DbSpace, BaseDbAdapter } from "../index";
+import { DbSpace, BaseDbAdapter, AtscriptDbTable, NoopLogger } from "../index";
 import { SchemaSync, syncSchema, SyncEntry } from "../sync";
 import type {
   TDbInsertResult,
@@ -2148,5 +2148,72 @@ describe("Snapshot-based diffing (Path B)", () => {
     expect(entry).toBeDefined();
     expect(entry!.viewType).toBe("E");
     expect(entry!.status).toBe("in-sync");
+  });
+});
+
+// ── Hardening: logger pass-through + per-index error isolation ───────────
+
+describe("sync hardening", () => {
+  it("passes opts.logger through syncSchema so index/FK failures are logged", async () => {
+    class FailingIndexAdapter extends MockAdapter {
+      override async syncIndexes(): Promise<void> {
+        if (this._table.tableName === "users") {
+          throw new Error("E11000 duplicate key error");
+        }
+      }
+    }
+    const tables = new Map<string, Array<Record<string, unknown>>>();
+    const space = new DbSpace(() => {
+      const adapter = new FailingIndexAdapter();
+      adapter.tables = tables;
+      return adapter;
+    });
+
+    const logged: string[] = [];
+    const logger = { ...NoopLogger, error: (...args: unknown[]) => logged.push(args.join(" ")) };
+
+    const result = await syncSchema(space, [UsersTable], { logger });
+    const entry = result.entries.find((e) => e.name === "users");
+    expect(entry?.status).toBe("error");
+    expect(entry?.errors.join("\n")).toContain("E11000");
+    expect(logged.join("\n")).toContain("Index/FK sync failed on users");
+  });
+
+  it("continues index maintenance after a failing operation and throws one aggregate error", async () => {
+    class ProbeAdapter extends MockAdapter {
+      async runDiff(opts: any) {
+        return this.syncIndexesWithDiff(opts);
+      }
+    }
+    const adapter = new ProbeAdapter();
+    // Binds adapter._table (UsersTable declares several @db.index.* entries)
+    new AtscriptDbTable(UsersTable, adapter);
+
+    const created: string[] = [];
+    const dropped: string[] = [];
+    await expect(
+      adapter.runDiff({
+        listExisting: async () => [
+          { name: "atscript__stale__one" },
+          { name: "atscript__stale__two" },
+        ],
+        createIndex: async (index: { name: string; key: string }) => {
+          if (index.name === "email_idx") {
+            throw new Error("boom-create");
+          }
+          created.push(index.key);
+        },
+        dropIndex: async (name: string) => {
+          if (name === "atscript__stale__one") {
+            throw new Error("boom-drop");
+          }
+          dropped.push(name);
+        },
+      }),
+    ).rejects.toThrow(/index sync failed .*: create index .*email_idx.*boom-create/);
+
+    // The failing create/drop did not abort the remaining index maintenance
+    expect(created.length).toBeGreaterThan(0);
+    expect(dropped).toContain("atscript__stale__two");
   });
 });

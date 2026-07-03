@@ -47,6 +47,15 @@ export interface TSearchIndex {
 
 export type TMongoIndex = TPlainIndex | TSearchIndex;
 
+export function isPlainIndex(index: TMongoIndex): index is TPlainIndex {
+  return (
+    index.type === "plain" ||
+    index.type === "unique" ||
+    index.type === "text" ||
+    index.type === "2dsphere"
+  );
+}
+
 export function mongoIndexKey(type: TMongoIndex["type"], name: string) {
   const cleanName = name
     .replace(/[^a-z0-9_.-]/gi, "_")

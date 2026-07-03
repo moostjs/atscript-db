@@ -57,16 +57,21 @@ const sync = new SchemaSync(db, console);
 
 Options for both `syncSchema()` and `sync.run()`:
 
-| Option           | Type      | Default     | Description                                                       |
-| ---------------- | --------- | ----------- | ----------------------------------------------------------------- |
-| `force`          | `boolean` | `false`     | Ignore hash check, always introspect the database                 |
-| `safe`           | `boolean` | `false`     | Skip destructive operations (column drops, table drops)           |
-| `podId`          | `string`  | Random UUID | Identifier for distributed locking                                |
-| `lockTtlMs`      | `number`  | `30000`     | Lock time-to-live in milliseconds (auto-extended while sync runs) |
-| `waitTimeoutMs`  | `number`  | `60000`     | Max wait time for another pod's lock                              |
-| `pollIntervalMs` | `number`  | `500`       | Poll interval when waiting for lock release                       |
+| Option           | Type             | Default      | Description                                                       |
+| ---------------- | ---------------- | ------------ | ----------------------------------------------------------------- |
+| `force`          | `boolean`        | `false`      | Ignore hash check, always introspect the database                 |
+| `safe`           | `boolean`        | `false`      | Skip destructive operations (column drops, table drops)           |
+| `podId`          | `string`         | Random UUID  | Identifier for distributed locking                                |
+| `lockTtlMs`      | `number`         | `30000`      | Lock time-to-live in milliseconds (auto-extended while sync runs) |
+| `waitTimeoutMs`  | `number`         | `60000`      | Max wait time for another pod's lock                              |
+| `pollIntervalMs` | `number`         | `500`        | Poll interval when waiting for lock release                       |
+| `logger`         | `TGenericLogger` | `NoopLogger` | Logger for sync progress and failures (see below)                 |
 
 The `plan()` method accepts only `force` and `safe`.
+
+::: warning Pass a logger in production
+Index and FK sync failures (e.g. a unique index over data that already contains duplicates) do **not** throw — they are logged, recorded on the entry (`status: 'error'`, `errors: [...]`), and the schema hash is not persisted so the next boot retries. With the default `NoopLogger` those log lines go nowhere. Pass `{ logger: console }` to `syncSchema()` (or `new SchemaSync(db, console)`) so they surface, or inspect `result.entries` for errored tables after every run.
+:::
 
 ## TSyncPlan
 

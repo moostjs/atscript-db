@@ -125,6 +125,7 @@ export type {
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";
+export { createFailureCollector } from "./shared/failure-collector";
 
 // Re-export walker utilities from @uniqu/core for adapter implementations
 export { walkFilter, isPrimitive, computeInsights } from "@uniqu/core";

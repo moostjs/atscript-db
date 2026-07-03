@@ -13,6 +13,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         "createdAt: number.timestamp\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       mergeStrategy: "append",
       argument: [
@@ -42,6 +43,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         "email: string.email\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       mergeStrategy: "append",
       argument: {
@@ -65,6 +67,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         "bio: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       mergeStrategy: "append",
       argument: [
@@ -95,6 +98,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         "geo: db.geoPoint\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: false,
       argument: {
         optional: true,

@@ -27,10 +27,11 @@ interface TSyncOptions {
   pollIntervalMs?: number; // default: 500
   force?: boolean; // default: false — when true, runs the full per-table diff regardless of the schema-hash match
   safe?: boolean; // default: false — skip destructive ops (DROP COLUMN, DROP TABLE)
+  logger?: TGenericLogger; // default: NoopLogger — index/FK DDL failures are logged, not thrown
 }
 ```
 
-Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deployments.
+Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deployments. ALWAYS pass `logger` (e.g. `console`) or inspect `result.entries` for `status: 'error'` in production — with the default `NoopLogger`, a failing `CREATE UNIQUE INDEX` is silent except for the entry status.
 
 ## `__atscript_control` (control table)
 

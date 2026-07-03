@@ -26,6 +26,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "}\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: false,
       argument: {
         name: "strategy",
@@ -80,6 +81,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "// → physical column: address__zip_code\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "name",
         type: "string",
@@ -98,6 +100,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "// Renames address__zip → address__postalCode\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "oldName",
         type: "string",
@@ -120,6 +123,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "username: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "collation",
         type: "string",
@@ -143,6 +147,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "price: decimal\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: [
         {
           name: "precision",
@@ -165,6 +170,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "Marks a field as a dimension — groupable in aggregate queries ($groupBy). " +
         "Dimension fields automatically receive a database index during schema sync.",
       nodeType: ["prop"],
+      passedWhenReferred: false,
     }),
 
     measure: new AnnotationSpec({
@@ -172,6 +178,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "Marks a field as a measure — aggregatable in aggregate queries " +
         "(sum, avg, count, min, max). Only valid on numeric or decimal fields.",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       validate(token, _args, doc) {
         return validateFieldBaseType(token, doc, "@db.column.measure", ["number", "decimal"]);
       },
@@ -197,6 +204,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "version: int\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       validate(token, _args, doc) {
         const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
 
@@ -244,6 +252,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "status: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "value",
         type: "string",
@@ -266,6 +275,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "id: number.int\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "start",
@@ -288,6 +298,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "id: string.uuid\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       validate(token, args, doc) {
         return validateFieldBaseType(token, doc, "db.default.uuid", "string");
       },
@@ -303,6 +314,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "createdAt: number.timestamp\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       validate(token, args, doc) {
         return validateFieldBaseType(token, doc, "db.default.now", ["number", "string"]);
       },
@@ -320,6 +332,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       "metadata: { key: string, value: string }\n" +
       "```\n",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     validate(token, _args, doc) {
       const errors = [] as TMessages;
       const field = token.parentNode!;
@@ -352,6 +365,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       "displayName: string\n" +
       "```\n",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     validate(token, _args, _doc) {
       const errors = [] as TMessages;
       const field = token.parentNode!;
@@ -378,6 +392,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       "apiToken?: string\n" +
       "```\n",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
     validate(token, _args, _doc) {
       const errors = [] as TMessages;
@@ -431,6 +446,7 @@ function columnCapability(capability: "filterable" | "sortable", verb: string): 
       "}\n" +
       "```\n",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
     validate(token, _args, _doc) {
       const errors = [] as TMessages;

@@ -8,6 +8,14 @@ outline: deep
 
 Complete reference for all `@db.*` annotations available in `.as` files. Generic annotations are provided by `@atscript/db/plugin` via `dbPlugin()` and work with every adapter. Adapter-specific annotations (PostgreSQL, MySQL, MongoDB) require the corresponding adapter plugin.
 
+## Annotations never travel across field refs
+
+A field that references another interface's field (an FK like `authorId: User.id`, or a view/dict field) inherits the target's **value and presentation** annotations (`@meta.label`, `@expect.*`, UI hints, literal `@db.amount.currency`/`@db.unit` tags) — but **never** its structural `@db.*` annotations. All `@db.index.*`, `@db.column.*`, `@db.default.*`, `@db.rel.*`, `@db.search.*`, `@db.agg.*`, `@db.encrypted`, `@db.json`, `@db.ignore`, and adapter-specific field annotations describe the storage of the table that declares them and stay there.
+
+The sibling-ref quantity bindings — `@db.amount.currency.ref` and `@db.unit.ref` — also stay: they name a field of the **declaring** interface, which the referring interface may not have. A view that mirrors a measure and its currency/unit column re-declares the one-line `.ref` binding on its own field.
+
+Practically: declaring `@db.index.unique` on `User.id` never creates an index on tables that FK-ref it; if the referring table needs an index on its FK column, declare one on the FK field itself. This holds at any ref depth (including refs through an intermediate dict/view interface). `extends` is different — inherited props keep all their annotations, structural ones included, because the child table physically owns those columns.
+
 ## Tables & Columns
 
 | Annotation              | Applies To | Arguments                              | Description                                                                                                                                                                             |

@@ -18,6 +18,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "embedding: db.vector\n" +
           "```\n",
         nodeType: ["prop"],
+        passedWhenReferred: false,
         multiple: false,
         argument: [
           {
@@ -73,6 +74,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "embedding: db.vector\n" +
           "```\n",
         nodeType: ["prop"],
+        passedWhenReferred: false,
         multiple: false,
         argument: {
           optional: false,
@@ -97,6 +99,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
         "category: string\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       multiple: true,
       argument: {
         optional: false,

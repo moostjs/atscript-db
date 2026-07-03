@@ -178,6 +178,7 @@ export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSp
       "authorId: User.id\n" +
       "```\n",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     argument: {
       name: "action",
       type: "string",

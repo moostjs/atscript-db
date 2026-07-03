@@ -48,6 +48,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "authorId: User.id\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "alias",
@@ -185,6 +186,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "author?: User\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "alias",
@@ -316,6 +318,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "comments: Comment[]\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "alias",
@@ -456,6 +459,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "tags: Tag[]\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "junction",
         type: "ref",
@@ -570,6 +574,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "publishedPosts: Post[]\n" +
         "```\n",
       nodeType: ["prop"],
+      passedWhenReferred: false,
       argument: {
         name: "condition",
         type: "query",

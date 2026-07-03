@@ -9,6 +9,7 @@ import type {
 import type { FilterExpr } from "@uniqu/core";
 
 import { DbError } from "./db-error";
+import { createFailureCollector } from "./shared/failure-collector";
 
 import type {
   DbQuery,
@@ -495,6 +496,11 @@ export abstract class BaseDbAdapter {
 
     const desiredNames = new Set<string>();
 
+    // Per-index error isolation: a failing CREATE/DROP (e.g. CREATE UNIQUE
+    // INDEX over duplicate rows) must not abort the remaining index
+    // maintenance for this table.
+    const { attempt, throwIfAny } = createFailureCollector("index sync");
+
     // Create missing indexes, rebuild definition-drifted ones
     for (const index of this._table.indexes.values()) {
       if (opts.warnUnsupportedTypes?.types.includes(index.type)) {
@@ -510,7 +516,7 @@ export abstract class BaseDbAdapter {
       desiredNames.add(index.key);
 
       if (!existingNames.has(index.key)) {
-        await opts.createIndex(index);
+        await attempt(`create index "${index.key}"`, () => opts.createIndex(index));
         continue;
       }
 
@@ -524,8 +530,10 @@ export abstract class BaseDbAdapter {
           (liveColumns.length !== desiredColumns.length ||
             liveColumns.some((c, i) => c !== desiredColumns[i]))
         ) {
-          await opts.dropIndex(index.key);
-          await opts.createIndex(index);
+          await attempt(`rebuild index "${index.key}"`, async () => {
+            await opts.dropIndex(index.key);
+            await opts.createIndex(index);
+          });
         }
       }
     }
@@ -533,9 +541,11 @@ export abstract class BaseDbAdapter {
     // Drop stale indexes
     for (const name of existingNames) {
       if (!desiredNames.has(name)) {
-        await opts.dropIndex(name);
+        await attempt(`drop index "${name}"`, () => opts.dropIndex(name));
       }
     }
+
+    throwIfAny();
   }
 
   // ── Search index metadata ─────────────────────────────────────────────────

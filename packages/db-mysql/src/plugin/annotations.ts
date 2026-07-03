@@ -32,6 +32,7 @@ export const annotations: TAnnotationsTree = {
       '**Default:** `"utf8mb4"`\n\n' +
       '```atscript\n@db.mysql.charset "latin1"\nexport interface Legacy { ... }\n```',
     nodeType: ["interface", "prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "charset",
@@ -46,6 +47,7 @@ export const annotations: TAnnotationsTree = {
       "Specifies a native MySQL collation (overrides portable `@db.column.collate`).\n\n" +
       '```atscript\n@db.mysql.collate "utf8mb4_turkish_ci"\nname: string\n```',
     nodeType: ["interface", "prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "collation",
@@ -59,6 +61,7 @@ export const annotations: TAnnotationsTree = {
       "Adds the UNSIGNED modifier to an integer column.\n\n" +
       "```atscript\n@db.mysql.unsigned\nage: number.int\n```",
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
   }),
 
@@ -67,6 +70,7 @@ export const annotations: TAnnotationsTree = {
       "Overrides the native MySQL column type.\n\n" +
       '```atscript\n@db.mysql.type "MEDIUMTEXT"\nbio: string\n```',
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "type",
@@ -80,6 +84,7 @@ export const annotations: TAnnotationsTree = {
       "Sets the MySQL ON UPDATE clause for a column.\n\n" +
       '```atscript\n@db.mysql.onUpdate "CURRENT_TIMESTAMP"\nupdatedAt: number.timestamp\n```',
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "expression",

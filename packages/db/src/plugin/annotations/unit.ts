@@ -57,6 +57,10 @@ export const dbUnitAnnotations: TAnnotationsTree = {
         "weight: decimal\n" +
         "```\n",
       nodeType: ["prop"],
+      // Binds to a sibling by name in the DECLARING interface — a referring
+      // field's host may not have that sibling, so the binding must not
+      // travel (the literal @db.unit form does travel).
+      passedWhenReferred: false,
       multiple: false,
       argument: {
         name: "fieldName",

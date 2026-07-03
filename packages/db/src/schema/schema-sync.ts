@@ -59,6 +59,11 @@ export interface TSyncOptions {
   force?: boolean;
   /** Safe mode — skip destructive operations (column drops, table drops). Default: false. */
   safe?: boolean;
+  /**
+   * Logger for sync progress and failures (index/FK DDL errors are logged,
+   * not thrown). Default: NoopLogger — pass `console` to surface them.
+   */
+  logger?: TGenericLogger;
 }
 
 export interface TSyncResult {
@@ -97,7 +102,7 @@ function buildFkChangeDetails(
 
 export class SchemaSync {
   private readonly store: SyncStore;
-  private readonly logger: TGenericLogger;
+  private logger: TGenericLogger;
 
   constructor(
     private readonly space: DbSpace,
@@ -302,6 +307,7 @@ export class SchemaSync {
    * Runs schema synchronization with distributed locking.
    */
   async run(types: TAtscriptAnnotatedType[], opts?: TSyncOptions): Promise<TSyncResult> {
+    this.logger = opts?.logger ?? this.logger;
     const podId = opts?.podId ?? crypto.randomUUID();
     const lockTtlMs = opts?.lockTtlMs ?? 30_000;
     const waitTimeoutMs = opts?.waitTimeoutMs ?? 60_000;

@@ -2,6 +2,10 @@
 
 Core `@db.*` annotations from `dbPlugin()` — portable across every adapter. Engine-specific namespaces (`@db.pg.*`, `@db.mysql.*`, `@db.mongo.*`) live in the per-engine references.
 
+## Ref-inheritance rule
+
+A field referencing another interface's field (FK `authorId: User.id`, view/dict fields) inherits the target's presentation/value annotations (`@meta.label`, `@expect.*`, UI hints, literal `@db.amount.currency`/`@db.unit`) but NEVER its structural ones — every field-level `@db.*` annotation in this reference (index, column, default, rel, search, agg, encrypted, json, ignore) applies only to the interface that declares it, at any ref depth. The sibling-ref bindings `@db.amount.currency.ref`/`@db.unit.ref` also do NOT travel (they name a field of the declaring interface) — a view mirroring measure + currency/unit re-declares the `.ref` on its own field. Need an index on an FK column → declare `@db.index.*` on the FK field itself; the target's index never travels. `extends` inherits everything, structural included (the child owns the columns).
+
 ## Table & column
 
 | Annotation                          | Target    | Args                                | Effect                                                                                                                                                                                                                                                                                                                                                |

@@ -16,6 +16,7 @@ export const annotations: TAnnotationsTree = {
       "Overrides the native PostgreSQL column type.\n\n" +
       '```atscript\n@db.pg.type "CITEXT"\nname: string\n```',
     nodeType: ["prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "type",
@@ -43,6 +44,7 @@ export const annotations: TAnnotationsTree = {
       "Specifies a native PostgreSQL collation (overrides portable `@db.column.collate`).\n\n" +
       '```atscript\n@db.pg.collate "tr-x-icu"\nname: string\n```',
     nodeType: ["interface", "prop"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "collation",
