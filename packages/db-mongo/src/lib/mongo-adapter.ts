@@ -83,6 +83,11 @@ import {
 } from "./mongo-schema-sync";
 import { validateMongoIdPlugin } from "./validate-plugins";
 
+// Public mongo-types surface. `mongoIndexKey`/`INDEX_PREFIX` let raw-`mongodb`-driver
+// consumers resolve the physical index name schema-sync provisions
+// (`atscript__<type>__<cleanName>`) — the logical `.as` name makes `$search` return
+// zero documents on Atlas. See adapters-mongo.md#managed-index-prefix--physical-index-names.
+export { INDEX_PREFIX, mongoIndexKey } from "./mongo-types";
 export type {
   TPlainIndex,
   TSearchIndex,

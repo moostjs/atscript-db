@@ -54,6 +54,10 @@ export interface User {
 
 `GET /query?$search=art` → first-declared index (`users_exact`, word match). `GET /query?$search=art&$index=users_prefix` → the typeahead variant. Same field, two locked behaviors, no query-time modes.
 
+### Physical index name (raw-driver interop)
+
+The logical name in `@db.mongo.search.static '…', fuzzy, 'users_exact'` is provisioned on Atlas as the physical index `atscript__search_text__users_exact`. Code running its own `$search` aggregation with the raw `mongodb` driver **must** pass the physical name — `$search` with the logical name silently returns zero documents. Import the helper instead of hardcoding: `mongoIndexKey('search_text', 'users_exact')` (and `INDEX_PREFIX`) are exported from `@atscript/db-mongo`. Full scheme in [adapters-mongo.md](adapters-mongo.md#managed-index-prefix--physical-index-names).
+
 ## Replaced / removed (use the generic core annotation instead)
 
 | Old (no longer exists)        | Use instead                                                |

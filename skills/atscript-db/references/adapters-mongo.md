@@ -39,11 +39,25 @@ plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.object
 | Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                                                                         |
 | JSON / nested           | Native — `@db.json` is a no-op (store as Document).                                                                                                                                                         |
 
-## Managed index prefix
+## Managed index prefix & physical index names
 
 **All indexes created by `syncIndexes()` start with `atscript__`.** Indexes not matching the prefix are left alone. Indexes matching the prefix that aren't in the desired set are dropped on drift.
 
 Implication: do not name a consumer-authored index with the `atscript__` prefix.
+
+The physical name of every managed index is `atscript__<type>__<cleanName>`, where `<cleanName>` is the logical name from the annotation, lowercased-safe (illegal chars → `_`, runs collapsed) and clamped to MongoDB's 127-char limit. `<type>` is `search_text` (`@db.mongo.search.static`), `dynamic_text` (`@db.mongo.search.dynamic`, logical name `_`), `vector` (`@db.search.vector`), `unique`/`plain`/`text`/`2dsphere`/`fulltext` for the generic index annotations. So `@db.mongo.search.static 'lucene.english', 1, 'inventory_search'` provisions the Atlas Search index `atscript__search_text__inventory_search`.
+
+**Raw-driver interop.** A consumer hitting an atscript-provisioned collection directly with the `mongodb` driver (e.g. a hand-rolled `$search` aggregation over portal-owned data) must pass the **physical** index name — Atlas `$search` with the logical annotation name silently returns zero documents. Rather than hardcode the scheme, import the helper:
+
+```ts
+import { mongoIndexKey, INDEX_PREFIX } from "@atscript/db-mongo";
+
+const indexName = mongoIndexKey("search_text", "inventory_search");
+// → "atscript__search_text__inventory_search"
+await db.collection("inventory").aggregate([{ $search: { index: indexName /* … */ } }]);
+```
+
+`mongoIndexKey(type, logicalName)` and `INDEX_PREFIX` are exported from the package root; they are the same functions schema-sync uses, so the physical name always matches what was provisioned.
 
 ## Unique indexes on optional fields are partial
 
@@ -100,6 +114,8 @@ interface Article {
 ```
 
 `search('quick brown', query, 'main')` emits an Atlas `$search` first stage. The operator shape depends on the index's fields + `strategy`: a plain `text` operator (word match), an `autocomplete` operator (prefix/typeahead), or a `compound.should` of both. Declared/`$fuzzy` typo tolerance is attached to the operator at query time. For `@db.mongo.search.autocomplete`, `strategy`, query-time `fuzzy`/`$fuzzy`, and the multi-index `$index` variant pattern, see [mongo-annotations.md](./mongo-annotations.md).
+
+The logical name `'main'` is provisioned as the physical index `atscript__search_text__main`; raw-driver `$search` must use that physical name — resolve it with `mongoIndexKey('search_text', 'main')`. See [Managed index prefix & physical index names](#managed-index-prefix--physical-index-names).
 
 Vector:
 

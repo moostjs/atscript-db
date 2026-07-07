@@ -449,6 +449,8 @@ const { data, count } = await table.searchWithCount("query", {
 const results = await table.search("query", {}, "product_search");
 ```
 
+Running your own `$search` pipeline with the raw MongoDB driver instead of `table.search()`? You must pass the **physical** index name (`atscript__search_text__product_search`), not the logical annotation name — see [Physical index names (raw-driver `$search`)](#physical-index-names-raw-driver-search).
+
 ## Vector Search
 
 MongoDB supports vector similarity search via Atlas `$vectorSearch`. Use the generic `@db.search.vector` annotation with the `db.vector` primitive:
@@ -541,6 +543,27 @@ const users = db.getTable(User);
 const adapter = users.getAdapter();
 const collection = adapter.collection; // native MongoDB Collection
 ```
+
+### Physical index names (raw-driver `$search`)
+
+Schema sync provisions every managed index under a physical name of the form `atscript__<type>__<cleanName>`, where `<cleanName>` is the logical name from the annotation (illegal characters replaced with `_`, runs collapsed, clamped to MongoDB's 127-character limit). For Atlas Search, `@db.mongo.search.static 'lucene.english', 0, 'product_search'` provisions the physical index `atscript__search_text__product_search`. `<type>` is `search_text` (static), `dynamic_text` (dynamic), or `vector` (`@db.search.vector`).
+
+`table.search()` and `table.vectorSearch()` resolve this for you. But a **raw** `$search` aggregation must pass the **physical** name — Atlas `$search` with the logical annotation name silently returns **zero documents** rather than erroring. Resolve it with the exported `mongoIndexKey` helper instead of hardcoding the prefix scheme:
+
+```typescript
+import { mongoIndexKey, INDEX_PREFIX } from "@atscript/db-mongo";
+
+const adapter = db.getAdapter(Product) as MongoAdapter;
+const indexName = mongoIndexKey("search_text", "product_search");
+// → "atscript__search_text__product_search"
+
+const cursor = adapter.collection.aggregate([
+  { $search: { index: indexName, text: { query: "wireless", path: "title" } } },
+]);
+const results = await cursor.toArray();
+```
+
+`mongoIndexKey(type, logicalName)` and `INDEX_PREFIX` are the same helpers schema sync uses, so the resolved name always matches what was provisioned — if the prefix scheme ever changes, your interop code tracks it automatically.
 
 ## Limitations
 

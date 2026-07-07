@@ -113,7 +113,7 @@ Note: The test fixtures' `atscript.d.ts` is also regenerated automatically by `p
 
 ## Important patterns
 
-- **Index naming**: All managed indexes use the `atscript__` prefix. `syncIndexes()` only touches these.
+- **Index naming**: All managed indexes use the `atscript__` prefix. `syncIndexes()` only touches these. Physical name = `atscript__<type>__<cleanName>` via `mongoIndexKey()` (`lib/mongo-types.ts`), which — together with `INDEX_PREFIX` — is re-exported from the package root so raw-`mongodb`-driver consumers can resolve the physical Atlas Search index name instead of hardcoding the scheme.
 - **Aggregation pipelines over classic updates**: `CollectionPatcher` uses `$reduce`, `$filter`, `$map`, `$concatArrays`, `$setUnion`, `$setDifference`.
 - **Fixtures compiled at test time**: `prepareFixtures()` calls `build()` + `generate()` before tests.
 - **Peer dependencies**: `@atscript/core`, `@atscript/typescript`, `mongodb ^6.17.0`.
