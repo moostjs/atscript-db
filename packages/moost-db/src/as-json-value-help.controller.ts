@@ -1,5 +1,5 @@
 import type { TAtscriptAnnotatedType, TAtscriptDataType } from "@atscript/typescript/utils";
-import type { FilterExpr } from "@atscript/db";
+import { buildMemoryPredicate, projectRow, sortRows } from "@atscript/db-memory";
 import { Inherit, Moost } from "moost";
 
 import { AsValueHelpController, type ValueHelpQuery } from "./as-value-help.controller";
@@ -9,18 +9,32 @@ import { AsValueHelpController, type ValueHelpQuery } from "./as-value-help.cont
  * filter/sort/search/paginate over the provided rows, respecting the
  * `@ui.dict.*` capability annotations on the bound interface.
  *
+ * Filter/sort/projection are delegated to the shared JS-native engine from
+ * `@atscript/db-memory` (the same one every in-memory table uses) so a static
+ * value-help source behaves identically to the SQL/Mongo adapters instead of
+ * carrying a second, weaker implementation.
+ *
  * **Semantics:**
  * - Filter is interpreted as a subset of MongoDB-style comparison operators
- *   (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`) and
- *   logical combinators (`$and`, `$or`, `$not`, `$nor`). Unknown operators
- *   fall through to strict equality.
- * - Sort is stable, multi-key, lexicographic. Direction via `-` prefix on the
- *   field name or `{ [field]: 'asc' | 'desc' }`.
+ *   (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`,
+ *   `$exists`) and logical combinators (`$and`, `$or`, `$not`). Field names may
+ *   be dot-paths (`a.b.c`) that descend into nested objects. Any operator the
+ *   engine does not implement raises `DbError('INVALID_QUERY')`, which the
+ *   validation interceptor surfaces as HTTP 400 (it is NOT silently ignored).
+ * - Null model is Mongo-like: `{ field: null }` / `$eq: null` matches an
+ *   explicit `null` OR a missing field; `$ne: null` matches only a concrete,
+ *   present, non-null value.
+ * - `$regex` honours `/pattern/flags` literals, so `$regex: '/foo/i'` is a real
+ *   case-insensitive match.
+ * - Sort is stable, multi-key, lexicographic (insertion order preserved among
+ *   ties). Direction via `-` prefix on the field name or `{ [field]: 'asc' |
+ *   'desc' | 1 | -1 }`.
  * - Search is case-insensitive substring matching across every field listed in
- *   {@link searchableFields}.
- * - Type coercion: comparisons compare raw JS values (no implicit string-to-
- *   number coercion); strings are compared case-insensitively only for
- *   `$search`, not for filter operators.
+ *   {@link searchableFields}. This is value-help's own concern — the shared
+ *   engine has no `$search`.
+ * - Projection (`$select`) supports inclusion (`[fields]` / `{ f: 1 }`) and
+ *   exclusion (`{ f: 0 }`) with dot-path nesting; the primary key is NOT auto-
+ *   added (a value-help projection returns exactly the selected fields).
  *
  * **Constructor:**
  * ```ts
@@ -64,10 +78,16 @@ export class AsJsonValueHelpController<
   ): Promise<{ data: DataType[]; count: number }> {
     let rows: DataType[] = this.rows;
 
+    // 1. Filter — compile the FilterExpr into a predicate via the shared engine.
+    //    Only build/apply when a filter is actually present (mirrors the old
+    //    guard and keeps the no-filter path allocation-free).
     if (controls.filter && Object.keys(controls.filter).length > 0) {
-      rows = rows.filter((row) => matchFilter(row, controls.filter));
+      const predicate = buildMemoryPredicate(controls.filter);
+      rows = rows.filter((row) => predicate(row as Record<string, unknown>));
     }
 
+    // 2. $search — value-help's own case-insensitive substring match across the
+    //    searchable fields (the shared engine has no `$search`).
     const search = controls.controls.$search as string | undefined;
     if (search) {
       const needle = search.toLowerCase();
@@ -83,16 +103,27 @@ export class AsJsonValueHelpController<
       });
     }
 
-    if (controls.controls.$sort) {
-      rows = sortRows(rows, controls.controls.$sort);
+    // 3. Sort — normalize the flexible value-help `$sort` grammar to an ordered
+    //    `{ field: 1 | -1 }` map, then hand comparison/ordering to the engine.
+    const sort = this.normalizeSort(controls.controls.$sort);
+    if (sort) {
+      rows = sortRows(rows as Record<string, unknown>[], sort) as DataType[];
     }
 
+    // 4. Paginate — total is the matched count BEFORE the window is applied.
     const total = rows.length;
     const skip = Math.max(0, Number(controls.controls.$skip ?? 0));
     const limit = Math.max(0, Number(controls.controls.$limit ?? total - skip));
     const page = rows.slice(skip, skip + limit);
 
-    const data = applySelect(page, controls.controls.$select as string[] | undefined);
+    // 5. Project — normalize `$select` to a `{ path: 0 | 1 }` map and run each
+    //    paged row through the engine (no PK auto-add, no deep clone).
+    const projection = this.normalizeSelect(controls.controls.$select);
+    const data = projection
+      ? (page.map((row) =>
+          projectRow(row as Record<string, unknown>, projection, { clone: false }),
+        ) as DataType[])
+      : page;
 
     return { data, count: total };
   }
@@ -100,143 +131,70 @@ export class AsJsonValueHelpController<
   protected async getOne(id: string | number): Promise<DataType | null> {
     return this._pkIndex?.get(String(id)) ?? null;
   }
-}
 
-// ── Helpers (filter / sort / projection) ────────────────────────────────
+  // ── Control normalizers ────────────────────────────────────────────────
 
-function matchFilter(row: unknown, filter: FilterExpr): boolean {
-  if (!filter || typeof filter !== "object") {
-    return true;
-  }
-  for (const [key, value] of Object.entries(filter)) {
-    if (key === "$and") {
-      if (!Array.isArray(value)) continue;
-      if (!value.every((clause) => matchFilter(row, clause as FilterExpr))) return false;
-      continue;
-    }
-    if (key === "$or") {
-      if (!Array.isArray(value)) continue;
-      if (!value.some((clause) => matchFilter(row, clause as FilterExpr))) return false;
-      continue;
-    }
-    if (key === "$nor") {
-      if (!Array.isArray(value)) continue;
-      if (value.some((clause) => matchFilter(row, clause as FilterExpr))) return false;
-      continue;
-    }
-    if (key === "$not") {
-      if (matchFilter(row, value as FilterExpr)) return false;
-      continue;
-    }
-    if (key.startsWith("$")) {
-      // Unknown top-level control operator — skip.
-      continue;
-    }
-    const fieldValue = (row as Record<string, unknown>)[key];
-    if (!matchFieldPredicate(fieldValue, value)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function matchFieldPredicate(fieldValue: unknown, predicate: unknown): boolean {
-  if (predicate === null || typeof predicate !== "object" || Array.isArray(predicate)) {
-    return fieldValue === predicate;
-  }
-  for (const [op, operand] of Object.entries(predicate as Record<string, unknown>)) {
-    switch (op) {
-      case "$eq":
-        if (fieldValue !== operand) return false;
-        break;
-      case "$ne":
-        if (fieldValue === operand) return false;
-        break;
-      case "$in":
-        if (!Array.isArray(operand) || !operand.includes(fieldValue as never)) return false;
-        break;
-      case "$nin":
-        if (!Array.isArray(operand) || operand.includes(fieldValue as never)) return false;
-        break;
-      case "$gt":
-        if (!((fieldValue as never) > (operand as never))) return false;
-        break;
-      case "$gte":
-        if (!((fieldValue as never) >= (operand as never))) return false;
-        break;
-      case "$lt":
-        if (!((fieldValue as never) < (operand as never))) return false;
-        break;
-      case "$lte":
-        if (!((fieldValue as never) <= (operand as never))) return false;
-        break;
-      case "$regex": {
-        const re = operand instanceof RegExp ? operand : new RegExp(String(operand));
-        if (typeof fieldValue !== "string" || !re.test(fieldValue)) return false;
-        break;
+  /**
+   * Ports the value-help `$sort` grammar to the shared engine's `{ field: 1 |
+   * -1 }` shape (order-preserving for multi-key sorts). Accepts:
+   * - a string `"field:asc,-other"` (comma-separated; `-` prefix or `:desc` → descending),
+   * - an array of such strings / `{ field: dir }` objects,
+   * - a `{ field: 'asc' | 'desc' | 1 | -1 }` object.
+   * Returns `undefined` when nothing sortable was parsed (engine skips sorting).
+   */
+  private normalizeSort(sort: unknown): Partial<Record<string, 1 | -1>> | undefined {
+    const out: Record<string, 1 | -1> = {};
+    const push = (name: string, explicit?: 1 | -1) => {
+      const clean = name.replace(/^[-+]/, "");
+      const dir: 1 | -1 = explicit ?? (name.startsWith("-") ? -1 : 1);
+      if (clean) out[clean] = dir;
+    };
+    if (typeof sort === "string") {
+      for (const part of sort.split(",")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const [name, dir] = trimmed.split(":");
+        push(name, dir === "desc" ? -1 : dir === "asc" ? 1 : undefined);
       }
-      default:
-        if (fieldValue !== operand) return false;
-    }
-  }
-  return true;
-}
-
-function sortRows<T>(rows: T[], sort: unknown): T[] {
-  const keys: Array<{ name: string; dir: 1 | -1 }> = [];
-  const push = (name: string, explicit?: 1 | -1) => {
-    const clean = name.replace(/^[-+]/, "");
-    const dir: 1 | -1 = explicit ?? (name.startsWith("-") ? -1 : 1);
-    if (clean) keys.push({ name: clean, dir });
-  };
-  if (typeof sort === "string") {
-    for (const part of sort.split(",")) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
-      const [name, dir] = trimmed.split(":");
-      push(name, dir === "desc" ? -1 : dir === "asc" ? 1 : undefined);
-    }
-  } else if (Array.isArray(sort)) {
-    for (const entry of sort) {
-      if (typeof entry === "string") {
-        push(entry);
-      } else if (entry && typeof entry === "object") {
-        for (const [name, d] of Object.entries(entry)) {
-          push(name, d === "desc" || d === -1 ? -1 : 1);
+    } else {
+      // A top-level `{ field: dir }` object is treated as a one-element array so
+      // the object-entry handling is written once (array and object forms share it).
+      const entries = Array.isArray(sort) ? sort : sort && typeof sort === "object" ? [sort] : [];
+      for (const entry of entries) {
+        if (typeof entry === "string") {
+          push(entry);
+        } else if (entry && typeof entry === "object") {
+          for (const [name, d] of Object.entries(entry)) {
+            push(name, d === "desc" || d === -1 ? -1 : 1);
+          }
         }
       }
     }
-  } else if (sort && typeof sort === "object") {
-    for (const [name, d] of Object.entries(sort as Record<string, unknown>)) {
-      push(name, d === "desc" || d === -1 ? -1 : 1);
-    }
+    return Object.keys(out).length > 0 ? out : undefined;
   }
-  if (keys.length === 0) return rows;
 
-  // Array.prototype.sort is stable in ES2019+ — cloning once to preserve the input.
-  const out = rows.slice();
-  out.sort((a, b) => {
-    for (const { name, dir } of keys) {
-      const av = (a as Record<string, unknown>)[name];
-      const bv = (b as Record<string, unknown>)[name];
-      if (av === bv) continue;
-      if (av === undefined || av === null) return -1 * dir;
-      if (bv === undefined || bv === null) return 1 * dir;
-      if ((av as never) < (bv as never)) return -1 * dir;
-      if ((av as never) > (bv as never)) return 1 * dir;
+  /**
+   * Normalizes the raw `parseUrl` `$select` form to the engine's `{ path: 0 |
+   * 1 }` projection map:
+   * - `string[]` (e.g. from `?$select=a,b`) → inclusion map `{ a: 1, b: 1 }`,
+   * - a plain `{ path: 0 | 1 }` object → passed through (0 / falsy → exclude),
+   * - anything else / empty → `undefined` (no projection; whole rows returned).
+   */
+  private normalizeSelect(select: unknown): Record<string, 0 | 1> | undefined {
+    if (Array.isArray(select)) {
+      const out: Record<string, 0 | 1> = {};
+      for (const field of select) {
+        if (typeof field === "string" && field) out[field] = 1;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
     }
-    return 0;
-  });
-  return out;
-}
-
-function applySelect<T>(rows: T[], select?: string[]): T[] {
-  if (!select?.length) return rows;
-  return rows.map((row) => {
-    const out: Record<string, unknown> = {};
-    for (const key of select) {
-      out[key] = (row as Record<string, unknown>)[key];
+    if (select && typeof select === "object") {
+      const out: Record<string, 0 | 1> = {};
+      for (const [path, v] of Object.entries(select as Record<string, unknown>)) {
+        out[path] = v === 0 || v === false ? 0 : 1;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
     }
-    return out as T;
-  });
+    return undefined;
+  }
 }

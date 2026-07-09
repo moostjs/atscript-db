@@ -36,6 +36,14 @@ pnpm add @atscript/core @atscript/typescript @atscript/db @atscript/db-mongo mon
 pnpm add @atscript/core @atscript/typescript @atscript/db @atscript/db-mysql mysql2
 ```
 
+```bash [Memory]
+pnpm add @atscript/core @atscript/typescript @atscript/db @atscript/db-memory
+```
+
+:::
+
+::: info Following along with the memory adapter?
+The memory adapter has no persistence, no driver, and no CLI sync step — it is meant for runtime-owned surfaces and tests, not the persisted Todo app this tutorial builds. Skip steps 2, 4, and 5 below: call `syncSchema(db, [Todo])` at runtime instead of `npx asc db sync`, and construct the space with `createAdapter()` from `@atscript/db-memory`. See the [Memory adapter page](/adapters/memory) for the full flow.
 :::
 
 ## 2. Configure Atscript

@@ -20,6 +20,8 @@
       "@atscript/db": ["./packages/db/src"],
       "@atscript/db/*": ["./packages/db/src/*"],
       "@atscript/db-sql-tools": ["./packages/db-sql-tools/src"],
+      "@atscript/db-memory": ["./packages/db-memory/src"],
+      "@atscript/db-memory/*": ["./packages/db-memory/src/*"],
       "@atscript/db-mongo": ["./packages/db-mongo/src"],
       "@atscript/db-mongo/*": ["./packages/db-mongo/src/*"],
       "@atscript/db-mysql": ["./packages/db-mysql/src"],

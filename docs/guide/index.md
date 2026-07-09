@@ -63,6 +63,7 @@ Your application code talks to the Table API. The adapter handles SQL generation
 | `@atscript/db-postgres` | PostgreSQL adapter with pgvector and CITEXT support                |
 | `@atscript/db-mongo`    | MongoDB adapter with Atlas Search and vector search support        |
 | `@atscript/db-mysql`    | MySQL adapter                                                      |
+| `@atscript/db-memory`   | In-memory adapter (no driver) for runtime-owned surfaces and tests |
 | `@atscript/moost-db`    | REST API controller for the [Moost](https://moost.org) framework   |
 
 ::: tip Used in production

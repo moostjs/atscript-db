@@ -7,6 +7,7 @@ Install, author a `.as` model, configure, sync, and run the first CRUD call.
 ```bash
 pnpm add @atscript/core @atscript/typescript @atscript/db
 pnpm add @atscript/db-sqlite better-sqlite3        # pick exactly one adapter
+pnpm add @atscript/db-memory                       # …or the in-memory adapter (no driver — tests / runtime surfaces)
 ```
 
 Adapters and their peer deps:
@@ -17,6 +18,7 @@ Adapters and their peer deps:
 | `@atscript/db-postgres` | `pg`, optional `pgvector` extension in DB                 |
 | `@atscript/db-mysql`    | `mysql2`                                                  |
 | `@atscript/db-mongo`    | `mongodb ^6`                                              |
+| `@atscript/db-memory`   | none beyond `@atscript/db` core — no driver, no plugin    |
 
 ## Configure Atscript
 

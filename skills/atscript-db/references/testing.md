@@ -4,12 +4,13 @@ Patterns for testing **an application that consumes atscript-db** — not for te
 
 ## Test DB choices
 
-| Stack      | Engine                           | Use when                                                                                                                                                              |
-| ---------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| SQLite     | `better-sqlite3` with `:memory:` | Default for unit + integration. Synchronous, zero setup, adapter-parity holds. Add `sqlite-vec` + `{ vector: true }` on the driver to exercise vector search locally. |
-| PostgreSQL | `pg` + Docker Postgres           | When your production depends on pgvector / CITEXT / FTS tsvector.                                                                                                     |
-| MySQL      | `mysql2` + Docker MySQL 9+       | When you use `VECTOR` or MySQL-specific features.                                                                                                                     |
-| MongoDB    | `mongodb-memory-server` replset  | When your production uses transactions or Atlas Search (local approximates with text indexes only).                                                                   |
+| Stack      | Engine                           | Use when                                                                                                                                                                                                  |
+| ---------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SQLite     | `better-sqlite3` with `:memory:` | Default for unit + integration. Synchronous, zero setup, adapter-parity holds. Add `sqlite-vec` + `{ vector: true }` on the driver to exercise vector search locally.                                     |
+| PostgreSQL | `pg` + Docker Postgres           | When your production depends on pgvector / CITEXT / FTS tsvector.                                                                                                                                         |
+| MySQL      | `mysql2` + Docker MySQL 9+       | When you use `VECTOR` or MySQL-specific features.                                                                                                                                                         |
+| MongoDB    | `mongodb-memory-server` replset  | When your production uses transactions or Atlas Search (local approximates with text indexes only).                                                                                                       |
+| Memory     | `@atscript/db-memory` (JS Maps)  | Fastest unit + trivial-table tests — no native module, no DB process, deterministic insertion order. JS-native filter/regex/null semantics (not SQL-parity); switch to SQLite for engine-fidelity checks. |
 
 Default to SQLite for domain tests; switch engines only for engine-specific features.
 

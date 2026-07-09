@@ -1,7 +1,8 @@
 ---
 name: atscript-db
 description: >-
-  Use when working with @atscript/db, @atscript/db-{sqlite,postgres,mysql,mongo},
+  Use when working with @atscript/db,
+  @atscript/db-{sqlite,postgres,mysql,mongo,memory},
   @atscript/db-sql-tools, @atscript/moost-db, @atscript/db-client, or .as models
   with @db.* annotations. Covers DbSpace, adapter wiring, table/view CRUD, query
   filters, patch/field/array ops, relations, views, schema sync, engine-specific
@@ -33,6 +34,7 @@ npx skills add moostjs/atscript        # sibling — .as syntax, @meta.*, @expec
     │       ├── @atscript/db-postgres   pg + pgvector + HNSW + CITEXT + FTS
     │       └── @atscript/db-mysql      mysql2 + VECTOR + FULLTEXT + utf8mb4
     ├── @atscript/db-mongo       mongodb (aggregation pipelines, Atlas Search, no SQL layer)
+    ├── @atscript/db-memory      in-memory adapter (no engine); provider-backed read-only + stored read-write
     ├── @atscript/moost-db       Moost HTTP controllers: AsDbController / AsDbReadableController
     └── @atscript/db-client      browser/SSR fetch client over moost-db REST
 ```
@@ -43,6 +45,7 @@ pnpm add @atscript/db-sqlite better-sqlite3                 # pick one adapter
 pnpm add @atscript/db-postgres pg
 pnpm add @atscript/db-mysql mysql2
 pnpm add @atscript/db-mongo mongodb
+pnpm add @atscript/db-memory                                 # in-memory (tests / runtime surfaces)
 pnpm add @atscript/moost-db @moostjs/event-http moost       # REST
 pnpm add @atscript/db-client                                 # browser/SSR client
 ```
@@ -119,6 +122,14 @@ import {
 import { PostgresAdapter, PgDriver, createAdapter as pgSpace } from "@atscript/db-postgres";
 import { MysqlAdapter, Mysql2Driver, createAdapter as mysqlSpace } from "@atscript/db-mysql";
 import { MongoAdapter } from "@atscript/db-mongo";
+import {
+  MemoryAdapter,
+  createAdapter as memorySpace,
+  setMemoryProvider,
+  buildMemoryPredicate,
+  sortRows,
+  projectRow, // shared JS-native engine — also backs moost-db value-help
+} from "@atscript/db-memory";
 
 // HTTP
 import {
@@ -149,6 +160,7 @@ import { Client } from "@atscript/db-client";
 | PostgreSQL specifics | [adapters-postgres.md](references/adapters-postgres.md) | `PgDriver`, pgvector + HNSW, CITEXT, `@db.pg.type`, `@db.pg.schema`, `@db.pg.collate`, tsvector FTS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | MySQL specifics      | [adapters-mysql.md](references/adapters-mysql.md)       | `Mysql2Driver`, `@db.mysql.engine/.charset/.collate/.type/.unsigned/.onUpdate`, VECTOR, FULLTEXT, utf8mb4 default                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | MongoDB specifics    | [adapters-mongo.md](references/adapters-mongo.md)       | `MongoAdapter(db, client?)`, aggregation-pipeline patches, Atlas Search text + vector, `atscript__` index prefix + physical index-name helper (`mongoIndexKey`/`INDEX_PREFIX` for raw-driver `$search` interop), ObjectId primitive                                                                                                                                                                                                                                                                                                                                                                                                |
+| Memory specifics     | [adapters-memory.md](references/adapters-memory.md)     | in-memory adapter; provider-backed runtime surfaces, in-memory tests, JS-native filter semantics                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Custom adapters      | [creating-adapters.md](references/creating-adapters.md) | `BaseDbAdapter` contract, abstract methods, overridable hooks, `supports*` flags, `@atscript/db-sql-tools` reuse                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `moost-db` HTTP      | [moost-db.md](references/moost-db.md)                   | `AsDbController` / `AsDbReadableController` routes, `TableController` / `ReadableController`, `@db.http.path` resolution, value-help endpoints                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Actions              | [actions.md](references/actions.md)                     | `@DbAction` / `@DbActionID*` / `@DbActionRow*` / `@InputForm` / `@DbActions*` decorators, `{ ids?, input? }` body envelope, row/rows/table actions, `processor: 'backend' \| 'navigate' \| 'custom'`, sync batch `disabled` gate (typed via `requiredFields` tuple, mandatory), `perRow()` helper, `onDisabledRows`, `@DbActionRow*` projection widening, `$actions=true` server-evaluated row availability augmentation, `inputForm` on `/meta` + `GET /meta/form/:name` form-schema endpoint (validation via user-installed atscript pipe), preferred-id navigate substitution, `ActionDisabledError`, `/meta` `actions[]` shape |

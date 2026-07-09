@@ -198,6 +198,7 @@ const adaptersSidebar = [
       { text: "SQLite", link: "/adapters/sqlite" },
       { text: "MongoDB", link: "/adapters/mongodb" },
       { text: "MySQL", link: "/adapters/mysql" },
+      { text: "Memory", link: "/adapters/memory" },
       { text: "Creating Custom Adapters", link: "/adapters/creating-adapters" },
     ],
   },

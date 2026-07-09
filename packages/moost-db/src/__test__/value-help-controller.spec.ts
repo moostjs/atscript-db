@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vite-plus/test";
+import { DbError } from "@atscript/db";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsJsonValueHelpController } from "../as-json-value-help.controller";
@@ -32,6 +33,26 @@ const STATUSES: Status[] = [
   { id: "archived", label: "Archived", description: "No longer used" },
   { id: "draft", label: "Draft", description: "In progress" },
 ];
+
+/** A bound type carrying just a `@meta.id` primary key (no other props matter). */
+function idOnlyType() {
+  return makeValueHelpType({
+    props: { id: { designType: "string", annotations: { "meta.id": true } } },
+  });
+}
+
+/** Invoke the protected `query()` pipeline directly with an explicit filter/controls. */
+function callQuery(
+  ctrl: AsJsonValueHelpController<any, any>,
+  filter: Record<string, unknown>,
+  controls: Record<string, unknown> = {},
+): Promise<{ data: any[]; count: number }> {
+  return (
+    ctrl as unknown as {
+      query(c: { filter: unknown; controls: unknown }): Promise<{ data: any[]; count: number }>;
+    }
+  ).query({ filter, controls });
+}
 
 describe("AsJsonValueHelpController — basic plumbing", () => {
   it("getOne returns matching row by ID", async () => {
@@ -213,5 +234,111 @@ describe("AsValueHelpController — meta response", () => {
     expect(meta.crud.update).toBeUndefined();
     expect(meta.crud.replace).toBeUndefined();
     expect(meta.crud.remove).toBeUndefined();
+  });
+});
+
+describe("AsJsonValueHelpController — shared db-memory engine semantics", () => {
+  it("dot-path filter matches a nested field (a.b)", async () => {
+    const type = idOnlyType();
+    const rows = [
+      { id: "1", meta: { code: "alpha" } },
+      { id: "2", meta: { code: "beta" } },
+    ];
+    const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
+    const res = await callQuery(ctrl, { "meta.code": "beta" });
+    expect(res.data).toEqual([rows[1]]);
+    expect(res.count).toBe(1);
+  });
+
+  it("$exists treats present-null as present and excludes absent fields", async () => {
+    const type = idOnlyType();
+    const rows = [{ id: "has", note: "x" }, { id: "null", note: null }, { id: "absent" }];
+    const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
+    const res = await callQuery(ctrl, { note: { $exists: true } });
+    expect(res.data.map((r) => r.id)).toEqual(["has", "null"]);
+  });
+
+  it("$regex with /i flag matches case-insensitively (corrected flag parsing)", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+      },
+    });
+    const ctrl = new AsJsonValueHelpController<typeof type, Status>(type, STATUSES, makeApp());
+    // `~=` maps to `$regex`; the `/active/i` literal is parsed for flags, so
+    // "Active" matches case-insensitively (the old engine dropped the flags).
+    const result = await ctrl.runQuery("?label~=/active/i");
+    expect(result).toEqual([STATUSES[0]]);
+  });
+
+  it("nested-path $select returns the projected nested shape (no PK auto-add)", async () => {
+    const type = idOnlyType();
+    const rows = [{ id: "1", meta: { code: "alpha", extra: "drop" }, other: "x" }];
+    const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
+    const res = await callQuery(ctrl, {}, { $select: ["meta.code"] });
+    expect(res.data).toEqual([{ meta: { code: "alpha" } }]);
+  });
+
+  it("Mongo-like null: {field: null} matches explicit-null and missing", async () => {
+    const type = idOnlyType();
+    const rows = [
+      { id: "present", parent: "p1" },
+      { id: "explicit", parent: null },
+      { id: "missing" },
+    ];
+    const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
+    const res = await callQuery(ctrl, { parent: null });
+    expect(res.data.map((r) => r.id)).toEqual(["explicit", "missing"]);
+  });
+
+  it("Mongo-like null: {$ne: null} matches only concrete present values", async () => {
+    const type = idOnlyType();
+    const rows = [
+      { id: "present", parent: "p1" },
+      { id: "explicit", parent: null },
+      { id: "missing" },
+    ];
+    const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
+    const res = await callQuery(ctrl, { parent: { $ne: null } });
+    expect(res.data.map((r) => r.id)).toEqual(["present"]);
+  });
+
+  it("unsupported filter operator surfaces as DbError (INVALID_QUERY → 400)", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+      },
+    });
+    const ctrl = new AsJsonValueHelpController<typeof type, Status>(type, STATUSES, makeApp());
+    await expect(callQuery(ctrl, { label: { $foo: "Active" } })).rejects.toBeInstanceOf(DbError);
+  });
+});
+
+describe("AsJsonValueHelpController — regression guards after the engine swap", () => {
+  it("$sort with '-' prefix sorts descending", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+      },
+    });
+    const ctrl = new AsJsonValueHelpController<typeof type, Status>(type, STATUSES, makeApp());
+    const result = await ctrl.runQuery("?$sort=-label");
+    expect(result).toEqual([STATUSES[2], STATUSES[1], STATUSES[0]]);
+  });
+
+  it("$search still narrows results (case-insensitive substring)", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+        description: { designType: "string" },
+      },
+    });
+    const ctrl = new AsJsonValueHelpController<typeof type, Status>(type, STATUSES, makeApp());
+    const result = await ctrl.runQuery("?$search=draft");
+    expect(result).toEqual([STATUSES[2]]);
   });
 });

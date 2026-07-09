@@ -118,6 +118,22 @@ importers:
         specifier: 'catalog:'
         version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
+  packages/db-memory:
+    dependencies:
+      '@atscript/db':
+        specifier: workspace:*
+        version: link:../db
+    devDependencies:
+      '@atscript/core':
+        specifier: 'catalog:'
+        version: 0.1.80
+      '@atscript/typescript':
+        specifier: 'catalog:'
+        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+      unplugin-atscript:
+        specifier: 'catalog:'
+        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+
   packages/db-mongo:
     dependencies:
       '@atscript/db':
@@ -243,6 +259,9 @@ importers:
       '@atscript/db':
         specifier: workspace:*
         version: link:../db
+      '@atscript/db-memory':
+        specifier: workspace:^
+        version: link:../db-memory
       '@uniqu/url':
         specifier: 'catalog:'
         version: 0.1.6

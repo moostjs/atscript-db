@@ -39,7 +39,13 @@ pnpm add @atscript/db-mongo mongodb
 pnpm add @atscript/db-mysql mysql2
 ```
 
+```bash [Memory]
+pnpm add @atscript/db-memory
+```
+
 :::
+
+The memory adapter needs no driver and no plugin — it speaks only the portable `@db.*` layer. See [Memory](/adapters/memory) for its provider-backed and stored modes.
 
 ## Registering the DB Plugin
 
@@ -203,6 +209,13 @@ const driver = new Mysql2Driver("mysql://root@localhost:3306/mydb");
 const db = new DbSpace(() => new MysqlAdapter(driver));
 ```
 
+```typescript [Memory]
+import { MemoryAdapter } from "@atscript/db-memory";
+
+// No driver, no connection — storage is an in-process Map per table.
+const db = new DbSpace(() => new MemoryAdapter());
+```
+
 :::
 
 ::: tip createAdapter Shorthand
@@ -220,6 +233,9 @@ const db = createAdapter("mongodb://localhost:27017/mydb");
 
 import { createAdapter } from "@atscript/db-mysql";
 const db = createAdapter("mysql://root@localhost:3306/mydb");
+
+import { createAdapter } from "@atscript/db-memory";
+const db = createAdapter(); // in-memory, no connection string
 ```
 
 :::

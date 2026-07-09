@@ -105,14 +105,21 @@ The picker resolves via `prop.ref.type().metadata.get('db.http.path')` (stamped 
 
 ## JSON-source semantics
 
-The built-in `AsJsonValueHelpController.query` implementation iterates the constructor-provided array and applies Uniquery controls in this order:
+The built-in `AsJsonValueHelpController.query` implementation iterates the constructor-provided array and applies Uniquery controls in this order, delegating filter, sort, and projection to the shared JS-native engine from the [Memory adapter](./memory) (`buildMemoryPredicate` / `sortRows` / `projectRow` — the same engine that backs in-memory tables):
 
-1. **Filter** — MongoDB-style comparison operators (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`) and logical combinators (`$and`, `$or`, `$not`, `$nor`). Unknown operators fall through to strict equality. Any field can be filtered — no gate.
-2. **Search** — case-insensitive substring match. Fields to match come from `@ui.dict.searchable`: field-level annotation narrows to those props; absent or interface-level defaults to every `string`-typed prop.
-3. **Sort** — stable, multi-key, lexicographic. Direction via a leading `-` or via the explicit `{ [field]: 'asc' \| 'desc' }` form. Any field can be sorted — no gate.
-4. **Pagination** — `$skip` + `$limit` applied after filter/search/sort. `/pages` returns the full total count.
+1. **Filter** — MongoDB-style comparison operators (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`, `$exists`) and logical combinators (`$and`, `$or`, `$not`, `$nor`), over **dot-path** access into nested objects. `$regex` honors inline flags (`/foo/i`). The [MongoDB-like null model](./memory#comparison-semantics) applies: `$eq: null` matches an explicit `null` **or** a missing field; `$ne: null` matches only a concrete present value. Any field can be filtered — no gate.
+2. **Search** — case-insensitive substring match, applied by the controller itself (the engine has no `$search`). Fields to match come from `@ui.dict.searchable`: field-level annotation narrows to those props; absent or interface-level defaults to every `string`-typed prop.
+3. **Sort** — stable, multi-key. Accepts the flexible value-help grammar: a leading `-`, `"field:asc,-other"` strings, arrays, or the `{ [field]: 'asc' \| 'desc' }` form. Any field can be sorted — no gate.
+4. **Projection** — `$select` resolves nested dot-paths.
+5. **Pagination** — `$skip` + `$limit` applied after filter/search/sort. `/pages` returns the full total count.
 
-If you need richer semantics (locale-aware sort, tokenized search, FTS-style ranking), subclass `AsValueHelpController` directly and implement `query` / `getOne` yourself — everything above the data source (routing, meta serialization) stays the same.
+::: warning Two behavior notes after the engine consolidation
+
+- An **unsupported filter operator returns HTTP 400** (`DbError('INVALID_QUERY')`), not a silent fall-through to equality.
+- **`$regex` now honors inline flags** — a consumer sending `/foo/i` gets a real case-insensitive match (previously the flags were dropped).
+  :::
+
+The `new AsJsonValueHelpController(Type, rows, app)` constructor and the action-less contract are unchanged. If you need richer semantics (locale-aware sort, tokenized search, FTS-style ranking), subclass `AsValueHelpController` directly and implement `query` / `getOne` yourself — everything above the data source (routing, meta serialization) stays the same.
 
 ## Client resolution order
 

@@ -235,7 +235,7 @@ Status-code mapping (`validation-interceptor.ts`):
 `AsReadableController`, `AsValueHelpController`, and `AsJsonValueHelpController` back non-DB `@db.rel.FK` sources (enums, static lists, JSON documents) so forms can resolve picker URLs from `@db.http.path` regardless of whether the target is a table.
 
 - `AsValueHelpController` — **abstract**. `query()` and `getOne()` are abstract; subclass must implement them (`as-value-help.controller.ts:105,111`).
-- `AsJsonValueHelpController` — **the only concrete subclass shipped**. Loads entries from a JSON file at startup.
+- `AsJsonValueHelpController` — **the only concrete subclass shipped**. `new AsJsonValueHelpController(Type, rows, app)` — holds a static in-memory row set and serves `/query` `/pages` `/one` `/meta` over it. Filter/sort/projection delegate to the shared `@atscript/db-memory` engine (see § query engine below).
 
 ```ts
 import { AsValueHelpController, ReadableController } from "@atscript/moost-db";
@@ -250,6 +250,29 @@ export class RolesController extends AsValueHelpController<typeof RolesDictionar
   }
 }
 ```
+
+### `AsJsonValueHelpController` query engine
+
+Filter, sort, and projection run on the shared `@atscript/db-memory` engine (`buildMemoryPredicate` + `sortRows` + `projectRow`) — the same JS-native engine the MemoryAdapter uses. Engine semantics (null model, regex, dot-paths, operator set) are owned there: [adapters-memory.md](adapters-memory.md). Pipeline order: **filter → `$search` → sort → paginate → project**.
+
+Gained for every static value-help surface (via the shared engine):
+
+- dot-path field access (`a.b.c`) in filters, sort, and `$select`.
+- `$exists`.
+- Mongo-like null model — `$eq:null` matches null AND missing; `$ne:null` matches only concrete present values.
+- nested-path projection via `$select`.
+
+Preserved (controller-owned, not the engine):
+
+- `$search` — case-insensitive substring across `@ui.dict.searchable` fields (the engine has no `$search`; the controller applies it).
+- flexible `$sort` grammar — `"field:asc,-other"`, arrays, `{ field: 'asc' | 'desc' }`.
+- pagination (`/pages`).
+- `@ui.dict.*` remain UI hints only; the controller stays **action-less** (`actions: []` — see [actions.md](actions.md)).
+
+Behavior-change gotchas (were silent before the shared-engine move):
+
+- **Unsupported filter operator → HTTP 400** (`DbError('INVALID_QUERY')`), previously a silent mis-match returning no rows.
+- **`$regex` honors `/pat/flags`** — `$regex:'/foo/i'` is a real case-insensitive match (flags were ignored before).
 
 ## Meta endpoint shape
 

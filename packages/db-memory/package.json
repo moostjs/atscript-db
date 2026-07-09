@@ -1,15 +1,13 @@
 {
-  "name": "@atscript/moost-db",
+  "name": "@atscript/db-memory",
   "version": "0.1.112",
-  "description": "Generic database controller for Moost with Atscript.",
+  "description": "In-memory adapter for atscript-db.",
   "keywords": [
-    "annotations",
     "atscript",
     "database",
-    "moost",
-    "typescript"
+    "memory"
   ],
-  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/moost-db#readme",
+  "homepage": "https://github.com/moostjs/atscript-db/tree/main/packages/db-memory#readme",
   "bugs": {
     "url": "https://github.com/moostjs/atscript-db/issues"
   },
@@ -18,7 +16,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/moostjs/atscript-db.git",
-    "directory": "packages/moost-db"
+    "directory": "packages/db-memory"
   },
   "files": [
     "dist"
@@ -44,28 +42,14 @@
     "test": "vp test",
     "check": "vp check"
   },
-  "dependencies": {
-    "@atscript/db-memory": "workspace:^",
-    "@uniqu/url": "catalog:"
-  },
   "devDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/typescript": "catalog:",
-    "@moostjs/event-http": "catalog:",
-    "@uniqu/core": "catalog:",
-    "@wooksjs/event-core": "catalog:",
-    "@wooksjs/event-http": "catalog:",
-    "@wooksjs/http-body": "catalog:",
-    "moost": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
+    "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "catalog:",
-    "@moostjs/event-http": "catalog:",
-    "@uniqu/core": "catalog:",
-    "@wooksjs/event-core": "catalog:",
-    "@wooksjs/http-body": "catalog:",
-    "moost": "catalog:"
+    "@atscript/typescript": "catalog:"
   }
 }

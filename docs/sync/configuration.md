@@ -55,12 +55,13 @@ The CLI resolves the adapter by importing the package and calling its `createAda
 
 ### Connection strings by adapter
 
-| Adapter                 | Example Connection                                                  |
-| ----------------------- | ------------------------------------------------------------------- |
-| `@atscript/db-sqlite`   | `'./data.db'` or `':memory:'`                                       |
-| `@atscript/db-postgres` | `'postgresql://user:pass@localhost:5432/mydb'`                      |
-| `@atscript/db-mysql`    | `{ host: 'localhost', port: 3306, user: 'root', database: 'mydb' }` |
-| `@atscript/db-mongo`    | `'mongodb://localhost:27017/mydb'`                                  |
+| Adapter                 | Example Connection                                                    |
+| ----------------------- | --------------------------------------------------------------------- |
+| `@atscript/db-sqlite`   | `'./data.db'` or `':memory:'`                                         |
+| `@atscript/db-postgres` | `'postgresql://user:pass@localhost:5432/mydb'`                        |
+| `@atscript/db-mysql`    | `{ host: 'localhost', port: 3306, user: 'root', database: 'mydb' }`   |
+| `@atscript/db-mongo`    | `'mongodb://localhost:27017/mydb'`                                    |
+| `@atscript/db-memory`   | `(none)` — in-memory, no connection; sync at runtime via `syncSchema` |
 
 ### Dynamic connection
 
