@@ -7,11 +7,11 @@ settings:
 catalogs:
   default:
     '@atscript/core':
-      specifier: ^0.1.80
-      version: 0.1.80
+      specifier: ^0.1.81
+      version: 0.1.81
     '@atscript/typescript':
-      specifier: ^0.1.80
-      version: 0.1.80
+      specifier: ^0.1.81
+      version: 0.1.81
     '@moostjs/event-http':
       specifier: ^0.6.29
       version: 0.6.29
@@ -19,11 +19,11 @@ catalogs:
       specifier: ^24
       version: 24.12.0
     '@uniqu/core':
-      specifier: ^0.1.6
-      version: 0.1.6
+      specifier: ^0.1.7
+      version: 0.1.7
     '@uniqu/url':
-      specifier: ^0.1.6
-      version: 0.1.6
+      specifier: ^0.1.7
+      version: 0.1.7
     '@wooksjs/event-core':
       specifier: ^0.7.19
       version: 0.7.19
@@ -43,8 +43,8 @@ catalogs:
       specifier: ^5
       version: 5.9.3
     unplugin-atscript:
-      specifier: ^0.1.80
-      version: 0.1.80
+      specifier: ^0.1.81
+      version: 0.1.81
     vite-plus:
       specifier: latest
       version: 0.1.24
@@ -85,38 +85,38 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-client:
     dependencies:
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/db':
         specifier: workspace:*
         version: link:../db
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-memory:
     dependencies:
@@ -126,13 +126,13 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-mongo:
     dependencies:
@@ -142,10 +142,10 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       mongodb:
         specifier: ^6.17.0
         version: 6.21.0
@@ -154,7 +154,7 @@ importers:
         version: 10.4.3
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-mysql:
     dependencies:
@@ -167,19 +167,19 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       mysql2:
         specifier: ^3.11.0
         version: 3.20.0(@types/node@25.5.0)
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-postgres:
     dependencies:
@@ -192,22 +192,22 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@types/pg':
         specifier: ^8.11.0
         version: 8.20.0
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       pg:
         specifier: ^8.13.0
         version: 8.20.0
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-sql-tools:
     dependencies:
@@ -217,10 +217,10 @@ importers:
     devDependencies:
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
   packages/db-sqlite:
     dependencies:
@@ -233,22 +233,22 @@ importers:
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       better-sqlite3:
         specifier: ^12.6.2
         version: 12.8.0
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
     optionalDependencies:
       sqlite-vec:
         specifier: 'catalog:'
@@ -264,20 +264,20 @@ importers:
         version: link:../db-memory
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
-        version: 0.1.80
+        version: 0.1.81
       '@atscript/typescript':
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       '@moostjs/event-http':
         specifier: 'catalog:'
         version: 0.6.29(@prostojs/infact@0.4.1)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(moost@0.6.29)(wooks@0.7.19)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.6
+        version: 0.1.7
       '@wooksjs/event-core':
         specifier: 'catalog:'
         version: 0.7.19
@@ -292,18 +292,18 @@ importers:
         version: 0.6.29
       unplugin-atscript:
         specifier: 'catalog:'
-        version: 0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
+        version: 0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19))
 
 packages:
 
-  '@atscript/core@0.1.80':
-    resolution: {integrity: sha512-/UNWX+2munGE0ur28WOg78LgKvOecKhC9b1+e0zlzFZ4M6v2fILsWYH67clT6AnggTrdCZl+R80Q5W+tjxZ9bw==}
+  '@atscript/core@0.1.81':
+    resolution: {integrity: sha512-gOBE1xEV6da2Ua/PLrFQAhZlfoXhUZTmp2v4gxWedGYINmSCaqr15cI7Wi37dUGHs4foqCS/IMoldFaNKD/5EQ==}
 
-  '@atscript/typescript@0.1.80':
-    resolution: {integrity: sha512-psVhZi1B8IXNXOw7ubUa0a41j1F9AVHS94EDzcnpLYABS+n/SU+1a1g8KzBVtdnHKFpYaOMz7H0gX2BMJSjlhA==}
+  '@atscript/typescript@0.1.81':
+    resolution: {integrity: sha512-LLBYVTY1crB6UQ3ElY5qsHJVgKzGzS1Bsce1Mja9mNB8PfVT8JTd+Kwq+JcqoqAu9P7lo0BYaM5bd3WWvsrs8Q==}
     hasBin: true
     peerDependencies:
-      '@atscript/core': ^0.1.80
+      '@atscript/core': ^0.1.81
       '@atscript/db': workspace:*
     peerDependenciesMeta:
       '@atscript/db':
@@ -1297,11 +1297,11 @@ packages:
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
     deprecated: Potential CWE-502 - Update to 1.3.1 or higher
 
-  '@uniqu/core@0.1.6':
-    resolution: {integrity: sha512-xh73g0IBZnWHIIJ3wKO7DpnSerbYjRTt9TF3QQGWi9rTBxdPxltsiwvS46fMjN3Q29pAXt38mIvHjrw5YBR9zQ==}
+  '@uniqu/core@0.1.7':
+    resolution: {integrity: sha512-FFk0mMg9fJB7hKH6srgT4q0lJZvBGwAnDS0oxpXlnJeEMl3fL2QCFawOnd5dvcCmlDlX0jqIF+h6pSW375ABnQ==}
 
-  '@uniqu/url@0.1.6':
-    resolution: {integrity: sha512-cxQj7ukfM3P2WK55P0cufltdFaVa+NjvirpqwEFwxEB3v0V55y7b7AQEc4V9mCQ+jYTKX+76xI4rS1PZCpF/yQ==}
+  '@uniqu/url@0.1.7':
+    resolution: {integrity: sha512-a+qH+0xzVNVksVb6jORHx0PdNLWLVleXI9o/QRPpriF/uSG9yjKXBkDcNFgX8RJyTca3TCGYfkM+tlQ8gdWdxw==}
 
   '@vitejs/plugin-vue@6.0.5':
     resolution: {integrity: sha512-bL3AxKuQySfk1iGcBsQnoRVexTPJq0Z/ixFVM8OhVJAP6ZXXXLtM7NFKWhLl30Kg7uTBqIaPXbh+nuQCuBDedg==}
@@ -2413,11 +2413,11 @@ packages:
   unist-util-visit@5.1.0:
     resolution: {integrity: sha512-m+vIdyeCOpdr/QeQCu2EzxX/ohgS8KbnPDgFni4dQsfSCtpz8UqDyY5GjRru8PDKuYn7Fq19j1CQ+nJSsGKOzg==}
 
-  unplugin-atscript@0.1.80:
-    resolution: {integrity: sha512-Cu/eDfDhbr1Kwg7NsnRLCNUULc54+qsqAgq1Qv2CDyXBsMdQQKWp//OdOPEJGXXh6p4jQqCRBzhLDPpbf9rUJQ==}
+  unplugin-atscript@0.1.81:
+    resolution: {integrity: sha512-N5zgNn/gONEHnMVQDDnROmRdz7EHA/0Od8PNORWiAlTl6UGFyG/G9nYJ5gundBRSAE/Ee28Ds14jzUPqHca7Vg==}
     peerDependencies:
-      '@atscript/core': ^0.1.80
-      '@atscript/typescript': ^0.1.80
+      '@atscript/core': ^0.1.81
+      '@atscript/typescript': ^0.1.81
 
   unplugin@2.3.11:
     resolution: {integrity: sha512-5uKD0nqiYVzlmCRs01Fhs2BdkEgBS3SAVP6ndrBsuK42iC2+JHyxM05Rm9G8+5mkmRtzMZGY8Ct5+mliZxU/Ww==}
@@ -2548,16 +2548,16 @@ packages:
 
 snapshots:
 
-  '@atscript/core@0.1.80':
+  '@atscript/core@0.1.81':
     dependencies:
       '@prostojs/parser': 0.6.0
       defu: 6.1.7
       glob: 13.0.6
       rolldown: 1.0.0-rc.4
 
-  '@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)':
+  '@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)':
     dependencies:
-      '@atscript/core': 0.1.80
+      '@atscript/core': 0.1.81
       '@moostjs/event-cli': 0.6.29(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(moost@0.6.29)(wooks@0.7.19)
       moost: 0.6.29
     optionalDependencies:
@@ -3190,11 +3190,11 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@uniqu/core@0.1.6': {}
+  '@uniqu/core@0.1.7': {}
 
-  '@uniqu/url@0.1.6':
+  '@uniqu/url@0.1.7':
     dependencies:
-      '@uniqu/core': 0.1.6
+      '@uniqu/core': 0.1.7
 
   '@vitejs/plugin-vue@6.0.5(vite@7.3.1(@types/node@25.5.0)(lightningcss@1.32.0))(vue@3.5.30(typescript@5.9.3))':
     dependencies:
@@ -4298,10 +4298,10 @@ snapshots:
       unist-util-is: 6.0.1
       unist-util-visit-parents: 6.0.2
 
-  unplugin-atscript@0.1.80(@atscript/core@0.1.80)(@atscript/typescript@0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)):
+  unplugin-atscript@0.1.81(@atscript/core@0.1.81)(@atscript/typescript@0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)):
     dependencies:
-      '@atscript/core': 0.1.80
-      '@atscript/typescript': 0.1.80(@atscript/core@0.1.80)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
+      '@atscript/core': 0.1.81
+      '@atscript/typescript': 0.1.81(@atscript/core@0.1.81)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.19)(wooks@0.7.19)
       unplugin: 2.3.11
 
   unplugin@2.3.11:
