@@ -13,7 +13,7 @@ import { MfUser } from "./users.as"
 export const dbTables = [MfEvent, MfUser] as const
 export const dbViews = [MfActiveUser] as const
 /** Every @db.table / @db.view model in this project. */
-export const atscriptModels = [MfEvent, MfActiveUser, MfUser] as const
+export const atscriptModels = [...dbTables, ...dbViews] as const
 /** Models grouped by @db.space (absent annotation → "default"). */
 export const modelsBySpace = {
   "default": [MfActiveUser, MfUser] as const,

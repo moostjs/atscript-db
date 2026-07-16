@@ -31,10 +31,11 @@ import { dbPlugin } from "@atscript/db/plugin";
 
 export default defineConfig({
   rootDir: "src",
-  // manifest (optional): full builds emit src/atscript.models.ts exporting
-  // atscriptModels / dbTables / dbViews / modelsBySpace — feed it to syncSchema
-  // so new models can't be forgotten. See schema-sync.md § Model manifest.
-  plugins: [ts(), dbPlugin({ manifest: "src/atscript.models.ts" })],
+  // manifest (optional): full builds emit src/atscript.models.ts (the path is
+  // rootDir-relative) exporting atscriptModels / dbTables / dbViews /
+  // modelsBySpace — feed it to syncSchema so new models can't be forgotten.
+  // See schema-sync.md § Model manifest.
+  plugins: [ts(), dbPlugin({ manifest: "atscript.models.ts" })],
   format: "dts",
   // Used by `npx asc db sync` CLI — programmatic sync does not read this.
   db: {

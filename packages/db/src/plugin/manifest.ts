@@ -9,7 +9,10 @@ import { DEFAULT_DB_SPACE } from "../shared/consts";
 
 /** Options for the generated model manifest (see {@link dbPlugin}). */
 export interface TDbManifestOptions {
-  /** Output path for the generated module, relative to the project root. */
+  /**
+   * Output path for the generated module, relative to the config's `rootDir`
+   * (with `rootDir: "src"`, `"models.gen.ts"` emits `src/models.gen.ts`).
+   */
   path: string;
 }
 
@@ -112,7 +115,16 @@ export async function generateModelManifest(
     a === DEFAULT_DB_SPACE ? -1 : b === DEFAULT_DB_SPACE ? 1 : a.localeCompare(b),
   );
 
-  const list = (items: string[]) => (items.length ? `[${items.join(", ")}] as const` : "[]");
+  const list = (items: string[]) => `[${items.join(", ")}] as const`;
+
+  // Each alias appears exactly once: in its kind list (dbTables/dbViews).
+  // atscriptModels derives from those, and when every model lives in a single
+  // space the group is a reference too — only genuinely different per-space
+  // subsets are spelled out.
+  const spaceGroups =
+    spaceKeys.length === 1
+      ? [`  ${JSON.stringify(spaceKeys[0])}: atscriptModels,`]
+      : spaceKeys.map((key) => `  ${JSON.stringify(key)}: ${list(spaces.get(key)!)},`);
 
   const content = [
     "/* oxlint-disable */",
@@ -128,10 +140,10 @@ export async function generateModelManifest(
     `export const dbTables = ${list(tables)}`,
     `export const dbViews = ${list(views)}`,
     "/** Every @db.table / @db.view model in this project. */",
-    `export const atscriptModels = ${list(entries.map((e) => e.alias))}`,
+    "export const atscriptModels = [...dbTables, ...dbViews] as const",
     '/** Models grouped by @db.space (absent annotation → "default"). */',
     "export const modelsBySpace = {",
-    ...spaceKeys.map((key) => `  ${JSON.stringify(key)}: ${list(spaces.get(key)!)},`),
+    ...spaceGroups,
     "} as const",
     "",
   ].join("\n");

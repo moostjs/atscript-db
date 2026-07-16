@@ -66,6 +66,7 @@ Rules:
 1. The manifest is an **inventory, not an action** — filter/extend at the call site: `syncSchema(db, [...atscriptModels.filter(m => m !== Legacy), ExternalPkgModel])`. Models from node_modules packages are outside the project build — append them manually.
 2. `modelsBySpace` groups by the `@db.space` annotation (absent → `"default"`) for multi-database apps: `syncSchema(mongo, modelsBySpace.default)` / `syncSchema(pg, modelsBySpace.analytics)`.
 3. Generated file — never hand-edit; regenerate with `npx asc -f dts`. Narrowed builds (e.g. `asc db sync`'s temp compile) never touch it.
+4. The `manifest` path resolves relative to the config's `rootDir`, NOT the package root — with `rootDir: "src"`, use `manifest: "atscript.models.ts"` (a `src/` prefix would emit `src/src/…`).
 
 ## `__atscript_control` (control table)
 

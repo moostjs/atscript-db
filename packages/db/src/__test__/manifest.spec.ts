@@ -81,7 +81,7 @@ describe("generateModelManifest", () => {
     expect(content).toContain('"analytics": [FeedRun]');
   });
 
-  it("splits views out of dbTables", async () => {
+  it("splits views out of dbTables and derives the aggregates without repeating them", async () => {
     const repo = makeRepo("/proj", {
       "file:///proj/a.as": { T: table("t"), V: view("v") },
     });
@@ -90,7 +90,10 @@ describe("generateModelManifest", () => {
     const content = output.at(-1)!.content;
     expect(content).toContain("export const dbTables = [T] as const");
     expect(content).toContain("export const dbViews = [V] as const");
-    expect(content).toContain("export const atscriptModels = [T, V] as const");
+    // Aggregates reference the kind lists — each alias is listed exactly once.
+    expect(content).toContain("export const atscriptModels = [...dbTables, ...dbViews] as const");
+    // Single space → the group is a reference, not a third copy of the list.
+    expect(content).toContain('"default": atscriptModels,');
   });
 
   it("dedupes colliding export names across files with import aliases", async () => {
@@ -104,6 +107,8 @@ describe("generateModelManifest", () => {
     expect(content).toContain('import { User } from "./a.as"');
     expect(content).toContain('import { User as User_1 } from "./b.as"');
     expect(content).toContain("[User, User_1]");
+    // No views → still a (typed) empty tuple, not a bare mutable array.
+    expect(content).toContain("export const dbViews = [] as const");
   });
 
   it("does nothing for non-dts formats (narrowed special-purpose builds)", async () => {
