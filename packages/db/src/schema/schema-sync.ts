@@ -126,7 +126,7 @@ export class SchemaSync {
    * Resolves types into categorized readables and computes the schema hash.
    * Passes each adapter's typeMapper for precise type tracking in snapshots.
    */
-  private async resolveAndHash(types: TAtscriptAnnotatedType[]): Promise<{
+  private async resolveAndHash(types: readonly TAtscriptAnnotatedType[]): Promise<{
     tables: AtscriptDbReadable[];
     views: AtscriptDbReadable[];
     externalViews: AtscriptDbView[];
@@ -316,7 +316,7 @@ export class SchemaSync {
   /**
    * Runs schema synchronization with distributed locking.
    */
-  async run(types: TAtscriptAnnotatedType[], opts?: TSyncOptions): Promise<TSyncResult> {
+  async run(types: readonly TAtscriptAnnotatedType[], opts?: TSyncOptions): Promise<TSyncResult> {
     this.logger = opts?.logger ?? this.logger;
     const podId = opts?.podId ?? crypto.randomUUID();
     const lockTtlMs = opts?.lockTtlMs ?? 30_000;
@@ -527,7 +527,7 @@ export class SchemaSync {
    * Computes a dry-run plan showing what `run()` would do, without executing any DDL.
    */
   async plan(
-    types: TAtscriptAnnotatedType[],
+    types: readonly TAtscriptAnnotatedType[],
     opts?: Pick<TSyncOptions, "force" | "safe">,
   ): Promise<TSyncPlan> {
     const force = opts?.force ?? false;

@@ -28,7 +28,7 @@ import type { TSyncOptions, TSyncPlan, TSyncResult } from "./schema/schema-sync"
  */
 export async function syncSchema(
   space: DbSpace,
-  types: TAtscriptAnnotatedType[],
+  types: readonly TAtscriptAnnotatedType[],
   opts?: TSyncOptions,
 ): Promise<TSyncResult> {
   const sync = new SchemaSync(space);
@@ -58,7 +58,7 @@ export async function syncSchema(
  */
 export async function planSchema(
   space: DbSpace,
-  types: TAtscriptAnnotatedType[],
+  types: readonly TAtscriptAnnotatedType[],
   opts?: Pick<TSyncOptions, "force" | "safe">,
 ): Promise<TSyncPlan> {
   const sync = new SchemaSync(space);
