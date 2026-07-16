@@ -35,7 +35,7 @@ describe("Action discovery — disabled wire emission", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(meta.actions[0].disabled).toBe(disabledWhenNotProcessing.toString());
@@ -64,7 +64,7 @@ describe("Action discovery — disabled wire emission", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0]).not.toHaveProperty("requiredFields");
   });
@@ -81,7 +81,7 @@ describe("Action discovery — disabled wire emission", () => {
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(typeof meta.actions[0].disabled).toBe("string");
@@ -106,7 +106,7 @@ describe("Action discovery — disabled wire emission", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(
@@ -128,7 +128,7 @@ describe("Action discovery — disabled wire emission", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(meta.actions[0]).not.toHaveProperty("requiredFields");
@@ -150,7 +150,7 @@ describe("Action discovery — disabled wire emission", () => {
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(
@@ -178,7 +178,7 @@ describe("Action discovery — disabled wire emission", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].disabled).toBe(captures.toString());
     // server emits the closure as-is — no validation that closure-cleanliness
@@ -215,7 +215,7 @@ describe("Action discovery — body conflict with row decorators", () => {
           },
         ]),
       ]);
-      const ctrl = new C(makeTable() as never, ctx.app);
+      const ctrl = new C(ctx.app, makeTable() as never);
       const meta = await ctrl.meta();
       expect(meta.actions).toEqual([]);
       expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("cannot mix"));

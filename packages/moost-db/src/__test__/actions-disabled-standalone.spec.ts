@@ -129,7 +129,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
         },
       ]),
     ]);
-    const ctrl = new ReadOnly(makeTable() as never, ctx.app);
+    const ctrl = new ReadOnly(ctx.app, makeTable() as never);
     return ctrl.meta().then((meta) => {
       expect(meta.actions).toHaveLength(1);
       expect(meta.actions[0].name).toBe("act");
@@ -161,7 +161,7 @@ describe("Discovery static-table check (non-AsDbController gating)", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("does not extend"));

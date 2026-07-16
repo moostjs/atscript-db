@@ -13,7 +13,7 @@ import { provideTestDbSpace, resetTestDbSpaces } from "../testing";
 /**
  * Coverage for the three `@TableController` binding forms (model token, lazy
  * factory, instance), the ambient space registry, the
- * `super(undefined, app)` constructor fallback, `assertExposed`, and the
+ * `super(app)` constructor fallback, `assertExposed`, and the
  * `@atscript/moost-db/testing` fixture. Uses the same mock-annotated-type +
  * full `app.init()` approach as as-db-http-path.spec.ts.
  */
@@ -147,14 +147,14 @@ describe("token/lazy controller binding", () => {
     }).toThrow(/lazy factory form needs an explicit route prefix/);
   });
 
-  it("super(undefined, app) fallback: resolves via the decorator's class metadata", async () => {
+  it("super(app) fallback: resolves via the decorator's class metadata", async () => {
     const Role = makeModel("Role");
     provideDbSpace(createAdapter());
 
     @TableController(Role as never)
     class RolesController extends AsDbController {
       constructor(app: Moost) {
-        super(undefined, app);
+        super(app);
       }
     }
 

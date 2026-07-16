@@ -47,13 +47,13 @@ export class AsDbReadableController<
   private readonly _adapterNonFilterable: ReadonlySet<string>;
 
   constructor(
+    app: Moost,
     @Inject(READABLE_DEF)
     @Optional()
-    readable: AtscriptDbReadable<T> | undefined,
-    app: Moost,
+    readable?: AtscriptDbReadable<T>,
   ) {
-    // `undefined` readable = a subclass with its own constructor called
-    // `super(undefined, app)` — resolve from the decorator's class metadata
+    // Omitted readable = a subclass with its own constructor called
+    // `super(app)` — resolve from the decorator's class metadata
     // (token / lazy-factory / instance binding). `new.target` is the
     // most-derived class and is legal before super().
     const resolved = readable ?? (resolveBoundReadable(new.target) as AtscriptDbReadable<T>);

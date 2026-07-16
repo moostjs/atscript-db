@@ -84,7 +84,7 @@ describe("AsDbReadableController.hasField — delegates to readable.isValidField
         ["assignee", { direction: "to", isArray: false, targetType: () => null } as any],
       ]),
     });
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
     const result = await controller.query("?$with=assignee($select=name)");
     expect(result).not.toBeInstanceOf(HttpError);
     expect(table.isValidFieldPath).toHaveBeenCalledWith("assignee.name");
@@ -104,7 +104,7 @@ describe("AsDbReadableController.hasField — delegates to readable.isValidField
         ["assignee", { direction: "to", isArray: false, targetType: () => null } as any],
       ]),
     });
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
     const result = await controller.query("?$with=assignee($select=bogus)");
     expect(result).toBeInstanceOf(HttpError);
     expect((result as HttpError).message).toMatch(/assignee\.bogus/);
@@ -115,7 +115,7 @@ describe("AsDbReadableController.hasField — delegates to readable.isValidField
     const table = makeMockTable({
       flatMap: { id: {}, title: {} },
     });
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
     const result = await controller.query("?$select=id,title");
     expect(result).not.toBeInstanceOf(HttpError);
     expect(table.isValidFieldPath).toHaveBeenCalled();

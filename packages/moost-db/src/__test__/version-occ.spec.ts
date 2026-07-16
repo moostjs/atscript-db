@@ -88,7 +88,7 @@ function createMockApp() {
 function createController(tableOverrides: Record<string, any> = {}) {
   const table = createMockTable(tableOverrides);
   const app = createMockApp();
-  const controller = new AsDbController(table, app);
+  const controller = new AsDbController(app, table);
   return { controller, table, app };
 }
 

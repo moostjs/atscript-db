@@ -98,7 +98,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
       }
     }
     const table = makeMockTable();
-    const controller = new GatedController(table, makeMockApp());
+    const controller = new GatedController(makeMockApp(), table);
 
     await controller.query("/query?$groupBy=status");
 
@@ -124,7 +124,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
       }
     }
     const table = makeMockTable();
-    const controller = new DenyGroupByController(table, makeMockApp());
+    const controller = new DenyGroupByController(makeMockApp(), table);
 
     const result = await controller.query("/query?$groupBy=status");
 
@@ -157,7 +157,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
       flatMap,
       fieldDescriptors,
     });
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
 
     // Filter on `region` (no @db.column.filterable) must be rejected.
     const result = await controller.query("/query?region=west&$groupBy=status");
@@ -187,7 +187,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
       flatMap,
       fieldDescriptors,
     });
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
 
     const result = await controller.query("/query?status=active&$groupBy=region");
     expect(result).not.toBeInstanceOf(HttpError);
@@ -196,7 +196,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
 
   it("validateInsights still rejects unknown insight fields on aggregate path", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
 
     // `sum(unknown_field):total` captures `unknown_field` in insights —
     // `validateInsights` (called from `validateParsed`) must reject because
@@ -213,7 +213,7 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
     // Without the strip, `validateControls` (DTO) would reject `$groupBy`
     // as an unknown $-property and the aggregate path would never run.
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeMockApp());
+    const controller = new AsDbController(makeMockApp(), table);
 
     const result = await controller.query("/query?$groupBy=status");
     expect(result).not.toBeInstanceOf(HttpError);

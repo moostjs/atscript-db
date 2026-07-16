@@ -52,7 +52,7 @@ Rules:
 
 1. Token/factory forms kill module-eval-order coupling: import controllers anywhere, connect the DB, `provideDbSpace(db)`, then `await app.init()`.
 2. Multi-space: `provideDbSpace(analyticsDb, "analytics")` + `@db.space "analytics"` on the model (or `@TableController(Model, { space: "analytics" })` to override).
-3. Subclass with its own constructor (extra DI services): call `super(undefined, moost)` — the base resolves the readable from the decorator's class metadata. No module-scope `getTable` needed:
+3. Subclass with its own constructor (extra DI services): call `super(moost)` — the base ctor is `(app, readable?)`; omit the readable and the base resolves it from the decorator's class metadata. No module-scope `getTable` needed:
 
 ```ts
 @TableController(Job)
@@ -61,7 +61,7 @@ export class JobsController extends AsDbController<typeof Job> {
     moost: Moost,
     private readonly registry: JobRegistry,
   ) {
-    super(undefined, moost);
+    super(moost);
   }
 }
 ```

@@ -99,24 +99,24 @@ describe("AsDbReadableController — /meta serialization shape", () => {
   // ── refDepth is statically 0.5 — not derived from @db.depth.limit ─────
 
   it("ships refDepth = 0.5 for @db.depth.limit 0", () => {
-    const c = new ExposedController(makeReadable(RootZero), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootZero));
     expect(c.expose().refDepth).toBe(0.5);
   });
 
   it("ships refDepth = 0.5 even when @db.depth.limit 2 (annotation does not raise ref expansion)", () => {
-    const c = new ExposedController(makeReadable(RootTwo), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootTwo));
     expect(c.expose().refDepth).toBe(0.5);
   });
 
   it("ships refDepth = 0.5 when no annotation is present", () => {
-    const c = new ExposedController(makeReadable(RootNone), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootNone));
     expect(c.expose().refDepth).toBe(0.5);
   });
 
   // ── Wire-shape: every FK ref is shallow regardless of annotation ──────
 
   it("@db.depth.limit 0 → FK ref.type is the shallow { id, metadata } shape", () => {
-    const c = new ExposedController(makeReadable(RootZero), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootZero));
     const ref = findFkRef(c.serialize(), "leafId");
     expect(ref).toBeDefined();
     expect(ref.type.props).toBeUndefined();
@@ -126,7 +126,7 @@ describe("AsDbReadableController — /meta serialization shape", () => {
   });
 
   it("no annotation → FK ref.type is the shallow shape", () => {
-    const c = new ExposedController(makeReadable(RootNone), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootNone));
     const ref = findFkRef(c.serialize(), "leafId");
     expect(ref).toBeDefined();
     expect(ref.type.props).toBeUndefined();
@@ -135,7 +135,7 @@ describe("AsDbReadableController — /meta serialization shape", () => {
   });
 
   it("@db.depth.limit 2 → FK ref.type is STILL the shallow shape (annotation does not trigger expansion)", () => {
-    const c = new ExposedController(makeReadable(RootTwo), makeApp());
+    const c = new ExposedController(makeApp(), makeReadable(RootTwo));
     const midRef = findFkRef(c.serialize(), "midId");
     expect(midRef).toBeDefined();
     // With refDepth: 0.5 the first FK hop is already shallow — the annotation

@@ -18,7 +18,7 @@ describe("Action level inference from ID-decorator usage", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].level).toBe("row");
   });
@@ -37,7 +37,7 @@ describe("Action level inference from ID-decorator usage", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].level).toBe("rows");
   });
@@ -56,7 +56,7 @@ describe("Action level inference from ID-decorator usage", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].level).toBe("table");
   });
@@ -75,7 +75,7 @@ describe("Action level inference from ID-decorator usage", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("[moost-db actions]"));

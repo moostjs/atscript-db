@@ -10,7 +10,7 @@ import { makeApp, makeTable } from "./actions-test-utils";
  */
 
 function build(fieldDescriptors: Array<{ path: string; designType: string }>): AsDbController {
-  return new AsDbController(makeTable({ fieldDescriptors }) as never, makeApp().app);
+  return new AsDbController(makeApp().app, makeTable({ fieldDescriptors }) as never);
 }
 
 describe("AsDbReadableController — /meta.fields filtering of nested-object parents", () => {

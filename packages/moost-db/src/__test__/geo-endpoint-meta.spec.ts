@@ -94,7 +94,7 @@ function makeApp() {
 describe("GET /meta — encrypted + geo flags", () => {
   it("reports encrypted: true with filterable/sortable vetoed", async () => {
     const table = makeMockTable({ encryptedFields: ["secret"], geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const meta = await controller.meta();
     expect(meta.fields.secret).toMatchObject({
       encrypted: true,
@@ -106,7 +106,7 @@ describe("GET /meta — encrypted + geo flags", () => {
 
   it("reports geo: true on geo-indexed fields and sortable: false", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const meta = await controller.meta();
     expect(meta.fields.geo).toMatchObject({ geo: true, sortable: false });
     expect(meta.fields.status!.geo).toBeUndefined();
@@ -114,19 +114,19 @@ describe("GET /meta — encrypted + geo flags", () => {
 
   it("reports geoSearchable + advertises the geo CRUD op when supported", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const meta = await new AsDbController(table, makeApp()).meta();
+    const meta = await new AsDbController(makeApp(), table).meta();
     expect(meta.geoSearchable).toBe(true);
     expect(meta.crud.geo).toContain("center");
   });
 
   it("geoSearchable is false without a geo index or without adapter support", async () => {
-    const noIndex = await new AsDbController(makeMockTable({ geoIndexed: [] }), makeApp()).meta();
+    const noIndex = await new AsDbController(makeApp(), makeMockTable({ geoIndexed: [] })).meta();
     expect(noIndex.geoSearchable).toBe(false);
     expect(noIndex.crud.geo).toBeUndefined();
 
     const noAdapter = await new AsDbController(
-      makeMockTable({ geoSearchable: false, geoIndexed: ["geo"] }),
       makeApp(),
+      makeMockTable({ geoSearchable: false, geoIndexed: ["geo"] }),
     ).meta();
     expect(noAdapter.geoSearchable).toBe(false);
   });
@@ -135,7 +135,7 @@ describe("GET /meta — encrypted + geo flags", () => {
 describe("GET /geo — endpoint behavior", () => {
   it("requires $center", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const result = await controller.geo("/geo?status=ACTIVE");
     expect(result).toBeInstanceOf(HttpError);
     expect((result as HttpError).message).toContain("$center");
@@ -144,14 +144,14 @@ describe("GET /geo — endpoint behavior", () => {
 
   it("rejects malformed $maxDistance", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const result = await controller.geo("/geo?$center=1,2&$maxDistance=abc");
     expect(result).toBeInstanceOf(HttpError);
   });
 
   it("parses $center/$maxDistance and returns distance-carrying rows", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const rows = (await controller.geo(
       "/geo?$center=-122.42,37.77&$maxDistance=50000&status=ACTIVE",
     )) as any[];
@@ -166,7 +166,7 @@ describe("GET /geo — endpoint behavior", () => {
 
   it("targets a named geo index via $index", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     await controller.geo("/geo?$center=1,2&$index=second");
     const call = table.geoSearch.mock.calls[0]!;
     expect(call[0]).toBe("second");
@@ -175,7 +175,7 @@ describe("GET /geo — endpoint behavior", () => {
 
   it("returns the pages envelope when $page/$size are present", async () => {
     const table = makeMockTable({ geoIndexed: ["geo"] });
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
     const result = (await controller.geo("/geo?$center=1,2&$page=2&$size=5")) as any;
     expect(result).toMatchObject({ page: 2, itemsPerPage: 5, count: 11, pages: 3 });
     expect(result.data[0].$distance).toBe(42);

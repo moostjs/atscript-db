@@ -51,12 +51,12 @@ export class AsDbController<
   }
 
   constructor(
+    app: Moost,
     @Inject(TABLE_DEF)
     @Optional()
-    table: AtscriptDbTable<T> | undefined,
-    app: Moost,
+    table?: AtscriptDbTable<T>,
   ) {
-    super(table, app);
+    super(app, table);
   }
 
   protected override buildCrud(): TCrudPermissions {

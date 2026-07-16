@@ -20,7 +20,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(
@@ -42,7 +42,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalled();
@@ -69,7 +69,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     const defaults = meta.actions.filter((a) => a.default).map((a) => a.name);
     expect(defaults).toEqual(["edit1"]);
@@ -92,7 +92,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("requires a label"));
@@ -113,7 +113,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       expect.objectContaining({ name: "block", label: "Block User", level: "row" }),
@@ -135,7 +135,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].label).toBe("Block User");
   });
@@ -154,7 +154,7 @@ describe("Action discovery — warning + drop scenarios", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("cannot mix"));

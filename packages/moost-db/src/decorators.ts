@@ -54,7 +54,7 @@ function normalizeOptions(
  * Builds the shared binding metadata for a decorator invocation: classifies
  * the binding form, computes the static route prefix, and packages a uniform
  * `resolve()` used by both the DI provide factory and the base controller's
- * `super(undefined, app)` fallback.
+ * `super(app)` fallback.
  */
 function buildBinding(
   binding: TReadableBinding<AtscriptDbReadable<any>>,
@@ -225,7 +225,7 @@ export function findReadableBinding(ctor: Function | undefined): TReadableBindin
  *
  * Used by {@link AsDbReadableController}'s constructor when `readable` is
  * `undefined` — i.e. a subclass with its own constructor called
- * `super(undefined, app)` instead of forwarding an injected instance.
+ * `super(app)` instead of forwarding an injected instance.
  */
 export function resolveBoundReadable(ctor: Function | undefined): AtscriptDbReadable<any> {
   const binding = findReadableBinding(ctor);

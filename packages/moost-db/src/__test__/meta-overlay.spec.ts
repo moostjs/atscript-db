@@ -5,7 +5,7 @@ import { AsDbController } from "../as-db.controller";
 import { makeApp, makeTable } from "./actions-test-utils";
 
 function instantiate(Ctor: typeof AsDbController): AsDbController {
-  return new Ctor(makeTable() as never, makeApp().app);
+  return new Ctor(makeApp().app, makeTable() as never);
 }
 
 describe("AsReadableController — applyMetaOverlay", () => {

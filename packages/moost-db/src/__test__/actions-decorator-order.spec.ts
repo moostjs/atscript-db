@@ -102,8 +102,8 @@ describe("@DbAction + @DbActionDefault — decorator order independence", () => 
         },
       ]),
     ]);
-    const a = await new A(makeTable() as never, ctxA.app).meta();
-    const b = await new B(makeTable() as never, ctxB.app).meta();
+    const a = await new A(ctxA.app, makeTable() as never).meta();
+    const b = await new B(ctxB.app, makeTable() as never).meta();
     expect(a.actions[0].default).toBe(true);
     expect(b.actions[0].default).toBe(true);
   });
@@ -125,7 +125,7 @@ describe("@DbActionDefault without @DbAction — drops with warning", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(

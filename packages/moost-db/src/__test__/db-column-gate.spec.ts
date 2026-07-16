@@ -82,7 +82,7 @@ function makeApp() {
 }
 
 function makeController(table: any) {
-  return new AsDbController(table, makeApp());
+  return new AsDbController(makeApp(), table);
 }
 
 describe("AsDbController — @db.column.filterable / @db.column.sortable gate", () => {

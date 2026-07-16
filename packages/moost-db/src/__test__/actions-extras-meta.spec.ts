@@ -38,7 +38,7 @@ describe("Action discovery — shortcut / tuple promptText / 'warning' intent", 
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(meta.actions[0].intent).toBe("warning");
@@ -61,7 +61,7 @@ describe("Action discovery — shortcut / tuple promptText / 'warning' intent", 
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].promptText).not.toBe(promptTuple);
     expect(meta.actions[0].promptText).toEqual(promptTuple);
@@ -81,7 +81,7 @@ describe("Action discovery — shortcut / tuple promptText / 'warning' intent", 
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].promptText).toBe("Delete this row?");
   });
@@ -99,7 +99,7 @@ describe("Action discovery — shortcut / tuple promptText / 'warning' intent", 
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toHaveLength(1);
     expect(meta.actions[0].intent).toBe("warning");
@@ -121,7 +121,7 @@ describe("Action discovery — shortcut / tuple promptText / 'warning' intent", 
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0]).not.toHaveProperty("shortcut");
     expect(meta.actions[0]).not.toHaveProperty("promptText");

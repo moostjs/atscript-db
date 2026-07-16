@@ -73,7 +73,7 @@ function selectOf(table: any): unknown {
 describe("AsDbController — @db.amount.currency.ref auto-widens $select", () => {
   it("adds the currency field when $select includes the amount (array form)", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     await controller.query("?$select=amount");
 
@@ -84,7 +84,7 @@ describe("AsDbController — @db.amount.currency.ref auto-widens $select", () =>
 
   it("adds the currency field when $select includes the amount (object form)", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     // URL parser emits $select as comma-separated array form, so simulate
     // object form by constructing a query that targets the readable
@@ -100,7 +100,7 @@ describe("AsDbController — @db.amount.currency.ref auto-widens $select", () =>
 
   it("does not duplicate the currency field when already requested", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     await controller.query("?$select=amount,currency");
 
@@ -111,7 +111,7 @@ describe("AsDbController — @db.amount.currency.ref auto-widens $select", () =>
 
   it("does not include the currency field when amount is not selected", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     await controller.query("?$select=name");
 
@@ -122,7 +122,7 @@ describe("AsDbController — @db.amount.currency.ref auto-widens $select", () =>
 
   it("is a no-op when $select is omitted (full row already includes currency)", async () => {
     const table = makeMockTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     await controller.query("");
 
@@ -174,7 +174,7 @@ describe("AsDbController — @db.unit.ref auto-widens $select via the shared pat
 
   it("adds the unit field when $select includes the weight", async () => {
     const table = makeUnitTable();
-    const controller = new AsDbController(table, makeApp());
+    const controller = new AsDbController(makeApp(), table);
 
     await controller.query("?$select=weight");
 

@@ -20,7 +20,7 @@ describe("Action discovery timing (lazy on first /meta)", () => {
         },
       ]),
     ]);
-    new C(makeTable() as never, ctx.app);
+    new C(ctx.app, makeTable() as never);
     // Discovery is the only thing that emits the [moost-db actions] warning prefix,
     // so its absence at construction proves discovery hasn't run yet.
     const warned = ctx.logger.warn.mock.calls.some((args: unknown[]) =>
@@ -43,7 +43,7 @@ describe("Action discovery timing (lazy on first /meta)", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     expect(ctx.logger.warn).not.toHaveBeenCalled();
     await ctrl.meta();
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("[moost-db actions]"));
@@ -89,7 +89,7 @@ describe("Action discovery timing (lazy on first /meta)", () => {
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     // Replace getControllersOverview with a counter AFTER construction, so we
     // measure only the discovery-pass calls (construction also touches it for
     // db.http.path resolution).

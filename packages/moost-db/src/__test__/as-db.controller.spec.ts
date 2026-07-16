@@ -115,7 +115,7 @@ function createController(tableOverrides: Record<string, any> = {}) {
   const table = createMockTable(tableOverrides);
   const app = createMockApp();
   // Construct directly — @Inject is a no-op at runtime without Moost DI
-  const controller = new AsDbController(table, app);
+  const controller = new AsDbController(app, table);
   return { controller, table, app };
 }
 
@@ -137,7 +137,7 @@ describe("AsDbController", () => {
     it("should set up logger with table name", () => {
       const app = createMockApp();
       const t = createMockTable();
-      new AsDbController(t, app);
+      new AsDbController(app, t);
       expect(app.getLogger).toHaveBeenCalledWith("db [test_table]");
     });
   });
@@ -159,7 +159,7 @@ describe("AsDbController", () => {
         setControllerContext({} as Record<string, unknown>, "method", "", {
           prefix: "api/db/tables/test",
         });
-        new AsDbController(t, app);
+        new AsDbController(app, t);
       });
       expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/test");
     });
@@ -174,7 +174,7 @@ describe("AsDbController", () => {
       app.getControllersOverview = vi
         .fn()
         .mockReturnValue([{ type: TestController, computedPrefix: "api/db/tables/from-overview" }]);
-      new TestController(t, app);
+      new TestController(app, t);
       expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/from-overview");
     });
 
@@ -187,7 +187,7 @@ describe("AsDbController", () => {
       app.getControllersOverview = vi
         .fn()
         .mockReturnValue([{ type: TestController, computedPrefix: "/api/already/slashed" }]);
-      new TestController(t, app);
+      new TestController(app, t);
       expect(t.type.metadata.get("db.http.path")).toBe("/api/already/slashed");
     });
 
@@ -196,7 +196,7 @@ describe("AsDbController", () => {
       // overview available must not throw and must not write bogus metadata.
       const app = createMockApp();
       const t = createMockTable();
-      new AsDbController(t, app);
+      new AsDbController(app, t);
       expect(t.type.metadata.get("db.http.path")).toBeUndefined();
     });
   });
@@ -443,7 +443,7 @@ describe("AsDbController", () => {
         }
       }
       const ctx = createController({ preferredId: ["slug"] });
-      const vectorController = new VectorController(ctx.table as any, (ctx as any).app);
+      const vectorController = new VectorController((ctx as any).app, ctx.table as any);
       vi.spyOn(vectorController as any, "transformProjection").mockReturnValue(["name"]);
       await vectorController.pages("/pages?$search=hello&$vector=embedding");
       const call = ctx.table.vectorSearchWithCount.mock.calls[0][2];
@@ -882,7 +882,7 @@ describe("AsDbController", () => {
         }
       }
       const ctx = createController();
-      const asyncController = new AsyncMetaController(ctx.table as any, (ctx as any).app);
+      const asyncController = new AsyncMetaController((ctx as any).app, ctx.table as any);
       const result = await asyncController.meta();
       expect(result.searchable).toBe(true);
     });

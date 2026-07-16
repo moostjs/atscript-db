@@ -90,7 +90,7 @@ describe("$actions — presence/absence and ordering", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query")) as Record<string, unknown>[];
     expect(result[0]).not.toHaveProperty("$actions");
@@ -113,7 +113,7 @@ describe("$actions — presence/absence and ordering", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query?$actions=true")) as Record<string, unknown>[];
     expect(result).toHaveLength(2);
@@ -130,7 +130,7 @@ describe("$actions — presence/absence and ordering", () => {
       c: { label: "C", processor: "backend", value: "/c" },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query?$actions=true")) as Record<string, unknown>[];
     expect(result[0].$actions).toEqual(["a", "b", "c"]);
@@ -167,7 +167,7 @@ describe("$actions — short-circuits", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = await ctrl.query("/query?$count=true&$actions=true");
     expect(result).toBe(42);
@@ -187,7 +187,7 @@ describe("$actions — short-circuits", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query?$groupBy=name&$actions=true")) as Record<
       string,
@@ -226,7 +226,7 @@ describe("$actions — applyMetaOverlay filtering", () => {
         return { ...meta, actions: meta.actions.filter((a) => a.name !== "delete") };
       }
     }
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query?$actions=true")) as Record<string, unknown>[];
     expect(result[0].$actions).toEqual(["approve"]);
@@ -247,7 +247,7 @@ describe("$actions on /pages and /one", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.pages("/pages?$actions=true&$page=1&$size=10")) as {
       data: Record<string, unknown>[];
@@ -274,7 +274,7 @@ describe("$actions on /pages and /one", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.getOne("1", "/one/1?$actions=true")) as Record<string, unknown>;
     expect(result.id).toBe("1");
@@ -297,7 +297,7 @@ describe("$actions — controller pre-widening (single read)", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.query("/query?$actions=true&$select=id&$select=name")) as Record<
       string,
@@ -326,7 +326,7 @@ describe("$actions — controller pre-widening (single read)", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     // Caller projection already includes `state` — the controller's
     // _widenSelectForActions takes the early-bail path and passes the
@@ -359,7 +359,7 @@ describe("$actions — controller pre-widening (single read)", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     const result = (await ctrl.getOne("1", "/one/1?$actions=true&$select=id")) as Record<
       string,
@@ -389,7 +389,7 @@ describe("$actions — overlay no-op short-circuit", () => {
       },
     })
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
     const metaSpy = vi.spyOn(ctrl, "meta");
 
     await ctrl.query("/query?$actions=true");
@@ -412,7 +412,7 @@ describe("$actions — overlay no-op short-circuit", () => {
         return overlay(meta);
       }
     }
-    const ctrl = new Ctrl(table as never, makeApp() as never);
+    const ctrl = new Ctrl(makeApp() as never, table as never);
 
     await ctrl.query("/query?$actions=true");
     expect(overlay).toHaveBeenCalled();

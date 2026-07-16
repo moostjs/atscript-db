@@ -143,7 +143,7 @@ describe("AsDbReadableController — row-level read isolation on /one (transform
         return { $and: [filter, { owner: "alice" }] };
       }
     }
-    const ctrl = new GatedCtrl(table as never, makeApp() as never);
+    const ctrl = new GatedCtrl(makeApp() as never, table as never);
     const result = (await ctrl.query("/query?")) as Row[];
     expect(result).toEqual([rowAlice]);
   });
@@ -155,7 +155,7 @@ describe("AsDbReadableController — row-level read isolation on /one (transform
         return { $and: [filter, { owner: "alice" }] };
       }
     }
-    const ctrl = new GatedCtrl(table as never, makeApp() as never);
+    const ctrl = new GatedCtrl(makeApp() as never, table as never);
 
     const bob = await ctrl.getOne(rowBob.id, `/one/${rowBob.id}?`);
     expect(bob).toBeInstanceOf(HttpError);
@@ -189,7 +189,7 @@ describe("AsDbReadableController — row-level read isolation on /one (transform
         return { $and: [filter, { owner: "alice" }] };
       }
     }
-    const ctrl = new GatedCtrl(table as never, makeApp() as never);
+    const ctrl = new GatedCtrl(makeApp() as never, table as never);
 
     const bob = await ctrl.getOneComposite({ owner: "bob" }, "/one?owner=bob");
     expect(bob).toBeInstanceOf(HttpError);
@@ -215,7 +215,7 @@ describe("AsDbReadableController — row-level read isolation on /one (transform
         return transformOneSpy(filter);
       }
     }
-    const ctrl = new CustomCtrl(table as never, makeApp() as never);
+    const ctrl = new CustomCtrl(makeApp() as never, table as never);
 
     // /query uses transformFilter (alice-only).
     const queryResult = (await ctrl.query("/query?")) as Row[];
@@ -248,7 +248,7 @@ describe("AsDbReadableController — row-level read isolation on /one (transform
         return transformFilterSpy(filter);
       }
     }
-    const ctrl = new GatedCtrl(table as never, makeApp() as never);
+    const ctrl = new GatedCtrl(makeApp() as never, table as never);
 
     transformFilterSpy.mockClear();
     await ctrl.getOne(rowAlice.id, `/one/${rowAlice.id}?`);

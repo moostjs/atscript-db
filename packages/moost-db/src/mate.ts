@@ -13,7 +13,7 @@ import type {
  * Class-level readable-binding descriptor written by `@TableController` /
  * `@ReadableController` / `@ViewController`. One uniform `resolve()` backs
  * both the DI provide factory and the base controller's
- * `super(undefined, app)` fallback; `model` additionally feeds
+ * `super(app)` fallback; `model` additionally feeds
  * `assertExposed()`.
  */
 export interface TReadableBindingMeta {

@@ -13,7 +13,7 @@ describe("AsDbController — actions in /meta", () => {
   it("emits actions: [] when no actions are declared", async () => {
     class NoActionsCtrl extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new NoActionsCtrl(makeTable() as never, ctx.app);
+    const ctrl = new NoActionsCtrl(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
   });
@@ -32,7 +32,7 @@ describe("AsDbController — actions in /meta", () => {
         },
       ]),
     ]);
-    const ctrl = new BackendCtrl(makeTable() as never, ctx.app);
+    const ctrl = new BackendCtrl(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {
@@ -53,7 +53,7 @@ describe("AsDbController — actions in /meta", () => {
 
   it("emits a navigate action passing the dict-supplied URL through unchanged", async () => {
     const ctx = makeApp();
-    const ctrl = new NavigateCtrl(makeTable() as never, ctx.app);
+    const ctrl = new NavigateCtrl(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {
@@ -73,7 +73,7 @@ describe("AsDbController — actions in /meta", () => {
 
   it("emits a custom action with value === <action key>", async () => {
     const ctx = makeApp();
-    const ctrl = new CustomCtrl(makeTable() as never, ctx.app);
+    const ctrl = new CustomCtrl(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {

@@ -16,7 +16,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {
@@ -35,7 +35,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {
@@ -55,7 +55,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     class C extends AsDbController {}
     const ctx = makeApp();
     // Empty overview: meta builder must NOT validate that the path is bound.
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([
       {
@@ -76,7 +76,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     // One warning per dropped entry.
@@ -89,7 +89,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('processor "backend"'));
@@ -105,7 +105,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(
@@ -119,7 +119,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions).toEqual([]);
     expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining("requires a level"));
@@ -131,7 +131,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
     })
     class C extends AsDbController {}
     const ctx = makeApp();
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(meta.actions[0].level).toBe("rows");
   });
@@ -153,7 +153,7 @@ describe("Class-level action decorators — @DbActions / @DbTableActions / @DbRo
         },
       ]),
     ]);
-    const ctrl = new C(makeTable() as never, ctx.app);
+    const ctrl = new C(ctx.app, makeTable() as never);
     const meta = await ctrl.meta();
     const names = meta.actions.map((a) => a.name).toSorted();
     expect(names).toEqual(["approve", "block"]);

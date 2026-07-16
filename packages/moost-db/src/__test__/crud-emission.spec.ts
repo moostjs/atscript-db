@@ -18,7 +18,7 @@ const valueHelpType = () =>
 describe("/meta crud — per-base-class emission", () => {
   it("AsDbReadableController emits exactly { query, pages, one }", async () => {
     class Ctrl extends AsDbReadableController {}
-    const ctrl = new Ctrl(makeTable() as never, makeApp().app);
+    const ctrl = new Ctrl(makeApp().app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(Object.keys(meta.crud).toSorted()).toEqual(["one", "pages", "query"]);
     expect(meta.crud.query).toEqual([...QUERY_CONTROLS]);
@@ -28,7 +28,7 @@ describe("/meta crud — per-base-class emission", () => {
 
   it("AsDbController emits all seven keys with write keys as []", async () => {
     class Ctrl extends AsDbController {}
-    const ctrl = new Ctrl(makeTable() as never, makeApp().app);
+    const ctrl = new Ctrl(makeApp().app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(Object.keys(meta.crud).toSorted()).toEqual([
       "insert",
