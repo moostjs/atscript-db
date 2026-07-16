@@ -112,7 +112,7 @@ await todos.deleteOne(1);
 // Core
 import { DbSpace, AtscriptDbTable, AtscriptDbView, BaseDbAdapter, DbError } from "@atscript/db";
 import { syncSchema, planSchema, SchemaSync, readStoredSnapshot } from "@atscript/db/sync";
-import { dbPlugin } from "@atscript/db/plugin"; // dbPlugin({ manifest: "src/atscript.models.ts" })
+import { dbPlugin } from "@atscript/db/plugin"; // dbPlugin({ manifest: "atscript.models.ts" }) — path is rootDir-relative
 import { $inc, $dec, $mul, $replace, $insert, $upsert, $update, $remove } from "@atscript/db/ops";
 // Optimistic concurrency — see references/versioning.md
 import { withOptimisticRetry, CasExhaustedError } from "@atscript/db";

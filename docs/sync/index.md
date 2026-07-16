@@ -145,5 +145,6 @@ Both `up-to-date` and `synced-by-peer` are success statuses that indicate no wor
 - [CLI](./cli) — command-line usage and flags
 - [What Gets Synced](./what-gets-synced) — detailed change categories, renames, and structural changes
 - [Configuration](./configuration) — config file setup
+- [Model Manifest](./model-manifest) — generated model inventory so the sync list can't go stale
 - [Programmatic API](./programmatic) — using sync from code
 - [CI/CD Integration](./ci-cd) — deployment strategies

@@ -54,7 +54,7 @@ No DDL executes; per-entry `destructive` / `hasChanges` / `hasErrors` flags supp
 
 ## Model manifest (never forget a model in the sync list)
 
-`dbPlugin({ manifest: "src/atscript.models.ts" })` in `atscript.config` makes full builds (`asc -f dts`) emit a generated inventory of every exported `@db.table` / `@db.view` model:
+`dbPlugin({ manifest: "atscript.models.ts" })` in `atscript.config` (path rootDir-relative — rule 4) makes full builds (`asc -f dts`) emit a generated inventory of every exported `@db.table` / `@db.view` model:
 
 ```ts
 import { atscriptModels, dbTables, dbViews, modelsBySpace } from "./atscript.models";

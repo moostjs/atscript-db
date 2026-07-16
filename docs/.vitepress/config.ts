@@ -256,6 +256,7 @@ const syncSidebar = [
       { text: "CLI", link: "/sync/cli" },
       { text: "Configuration", link: "/sync/configuration" },
       { text: "What Gets Synced", link: "/sync/what-gets-synced" },
+      { text: "Model Manifest", link: "/sync/model-manifest" },
       { text: "Programmatic API", link: "/sync/programmatic" },
       { text: "CI/CD Integration", link: "/sync/ci-cd" },
     ],
