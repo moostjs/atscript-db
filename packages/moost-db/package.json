@@ -32,6 +32,11 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     },
+    "./testing": {
+      "types": "./dist/testing.d.mts",
+      "import": "./dist/testing.mjs",
+      "require": "./dist/testing.cjs"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {

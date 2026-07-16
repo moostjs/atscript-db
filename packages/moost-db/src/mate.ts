@@ -1,3 +1,4 @@
+import type { AtscriptDbReadable } from "@atscript/db";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { type Mate, type TMateParamMeta, type TMoostMetadata, getMoostMate } from "moost";
 
@@ -7,6 +8,24 @@ import type {
   TDbActionParamKind,
   TDbClassActionMeta,
 } from "./actions/keys";
+
+/**
+ * Class-level readable-binding descriptor written by `@TableController` /
+ * `@ReadableController` / `@ViewController`. One uniform `resolve()` backs
+ * both the DI provide factory and the base controller's
+ * `super(undefined, app)` fallback; `model` additionally feeds
+ * `assertExposed()`.
+ */
+export interface TReadableBindingMeta {
+  /**
+   * The bound model token. Present for the token form (the token itself) and
+   * the instance form (`readable.type`); unknown for lazy factories until
+   * resolved.
+   */
+  model?: TAtscriptAnnotatedType;
+  /** Resolves the readable — lazily for token/factory, identity for instance. */
+  resolve: () => AtscriptDbReadable<any>;
+}
 
 /**
  * Class- and method-level metadata written by `@atscript/moost-db`'s
@@ -30,6 +49,8 @@ export interface AtscriptDbMeta {
   atscript_db_action_row?: true;
   /** Param-level marker — written by `@DbActionRows()`. */
   atscript_db_action_rows?: true;
+  /** Class-level — written by `@TableController` / `@ReadableController` / `@ViewController`. */
+  atscript_db_readable_binding?: TReadableBindingMeta;
 }
 
 /**

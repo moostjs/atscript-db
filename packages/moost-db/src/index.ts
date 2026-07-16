@@ -4,12 +4,15 @@ export * from "./as-db.controller";
 export * from "./as-value-help.controller";
 export * from "./as-json-value-help.controller";
 export * from "./decorators";
+export * from "./db-space-registry";
+export * from "./assert-exposed";
 export * from "./validation-interceptor";
 export * from "./actions";
 export {
   type AtscriptDbMate,
   type AtscriptDbMeta,
   type AtscriptDbParamsMeta,
+  type TReadableBindingMeta,
   getAtscriptDbMate,
 } from "./mate";
 

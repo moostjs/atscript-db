@@ -170,6 +170,29 @@ export const dbTableAnnotations: TAnnotationsTree = {
     },
   }),
 
+  space: new AnnotationSpec({
+    description:
+      "Binds the entity to a named database space (a `DbSpace` — one per " +
+      "physical database) for apps running more than one database at once " +
+      "(e.g. MongoDB + PostgreSQL). Absent means the default space." +
+      "\n\n" +
+      "Consumed by the generated model manifest (grouping in `modelsBySpace`) " +
+      "and by `@TableController(Model)` token binding, which resolves the " +
+      "space registered under this name via `provideDbSpace(space, name)`." +
+      "\n\n**Example:**\n" +
+      "```atscript\n" +
+      '@db.table "feed_runs"\n' +
+      '@db.space "analytics"\n' +
+      "export interface FeedRun { ... }\n" +
+      "```\n",
+    nodeType: ["interface"],
+    argument: {
+      name: "name",
+      type: "string",
+      description: 'Space name (matches `provideDbSpace(space, name)`). Default: "default".',
+    },
+  }),
+
   http: {
     path: new AnnotationSpec({
       description:

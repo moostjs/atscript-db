@@ -50,16 +50,25 @@ describe("TableController — accepts tables with non-empty NavType", () => {
   it("compiles when given a typed table with nav props (BUG-2 regression)", () => {
     // The whole point is that this signature accepts the narrower table type.
     // No runtime call is made; the assertion is the call-signature compatibility.
-    expectTypeOf(TableController<TableWithNavProps>)
-      .parameter(0)
-      .toMatchTypeOf<TableWithNavProps>();
+    // (Parameter 0 is now the binding union — instance | lazy factory | model
+    // token — so the assertion checks the instance is assignable INTO it.)
+    expectTypeOf<TableWithNavProps>().toMatchTypeOf<
+      Parameters<typeof TableController<TableWithNavProps>>[0]
+    >();
+    // The lazy-factory form must accept the same narrow instance type.
+    expectTypeOf<() => TableWithNavProps>().toMatchTypeOf<
+      Parameters<typeof TableController<TableWithNavProps>>[0]
+    >();
   });
 });
 
 describe("ReadableController — accepts readables with non-empty NavType", () => {
   it("compiles when given a typed readable with nav props (BUG-2 regression)", () => {
-    expectTypeOf(ReadableController<ReadableWithNavProps>)
-      .parameter(0)
-      .toMatchTypeOf<ReadableWithNavProps>();
+    expectTypeOf<ReadableWithNavProps>().toMatchTypeOf<
+      Parameters<typeof ReadableController<ReadableWithNavProps>>[0]
+    >();
+    expectTypeOf<() => ReadableWithNavProps>().toMatchTypeOf<
+      Parameters<typeof ReadableController<ReadableWithNavProps>>[0]
+    >();
   });
 });

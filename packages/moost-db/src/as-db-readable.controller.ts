@@ -8,13 +8,13 @@ import type {
   Uniquery,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
-import { Inherit, Inject, Moost, Param } from "moost";
+import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions } from "./actions/list-augmenter";
 import { AsReadableController, type ReadableGates } from "./as-readable.controller";
-import { READABLE_DEF } from "./decorators";
+import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { findFilterOffender } from "./gate-utils";
 import {
   GEO_CONTROLS,
@@ -48,14 +48,20 @@ export class AsDbReadableController<
 
   constructor(
     @Inject(READABLE_DEF)
-    readable: AtscriptDbReadable<T>,
+    @Optional()
+    readable: AtscriptDbReadable<T> | undefined,
     app: Moost,
   ) {
-    super(readable.type as T, readable.tableName, app, readable.isView ? "view" : "table");
-    this.readable = readable;
+    // `undefined` readable = a subclass with its own constructor called
+    // `super(undefined, app)` — resolve from the decorator's class metadata
+    // (token / lazy-factory / instance binding). `new.target` is the
+    // most-derived class and is legal before super().
+    const resolved = readable ?? (resolveBoundReadable(new.target) as AtscriptDbReadable<T>);
+    super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
+    this.readable = resolved;
     this._adapterNonFilterable = this._collectAdapterNonFilterable();
     this._gates = this._buildGates();
-    this._preferredIdSet = new Set(readable.preferredId ?? []);
+    this._preferredIdSet = new Set(resolved.preferredId ?? []);
     this._quantityRefByPath = this._collectQuantityRefs();
     const defaultOverlay = (
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }

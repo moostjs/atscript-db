@@ -2,7 +2,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import type { DbSpace } from "./table/db-space";
 import { SchemaSync } from "./schema/schema-sync";
-import type { TSyncOptions, TSyncResult } from "./schema/schema-sync";
+import type { TSyncOptions, TSyncPlan, TSyncResult } from "./schema/schema-sync";
 
 /**
  * Synchronizes database schema with distributed locking.
@@ -33,6 +33,36 @@ export async function syncSchema(
 ): Promise<TSyncResult> {
   const sync = new SchemaSync(space);
   return sync.run(types, opts);
+}
+
+/**
+ * Computes a dry-run plan showing what {@link syncSchema} would do, without
+ * executing any DDL. Wraps {@link SchemaSync.plan}.
+ *
+ * The plan carries structured per-entry diffs (columns to add/rename/drop,
+ * type/nullable/default changes, FK changes) plus a human-readable renderer:
+ *
+ * ```typescript
+ * import { planSchema } from '@atscript/db/sync'
+ *
+ * const plan = await planSchema(db, [UsersType, PostsType])
+ * if (plan.status === 'changes-needed') {
+ *   for (const entry of plan.entries) {
+ *     console.log(entry.print('plan').join('\n'))
+ *   }
+ * }
+ * ```
+ *
+ * Note: reading the stored baseline still requires a live DB connection (the
+ * snapshot lives in the `__atscript_control` table).
+ */
+export async function planSchema(
+  space: DbSpace,
+  types: TAtscriptAnnotatedType[],
+  opts?: Pick<TSyncOptions, "force" | "safe">,
+): Promise<TSyncPlan> {
+  const sync = new SchemaSync(space);
+  return sync.plan(types, opts);
 }
 
 export { SchemaSync, SyncEntry, readStoredSnapshot } from "./schema/schema-sync";

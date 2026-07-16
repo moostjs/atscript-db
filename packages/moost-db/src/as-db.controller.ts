@@ -1,7 +1,7 @@
 import type { TAtscriptAnnotatedType, TAtscriptDataType } from "@atscript/typescript/utils";
 import type { AtscriptDbTable, TCrudPermissions, TDbUpdateResult } from "@atscript/db";
 import { Body, Delete, HttpError, Patch, Post, Put, Query } from "@moostjs/event-http";
-import { Inherit, Inject, Moost, Param } from "moost";
+import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
 import { TABLE_DEF } from "./decorators";
@@ -52,7 +52,8 @@ export class AsDbController<
 
   constructor(
     @Inject(TABLE_DEF)
-    table: AtscriptDbTable<T>,
+    @Optional()
+    table: AtscriptDbTable<T> | undefined,
     app: Moost,
   ) {
     super(table, app);

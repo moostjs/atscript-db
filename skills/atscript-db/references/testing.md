@@ -100,6 +100,17 @@ In SQLite with `:memory:`, closing the driver and creating a new space is the fa
 
 ## Driving `moost-db` controllers from a test harness
 
+Token-bound controllers (`@TableController(User)`) need only a registered space — one call, no DB connection, no import-order dance:
+
+```ts
+import { provideTestDbSpace, resetTestDbSpaces } from "@atscript/moost-db/testing";
+
+beforeAll(() => provideTestDbSpace([User, Post])); // in-memory DbSpace + ambient registration
+afterAll(() => resetTestDbSpaces());
+```
+
+`provideTestDbSpace(models?, { name?, space? })` returns the `DbSpace` for direct seeding/assertions; pass `space` to register your own (e.g. SQLite `:memory:`) instead of the memory adapter, `name` for non-default spaces.
+
 `MoostHttp.listen()` returns `Promise<void>`, not a server handle. Two clean in-process options:
 
 ### Option A — in-process via `http.request()` (no TCP socket)
@@ -108,11 +119,13 @@ In SQLite with `:memory:`, closing the driver and creating a new space is the fa
 import { Moost } from "moost";
 import { MoostHttp } from "@moostjs/event-http";
 import { AsDbController, TableController } from "@atscript/moost-db";
+import { provideTestDbSpace } from "@atscript/moost-db/testing";
 
-@TableController(usersTable)
+@TableController(User) // token form — resolves from the test space at init()
 class UsersController extends AsDbController<typeof User> {}
 
 async function makeHarness() {
+  provideTestDbSpace([User]);
   const app = new Moost();
   const http = new MoostHttp();
   app.adapter(http);

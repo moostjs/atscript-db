@@ -64,6 +64,16 @@ export interface TSyncOptions {
    * not thrown). Default: NoopLogger — pass `console` to surface them.
    */
   logger?: TGenericLogger;
+  /**
+   * What to do when the run finishes with errored entries (failed index/FK
+   * DDL, external-view checks, …):
+   * - `"warn"` (default) — emit a one-line summary plus per-entry error lines
+   *   via the configured logger, **falling back to `console` when no logger
+   *   is set** (errors are never silently swallowed by the NoopLogger default);
+   * - `"throw"` — same reporting, then throw after snapshots/locks are handled;
+   * - `"silent"` — legacy behavior: outcome is only observable on the result.
+   */
+  onError?: "throw" | "warn" | "silent";
 }
 
 export interface TSyncResult {
@@ -468,10 +478,48 @@ export class SchemaSync {
         await this.store.writeHash(hash);
       }
 
-      return { status: "synced", schemaHash: hash, entries };
+      const result: TSyncResult = { status: "synced", schemaHash: hash, entries };
+      this.reportOutcome(result, opts?.onError ?? "warn");
+      return result;
     } finally {
       heartbeat.stop();
       await this.store.releaseLock(podId);
+    }
+  }
+
+  /**
+   * Surfaces the run outcome per the `onError` policy. Reporting must never be
+   * silently lost to the NoopLogger default — when no real logger is
+   * configured, warnings/errors go to `console` (a production consumer lost
+   * months of failed-index errors to the silent default).
+   */
+  private reportOutcome(result: TSyncResult, onError: "throw" | "warn" | "silent"): void {
+    if (onError === "silent" || result.entries.length === 0) {
+      return;
+    }
+    const out: TGenericLogger = this.logger === NoopLogger ? console : this.logger;
+
+    const counts = new Map<string, number>();
+    for (const entry of result.entries) {
+      counts.set(entry.status, (counts.get(entry.status) ?? 0) + 1);
+    }
+    const summary = [...counts.entries()].map(([status, n]) => `${n} ${status}`).join(", ");
+    out.log(`[schema-sync] ${result.status}: ${summary}`);
+
+    const errored = result.entries.filter((e) => e.hasErrors);
+    if (errored.length === 0) {
+      return;
+    }
+    const lines = errored.map(
+      (e) => `[schema-sync] "${e.name}" failed: ${e.errors.join("; ") || e.status}`,
+    );
+    for (const line of lines) {
+      out.error(line);
+    }
+    if (onError === "throw") {
+      throw new Error(
+        `[schema-sync] ${errored.length} entr${errored.length === 1 ? "y" : "ies"} failed:\n${lines.join("\n")}`,
+      );
     }
   }
 

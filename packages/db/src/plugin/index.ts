@@ -1,4 +1,5 @@
 import type { TAtscriptPlugin } from "@atscript/core";
+import { generateModelManifest, type TDbManifestOptions } from "./manifest";
 import { dbAggAnnotations } from "./annotations/agg";
 import { dbAmountAnnotations } from "./annotations/amount";
 import { dbColumnAnnotations } from "./annotations/column";
@@ -9,8 +10,28 @@ import { dbTableAnnotations } from "./annotations/table";
 import { dbUnitAnnotations } from "./annotations/unit";
 import { dbViewAnnotations } from "./annotations/view";
 
-export const dbPlugin: () => TAtscriptPlugin = () => ({
+/** Options for {@link dbPlugin}. */
+export interface TDbPluginOptions {
+  /**
+   * When set, full builds (`asc -f dts`) additionally emit a generated model
+   * manifest module at this path (relative to the project root): an inventory
+   * of every exported `@db.table` / `@db.view` entity —
+   * `dbTables` / `dbViews` / `atscriptModels` / `modelsBySpace` (grouped by
+   * `@db.space`). Feed it to `syncSchema(db, atscriptModels)` so newly added
+   * models can't be silently forgotten.
+   */
+  manifest?: string | TDbManifestOptions;
+}
+
+export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (options) => ({
   name: "db",
+
+  async buildEnd(output, format, repo) {
+    if (!options?.manifest) return;
+    const manifestOptions =
+      typeof options.manifest === "string" ? { path: options.manifest } : options.manifest;
+    await generateModelManifest(manifestOptions, output, format, repo);
+  },
 
   config() {
     return {
@@ -19,6 +40,7 @@ export const dbPlugin: () => TAtscriptPlugin = () => ({
           patch: dbColumnAnnotations.patch,
           table: dbTableAnnotations.table,
           schema: dbTableAnnotations.schema,
+          space: dbTableAnnotations.space,
           index: dbIndexAnnotations.index,
           column: dbColumnAnnotations.column,
           default: dbColumnAnnotations.default,

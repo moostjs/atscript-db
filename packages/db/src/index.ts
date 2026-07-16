@@ -1,4 +1,5 @@
 export { AtscriptDbReadable, resolveDesignType } from "./table/db-readable";
+export { DEFAULT_DB_SPACE } from "./shared/consts";
 export { TableMetadata } from "./table/table-metadata";
 export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-mapping";
 export { RelationalFieldMapper } from "./strategies/relational-field-mapper";

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 import { DbSpace, BaseDbAdapter, AtscriptDbTable, NoopLogger } from "../index";
-import { SchemaSync, syncSchema, SyncEntry } from "../sync";
+import { planSchema, SchemaSync, syncSchema, SyncEntry } from "../sync";
 import type {
   TDbInsertResult,
   TDbInsertManyResult,
@@ -624,6 +624,20 @@ describe("SchemaSync.run — views", () => {
 });
 
 // ── plan() ───────────────────────────────────────────────────────────────
+
+describe("planSchema (public wrapper)", () => {
+  it("returns the same dry-run plan as SchemaSync.plan without executing DDL", async () => {
+    const space = createSpace();
+
+    const plan = await planSchema(space, [UsersTable]);
+
+    expect(plan.status).toBe("changes-needed");
+    const usersEntry = plan.entries.find((e) => e.name === "users");
+    expect(usersEntry?.status).toBe("create");
+    // Dry-run: nothing but the control table exists.
+    expect(sharedTables.has("users")).toBe(false);
+  });
+});
 
 describe("SchemaSync.plan", () => {
   it("should return up-to-date when hash matches", async () => {

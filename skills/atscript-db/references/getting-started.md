@@ -31,7 +31,10 @@ import { dbPlugin } from "@atscript/db/plugin";
 
 export default defineConfig({
   rootDir: "src",
-  plugins: [ts(), dbPlugin()],
+  // manifest (optional): full builds emit src/atscript.models.ts exporting
+  // atscriptModels / dbTables / dbViews / modelsBySpace — feed it to syncSchema
+  // so new models can't be forgotten. See schema-sync.md § Model manifest.
+  plugins: [ts(), dbPlugin({ manifest: "src/atscript.models.ts" })],
   format: "dts",
   // Used by `npx asc db sync` CLI — programmatic sync does not read this.
   db: {
@@ -100,7 +103,7 @@ import { syncSchema } from "@atscript/db/sync";
 await syncSchema(db, [Todo]); // idempotent, lock-coordinated
 ```
 
-Or from the CLI: `npx asc db sync`.
+Or from the CLI: `npx asc db sync`. With the manifest configured (see above), pass `atscriptModels` instead of a hand-maintained array — [schema-sync.md § Model manifest](schema-sync.md#model-manifest-never-forget-a-model-in-the-sync-list). Sync failures report loudly by default (`onError: "warn"`).
 
 ## First CRUD call
 

@@ -27,11 +27,45 @@ interface TSyncOptions {
   pollIntervalMs?: number; // default: 500
   force?: boolean; // default: false — when true, runs the full per-table diff regardless of the schema-hash match
   safe?: boolean; // default: false — skip destructive ops (DROP COLUMN, DROP TABLE)
-  logger?: TGenericLogger; // default: NoopLogger — index/FK DDL failures are logged, not thrown
+  logger?: TGenericLogger; // default: NoopLogger for progress logs (see onError for failures)
+  onError?: "throw" | "warn" | "silent"; // default: "warn"
 }
 ```
 
-Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deployments. ALWAYS pass `logger` (e.g. `console`) or inspect `result.entries` for `status: 'error'` in production — with the default `NoopLogger`, a failing `CREATE UNIQUE INDEX` is silent except for the entry status.
+Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deployments.
+
+`onError` policy — runs with errored entries (failed index/FK DDL, external-view checks) are never silent by default:
+
+- `"warn"` (default) — one-line summary + per-entry error lines via `logger`, **falling back to `console`** when no logger is set. A failing `CREATE UNIQUE INDEX` surfaces even with the `NoopLogger` default.
+- `"throw"` — same reporting, then throws (after snapshots/lock handling, so retries stay correct).
+- `"silent"` — legacy: inspect `result.entries` for `status: 'error'` yourself.
+
+## Dry-run plan (`planSchema`)
+
+```ts
+import { planSchema } from "@atscript/db/sync";
+const plan = await planSchema(db, atscriptModels, { safe: true });
+// plan.status: 'up-to-date' | 'changes-needed'
+// plan.entries: structured diffs (columnsToAdd/rename/drop, type/nullable/default/FK changes)
+for (const e of plan.entries) console.log(e.print("plan").join("\n")); // "+ table — create", "~ col: t1 → t2", …
+```
+
+No DDL executes; per-entry `destructive` / `hasChanges` / `hasErrors` flags support CI gating. Reading the stored baseline still needs a live DB connection (`__atscript_control`). Same engine as `asc db sync --dry-run`.
+
+## Model manifest (never forget a model in the sync list)
+
+`dbPlugin({ manifest: "src/atscript.models.ts" })` in `atscript.config` makes full builds (`asc -f dts`) emit a generated inventory of every exported `@db.table` / `@db.view` model:
+
+```ts
+import { atscriptModels, dbTables, dbViews, modelsBySpace } from "./atscript.models";
+await syncSchema(db, atscriptModels); // instead of a hand-maintained import array
+```
+
+Rules:
+
+1. The manifest is an **inventory, not an action** — filter/extend at the call site: `syncSchema(db, [...atscriptModels.filter(m => m !== Legacy), ExternalPkgModel])`. Models from node_modules packages are outside the project build — append them manually.
+2. `modelsBySpace` groups by the `@db.space` annotation (absent → `"default"`) for multi-database apps: `syncSchema(mongo, modelsBySpace.default)` / `syncSchema(pg, modelsBySpace.analytics)`.
+3. Generated file — never hand-edit; regenerate with `npx asc -f dts`. Narrowed builds (e.g. `asc db sync`'s temp compile) never touch it.
 
 ## `__atscript_control` (control table)
 

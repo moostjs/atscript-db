@@ -12,36 +12,93 @@ pnpm add @atscript/moost-db @moostjs/event-http moost
 
 ## Write controller (full CRUD)
 
+Preferred: bind by **model token** — no DbSpace needed at import time.
+
 ```ts
 import { AsDbController, TableController } from "@atscript/moost-db";
 import { Todo } from "./todo.as";
-import { todosTable } from "./db";
 
-@TableController(todosTable) // Provide + Controller + Inherit
+@TableController(Todo) // Provide + Controller + Inherit; resolves at app.init()
 export class TodoController extends AsDbController<typeof Todo> {}
 ```
 
-Register:
+Register (the space BEFORE `app.init()`):
 
 ```ts
 import { Moost } from "moost";
 import { MoostHttp } from "@moostjs/event-http";
+import { provideDbSpace } from "@atscript/moost-db";
+import { db } from "./db";
 
 const app = new Moost();
 app.adapter(new MoostHttp()).listen(3000);
+provideDbSpace(db); // ambient registry — token bindings resolve against it
 app.registerControllers(["todos", TodoController]); // URL prefix segment
 await app.init();
 ```
+
+## Binding forms
+
+`TableController` / `ReadableController` / `ViewController` all accept three
+binding forms (second arg: prefix string or `{ prefix?, space? }`):
+
+| Form                                                  | Resolves           | Use when                                                                       |
+| ----------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------ |
+| `@TableController(Model)`                             | lazily at `init()` | Default. Space from `@db.space` annotation → `{ space }` option → `"default"`. |
+| `@TableController(() => db.getTable(Model), "todos")` | lazily at `init()` | Table needs custom construction. Explicit prefix REQUIRED (throws otherwise).  |
+| `@TableController(todosTable)`                        | eagerly at import  | Legacy — DbSpace must exist when the controller module loads.                  |
+
+Rules:
+
+1. Token/factory forms kill module-eval-order coupling: import controllers anywhere, connect the DB, `provideDbSpace(db)`, then `await app.init()`.
+2. Multi-space: `provideDbSpace(analyticsDb, "analytics")` + `@db.space "analytics"` on the model (or `@TableController(Model, { space: "analytics" })` to override).
+3. Subclass with its own constructor (extra DI services): call `super(undefined, moost)` — the base resolves the readable from the decorator's class metadata. No module-scope `getTable` needed:
+
+```ts
+@TableController(Job)
+export class JobsController extends AsDbController<typeof Job> {
+  constructor(
+    moost: Moost,
+    private readonly registry: JobRegistry,
+  ) {
+    super(undefined, moost);
+  }
+}
+```
+
+4. Missing space at init → descriptive throw naming `provideDbSpace`. `clearDbSpaces()` resets the registry (tests).
+5. Mount prefixes: the tuple form `registerControllers(["api/todos", Ctrl])` REPLACES the model-derived prefix — pass the full path. To mount many controllers under a base path while keeping derived prefixes, use `registerControllers({ prefix: "api", controllers: [CtrlA, CtrlB] })` (prepends by default; moost ≥ 0.6.32) or Moost's `globalPrefix` option.
 
 ## Read-only controller (views, public read endpoints)
 
 ```ts
 import { AsDbReadableController, ReadableController } from "@atscript/moost-db";
-import { activeTasksView } from "./db";
+import { ActiveTasks } from "./active-tasks.as";
 
-@ReadableController(activeTasksView)
+@ReadableController(ActiveTasks) // token form; instance + factory forms work too
 export class ActiveTasksController extends AsDbReadableController<typeof ActiveTasks> {}
 ```
+
+## Exposure assertion (dev)
+
+After `init()`, warn for models annotated `@db.http.path` with no bound controller:
+
+```ts
+import { assertExposed } from "@atscript/moost-db";
+const missing = assertExposed(app, atscriptModels); // returns the unexposed models
+```
+
+Detects token + instance bindings; lazy-factory bindings can't name their model and are skipped.
+
+## Testing fixture
+
+```ts
+import { provideTestDbSpace, resetTestDbSpaces } from "@atscript/moost-db/testing";
+beforeAll(() => provideTestDbSpace([User, Post])); // in-memory space, registered for token binding
+afterAll(() => resetTestDbSpaces());
+```
+
+No DB connection or import-order dance — see [testing.md](testing.md).
 
 ## Generated routes
 

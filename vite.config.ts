@@ -5,7 +5,7 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   fmt: {
-    ignorePatterns: ["**/*.as.d.ts", "**/atscript.d.ts"],
+    ignorePatterns: ["**/*.as.d.ts", "**/atscript.d.ts", "**/*.gen.ts"],
   },
   lint: {
     ignorePatterns: ["**/*.as", "docs/**"],
