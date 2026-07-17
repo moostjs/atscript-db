@@ -215,6 +215,62 @@ describe("assertExposed", () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0][0])).toContain("Unbound");
   });
+
+  it("all: true audits every model, honoring exclude (prefix-bound repos)", async () => {
+    const Bound = makeModel("Bound");
+    const Orphan = makeModel("Orphan");
+    const Internal = makeModel("Internal");
+    provideDbSpace(createAdapter());
+
+    @TableController(Bound as never)
+    class BoundController extends AsDbController {}
+
+    const app = new Moost();
+    app.registerControllers(BoundController);
+    await app.init();
+
+    const warn = vi.fn();
+    const missing = assertExposed(app, [Bound, Orphan, Internal] as never[], {
+      all: true,
+      exclude: [Internal] as never[],
+      logger: { warn },
+    });
+
+    expect(missing).toEqual([Orphan]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain("Orphan");
+    expect(String(warn.mock.calls[0][0])).toContain("exclude");
+  });
+});
+
+describe("AsDbReadableController.table (writable accessor)", () => {
+  beforeEach(() => {
+    getMoostInfact()._cleanup();
+    resetTestDbSpaces();
+  });
+
+  it("returns the bound readable when it is a real table", () => {
+    const Role = makeModel("Role");
+    const space = provideTestDbSpace([Role] as never[]);
+    const table = space.getTable(Role as never);
+
+    class Exposing extends AsDbReadableController {
+      get writable() {
+        return this.table;
+      }
+    }
+    const ctrl = new Exposing(new Moost(), table as never);
+    expect(ctrl.writable).toBe(table);
+  });
+
+  it("throws a clear error for non-table readables (views)", () => {
+    const ctrl = Object.create(AsDbReadableController.prototype) as {
+      readable: unknown;
+      table: unknown;
+    };
+    ctrl.readable = { isView: true, tableName: "active_tasks" };
+    expect(() => ctrl.table).toThrow(/bound to a view.*active_tasks.*table-bound/);
+  });
 });
 
 describe("@atscript/moost-db/testing", () => {

@@ -33,17 +33,22 @@ export const dbPlugin = createDbValidatorPlugin();
  * @param type - The annotated type to validate against.
  * @param mode - The write operation mode.
  * @param extraPlugins - Additional adapter-specific plugins (prepended before the db plugin).
+ * @param opts - `unknownProps` overrides the validator's unknown-property policy
+ *   (used by db-client's `lenientWrites`, where the served type may be a
+ *   projection of the full server-side type).
  */
 export function buildDbValidator(
   type: TAtscriptAnnotatedType,
   mode: ValidatorMode,
   extraPlugins?: TValidatorPlugin[],
+  opts?: { unknownProps?: "strip" | "ignore" | "error" },
 ): Validator<any> {
   const plugins = extraPlugins ? [...extraPlugins, dbPlugin] : [dbPlugin];
   return type.validator({
     plugins,
     partial: mode === "patch",
     replace: forceNavNonOptional,
+    ...(opts?.unknownProps ? { unknownProps: opts.unknownProps } : {}),
   });
 }
 

@@ -188,6 +188,32 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
     sortable: columnCapability("sortable", "sorting"),
 
+    searchable: new AnnotationSpec({
+      description:
+        "Includes this column in the generic `$search` fallback: when the adapter reports no " +
+        "native search capability (no FTS / Atlas index configured), the readable controller " +
+        "matches the `$search` term as a case-insensitive substring across all " +
+        "`@db.column.searchable` fields (`$or`). Where adapter-native search IS available it " +
+        "wins and this annotation is not consulted. The term is escaped literally — no " +
+        "user-supplied regex. String-typed columns only.\n\n" +
+        "**Example:**\n" +
+        "```atscript\n" +
+        '@db.table "jobs"\n' +
+        "export interface Job {\n" +
+        "  @db.column.searchable\n" +
+        "  jobName: string\n" +
+        "  @db.column.searchable\n" +
+        "  description: string\n" +
+        "}\n" +
+        "```\n",
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      multiple: false,
+      validate(token, _args, doc) {
+        return validateFieldBaseType(token, doc, "@db.column.searchable", ["string"]);
+      },
+    }),
+
     version: new AnnotationSpec({
       description:
         "Marks a numeric column as the row's version for optimistic concurrency control (OCC). " +
@@ -420,6 +446,39 @@ export const dbColumnAnnotations: TAnnotationsTree = {
             range: token.range,
           });
         }
+      }
+      return errors;
+    },
+  }),
+
+  writeOnly: new AnnotationSpec({
+    description:
+      "Marks a field as write-only over HTTP: it may be set through insert/update/replace " +
+      "payloads but NEVER appears in read responses — the readable controller excludes it " +
+      "from every projection, rejects filtering/sorting/grouping on it, and `/meta` serves " +
+      "its TYPE (flagged `writeOnly`) so client preflight validation and generated forms " +
+      "still know its shape. The classic case is a sealed secret (pair with `@db.encrypted`): " +
+      "writable via generic forms, unreadable by anyone.\n\n" +
+      "Server-side code reading through `AtscriptDbTable` still sees the value — the seal is " +
+      "an HTTP-layer contract, not a storage one.\n\n" +
+      "**Example:**\n" +
+      "```atscript\n" +
+      "@db.writeOnly\n" +
+      "@db.encrypted\n" +
+      "credentials?: string\n" +
+      "```\n",
+    nodeType: ["prop"],
+    passedWhenReferred: false,
+    multiple: false,
+    validate(token, _args, _doc) {
+      const errors = [] as TMessages;
+      const field = token.parentNode!;
+      if (field.countAnnotations("meta.id") > 0) {
+        errors.push({
+          message: `@db.writeOnly cannot coexist with @meta.id — the primary key must be readable`,
+          severity: 1,
+          range: token.range,
+        });
       }
       return errors;
     },

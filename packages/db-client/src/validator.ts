@@ -15,6 +15,20 @@ import type { MetaResponse } from "./types";
 
 export type { DbValidationContext, ValidatorMode } from "@atscript/db/validator";
 
+/** Options for {@link ClientValidator} / {@link createClientValidator}. */
+export interface ClientValidatorOptions {
+  /**
+   * Tolerate unknown properties in write payloads. Enable when the served
+   * `/meta` type is a PROJECTION of the full server-side type (e.g. an ARBAC
+   * read overlay that strips write-only fields such as sealed credentials) —
+   * otherwise a legitimate write carrying such a field is rejected client-side
+   * while the server would accept it. The server stays authoritative; this
+   * only relaxes the client preflight, so leave it off unless you need it
+   * (strict preflight catches typos).
+   */
+  lenientWrites?: boolean;
+}
+
 /**
  * Client-side validator backed by an Atscript type from the `/meta` endpoint.
  *
@@ -23,6 +37,7 @@ export type { DbValidationContext, ValidatorMode } from "@atscript/db/validator"
 export class ClientValidator {
   private _type: TAtscriptAnnotatedType<TAtscriptTypeObject>;
   private _validators = new Map<string, Validator<any>>();
+  private _lenientWrites: boolean;
 
   /** Flat map of dotted field paths to their annotated types. */
   readonly flatMap: Map<string, TAtscriptAnnotatedType>;
@@ -30,8 +45,9 @@ export class ClientValidator {
   /** Set of field paths that are navigation relations (TO/FROM/VIA). */
   readonly navFields: ReadonlySet<string>;
 
-  constructor(type: TAtscriptAnnotatedType<TAtscriptTypeObject>) {
+  constructor(type: TAtscriptAnnotatedType<TAtscriptTypeObject>, opts?: ClientValidatorOptions) {
     this._type = type;
+    this._lenientWrites = opts?.lenientWrites === true;
     const ctx = buildValidationContext(type);
     this.flatMap = ctx.flatMap;
     this.navFields = ctx.navFields;
@@ -61,7 +77,12 @@ export class ClientValidator {
   private _getValidator(mode: ValidatorMode): Validator<any> {
     let v = this._validators.get(mode);
     if (!v) {
-      v = buildDbValidator(this._type, mode);
+      v = buildDbValidator(
+        this._type,
+        mode,
+        undefined,
+        this._lenientWrites ? { unknownProps: "ignore" } : undefined,
+      );
       this._validators.set(mode, v);
     }
     return v;
@@ -94,7 +115,10 @@ export class ClientValidationError extends Error {
  * validator.validate({ name: 'foo' }, 'insert')
  * ```
  */
-export function createClientValidator(meta: MetaResponse): ClientValidator {
+export function createClientValidator(
+  meta: MetaResponse,
+  opts?: ClientValidatorOptions,
+): ClientValidator {
   const type = deserializeAnnotatedType(meta.type) as TAtscriptAnnotatedType<TAtscriptTypeObject>;
-  return new ClientValidator(type);
+  return new ClientValidator(type, opts);
 }

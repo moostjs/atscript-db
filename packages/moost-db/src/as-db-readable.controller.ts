@@ -7,6 +7,7 @@ import type {
   UniqueryControls,
   Uniquery,
 } from "@atscript/db";
+import type { AtscriptDbTable } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
@@ -38,6 +39,31 @@ export class AsDbReadableController<
   /** Reference to the underlying readable (table or view). */
   protected readable: AtscriptDbReadable<T>;
 
+  /**
+   * The bound readable as a writable table. The canonical readable-controller
+   * posture is "generic reads + named `@DbAction` mutations" — action handlers
+   * write through this instead of re-importing the DbSpace module for a
+   * module-scope `getTable`. Throws when the controller is bound to a view
+   * (or any non-table readable).
+   */
+  protected get table(): AtscriptDbTable<T> {
+    // `readable` may be undefined here: moost's bind-time method scan probes
+    // prototype accessors with the prototype as `this`. Only a REAL non-table
+    // readable is a caller error. Duck-typed (write methods present) rather
+    // than instanceof — consistent with the partial-mock tolerance elsewhere.
+    const readable = this.readable as AtscriptDbReadable<T> | undefined;
+    if (
+      readable &&
+      (readable.isView || typeof (readable as { insertOne?: unknown }).insertOne !== "function")
+    ) {
+      throw new Error(
+        `${this.constructor.name} is bound to a ${readable.isView ? "view" : "non-table readable"} ` +
+          `("${readable.tableName}") — .table is only available for table-bound controllers.`,
+      );
+    }
+    return readable as AtscriptDbTable<T>;
+  }
+
   private readonly _gates: ReadableGates;
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
@@ -45,6 +71,10 @@ export class AsDbReadableController<
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
   /** Paths the adapter vetoes for filtering (e.g. JSON storage on SQL). Symmetric with `/meta` `filterable: false`. */
   private readonly _adapterNonFilterable: ReadonlySet<string>;
+  /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
+  private readonly _searchFallbackFields: readonly string[];
+  /** `@db.writeOnly` paths — settable in writes, sealed out of every read surface. */
+  private readonly _writeOnlySet: ReadonlySet<string>;
 
   constructor(
     app: Moost,
@@ -60,6 +90,8 @@ export class AsDbReadableController<
     super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
     this.readable = resolved;
     this._adapterNonFilterable = this._collectAdapterNonFilterable();
+    this._writeOnlySet = this._collectAnnotated("db.writeOnly");
+    this._searchFallbackFields = this._collectSearchFallbackFields();
     this._gates = this._buildGates();
     this._preferredIdSet = new Set(resolved.preferredId ?? []);
     this._quantityRefByPath = this._collectQuantityRefs();
@@ -105,13 +137,30 @@ export class AsDbReadableController<
       const allowed = this._collectAnnotated("db.column.sortable");
       gates.sort = { predicate: (f) => allowed.has(f), annotation: "@db.column.sortable" };
     }
+    // @db.writeOnly fields are unconditionally unfilterable/unsortable —
+    // an equality probe or sort order would leak the sealed value.
+    const writeOnly = this._writeOnlySet;
+    if (writeOnly.size > 0) {
+      const prevFilter = gates.filter;
+      gates.filter = {
+        predicate: (f) => !writeOnly.has(f) && (prevFilter ? prevFilter.predicate(f) : true),
+        annotation: prevFilter?.annotation ?? "@db.column.filterable (field is @db.writeOnly)",
+      };
+      const prevSort = gates.sort;
+      gates.sort = {
+        predicate: (f) => !writeOnly.has(f) && (prevSort ? prevSort.predicate(f) : true),
+        annotation: prevSort?.annotation ?? "@db.column.sortable (field is @db.writeOnly)",
+      };
+    }
     return gates;
   }
 
   private _collectAnnotated(annotation: string): Set<string> {
     const out = new Set<string>();
+    // Guarded for the partial-mock readables in *.spec.ts.
+    if (!this.readable.flatMap) return out;
     for (const [path, entry] of this.readable.flatMap) {
-      if (entry.metadata.has(annotation)) out.add(path);
+      if (entry?.metadata?.has?.(annotation)) out.add(path);
     }
     return out;
   }
@@ -463,6 +512,100 @@ export class AsDbReadableController<
     return { envelopes, resolvedProjection, widenedSelect };
   }
 
+  /** `@db.column.searchable` paths, minus anything the adapter can't filter (JSON storage, encrypted). */
+  private _collectSearchFallbackFields(): string[] {
+    const out: string[] = [];
+    // Guarded for the partial-mock readables in *.spec.ts.
+    if (!this.readable.fieldDescriptors) return out;
+    for (const fd of this.readable.fieldDescriptors) {
+      if (fd.ignored) continue;
+      if (!fd.type?.metadata?.has?.("db.column.searchable")) continue;
+      if (this._adapterNonFilterable.has(fd.path)) continue;
+      if (this._writeOnlySet.has(fd.path)) continue;
+      out.push(fd.path);
+    }
+    return out;
+  }
+
+  /**
+   * Removes `@db.writeOnly` fields from any `$select` shape — and forces an
+   * exclusion when no projection was requested — so sealed values never leave
+   * the database on a read. Runs AFTER `transformProjection` so permission
+   * overlays compose (they see the wire `$select`; this guarantees the seal on
+   * whatever they return).
+   */
+  private _sealProjection(
+    select: UniqueryControls["$select"] | undefined,
+  ): UniqueryControls["$select"] | undefined {
+    const writeOnly = this._writeOnlySet;
+    if (writeOnly.size === 0) return select;
+    const exclusion = (): UniqueryControls["$select"] => {
+      const out: Record<string, 0> = {};
+      for (const f of writeOnly) out[f] = 0;
+      return out as UniqueryControls["$select"];
+    };
+    if (select === undefined) return exclusion();
+    if (Array.isArray(select)) {
+      const kept = (select as unknown[]).filter((item) =>
+        typeof item === "string"
+          ? !writeOnly.has(item)
+          : !writeOnly.has((item as { $field?: string }).$field ?? ""),
+      );
+      // Everything requested was sealed — an empty inclusion means "all
+      // fields", so fall back to the exclusion form instead.
+      return kept.length > 0 ? (kept as UniqueryControls["$select"]) : exclusion();
+    }
+    const entries = Object.entries(select as Record<string, 0 | 1>);
+    if (entries.length > 0 && (entries[0][1] === 1 || (entries[0][1] as unknown) === true)) {
+      const out: Record<string, 0 | 1> = {};
+      for (const [k, v] of entries) if (!writeOnly.has(k)) out[k] = v;
+      return Object.keys(out).length > 0 ? (out as UniqueryControls["$select"]) : exclusion();
+    }
+    const out: Record<string, 0 | 1> = { ...(select as Record<string, 0 | 1>) };
+    for (const f of writeOnly) out[f] = 0;
+    return out as UniqueryControls["$select"];
+  }
+
+  /** First `@db.writeOnly` field referenced by `$groupBy` / aggregate `$select`, or undefined. */
+  private _findWriteOnlyInAggregate(
+    groupBy: readonly string[],
+    select: unknown,
+  ): string | undefined {
+    if (this._writeOnlySet.size === 0) return undefined;
+    for (const f of groupBy) {
+      if (this._writeOnlySet.has(f)) return f;
+    }
+    if (Array.isArray(select)) {
+      for (const item of select as unknown[]) {
+        const field = typeof item === "string" ? item : (item as { $field?: string }).$field;
+        if (field && this._writeOnlySet.has(field)) return field;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Merges the `$search` fallback into the filter: a case-insensitive literal
+   * substring match OR'd across the `@db.column.searchable` fields, `$and`-combined
+   * with the existing filter. Applies only when the adapter has no native search
+   * (native wins) and the request isn't a vector search (`$vector` consumes the term).
+   */
+  protected applySearchFallback(
+    filter: FilterExpr | undefined,
+    controls: Record<string, unknown>,
+  ): FilterExpr | undefined {
+    const term = controls.$search as string | undefined;
+    if (!term || controls.$vector !== undefined) return filter;
+    if (this.readable.isSearchable() || this._searchFallbackFields.length === 0) return filter;
+    const rx = `/${term.replace(/[.*+?^${}()|[\]\\/]/g, String.raw`\$&`)}/i`;
+    const fragment = {
+      $or: this._searchFallbackFields.map((f) => ({ [f]: { $regex: rx } })),
+    } as FilterExpr;
+    return filter && Object.keys(filter).length > 0
+      ? ({ $and: [filter, fragment] } as FilterExpr)
+      : fragment;
+  }
+
   private async _resolveReadStrategy(
     controls: Record<string, unknown>,
   ): Promise<
@@ -575,7 +718,14 @@ export class AsDbReadableController<
 
     // ── Aggregate path ──────────────────────────────────────────────
     if (groupBy?.length) {
-      const filter = await this.transformFilter(parsed.filter);
+      const sealed = this._findWriteOnlyInAggregate(groupBy, controls.$select);
+      if (sealed) {
+        return new HttpError(400, `Field "${sealed}" is @db.writeOnly and cannot be aggregated`);
+      }
+      const filter = this.applySearchFallback(
+        await this.transformFilter(parsed.filter),
+        controls as Record<string, unknown>,
+      );
       return this.readable.aggregate({
         filter,
         controls: controls as any,
@@ -585,10 +735,12 @@ export class AsDbReadableController<
 
     // ── Regular query path ──────────────────────────────────────────
 
-    const [filter, rawSelect] = await Promise.all([
+    const [transformedFilter, transformedSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select),
     ]);
+    const filter = this.applySearchFallback(transformedFilter, controls as Record<string, unknown>);
+    const rawSelect = this._sealProjection(transformedSelect);
 
     if (controls.$count) {
       return this.readable.count({
@@ -671,10 +823,12 @@ export class AsDbReadableController<
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
-    const [filter, rawSelect] = await Promise.all([
+    const [transformedFilter, transformedSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
+    const filter = this.applySearchFallback(transformedFilter, controls);
+    const rawSelect = this._sealProjection(transformedSelect);
     const select = this.widenPreferredIdProjection(rawSelect);
     if (select instanceof HttpError) {
       return select;
@@ -776,11 +930,11 @@ export class AsDbReadableController<
       return gateError;
     }
 
-    const [filter, rawSelect] = await Promise.all([
+    const [filter, transformedSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
-    const select = this.widenPreferredIdProjection(rawSelect);
+    const select = this.widenPreferredIdProjection(this._sealProjection(transformedSelect));
     if (select instanceof HttpError) {
       return select;
     }
@@ -876,7 +1030,7 @@ export class AsDbReadableController<
     }
 
     const rawSelect = await this.transformProjection(parsed.controls.$select);
-    const select = this.widenPreferredIdProjection(rawSelect);
+    const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
     if (select instanceof HttpError) {
       return select;
     }
@@ -901,7 +1055,7 @@ export class AsDbReadableController<
     const { parsed } = this.parseControlsOnlyFromUrl(url);
     this._coerceActionsControl(parsed.controls as Record<string, unknown>);
     const rawSelect = await this.transformProjection(parsed.controls.$select);
-    const select = this.widenPreferredIdProjection(rawSelect);
+    const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
     if (select instanceof HttpError) {
       return select;
     }
@@ -988,10 +1142,19 @@ export class AsDbReadableController<
       if (geoIndexedPhysical.has(fd.physicalName)) {
         fields[fd.path].geo = true;
       }
+      if (this._writeOnlySet.has(fd.path)) {
+        // Settable in writes, never present in reads — UIs render a set-only
+        // input; filter/sort are force-vetoed above regardless of annotations.
+        fields[fd.path].writeOnly = true;
+        fields[fd.path].filterable = false;
+        fields[fd.path].sortable = false;
+      }
     }
 
     return {
-      searchable: this.readable.isSearchable(),
+      // Native search OR the @db.column.searchable fallback — either way the
+      // UI's search box works, so /meta reports it uniformly.
+      searchable: this.readable.isSearchable() || this._searchFallbackFields.length > 0,
       vectorSearchable: this.readable.isVectorSearchable(),
       geoSearchable: this._isGeoSearchable(),
       searchIndexes: this.readable.getSearchIndexes(),

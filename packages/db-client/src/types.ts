@@ -68,6 +68,15 @@ export interface ClientOptions {
    * ```
    */
   navigate?: (url: string) => void | Promise<void>;
+
+  /**
+   * Tolerate unknown properties in write payloads during client preflight
+   * validation. Enable when the served `/meta` type is a projection of the
+   * full server-side type (e.g. an ARBAC read overlay strips write-only
+   * fields) — the server stays authoritative. Off by default: strict
+   * preflight catches typos.
+   */
+  lenientWrites?: boolean;
 }
 
 // ── Meta Response Types ─────────────────────────────────────────────────────

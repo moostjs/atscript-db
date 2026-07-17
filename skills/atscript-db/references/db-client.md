@@ -254,6 +254,8 @@ validator.validate(payload, "replace");
 
 Pre-flight validation saves a round-trip on bad payloads.
 
+`new Client(path, { lenientWrites: true })` makes write preflight tolerate UNKNOWN properties (required fields/formats still enforced). Use it when the served `/meta` type is a projection of the full server type (e.g. an ARBAC read overlay strips write-only fields) — otherwise a legitimate write carrying a stripped field is rejected client-side while the server accepts it. Leave off elsewhere: strict preflight catches typos. (`createClientValidator(meta, { lenientWrites })` for standalone validators.)
+
 ## Auth
 
 Use `headers` for bearer / cookie / CSRF:

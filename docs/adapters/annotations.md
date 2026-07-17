@@ -38,6 +38,8 @@ Practically: declaring `@db.index.unique` on `User.id` never creates an index on
 | `@db.table.sortable`    | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Sort-gating mode. `'auto'` (default) keeps all columns sortable; `'manual'` requires `@db.column.sortable` on each sortable field                                                       |
 | `@db.json`              | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                                     |
 | `@db.ignore`            | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                                         |
+| `@db.column.searchable` | Field      | —                                      | Include a string field in the generic `$search` fallback (case-insensitive substring across annotated fields) when the adapter has no native search; native search wins when configured |
+| `@db.writeOnly`         | Field      | —                                      | HTTP write-only seal: settable via insert/update/replace, never present in read responses (projections exclude it; filter/sort/groupBy rejected; `/meta` flags it `writeOnly` so forms render set-only inputs). Pair with `@db.encrypted` for sealed secrets |
 
 ```atscript
 @db.table 'users'

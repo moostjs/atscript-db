@@ -68,6 +68,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private readonly _fetch: typeof globalThis.fetch;
   private readonly _headers?: ClientOptions["headers"];
   private readonly _navigate?: ClientOptions["navigate"];
+  private readonly _lenientWrites?: boolean;
   private _metaPromise?: Promise<MetaResponse>;
   private _validatorPromise?: Promise<ClientValidator>;
   /** Cached deserialized form schemas keyed by form name. */
@@ -79,6 +80,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     this._fetch = opts?.fetch ?? globalThis.fetch.bind(globalThis);
     this._headers = opts?.headers;
     this._navigate = opts?.navigate;
+    this._lenientWrites = opts?.lenientWrites;
   }
 
   // ── GET /query ─────────────────────────────────────────────────────────────
@@ -395,7 +397,9 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private _getValidator(): Promise<ClientValidator> {
     if (!this._validatorPromise) {
       this._validatorPromise = Promise.all([this.meta(), import("./validator")])
-        .then(([m, { createClientValidator }]) => createClientValidator(m))
+        .then(([m, { createClientValidator }]) =>
+          createClientValidator(m, { lenientWrites: this._lenientWrites }),
+        )
         .catch((err) => {
           this._validatorPromise = undefined;
           throw err;

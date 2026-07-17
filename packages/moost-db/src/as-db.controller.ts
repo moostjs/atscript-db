@@ -45,10 +45,8 @@ export class AsDbController<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
 > extends AsDbReadableController<T, DataType> {
-  /** Reference to the underlying table (typed for write access). */
-  protected get table(): AtscriptDbTable<T> {
-    return this.readable as AtscriptDbTable<T>;
-  }
+  // `.table` (writable accessor) is inherited from AsDbReadableController —
+  // guarded there with an instanceof check instead of this class's old cast.
 
   constructor(
     app: Moost,

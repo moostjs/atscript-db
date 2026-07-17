@@ -72,6 +72,12 @@ export interface TFieldMeta {
   encrypted?: boolean;
   /** Present (true) when the field carries a `@db.index.geo` geospatial index. */
   geo?: boolean;
+  /**
+   * Present (true) when the field is write-only over HTTP (`@db.writeOnly` or
+   * stamped by a permission overlay): settable in write payloads, never
+   * present in read responses. UIs render it as a set-only input.
+   */
+  writeOnly?: boolean;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */

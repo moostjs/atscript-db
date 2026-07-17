@@ -167,7 +167,10 @@ export abstract class AsReadableController<
           key === "db.json" ||
           key === "db.patch.strategy" ||
           key.startsWith("db.default") ||
-          key === "db.http.path"
+          key === "db.http.path" ||
+          // Clients need the write-only marker: forms render set-only inputs,
+          // validators accept the field in writes and never expect it in reads.
+          key === "db.writeOnly"
         ) {
           return { key, value };
         }

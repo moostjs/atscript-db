@@ -81,14 +81,25 @@ export class ActiveTasksController extends AsDbReadableController<typeof ActiveT
 
 ## Exposure assertion (dev)
 
-After `init()`, warn for models annotated `@db.http.path` with no bound controller:
+After `init()`, warn for models with no bound controller:
 
 ```ts
 import { assertExposed } from "@atscript/moost-db";
-const missing = assertExposed(app, atscriptModels); // returns the unexposed models
+const missing = assertExposed(app, atscriptModels); // default: only @db.http.path models
+// Prefix-bound repos (no @db.http.path anywhere): audit EVERY passed model
+assertExposed(app, atscriptModels, { all: true, exclude: [InternalCache] });
 ```
 
-Detects token + instance bindings; lazy-factory bindings can't name their model and are skipped.
+Detects token + instance bindings; lazy-factory bindings can't name their model — with `all: true` they false-positive, so list them in `exclude`.
+
+## Writable table access in readable controllers
+
+`AsDbReadableController` (and subclasses) expose `this.table` — the bound readable as a writable `AtscriptDbTable`. Action handlers write through it; NEVER keep a module-scope `db.getTable(Model)` just to regain write access. Throws for view-bound controllers.
+
+## $search fallback + write-only fields
+
+- `@db.column.searchable` fields: `$search` works without native search (escaped case-insensitive substring, `$or` across annotated fields; native search wins when configured; `/meta` reports `searchable: true`).
+- `@db.writeOnly` fields: settable via insert/update/replace, sealed out of ALL reads (projections force-exclude them; filter/sort/`$groupBy` on them → 400; `/meta` serves the type with `fields[path].writeOnly: true`). Server-side `table.findOne` still sees the value — the seal is HTTP-layer. Related-model writeOnly fields are NOT sealed through `$with` nav loads — seal at that model's own controller/overlay.
 
 ## Testing fixture
 
