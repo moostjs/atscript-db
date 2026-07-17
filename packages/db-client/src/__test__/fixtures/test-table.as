@@ -10,4 +10,20 @@ export interface User {
 
   @db.default "active"
   status: string
+
+  @db.patch.strategy "merge"
+  credit?: {
+    provider: string
+    status: 'none' | 'pending' | 'active' | 'failed'
+    note?: string
+    credentials?: {
+      account: string
+      password: string
+    }
+  }
+
+  profile?: {
+    bio: string
+    age?: number
+  }
 }

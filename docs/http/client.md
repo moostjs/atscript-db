@@ -634,9 +634,11 @@ validator.navFields; // Set of navigation field names
 validator.validate(data, "insert"); // throws on failure
 ```
 
+Patch preflight is **merge-aware** (since 0.1.124), mirroring the server's update validation exactly: a nested [`@db.patch.strategy 'merge'`](../api/update-patch#embedded-object-patches) block validates as a deep partial — absent required keys (e.g. server-stamped fields) pass, present keys are still type-checked — while non-merge nested objects keep full validation, since they are `$set` as a whole. Insert and replace always validate the full shape.
+
 ### Lenient writes (projected metas) {#lenient-writes}
 
-When the served `/meta` type is a **projection** of the full server-side type (e.g. an ARBAC read overlay strips fields the caller may write but not read), strict preflight rejects legitimate writes carrying those fields. Opt into tolerance for *unknown* properties on writes — required fields and formats stay enforced, and the server remains authoritative:
+When the served `/meta` type is a **projection** of the full server-side type (e.g. an ARBAC read overlay strips fields the caller may write but not read), strict preflight rejects legitimate writes carrying those fields. Opt into tolerance for _unknown_ properties on writes — required fields and formats stay enforced, and the server remains authoritative:
 
 ```typescript
 const users = new Client<typeof User>("/api/users", { lenientWrites: true });

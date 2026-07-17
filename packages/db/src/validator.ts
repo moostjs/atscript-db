@@ -46,10 +46,45 @@ export function buildDbValidator(
   const plugins = extraPlugins ? [...extraPlugins, dbPlugin] : [dbPlugin];
   return type.validator({
     plugins,
-    partial: mode === "patch",
+    partial: mode === "patch" ? buildPatchPartial(collectNavRoots(type)) : false,
     replace: forceNavNonOptional,
     ...(opts?.unknownProps ? { unknownProps: opts.unknownProps } : {}),
   });
+}
+
+/**
+ * Path-aware `partial` callback for patch/update validation — the single
+ * implementation shared by the server's `bulkUpdate` validator and the
+ * client's patch preflight:
+ *
+ * - the root object is partial (a patch names only the fields it touches)
+ * - nav-relation subtrees are partial (nested data is validated by its own table)
+ * - `@db.patch.strategy "merge"` blocks are partial (the decomposer merges
+ *   per leaf, so absent keys survive server-side by design)
+ *
+ * Every other nested object stays strict: non-merge blocks are `$set` as a
+ * whole (replace semantics), so their required fields really are required.
+ */
+export function buildPatchPartial(
+  navPaths: ReadonlySet<string>,
+): (def: TAtscriptAnnotatedType<TAtscriptTypeObject>, path: string) => boolean {
+  return (def, path) => {
+    if (path === "") return true;
+    const root = path.split(".")[0];
+    if (navPaths.has(root)) return true;
+    return def.metadata.get("db.patch.strategy") === "merge";
+  };
+}
+
+/** Collects top-level nav-relation (TO/FROM/VIA) prop names from an object type. */
+function collectNavRoots(type: TAtscriptAnnotatedType): ReadonlySet<string> {
+  const roots = new Set<string>();
+  if (type.type.kind === "object") {
+    for (const [key, prop] of (type as TAtscriptAnnotatedType<TAtscriptTypeObject>).type.props) {
+      if (isNavRelation(prop)) roots.add(key);
+    }
+  }
+  return roots;
 }
 
 // ── Shared validator option helpers ─────────────────────────────────────────

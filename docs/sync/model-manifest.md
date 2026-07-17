@@ -67,13 +67,13 @@ The same annotation drives [token-based controller binding](../http/) in `@atscr
 
 ## Guarding exposure completeness: `assertExposed`
 
-The manifest guards *sync* completeness; `assertExposed` (from `@atscript/moost-db`) guards *exposure* completeness with the same input. After `app.init()`:
+The manifest guards _sync_ completeness; `assertExposed` (from `@atscript/moost-db`) guards _exposure_ completeness with the same input. After `app.init()`:
 
 ```ts
 const missing = assertExposed(app, atscriptModels); // default: audits @db.http.path models only
 // Prefix-bound repos (@TableController(Model, 'db/x') everywhere):
 const missing = assertExposed(app, atscriptModels, {
-  all: true,                 // every passed model must have a bound controller
+  all: true, // every passed model must have a bound controller
   exclude: [EmbeddingCache], // internal-on-purpose collections, greppable
 });
 if (missing.length && process.env.CI) throw new Error("unexposed models");

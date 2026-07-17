@@ -35,7 +35,13 @@ import {
   batchPatchNestedVia,
 } from "../rel/nested-writer";
 import { type DbValidationContext } from "../db-validator-plugin";
-import { buildDbValidator, dbPlugin, forceNavNonOptional, type ValidatorMode } from "../validator";
+import {
+  buildDbValidator,
+  buildPatchPartial,
+  dbPlugin,
+  forceNavNonOptional,
+  type ValidatorMode,
+} from "../validator";
 import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
 import { ApplicationIntegrity } from "../strategies/application-integrity";
@@ -1005,7 +1011,7 @@ export class AtscriptDbTable<
         const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
         return this.createValidator({
           plugins,
-          partial: mode === "patch",
+          partial: mode === "patch" ? buildPatchPartial(this._meta.navFields) : false,
           // Make the version field optional in the type tree (server-managed:
           // the adapter sets it on insert and auto-bumps on update; callers
           // must NOT supply it). The replace callback fires per def node and
@@ -1027,15 +1033,9 @@ export class AtscriptDbTable<
     // the storage layer (it'd surface as a NOT NULL violation).
     if (purpose === "bulkUpdate") {
       const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
-      const navFields = this._meta.navFields;
       return this.createValidator({
         plugins,
-        partial: (_def, path) => {
-          if (path === "") return true;
-          const root = path.split(".")[0];
-          if (navFields.has(root)) return true;
-          return _def.metadata.get("db.patch.strategy") === "merge";
-        },
+        partial: buildPatchPartial(this._meta.navFields),
         replace: forceNavNonOptional,
       });
     }
