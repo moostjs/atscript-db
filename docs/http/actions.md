@@ -84,7 +84,7 @@ curl -X POST http://localhost:3000/users/actions/block \
 ```
 
 ::: tip The body is an envelope: `{ ids?, input? }`
-Every action request body is an object envelope. `ids` carries the identifier(s); `input` carries the optional `@InputForm` payload (see [Form input](#input-form)). Both fields are optional: a `'table'`-level action with no form declares no `ids`, and an action without `@InputForm` carries no `input`. Even single-field PK tables send `{ "ids": { "id": "abc" } }`, never the bare scalar. See [Body envelope](#body-envelope).
+Every action request body is an object envelope. `ids` carries the identifier(s); `input` carries the optional `@InputForm` payload, validated server-side against the declared form (see [Form input](#input-form)). Both fields are optional: a `'table'`-level action with no form declares no `ids`, and an action without `@InputForm` carries no `input`. Even single-field PK tables send `{ "ids": { "id": "abc" } }`, never the bare scalar. See [Body envelope](#body-envelope).
 :::
 
 ## Action Levels
@@ -407,26 +407,40 @@ Returns the serialized form schema for the named `@InputForm` type. Annotation a
 
 Discovery is lazy: hitting `/meta/form/:name` triggers `discoverActions` if `/meta` hasn't been called yet on this process. Unknown names → HTTP 404.
 
-### Validation — pluggable, not built-in
+### Inferring the form from the parameter type
 
-`@InputForm()` is **intentionally validation-free**. The decorator stamps two pieces of param metadata:
-
-- `atscript_db_action_input_form` — `{ type: FormType, name: <string> }`. Consumed by discovery.
-- `atscript_type` — the type ref alone. A generic, atscript-aware Moost pipe reads this and runs `FormType.validator()` against the resolved value.
-
-Without a pipe installed, `input` arrives at your handler as raw JSON — no validation, no coercion. To enable validation, install an atscript validator pipe globally on the Moost app or scope it per-controller / per-method:
+The `FormType` argument may be omitted — `@InputForm()` reads the parameter's reflected design type and resolves the form from it:
 
 ```typescript
-import { Moost } from "moost";
-import { atscriptValidatorPipe } from "<your-pipe-package>"; // not bundled with moost-db
-
-const app = new Moost();
-app.applyGlobalPipes(atscriptValidatorPipe());
+async approve(@DbActionID() id: { id: string }, @InputForm() input: CommentForm) { ... }
 ```
 
-A validator pipe that throws `ValidatorError` from `@atscript/typescript/utils` flows through the existing `validationErrorTransform()` interceptor and surfaces as HTTP 400 with the same envelope as DTO failures — no extra wiring needed.
+Inference relies on `design:paramtypes`, so it works only when the parameter is annotated with the compiled `.as` class through a **value import** — an `import type { CommentForm }` elides the class and reflection yields `Object`. When the reflected type is unusable (plain interface annotation, `import type`, circular import, metadata emission off), decoration **throws at import time** with a fix hint rather than silently serving an action without a form. Passing the form explicitly sidesteps reflection entirely and always wins over the parameter annotation.
 
-This separation is deliberate: validation policy varies (replace mode, partial mode, custom plugins, schema dialect), and forcing one default into the decorator would lock in choices the consumer may not want.
+::: warning Keep `.as` imports as value imports
+Lint rules that force type-only imports (`typescript/consistent-type-imports` and friends) convert `.as` imports used only in type positions to `import type`, breaking inference and any other `design:paramtypes` consumer. Keep such rules off in projects importing `.as` files.
+:::
+
+### Validation — built-in
+
+The `input` payload is validated **before your handler fires**: the decorator's resolver runs `FormType.validator(validatorOpts).validate(input ?? {})`. On mismatch it throws `ValidatorError`, which the controllers' built-in `validationErrorTransform()` shapes into a structured HTTP 400 — the same envelope as strict-`ids` failures and DTO validation errors:
+
+```json
+{
+  "message": "...",
+  "statusCode": 400,
+  "errors": [{ "path": "note", "message": "Required" }]
+}
+```
+
+Semantics worth knowing:
+
+- **Absent `input` validates as `{}`** — an all-optional form passes, required fields produce per-field errors. Your handler always receives an object, never `undefined`.
+- **Unknown properties are rejected** by the atscript validator's strict default, matching the strict `ids` contract.
+- **Validator options** pass through the second argument: `@InputForm(CommentForm, { partial: "deep" })` forwards to `FormType.validator(opts)`.
+- An app-level atscript validator pipe (e.g. `validatorPipe()` from `@atscript/moost-validator`) re-validating the same parameter is harmless — same validator, same result.
+
+The decorator also stamps two pieces of param metadata: `atscript_db_action_input_form` (`{ type, name }`, consumed by discovery for `/meta` and `GET /meta/form/:name`) and `atscript_type` (a generic hook for atscript-aware Moost pipes).
 
 ### Constraints
 

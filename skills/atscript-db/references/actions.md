@@ -59,19 +59,19 @@ Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` +
 
 ## Decorators
 
-| Decorator                | Target | Effect                                                                                                         |
-| ------------------------ | ------ | -------------------------------------------------------------------------------------------------------------- |
-| `@DbAction(name, opts?)` | method | Backend action. Pair with `@Post(...)`. Registers gate interceptor when `disabled` or `@DbActionRow*` present. |
-| `@DbActionDefault()`     | method | Sugar for `opts.default = true`. Order-independent.                                                            |
-| `@DbActionID()`          | param  | Single identifier object from JSON body. Infers `level: 'row'`.                                                |
-| `@DbActionIDs()`         | param  | Identifier-object array from body. Infers `level: 'rows'`.                                                     |
-| `@DbActionRow()`         | param  | Injects gate-loaded row (no double-fetch). Infers `level: 'row'`.                                              |
-| `@DbActionRows()`        | param  | Injects gate-loaded rows (survivors only in `'skip'` mode). Infers `level: 'rows'`.                            |
-| `@InputForm(FormType)`   | param  | Injects `body.input`; stamps form ref + `FormType.name` on param mate. Does NOT affect level. One per action.  |
-| `@DbActions(dict)`       | class  | Generic dict; each entry must include `level`.                                                                 |
-| `@DbTableActions(dict)`  | class  | Sugar — pins `level: 'table'`.                                                                                 |
-| `@DbRowActions(dict)`    | class  | Sugar — pins `level: 'row'`.                                                                                   |
-| `@DbRowsActions(dict)`   | class  | Sugar — pins `level: 'rows'`.                                                                                  |
+| Decorator                | Target | Effect                                                                                                                                            |
+| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@DbAction(name, opts?)` | method | Backend action. Pair with `@Post(...)`. Registers gate interceptor when `disabled` or `@DbActionRow*` present.                                    |
+| `@DbActionDefault()`     | method | Sugar for `opts.default = true`. Order-independent.                                                                                               |
+| `@DbActionID()`          | param  | Single identifier object from JSON body. Infers `level: 'row'`.                                                                                   |
+| `@DbActionIDs()`         | param  | Identifier-object array from body. Infers `level: 'rows'`.                                                                                        |
+| `@DbActionRow()`         | param  | Injects gate-loaded row (no double-fetch). Infers `level: 'row'`.                                                                                 |
+| `@DbActionRows()`        | param  | Injects gate-loaded rows (survivors only in `'skip'` mode). Infers `level: 'rows'`.                                                               |
+| `@InputForm(FormType?)`  | param  | Injects `body.input` **validated** against the form; form inferred from the param's type when arg omitted. Does NOT affect level. One per action. |
+| `@DbActions(dict)`       | class  | Generic dict; each entry must include `level`.                                                                                                    |
+| `@DbTableActions(dict)`  | class  | Sugar — pins `level: 'table'`.                                                                                                                    |
+| `@DbRowActions(dict)`    | class  | Sugar — pins `level: 'row'`.                                                                                                                      |
+| `@DbRowsActions(dict)`   | class  | Sugar — pins `level: 'rows'`.                                                                                                                     |
 
 ## Level inference (method decorators)
 
@@ -120,7 +120,7 @@ Field names are **logical** (the `.as` prop names) — never physical column nam
 
 ### Input shape (`input` field)
 
-Free-form (no server-side validation by default — see § InputForm). Present iff the action declares `@InputForm(FormType)`. Empty `{}` body is fine; `input` defaults to `undefined`.
+Validated server-side against the action's form before the handler fires (see § InputForm). Meaningful iff the action declares `@InputForm(...)`. Empty `{}` body is fine; absent `input` is validated as `{}` — all-optional forms pass, required fields produce a structured 400.
 
 ## Preferred row identifier
 
@@ -370,18 +370,20 @@ const input = await useDbActionInput().load(); // body.input — unknown; not va
 
 In skip-mode, `useDbActionIds().load()` returns the **filtered subset of original objects** (reference-equal to the entries the client posted), and `useDbActionRows().load()` returns the parallel-aligned filtered rows. No `undefined` gaps.
 
-## `@InputForm(FormType)` — structured user input
+## `@InputForm(FormType?, validatorOpts?)` — structured user input
 
 Marks a param as the action's `input` payload (`body.input`). `FormType` is a compiled `.as` interface class. One per action; for multiple structured inputs, compose a single `.as` interface.
+
+`FormType` may be **omitted** — `@InputForm() input: CommentForm` infers the form from the param's reflected type (`design:paramtypes`). Inference requires the compiled `.as` class as the param annotation through a **value import** (`import type` elides the class → reflection yields `Object`). When the reflected type is unusable, decoration **throws at import time** with a fix hint — never a silently form-less action. The explicit arg sidesteps reflection and always wins over the annotation.
 
 Stamps two param mate keys:
 
 | Key                             | Value                                | Consumer                                                                         |
 | ------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
 | `atscript_db_action_input_form` | `{ type: FormType, name: <string> }` | Discovery — emits `inputForm` on `/meta`; registers form for `/meta/form/:name`. |
-| `atscript_type`                 | `FormType`                           | Generic atscript-aware Moost pipe (validation hook).                             |
+| `atscript_type`                 | `FormType`                           | Generic atscript-aware Moost pipe hook.                                          |
 
-**Validation is NOT performed by the decorator.** Install a Moost pipe that reads `atscript_type` and runs `FormType.validator()` — globally via `app.applyGlobalPipes(...)` or scoped via `@Pipe(...)`. Without a pipe, `input` arrives as raw JSON. `ValidatorError` from such a pipe surfaces as HTTP 400 via the existing `validationErrorTransform()` interceptor.
+**Validation is built in.** The resolver runs `FormType.validator(validatorOpts).validate(input ?? {})` before the handler fires; a mismatch throws `ValidatorError` → structured HTTP 400 via the controllers' own `validationErrorTransform()` (same envelope as strict-`ids` failures). Absent `input` validates as `{}` and the handler always receives an object, never `undefined`. An app-level `validatorPipe()` re-validating the same param is harmless.
 
 Form name on the wire is `FormType.name` (compiled `.as` classes have stable names). Reusing the same `FormType` across multiple actions on the same controller is allowed; clashing names with different type refs → discovery warns and drops the second action.
 
