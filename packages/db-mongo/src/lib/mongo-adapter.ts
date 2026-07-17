@@ -95,6 +95,45 @@ export type {
   TMongoSearchIndexDefinition,
 } from "./mongo-types";
 
+// ── ObjectId value mapping ───────────────────────────────────────────────────
+
+/** Mirrors the `mongo.objectId` primitive's pattern — only definite hex ids convert. */
+const OBJECT_ID_HEX = /^[a-fA-F0-9]{24}$/;
+
+/** True for `mongo.objectId`-typed fields and arrays of them (tag-based, same as `prepareId`). */
+function isObjectIdColumn(fieldType: TAtscriptAnnotatedType): boolean {
+  const t = fieldType.type as {
+    kind?: string;
+    tags?: ReadonlySet<string>;
+    of?: TAtscriptAnnotatedType;
+  };
+  if (t.kind === "array") {
+    return !!t.of && isObjectIdColumn(t.of);
+  }
+  return t.tags?.has("objectId") === true && t.tags?.has("mongo") === true;
+}
+
+function objectIdToStorage(value: unknown): unknown {
+  if (typeof value === "string" && OBJECT_ID_HEX.test(value)) {
+    return new ObjectId(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(objectIdToStorage);
+  }
+  // ObjectId instances (e.g. from prepareId), non-hex strings, operator scraps pass through.
+  return value;
+}
+
+function objectIdFromStorage(value: unknown): unknown {
+  if (value instanceof ObjectId) {
+    return value.toHexString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(objectIdFromStorage);
+  }
+  return value;
+}
+
 // ── Adapter ──────────────────────────────────────────────────────────────────
 
 export class MongoAdapter extends BaseDbAdapter {
@@ -334,26 +373,37 @@ export class MongoAdapter extends BaseDbAdapter {
    * write `[lng, lat]` → `{ type: 'Point', coordinates: [lng, lat] }`,
    * unwrap back to the tuple on read. Non-tuple values (e.g. `$geoWithin`
    * operator objects flowing through filter translation) pass through.
+   *
+   * Converts `mongo.objectId` values between wire hex strings and native
+   * ObjectId storage. Filters, writes, and reads all flow through these
+   * formatters, so id envelopes (`@DbActionID` row loading), FK filters
+   * (`{ leadId: '<hex>' }`), and inserted documents match natively stored
+   * ObjectIds — and reads return the hex strings the declared type promises.
+   * Top-level fields only: nested values skip the write/read formatter passes,
+   * so a nested formatter would coerce filters against un-coerced storage.
    */
   override formatValue(field: TDbFieldMeta) {
-    if (!field.isGeoPoint) {
-      return undefined;
+    if (field.isGeoPoint) {
+      return {
+        toStorage: (value: unknown) =>
+          Array.isArray(value) &&
+          value.length === 2 &&
+          typeof value[0] === "number" &&
+          typeof value[1] === "number"
+            ? { type: "Point", coordinates: value }
+            : value,
+        fromStorage: (value: unknown) => {
+          const v = value as { type?: string; coordinates?: unknown } | null;
+          return v && typeof v === "object" && v.type === "Point" && Array.isArray(v.coordinates)
+            ? v.coordinates
+            : value;
+        },
+      };
     }
-    return {
-      toStorage: (value: unknown) =>
-        Array.isArray(value) &&
-        value.length === 2 &&
-        typeof value[0] === "number" &&
-        typeof value[1] === "number"
-          ? { type: "Point", coordinates: value }
-          : value,
-      fromStorage: (value: unknown) => {
-        const v = value as { type?: string; coordinates?: unknown } | null;
-        return v && typeof v === "object" && v.type === "Point" && Array.isArray(v.coordinates)
-          ? v.coordinates
-          : value;
-      },
-    };
+    if (!field.path.includes(".") && isObjectIdColumn(field.type)) {
+      return { toStorage: objectIdToStorage, fromStorage: objectIdFromStorage };
+    }
+    return undefined;
   }
 
   // Uses default 'db.__topLevelArray' tag from base adapter
@@ -852,7 +902,7 @@ export class MongoAdapter extends BaseDbAdapter {
     const result = await this._wrapDuplicateKeyError(() =>
       this.collection.insertOne(data, this._getSessionOpts()),
     );
-    return { insertedId: this._resolveInsertedId(data, result.insertedId) };
+    return { insertedId: objectIdFromStorage(this._resolveInsertedId(data, result.insertedId)) };
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
@@ -885,7 +935,9 @@ export class MongoAdapter extends BaseDbAdapter {
     );
     return {
       insertedCount: result.insertedCount,
-      insertedIds: data.map((item, i) => this._resolveInsertedId(item, result.insertedIds[i])),
+      insertedIds: data.map((item, i) =>
+        objectIdFromStorage(this._resolveInsertedId(item, result.insertedIds[i])),
+      ),
     };
   }
 

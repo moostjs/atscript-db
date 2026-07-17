@@ -491,6 +491,17 @@ describe("AtscriptDbTable", () => {
       expect(call.args[0].filter.createdAt).toBe("formatted:5000");
     });
 
+    it("should treat class-instance filter values as direct values, not operator objects", async () => {
+      const hookAdapter = withTimestampFormatter(new MockAdapter());
+      const t = new AtscriptDbTable(UsersTable, hookAdapter);
+      // A class instance (Date, ObjectId, ...) must survive intact — rebuilding
+      // it from Object.entries would destroy it.
+      const instant = new Date(1000);
+      await t.findMany({ filter: { createdAt: instant } as any, controls: {} });
+      const call = hookAdapter.calls.find((c) => c.method === "findMany")!;
+      expect(call.args[0].filter.createdAt).toBe(instant);
+    });
+
     it("should apply value formatter to operator filter values ($gt, $lt)", async () => {
       const hookAdapter = withTimestampFormatter(new MockAdapter());
       const t = new AtscriptDbTable(UsersTable, hookAdapter);

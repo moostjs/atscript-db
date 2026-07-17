@@ -127,7 +127,7 @@ All generic `@db.*` annotations (`@db.table`, `@db.index.*`, `@db.default.*`, `@
 
 ### `mongo.objectId`
 
-A string type constrained to 24-character hex strings matching the MongoDB ObjectId format. Used for `_id` fields. At runtime, the adapter converts these strings to native `ObjectId` instances automatically.
+A string type constrained to 24-character hex strings matching the MongoDB ObjectId format. Used for `_id` fields and ObjectId FK reference columns.
 
 ```atscript
 @db.table 'users'
@@ -137,6 +137,14 @@ export interface User {
     name: string
 }
 ```
+
+In application code the value is always the hex **string** — the adapter maps it to and from native `ObjectId` at the storage boundary for every top-level `mongo.objectId` column (including arrays of them):
+
+- **Filters** — hex strings coerce to `ObjectId` in equality, operator (`$in`, `$ne`, ...), `$or`/`$and` positions. `{ leadId: '<hex>' }` matches natively stored ObjectIds, so id envelopes and FK filters work symmetrically with reads.
+- **Writes** — hex strings are stored as native `ObjectId`; `insertedId` comes back as a hex string.
+- **Reads** — natively stored `ObjectId` values are returned as hex strings, matching the declared type.
+
+Non-hex strings and existing `ObjectId` instances pass through untouched. Fields nested inside embedded objects are stored verbatim (as strings) — the mapping applies to top-level columns only.
 
 ### `db.vector`
 

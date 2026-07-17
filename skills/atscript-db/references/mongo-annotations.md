@@ -77,7 +77,7 @@ The logical name in `@db.mongo.search.static '…', fuzzy, 'users_exact'` is pro
 | ---------------- | ---------------------------------------- |
 | `mongo.objectId` | `string` matching `/^[a-fA-F0-9]{24}$/`. |
 
-The adapter's `prepareId()` converts incoming `string` ids into `ObjectId` before the driver call when the field is typed `mongo.objectId`.
+The adapter maps hex strings ↔ native `ObjectId` automatically for all top-level `mongo.objectId` columns — filters, writes, and reads (see [adapters-mongo.md](./adapters-mongo.md) for the full contract). Application code always deals in hex strings.
 
 For vector fields, use the core `db.vector` primitive (registered by `dbPlugin()`) together with `@db.search.vector`. There is no `mongo.vector`.
 

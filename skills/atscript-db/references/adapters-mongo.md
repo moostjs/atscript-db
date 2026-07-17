@@ -94,7 +94,7 @@ Capped collections:
 
 The Mongo plugin provides only `mongo.objectId`. Vector fields use the core `db.vector` primitive (from `dbPlugin()`), not a Mongo-specific one.
 
-On `insertOne`/`updateOne`/`findOne` with a `mongo.objectId`-typed PK, the adapter's `prepareId()` converts `string` to `ObjectId` before the driver call, and returns the user-supplied string as `insertedId`.
+Hex ↔ native `ObjectId` mapping is automatic for every **top-level** `mongo.objectId` column (`_id`, FK columns, arrays of them): filters coerce hex strings in equality/operator/`$in`/`$or` positions, writes store native `ObjectId`, reads and `insertedId` return hex strings. Non-hex strings and `ObjectId` instances pass through. Nested (embedded-object) objectId fields are NOT mapped — they store as strings verbatim. Never hand-convert to `ObjectId` in filters; pass the hex string.
 
 ## Atlas Search
 

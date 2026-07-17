@@ -227,6 +227,14 @@ export abstract class FieldMappingStrategy {
       return fmt(value);
     }
 
+    // Class instances (ObjectId, Date, ...) are direct values too — only plain
+    // objects can carry operators; rebuilding an instance from its entries
+    // would destroy it.
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      return fmt(value);
+    }
+
     // Operator object: { $gt: 123, $lt: 456 }
     const ops = value as Record<string, unknown>;
     const formatted: Record<string, unknown> = {};
