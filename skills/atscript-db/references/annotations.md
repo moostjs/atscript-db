@@ -160,12 +160,12 @@ interface Order {
 
 ## Encryption & geo
 
-| Annotation      | Args            | Effect                                                                                                                                                                                   |
-| --------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.encrypted` | none            | AES-256-GCM encryption at rest (core-layer, all adapters). Requires `DbSpace` `encryption` options. No filter/sort/index/agg/arith-patch. Full rules → [encryption.md](./encryption.md). |
-| `@db.writeOnly` | none            | HTTP-layer seal: settable in write payloads, NEVER in read responses (projections exclude it; filter/sort/groupBy → 400; `/meta` serves the type flagged `writeOnly` so forms/validators know the shape). Pair with `@db.encrypted` for sealed secrets. Server-side table reads still see it. |
-| `@db.column.searchable` | none    | Includes a string field in the generic `$search` fallback (escaped case-insensitive substring `$or`) when the adapter has no native search. Native search wins when configured. |
-| `@db.index.geo` | `name?: string` | See [Indexes](#indexes) above; full rules → [geo-search.md](./geo-search.md).                                                                                                            |
+| Annotation              | Args            | Effect                                                                                                                                                                                                                                                                                        |
+| ----------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.encrypted`         | none            | AES-256-GCM encryption at rest (core-layer, all adapters). Requires `DbSpace` `encryption` options. No filter/sort/index/agg/arith-patch. Full rules → [encryption.md](./encryption.md).                                                                                                      |
+| `@db.writeOnly`         | none            | HTTP-layer seal: settable in write payloads, NEVER in read responses (projections exclude it; filter/sort/groupBy → 400; `/meta` serves the type flagged `writeOnly` so forms/validators know the shape). Pair with `@db.encrypted` for sealed secrets. Server-side table reads still see it. |
+| `@db.column.searchable` | none            | Includes a string field in the generic `$search` fallback (escaped case-insensitive substring `$or`) when the adapter has no native search. Native search wins when configured.                                                                                                               |
+| `@db.index.geo`         | `name?: string` | See [Indexes](#indexes) above; full rules → [geo-search.md](./geo-search.md).                                                                                                                                                                                                                 |
 
 Primitives: `db.geoPoint` = `[lng, lat]` tuple (longitude FIRST, range-validated on write); `db.vector` = `number[]` embedding; `db.currencyCode` = uppercase code string.
 
