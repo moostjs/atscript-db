@@ -433,6 +433,25 @@ A `version` field on a non-versioned table's payload is treated like any other f
 
 See the [Versioning reference](/api/versioning) for the SDK-level API, error codes, and the `withOptimisticRetry` helper.
 
+## Write-Only Fields (`@db.writeOnly`) {#write-only}
+
+A field annotated `@db.writeOnly` is settable through insert/update/replace payloads but **never appears in read responses** — the classic case is a sealed secret (pair it with `@db.encrypted`):
+
+```atscript
+@db.writeOnly
+@db.encrypted
+credentials?: string
+```
+
+The controller enforces the seal, not just hides the value:
+
+- Every read projection force-excludes the field (`$select`ing it explicitly is silently stripped — even when it's the only selected field).
+- Filtering, sorting, and aggregate `$groupBy`/`$select` on it are rejected — an equality probe or sort order would leak the sealed value.
+- `/meta` still serves the field's **type**, flagged `writeOnly: true`, so generated forms render a set-only input and client preflight validation accepts the field in write payloads.
+- Server-side code reading through `AtscriptDbTable` still sees the value — the seal is an HTTP-layer contract.
+
+Two boundaries to know: related models' write-only fields are **not** sealed through `$with` relation loads (seal them at their own controller), and permission overlays (e.g. `@aooth/arbac-moost`) can stamp `writeOnly` per-caller for fields the caller may write but not read.
+
 ## Deleting Records
 
 ### DELETE /:id {#delete}

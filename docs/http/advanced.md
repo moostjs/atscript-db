@@ -131,6 +131,21 @@ For the programmatic equivalent, see [Relations — Loading](/relations/loading)
 
 Perform full-text search on fields annotated with `@db.index.fulltext` or similar search indexes.
 
+### Fallback without native search {#search-fallback}
+
+When the adapter reports no native search capability (db-memory always; MongoDB without Atlas Search indexes), `$search` falls back to a case-insensitive **literal substring** match OR'd across the fields annotated `@db.column.searchable`:
+
+```atscript
+export interface Job {
+    @db.column.searchable
+    jobName: string
+    @db.column.searchable
+    description: string
+}
+```
+
+The term is escaped by the framework (no user-supplied regex), merged into the request filter with `$and`, and applied uniformly on `query` (including `$count`), `pages`, and aggregate reads. Where native search **is** configured it wins and the annotation is not consulted. `/meta` reports `searchable: true` either way, so UI search boxes appear without overrides. Encrypted, adapter-unfilterable, and `@db.writeOnly` fields never participate.
+
 ### Basic Search
 
 Search across all fulltext-indexed fields:

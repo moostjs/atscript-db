@@ -333,11 +333,11 @@ protected async init() {
 Inside any hook or custom method, you have access to the underlying table instance:
 
 ```typescript
-this.table; // AtscriptDbTable — full read/write access (AsDbController only)
-this.readable; // AtscriptDbReadable — read-only access (both controllers)
+this.table; // AtscriptDbTable — full read/write access (table-bound controllers)
+this.readable; // AtscriptDbReadable — read-only access (all controllers)
 ```
 
-Both controllers expose `this.readable`. The writable `this.table` property is only available on `AsDbController`.
+Both controllers expose `this.readable` **and** the writable `this.table` — including `AsDbReadableController`, where named `@DbAction` handlers are the mutation surface. This is the canonical write access for the "generic reads + named actions" posture: no module-scope `db.getTable(Model)` needed. `this.table` throws for view-bound controllers.
 
 ```typescript
 // In any hook or custom method

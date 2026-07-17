@@ -634,6 +634,18 @@ validator.navFields; // Set of navigation field names
 validator.validate(data, "insert"); // throws on failure
 ```
 
+### Lenient writes (projected metas) {#lenient-writes}
+
+When the served `/meta` type is a **projection** of the full server-side type (e.g. an ARBAC read overlay strips fields the caller may write but not read), strict preflight rejects legitimate writes carrying those fields. Opt into tolerance for *unknown* properties on writes — required fields and formats stay enforced, and the server remains authoritative:
+
+```typescript
+const users = new Client<typeof User>("/api/users", { lenientWrites: true });
+// or standalone:
+const validator = createClientValidator(meta, { lenientWrites: true });
+```
+
+Leave it off elsewhere — strict preflight catches typos. Note that servers on `@aooth/arbac-moost` ≥ 0.1.57 stamp write-granted fields into the served type as [`writeOnly`](./crud#write-only) instead of stripping them, which removes the need for this flag in most setups.
+
 ## Re-exports
 
 ### Query types (from `@uniqu/core`)
