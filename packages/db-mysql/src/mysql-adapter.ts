@@ -1,6 +1,7 @@
 import type { TAtscriptAnnotatedType, TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
+import { BaseDbAdapter, DbError } from "@atscript/db";
 import type {
+  AtscriptDbView,
   TDbDeleteResult,
   TDbIndex,
   TDbInsertManyResult,
@@ -13,6 +14,10 @@ import type {
   TSyncColumnResult,
   TDbFieldMeta,
   TDbDefaultFn,
+  TDbObjectKind,
+  TEnsureTableOptions,
+  TPrimaryKeyChange,
+  TReferencingForeignKey,
   TValueFormatterPair,
   TFieldOps,
 } from "@atscript/db";
@@ -20,13 +25,16 @@ import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  fillReplacePayload,
   geoWindowFromControls,
   normalizeGeoPointValue,
   renameGeoDistance,
+  replaceColumnsFor,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
 import {
+  buildColumnDefinition,
   buildCreateTable,
   buildCreateView,
   buildDelete,
@@ -38,14 +46,20 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   geoPointToMysqlInternal,
+  mysqlBytesPerChar,
+  mysqlCharLength,
+  mysqlDefaultLiteral,
   mysqlGeoDistanceExpr,
   mysqlGeoValueToPoint,
+  mysqlIndexPrefix,
+  mysqlTypeDefault,
   mysqlTypeFromField,
   qi,
   quoteTableName,
-  collationToMysql,
   refActionToSql,
   mysqlDialect,
+  type TMysqlColumnContext,
+  type TMysqlTableOptions,
 } from "./sql-builder";
 import type { TMysqlConnection, TMysqlDriver } from "./types";
 
@@ -124,9 +138,14 @@ export class MysqlAdapter extends BaseDbAdapter {
   /** Default similarity thresholds per vector field (from @db.search.vector.threshold). */
   private _vectorThresholds = new Map<string, number>();
 
-  /** Schema name for INFORMATION_SCHEMA queries (null falls through to DATABASE()). */
+  /**
+   * Schema name for INFORMATION_SCHEMA queries — `@db.schema` of the bound
+   * table, or `null` (→ `DATABASE()`, the pool's database) when the table
+   * declares none or the adapter is an administrative one with no readable
+   * (the name-taking schema-sync primitives run on such an adapter).
+   */
   private get _schema(): string | null {
-    return this._table.schema ?? null;
+    return this._table?.schema ?? null;
   }
 
   constructor(protected readonly driver: TMysqlDriver) {
@@ -134,6 +153,16 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   // ── Transaction primitives ──────────────────────────────────────────────
+
+  /** Every adapter over this pool shares one transaction (since 0.1.128). */
+  protected override _transactionOwner(): unknown {
+    return this.driver;
+  }
+
+  /** The dedicated connection of this pool's open transaction, if any. */
+  private _txConnection(): TMysqlConnection | undefined {
+    return this._getTransactionState() as TMysqlConnection | undefined;
+  }
 
   protected override async _beginTransaction(): Promise<TMysqlConnection> {
     const conn = await this.driver.getConnection();
@@ -167,8 +196,7 @@ export class MysqlAdapter extends BaseDbAdapter {
    * otherwise the pool-based driver.
    */
   private _exec(): Pick<TMysqlDriver, "run" | "all" | "get" | "exec"> {
-    const txState = this._getTransactionState() as TMysqlConnection | undefined;
-    return txState ?? this.driver;
+    return this._txConnection() ?? this.driver;
   }
 
   // ── Capability flags ──────────────────────────────────────────────────────
@@ -261,7 +289,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     ];
   }
 
-  override async getExistingTableOptions(): Promise<TExistingTableOption[]> {
+  override async getExistingTableOptions(tableName?: string): Promise<TExistingTableOption[]> {
     const row = await this._exec().get<{
       ENGINE: string;
       TABLE_COLLATION: string;
@@ -269,7 +297,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       `SELECT ENGINE, TABLE_COLLATION
        FROM INFORMATION_SCHEMA.TABLES
        WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())`,
-      [this._table.tableName, this._schema],
+      [tableName ?? this._table.tableName, this._schema],
     );
     if (!row) {
       return [];
@@ -545,12 +573,21 @@ export class MysqlAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
+    // Use UPDATE instead of DELETE+INSERT to avoid triggering CASCADE deletes.
+    // Full replace (since 0.1.128): every column is assigned — omitted ones
+    // become NULL, native function defaults (`now` / `increment`) re-apply
+    // their DDL DEFAULT — matching the document adapters' whole-row replace
+    // instead of silently merging with the old row.
     const where = buildWhere(filter);
     const versionColumn = this._table.versionColumn;
+    const full = fillReplacePayload(
+      data,
+      replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
+      versionColumn,
+    );
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
-      data,
+      full,
       where,
       1,
       undefined,
@@ -605,27 +642,161 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
   }
 
-  async ensureTable(): Promise<void> {
+  async ensureTable(opts?: TEnsureTableOptions): Promise<void> {
     // Detect vector support lazily on first schema operation
     await this.prepareTypeMapper();
-    if (this._table instanceof AtscriptDbView) {
+    // Structural check (never `instanceof`): a bundle may carry two copies of
+    // @atscript/db, and a false `instanceof` would create an empty table here.
+    if (this._table.isView) {
       return this._ensureView();
     }
     const sql = buildCreateTable(
       this.resolveTableName(),
       this._table.fieldDescriptors,
       this._table.foreignKeys,
-      {
-        engine: this._engine,
-        charset: this._charset,
-        collation: this._collation,
-        autoIncrementStart: this._autoIncrementStart,
-        incrementFields: this._incrementFields,
-        onUpdateFields: this._onUpdateFields,
-      },
+      this._tableOptions(opts),
     );
     this._log(sql);
     await this._exec().exec(sql);
+  }
+
+  /** The CREATE TABLE options (engine/charset/collation/increment/ON UPDATE/type mapper). */
+  private _tableOptions(opts?: TEnsureTableOptions): TMysqlTableOptions {
+    return {
+      engine: this._engine,
+      charset: this._charset,
+      collation: this._collation,
+      autoIncrementStart: this._autoIncrementStart,
+      incrementFields: this._incrementFields,
+      onUpdateFields: this._onUpdateFields,
+      typeMapper: (field) => this.typeMapper(field),
+      deferForeignKeysTo: opts?.deferForeignKeysTo,
+    };
+  }
+
+  /** The shared column-definition context for ADD/MODIFY statements. */
+  private _columnCtx(purpose: TMysqlColumnContext["purpose"]): TMysqlColumnContext {
+    return {
+      incrementFields: this._incrementFields,
+      onUpdateFields: this._onUpdateFields,
+      typeMapper: (field) => this.typeMapper(field),
+      purpose,
+    };
+  }
+
+  // ── Schema sync primitives (since 0.1.128) ─────────────────────────────
+
+  async hasRows(tableName?: string): Promise<boolean> {
+    const target = tableName
+      ? quoteTableName(this._schema ? `${this._schema}.${tableName}` : tableName)
+      : quoteTableName(this.resolveTableName());
+    const sql = `SELECT EXISTS(SELECT 1 FROM ${target}) AS present`;
+    this._log(sql);
+    const row = await this._exec().get<{ present: number | boolean }>(sql, []);
+    return Boolean(Number(row?.present ?? 0));
+  }
+
+  /** Live foreign keys referencing `tableName` (any table of the schema). */
+  async getReferencingForeignKeys(tableName: string): Promise<TReferencingForeignKey[]> {
+    const rows = await this._exec().all<{
+      TABLE_NAME: string;
+      CONSTRAINT_NAME: string;
+      COLUMN_NAME: string;
+      REFERENCED_COLUMN_NAME: string;
+    }>(
+      `SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME
+       FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+       WHERE REFERENCED_TABLE_NAME = ? AND REFERENCED_TABLE_SCHEMA = COALESCE(?, DATABASE())
+       ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`,
+      [tableName, this._schema],
+    );
+    const byConstraint = new Map<string, TReferencingForeignKey>();
+    for (const r of rows) {
+      const key = `${r.TABLE_NAME}\0${r.CONSTRAINT_NAME}`;
+      let fk = byConstraint.get(key);
+      if (!fk) {
+        fk = { table: r.TABLE_NAME, fields: [], targetFields: [] };
+        byConstraint.set(key, fk);
+      }
+      fk.fields.push(r.COLUMN_NAME);
+      fk.targetFields.push(r.REFERENCED_COLUMN_NAME);
+    }
+    return [...byConstraint.values()];
+  }
+
+  async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
+    const row = await this._exec().get<{ TABLE_TYPE: string }>(
+      `SELECT TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())`,
+      [name, this._schema],
+    );
+    if (!row) {
+      return undefined;
+    }
+    return row.TABLE_TYPE.toUpperCase() === "VIEW" ? "view" : "table";
+  }
+
+  /**
+   * One `ALTER TABLE … [MODIFY …,] DROP PRIMARY KEY, ADD PRIMARY KEY (…)`
+   * statement (atomic). The sole owner of the columns entering the key:
+   * `syncColumns` adds them without AUTO_INCREMENT and skips their MODIFYs
+   * while the key change is pending, and this statement re-declares each of
+   * them in full (AUTO_INCREMENT when the model declares increment, explicit
+   * NOT NULL) together with the key swap — so an AUTO_INCREMENT column never
+   * exists without a key (ER 1075), in safe mode or otherwise. A demoted key
+   * column loses AUTO_INCREMENT in the same statement (pre-flight guarantees
+   * its model no longer declares increment). Called on an empty table only.
+   */
+  async rebuildPrimaryKey(change: TPrimaryKeyChange): Promise<void> {
+    const fields = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
+    const to = new Set(change.to);
+    const clauses: string[] = [];
+
+    for (const name of change.to) {
+      const field = fields.get(name);
+      if (field) {
+        clauses.push(
+          `MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`,
+        );
+      }
+    }
+
+    if (change.from.length > 0) {
+      const placeholders = change.from.map(() => "?").join(", ");
+      const live = await this._exec().all<{
+        COLUMN_NAME: string;
+        COLUMN_TYPE: string;
+        EXTRA: string;
+      }>(
+        `SELECT COLUMN_NAME, COLUMN_TYPE, EXTRA FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
+           AND COLUMN_NAME IN (${placeholders})`,
+        [this._table.tableName, this._schema, ...change.from],
+      );
+      for (const col of live) {
+        if (to.has(col.COLUMN_NAME) || !/auto_increment/i.test(col.EXTRA ?? "")) {
+          continue;
+        }
+        const field = fields.get(col.COLUMN_NAME);
+        // A demoted column that left the model is dropped right after the
+        // swap — re-declare it from its live type, minus AUTO_INCREMENT.
+        const def = field
+          ? buildColumnDefinition(field, this._columnCtx("modify")).def
+          : `${qi(col.COLUMN_NAME)} ${col.COLUMN_TYPE.toUpperCase()} NOT NULL`;
+        clauses.push(`MODIFY COLUMN ${def}`);
+      }
+      clauses.push("DROP PRIMARY KEY");
+    }
+
+    if (change.to.length > 0) {
+      clauses.push(`ADD PRIMARY KEY (${change.to.map((c) => qi(c)).join(", ")})`);
+    }
+    if (clauses.length === 0) {
+      return;
+    }
+    const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ${clauses.join(", ")}`;
+    this._log(ddl);
+    await this._exec().exec(ddl);
   }
 
   private async _ensureView(): Promise<void> {
@@ -645,20 +816,27 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async getExistingColumnsForTable(tableName: string): Promise<TExistingColumn[]> {
-    const schema = this._schema;
+    // `COLUMN_KEY = 'PRI'` also flags the first NOT NULL UNIQUE index of a
+    // table WITHOUT a primary key (documented SHOW COLUMNS behaviour) — the
+    // PRIMARY constraint (KEY_COLUMN_USAGE) is the only trustworthy source,
+    // joined in so introspection is one round trip per table.
     const rows = await this._exec().all<{
       COLUMN_NAME: string;
       COLUMN_TYPE: string;
       IS_NULLABLE: string;
-      COLUMN_KEY: string;
       COLUMN_DEFAULT: string | null;
       SRS_ID: number | null;
+      IS_PK: number | boolean | null;
     }>(
-      `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, SRS_ID
-       FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
-       ORDER BY ORDINAL_POSITION`,
-      [tableName, schema],
+      `SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.SRS_ID,
+              (k.COLUMN_NAME IS NOT NULL) AS IS_PK
+       FROM INFORMATION_SCHEMA.COLUMNS c
+       LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+         ON k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME
+        AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME = 'PRIMARY'
+       WHERE c.TABLE_NAME = ? AND c.TABLE_SCHEMA = COALESCE(?, DATABASE())
+       ORDER BY c.ORDINAL_POSITION`,
+      [tableName, this._schema],
     );
     return rows.map((r) => ({
       name: r.COLUMN_NAME,
@@ -669,7 +847,7 @@ export class MysqlAdapter extends BaseDbAdapter {
           ? r.COLUMN_TYPE.toUpperCase()
           : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
       notnull: r.IS_NULLABLE === "NO",
-      pk: r.COLUMN_KEY === "PRI",
+      pk: Boolean(Number(r.IS_PK ?? 0)),
       dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT),
     }));
   }
@@ -687,33 +865,39 @@ export class MysqlAdapter extends BaseDbAdapter {
       renamed.push(field.physicalName);
     }
 
-    // Adds
+    const quotedTable = quoteTableName(tableName);
+
+    // Adds — a required column without a model default gets an invented type
+    // default so existing rows are filled, then loses it again immediately:
+    // the live column must end in the canonical "no default" state or the
+    // next diff would try to remove a default the adapter itself invented.
+    // An increment column is added WITHOUT AUTO_INCREMENT (it would need a key
+    // in the same statement) — the primary-key rebuild declares it.
     for (const field of diff.added) {
-      const sqlType = this.typeMapper(field);
-      let ddl = `ALTER TABLE ${quoteTableName(tableName)} ADD COLUMN ${qi(field.physicalName)} ${sqlType}`;
-      if (!field.optional && !field.isPrimaryKey) {
-        ddl += " NOT NULL";
-      }
-      if (field.defaultValue?.kind === "value") {
-        ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-      } else if (!field.optional && !field.isPrimaryKey) {
-        // Geometry columns reject plain literals — use an expression default
-        ddl +=
-          field.isGeoPoint && !field.encrypted
-            ? ` DEFAULT (ST_SRID(POINT(0, 0), 4326))`
-            : ` DEFAULT ${defaultValueForType(field.designType)}`;
-      }
-      if (field.collate) {
-        const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
-        ddl += ` COLLATE ${nativeCollate ?? collationToMysql(field.collate)}`;
-      }
+      const { def, inventedDefault } = buildColumnDefinition(field, this._columnCtx("add"));
+      const ddl = `ALTER TABLE ${quotedTable} ADD COLUMN ${def}`;
       this._log(ddl);
       await this._exec().exec(ddl);
+      if (inventedDefault) {
+        const drop = `ALTER TABLE ${quotedTable} ALTER COLUMN ${qi(field.physicalName)} DROP DEFAULT`;
+        this._log(drop);
+        await this._exec().exec(drop);
+      }
       added.push(field.physicalName);
     }
 
-    // Type changes — MySQL supports ALTER TABLE MODIFY COLUMN natively
+    // Modifications — type, nullability and default changes on one column
+    // collapse into ONE `MODIFY COLUMN <full definition>` (the definition
+    // carries DEFAULT / COLLATE / ON UPDATE / AUTO_INCREMENT, so nothing is
+    // silently reset by a partial MODIFY). Columns entering a pending primary
+    // key are left to `rebuildPrimaryKey`, which re-declares them in the swap
+    // statement (their AUTO_INCREMENT needs the key in the same statement).
+    const enteringKey = new Set(diff.primaryKeyChanged?.to ?? []);
+    const modified = new Map<string, TDbFieldMeta>();
     for (const { field } of diff.typeChanged ?? []) {
+      if (enteringKey.has(field.physicalName)) {
+        continue;
+      }
       const sqlType = this.typeMapper(field);
       if (field.isGeoPoint && !field.encrypted && sqlType.startsWith("POINT")) {
         // v1 JSON '[lng, lat]' → native POINT SRID 4326. MODIFY can't convert
@@ -721,37 +905,33 @@ export class MysqlAdapter extends BaseDbAdapter {
         await this._migrateJsonColumnToPoint(tableName, field);
         continue;
       }
-      let ddl = `ALTER TABLE ${quoteTableName(tableName)} MODIFY COLUMN ${qi(field.physicalName)} ${sqlType}`;
-      if (!field.optional && !field.isPrimaryKey) {
-        ddl += " NOT NULL";
-      }
-      this._log(ddl);
-      await this._exec().exec(ddl);
+      modified.set(field.physicalName, field);
     }
-
-    // Nullable changes
     for (const { field } of diff.nullableChanged ?? []) {
-      const sqlType = this.typeMapper(field);
-      const nullability = field.optional ? "NULL" : "NOT NULL";
-      const ddl = `ALTER TABLE ${quoteTableName(tableName)} MODIFY COLUMN ${qi(field.physicalName)} ${sqlType} ${nullability}`;
-      this._log(ddl);
-      await this._exec().exec(ddl);
+      if (enteringKey.has(field.physicalName)) {
+        continue;
+      }
+      if (!field.optional) {
+        // NULLs would make the NOT NULL MODIFY fail under strict sql_mode —
+        // backfill with the model default (or a type default) first.
+        const sqlType = this.typeMapper(field);
+        const fallback =
+          field.defaultValue?.kind === "value"
+            ? mysqlDefaultLiteral(sqlType, field.designType, field.defaultValue.value)
+            : mysqlTypeDefault(sqlType, field);
+        const backfill = `UPDATE ${quotedTable} SET ${qi(field.physicalName)} = ${fallback} WHERE ${qi(field.physicalName)} IS NULL`;
+        this._log(backfill);
+        await this._exec().exec(backfill);
+      }
+      modified.set(field.physicalName, field);
     }
-
-    // Default value changes
     for (const { field } of diff.defaultChanged ?? []) {
-      const sqlType = this.typeMapper(field);
-      let ddl = `ALTER TABLE ${quoteTableName(tableName)} MODIFY COLUMN ${qi(field.physicalName)} ${sqlType}`;
-      if (!field.optional && !field.isPrimaryKey) {
-        ddl += " NOT NULL";
+      if (!enteringKey.has(field.physicalName)) {
+        modified.set(field.physicalName, field);
       }
-      if (field.defaultValue?.kind === "value") {
-        ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-      } else if (field.defaultValue?.kind === "fn") {
-        ddl += ` DEFAULT ${field.defaultValue.fn === "now" ? "CURRENT_TIMESTAMP" : field.defaultValue.fn === "uuid" ? "(UUID())" : `(${field.defaultValue.fn}())`}`;
-      } else {
-        ddl += " DEFAULT NULL";
-      }
+    }
+    for (const field of modified.values()) {
+      const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
       this._log(ddl);
       await this._exec().exec(ddl);
     }
@@ -763,25 +943,23 @@ export class MysqlAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
     const tempName = `${this._table.tableName}__tmp_${Date.now()}`;
 
-    // Disable FK checks during recreation
-    await this._exec().exec("SET FOREIGN_KEY_CHECKS = 0");
+    // `SET FOREIGN_KEY_CHECKS` is session-scoped: every statement of the
+    // recreate must run on the SAME dedicated connection (the pool would hand
+    // the DROP to a connection where checks are still on).
+    const tx = this._txConnection();
+    const conn = tx ?? (await this.driver.getConnection());
+    const dedicated = tx === undefined;
+    await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
     try {
       // 1. Create new table with temp name
       const createSql = buildCreateTable(
         tempName,
         this._table.fieldDescriptors,
         this._table.foreignKeys,
-        {
-          engine: this._engine,
-          charset: this._charset,
-          collation: this._collation,
-          autoIncrementStart: this._autoIncrementStart,
-          incrementFields: this._incrementFields,
-          onUpdateFields: this._onUpdateFields,
-        },
+        this._tableOptions(),
       );
       this._log(createSql);
-      await this._exec().exec(createSql);
+      await conn.exec(createSql);
 
       // 2. Get columns that exist in both old and new
       const oldCols = (await this.getExistingColumns()).map((c) => c.name);
@@ -810,14 +988,17 @@ export class MysqlAdapter extends BaseDbAdapter {
           .join(", ");
         const copySql = `INSERT INTO ${qi(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
         this._log(copySql);
-        await this._exec().exec(copySql);
+        await conn.exec(copySql);
       }
 
       // 4. Drop old, rename new
-      await this._exec().exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
-      await this._exec().exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
+      await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
+      await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
     } finally {
-      await this._exec().exec("SET FOREIGN_KEY_CHECKS = 1");
+      await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
+      if (dedicated) {
+        conn.release();
+      }
     }
   }
 
@@ -903,28 +1084,52 @@ export class MysqlAdapter extends BaseDbAdapter {
     const tableName = this._table.tableName;
     const schema = this._schema;
 
-    // Pre-build lookup for string fields (O(1) per index field instead of linear scan)
-    const stringFields = new Set(
-      this._table.fieldDescriptors
-        .filter((f) => f.designType === "string")
-        .map((f) => f.physicalName),
-    );
+    // Key-length prefixes are a function of the MAPPED column type and the
+    // table charset (MySQL has no column-level charset annotation). Live key
+    // parts are rendered the same way — with a SUB_PART equal to the column's
+    // declared length normalised to "no prefix" — so the definition-drift
+    // check rebuilds an index exactly once when its prefix must change.
+    const bytesPerChar = mysqlBytesPerChar(this._charset);
+    const fields = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
+    const mappedType = (column: string): string | undefined => {
+      const field = fields.get(column);
+      return field ? this.typeMapper(field) : undefined;
+    };
+    const desiredPrefix = (column: string): number | undefined => {
+      const type = mappedType(column);
+      return type === undefined ? undefined : mysqlIndexPrefix(type, bytesPerChar);
+    };
+    const renderPart = (column: string, prefix: number | undefined): string =>
+      prefix === undefined ? column : `${column}(${prefix})`;
 
     await this.syncIndexesWithDiff({
       listExisting: async () => {
-        const rows = await this._exec().all<{ name: string; columns: string | null }>(
-          `SELECT INDEX_NAME AS name,
-                  GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS columns
+        const rows = await this._exec().all<{
+          INDEX_NAME: string;
+          COLUMN_NAME: string;
+          SUB_PART: number | null;
+          SEQ_IN_INDEX: number;
+        }>(
+          `SELECT INDEX_NAME, COLUMN_NAME, SUB_PART, SEQ_IN_INDEX
            FROM INFORMATION_SCHEMA.STATISTICS
            WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
-           GROUP BY INDEX_NAME`,
+           ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
           [tableName, schema],
         );
-        return rows.map((r) => ({
-          name: r.name,
-          columns: r.columns ? r.columns.split(",") : undefined,
-        }));
+        const byName = new Map<string, string[]>();
+        for (const r of rows) {
+          let subPart = r.SUB_PART ?? undefined;
+          const type = mappedType(r.COLUMN_NAME);
+          if (subPart !== undefined && type !== undefined && mysqlCharLength(type) === subPart) {
+            subPart = undefined;
+          }
+          const parts = byName.get(r.INDEX_NAME) ?? [];
+          parts.push(renderPart(r.COLUMN_NAME, subPart));
+          byName.set(r.INDEX_NAME, parts);
+        }
+        return [...byName].map(([name, columns]) => ({ name, columns }));
       },
+      renderDesiredColumn: (_index, f) => renderPart(f.name, desiredPrefix(f.name)),
       createIndex: async (index: TDbIndex) => {
         if (index.type === "geo") {
           // MySQL requires NOT NULL columns for SPATIAL indexes. Optional
@@ -945,15 +1150,15 @@ export class MysqlAdapter extends BaseDbAdapter {
         }
         const unique = index.type === "unique" ? "UNIQUE " : "";
         const fulltext = index.type === "fulltext" ? "FULLTEXT " : "";
-        // FULLTEXT indexes accept TEXT columns; others need a key length prefix
-        // for string fields that may still be TEXT in pre-existing tables
+        // FULLTEXT indexes accept TEXT columns; others take a key-length
+        // prefix only where the mapped type requires one (see mysqlIndexPrefix)
         const isFulltext = index.type === "fulltext";
         const cols = index.fields
           .map((f) => {
             const col = qi(f.name);
-            const prefix = !isFulltext && stringFields.has(f.name) ? "(255)" : "";
+            const prefix = isFulltext ? undefined : desiredPrefix(f.name);
             const order = isFulltext ? "" : ` ${f.sort === "desc" ? "DESC" : "ASC"}`;
-            return `${col}${prefix}${order}`;
+            return `${col}${prefix === undefined ? "" : `(${prefix})`}${order}`;
           })
           .join(", ");
         const sql = `CREATE ${fulltext}${unique}INDEX ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} (${cols})`;
@@ -1398,7 +1603,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       `ALTER TABLE ${quotedTable} RENAME COLUMN ${tmp} TO ${col}`,
       ...(field.optional || field.isPrimaryKey
         ? []
-        : [`ALTER TABLE ${quotedTable} MODIFY COLUMN ${col} POINT SRID 4326 NOT NULL`]),
+        : [
+            `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`,
+          ]),
     ];
     for (const ddl of steps) {
       this._log(ddl);

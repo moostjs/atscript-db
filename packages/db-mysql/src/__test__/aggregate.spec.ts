@@ -8,12 +8,14 @@ import { prepareFixtures, createMockDriver } from "./test-utils";
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 let AggOrders: any;
+let AggPages: any;
 
 describe("MysqlAdapter aggregate", () => {
   beforeAll(async () => {
     await prepareFixtures();
     const fixtures = await import("./fixtures/agg-orders.as");
     AggOrders = fixtures.AggOrders;
+    AggPages = fixtures.AggPages;
   });
 
   it("groups by one dimension with SUM", async () => {
@@ -137,6 +139,48 @@ describe("MysqlAdapter aggregate", () => {
     expect(call.sql).toContain("ORDER BY `total` DESC");
   });
 
+  it("$having on an aggregate alias renders the aggregate expression, not the alias", async () => {
+    const driver = createMockDriver({ allResult: [{ status: "active", total: 450 }] });
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(AggOrders, adapter);
+
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["status"],
+        $select: ["status", { $fn: "sum", $field: "amount", $as: "total" }] as any,
+        $having: { total: { $gt: 100 } } as any,
+      },
+    });
+
+    const call = driver.calls[0];
+    expect(call.method).toBe("all");
+    expect(call.sql).toBe(
+      "SELECT `status`, SUM(`amount`) AS `total` FROM `orders` WHERE 1=1 GROUP BY `status` HAVING SUM(`amount`) > ?",
+    );
+    expect(call.params).toEqual([100]);
+  });
+
+  it("$having mixes alias expressions and grouped columns", async () => {
+    const driver = createMockDriver({ allResult: [] });
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(AggOrders, adapter);
+
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["status"],
+        $select: ["status", { $fn: "count", $field: "*", $as: "cnt" }] as any,
+        $having: { $or: [{ cnt: { $gte: 2 } }, { status: "active" }] } as any,
+      },
+    });
+
+    expect(driver.calls[0].sql).toBe(
+      "SELECT `status`, COUNT(*) AS `cnt` FROM `orders` WHERE 1=1 GROUP BY `status` HAVING (COUNT(*) >= ? OR `status` = ?)",
+    );
+    expect(driver.calls[0].params).toEqual([2, "active"]);
+  });
+
   it("supports pagination with $limit and $skip", async () => {
     const allResult = [
       { status: "active", currency: "EUR", total: 150 },
@@ -223,5 +267,54 @@ describe("MysqlAdapter aggregate", () => {
     const call = driver.calls[0];
     expect(call.sql).toContain("COUNT(*) AS `total_rows`");
     expect(call.sql).toContain("COUNT(`amount`) AS `with_amount`");
+  });
+
+  // Aggregate rows have the regular-row shape (since 0.1.128): a grouped
+  // flattened leaf (`stats__views`) comes back nested, not as a dotted key.
+  it("grouped flattened-object keys come back nested; $having matches them by logical path", async () => {
+    const driver = createMockDriver({ allResult: [{ stats__views: 10, cnt: 2 }] });
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(AggPages, adapter);
+
+    const result = await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["stats.views"],
+        $select: ["stats.views", { $fn: "count", $field: "*", $as: "cnt" }] as any,
+        $having: { "stats.views": { $gte: 10 } } as any,
+      },
+    });
+
+    expect(result).toEqual([{ stats: { views: 10 }, cnt: 2 }]);
+    const call = driver.calls[0];
+    expect(call.sql).toContain("GROUP BY `stats__views`");
+    expect(call.sql).toContain("HAVING `stats__views` >= ?");
+    expect(call.params).toEqual([10]);
+  });
+
+  it("$having on a real but non-grouped column is rejected in core before any SQL (since 0.1.128)", async () => {
+    const driver = createMockDriver({ allResult: [] });
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(AggOrders, adapter);
+
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: {
+          $groupBy: ["status"],
+          $select: ["status", { $fn: "sum", $field: "amount", $as: "total" }] as any,
+          $having: { amount: { $gt: 1 } } as any,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [
+        {
+          path: "amount",
+          message: '$having key "amount" must be an aggregate alias or a $groupBy field',
+        },
+      ],
+    });
+    expect(driver.calls).toHaveLength(0);
   });
 });

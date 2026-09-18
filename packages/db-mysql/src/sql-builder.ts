@@ -30,6 +30,241 @@ export interface TMysqlTableOptions {
   autoIncrementStart?: number;
   incrementFields?: ReadonlySet<string>;
   onUpdateFields?: ReadonlyMap<string, string>;
+  /** Adapter type mapper (vector/encrypted folding). Falls back to `mysqlTypeFromField`. */
+  typeMapper?: (field: TDbFieldMeta) => string;
+  /**
+   * Target tables whose inline FOREIGN KEY constraints are omitted (added by
+   * `syncForeignKeys` once every member of a foreign-key cycle exists).
+   * @since 0.1.128
+   */
+  deferForeignKeysTo?: ReadonlySet<string>;
+}
+
+// ── Column definitions (since 0.1.128) ──────────────────────────────────────
+
+export interface TMysqlColumnContext {
+  /** Physical names of `@db.default.increment` columns (→ AUTO_INCREMENT). */
+  incrementFields?: ReadonlySet<string>;
+  /** Physical name → ON UPDATE expression (`@db.mysql.onUpdate`). */
+  onUpdateFields?: ReadonlyMap<string, string>;
+  /** Adapter type mapper. Falls back to `mysqlTypeFromField`. */
+  typeMapper?: (field: TDbFieldMeta) => string;
+  /**
+   * - `create`: column of a CREATE TABLE (PRIMARY KEY implies NOT NULL);
+   * - `add`: ALTER TABLE … ADD COLUMN — never `AUTO_INCREMENT` (MySQL requires
+   *   a key in the same statement; the primary-key rebuild re-declares the
+   *   column with it); a required column without a model default gets an
+   *   invented type default so existing rows can be filled
+   *   (`inventedDefault: true`; the caller drops it right after);
+   * - `modify`: ALTER TABLE … MODIFY COLUMN — the full definition, so
+   *   DEFAULT / COLLATE / ON UPDATE / AUTO_INCREMENT are never lost.
+   */
+  purpose: "create" | "add" | "modify";
+}
+
+export interface TMysqlColumnDefinition {
+  /** `` `name` TYPE [AUTO_INCREMENT] NULL|NOT NULL [DEFAULT …] [COLLATE …] [ON UPDATE …] `` */
+  def: string;
+  /** A type default was invented for a required, default-less column (`purpose: "add"`). */
+  inventedDefault: boolean;
+}
+
+/** TEXT / BLOB families (`TINYTEXT` … `LONGBLOB`). */
+const TEXT_BLOB_RE = /^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b/i;
+
+/** Spatial types (`POINT SRID 4326`, `GEOMETRY`, `MULTI*`, …). */
+const GEOMETRY_RE =
+  /^(GEOMETRY|POINT|LINESTRING|POLYGON|MULTIPOINT|MULTILINESTRING|MULTIPOLYGON|GEOMETRYCOLLECTION)\b/i;
+
+/** TEXT/BLOB/JSON/GEOMETRY families only accept the expression form `DEFAULT (expr)` (MySQL ≥ 8.0.13). */
+function needsExpressionDefault(sqlType: string): boolean {
+  return TEXT_BLOB_RE.test(sqlType) || /^JSON\b/i.test(sqlType) || GEOMETRY_RE.test(sqlType);
+}
+
+/**
+ * Renders a model value default for a column of `sqlType`: the SQL literal,
+ * wrapped in the expression form for the types that require it.
+ */
+export function mysqlDefaultLiteral(sqlType: string, designType: string, value: string): string {
+  const literal = defaultValueToSqlLiteral(designType, value);
+  return needsExpressionDefault(sqlType) ? `(${literal})` : literal;
+}
+
+/**
+ * Type-aware fallback value for a column that must get a value it has no
+ * model default for (invented ADD default, NULL backfill before NOT NULL).
+ * Every value is legal for its type under strict `sql_mode`.
+ */
+export function mysqlTypeDefault(sqlType: string, field: TDbFieldMeta): string {
+  const type = sqlType.toUpperCase();
+  if (type.startsWith("JSON")) {
+    return "('{}')";
+  }
+  if (GEOMETRY_RE.test(type)) {
+    return "(ST_SRID(POINT(0, 0), 4326))";
+  }
+  if (/^(TIMESTAMP|DATETIME)/.test(type)) {
+    return "CURRENT_TIMESTAMP";
+  }
+  if (/^DATE\b/.test(type)) {
+    return "'1970-01-01'";
+  }
+  if (/^YEAR\b/.test(type)) {
+    return "1970";
+  }
+  if (/^TIME\b/.test(type)) {
+    return "'00:00:00'";
+  }
+  if (TEXT_BLOB_RE.test(type)) {
+    return "('')";
+  }
+  if (/^(VARCHAR|CHAR|VARBINARY|BINARY|ENUM|SET)\b/.test(type)) {
+    return "''";
+  }
+  if (
+    /^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|DOUBLE|FLOAT|DECIMAL|NUMERIC|REAL|BIT|BOOL)/.test(
+      type,
+    )
+  ) {
+    return "0";
+  }
+  return defaultValueForType(field.designType);
+}
+
+// ── Index key-length prefixes (since 0.1.128) ──────────────────────────────
+
+/** InnoDB maximum index key part in bytes (ROW_FORMAT=DYNAMIC/COMPRESSED, the default since 5.7.7). */
+export const MYSQL_MAX_KEY_PART_BYTES = 3072;
+
+/** Prefix used for TEXT/BLOB key parts — unchanged from earlier releases so existing indexes keep their definition. */
+export const MYSQL_TEXT_PREFIX = 255;
+
+/** Bytes per character of a table charset (unknown charsets assume the widest, 4). */
+export function mysqlBytesPerChar(charset: string | undefined): number {
+  switch ((charset ?? "utf8mb4").toLowerCase()) {
+    case "utf8mb4": {
+      return 4;
+    }
+    case "utf8":
+    case "utf8mb3": {
+      return 3;
+    }
+    case "latin1":
+    case "ascii":
+    case "binary": {
+      return 1;
+    }
+    default: {
+      return 4;
+    }
+  }
+}
+
+/** Declared character length of a `CHAR(n)` / `VARCHAR(n)` mapped type, else `undefined`. */
+export function mysqlCharLength(mappedType: string): number | undefined {
+  const m = /^(?:VAR)?CHAR\((\d+)\)/i.exec(mappedType.trim());
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * Key-length prefix a plain/unique index needs for a column of `mappedType`:
+ * - `CHAR(n)` / `VARCHAR(n)` within the key-part limit (3072 bytes ÷ bytes per
+ *   char: 768 chars on utf8mb4) → no prefix; longer → the full limit (a
+ *   shorter constant would needlessly weaken uniqueness);
+ * - `BINARY(n)` / `VARBINARY(n)` → same rule with 1 byte per char;
+ * - TEXT / BLOB families → 255 (a prefix is mandatory);
+ * - everything else (numeric, ENUM, JSON, VECTOR, geometry, …) → never.
+ */
+export function mysqlIndexPrefix(mappedType: string, bytesPerChar: number): number | undefined {
+  const type = mappedType.trim().toUpperCase();
+  const chars = mysqlCharLength(type);
+  if (chars !== undefined) {
+    const limit = Math.floor(MYSQL_MAX_KEY_PART_BYTES / bytesPerChar);
+    return chars <= limit ? undefined : limit;
+  }
+  const bin = /^(?:VAR)?BINARY\((\d+)\)/.exec(type);
+  if (bin) {
+    return Number(bin[1]) <= MYSQL_MAX_KEY_PART_BYTES ? undefined : MYSQL_MAX_KEY_PART_BYTES;
+  }
+  if (TEXT_BLOB_RE.test(type)) {
+    return MYSQL_TEXT_PREFIX;
+  }
+  return undefined;
+}
+
+/**
+ * The ONE column-definition renderer for CREATE TABLE, ADD COLUMN and MODIFY
+ * COLUMN. Rules:
+ * 1. type from the adapter mapper (vector/encrypted folding);
+ * 2. `AUTO_INCREMENT` for `@db.default.increment` columns on `create` and
+ *    `modify` — never on `add` (ER 1075 without a key; `rebuildPrimaryKey`
+ *    owns the columns entering the key and re-declares them);
+ * 3. nullability — `create`: as MySQL infers it (PRIMARY KEY / AUTO_INCREMENT
+ *    imply NOT NULL); `add`/`modify`: always explicit (`NULL` matters for
+ *    TIMESTAMP under `explicit_defaults_for_timestamp=OFF`, and MySQL rejects
+ *    an explicit `NULL` on a key column, so key columns say NOT NULL);
+ * 4. DEFAULT — a model default only; NEVER `DEFAULT NULL` (it is the implicit
+ *    default of a nullable column, and `NOT NULL DEFAULT NULL` is ER 1067);
+ *    expression form for TEXT/BLOB/JSON/GEOMETRY; invented type default for a
+ *    required default-less column on `add`;
+ * 5. COLLATE (native `@db.mysql.collate` or portable `@db.column.collate`);
+ * 6. ON UPDATE.
+ */
+export function buildColumnDefinition(
+  field: TDbFieldMeta,
+  ctx: TMysqlColumnContext,
+): TMysqlColumnDefinition {
+  const sqlType = ctx.typeMapper?.(field) ?? mysqlTypeFromField(field);
+  const increment =
+    ctx.purpose !== "add" && (ctx.incrementFields?.has(field.physicalName) ?? false);
+  let def = `${qi(field.physicalName)} ${sqlType}`;
+
+  if (increment) {
+    def += " AUTO_INCREMENT";
+  }
+
+  if (ctx.purpose === "create") {
+    if (!field.optional && !field.isPrimaryKey && !increment) {
+      def += " NOT NULL";
+    }
+  } else {
+    def += !field.optional || field.isPrimaryKey || increment ? " NOT NULL" : " NULL";
+  }
+
+  let inventedDefault = false;
+  if (field.defaultValue?.kind === "value") {
+    def += ` DEFAULT ${mysqlDefaultLiteral(sqlType, field.designType, field.defaultValue.value)}`;
+  } else if (field.defaultValue?.kind === "fn") {
+    // DB-level defaults for uuid and now; increment is AUTO_INCREMENT above
+    if (field.defaultValue.fn === "uuid") {
+      def += " DEFAULT (UUID())";
+    } else if (field.defaultValue.fn === "now") {
+      def += " DEFAULT CURRENT_TIMESTAMP";
+    }
+  } else if (
+    ctx.purpose === "add" &&
+    !field.optional &&
+    !field.isPrimaryKey &&
+    !increment &&
+    !/^VECTOR\b/i.test(sqlType)
+  ) {
+    def += ` DEFAULT ${mysqlTypeDefault(sqlType, field)}`;
+    inventedDefault = true;
+  }
+
+  const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
+  if (nativeCollate) {
+    def += ` COLLATE ${nativeCollate}`;
+  } else if (field.collate) {
+    def += ` COLLATE ${collationToMysql(field.collate)}`;
+  }
+
+  const onUpdate = ctx.onUpdateFields?.get(field.physicalName);
+  if (onUpdate) {
+    def += ` ON UPDATE ${onUpdate}`;
+  }
+
+  return { def, inventedDefault };
 }
 
 // ── Identifier quoting ──────────────────────────────────────────────────────
@@ -382,75 +617,37 @@ export function buildCreateTable(
   foreignKeys?: ReadonlyMap<string, TDbForeignKey>,
   options?: TMysqlTableOptions,
 ): string {
-  const colDefs: string[] = [];
   const primaryKeys = fields.filter((f) => f.isPrimaryKey);
+  const ctx: TMysqlColumnContext = {
+    incrementFields: options?.incrementFields,
+    onUpdateFields: options?.onUpdateFields,
+    typeMapper: options?.typeMapper,
+    purpose: "create",
+  };
 
-  for (const field of fields) {
-    if (field.ignored) {
-      continue;
-    }
-
-    const sqlType = mysqlTypeFromField(field);
-    let def = `${qi(field.physicalName)} ${sqlType}`;
-
-    // AUTO_INCREMENT for integer PKs with @db.default.increment
-    if (options?.incrementFields?.has(field.physicalName)) {
-      def += " AUTO_INCREMENT";
-    }
-
-    if (
-      !field.optional &&
-      !field.isPrimaryKey &&
-      !options?.incrementFields?.has(field.physicalName)
-    ) {
-      def += " NOT NULL";
-    }
-    if (field.defaultValue?.kind === "value") {
-      def += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-    } else if (field.defaultValue?.kind === "fn") {
-      // DB-level defaults for uuid and now
-      if (field.defaultValue.fn === "uuid") {
-        def += " DEFAULT (UUID())";
-      } else if (field.defaultValue.fn === "now") {
-        def += " DEFAULT CURRENT_TIMESTAMP";
-      }
-      // increment is handled via AUTO_INCREMENT above
-    }
-
-    // Collation (portable or native override)
-    const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
-    if (nativeCollate) {
-      def += ` COLLATE ${nativeCollate}`;
-    } else if (field.collate) {
-      def += ` COLLATE ${collationToMysql(field.collate)}`;
-    }
-
-    // ON UPDATE expression
-    const onUpdate = options?.onUpdateFields?.get(field.physicalName);
-    if (onUpdate) {
-      def += ` ON UPDATE ${onUpdate}`;
-    }
-
-    colDefs.push(def);
-  }
+  const colDefs = fields
+    .filter((f) => !f.ignored)
+    .map((f) => ({ name: f.physicalName, def: buildColumnDefinition(f, ctx).def }));
+  const constraints: string[] = [];
 
   // Primary key constraint
   if (primaryKeys.length === 1) {
-    const pkCol = qi(primaryKeys[0].physicalName);
-    for (let i = 0; i < colDefs.length; i++) {
-      if (colDefs[i].startsWith(pkCol)) {
-        colDefs[i] += " PRIMARY KEY";
-        break;
-      }
+    const pk = colDefs.find((c) => c.name === primaryKeys[0].physicalName);
+    if (pk) {
+      pk.def += " PRIMARY KEY";
     }
   } else if (primaryKeys.length > 1) {
     const pkCols = primaryKeys.map((pk) => qi(pk.physicalName)).join(", ");
-    colDefs.push(`PRIMARY KEY (${pkCols})`);
+    constraints.push(`PRIMARY KEY (${pkCols})`);
   }
 
-  // Foreign key constraints
+  // Foreign key constraints — members of a foreign-key cycle are created
+  // without the inline constraints to each other (added by syncForeignKeys)
   if (foreignKeys) {
     for (const fk of foreignKeys.values()) {
+      if (options?.deferForeignKeysTo?.has(fk.targetTable)) {
+        continue;
+      }
       const localCols = fk.fields.map((f) => qi(f)).join(", ");
       const targetCols = fk.targetFields.map((f) => qi(f)).join(", ");
       let constraint = `FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
@@ -460,11 +657,12 @@ export function buildCreateTable(
       if (fk.onUpdate) {
         constraint += ` ON UPDATE ${refActionToSql(fk.onUpdate)}`;
       }
-      colDefs.push(constraint);
+      constraints.push(constraint);
     }
   }
 
-  let sql = `CREATE TABLE IF NOT EXISTS ${quoteTableName(table)} (${colDefs.join(", ")})`;
+  const body = [...colDefs.map((c) => c.def), ...constraints].join(", ");
+  let sql = `CREATE TABLE IF NOT EXISTS ${quoteTableName(table)} (${body})`;
 
   // Table options
   const engine = options?.engine ?? "InnoDB";

@@ -91,19 +91,19 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "id",
           COLUMN_TYPE: "int",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "PRI",
+          IS_PK: 1,
           COLUMN_DEFAULT: null,
         },
         {
           COLUMN_NAME: "name",
           COLUMN_TYPE: "text",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "",
+          IS_PK: 0,
           COLUMN_DEFAULT: null,
         },
       ];
       const driver = createSyncMockDriver({
-        allResults: new Map([["INFORMATION_SCHEMA.COLUMNS", cannedColumns]]),
+        allResults: new Map<string, unknown[]>([["INFORMATION_SCHEMA.COLUMNS", cannedColumns]]),
       });
       const adapter = new MysqlAdapter(driver);
       new AtscriptDbTable(UsersTable, adapter);
@@ -121,7 +121,7 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "created_at",
           COLUMN_TYPE: "timestamp",
           IS_NULLABLE: "YES",
-          COLUMN_KEY: "",
+          IS_PK: 0,
           COLUMN_DEFAULT: "CURRENT_TIMESTAMP",
         },
       ];
@@ -141,7 +141,7 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "id",
           COLUMN_TYPE: "varchar(255)",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "PRI",
+          IS_PK: 1,
           COLUMN_DEFAULT: "uuid()",
         },
       ];
@@ -161,7 +161,7 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "status",
           COLUMN_TYPE: "varchar(255)",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "",
+          IS_PK: 0,
           COLUMN_DEFAULT: "'active'",
         },
       ];
@@ -338,7 +338,7 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "id",
           COLUMN_TYPE: "int",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "PRI",
+          IS_PK: 1,
           COLUMN_DEFAULT: null,
         },
       ];
@@ -361,14 +361,14 @@ describe("MysqlAdapter — schema sync", () => {
           COLUMN_NAME: "id",
           COLUMN_TYPE: "int",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "PRI",
+          IS_PK: 1,
           COLUMN_DEFAULT: null,
         },
         {
           COLUMN_NAME: "name",
           COLUMN_TYPE: "text",
           IS_NULLABLE: "NO",
-          COLUMN_KEY: "",
+          IS_PK: 0,
           COLUMN_DEFAULT: null,
         },
       ];
@@ -469,11 +469,38 @@ describe("MysqlAdapter — schema sync", () => {
     });
 
     it("should skip existing indexes", async () => {
+      // Per-key-part rows (since 0.1.128 the query is no longer GROUP_CONCATed)
       const existingIndexes = [
-        { name: "atscript__unique__email_idx" },
-        { name: "atscript__plain__name_idx" },
-        { name: "atscript__plain__created_idx" },
-        { name: "atscript__fulltext__search_idx" },
+        {
+          INDEX_NAME: "atscript__unique__email_idx",
+          COLUMN_NAME: "email_address",
+          SUB_PART: 255,
+          SEQ_IN_INDEX: 1,
+        },
+        {
+          INDEX_NAME: "atscript__plain__name_idx",
+          COLUMN_NAME: "name",
+          SUB_PART: 255,
+          SEQ_IN_INDEX: 1,
+        },
+        {
+          INDEX_NAME: "atscript__plain__name_idx",
+          COLUMN_NAME: "createdAt",
+          SUB_PART: null,
+          SEQ_IN_INDEX: 2,
+        },
+        {
+          INDEX_NAME: "atscript__plain__created_idx",
+          COLUMN_NAME: "createdAt",
+          SUB_PART: null,
+          SEQ_IN_INDEX: 1,
+        },
+        {
+          INDEX_NAME: "atscript__fulltext__search_idx",
+          COLUMN_NAME: "bio",
+          SUB_PART: null,
+          SEQ_IN_INDEX: 1,
+        },
       ];
       const driver = createSyncMockDriver({
         allResults: new Map([["INFORMATION_SCHEMA.STATISTICS", existingIndexes]]),
