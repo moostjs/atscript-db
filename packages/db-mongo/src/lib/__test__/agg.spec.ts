@@ -220,6 +220,67 @@ describe("buildAggregatePipeline", () => {
   });
 });
 
+// ── Dotted $groupBy paths (JSON / nested descendants) ────────────────────────
+// `$group` output field names may not contain `.`; a dotted path is keyed
+// positionally inside `_id` and projected back under its dotted path, which
+// `$project` nests (`{ metadata: { clicks } }`) — the same shape a dotted
+// `$select` yields on find.
+describe("buildAggregatePipeline — dotted $groupBy path", () => {
+  it("keys the dotted path positionally in _id and projects it back nested", () => {
+    const query = makeQuery({
+      groupBy: ["metadata.clicks"],
+      select: ["metadata.clicks", { $fn: "count", $field: "name", $as: "cnt" }],
+    });
+    const pipeline = buildAggregatePipeline(query);
+
+    expect(pipeline).toEqual([
+      { $match: {} },
+      {
+        $group: {
+          _id: { k0: "$metadata.clicks" },
+          cnt: { $sum: { $cond: [{ $ne: ["$name", null] }, 1, 0] } },
+        },
+      },
+      { $project: { _id: 0, "metadata.clicks": "$_id.k0", cnt: 1 } },
+    ]);
+  });
+
+  it("mixes plain and dotted paths — plain keys keep their name, dotted ones are positional", () => {
+    const query = makeQuery({
+      groupBy: ["category", "metadata.clicks"],
+      select: ["category", "metadata.clicks", { $fn: "count", $field: "*", $as: "cnt" }],
+      having: { cnt: { $gt: 1 }, "metadata.clicks": { $gte: 5 } },
+      sort: { "metadata.clicks": 1 },
+    });
+    const pipeline = buildAggregatePipeline(query);
+
+    expect(pipeline).toEqual([
+      { $match: {} },
+      { $group: { _id: { category: "$category", k1: "$metadata.clicks" }, cnt: { $sum: 1 } } },
+      { $project: { _id: 0, category: "$_id.category", "metadata.clicks": "$_id.k1", cnt: 1 } },
+      { $match: { $and: [{ cnt: { $gt: 1 } }, { "metadata.clicks": { $gte: 5 } }] } },
+      { $sort: { "metadata.clicks": 1 } },
+    ]);
+  });
+
+  it("count pipeline uses the positional key and projects it back when $having is present", () => {
+    const query = makeQuery({
+      groupBy: ["metadata.clicks"],
+      having: { "metadata.clicks": { $gt: 5 } },
+      count: true,
+    });
+    const pipeline = buildCountPipeline(query);
+
+    expect(pipeline).toEqual([
+      { $match: {} },
+      { $group: { _id: { k0: "$metadata.clicks" } } },
+      { $project: { _id: 0, "metadata.clicks": "$_id.k0" } },
+      { $match: { "metadata.clicks": { $gt: 5 } } },
+      { $count: "count" },
+    ]);
+  });
+});
+
 describe("buildCountPipeline", () => {
   it("returns group count pipeline", () => {
     const query = makeQuery({

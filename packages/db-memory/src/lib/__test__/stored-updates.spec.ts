@@ -326,6 +326,47 @@ describe("MemoryAdapter stored mode — mutations (update / replace / delete + O
     expect(row.version).toBe(1);
   });
 
+  // ── Versioned touch (since 0.1.128) ─────────────────────────────────────
+  // A PK-only patch carrying `$cas` executes the CAS write (the memory adapter
+  // selects with expectedVersion, then commits an empty merge + bump).
+  it("table.updateOne PK-only + $cas: hit bumps and reports { 1, 1 }; stale / missing → { 0, 0 }", async () => {
+    await users.insertOne(user({ id: "u1", name: "Ada" }));
+    expect(await users.updateOne({ id: "u1", $cas: { version: 0 } } as any)).toEqual({
+      matchedCount: 1,
+      modifiedCount: 1,
+    });
+    let row = await readUser("u1");
+    expect(row.version).toBe(1);
+    expect(row.name).toBe("Ada");
+
+    // Same expected version again → stale.
+    expect(await users.updateOne({ id: "u1", $cas: { version: 0 } } as any)).toEqual({
+      matchedCount: 0,
+      modifiedCount: 0,
+    });
+    row = await readUser("u1");
+    expect(row.version).toBe(1);
+
+    expect(await users.updateOne({ id: "nope", $cas: { version: 0 } } as any)).toEqual({
+      matchedCount: 0,
+      modifiedCount: 0,
+    });
+  });
+
+  // WHY: a PK-only patch WITHOUT `$cas` is a no-op — honest existence count, no bump.
+  it("table.updateOne PK-only without $cas: honest match, no write, no bump", async () => {
+    await users.insertOne(user({ id: "u1" }));
+    expect(await users.updateOne({ id: "u1" } as any)).toEqual({
+      matchedCount: 1,
+      modifiedCount: 0,
+    });
+    expect(await users.updateOne({ id: "nope" } as any)).toEqual({
+      matchedCount: 0,
+      modifiedCount: 0,
+    });
+    expect((await readUser("u1")).version).toBe(0);
+  });
+
   // WHY: AtscriptDbTable.deleteOne by id resolves the pk filter and removes the
   // row from the store.
   it("table.deleteOne: removes the row by id", async () => {

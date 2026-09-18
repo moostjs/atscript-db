@@ -41,3 +41,20 @@ describe("buildMongoFilter", () => {
     });
   });
 });
+
+// ── Finding 34: mixed comparison + logical nodes (uniqu ≥ 0.1.8 implicit AND) ──
+describe("buildMongoFilter — mixed comparison + logical nodes", () => {
+  it("ANDs sibling fields with the $or in key insertion order (three children → $and)", () => {
+    expect(
+      buildMongoFilter({ id: 101, nextRefreshAt: { $lte: 5 }, $or: [{ a: 1 }, { b: 2 }] } as any),
+    ).toEqual({
+      $and: [{ id: 101 }, { nextRefreshAt: { $lte: 5 } }, { $or: [{ a: 1 }, { b: 2 }] }],
+    });
+  });
+
+  it("a single field next to a $not keeps both predicates", () => {
+    expect(buildMongoFilter({ $not: { s: 1 }, id: 101 } as any)).toEqual({
+      $and: [{ $nor: [{ s: 1 }] }, { id: 101 }],
+    });
+  });
+});

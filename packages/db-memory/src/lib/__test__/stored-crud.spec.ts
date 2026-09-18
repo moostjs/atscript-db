@@ -187,6 +187,26 @@ describe("MemoryAdapter stored mode (driven through AtscriptDbTable)", () => {
     expect(row.version).toBe(0);
   });
 
+  // WHY (since 0.1.128): `undefined` ≡ absent, `null` ≡ explicit null — an
+  // undefined prop never lands in the stored document, and a patch with an
+  // undefined prop leaves the stored value untouched.
+  it("undefined props are absent on insert and untouched on patch; null is stored as null", async () => {
+    await users.insertOne(user({ id: "u1", nickname: undefined, tags: null }));
+    let row = (await users.findOne({ filter: { id: "u1" }, controls: {} })) as any;
+    expect("nickname" in row).toBe(false);
+    expect(row.tags).toBeNull();
+
+    await users.updateOne({ id: "u1", nickname: "nick" } as any);
+    await users.updateOne({ id: "u1", name: "Bea", nickname: undefined } as any);
+    row = (await users.findOne({ filter: { id: "u1" }, controls: {} })) as any;
+    expect(row.name).toBe("Bea");
+    expect(row.nickname).toBe("nick");
+
+    await users.updateOne({ id: "u1", nickname: null } as any);
+    row = (await users.findOne({ filter: { id: "u1" }, controls: {} })) as any;
+    expect(row.nickname).toBeNull();
+  });
+
   // WHY: composite keys must be encoded collision-proof — a naive string concat
   // ("a"+"b:c" === "a:b"+"c") would merge these into one row; JSON encoding
   // keeps them distinct.

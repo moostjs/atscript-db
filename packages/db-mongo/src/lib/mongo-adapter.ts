@@ -19,6 +19,8 @@ import {
   type TTableResolver,
   type WithRelation,
   type TColumnDiff,
+  type TDbObjectKind,
+  type TPrimaryKeyChange,
   type TSyncColumnResult,
   type TDbCollation,
   type TExistingTableOption,
@@ -79,6 +81,8 @@ import {
   dropTableByNameImpl,
   getDesiredTableOptionsImpl,
   getExistingTableOptionsImpl,
+  getObjectKindImpl,
+  hasRowsImpl,
   DESTRUCTIVE_OPTION_KEYS,
 } from "./mongo-schema-sync";
 import { validateMongoIdPlugin } from "./validate-plugins";
@@ -110,7 +114,7 @@ function isObjectIdColumn(fieldType: TAtscriptAnnotatedType): boolean {
   if (t.kind === "array") {
     return !!t.of && isObjectIdColumn(t.of);
   }
-  return t.tags?.has("objectId") === true && t.tags?.has("mongo") === true;
+  return t.tags?.has("objectId") === true && t.tags?.has("mongo");
 }
 
 function objectIdToStorage(value: unknown): unknown {
@@ -192,6 +196,11 @@ export class MongoAdapter extends BaseDbAdapter {
     return this.client;
   }
 
+  /** Every adapter over this client (or database handle) shares one session (since 0.1.128). */
+  protected override _transactionOwner(): unknown {
+    return this.client ?? this.db;
+  }
+
   /**
    * Per-client cache: whether transactions are unavailable (standalone MongoDB).
    * Shared across all adapter instances for the same client so topology is probed once.
@@ -258,6 +267,7 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Returns `{ session }` opts if inside a transaction, empty object otherwise. */
   protected _getSessionOpts(): { session: ClientSession } | Record<string, never> {
+    // Branded by owner: another adapter family's transaction is never handed out here.
     const session = this._getTransactionState() as ClientSession | undefined;
     return session ? { session } : MongoAdapter._noSession;
   }
@@ -1068,8 +1078,21 @@ export class MongoAdapter extends BaseDbAdapter {
     return tableExistsImpl(this as any as TMongoSchemaSyncHost);
   }
   async ensureTable(): Promise<void> {
+    // No inline constraints on MongoDB — `deferForeignKeysTo` does not apply
     return ensureTableImpl(this as any as TMongoSchemaSyncHost, this._table);
   }
+  async hasRows(tableName?: string): Promise<boolean> {
+    return hasRowsImpl(this as any as TMongoSchemaSyncHost, tableName);
+  }
+  async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
+    return getObjectKindImpl(this as any as TMongoSchemaSyncHost, name);
+  }
+  /**
+   * No physical primary key on MongoDB (`_id` is fixed): a `@meta.id` move is
+   * an index change that `syncIndexes` reconciles. Schema sync refuses the
+   * change on a populated collection for cross-adapter consistency.
+   */
+  async rebuildPrimaryKey(_change: TPrimaryKeyChange): Promise<void> {}
   override async syncIndexes(): Promise<void> {
     return syncIndexesImpl(this as any as TMongoSchemaSyncHost);
   }
@@ -1097,8 +1120,8 @@ export class MongoAdapter extends BaseDbAdapter {
   override getDesiredTableOptions(): TExistingTableOption[] {
     return getDesiredTableOptionsImpl(this._cappedOptions);
   }
-  override async getExistingTableOptions(): Promise<TExistingTableOption[]> {
-    return getExistingTableOptionsImpl(this as any as TMongoSchemaSyncHost);
+  override async getExistingTableOptions(tableName?: string): Promise<TExistingTableOption[]> {
+    return getExistingTableOptionsImpl(this as any as TMongoSchemaSyncHost, tableName);
   }
   override destructiveOptionKeys(): ReadonlySet<string> {
     return DESTRUCTIVE_OPTION_KEYS;

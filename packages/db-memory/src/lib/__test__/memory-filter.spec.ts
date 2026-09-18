@@ -266,3 +266,20 @@ describe("unsupported operator", () => {
     }
   });
 });
+
+// ── Finding 34: mixed comparison + logical nodes (uniqu ≥ 0.1.8 implicit AND) ──
+describe("mixed comparison + logical nodes — predicate isolation", () => {
+  const mixed: FilterExpr = {
+    id: 101,
+    nextRefreshAt: { $lte: 5 },
+    $or: [{ a: 1 }, { b: 2 }],
+  } as any;
+
+  it("matches only rows satisfying every sibling predicate AND the $or", () => {
+    expect(match(mixed, { id: 101, nextRefreshAt: 3, a: 1 })).toBe(true);
+    expect(match(mixed, { id: 102, nextRefreshAt: 3, a: 1 })).toBe(false); // id sibling
+    expect(match(mixed, { id: 101, nextRefreshAt: 9, a: 1 })).toBe(false); // range sibling
+    expect(match(mixed, { id: 101, nextRefreshAt: 3, a: 0, b: 0 })).toBe(false); // $or
+    expect(match(mixed, { id: 101, nextRefreshAt: 3, a: 0, b: 2 })).toBe(true);
+  });
+});

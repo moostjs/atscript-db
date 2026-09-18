@@ -3,6 +3,7 @@ import type { DbSpace, TDbFieldMeta } from "@atscript/db";
 import { syncSchema } from "@atscript/db/sync";
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
+import { MemoryAdapter } from "../memory-adapter";
 import { createTestSpace, prepareFixtures, user } from "./test-utils";
 
 // Populated after fixtures compile.
@@ -156,5 +157,20 @@ describe("MemoryAdapter — schema sync + capability overrides", () => {
 
     const name = descriptors.find((d: TDbFieldMeta) => d.path === "name")!;
     expect(adapter.canFilterField(name)).toBe(true);
+  });
+});
+
+// ── hasRows (since 0.1.128) ───────────────────────────────────────────────
+
+describe("MemoryAdapter.hasRows", () => {
+  // The base-class default (`count() > 0`) answers through `count()`, which
+  // reads the instance Map in stored mode and the snapshot in provider mode.
+  it("reports whether the store holds any row (base-class default)", async () => {
+    const db: DbSpace = createTestSpace();
+    await syncSchema(db, [User, Composite]);
+    const adapter = db.getAdapter(User) as MemoryAdapter;
+    expect(await adapter.hasRows()).toBe(false);
+    await db.getTable(User).insertOne(user({ id: "r1", name: "Row" }));
+    expect(await adapter.hasRows()).toBe(true);
   });
 });

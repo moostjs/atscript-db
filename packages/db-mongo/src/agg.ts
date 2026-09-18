@@ -38,13 +38,26 @@ function toAccumulator(expr: AggregateExpr): Document {
 }
 
 /**
+ * `$group` output field names (including `_id` sub-keys) may not contain `.`,
+ * so a dotted `$groupBy` path (a JSON/nested descendant such as
+ * `metadata.clicks`) is keyed positionally inside `_id` (`k0`, `k1`, …) and
+ * projected back under its dotted path — `$project` accepts dotted output
+ * keys and nests them, which is the row shape a dotted `$select` yields on
+ * find (`{ metadata: { clicks } }`). Plain paths keep their own name.
+ */
+function groupIdKey(field: string, index: number): string {
+  return field.includes(".") ? `k${index}` : field;
+}
+
+/**
  * Builds the common prefix stages: $match + $group._id from groupBy fields.
  * Shared by both full aggregate and count pipelines.
+ * `groupKeys` maps each `$groupBy` path to its `_id` sub-key.
  */
 function buildPrefix(query: DbQuery): {
   pipeline: Document[];
   groupId: Document;
-  groupBy: string[];
+  groupKeys: Array<[path: string, idKey: string]>;
   controls: DbQuery["controls"];
 } {
   const controls = query.controls || {};
@@ -52,11 +65,14 @@ function buildPrefix(query: DbQuery): {
   const pipeline: Document[] = [{ $match: buildMongoFilter(query.filter) }];
 
   const groupId: Document = {};
-  for (const field of groupBy) {
-    groupId[field] = `$${field}`;
+  const groupKeys: Array<[string, string]> = [];
+  for (const [index, field] of groupBy.entries()) {
+    const idKey = groupIdKey(field, index);
+    groupId[idKey] = `$${field}`;
+    groupKeys.push([field, idKey]);
   }
 
-  return { pipeline, groupId, groupBy, controls };
+  return { pipeline, groupId, groupKeys, controls };
 }
 
 /**
@@ -65,7 +81,7 @@ function buildPrefix(query: DbQuery): {
  * Pipeline: $match → $group → $project → $match(having) → $sort → $skip → $limit
  */
 export function buildAggregatePipeline(query: DbQuery): Document[] {
-  const { pipeline, groupId, groupBy, controls } = buildPrefix(query);
+  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query);
 
   // $group: dimensions + accumulators
   const groupStage: Document = { _id: groupId };
@@ -73,8 +89,8 @@ export function buildAggregatePipeline(query: DbQuery): Document[] {
   const aggregates = controls.$select?.aggregates;
 
   // Build $group accumulators and $project in a single pass over groupBy + aggregates
-  for (const field of groupBy) {
-    project[field] = `$_id.${field}`;
+  for (const [field, idKey] of groupKeys) {
+    project[field] = `$_id.${idKey}`;
   }
   if (aggregates) {
     for (const expr of aggregates) {
@@ -110,7 +126,7 @@ export function buildAggregatePipeline(query: DbQuery): Document[] {
  * Pipeline: $match → $group (just _id) → $project → $match(having) → $count
  */
 export function buildCountPipeline(query: DbQuery): Document[] {
-  const { pipeline, groupId, groupBy, controls } = buildPrefix(query);
+  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query);
 
   pipeline.push({ $group: { _id: groupId } });
 
@@ -118,8 +134,8 @@ export function buildCountPipeline(query: DbQuery): Document[] {
   if (controls.$having) {
     // Need $project to flatten _id so $having aliases resolve
     const project: Document = { _id: 0 };
-    for (const field of groupBy) {
-      project[field] = `$_id.${field}`;
+    for (const [field, idKey] of groupKeys) {
+      project[field] = `$_id.${idKey}`;
     }
     pipeline.push({ $project: project });
     pipeline.push({ $match: buildMongoFilter(controls.$having) });

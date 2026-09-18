@@ -1,11 +1,13 @@
 import type { Collection, CreateIndexesOptions, Db, Document } from "mongodb";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
-  AtscriptDbView,
+  isAtscriptDbView,
   createFailureCollector,
+  type AtscriptDbView,
   type TColumnDiff,
   type TSyncColumnResult,
   type TDbFieldMeta,
+  type TDbObjectKind,
   type TExistingTableOption,
   type TViewColumnMapping,
   type AtscriptQueryNode,
@@ -115,9 +117,10 @@ export function getDesiredTableOptionsImpl(cappedOptions?: {
 
 export async function getExistingTableOptionsImpl(
   host: TMongoSchemaSyncHost,
+  tableName?: string,
 ): Promise<TExistingTableOption[]> {
   const cols = await host.db
-    .listCollections({ name: host._table.tableName }, { nameOnly: false })
+    .listCollections({ name: tableName ?? host._table.tableName }, { nameOnly: false })
     .toArray();
   if (cols.length === 0) {
     return [];
@@ -139,10 +142,36 @@ export async function getExistingTableOptionsImpl(
 // ── Table / view creation ────────────────────────────────────────────────────
 
 export async function ensureTableImpl(host: TMongoSchemaSyncHost, table: any): Promise<void> {
-  if (table instanceof AtscriptDbView && !table.isExternal) {
+  // Structural check (never `instanceof`): a bundle may carry two copies of
+  // @atscript/db, and a false `instanceof` would create a plain collection here.
+  if (isAtscriptDbView(table) && !table.isExternal) {
     return ensureView(host, table as AtscriptDbView);
   }
   return host.ensureCollectionExists();
+}
+
+/** Whether the collection has at least one document (exact — `findOne`, not the estimated count). */
+export async function hasRowsImpl(
+  host: TMongoSchemaSyncHost,
+  tableName?: string,
+): Promise<boolean> {
+  const doc = await host.db
+    .collection(tableName ?? host.resolveTableName(false))
+    .findOne({}, { projection: { _id: 1 }, ...host._getSessionOpts() });
+  return doc !== null;
+}
+
+/** Kind of the object stored under `name` (`listCollections` reports views as `"view"`). */
+export async function getObjectKindImpl(
+  host: TMongoSchemaSyncHost,
+  name: string,
+): Promise<TDbObjectKind | undefined> {
+  const cols = await host.db.listCollections({ name }, { nameOnly: true }).toArray();
+  const type = (cols[0] as { type?: string } | undefined)?.type;
+  if (type === undefined) {
+    return undefined;
+  }
+  return type === "view" ? "view" : "table";
 }
 
 /** Creates a MongoDB view from the AtscriptDbView's view plan. */
