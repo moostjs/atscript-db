@@ -3,20 +3,32 @@ import type {
   AtscriptDbReadable,
   FilterExpr,
   TCrudPermissions,
+  TFieldMeta,
   TMetaResponse,
+  TQueryPathOp,
   UniqueryControls,
   Uniquery,
 } from "@atscript/db";
 import type { AtscriptDbTable } from "@atscript/db";
+import {
+  checkHavingKeys,
+  collectQueryPaths,
+  findAncestorInSet,
+  unsupportedOperatorMessage,
+} from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions } from "./actions/list-augmenter";
-import { AsReadableController, type ReadableGates } from "./as-readable.controller";
+import { AsReadableController } from "./as-readable.controller";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
-import { findFilterOffender } from "./gate-utils";
+import { FieldCapabilityIndex } from "./meta/field-capabilities";
+import { badRequest } from "./validation-interceptor";
+
+/** The gate positions in check order; `refs[op]` are the paths collected for each. */
+const OPS: readonly TQueryPathOp[] = ["filter", "sort", "select", "groupBy", "having", "aggregate"];
 import {
   GEO_CONTROLS,
   ONE_CONTROLS,
@@ -64,17 +76,28 @@ export class AsDbReadableController<
     return readable as AtscriptDbTable<T>;
   }
 
-  private readonly _gates: ReadableGates;
+  /**
+   * Per-path capability index (since 0.1.128): the ONE input both `/meta.fields`
+   * and the request gate ({@link checkCapabilities}) are computed from, so
+   * metadata and runtime can never diverge.
+   */
+  protected readonly capabilities: FieldCapabilityIndex;
+  /** Bound once: the field-existence check the gate hands to `capabilities.check`. */
+  private readonly _exists = (path: string): boolean => this.hasField(path);
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
-  /** Paths the adapter vetoes for filtering (e.g. JSON storage on SQL). Symmetric with `/meta` `filterable: false`. */
-  private readonly _adapterNonFilterable: ReadonlySet<string>;
   /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
   private readonly _searchFallbackFields: readonly string[];
   /** `@db.writeOnly` paths — settable in writes, sealed out of every read surface. */
   private readonly _writeOnlySet: ReadonlySet<string>;
+  /**
+   * Logical paths an exclusion `$select` inverts into: every listed leaf and
+   * (on nested-object adapters) object parents — never navigation descendants,
+   * which the core path guard rejects.
+   */
+  private readonly _invertibleFields: readonly string[];
 
   constructor(
     app: Moost,
@@ -89,10 +112,10 @@ export class AsDbReadableController<
     const resolved = readable ?? (resolveBoundReadable(new.target) as AtscriptDbReadable<T>);
     super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
     this.readable = resolved;
-    this._adapterNonFilterable = this._collectAdapterNonFilterable();
     this._writeOnlySet = this._collectAnnotated("db.writeOnly");
+    this.capabilities = new FieldCapabilityIndex(resolved, this._writeOnlySet);
+    this._invertibleFields = this._collectInvertibleFields();
     this._searchFallbackFields = this._collectSearchFallbackFields();
-    this._gates = this._buildGates();
     this._preferredIdSet = new Set(resolved.preferredId ?? []);
     this._quantityRefByPath = this._collectQuantityRefs();
     const defaultOverlay = (
@@ -101,14 +124,13 @@ export class AsDbReadableController<
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
   }
 
-  private _collectAdapterNonFilterable(): Set<string> {
-    const out = new Set<string>();
-    // Guarded for the partial-mock readables in *.spec.ts that omit these.
-    if (!this.readable.fieldDescriptors || typeof this.readable.canFilterField !== "function") {
-      return out;
-    }
+  private _collectInvertibleFields(): string[] {
+    const out: string[] = [];
+    const nav = this.capabilities.navFields;
     for (const fd of this.readable.fieldDescriptors) {
-      if (!fd.ignored && !this.readable.canFilterField(fd)) out.add(fd.path);
+      if (fd.ignored) continue;
+      if (nav.has(fd.path) || findAncestorInSet(fd.path, nav) !== undefined) continue;
+      out.push(fd.path);
     }
     return out;
   }
@@ -126,39 +148,8 @@ export class AsDbReadableController<
     return out;
   }
 
-  private _buildGates(): ReadableGates {
-    const meta = this.readable.type.metadata;
-    const gates: ReadableGates = {};
-    if (meta.get("db.table.filterable") === "manual") {
-      const allowed = this._collectAnnotated("db.column.filterable");
-      gates.filter = { predicate: (f) => allowed.has(f), annotation: "@db.column.filterable" };
-    }
-    if (meta.get("db.table.sortable") === "manual") {
-      const allowed = this._collectAnnotated("db.column.sortable");
-      gates.sort = { predicate: (f) => allowed.has(f), annotation: "@db.column.sortable" };
-    }
-    // @db.writeOnly fields are unconditionally unfilterable/unsortable —
-    // an equality probe or sort order would leak the sealed value.
-    const writeOnly = this._writeOnlySet;
-    if (writeOnly.size > 0) {
-      const prevFilter = gates.filter;
-      gates.filter = {
-        predicate: (f) => !writeOnly.has(f) && (prevFilter ? prevFilter.predicate(f) : true),
-        annotation: prevFilter?.annotation ?? "@db.column.filterable (field is @db.writeOnly)",
-      };
-      const prevSort = gates.sort;
-      gates.sort = {
-        predicate: (f) => !writeOnly.has(f) && (prevSort ? prevSort.predicate(f) : true),
-        annotation: prevSort?.annotation ?? "@db.column.sortable (field is @db.writeOnly)",
-      };
-    }
-    return gates;
-  }
-
   private _collectAnnotated(annotation: string): Set<string> {
     const out = new Set<string>();
-    // Guarded for the partial-mock readables in *.spec.ts.
-    if (!this.readable.flatMap) return out;
     for (const [path, entry] of this.readable.flatMap) {
       if (entry?.metadata?.has?.(annotation)) out.add(path);
     }
@@ -175,25 +166,66 @@ export class AsDbReadableController<
   }
 
   /**
-   * Adds an adapter-capability veto on top of the base gate. Distinct from the
-   * `@db.column.filterable` rejection because the message must reference the
-   * adapter, not an annotation the user could add to bypass it. Sort uses
-   * adapter capability differently and is enforced at the SQL builder layer.
+   * Structural capability gate (since 0.1.128): walks the PARSED query —
+   * filter tree, `$sort`, `$select`, `$groupBy`, `$having`, aggregate
+   * `$field`s — and checks every root path against {@link capabilities}, the
+   * same index `/meta.fields` is projected from. Runs on the wire request,
+   * before `transformFilter` / `transformProjection` and before the write-only
+   * seal (a `@db.writeOnly` field is selectable; the seal strips it silently).
+   *
+   * Rejections use the structured envelope `{ message, statusCode: 400,
+   * errors: [{ path, message }] }` — `path` is the offending logical path.
+   * After the per-path checks the core `$having` rule runs (`checkHavingKeys`:
+   * aliases or `$groupBy` fields only), so a readable mock and a real table
+   * answer alike.
    */
-  protected override checkGates(
-    filter: FilterExpr | undefined,
-    controls: Record<string, unknown>,
-    gates: ReadableGates,
-  ): HttpError | undefined {
-    const baseError = super.checkGates(filter, controls, gates);
-    if (baseError) return baseError;
-    if (this._adapterNonFilterable.size === 0) return undefined;
-    const offender = findFilterOffender(filter, (f) => !this._adapterNonFilterable.has(f));
-    if (!offender) return undefined;
-    return new HttpError(
-      400,
-      `Filtering on field "${offender}" is not permitted — adapter cannot filter on this storage type.`,
-    );
+  protected checkCapabilities(parsed: {
+    filter?: FilterExpr;
+    controls?: object;
+  }): HttpError | undefined {
+    const refs = collectQueryPaths(parsed);
+    if (refs.unsupportedOperator !== undefined) {
+      return badRequest(
+        refs.unsupportedOperator,
+        unsupportedOperatorMessage(refs.unsupportedOperator),
+      );
+    }
+    for (const op of OPS) {
+      for (const path of refs[op]) {
+        const verdict = this.capabilities.check(path, op, this._exists);
+        if (verdict) return badRequest(verdict.path, verdict.message);
+      }
+    }
+    // A `$geoWithin` predicate is a filter on its field like any other at the HTTP layer.
+    for (const path of refs.geoFilter) {
+      const verdict = this.capabilities.check(path, "filter", this._exists);
+      if (verdict) return badRequest(verdict.path, verdict.message);
+    }
+    // `$having` keys exist (checked above); they must also be aliases or
+    // `$groupBy` fields — the core rule, answered here with the same wording.
+    const having = checkHavingKeys(refs);
+    if (having) return badRequest(having.path, having.message);
+    return this.checkGates(parsed);
+  }
+
+  /**
+   * Root-path existence moved into {@link checkCapabilities}; the insights map
+   * only serves `$with` sub-controls here — the URL parser flattens
+   * `$with=assignee($select=name)` into the insight `assignee.name`, which is
+   * resolved against the target table through `isValidFieldPath`.
+   */
+  protected override validateInsights(insights: Map<string, unknown>): string | undefined {
+    const nav = this.capabilities.navFields;
+    for (const [key] of insights) {
+      if (key === "*") continue;
+      const dot = key.indexOf(".");
+      if (dot === -1) continue;
+      if (!nav.has(key.slice(0, dot))) continue;
+      if (!this.hasField(key)) {
+        return `Unknown field "${key}"`;
+      }
+    }
+    return undefined;
   }
 
   /** Validates $with relations against the readable. */
@@ -212,11 +244,11 @@ export class AsDbReadableController<
       const relations = this.readable.relations;
       for (const rel of withRelations) {
         if (!rel.name.includes(".") && !relations.has(rel.name)) {
-          return new HttpError(400, {
-            message: `Unknown relation "${rel.name}" in $with. Available relations: ${[...relations.keys()].join(", ") || "(none)"}`,
-            statusCode: 400,
-            errors: [{ path: "$with", message: `Unknown relation "${rel.name}"` }],
-          });
+          return badRequest(
+            "$with",
+            `Unknown relation "${rel.name}"`,
+            `Unknown relation "${rel.name}" in $with. Available relations: ${[...relations.keys()].join(", ") || "(none)"}`,
+          );
         }
       }
     }
@@ -332,8 +364,8 @@ export class AsDbReadableController<
     }
 
     const widened: Record<string, 1> = {};
-    for (const fd of this.readable.fieldDescriptors) {
-      if (!fd.ignored && !excluded.has(fd.path)) widened[fd.path] = 1;
+    for (const path of this._invertibleFields) {
+      if (!excluded.has(path)) widened[path] = 1;
     }
     for (const field of this._preferredIdSet) widened[field] = 1;
     return widened as UniqueryControls["$select"];
@@ -442,11 +474,7 @@ export class AsDbReadableController<
     if (included.length > 0 && excluded.length === 0) return included;
     if (excluded.length > 0 && included.length === 0) {
       const excludedSet = new Set(excluded);
-      const out: string[] = [];
-      for (const fd of this.readable.fieldDescriptors) {
-        if (!fd.ignored && !excludedSet.has(fd.path)) out.push(fd.path);
-      }
-      return out;
+      return this._invertibleFields.filter((path) => !excludedSet.has(path));
     }
     throw new HttpError(
       500,
@@ -512,16 +540,18 @@ export class AsDbReadableController<
     return { envelopes, resolvedProjection, widenedSelect };
   }
 
-  /** `@db.column.searchable` paths, minus anything the adapter can't filter (JSON storage, encrypted). */
+  /**
+   * `@db.column.searchable` paths, minus anything the adapter can't filter
+   * (JSON storage, encrypted), `@db.writeOnly` fields and navigation
+   * descendants — physical capability only (manual-mode policy does not
+   * apply to `$search`).
+   */
   private _collectSearchFallbackFields(): string[] {
     const out: string[] = [];
-    // Guarded for the partial-mock readables in *.spec.ts.
-    if (!this.readable.fieldDescriptors) return out;
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
       if (!fd.type?.metadata?.has?.("db.column.searchable")) continue;
-      if (this._adapterNonFilterable.has(fd.path)) continue;
-      if (this._writeOnlySet.has(fd.path)) continue;
+      if (!this.capabilities.isPhysicallyFilterable(fd.path)) continue;
       out.push(fd.path);
     }
     return out;
@@ -699,7 +729,7 @@ export class AsDbReadableController<
     }
 
     // Aggregate and regular paths share validation: subclass `validateControls`
-    // overrides (per-control auth) and `checkGates` (field-level gates) must
+    // overrides (per-control auth) and `checkCapabilities` (field-level gate) must
     // apply to both. The base `validateControls` bypasses the DTO check when
     // `$groupBy` is present (aggregate `$select` shape doesn't fit the DTO).
     const error = this.validateParsed(parsed, "query");
@@ -707,21 +737,20 @@ export class AsDbReadableController<
       return error;
     }
 
-    const gateError = this.checkGates(
-      parsed.filter,
-      controls as Record<string, unknown>,
-      this._gates,
-    );
+    if (groupBy?.length) {
+      const sealed = this._findWriteOnlyInAggregate(groupBy, controls.$select);
+      if (sealed) {
+        return new HttpError(400, `Field "${sealed}" is @db.writeOnly and cannot be aggregated`);
+      }
+    }
+
+    const gateError = this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
     }
 
     // ── Aggregate path ──────────────────────────────────────────────
     if (groupBy?.length) {
-      const sealed = this._findWriteOnlyInAggregate(groupBy, controls.$select);
-      if (sealed) {
-        return new HttpError(400, `Field "${sealed}" is @db.writeOnly and cannot be aggregated`);
-      }
       const filter = this.applySearchFallback(
         await this.transformFilter(parsed.filter),
         controls as Record<string, unknown>,
@@ -815,7 +844,7 @@ export class AsDbReadableController<
 
     const controls = parsed.controls as Record<string, unknown>;
 
-    const gateError = this.checkGates(parsed.filter, controls, this._gates);
+    const gateError = this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
     }
@@ -925,7 +954,7 @@ export class AsDbReadableController<
         return new HttpError(400, insightsError);
       }
     }
-    const gateError = this.checkGates(parsed.filter, controls, this._gates);
+    const gateError = this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
     }
@@ -1028,6 +1057,10 @@ export class AsDbReadableController<
     if (error) {
       return error;
     }
+    const gateError = this.checkCapabilities(parsed);
+    if (gateError) {
+      return gateError;
+    }
 
     const rawSelect = await this.transformProjection(parsed.controls.$select);
     const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
@@ -1054,6 +1087,16 @@ export class AsDbReadableController<
 
     const { parsed } = this.parseControlsOnlyFromUrl(url);
     this._coerceActionsControl(parsed.controls as Record<string, unknown>);
+    // Same validation + capability gate as `/one/:id` (since 0.1.128) — an
+    // unknown `$select` path used to reach the driver here.
+    const error = this.validateParsed(parsed, "getOne");
+    if (error) {
+      return error;
+    }
+    const gateError = this.checkCapabilities(parsed);
+    if (gateError) {
+      return gateError;
+    }
     const rawSelect = await this.transformProjection(parsed.controls.$select);
     const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
     if (select instanceof HttpError) {
@@ -1104,9 +1147,6 @@ export class AsDbReadableController<
       relations.push({ name, direction: rel.direction, isArray: rel.isArray });
     }
 
-    const filterableMode = this.readable.type.metadata.get("db.table.filterable") === "manual";
-    const sortableMode = this.readable.type.metadata.get("db.table.sortable") === "manual";
-
     // Physical column names carrying a @db.index.geo index → `geo: true` flag.
     const geoIndexedPhysical = new Set<string>();
     if (this.readable.indexes instanceof Map) {
@@ -1117,38 +1157,31 @@ export class AsDbReadableController<
       }
     }
 
+    // `/meta.fields` is a projection of the capability index — the same
+    // object the request gate reads — so `sortable: true` ⇔ `$sort` accepted
+    // and `filterable: true` ⇔ filter accepted, per adapter, mode and field
+    // kind. Nested-object parents and navigation paths are never listed.
     const fields: TMetaResponse["fields"] = {};
-    for (const fd of this.readable.fieldDescriptors) {
-      if (fd.ignored) continue;
-      // Skip non-JSON nested-object parents — Mongo `$project` rejects parent+leaf
-      // pairs with code 31249 (Path collision), and parents render as `[object Object]`.
-      if (fd.designType === "object") continue;
-      const annotations = fd.type?.metadata;
-      const annotatedFilterable = annotations?.has("db.column.filterable") ?? false;
-      const annotatedSortable = annotations?.has("db.column.sortable") ?? false;
-      // Adapter capability is a hard gate — JSON-stored fields on SQL adapters
-      // can't be filtered/sorted no matter what the user annotates.
-      const adapterCanFilter = this.readable.canFilterField(fd);
-      const adapterCanSort = this.readable.canSortField(fd);
-      fields[fd.path] = {
-        sortable: adapterCanSort && (sortableMode ? annotatedSortable : !!fd.isIndexed),
-        filterable: adapterCanFilter && (filterableMode ? annotatedFilterable : true),
-      };
+    for (const [path, cap, fd] of this.capabilities.entries()) {
+      const entry: TFieldMeta = { sortable: cap.sortable, filterable: cap.filterable };
+      if (cap.indexed) {
+        // Advisory hint (prefer cheap sort keys) — never affects acceptance.
+        entry.indexed = true;
+      }
       if (fd.encrypted) {
         // At-rest protection marker: filterable/sortable are already vetoed
-        // by the adapter gate above; UIs use this to render a lock indicator.
-        fields[fd.path].encrypted = true;
+        // in the index; UIs use this to render a lock indicator.
+        entry.encrypted = true;
       }
       if (geoIndexedPhysical.has(fd.physicalName)) {
-        fields[fd.path].geo = true;
+        entry.geo = true;
       }
-      if (this._writeOnlySet.has(fd.path)) {
+      if (this._writeOnlySet.has(path)) {
         // Settable in writes, never present in reads — UIs render a set-only
-        // input; filter/sort are force-vetoed above regardless of annotations.
-        fields[fd.path].writeOnly = true;
-        fields[fd.path].filterable = false;
-        fields[fd.path].sortable = false;
+        // input; filter/sort are vetoed in the index regardless of annotations.
+        entry.writeOnly = true;
       }
+      fields[path] = entry;
     }
 
     return {

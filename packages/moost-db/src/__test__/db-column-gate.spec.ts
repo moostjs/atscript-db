@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vite-plus/test";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsDbController } from "../as-db.controller";
+import { createMockReadable } from "./test-utils";
 
 /**
  * Task 3.3 / spec `db-column-query-gate`:
@@ -44,7 +45,7 @@ function makeMockTable({
   const canFilterField =
     adapterMode === "mongo" ? vi.fn(() => true) : vi.fn((fd: any) => sqlCanFilterOrSort(fd));
   const canSortField = vi.fn((fd: any) => sqlCanFilterOrSort(fd));
-  return {
+  return createMockReadable({
     tableName: "gated_table",
     type: {
       __is_atscript_annotated_type: true,
@@ -66,7 +67,7 @@ function makeMockTable({
     getSearchIndexes: vi.fn().mockReturnValue([]),
     findMany: vi.fn().mockResolvedValue([]),
     findManyWithCount: vi.fn().mockResolvedValue({ data: [], count: 0 }),
-  } as any;
+  });
 }
 
 function makeApp() {
@@ -200,16 +201,60 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     expect(meta.fields.tags).toEqual({ filterable: false, sortable: false });
   });
 
-  it("SQL adapter: scalar fields keep default-open filter/sort behavior", async () => {
+  // Deliberate change (0.1.128, finding 13): auto mode advertises every
+  // adapter-sortable field — the runtime accepted `$sort=name` all along, so
+  // `sortable: false` was a lie. "Prefer indexed sort keys" survives as the
+  // separate advisory `indexed` flag.
+  it("auto mode advertises every adapter-sortable field; `indexed` is a separate hint", async () => {
     const table = makeMockTable({
       fields: { name: {}, createdAt: {} },
       fieldIndexed: { createdAt: true },
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    // Default-open: any scalar is filterable; sortable derived from isIndexed.
-    expect(meta.fields.name).toEqual({ filterable: true, sortable: false });
-    expect(meta.fields.createdAt).toEqual({ filterable: true, sortable: true });
+    expect(meta.fields.name).toEqual({ filterable: true, sortable: true });
+    expect(meta.fields.createdAt).toEqual({ filterable: true, sortable: true, indexed: true });
+    // Parity: what /meta advertises is what the gate accepts.
+    expect(await controller.query("?$sort=name")).not.toBeInstanceOf(HttpError);
+    expect(await controller.query("?$sort=-createdAt,name")).not.toBeInstanceOf(HttpError);
+  });
+
+  it("SQL adapter: $sort on a @db.json column is rejected at the gate (meta says sortable: false)", async () => {
+    const table = makeMockTable({
+      fields: { name: {}, address: {} },
+      fieldStorage: { address: "json" },
+    });
+    const controller = makeController(table);
+    const meta = await controller.meta();
+    expect(meta.fields.address.sortable).toBe(false);
+    const result = await controller.query("?$sort=address");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).message).toContain('"address"');
+    expect((result as HttpError).message).toContain("adapter");
+    expect(((result as HttpError).body as { errors?: unknown }).errors).toEqual([
+      { path: "address", message: expect.stringContaining("adapter cannot sort") },
+    ]);
+    expect(table.findMany).not.toHaveBeenCalled();
+  });
+
+  it("manual mode + @db.column.sortable on a JSON column: adapter veto wins for meta AND the gate", async () => {
+    const table = makeMockTable({
+      tableMeta: { "db.table.sortable": "manual" },
+      fields: { name: {}, address: { "db.column.sortable": true } },
+      fieldStorage: { address: "json" },
+    });
+    const controller = makeController(table);
+    const meta = await controller.meta();
+    expect(meta.fields.address.sortable).toBe(false);
+    const result = await controller.query("?$sort=address");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).message).toContain("adapter");
+    // Un-annotated scalar in manual mode keeps the annotation wording.
+    const manual = await controller.query("?$sort=name");
+    expect(manual).toBeInstanceOf(HttpError);
+    expect((manual as HttpError).message).toBe(
+      'Sorting on field "name" is not permitted — add @db.column.sortable to enable.',
+    );
   });
 
   it("SQL adapter: explicit @db.column.filterable on a JSON field is overridden by adapter gate", async () => {

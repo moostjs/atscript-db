@@ -4,6 +4,7 @@ import { Moost, Controller, ImportController, getMoostInfact } from "moost";
 
 import { AsDbController } from "../as-db.controller";
 import { TableController } from "../decorators";
+import { createMockReadable } from "./test-utils";
 
 /**
  * Integration coverage for the `db.http.path` metadata write done by
@@ -16,26 +17,8 @@ import { TableController } from "../decorators";
  * not per-request.
  */
 
-type MockTable = {
-  tableName: string;
-  isView: boolean;
-  type: {
-    __is_atscript_annotated_type: true;
-    type: { kind: string; props: Map<string, unknown> };
-    metadata: Map<string, unknown>;
-  };
-};
-
-function makeTable(tableName: string): MockTable {
-  return {
-    tableName,
-    isView: false,
-    type: {
-      __is_atscript_annotated_type: true,
-      type: { kind: "object", props: new Map() },
-      metadata: new Map(),
-    },
-  };
+function makeTable(tableName: string): { type: { metadata: Map<string, unknown> } } {
+  return createMockReadable({ tableName });
 }
 
 describe("db.http.path runtime resolution (Moost integration)", () => {

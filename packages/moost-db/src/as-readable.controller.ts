@@ -17,20 +17,10 @@ import { Get, HttpError } from "@moostjs/event-http";
 import { Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
-import { UseValidationErrorTransform } from "./validation-interceptor";
+import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
 import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/controls.dto.as";
-import { findFilterOffender, findSortOffender } from "./gate-utils";
 import { discoverActions, getControllerFormType } from "./actions/discover";
-
-/**
- * Optional gate configuration for a single request. Each present entry enables
- * the corresponding check; omitted entries skip that gate entirely.
- */
-export interface ReadableGates {
-  filter?: { predicate: (field: string) => boolean; annotation: string };
-  sort?: { predicate: (field: string) => boolean; annotation: string };
-  search?: { allowed: boolean; rejectionMessage: string };
-}
+import { applyTerminalRefs } from "./meta/terminal-ref";
 
 /**
  * Abstract base class for read-only HTTP controllers over an Atscript interface.
@@ -128,9 +118,21 @@ export abstract class AsReadableController<
   /** Lazily serializes the bound type (after all controllers have set @db.http.path). */
   protected getSerializedType() {
     if (!this._serializedType) {
-      this._serializedType = serializeAnnotatedType(this.boundType, this.getSerializeOptions());
+      this._serializedType = this.serializeForMeta(this.boundType);
     }
     return this._serializedType;
+  }
+
+  /**
+   * Serializes a type for the meta surfaces (`/meta`, `/meta/form/:name`)
+   * with {@link getSerializeOptions}, then re-points every reference chain to
+   * its terminal field and inherits the `db.rel.FK` value-help marker through
+   * the chain (since 0.1.128; see `meta/terminal-ref.ts`). Direct references
+   * serialize exactly as before.
+   */
+  protected serializeForMeta(type: TAtscriptAnnotatedType): TSerializedAnnotatedType {
+    const options = this.getSerializeOptions();
+    return applyTerminalRefs(serializeAnnotatedType(type, options), type, options);
   }
 
   /**
@@ -170,7 +172,10 @@ export abstract class AsReadableController<
           key === "db.http.path" ||
           // Clients need the write-only marker: forms render set-only inputs,
           // validators accept the field in writes and never expect it in reads.
-          key === "db.writeOnly"
+          key === "db.writeOnly" ||
+          // The db-client validator skips a missing server-managed version on
+          // insert only when it can see the annotation (since 0.1.128).
+          key === "db.column.version"
         ) {
           return { key, value };
         }
@@ -268,36 +273,16 @@ export abstract class AsReadableController<
   }
 
   /**
-   * Shared filter/sort/search gate check. Subclasses assemble a {@link ReadableGates}
-   * config per request (or once in the constructor when static) and call this to
-   * get a uniform HTTP 400 response for any offending field/control.
+   * Per-request gate hook, invoked by the DB readable controller right after
+   * its capability gate (`checkCapabilities`) with the parsed query. The
+   * default accepts everything. Return an `HttpError` to reject.
+   *
+   * @deprecated since 0.1.128 — the filter / sort gate is the
+   * `FieldCapabilityIndex` behind `checkCapabilities` (override that, or read
+   * `this.capabilities` on `AsDbReadableController`); this hook only remains
+   * so subclasses that overrode it keep being called.
    */
-  protected checkGates(
-    filter: FilterExpr | undefined,
-    controls: Record<string, unknown>,
-    gates: ReadableGates,
-  ): HttpError | undefined {
-    if (gates.filter) {
-      const bad = findFilterOffender(filter, gates.filter.predicate);
-      if (bad) {
-        return new HttpError(
-          400,
-          `Filtering on field "${bad}" is not permitted — add ${gates.filter.annotation} to enable.`,
-        );
-      }
-    }
-    if (gates.sort) {
-      const bad = findSortOffender(controls.$sort, gates.sort.predicate);
-      if (bad) {
-        return new HttpError(
-          400,
-          `Sorting on field "${bad}" is not permitted — add ${gates.sort.annotation} to enable.`,
-        );
-      }
-    }
-    if (gates.search && controls.$search && !gates.search.allowed) {
-      return new HttpError(400, gates.search.rejectionMessage);
-    }
+  protected checkGates(_parsed: { filter?: FilterExpr; controls?: object }): HttpError | undefined {
     return undefined;
   }
 
@@ -305,7 +290,23 @@ export abstract class AsReadableController<
 
   protected parseQueryString(url: string) {
     const idx = url.indexOf("?");
-    return parseUrl(idx >= 0 ? url.slice(idx + 1) : "");
+    return this.parseUrlOr400(idx >= 0 ? url.slice(idx + 1) : "");
+  }
+
+  /**
+   * The ONE place a query string meets the `@uniqu/url` grammar. A lexer /
+   * parser error (e.g. an unquoted `-` in a value: `?name=json-w1`) is the
+   * client's fault, so since 0.1.128 it is a 400 with the validation envelope
+   * `{ message, statusCode: 400, errors: [{ path: "", message }] }` instead of
+   * an unhandled 500. Quote such values: `?name='json-w1'`.
+   */
+  protected parseUrlOr400(queryString: string): ReturnType<typeof parseUrl> {
+    try {
+      return parseUrl(queryString);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw badRequest("", `Malformed query string: ${detail}`);
+    }
   }
 
   /**
@@ -323,7 +324,7 @@ export abstract class AsReadableController<
   } {
     const idx = url.indexOf("?");
     const qs = idx >= 0 ? url.slice(idx + 1) : "";
-    if (!qs) return { parsed: parseUrl(""), hasNonControl: false };
+    if (!qs) return { parsed: this.parseUrlOr400(""), hasNonControl: false };
     const kept: string[] = [];
     let hasNonControl = false;
     for (const part of qs.split("&")) {
@@ -342,7 +343,7 @@ export abstract class AsReadableController<
         hasNonControl = true;
       }
     }
-    return { parsed: parseUrl(kept.join("&")), hasNonControl };
+    return { parsed: this.parseUrlOr400(kept.join("&")), hasNonControl };
   }
 
   protected async returnOne(result: Promise<DataType | null>): Promise<DataType | HttpError> {
@@ -387,7 +388,7 @@ export abstract class AsReadableController<
     }
     let cached = this._formSchemas.get(name);
     if (!cached) {
-      cached = serializeAnnotatedType(formType, this.getSerializeOptions());
+      cached = this.serializeForMeta(formType);
       this._formSchemas.set(name, cached);
     }
     return cached;

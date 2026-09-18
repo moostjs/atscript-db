@@ -4,6 +4,7 @@ import { HttpError } from "@moostjs/event-http";
 import { createEventContext, setControllerContext } from "moost";
 
 import { AsDbController } from "../as-db.controller";
+import { createMockReadable } from "./test-utils";
 
 // ── Mock table ──────────────────────────────────────────────────────────────
 
@@ -33,7 +34,7 @@ function createMockTable(overrides: Record<string, any> = {}) {
   const indexes: Map<string, any> = overrides.indexes ?? new Map();
   const identifications = overrides.identifications ?? deriveIdentifications(primaryKeys, indexes);
 
-  return {
+  return createMockReadable({
     tableName: "test_table",
     type: {
       __is_atscript_annotated_type: true,
@@ -56,10 +57,16 @@ function createMockTable(overrides: Record<string, any> = {}) {
     uniqueProps: new Set<string>(),
     indexes,
     relations: new Map(),
+    // Deliberate mock change (0.1.128): the capability gate is closed-world —
+    // every path a request uses must be a descriptor, so the aggregate tests'
+    // `status` / `amount` / `region` are declared here (`total` stays an alias).
     fieldDescriptors: [
       { path: "id", ignored: false, isIndexed: true },
       { path: "name", ignored: false, isIndexed: false },
       { path: "email", ignored: false, isIndexed: true },
+      { path: "status", ignored: false, isIndexed: false },
+      { path: "amount", ignored: false, isIndexed: false },
+      { path: "region", ignored: false, isIndexed: false },
     ],
     isView: false,
     isSearchable: vi.fn().mockReturnValue(false),
@@ -92,7 +99,7 @@ function createMockTable(overrides: Record<string, any> = {}) {
     bulkUpdate: vi.fn().mockResolvedValue({ matchedCount: 2, modifiedCount: 2 }),
     deleteOne: vi.fn().mockResolvedValue({ deletedCount: 1 }),
     ...overrides,
-  } as any;
+  });
 }
 
 // ── Mock app ──────────────────────────────────────────────────────────────
@@ -107,6 +114,18 @@ function createMockApp() {
       debug: vi.fn(),
     }),
   } as any;
+}
+
+// ── Helper: built-in write failures are THROWN as HttpError (since 0.1.128) ──
+
+async function expectHttpError(p: Promise<unknown>, statusCode: number): Promise<HttpError> {
+  const err = await p.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(HttpError);
+  expect((err as HttpError).body.statusCode).toBe(statusCode);
+  return err as HttpError;
 }
 
 // ── Helper: construct controller bypassing DI decorators ─────────────────
@@ -291,7 +310,16 @@ describe("AsDbController", () => {
       vi.spyOn(ctx.controller as any, "transformProjection").mockReturnValue({ id: 0 });
       await ctx.controller.query("/query?");
       const call = ctx.table.findMany.mock.calls[0][0];
-      expect(call.controls.$select).toEqual({ name: 1, email: 1, id: 1 });
+      // Inverts over every listed leaf descriptor (the deliberate 0.1.128 mock
+      // change added status / amount / region), then re-adds the preferred id.
+      expect(call.controls.$select).toEqual({
+        name: 1,
+        email: 1,
+        status: 1,
+        amount: 1,
+        region: 1,
+        id: 1,
+      });
     });
 
     it("rejects mixed inclusion/exclusion projection maps before reading", async () => {
@@ -673,9 +701,7 @@ describe("AsDbController", () => {
     it("should return 500 when onWrite returns undefined", async () => {
       const ctx = createController();
       vi.spyOn(ctx.controller as any, "onWrite").mockReturnValue(undefined);
-      const result = await ctx.controller.insert({ name: "Test" });
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(500);
+      await expectHttpError(ctx.controller.insert({ name: "Test" }), 500);
     });
   });
 
@@ -719,9 +745,7 @@ describe("AsDbController", () => {
     it("should return 500 when onWrite returns undefined for array", async () => {
       const ctx = createController();
       vi.spyOn(ctx.controller as any, "onWrite").mockReturnValue(undefined);
-      const result = await ctx.controller.replace([{ id: "1", name: "A" }]);
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(500);
+      await expectHttpError(ctx.controller.replace([{ id: "1", name: "A" }]), 500);
     });
   });
 
@@ -760,9 +784,7 @@ describe("AsDbController", () => {
     it("should return 500 when onWrite returns undefined for array", async () => {
       const ctx = createController();
       vi.spyOn(ctx.controller as any, "onWrite").mockReturnValue(undefined);
-      const result = await ctx.controller.update([{ id: "1", name: "X" }]);
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(500);
+      await expectHttpError(ctx.controller.update([{ id: "1", name: "X" }]), 500);
     });
   });
 
@@ -777,17 +799,13 @@ describe("AsDbController", () => {
 
     it("should return 404 when nothing deleted", async () => {
       table.deleteOne.mockResolvedValue({ deletedCount: 0 });
-      const result = await controller.remove("999");
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(404);
+      await expectHttpError(controller.remove("999"), 404);
     });
 
     it("should return 500 when onRemove returns undefined", async () => {
       const ctx = createController();
       vi.spyOn(ctx.controller as any, "onRemove").mockReturnValue(undefined);
-      const result = await ctx.controller.remove("123");
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(500);
+      await expectHttpError(ctx.controller.remove("123"), 500);
     });
   });
 
@@ -825,15 +843,11 @@ describe("AsDbController", () => {
 
     it("should return 400 when query params match no composite key or unique index", async () => {
       const ctx = createController({ primaryKeys: ["taskId", "tagId"] });
-      const result = await ctx.controller.removeComposite({ taskId: "5" });
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(400);
+      await expectHttpError(ctx.controller.removeComposite({ taskId: "5" }), 400);
     });
 
     it("should return 400 when query params match no identification (PK or unique index)", async () => {
-      const result = await controller.removeComposite({ unknown: "x" });
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(400);
+      await expectHttpError(controller.removeComposite({ unknown: "x" }), 400);
     });
 
     it("should return 404 when nothing deleted", async () => {
@@ -841,9 +855,7 @@ describe("AsDbController", () => {
         primaryKeys: ["taskId", "tagId"],
         deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
       });
-      const result = await ctx.controller.removeComposite({ taskId: "5", tagId: "1" });
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(404);
+      await expectHttpError(ctx.controller.removeComposite({ taskId: "5", tagId: "1" }), 404);
     });
 
     it("should call onRemove hook with id object", async () => {

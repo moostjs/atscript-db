@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { AsDbController } from "../as-db.controller";
+import { createMockApp as makeApp, createMockReadable } from "./test-utils";
 
 /**
  * Verifies the readable controller automatically includes the currency-ref
@@ -30,7 +31,7 @@ function makeMockTable() {
     type,
   }));
 
-  return {
+  return createMockReadable({
     tableName: "orders",
     type: {
       __is_atscript_annotated_type: true,
@@ -50,19 +51,7 @@ function makeMockTable() {
     getSearchIndexes: vi.fn().mockReturnValue([]),
     findMany: vi.fn().mockResolvedValue([]),
     findManyWithCount: vi.fn().mockResolvedValue({ data: [], count: 0 }),
-  } as any;
-}
-
-function makeApp() {
-  return {
-    getLogger: vi.fn().mockReturnValue({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      log: vi.fn(),
-      debug: vi.fn(),
-    }),
-  } as any;
+  });
 }
 
 function selectOf(table: any): unknown {
@@ -149,7 +138,7 @@ describe("AsDbController — @db.unit.ref auto-widens $select via the shared pat
       type,
     }));
 
-    return {
+    return createMockReadable({
       tableName: "products",
       type: {
         __is_atscript_annotated_type: true,
@@ -169,7 +158,7 @@ describe("AsDbController — @db.unit.ref auto-widens $select via the shared pat
       getSearchIndexes: vi.fn().mockReturnValue([]),
       findMany: vi.fn().mockResolvedValue([]),
       findManyWithCount: vi.fn().mockResolvedValue({ data: [], count: 0 }),
-    } as any;
+    });
   }
 
   it("adds the unit field when $select includes the weight", async () => {

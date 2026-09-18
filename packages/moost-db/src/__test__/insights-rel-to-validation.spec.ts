@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vite-plus/test";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsDbController } from "../as-db.controller";
+import { createMockReadable } from "./test-utils";
 
 /**
  * Regression coverage for the rel.to insights validation gap:
@@ -23,7 +24,7 @@ function makeMockTable(opts: {
   relations?: Map<string, unknown>;
 }) {
   const flatMap = new Map<string, unknown>([["", {}], ...Object.entries(opts.flatMap)]);
-  return {
+  return createMockReadable({
     tableName: "tasks",
     type: {
       __is_atscript_annotated_type: true,
@@ -52,7 +53,7 @@ function makeMockTable(opts: {
     isValidFieldPath: vi.fn(opts.isValidFieldPath ?? ((path: string) => flatMap.has(path))),
     findMany: vi.fn().mockResolvedValue([]),
     findManyWithCount: vi.fn().mockResolvedValue({ data: [], count: 0 }),
-  } as any;
+  });
 }
 
 function makeMockApp() {
@@ -111,13 +112,17 @@ describe("AsDbReadableController.hasField — delegates to readable.isValidField
     expect(table.findMany).not.toHaveBeenCalled();
   });
 
-  it("still accepts top-level fields directly via the fast path", async () => {
+  // Deliberate change (0.1.128, efficiency): a listed leaf is a real field by
+  // construction, so the gate answers from the capability index without an
+  // existence lookup — `isValidFieldPath` is consulted only for paths that are
+  // not listed leaves (nav descendants, JSON / encrypted descendants, unknowns).
+  it("accepts listed top-level fields without consulting isValidFieldPath", async () => {
     const table = makeMockTable({
       flatMap: { id: {}, title: {} },
     });
     const controller = new AsDbController(makeMockApp(), table);
     const result = await controller.query("?$select=id,title");
     expect(result).not.toBeInstanceOf(HttpError);
-    expect(table.isValidFieldPath).toHaveBeenCalled();
+    expect(table.isValidFieldPath).not.toHaveBeenCalled();
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsDbController } from "../as-db.controller";
+import { createMockReadable } from "./test-utils";
 
 // ── Mock table (mirrors as-db.controller.spec.ts shape) ─────────────────────
 
@@ -19,7 +20,7 @@ function createMockTable(overrides: Record<string, any> = {}) {
   };
   const primaryKeys = overrides.primaryKeys ?? ["id"];
   const identifications = overrides.identifications ?? deriveIdentifications(primaryKeys);
-  return {
+  return createMockReadable({
     tableName: "users",
     type: {
       __is_atscript_annotated_type: true,
@@ -70,7 +71,7 @@ function createMockTable(overrides: Record<string, any> = {}) {
     bulkUpdate: vi.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 }),
     deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
     ...overrides,
-  } as any;
+  });
 }
 
 function createMockApp() {
@@ -90,6 +91,17 @@ function createController(tableOverrides: Record<string, any> = {}) {
   const app = createMockApp();
   const controller = new AsDbController(app, table);
   return { controller, table, app };
+}
+
+// Built-in write failures are THROWN as HttpError (since 0.1.128).
+async function expectHttpError(p: Promise<unknown>, statusCode: number): Promise<HttpError> {
+  const err = await p.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(HttpError);
+  expect((err as HttpError).body.statusCode).toBe(statusCode);
+  return err as HttpError;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -141,9 +153,11 @@ describe("AsDbController OCC integration", () => {
     it("returns 409 with version_mismatch when row exists but version is stale", async () => {
       table.updateOne.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       table.findOne.mockResolvedValue({ id: "u1", name: "Ada", version: 6 });
-      const result = await controller.update({ id: "u1", name: "Ada", version: 4 });
-      expect(result).toBeInstanceOf(HttpError);
-      const body = (result as HttpError).body as unknown as Record<string, unknown>;
+      const err = await expectHttpError(
+        controller.update({ id: "u1", name: "Ada", version: 4 }),
+        409,
+      );
+      const body = err.body as unknown as Record<string, unknown>;
       // NOTE: the Wooks `HttpError.body` getter forcibly stamps
       // `error: "Conflict"` from the canonical status text, overriding our
       // discriminator. We carry the proposal's `error: "version_mismatch"`
@@ -164,9 +178,7 @@ describe("AsDbController OCC integration", () => {
     it("returns 404 when row is missing on a CAS-protected update", async () => {
       table.updateOne.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       table.findOne.mockResolvedValue(null);
-      const result = await controller.update({ id: "u1", name: "Ada", version: 4 });
-      expect(result).toBeInstanceOf(HttpError);
-      expect((result as HttpError).body.statusCode).toBe(404);
+      await expectHttpError(controller.update({ id: "u1", name: "Ada", version: 4 }), 404);
     });
 
     // WHY: presence-based opt-out from §6.2 — clients that strip `version`
@@ -180,6 +192,62 @@ describe("AsDbController OCC integration", () => {
       expect(table.findOne).not.toHaveBeenCalled();
       // No CAS → result passes through verbatim, even with matchedCount === 0.
       expect(result).toEqual({ matchedCount: 0, modifiedCount: 0 });
+    });
+
+    // WHY (since 0.1.128): the SDK shape is accepted on the wire — a raw `$cas`
+    // body is CAS-bearing, so a 0-match must disambiguate 404/409 too (it used
+    // to answer 202 { 0, 0 }).
+    it("raw $cas body: disambiguates to 409 on a stale version", async () => {
+      table.updateOne.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
+      table.findOne.mockResolvedValue({ id: "u1", name: "Ada", version: 6 });
+      const err = await expectHttpError(
+        controller.update({ id: "u1", name: "Ada", $cas: { version: 3 } }),
+        409,
+      );
+      expect((err.body as unknown as Record<string, unknown>).currentVersion).toBe(6);
+      expect(table.updateOne).toHaveBeenCalledWith({ id: "u1", name: "Ada", $cas: { version: 3 } });
+    });
+
+    // WHY (since 0.1.128): a PK-only PATCH carrying a version is a real write —
+    // the versioned touch. The controller passes it through; the SDK executes it.
+    it("PK-only body with version is lifted to a $cas touch and passed through", async () => {
+      table.updateOne.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
+      const result = await controller.update({ id: "u1", version: 4 });
+      expect(table.updateOne).toHaveBeenCalledWith({ id: "u1", $cas: { version: 4 } });
+      expect(result).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    });
+
+    // WHY (review #5): `version` and `$cas` carrying different values is
+    // ambiguous — 400 at `$cas` instead of silently overwriting the `$cas`.
+    it("version + differing $cas → 400 at path $cas", async () => {
+      const err = await expectHttpError(
+        controller.update({ id: "u1", version: 4, $cas: { version: 3 } }),
+        400,
+      );
+      expect((err.body as unknown as { errors: unknown }).errors).toEqual([
+        { path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' },
+      ]);
+      expect(table.updateOne).not.toHaveBeenCalled();
+    });
+
+    it("version + identical $cas → lifted once, no conflict", async () => {
+      table.updateOne.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
+      await controller.update({ id: "u1", version: 4, $cas: { version: 4 } });
+      expect(table.updateOne).toHaveBeenCalledWith({ id: "u1", $cas: { version: 4 } });
+    });
+
+    it("bulk: version + differing $cas → 400 at path [i].$cas", async () => {
+      const err = await expectHttpError(
+        controller.update([
+          { id: "u1", version: 1 },
+          { id: "u2", version: 2, $cas: { version: 9 } },
+        ]),
+        400,
+      );
+      expect((err.body as unknown as { errors: Array<{ path: string }> }).errors[0]!.path).toBe(
+        "[1].$cas",
+      );
+      expect(table.bulkUpdate).not.toHaveBeenCalled();
     });
 
     // WHY: `versionColumn === undefined` must short-circuit the entire
@@ -223,9 +291,11 @@ describe("AsDbController OCC integration", () => {
     it("returns 409 with version_mismatch on stale replace", async () => {
       table.replaceOne.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       table.findOne.mockResolvedValue({ id: "u1", name: "Ada", version: 9 });
-      const result = await controller.replace({ id: "u1", name: "Ada", version: 4 });
-      expect(result).toBeInstanceOf(HttpError);
-      const body = (result as HttpError).body as unknown as Record<string, unknown>;
+      const err = await expectHttpError(
+        controller.replace({ id: "u1", name: "Ada", version: 4 }),
+        409,
+      );
+      const body = err.body as unknown as Record<string, unknown>;
       expect(body.statusCode).toBe(409);
       expect(body.message).toBe("version_mismatch");
       expect(body.kind).toBe("version_mismatch");

@@ -1,30 +1,24 @@
 import { ValidatorError } from "@atscript/typescript/utils";
 import { DbError } from "@atscript/db";
-import { HttpError } from "@moostjs/event-http";
 import { defineInterceptor, Intercept, TInterceptorPriority } from "moost";
+
+import { errorEnvelope } from "./http-errors";
+
+export { badRequest, errorEnvelope } from "./http-errors";
+export type { THttpErrorEntry } from "./http-errors";
 
 const dbErrorCodeToStatus: Record<string, number> = {
   CONFLICT: 409,
+  // SQLite transaction-gate waiter timed out (`transactionWaitTimeoutMs`) —
+  // the store is busy, not the request malformed.
+  TX_WAIT_TIMEOUT: 503,
 };
 
 function transformValidationError(error: unknown, reply: (response: unknown) => void) {
   if (error instanceof ValidatorError) {
-    reply(
-      new HttpError(400, {
-        message: error.message,
-        statusCode: 400,
-        errors: error.errors,
-      }),
-    );
+    reply(errorEnvelope(400, error.message, error.errors));
   } else if (error instanceof DbError) {
-    const statusCode = dbErrorCodeToStatus[error.code] ?? 400;
-    reply(
-      new HttpError(statusCode as ConstructorParameters<typeof HttpError>[0], {
-        message: error.message,
-        statusCode: statusCode as number,
-        errors: error.errors,
-      }),
-    );
+    reply(errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, error.errors));
   }
 }
 

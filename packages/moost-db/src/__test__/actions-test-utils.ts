@@ -7,6 +7,7 @@ import { getMoostMate, setControllerContext } from "moost";
 import type { TDbActionInputFormMeta, TDbActionMeta } from "../actions/keys";
 import { boundTableKey } from "../actions/id-cache";
 import type { DbActionOpts } from "../actions/types";
+import { createMockReadable, makeFieldDescriptor } from "./test-utils";
 
 /** Per-test logger spy compatible with `TConsoleBase`. */
 export type LoggerSpy = {
@@ -49,7 +50,7 @@ export function makeApp(logger: LoggerSpy = makeLogger()): {
   };
 }
 
-/** Bare table mock with ID-typed field descriptors — sufficient for action discovery + ID validation. */
+/** Table mock with ID-typed field descriptors — a {@link createMockReadable} with only the PK fields listed. */
 export function makeTable(
   opts: {
     primaryKeys?: string[];
@@ -58,37 +59,9 @@ export function makeTable(
 ): any {
   const primaryKeys = opts.primaryKeys ?? ["id"];
   const fieldDescriptors =
-    opts.fieldDescriptors ??
-    primaryKeys.map((p) => ({
-      path: p,
-      designType: "string",
-      ignored: false,
-      isIndexed: true,
-      type: { metadata: new Map() },
-    }));
-  return {
-    tableName: "test_table",
-    type: {
-      __is_atscript_annotated_type: true,
-      type: { kind: "object", props: new Map(), propsPatterns: [], tags: new Set() },
-      metadata: new Map(),
-    },
-    flatMap: new Map([["", {}], ...primaryKeys.map((p) => [p, {}] as [string, unknown])]),
-    primaryKeys,
-    preferredId: [...primaryKeys],
-    identifications: [{ fields: [...primaryKeys], source: "primaryKey" }],
-    uniqueProps: new Set<string>(),
-    indexes: new Map(),
-    relations: new Map(),
-    fieldDescriptors,
-    isView: false,
-    isSearchable: vi.fn().mockReturnValue(false),
-    isVectorSearchable: vi.fn().mockReturnValue(false),
-    canFilterField: vi.fn().mockReturnValue(true),
-    canSortField: vi.fn().mockReturnValue(true),
-    getSearchIndexes: vi.fn().mockReturnValue([]),
-    getValidator: vi.fn().mockReturnValue({ validate: vi.fn().mockReturnValue(true), errors: [] }),
-  };
+    opts.fieldDescriptors?.map((fd) => makeFieldDescriptor(fd.path, { ...fd, isIndexed: true })) ??
+    primaryKeys.map((p) => makeFieldDescriptor(p, { isIndexed: true }));
+  return createMockReadable({ fieldDescriptors }, { primaryKeys, fields: [...primaryKeys] });
 }
 
 /**
@@ -144,9 +117,15 @@ export function inputFormMate(
   return { atscript_db_action_input_form: meta };
 }
 
-export function makeProp(designType: string, annotations: Record<string, unknown> = {}): any {
+/** An annotated prop entry as a compiled `.as` type carries it (`kind: "object"` for nested objects). */
+export function makeProp(
+  designType: string,
+  annotations: Record<string, unknown> = {},
+  kind = "",
+): any {
   return {
-    type: { kind: "", designType, tags: new Set() },
+    __is_atscript_annotated_type: true,
+    type: { kind, designType, tags: new Set() },
     metadata: new Map(Object.entries(annotations)),
   };
 }

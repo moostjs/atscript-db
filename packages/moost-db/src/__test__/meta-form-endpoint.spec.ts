@@ -1,43 +1,17 @@
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import path from "path";
-
 import { describe, it, expect, beforeAll } from "vite-plus/test";
-import { build } from "@atscript/core";
-import { tsPlugin as ts } from "@atscript/typescript";
-import dbPlugin from "@atscript/db/plugin";
 import { HttpError } from "@moostjs/event-http";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { AsReadableController } from "../as-readable.controller";
 import { discoverActions } from "../actions/discover";
 import { fakeOverview, idMate, inputFormMate, makeApp } from "./actions-test-utils";
+import { prepareFixtures } from "./test-utils";
 
 /**
  * Coverage for `GET /meta/form/:name` — the per-controller form schema
  * endpoint. Uses real compiled `.as` form interfaces so `serializeAnnotatedType`
  * sees the same shape it does at runtime.
  */
-
-async function prepareFixtures() {
-  const wd = path.join(path.dirname(import.meta.url.slice(7)), "fixtures");
-  const repo = await build({
-    rootDir: wd,
-    include: ["**/*.as"],
-    plugins: [ts(), dbPlugin()],
-  });
-  const out = await repo.generate({ outDir: ".", format: "js" });
-  const outDts = await repo.generate({ outDir: ".", format: "dts" });
-  for (const file of [...out, ...outDts]) {
-    if (existsSync(file.target)) {
-      const content = readFileSync(file.target).toString();
-      if (content !== file.content) {
-        writeFileSync(file.target, file.content);
-      }
-    } else {
-      writeFileSync(file.target, file.content);
-    }
-  }
-}
 
 function makeBoundType(): TAtscriptAnnotatedType {
   return {
