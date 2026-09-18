@@ -334,6 +334,8 @@ The include array can also contain `AggregateExpr` objects from `@uniqu/core` (`
 
 ::: tip Aggregate rows are reverse-mapped like regular rows (since 0.1.128)
 Aggregate rows go through the same reverse mapping as regular rows: grouping by a flattened nested-object leaf (`$groupBy: ['stats.views']`) returns `{ stats: { views: 1 }, cnt: 2 }` on every adapter — SQL adapters used to return the dotted key `'stats.views'` while MongoDB nested it — and grouped boolean, decimal and `@db.json` columns are coerced exactly as in `findMany` (a grouped boolean is `true` / `false`, not the stored `0` / `1`). Aggregate aliases (`total`, `sum_amount`, `count_star`) and plain grouped columns are unchanged.
+
+`$count: true` on an aggregate query counts the groups that survive `$having` on every adapter (since 0.1.129) — one row `{ count: N }`; before, SQL adapters counted all groups and MongoDB returned `0` when `$having` referenced an aggregate alias.
 :::
 
 ::: tip FK Fields Auto-Included
