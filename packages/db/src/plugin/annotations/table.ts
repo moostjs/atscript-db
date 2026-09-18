@@ -337,9 +337,17 @@ function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec 
   return new AnnotationSpec({
     description:
       `Controls ${verb}-gating on the readable controller's \`/query\` and \`/pages\` endpoints.\n\n` +
-      `- **\`'auto'\`** (default when the annotation is absent) — every column is ${capability}.\n` +
+      `- **\`'auto'\`** (default when the annotation is absent) — every column the adapter can ` +
+      `${verb} is ${capability} (JSON / array columns are never sortable, and not filterable on ` +
+      "SQL adapters).\n" +
       `- **\`'manual'\`** — only fields annotated \`@db.column.${capability}\` are ${capability}; ` +
       "  all others are rejected with HTTP 400.\n\n" +
+      "`/meta.fields[*]." +
+      capability +
+      "` advertises exactly what the gate accepts in either mode. The policy applies to " +
+      (capability === "filterable"
+        ? "filters only — `$groupBy`, `$having` keys and aggregate fields use the adapter's physical capability.\n\n"
+        : "`$sort` only.\n\n") +
       `Writing the annotation explicitly as \`@db.table.${capability} 'auto'\` has the same ` +
       "runtime effect as omitting it; use it to document intent.\n\n" +
       "**Example:**\n" +

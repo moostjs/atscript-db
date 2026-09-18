@@ -6,11 +6,12 @@ import { AtscriptDbTable } from "../table/db-table";
 import { DbError } from "../db-error";
 import { resolveAlias } from "../agg";
 
-import { MockAdapter, prepareFixtures } from "./test-utils";
+import { MockAdapter, NestedMockAdapter, prepareFixtures } from "./test-utils";
 
 let AggOrders: any;
 let PlainEvents: any;
 let IndexedMetrics: any;
+let AggPages: any;
 
 beforeAll(async () => {
   await prepareFixtures();
@@ -18,6 +19,7 @@ beforeAll(async () => {
   AggOrders = aggModule.AggOrders;
   PlainEvents = aggModule.PlainEvents;
   IndexedMetrics = aggModule.IndexedMetrics;
+  AggPages = aggModule.AggPages;
 });
 
 // ── UniquSelect ──────────────────────────────────────────────────────────────
@@ -379,5 +381,72 @@ describe("BaseDbAdapter.aggregate() default", () => {
     const { BaseDbAdapter } = await import("../base-adapter");
     const base = Object.create(BaseDbAdapter.prototype);
     await expect(base.aggregate({})).rejects.toThrow("Aggregation not supported by this adapter");
+  });
+});
+
+// ── Aggregate row shape (since 0.1.128) ──────────────────────────────────────
+// `aggregate()` rows go through the strategy's `reconstructFromRead`, exactly
+// like regular rows: a flattened leaf column comes back nested, boolean /
+// decimal / JSON grouped columns are coerced, aliases are copied as-is.
+// Adapters that already return nested objects (MongoDB) are untouched.
+
+describe("aggregate() row shape — dotted logical paths nest like regular rows", () => {
+  const cnt = { $fn: "count", $field: "*", $as: "cnt" };
+
+  it("relational: a flattened leaf column comes back nested; $groupBy / $having translate to the column", async () => {
+    const adapter = new MockAdapter();
+    adapter.aggregateResult = [
+      { stats__views: 1, cnt: 2 },
+      { stats__views: 5, cnt: 1 },
+    ];
+    const table = new AtscriptDbTable(AggPages, adapter);
+    const result = await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["stats.views"],
+        $select: ["stats.views", cnt],
+        $having: { "stats.views": { $gt: 0 } },
+      },
+    } as any);
+    expect(result).toEqual([
+      { stats: { views: 1 }, cnt: 2 },
+      { stats: { views: 5 }, cnt: 1 },
+    ]);
+    const sent = adapter.calls.find((c) => c.method === "aggregate")!.args[0];
+    expect(sent.controls.$groupBy).toEqual(["stats__views"]);
+    expect(sent.controls.$having).toEqual({ stats__views: { $gt: 0 } });
+  });
+
+  it("relational: aliases and plain grouped columns are assigned as-is (an alias is never nested)", async () => {
+    const adapter = new MockAdapter();
+    adapter.aggregateResult = [{ title: "a", stats__views: 1, "n.total": 2 }];
+    const table = new AtscriptDbTable(AggPages, adapter);
+    const result = await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["title", "stats.views"],
+        $select: ["title", "stats.views", { $fn: "count", $field: "*", $as: "n.total" }],
+      },
+    } as any);
+    expect(result).toEqual([{ title: "a", stats: { views: 1 }, "n.total": 2 }]);
+  });
+
+  it("nested-object adapter: already-nested rows are a no-op; the dotted $groupBy path is sent as-is", async () => {
+    const adapter = new NestedMockAdapter();
+    adapter.aggregateResult = [
+      { stats: { views: 1 }, cnt: 2 },
+      { metadata: { clicks: 5 }, cnt: 1 },
+    ];
+    const table = new AtscriptDbTable(AggPages, adapter);
+    const result = await table.aggregate({
+      filter: {},
+      controls: { $groupBy: ["metadata.clicks"], $select: ["metadata.clicks", cnt] },
+    } as any);
+    expect(result).toEqual([
+      { stats: { views: 1 }, cnt: 2 },
+      { metadata: { clicks: 5 }, cnt: 1 },
+    ]);
+    const sent = adapter.calls.find((c) => c.method === "aggregate")!.args[0];
+    expect(sent.controls.$groupBy).toEqual(["metadata.clicks"]);
   });
 });

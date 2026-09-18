@@ -25,6 +25,7 @@ import { DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type {
+  NullableOptional,
   TDbDefaultValue,
   TDbFieldMeta,
   TDbForeignKey,
@@ -174,10 +175,11 @@ function isIdCompatible(id: unknown, fieldType: TAtscriptAnnotatedType): boolean
 export class AtscriptDbReadable<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
-  _FlatType = FlatOf<T>,
+  // Optional columns read back / filter as `null` too (since 0.1.128).
+  _FlatType = NullableOptional<FlatOf<T>>,
   A extends BaseDbAdapter = BaseDbAdapter,
   IdType = PrimaryKeyOf<T>,
-  OwnProps = OwnPropsOf<T>,
+  OwnProps = NullableOptional<OwnPropsOf<T>>,
   NavType extends Record<string, unknown> = NavPropsOf<T>,
 > {
   /** Resolved table/collection/view name. */
@@ -779,16 +781,16 @@ export class AtscriptDbReadable<
     const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta);
     const results = await this.adapter.aggregate(dbQuery);
 
-    // Reverse-map physical → logical field names, apply fromStorage formatters
-    return results.map((row) => {
-      const mapped: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(row)) {
-        const logical = this._meta.physicalToPath.get(key) ?? key;
-        const fmt = this._meta.fromStorageFormatters?.get(key);
-        mapped[logical] = fmt && value !== null && value !== undefined ? fmt(value) : value;
-      }
-      return mapped;
-    });
+    // Aggregate rows take the same reverse path as regular rows (since
+    // 0.1.128): physical → logical names, fromStorage formatters, boolean /
+    // decimal / JSON coercion of grouped columns, and a flattened leaf
+    // (`stats__views`) nests as `{ stats: { views } }`. Keys that are not
+    // columns — aggregate aliases such as `total` or `count_star` — are
+    // copied as-is by both strategies; an alias that collides with a
+    // physical column name is treated as that column (as the formatter rule
+    // always did). Rows an adapter already returns nested (MongoDB) pass
+    // through unchanged.
+    return results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
   }
 
   // ── Search ──────────────────────────────────────────────────────────────

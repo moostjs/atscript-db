@@ -1,5 +1,6 @@
 import type { TDbFieldMeta, TExistingColumn, TColumnDiff } from "../types";
 import { serializeDefaultValue } from "./schema-hash";
+import { fkKey } from "./fk-diff";
 
 /**
  * Computes the difference between desired schema fields and existing database columns.
@@ -84,5 +85,29 @@ export function computeColumnDiff(
     (c) => !desiredByName.has(c.name) && !renamedOldNames.has(c.name),
   );
 
-  return { added, removed, renamed, typeChanged, nullableChanged, defaultChanged, conflicts };
+  const diff: TColumnDiff = {
+    added,
+    removed,
+    renamed,
+    typeChanged,
+    nullableChanged,
+    defaultChanged,
+    conflicts,
+  };
+
+  // Primary-key field set — only meaningful when the table exists. Compared
+  // as sorted sets (consistent with the schema hash, which stores
+  // `isPrimaryKey` per field sorted by name and cannot see a reorder either).
+  // A renamed PK column is mapped to its new name before comparing so a plain
+  // `@db.column.renamed` on the key is not mistaken for a key change.
+  if (existing.length > 0) {
+    const newNameByOld = new Map(renamed.map((r) => [r.oldName, r.field.physicalName]));
+    const from = existing.filter((c) => c.pk).map((c) => newNameByOld.get(c.name) ?? c.name);
+    const to = desired.filter((f) => !f.ignored && f.isPrimaryKey).map((f) => f.physicalName);
+    if (fkKey(from) !== fkKey(to)) {
+      diff.primaryKeyChanged = { from, to };
+    }
+  }
+
+  return diff;
 }

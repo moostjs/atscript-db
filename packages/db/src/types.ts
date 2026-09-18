@@ -78,6 +78,13 @@ export interface TFieldMeta {
    * present in read responses. UIs render it as a set-only input.
    */
   writeOnly?: boolean;
+  /**
+   * Present (true) when the field is index-backed (explicit `@db.index*`,
+   * primary key or unique field). Advisory only — a hint for UIs that want to
+   * steer users toward cheap sort keys; it never affects whether a `$sort`
+   * is accepted (`sortable` does). Since 0.1.128.
+   */
+  indexed?: boolean;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
@@ -412,6 +419,64 @@ export interface TColumnDiff {
   nullableChanged: Array<{ field: TDbFieldMeta; wasNullable: boolean }>;
   defaultChanged: Array<{ field: TDbFieldMeta; oldDefault?: string; newDefault?: string }>;
   conflicts: Array<{ field: TDbFieldMeta; oldName: string; conflictsWith: string }>;
+  /**
+   * The primary-key FIELD SET differs between the live table and the model
+   * (set semantics — a composite-key reorder is not a change, consistent with
+   * the schema hash). Column names are physical; a renamed PK column is
+   * compared under its new name. Only reported when the table exists.
+   * @since 0.1.128
+   */
+  primaryKeyChanged?: TPrimaryKeyChange;
+}
+
+// ── Schema Sync: primary keys & FK introspection (since 0.1.128) ─────────
+
+/** Old and new primary-key column sets of a table whose key definition moved. */
+export interface TPrimaryKeyChange {
+  /** Physical PK columns currently in the database (after rename mapping). */
+  from: string[];
+  /** Physical PK columns the model declares. */
+  to: string[];
+}
+
+/**
+ * A live foreign-key constraint as introspected from the database
+ * (outbound: declared on the table that owns it).
+ */
+export interface TExistingForeignKey {
+  /** Local (referencing) columns, in constraint order. */
+  fields: string[];
+  /** Referenced table name. */
+  targetTable: string;
+  /** Referenced columns, in constraint order. */
+  targetFields: string[];
+}
+
+/**
+ * A live foreign key that REFERENCES a given table (inbound edge), as returned
+ * by `BaseDbAdapter.getReferencingForeignKeys(tableName)`.
+ */
+export interface TReferencingForeignKey {
+  /** The referencing (child) table. */
+  table: string;
+  /** Referencing columns on `table`, in constraint order. */
+  fields: string[];
+  /** Referenced columns on the queried table, in constraint order. */
+  targetFields: string[];
+}
+
+/** Kind of a physical database object, as returned by `BaseDbAdapter.getObjectKind`. */
+export type TDbObjectKind = "table" | "view" | "materialized";
+
+/** Options accepted by `BaseDbAdapter.ensureTable`. */
+export interface TEnsureTableOptions {
+  /**
+   * Table names whose inline FOREIGN KEY constraints must be omitted from
+   * CREATE TABLE — the constraints are added afterwards by `syncForeignKeys()`.
+   * Schema sync passes the members of a foreign-key cycle so they can be
+   * created in any order.
+   */
+  deferForeignKeysTo?: ReadonlySet<string>;
 }
 
 /** Result of applying column diff to the database. */
@@ -596,3 +661,120 @@ export interface TDbRelation {
   /** Junction type reference for 'via' (M:N) relations. */
   viaType?: () => TAtscriptAnnotatedType;
 }
+
+// ── Write semantics (Group B: payload aliases + validated-stage guard contexts) ──
+
+/**
+ * Write payload for insert / patch paths: every key optional, and optional
+ * columns additionally accept `null` (an explicit NULL — `undefined` means
+ * "absent" and is dropped before the row reaches defaults or validation).
+ */
+export type DbPatch<D> = {
+  [K in keyof D]?: undefined extends D[K] ? D[K] | null : D[K];
+} & Record<string, unknown>;
+
+/**
+ * Write payload for full-row replace paths: required keys stay required,
+ * optional columns additionally accept `null` (explicit NULL).
+ */
+export type DbRow<D> = {
+  [K in keyof D]: undefined extends D[K] ? D[K] | null : D[K];
+} & Record<string, unknown>;
+
+/** Built-in write actions a moost-db `AsDbController` endpoint performs. */
+export type TDbWriteAction =
+  | "insert"
+  | "insertMany"
+  | "replace"
+  | "replaceMany"
+  | "update"
+  | "updateMany";
+
+/**
+ * Context handed to a write {@link TWriteOptions.guard} (since 0.1.128) — and
+ * through it to `AsDbController.guardWrite()`. The table invokes the guard
+ * exactly once, inside its own transaction, after `undefined`-pruning,
+ * defaults and validation and before encryption / nested-relation phases.
+ */
+export interface TDbWriteGuardContext<Row = Record<string, unknown>> {
+  /** The table method the guard runs for (`insertOne` → `insert`, `insertMany` → `insertMany`, …). */
+  readonly action: TDbWriteAction;
+  /**
+   * insert/replace: validated rows with SDK-side defaults applied (plaintext,
+   * nav data still attached); update: validated patches with the identifying
+   * PK/unique fields present and `$cas` removed. Mutate in place to enrich —
+   * the table re-validates the rows after the guard.
+   */
+  readonly rows: Row[];
+  /** Parallel to `rows`: expected version lifted from `$cas`, or `undefined`. */
+  readonly expectedVersions: ReadonlyArray<number | undefined>;
+  /**
+   * Lazy, memoised pre-image of `rows[i]` by its identifying filter, read
+   * inside the transaction. `null` when the row is missing OR when it carries
+   * no identifying key yet (e.g. auto-increment inserts) — never throws.
+   */
+  current(i: number): Promise<Row | null>;
+}
+
+/**
+ * Context handed to a delete {@link TDeleteOptions.guard} (since 0.1.128) —
+ * and through it to `AsDbController.guardRemove()`. Runs inside the table's
+ * transaction; an id that resolves to no filter never reaches the guard
+ * (`deleteOne` answers `{ deletedCount: 0 }`).
+ */
+export interface TDbRemoveGuardContext<Row = Record<string, unknown>> {
+  /** The id `deleteOne` was called with. */
+  readonly id: unknown;
+  /** `table.resolveIdFilter(id)` — never null here. */
+  readonly filter: _FilterExpr;
+  /** Lazy, memoised pre-image of the row about to be deleted (`null` when missing). */
+  current(): Promise<Row | null>;
+}
+
+/** A validated-stage write guard — see {@link TWriteOptions.guard}. */
+export type TDbWriteGuard<Row = Record<string, unknown>> = (
+  ctx: TDbWriteGuardContext<Row>,
+) => void | Promise<void>;
+
+/** A validated-stage delete guard — see {@link TDeleteOptions.guard}. */
+export type TDbRemoveGuard<Row = Record<string, unknown>> = (
+  ctx: TDbRemoveGuardContext<Row>,
+) => void | Promise<void>;
+
+/** Options of `insertOne/Many`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate`. */
+export interface TWriteOptions<Row = Record<string, unknown>> {
+  /** Nested-relation write recursion limit (default 3). */
+  maxDepth?: number;
+  /**
+   * Validated-stage guard (since 0.1.128): invoked exactly once inside the
+   * table's transaction, after defaults + validation and before encryption
+   * and nested-relation phases, with the rows the table is about to write.
+   * Rows may be enriched in place — they are validated again afterwards. A
+   * throw rolls the transaction back and propagates unchanged. Never runs
+   * for the nested re-entries a deep write performs on related tables.
+   */
+  guard?: TDbWriteGuard<Row>;
+}
+
+/** Options of `deleteOne`. */
+export interface TDeleteOptions<Row = Record<string, unknown>> {
+  /**
+   * Validated-stage guard (since 0.1.128): invoked inside the table's
+   * transaction after the id resolved to a filter and before cascade /
+   * delete. A throw rolls the transaction back and propagates unchanged.
+   */
+  guard?: TDbRemoveGuard<Row>;
+}
+
+// ── Nullable typing (Group C: read-side generics; since 0.1.128) ─────────────
+
+/**
+ * Adds `null` to every optional property of `O`. Optional columns store SQL
+ * NULL / Mongo null, and the runtime validator accepts `null` for optional
+ * props — so filter shapes (`{ note: null }`, `{ note: { $ne: null } }`) and
+ * row shapes must admit it at the type level too. Homomorphic: keys and
+ * required properties are unchanged; applying it twice is a no-op.
+ */
+export type NullableOptional<O> = {
+  [K in keyof O]: undefined extends O[K] ? O[K] | null : O[K];
+};

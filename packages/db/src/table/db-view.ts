@@ -11,6 +11,7 @@ import type {
 } from "@atscript/typescript/utils";
 
 import type { BaseDbAdapter } from "../base-adapter";
+import type { NullableOptional } from "../types";
 import { AtscriptDbReadable } from "./db-readable";
 import type { TViewPlan, TViewJoin } from "../query/query-tree";
 
@@ -40,10 +41,11 @@ export interface TViewColumnMapping {
 export class AtscriptDbView<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
-  FlatType = FlatOf<T>,
+  // Optional columns read back / filter as `null` too (since 0.1.128).
+  FlatType = NullableOptional<FlatOf<T>>,
   A extends BaseDbAdapter = BaseDbAdapter,
   IdType = PrimaryKeyOf<T>,
-  OwnProps = OwnPropsOf<T>,
+  OwnProps = NullableOptional<OwnPropsOf<T>>,
   NavType extends Record<string, unknown> = NavPropsOf<T>,
 > extends AtscriptDbReadable<T, DataType, FlatType, A, IdType, OwnProps, NavType> {
   private _viewPlan?: TViewPlan;
@@ -174,7 +176,15 @@ export class AtscriptDbView<
       "db.agg.max",
     ] as const;
 
+    // `@db.ignore` fields exist on the type but have no column anywhere —
+    // the same source of truth tables use (snapshot, column diff, DDL).
+    // Iteration stays over `props`: view fields are top-level chain refs.
+    const ignored = this.ignoredFields;
+
     for (const [fieldName, fieldType] of this._type.type.props.entries()) {
+      if (ignored.has(fieldName)) {
+        continue;
+      }
       // Detect aggregate annotations on this field
       let aggFn: string | undefined;
       let aggField: string | undefined;
@@ -207,4 +217,19 @@ export class AtscriptDbView<
 
     return mappings;
   }
+}
+
+/**
+ * Structural type guard for views: `true` when the readable reports
+ * `isView`, whether or not it is an `AtscriptDbView` instance of THIS copy
+ * of `@atscript/db`. Adapters must use this (or `readable.isView`) instead of
+ * `instanceof AtscriptDbView` — in a bundle that carries two copies of the
+ * core (app bundle + external adapter), `instanceof` is false and the adapter
+ * would create an empty physical table under the view's name.
+ * @since 0.1.128
+ */
+export function isAtscriptDbView(
+  readable: AtscriptDbReadable<any, any, any, any, any, any, any>,
+): readable is AtscriptDbView<any, any, any, any, any, any, any> {
+  return readable.isView;
 }

@@ -124,6 +124,13 @@ export class MockAdapter extends BaseDbAdapter {
   async ensureTable(): Promise<void> {}
 }
 
+/** Document-style mock: nested objects kept inline (no flattening, no physical-name mapping). */
+export class NestedMockAdapter extends MockAdapter {
+  override supportsNestedObjects(): boolean {
+    return true;
+  }
+}
+
 /** Simple filter matching for tests — supports exact match, $in, and $or */
 export function matchesFilter(row: Record<string, unknown>, filter: FilterExpr): boolean {
   for (const [key, value] of Object.entries(filter)) {

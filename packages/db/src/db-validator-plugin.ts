@@ -101,14 +101,18 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─
     if (value === undefined && (dbCtx.mode === "insert" || dbCtx.mode === "replace")) {
       const meta = def.metadata;
-      const hasDefault =
+      // Server-managed fields: defaulted columns, and the OCC version column
+      // (adapter-initialised to 0 on insert, auto-bumped on every write) —
+      // single source of truth for both the server validators and db-client.
+      const serverManaged =
         meta.has("db.default") ||
         meta.has("db.default.increment") ||
         meta.has("db.default.uuid") ||
-        meta.has("db.default.now");
+        meta.has("db.default.now") ||
+        meta.has("db.column.version");
       const hasFK = meta.has("db.rel.FK");
 
-      if (hasDefault || hasFK) {
+      if (serverManaged || hasFK) {
         // Default/FK fields optional in both modes, EXCEPT top-level PK in replace
         // (must identify the record). Nested nav children are effectively inserts.
         if (

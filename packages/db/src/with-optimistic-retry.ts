@@ -1,4 +1,5 @@
 import { CasExhaustedError, DbError } from "./db-error";
+import { isEmptyObject } from "./shared/object";
 import type { AtscriptDbTable } from "./table/db-table";
 import type { FilterExpr, TDbUpdateResult } from "./types";
 
@@ -21,6 +22,11 @@ export interface WithOptimisticRetryOptions {
  * a version conflict (`matchedCount === 0`) it re-reads the row, calls the
  * mutator with the fresh state, and retries — up to `maxAttempts` times.
  *
+ * A mutator that returns `undefined` or an empty object `{}` aborts without
+ * writing: the helper resolves `{ matchedCount: 1, modifiedCount: 0 }` and the
+ * version does not move (since 0.1.128 — previously `{}` reported a fabricated
+ * match as well, but through the empty-patch short-circuit).
+ *
  * The filter (typically the primary key) is threaded into the update payload
  * so the table layer can extract the row identity. If `mutator` returns
  * fields that overlap with the filter, the patch wins (last-write semantics
@@ -34,10 +40,13 @@ export interface WithOptimisticRetryOptions {
  * @throws {CasExhaustedError} if `maxAttempts` is reached without a
  *   successful commit.
  */
+
 export async function withOptimisticRetry<TRow extends Record<string, unknown>>(
   table: AtscriptDbTable,
   filter: Record<string, unknown>,
-  mutator: (row: TRow) => Promise<Record<string, unknown>> | Record<string, unknown>,
+  mutator: (
+    row: TRow,
+  ) => Promise<Record<string, unknown> | undefined> | Record<string, unknown> | undefined,
   opts?: WithOptimisticRetryOptions,
 ): Promise<TDbUpdateResult> {
   const versionColumn = table.versionColumn;
@@ -73,6 +82,15 @@ export async function withOptimisticRetry<TRow extends Record<string, unknown>>(
 
     lastSeenVersion = row[versionColumn] as number;
     const patch = await mutator(row);
+
+    // Explicit no-write (since 0.1.128): a mutator returning `undefined` or `{}`
+    // decided there is nothing to change. Nothing is written and nothing bumps
+    // — a no-op must not invalidate every other reader's version. The row was
+    // just read by `findOne`, so `matchedCount: 1` is honest. Callers who want
+    // a fence call `updateOne({ ...pk, $cas })` directly (versioned touch).
+    if (patch === undefined || isEmptyObject(patch)) {
+      return { matchedCount: 1, modifiedCount: 0 };
+    }
 
     const result = await table.updateOne({
       ...filter,

@@ -97,7 +97,17 @@ export class SyncStore {
     return entries;
   }
 
-  async writeTrackedList(readables: AtscriptDbReadable[]): Promise<void> {
+  /**
+   * Writes the tracked list: the current readables plus `retained` — entries
+   * from the previous list that were scheduled for removal but NOT dropped
+   * (safe mode, blocked or failed drop). Tracking must keep describing what
+   * sync believes exists, so a later run that actually executes still drops
+   * them instead of orphaning them behind a matching hash.
+   */
+  async writeTrackedList(
+    readables: AtscriptDbReadable[],
+    retained: Array<{ name: string; isView: boolean; viewType?: "V" | "M" | "E" }> = [],
+  ): Promise<void> {
     const entries = readables.map((r) => {
       const isView = r.isView;
       let viewType: "V" | "M" | "E" | undefined;
@@ -107,6 +117,13 @@ export class SyncStore {
       }
       return { name: r.tableName, isView, viewType };
     });
+    const current = new Set(entries.map((e) => e.name));
+    for (const e of retained) {
+      if (!current.has(e.name)) {
+        entries.push({ name: e.name, isView: e.isView, viewType: e.viewType });
+        current.add(e.name);
+      }
+    }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     await this.writeControlValue("synced_tables", JSON.stringify(entries));
   }

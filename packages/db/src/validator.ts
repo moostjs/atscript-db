@@ -7,6 +7,11 @@ export type { TArrayPatch, TDbPatch } from "./patch/patch-types";
 
 // Re-export field & array op helpers (browser-safe convenience)
 export { $inc, $dec, $mul, $cas, $replace, $insert, $upsert, $update, $remove } from "./ops";
+// `$cas` extraction/validation — shared by the server write paths and the
+// db-client `$cas` lift so both produce the same INVALID_QUERY messages.
+export { separateCas, reconcileCas } from "./ops";
+export { DbError } from "./db-error";
+export { isPlainObject, isEmptyObject } from "./shared/object";
 
 import {
   flattenAnnotatedType,

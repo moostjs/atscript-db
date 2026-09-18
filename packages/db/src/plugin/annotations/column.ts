@@ -310,7 +310,17 @@ export const dbColumnAnnotations: TAnnotationsTree = {
           "Starting value for the auto-increment sequence. Adapter-specific behavior; some adapters may ignore this.",
       },
       validate(token, args, doc) {
-        return validateFieldBaseType(token, doc, "db.default.increment", "number");
+        const errors = validateFieldBaseType(token, doc, "db.default.increment", "number");
+        // Schema sync refuses a primary-key change that demotes an auto-increment
+        // column (MySQL cannot keep AUTO_INCREMENT off a key) — flag it at compile time.
+        if (token.parentNode!.countAnnotations("meta.id") === 0) {
+          errors.push({
+            message: `@db.default.increment on a field without @meta.id — auto-increment columns must be primary-key columns for schema sync to manage them`,
+            severity: 2,
+            range: token.range,
+          });
+        }
+        return errors;
       },
     }),
 
@@ -494,8 +504,11 @@ function columnCapability(capability: "filterable" | "sortable", verb: string): 
     description:
       `Marks a column as ${capability} in the readable controller's query/pages endpoints. ` +
       `Relevant only when the host \`@db.table\` interface opts into strict mode with ` +
-      `\`@db.table.${capability} 'manual'\`; otherwise ${verb} is open on all columns ` +
-      "(default-open, back-compat).\n\n" +
+      `\`@db.table.${capability} 'manual'\`; otherwise ${verb} is open on every column the ` +
+      "adapter can handle (default-open, back-compat) and the annotation is a no-op. Adapter " +
+      "capability always wins: `@db.json` / array columns stay non-sortable (and non-filterable " +
+      "on SQL adapters) even when annotated. `/meta.fields` advertises exactly what the gate " +
+      "accepts; index-backed columns additionally carry the advisory `indexed` flag.\n\n" +
       "**Example:**\n" +
       "```atscript\n" +
       '@db.table "users"\n' +

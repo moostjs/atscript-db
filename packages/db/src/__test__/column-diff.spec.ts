@@ -257,3 +257,122 @@ describe("computeColumnDiff", () => {
     expect(diff.renamed[0].field.physicalName).toBe("full_name");
   });
 });
+
+// ── Primary-key field-set change (since 0.1.128) ─────────────────────────
+
+describe("computeColumnDiff — primaryKeyChanged", () => {
+  it("reports no change when the PK set is identical", () => {
+    const desired = [
+      field({ physicalName: "id", isPrimaryKey: true }),
+      field({ physicalName: "n" }),
+    ];
+    const existing = [col("id", "INTEGER", true, true), col("n")];
+    expect(computeColumnDiff(desired, existing).primaryKeyChanged).toBeUndefined();
+  });
+
+  it("detects the PK moved to another existing column", () => {
+    const desired = [
+      field({ physicalName: "id", designType: "number" }),
+      field({ physicalName: "code", isPrimaryKey: true }),
+    ];
+    const existing = [col("id", "INTEGER", true, true), col("code", "TEXT", true)];
+    const diff = computeColumnDiff(desired, existing);
+    expect(diff.primaryKeyChanged).toEqual({ from: ["id"], to: ["code"] });
+    // Column-level diff is otherwise clean — both columns exist
+    expect(diff.added).toEqual([]);
+    expect(diff.removed).toEqual([]);
+  });
+
+  it("detects single → composite", () => {
+    const desired = [
+      field({ physicalName: "studentId", isPrimaryKey: true }),
+      field({ physicalName: "courseId", isPrimaryKey: true }),
+    ];
+    const existing = [col("id", "INTEGER", true, true), col("studentId"), col("courseId")];
+    const diff = computeColumnDiff(desired, existing);
+    expect(diff.primaryKeyChanged).toEqual({ from: ["id"], to: ["studentId", "courseId"] });
+    expect(diff.removed.map((c) => c.name)).toEqual(["id"]);
+  });
+
+  it("detects composite → single", () => {
+    const desired = [
+      field({ physicalName: "id", isPrimaryKey: true }),
+      field({ physicalName: "studentId" }),
+      field({ physicalName: "courseId" }),
+    ];
+    const existing = [
+      col("studentId", "INTEGER", true, true),
+      col("courseId", "INTEGER", true, true),
+      col("id", "INTEGER", true),
+    ];
+    expect(computeColumnDiff(desired, existing).primaryKeyChanged).toEqual({
+      from: ["studentId", "courseId"],
+      to: ["id"],
+    });
+  });
+
+  it("detects composite membership change", () => {
+    const desired = [
+      field({ physicalName: "a", isPrimaryKey: true }),
+      field({ physicalName: "c", isPrimaryKey: true }),
+      field({ physicalName: "b" }),
+    ];
+    const existing = [col("a", "TEXT", true, true), col("b", "TEXT", true, true), col("c")];
+    expect(computeColumnDiff(desired, existing).primaryKeyChanged).toEqual({
+      from: ["a", "b"],
+      to: ["a", "c"],
+    });
+  });
+
+  it("does NOT detect a composite reorder (set semantics)", () => {
+    const desired = [
+      field({ physicalName: "b", isPrimaryKey: true }),
+      field({ physicalName: "a", isPrimaryKey: true }),
+    ];
+    const existing = [col("a", "TEXT", true, true), col("b", "TEXT", true, true)];
+    expect(computeColumnDiff(desired, existing).primaryKeyChanged).toBeUndefined();
+  });
+
+  it("maps a renamed PK column to its new name (no false change)", () => {
+    const desired = [field({ physicalName: "uid", isPrimaryKey: true, renamedFrom: "id" })];
+    const existing = [col("id", "INTEGER", true, true)];
+    const diff = computeColumnDiff(desired, existing);
+    expect(diff.renamed).toHaveLength(1);
+    expect(diff.primaryKeyChanged).toBeUndefined();
+  });
+
+  it("detects a PK move onto a newly added column", () => {
+    const desired = [
+      field({ physicalName: "id", designType: "number" }),
+      field({ physicalName: "code", isPrimaryKey: true }),
+    ];
+    const existing = [col("id", "INTEGER", true, true)];
+    const diff = computeColumnDiff(desired, existing);
+    expect(diff.added.map((f) => f.physicalName)).toEqual(["code"]);
+    expect(diff.primaryKeyChanged).toEqual({ from: ["id"], to: ["code"] });
+  });
+
+  it("ignores @db.ignore fields and reports nothing for a non-existent table", () => {
+    const desired = [
+      field({ physicalName: "id", isPrimaryKey: true }),
+      field({ physicalName: "ghost", isPrimaryKey: true, ignored: true }),
+    ];
+    expect(
+      computeColumnDiff(desired, [col("id", "INTEGER", true, true)]).primaryKeyChanged,
+    ).toBeUndefined();
+    expect(computeColumnDiff(desired, []).primaryKeyChanged).toBeUndefined();
+  });
+
+  it("detects a table gaining or losing its primary key entirely", () => {
+    const gaining = computeColumnDiff(
+      [field({ physicalName: "id", isPrimaryKey: true })],
+      [col("id", "INTEGER", true, false)],
+    );
+    expect(gaining.primaryKeyChanged).toEqual({ from: [], to: ["id"] });
+    const losing = computeColumnDiff(
+      [field({ physicalName: "id" })],
+      [col("id", "INTEGER", true, true)],
+    );
+    expect(losing.primaryKeyChanged).toEqual({ from: ["id"], to: [] });
+  });
+});

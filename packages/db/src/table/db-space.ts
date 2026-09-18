@@ -7,7 +7,7 @@ import type { BaseDbAdapter } from "../base-adapter";
 import { DbEncryption, type TDbEncryptionOptions } from "../encryption";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
-import type { TCascadeTarget, TFkLookupTarget } from "../types";
+import type { TCascadeTarget, TFkLookupTarget, TReferencingForeignKey } from "../types";
 
 /**
  * Adapter factory function. Called once per table/view to create a fresh adapter instance.
@@ -168,6 +168,34 @@ export class DbSpace {
     }
   }
 
+  /**
+   * Drops a group of mutually referencing tables as one operation.
+   * Used by schema sync to remove a foreign-key cycle no longer in the schema.
+   * @since 0.1.128
+   */
+  async dropTablesByName(tableNames: string[]): Promise<void> {
+    await this._getAdminAdapter().dropTablesByName(tableNames);
+  }
+
+  /**
+   * Live foreign keys referencing `tableName`, or `undefined` when the
+   * adapter cannot introspect them. Used by schema sync for drop ordering
+   * and surviving-reference checks of tables without a registered readable.
+   * @since 0.1.128
+   */
+  async getReferencingForeignKeys(
+    tableName: string,
+  ): Promise<TReferencingForeignKey[] | undefined> {
+    const adapter = this._getAdminAdapter();
+    return adapter.getReferencingForeignKeys?.(tableName);
+  }
+
+  /**
+   * A factory-fresh adapter with NO registered readable. Only the name-taking
+   * primitives may run on it (`dropTableByName`, `dropViewByName`,
+   * `dropTablesByName`, `getReferencingForeignKeys`) — adapters derive the
+   * schema for those from the driver/connection, not from a bound table.
+   */
   private _getAdminAdapter(): BaseDbAdapter {
     return (this._adminAdapter ??= this.adapterFactory());
   }

@@ -19,7 +19,9 @@ export type DbErrorCode =
   // ── Geo (db.geoPoint / @db.index.geo) ──
   | "GEO_INDEX_MISSING"
   | "GEO_NOT_SUPPORTED"
-  | "FILTER_TYPE_MISMATCH";
+  | "FILTER_TYPE_MISMATCH"
+  // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
+  | "TX_WAIT_TIMEOUT";
 
 export class DbError extends Error {
   name = "DbError";

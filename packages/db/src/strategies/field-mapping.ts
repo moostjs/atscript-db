@@ -2,6 +2,7 @@ import type { AggregateQuery, FilterExpr, Uniquery } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { UniquSelect } from "../query/uniqu-select";
+import { isPlainObject } from "../shared/object";
 import type { DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
 
@@ -230,8 +231,7 @@ export abstract class FieldMappingStrategy {
     // Class instances (ObjectId, Date, ...) are direct values too — only plain
     // objects can carry operators; rebuilding an instance from its entries
     // would destroy it.
-    const proto: unknown = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
+    if (!isPlainObject(value)) {
       return fmt(value);
     }
 

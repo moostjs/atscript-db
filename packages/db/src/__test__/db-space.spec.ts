@@ -89,6 +89,30 @@ class MockAdapter extends BaseDbAdapter {
   }
 }
 
+/** A mock that also implements the name-taking schema-sync primitives. */
+class AdminMockAdapter extends MockAdapter {
+  /** `true` when the primitive ran on an adapter with a registered readable. */
+  public boundAt: Array<{ method: string; bound: boolean }> = [];
+
+  private admin(method: string, ...args: any[]) {
+    this.boundAt.push({ method, bound: this._table !== undefined });
+    this.calls.push({ method, args });
+  }
+
+  async getReferencingForeignKeys(tableName: string) {
+    this.admin("getReferencingForeignKeys", tableName);
+    return [{ table: "profiles", fields: ["userId"], targetFields: ["id"] }];
+  }
+
+  async dropTableByName(tableName: string): Promise<void> {
+    this.admin("dropTableByName", tableName);
+  }
+
+  async dropViewByName(viewName: string): Promise<void> {
+    this.admin("dropViewByName", viewName);
+  }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe("DbSpace", () => {
@@ -166,5 +190,55 @@ describe("DbSpace", () => {
     const table = space.getTable(UsersTable);
     // Access internal logger
     expect((table as any).logger).toBe(logger);
+  });
+
+  // ── Administrative adapter (schema sync: drop by name, inbound FKs) ──────
+
+  it("runs the name-taking primitives on ONE dedicated adapter that has no registered readable", async () => {
+    const created: AdminMockAdapter[] = [];
+    const factory = vi.fn(() => {
+      const a = new AdminMockAdapter();
+      created.push(a);
+      return a;
+    });
+    const space = new DbSpace(factory);
+    const users = space.getTable(UsersTable);
+
+    expect(await space.getReferencingForeignKeys("users")).toEqual([
+      { table: "profiles", fields: ["userId"], targetFields: ["id"] },
+    ]);
+    await space.dropTableByName("gone");
+    await space.dropViewByName("gone_view");
+    await space.dropTablesByName(["cycle_a", "cycle_b"]); // base default → dropTableByName each
+
+    // The table's adapter plus exactly one admin adapter, reused across calls
+    expect(factory).toHaveBeenCalledTimes(2);
+    const admin = created[1];
+    expect(admin).not.toBe(users.dbAdapter);
+    expect(admin.boundAt.every((c) => !c.bound)).toBe(true);
+    expect(admin.calls.map((c) => [c.method, ...c.args])).toEqual([
+      ["getReferencingForeignKeys", "users"],
+      ["dropTableByName", "gone"],
+      ["dropViewByName", "gone_view"],
+      ["dropTableByName", "cycle_a"],
+      ["dropTableByName", "cycle_b"],
+    ]);
+    // The bound adapter of the registered table is never involved
+    expect((users.dbAdapter as MockAdapter).calls).toEqual([]);
+  });
+
+  it("admin primitives resolve to no-ops / undefined on adapters that lack them", async () => {
+    const space = new DbSpace(() => new MockAdapter());
+    expect(await space.getReferencingForeignKeys("users")).toBeUndefined();
+    await expect(space.dropTableByName("x")).resolves.toBeUndefined();
+    await expect(space.dropViewByName("v")).resolves.toBeUndefined();
+    await expect(space.dropTablesByName(["a", "b"])).resolves.toBeUndefined();
+  });
+
+  it("base hasRows(tableName) on an unbound adapter answers 'cannot tell'; table-scoped ops throw a clear error", async () => {
+    const unbound = new MockAdapter();
+    expect(await unbound.hasRows("users")).toBeUndefined();
+    expect(() => unbound.resolveTableName()).toThrow(/no registered readable/);
+    expect(unbound.calls).toEqual([]);
   });
 });

@@ -200,6 +200,64 @@ export function separateFieldOps(data: Record<string, unknown>): TFieldOps | und
  *
  * Zero-allocation on the no-op (no `$cas`) path.
  */
+/**
+ * Reconciles the two spellings of one write item's expected version, in
+ * place (since 0.1.128): the SDK operator `$cas: { [versionColumn]: N }` and a
+ * top-level `[versionColumn]: N` (the HTTP wire shape, where a body's version
+ * column is a CAS predicate, not a SET). Shared by the moost-db controller
+ * (`target: "cas"` — normalises to `$cas` for the table) and the db-client
+ * (`target: "version"` — normalises to the wire shape).
+ *
+ * - neither present → no-op, returns `undefined`
+ * - one present → normalised to `target`, returns the expected version
+ * - both present and equal → normalised once
+ * - both present and different → `DbError("INVALID_QUERY")` at path `$cas`:
+ *   `Ambiguous version: "<col>" and "$cas.<col>" differ`
+ * - `$cas` malformed → {@link separateCas}'s own error (checked first, so a
+ *   malformed `$cas` is never reported as "ambiguous")
+ * - `$cas: undefined` counts as absent (the key is dropped)
+ * - `versionColumn === undefined` with a `$cas` → {@link separateCas}'s
+ *   "table has no @db.column.version" error
+ *
+ * Only a finite number counts as a present version column value — anything
+ * else is left untouched for the write validator to reject.
+ */
+export function reconcileCas(
+  data: Record<string, unknown>,
+  versionColumn: string | undefined,
+  target: "cas" | "version",
+): number | undefined {
+  if ("$cas" in data && data.$cas === undefined) {
+    delete data.$cas;
+  }
+  const versionValue = versionColumn === undefined ? undefined : data[versionColumn];
+  const hasVersion = typeof versionValue === "number" && Number.isFinite(versionValue);
+  const hasCas = "$cas" in data;
+  if (!hasCas && !hasVersion) return undefined;
+
+  let expected: number;
+  if (hasCas) {
+    expected = separateCas(data, versionColumn)!;
+    if (hasVersion && versionValue !== expected) {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$cas",
+          message: `Ambiguous version: "${versionColumn}" and "$cas.${versionColumn}" differ`,
+        },
+      ]);
+    }
+  } else {
+    expected = versionValue as number;
+  }
+  if (target === "cas") {
+    delete data[versionColumn!];
+    data.$cas = { [versionColumn!]: expected };
+  } else {
+    data[versionColumn!] = expected;
+  }
+  return expected;
+}
+
 export function separateCas(
   data: Record<string, unknown>,
   versionColumn?: string,

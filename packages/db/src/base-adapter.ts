@@ -27,6 +27,10 @@ import type {
   TDbDefaultFn,
   TMetadataOverrides,
   TValueFormatterPair,
+  TDbObjectKind,
+  TEnsureTableOptions,
+  TPrimaryKeyChange,
+  TReferencingForeignKey,
 } from "./types";
 import type {
   TDbInsertResult,
@@ -47,10 +51,30 @@ const EMPTY_DEFAULT_FNS: ReadonlySet<TDbDefaultFn> = new Set();
 
 // ── Transaction context ─────────────────────────────────────────────────────
 
+/**
+ * One open transaction in the async chain (since 0.1.128 the state is branded
+ * by its `owner` — see {@link BaseDbAdapter._transactionOwner}). An adapter
+ * only ever reads a state whose owner is its own; a transaction opened by
+ * another adapter family is "no transaction of mine", and a nested
+ * `withTransaction` from that family opens its own transaction on top —
+ * `parent` keeps the outer one reachable for the outer family's statements.
+ */
 interface TxContext {
+  readonly owner: unknown;
   state: unknown;
+  readonly parent: TxContext | undefined;
 }
 const txStorage = new AsyncLocalStorage<TxContext>();
+
+/** The innermost open transaction of `owner` in the current async chain. */
+function findTxContext(owner: unknown): TxContext | undefined {
+  for (let ctx = txStorage.getStore(); ctx; ctx = ctx.parent) {
+    if (ctx.owner === owner) {
+      return ctx;
+    }
+  }
+  return undefined;
+}
 
 /**
  * Abstract base class for database adapters.
@@ -78,6 +102,15 @@ const txStorage = new AsyncLocalStorage<TxContext>();
 export abstract class BaseDbAdapter {
   // ── Table/view back-reference ─────────────────────────────────────────────
 
+  /**
+   * The readable this adapter serves. UNSET on an administrative adapter:
+   * `DbSpace` creates one from the factory without a readable for the
+   * name-taking schema-sync primitives (`dropTableByName`, `dropViewByName`,
+   * `dropTablesByName`, `getReferencingForeignKeys`, `getObjectKind`,
+   * `getExistingColumnsForTable`, `hasRows(tableName)`), so those must derive
+   * everything — the schema included — from the driver/connection, never from
+   * `this._table`.
+   */
   protected _table!: AtscriptDbReadable<any, any, any, any, any, any, any>;
 
   /**
@@ -133,18 +166,21 @@ export abstract class BaseDbAdapter {
 
   /**
    * Runs `fn` inside a database transaction. Nested calls (from related tables
-   * within the same async chain) reuse the existing transaction automatically.
+   * within the same async chain) reuse the existing transaction automatically
+   * — "existing" meaning a transaction of the same {@link _transactionOwner};
+   * inside another adapter family's transaction this opens its own.
    *
    * The generic layer handles nesting detection via `AsyncLocalStorage`.
    * Adapters override `_beginTransaction`, `_commitTransaction`, and
    * `_rollbackTransaction` to provide raw DB-specific transaction primitives.
    */
   async withTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    if (txStorage.getStore()) {
+    const owner = this._transactionOwner();
+    if (findTxContext(owner)) {
       return fn();
     }
 
-    const ctx: TxContext = { state: undefined };
+    const ctx: TxContext = { owner, state: undefined, parent: txStorage.getStore() };
     ctx.state = await this._beginTransaction();
     return txStorage.run(ctx, async () => {
       try {
@@ -163,11 +199,24 @@ export abstract class BaseDbAdapter {
   }
 
   /**
-   * Returns the opaque transaction state from the current async context.
+   * The object a transaction state is branded with (since 0.1.128). Every
+   * adapter instance that returns the same owner shares one transaction —
+   * override to return the driver / pool / client the adapter was constructed
+   * with, so all tables of a space join it. The default (the adapter class)
+   * suits adapters without a connection object (in-memory, mocks).
+   */
+  protected _transactionOwner(): unknown {
+    return this.constructor;
+  }
+
+  /**
+   * Returns the opaque transaction state of THIS adapter's owner from the
+   * current async context — `undefined` when no transaction is open or only
+   * another adapter family's transaction is (its state is never handed out).
    * Adapters use this to retrieve DB-specific state (e.g., MongoDB `ClientSession`).
    */
   protected _getTransactionState(): unknown {
-    return txStorage.getStore()?.state;
+    return findTxContext(this._transactionOwner())?.state;
   }
 
   /**
@@ -175,13 +224,14 @@ export abstract class BaseDbAdapter {
    * Adapters that override `withTransaction` (e.g., to use MongoDB's
    * `session.withTransaction()` Convenient API) use this to set up the
    * shared context so that nested adapters see the same session.
-   * If a context already exists (nesting), it's reused.
+   * If a context of the same owner already exists (nesting), it's reused.
    */
   protected _runInTransactionContext<T>(state: unknown, fn: () => Promise<T>): Promise<T> {
-    if (txStorage.getStore()) {
+    const owner = this._transactionOwner();
+    if (findTxContext(owner)) {
       return fn();
     }
-    return txStorage.run({ state }, fn);
+    return txStorage.run({ owner, state, parent: txStorage.getStore() }, fn);
   }
 
   /**
@@ -246,11 +296,14 @@ export abstract class BaseDbAdapter {
   }
 
   /**
-   * Whether the DB engine handles static `@db.default "value"` natively
-   * via column-level DEFAULT clauses in CREATE TABLE.
-   * When `true`, `_applyDefaults()` skips client-side value defaults,
-   * letting the DB apply its own DEFAULT. SQL adapters return `true`;
-   * document stores (MongoDB) return `false` and apply defaults client-side.
+   * Whether the DB engine carries static `@db.default "value"` defaults in
+   * its DDL (`DEFAULT` clauses in `CREATE TABLE`).
+   *
+   * @deprecated since 0.1.128 — no longer consulted: the table layer fills
+   * static value defaults SDK-side on every adapter before validation, and the
+   * SQL adapters emit their DDL `DEFAULT` clauses regardless of this flag.
+   * Kept as a capability hint for tooling; nothing in the generic layer
+   * branches on it.
    */
   supportsNativeValueDefaults(): boolean {
     return false;
@@ -306,14 +359,20 @@ export abstract class BaseDbAdapter {
 
   /**
    * Whether this adapter can sort by a given field.
-   * Default: scalar columns yes, JSON-stored columns no. Mongo's array sort
-   * (min/max element) is a footgun for generic UI sort headers, so the default
-   * stays conservative even for adapters that technically support it.
+   * Default: scalar columns yes; JSON-stored columns, `@db.json` objects and
+   * arrays no. Mongo's array sort (min/max element) is a footgun for generic
+   * UI sort headers, so the default stays conservative even for adapters that
+   * technically support it — the veto keys on `designType` as well as
+   * `storage` because nested-object adapters keep arrays / `@db.json` values
+   * inline as `storage: 'column'` (since 0.1.128).
    */
   canSortField(fd: TDbFieldMeta): boolean {
     if (fd.encrypted || fd.isGeoPoint) {
       // Encrypted: ciphertext order is meaningless. Geo: distance sort goes
       // through geoSearch(), never $sort.
+      return false;
+    }
+    if (fd.designType === "json" || fd.designType === "array") {
       return false;
     }
     return fd.storage !== "json";
@@ -442,6 +501,11 @@ export abstract class BaseDbAdapter {
    * @param includeSchema - Whether to prepend `schema.` prefix (default: true).
    */
   resolveTableName(includeSchema = true): string {
+    if (!this._table) {
+      throw new Error(
+        "Adapter has no registered readable: table-scoped operations need a table/view; on an administrative adapter use the name-taking primitives (dropTableByName, hasRows(tableName), …)",
+      );
+    }
     const schema = this._table.schema;
     const name = this._table.tableName;
     return includeSchema && schema ? `${schema}.${name}` : name;
@@ -478,6 +542,14 @@ export abstract class BaseDbAdapter {
     dropIndex(name: string): Promise<void>;
     prefix?: string;
     shouldSkipType?(type: TDbIndex["type"]): boolean;
+    /**
+     * Renders one desired key part for the drift comparison, so adapters whose
+     * `listExisting` reports more than a bare column name (e.g. MySQL's
+     * `col(255)` key-length prefix) can render the model side identically.
+     * Default: the column name.
+     * @since 0.1.128
+     */
+    renderDesiredColumn?(index: TDbIndex, field: TDbIndex["fields"][number]): string;
     /**
      * Index types declared on the model but not supported by this adapter —
      * warns and skips (models stay portable; sync never errors on these).
@@ -524,7 +596,9 @@ export abstract class BaseDbAdapter {
       // and other expression-backed indexes don't introspect to plain columns
       if (index.type === "plain" || index.type === "unique") {
         const liveColumns = existingColumns.get(index.key);
-        const desiredColumns = index.fields.map((f) => f.name);
+        const desiredColumns = index.fields.map(
+          (f) => opts.renderDesiredColumn?.(index, f) ?? f.name,
+        );
         if (
           liveColumns &&
           (liveColumns.length !== desiredColumns.length ||
@@ -773,8 +847,14 @@ export abstract class BaseDbAdapter {
   /**
    * Ensures the table exists in the database, creating it if needed.
    * Uses `this._table.tableName`, `this._table.schema`, etc.
+   *
+   * @param opts - Optional (since 0.1.128). Relational adapters that emit
+   *   inline FOREIGN KEY constraints must omit those whose target is in
+   *   `opts.deferForeignKeysTo` — schema sync adds them afterwards through
+   *   {@link syncForeignKeys} so a foreign-key cycle can be created in any
+   *   order. Adapters without inline constraints ignore the parameter.
    */
-  abstract ensureTable(): Promise<void>;
+  abstract ensureTable(opts?: TEnsureTableOptions): Promise<void>;
 
   /**
    * Synchronizes foreign key constraints between Atscript definitions and the database.
@@ -816,8 +896,13 @@ export abstract class BaseDbAdapter {
    *
    * Returns undefined if the adapter cannot introspect table options.
    * In that case, schema sync falls back to stored snapshot.
+   *
+   * @param tableName - Introspect this table instead of the adapter's own
+   *   (schema sync passes the OLD name of a table that is about to be
+   *   renamed, as for `getExistingColumnsForTable`). Defaults to the bound
+   *   table.
    */
-  getExistingTableOptions?(): Promise<TExistingTableOption[]>;
+  getExistingTableOptions?(tableName?: string): Promise<TExistingTableOption[]>;
 
   /**
    * Applies non-destructive table option changes (e.g., MySQL ALTER TABLE ENGINE=X).
@@ -905,6 +990,72 @@ export abstract class BaseDbAdapter {
    * Optional — only relational adapters implement this.
    */
   dropViewByName?(viewName: string): Promise<void>;
+
+  /**
+   * Drops several tables that reference each other (a foreign-key cycle) as
+   * one operation. Schema sync only calls this for cycles whose members are
+   * ALL being removed. Default: {@link dropTableByName} in the given order —
+   * enough for engines that tolerate it (SQLite with FK checks off, MySQL with
+   * FOREIGN_KEY_CHECKS=0); PostgreSQL overrides it with one multi-table
+   * `DROP TABLE a, b` statement.
+   * @since 0.1.128
+   */
+  async dropTablesByName(tableNames: string[]): Promise<void> {
+    for (const name of tableNames) {
+      await this.dropTableByName?.(name);
+    }
+  }
+
+  /**
+   * Whether the table has at least one row. Schema sync uses it in the
+   * pre-flight phase to refuse a primary-key change on a populated table.
+   * Override with an EXISTS/LIMIT 1 probe — this default is `count() > 0`,
+   * a full scan on some engines, and it can only answer for the adapter's
+   * OWN table: for another `tableName` (or on an administrative adapter
+   * without a readable) it returns `undefined` ("cannot tell"), which schema
+   * sync treats as a refusal.
+   *
+   * @param tableName - Check this table instead of the adapter's own (schema
+   *   sync passes the OLD name of a table that is about to be renamed).
+   * @returns `true`/`false`, or `undefined` when the adapter cannot tell.
+   * @since 0.1.128
+   */
+  async hasRows(tableName?: string): Promise<boolean | undefined> {
+    if (tableName !== undefined && tableName !== this._table?.tableName) {
+      return undefined;
+    }
+    return (await this.count({ filter: {}, controls: {} })) > 0;
+  }
+
+  /**
+   * Live foreign keys that REFERENCE `tableName` (inbound edges), from any
+   * table in the database — including tables whose models are no longer in
+   * the sync inventory. Schema sync uses it to order drops (children before
+   * parents), to refuse dropping a table that an unmanaged table still
+   * references, and to refuse a primary-key change that a live FK depends on.
+   * Optional — engines without physical foreign keys omit it.
+   * @since 0.1.128
+   */
+  getReferencingForeignKeys?(tableName: string): Promise<TReferencingForeignKey[]>;
+
+  /**
+   * Kind of the physical object stored under `name`, or `undefined` when
+   * nothing exists. Schema sync refuses a run when a physical table sits
+   * where a managed view is declared (or a view where a table is declared)
+   * instead of silently creating/skipping over it.
+   * Optional — adapters without the method skip the check.
+   * @since 0.1.128
+   */
+  getObjectKind?(name: string): Promise<TDbObjectKind | undefined>;
+
+  /**
+   * Rewrites the table's primary key from `change.from` to `change.to`.
+   * Called only on an EMPTY table (schema sync refuses populated ones) after
+   * new columns were added and before stale columns are dropped, so both
+   * column sets exist. Adapters without it fall back to {@link recreateTable}.
+   * @since 0.1.128
+   */
+  rebuildPrimaryKey?(change: TPrimaryKeyChange): Promise<void>;
 
   /**
    * Renames a table/collection from `oldName` to the adapter's current table name.

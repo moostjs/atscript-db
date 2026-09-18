@@ -42,3 +42,18 @@ export interface VersionedWithExplicitDefault {
     @db.default "7"
     version: number
 }
+
+@db.table "versioned_posts"
+export interface VersionedPost {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    title: string
+
+    @db.rel.FK
+    authorId: VersionedUser.id
+
+    @db.rel.to
+    author?: VersionedUser
+}

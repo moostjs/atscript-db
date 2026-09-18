@@ -72,6 +72,7 @@ export type {
   TSyncPlan,
   TSyncColors,
   TSyncEntryStatus,
+  TSyncSkippedWork,
 } from "./schema/schema-sync";
 export { computeColumnDiff } from "./schema/column-diff";
 export { computeTableOptionDiff } from "./schema/table-option-diff";
@@ -91,3 +92,16 @@ export type {
 } from "./schema/schema-hash";
 export { computeForeignKeyDiff, hasForeignKeyChanges, fkKey } from "./schema/fk-diff";
 export type { TForeignKeyDiff } from "./schema/fk-diff";
+// ── Since 0.1.128 ────────────────────────────────────────────────────────────
+export type { TSyncEntryInit } from "./schema/schema-sync";
+export { canonicalizeQueryNode } from "./schema/schema-hash";
+export type { TViewJoinSnapshot } from "./schema/schema-hash";
+export { topoOrder } from "./schema/dependency-order";
+export type { TDependencyEdge } from "./schema/dependency-order";
+export type {
+  TPrimaryKeyChange,
+  TExistingForeignKey,
+  TReferencingForeignKey,
+  TDbObjectKind,
+  TEnsureTableOptions,
+} from "./types";

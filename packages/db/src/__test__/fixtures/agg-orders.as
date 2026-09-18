@@ -51,3 +51,24 @@ export interface IndexedMetrics {
     @db.column.measure
     revenue: number
 }
+
+// Aggregate row shape (aggregate.spec.ts): a flattened nested object
+// (`stats.views` → `stats__views`) and a @db.json object whose descendants
+// nested-object adapters group natively.
+@db.table "agg_pages"
+export interface AggPages {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    title: string
+
+    stats: {
+        views: number
+    }
+
+    @db.json
+    metadata: {
+        clicks: number
+    }
+}

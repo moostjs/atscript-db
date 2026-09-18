@@ -12,7 +12,7 @@ import type {
   TDbDeleteResult,
 } from "../types";
 
-import { prepareFixtures } from "./test-utils";
+import { NestedMockAdapter, prepareFixtures } from "./test-utils";
 
 // Helper to build WithRelation objects (Uniquery & { name })
 function withRel(name: string, opts?: { filter?: any; controls?: any }): any {
@@ -896,18 +896,20 @@ describe("AtscriptDbTable — embedded objects", () => {
       expect(query.controls?.$sort).toHaveProperty("contact__email");
     });
 
-    it("should strip intermediate parent paths from $sort", async () => {
-      await table.findMany({
-        filter: {},
-        controls: { $sort: { contact: 1, name: -1 } },
-      } as any);
-
-      const call = adapter.calls.find((c) => c.method === "findMany")!;
-      const query = call.args[0] as DbQuery;
-      // "contact" is an intermediate parent — should be stripped
-      expect(query.controls?.$sort).not.toHaveProperty("contact");
-      // "name" is a leaf — should remain
-      expect(query.controls?.$sort).toHaveProperty("name", -1);
+    // Deliberate change (0.1.128): a flattened object parent in `$sort` used to
+    // be silently dropped by the field mapper; the core path guard now rejects
+    // it loudly so `/meta` (which never lists the parent) and the runtime agree.
+    it("should reject intermediate parent paths in $sort (INVALID_QUERY, not silently stripped)", async () => {
+      await expect(
+        table.findMany({
+          filter: {},
+          controls: { $sort: { contact: 1, name: -1 } },
+        } as any),
+      ).rejects.toMatchObject({
+        code: "INVALID_QUERY",
+        errors: [{ path: "contact", message: expect.stringContaining("nested object") }],
+      });
+      expect(adapter.calls.find((c) => c.method === "findMany")).toBeUndefined();
     });
 
     it("should expand intermediate parent in $select array to leaf columns", async () => {
@@ -1516,12 +1518,7 @@ describe("AtscriptDbTable — embedded objects", () => {
 
   describe("nested-objects adapter (bug #14)", () => {
     it("should build fieldDescriptors when adapter supports nested objects", () => {
-      class NestedAdapter extends MockAdapter {
-        override supportsNestedObjects(): boolean {
-          return true;
-        }
-      }
-      const nestedTable = new AtscriptDbTable(UsersTable, new NestedAdapter());
+      const nestedTable = new AtscriptDbTable(UsersTable, new NestedMockAdapter());
       const descriptors = nestedTable.fieldDescriptors;
       expect(descriptors).toBeDefined();
       expect(Array.isArray(descriptors)).toBe(true);
@@ -1531,11 +1528,8 @@ describe("AtscriptDbTable — embedded objects", () => {
   });
 
   describe("native patch path (@db.column translation)", () => {
-    class NativePatchAdapter extends MockAdapter {
+    class NativePatchAdapter extends NestedMockAdapter {
       override supportsNativePatch(): boolean {
-        return true;
-      }
-      override supportsNestedObjects(): boolean {
         return true;
       }
       override async nativePatch(filter: any, patch: any, ops?: any): Promise<TDbUpdateResult> {

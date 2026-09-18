@@ -46,19 +46,30 @@ import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
 import { ApplicationIntegrity } from "../strategies/application-integrity";
 import type {
+  DbPatch,
+  DbRow,
   TCascadeResolver,
   TDbDeleteResult,
   TDbInsertManyResult,
   TDbInsertResult,
+  TDbRemoveGuardContext,
   TDbUpdateResult,
+  TDbWriteAction,
+  TDbWriteGuardContext,
+  TDeleteOptions,
   TFkLookupResolver,
   TTableResolver,
+  TWriteOptions,
   TWriteTableResolver,
+  NullableOptional,
 } from "../types";
+import { isEmptyObject, isPlainObject } from "../shared/object";
 
-import { guardFilter } from "../query/query-guards";
+import { guardFilter, guardPaths } from "../query/query-guards";
 
-export { resolveDesignType } from "./db-readable";
+import { resolveDesignType } from "./db-readable";
+
+export { resolveDesignType };
 
 /** Returns true when `value` is a plain object carrying any `$`-prefixed key (an operator object). */
 function _hasOperatorKeys(value: unknown): boolean {
@@ -90,10 +101,114 @@ function _hasOperatorKeys(value: unknown): boolean {
  * @typeParam DataType - The inferred data shape from the annotated type.
  */
 
-/** Zero-allocation emptiness check for objects. */
-function _isEmptyObj(obj: Record<string, unknown>): boolean {
-  for (const _ in obj) return false;
-  return true;
+/**
+ * Clones a write payload while dropping every own key whose value is
+ * `=== undefined` (`undefined` ≡ absent; `null` stays an explicit NULL), so
+ * that defaults, validation, encryption and decomposition never see an
+ * `undefined` prop.
+ *
+ * Recurses into plain objects and into arrays at any depth (plain-object
+ * elements are cloned, elements are never dropped or reordered) and never
+ * into class instances (`Date`, `Uint8Array`/`Buffer`, `ObjectId`, …), which
+ * are kept by reference. Arrays without plain-object elements anywhere below
+ * them are kept by reference too. The caller's payload tree is never mutated.
+ * @internal exported for the core spec only — not part of the package surface.
+ */
+export function _cloneWritePayload(source: Record<string, unknown>): Record<string, unknown> {
+  if (typeof source !== "object" || source === null) {
+    // Mirrors the former `{ ...p }` clone: a null / primitive payload becomes an
+    // (empty) object the validator rejects with a proper ValidatorError.
+    return { ...(source as unknown as object) };
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (value === undefined) continue;
+    out[key] = _cloneWriteValue(value);
+  }
+  return out;
+}
+
+function _cloneWriteValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    let cloned: unknown[] | undefined;
+    for (let i = 0; i < value.length; i++) {
+      const el: unknown = value[i];
+      if (isPlainObject(el) || Array.isArray(el)) {
+        const c = _cloneWriteValue(el);
+        if (c !== el) {
+          cloned ??= value.slice();
+          cloned[i] = c;
+        }
+      }
+    }
+    return cloned ?? value;
+  }
+  return isPlainObject(value) ? _cloneWritePayload(value) : value;
+}
+
+/**
+ * The clone for a nested re-entry (`_depth > 0`) and for `preValidateItems`:
+ * the root call already deep-pruned the whole tree, so only the row's own
+ * keys are (re-)pruned — no recursion, no per-level re-cloning of subtrees.
+ */
+function _shallowPrunedClone(source: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key in source) {
+    const value = source[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/** Write options with the internal fields the nested writer and the `*One` wrappers pass through. */
+type TInternalWriteOptions<Row> = TWriteOptions<Row> & {
+  _depth?: number;
+  _action?: TDbWriteAction;
+};
+
+/**
+ * {@link TDbWriteGuardContext} handed to a write guard: a sparse per-index
+ * cache of pre-image reads, allocated only when `current(i)` is first used.
+ */
+class WriteGuardContext<Row> implements TDbWriteGuardContext<Row> {
+  private _pending?: Array<Promise<Row | null> | undefined>;
+
+  constructor(
+    readonly action: TDbWriteAction,
+    readonly rows: Row[],
+    readonly expectedVersions: ReadonlyArray<number | undefined>,
+    private readonly _table: AtscriptDbTable,
+  ) {}
+
+  current(i: number): Promise<Row | null> {
+    const cache = (this._pending ??= []);
+    let pending = cache[i];
+    if (!pending) {
+      pending = this._table._readPreImage(this.rows[i]) as Promise<Row | null>;
+      cache[i] = pending;
+    }
+    return pending;
+  }
+}
+
+/** {@link TDbRemoveGuardContext} handed to a delete guard (one memoised pre-image read). */
+class RemoveGuardContext<Row> implements TDbRemoveGuardContext<Row> {
+  private _pending?: Promise<Row | null>;
+
+  constructor(
+    readonly id: unknown,
+    readonly filter: FilterExpr,
+    private readonly _table: AtscriptDbTable,
+  ) {}
+
+  current(): Promise<Row | null> {
+    this._pending ??= this._table.findOne({
+      filter: this.filter,
+      controls: {},
+    } as never) as Promise<Row | null>;
+    return this._pending;
+  }
 }
 
 /** Translates a single ops record from logical to physical column names. */
@@ -119,10 +234,10 @@ function _translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
 export class AtscriptDbTable<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
-  FlatType = FlatOf<T>,
+  FlatType = NullableOptional<FlatOf<T>>,
   A extends BaseDbAdapter = BaseDbAdapter,
   IdType = PrimaryKeyOf<T>,
-  OwnProps = OwnPropsOf<T>,
+  OwnProps = NullableOptional<OwnPropsOf<T>>,
   NavType extends Record<string, unknown> = NavPropsOf<T>,
 > extends AtscriptDbReadable<T, DataType, FlatType, A, IdType, OwnProps, NavType> {
   // ── Cascade resolver ─────────────────────────────────────────────────────
@@ -196,10 +311,13 @@ export class AtscriptDbTable<
    * nested creation support.
    */
   public async insertOne(
-    payload: Partial<DataType> & Record<string, unknown>,
-    opts?: { maxDepth?: number },
+    payload: DbPatch<DataType>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbInsertResult> {
-    const result = await this.insertMany([payload], opts);
+    const result = await this.insertMany([payload], {
+      ...opts,
+      _action: "insert",
+    } as TInternalWriteOptions<DataType>);
     return { insertedId: result.insertedIds[0] };
   }
 
@@ -213,13 +331,21 @@ export class AtscriptDbTable<
    * (they receive our PKs as their FKs). Fully recursive — nested records
    * with their own nav data trigger further batch inserts at each level.
    * Recursive up to `maxDepth` (default 3).
+   *
+   * `opts.guard` (since 0.1.128) runs once inside the transaction, after
+   * defaults + validation, with the prepared rows — see {@link TWriteOptions}.
    */
   public async insertMany(
-    payloads: Array<Partial<DataType> & Record<string, unknown>>,
-    opts?: { maxDepth?: number },
+    payloads: Array<DbPatch<DataType>>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbInsertManyResult> {
     this._ensureBuilt();
-    const { _depth, maxDepth: userMax } = (opts ?? {}) as { _depth?: number; maxDepth?: number };
+    const {
+      _depth,
+      _action,
+      maxDepth: userMax,
+      guard,
+    } = (opts ?? {}) as TInternalWriteOptions<DataType>;
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
@@ -229,8 +355,13 @@ export class AtscriptDbTable<
 
     return enrichFkViolation(this._meta, () =>
       this.adapter.withTransaction(async () => {
-        // Clone + apply defaults (keep originals for FROM phase)
-        const items = payloads.map((p) => this._applyDefaults({ ...p }));
+        // Clone (dropping `undefined` props — deep at the root call only, the
+        // nested re-entries receive already-pruned subtrees) + apply defaults.
+        const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
+        const items = payloads.map((p) => this._applyDefaults(clone(p)));
+        // Nav data for the FROM / VIA phases, read from the pruned rows (nav
+        // fields are stripped from `items` before the main insert).
+        const originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         // Validate full payload (including nav fields) before any writes.
         // Depth is only enforced at the root call — nested-writer re-entries
@@ -239,6 +370,20 @@ export class AtscriptDbTable<
         const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
+
+        // Validated-stage guard: sees the plaintext rows (defaults applied, nav
+        // data attached) and may enrich them — validated again afterwards.
+        if (guard) {
+          await guard(
+            new WriteGuardContext<DataType>(
+              _action ?? "insertMany",
+              items as DataType[],
+              Array.from({ length: items.length }),
+              this as AtscriptDbTable,
+            ),
+          );
+          validateBatch(validator, items, ctx);
+        }
 
         // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
         await this._encryptItems(items, "write");
@@ -270,7 +415,7 @@ export class AtscriptDbTable<
         // Catches errors early (before the parent is committed), essential for
         // adapters without transaction support.
         if (canNest) {
-          await preValidateNestedFrom(host, payloads as Array<Record<string, unknown>>);
+          await preValidateNestedFrom(host, originals);
         }
 
         // Phase 2: Batch main insert
@@ -278,24 +423,12 @@ export class AtscriptDbTable<
 
         // Phase 3: Batch FROM dependents (they need our PKs)
         if (canNest) {
-          await batchInsertNestedFrom(
-            host,
-            payloads as Array<Record<string, unknown>>,
-            result.insertedIds,
-            maxDepth,
-            depth,
-          );
+          await batchInsertNestedFrom(host, originals, result.insertedIds, maxDepth, depth);
         }
 
         // Phase 4: Batch VIA relations (insert targets + junction entries)
         if (canNest) {
-          await batchInsertNestedVia(
-            host,
-            payloads as Array<Record<string, unknown>>,
-            result.insertedIds,
-            maxDepth,
-            depth,
-          );
+          await batchInsertNestedVia(host, originals, result.insertedIds, maxDepth, depth);
         }
 
         return result;
@@ -308,10 +441,13 @@ export class AtscriptDbTable<
    * Delegates to {@link bulkReplace} for unified nested relation support.
    */
   public async replaceOne(
-    payload: DataType & Record<string, unknown>,
-    opts?: { maxDepth?: number },
+    payload: DbRow<DataType>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbUpdateResult> {
-    return this.bulkReplace([payload], opts);
+    return this.bulkReplace([payload], {
+      ...opts,
+      _action: "replace",
+    } as TInternalWriteOptions<DataType>);
   }
 
   /**
@@ -321,14 +457,23 @@ export class AtscriptDbTable<
    * replaced first (their PKs become our FKs), FROM dependents are replaced
    * after (they receive our PKs as their FKs), VIA relations clear and
    * re-create junction rows. Fully recursive up to `maxDepth` (default 3).
+   *
+   * `opts.guard` (since 0.1.128) runs once inside the transaction, after
+   * `$cas` extraction, defaults + validation — see {@link TWriteOptions}.
    */
   public async bulkReplace(
-    payloads: Array<DataType & Record<string, unknown>>,
-    opts?: { maxDepth?: number },
+    payloads: Array<DbRow<DataType>>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
-    const maxDepth = opts?.maxDepth ?? 3;
-    const depth = (opts as { _depth?: number })?._depth ?? 0;
+    const {
+      _depth,
+      _action,
+      maxDepth: userMax,
+      guard,
+    } = (opts ?? {}) as TInternalWriteOptions<DataType>;
+    const maxDepth = userMax ?? 3;
+    const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
     if (!canNest && this._meta.navFields.size > 0) {
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
@@ -336,24 +481,39 @@ export class AtscriptDbTable<
 
     return enrichFkViolation(this._meta, () =>
       this.adapter.withTransaction(async () => {
-        // Phase 0: Setup — extract $cas FIRST (on raw payload clones) so OCC state
-        // never leaks into _applyDefaults, then apply defaults, then validate.
-        // Hoist versionColumn — constant per table; one lookup serves the whole batch.
+        // Phase 0: Setup — clone (dropping `undefined` props), extract $cas FIRST
+        // so OCC state never leaks into _applyDefaults, then apply defaults, then
+        // validate. Hoist versionColumn — constant per table; one lookup serves
+        // the whole batch.
         const versionColumn = this.versionColumn;
         const expectedVersions: Array<number | undefined> = Array.from({
           length: payloads.length,
         });
+        const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
         const items = payloads.map((p, i) => {
-          const clone = { ...p } as Record<string, unknown>;
-          expectedVersions[i] = separateCas(clone, versionColumn);
-          return this._applyDefaults(clone);
+          const c = clone(p);
+          expectedVersions[i] = separateCas(c, versionColumn);
+          return this._applyDefaults(c);
         });
-        const originals = canNest ? payloads.map((p) => ({ ...p })) : [];
+        // Nav data for the FROM / VIA phases, read from the pruned rows.
+        const originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         const validator = this.getValidator("bulkReplace");
         const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
+
+        if (guard) {
+          await guard(
+            new WriteGuardContext<DataType>(
+              _action ?? "replaceMany",
+              items as DataType[],
+              expectedVersions,
+              this as AtscriptDbTable,
+            ),
+          );
+          validateBatch(validator, items, ctx);
+        }
 
         // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
         await this._encryptItems(items, "write");
@@ -421,10 +581,13 @@ export class AtscriptDbTable<
    * Delegates to {@link bulkUpdate} for unified nested relation support.
    */
   public async updateOne(
-    payload: Partial<DataType> & Record<string, unknown>,
-    opts?: { maxDepth?: number },
+    payload: DbPatch<DataType>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbUpdateResult> {
-    return this.bulkUpdate([payload], opts);
+    return this.bulkUpdate([payload], {
+      ...opts,
+      _action: "update",
+    } as TInternalWriteOptions<DataType>);
   }
 
   /**
@@ -433,14 +596,24 @@ export class AtscriptDbTable<
    * Only TO relations (1:1, N:1) are supported for patching. FROM/VIA
    * relations will error — use {@link bulkReplace} for those.
    * Recursive up to `maxDepth` (default 3).
+   *
+   * `opts.guard` (since 0.1.128) runs once inside the transaction, after
+   * `$cas` extraction and validation, with the patches (identifying fields
+   * present, `$cas` removed) — see {@link TWriteOptions}.
    */
   public async bulkUpdate(
-    payloads: Array<Partial<DataType> & Record<string, unknown>>,
-    opts?: { maxDepth?: number },
+    payloads: Array<DbPatch<DataType>>,
+    opts?: TWriteOptions<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
-    const maxDepth = opts?.maxDepth ?? 3;
-    const depth = (opts as { _depth?: number })?._depth ?? 0;
+    const {
+      _depth,
+      _action,
+      maxDepth: userMax,
+      guard,
+    } = (opts ?? {}) as TInternalWriteOptions<DataType>;
+    const maxDepth = userMax ?? 3;
+    const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
     if (!canNest && this._meta.navFields.size > 0) {
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
@@ -452,14 +625,15 @@ export class AtscriptDbTable<
         // validator would otherwise reject $cas as an unknown top-level key
         // (it's not part of the schema). Hoist versionColumn once — constant
         // per table; per-payload lookups in a hot loop would waste cycles.
-        // Work on a local `cloned` array so the caller's payload array (and
-        // payload objects) are never mutated.
+        // Work on a local `cloned` array (with `undefined` props dropped) so the
+        // caller's payload array (and payload objects) are never mutated.
         const versionColumn = this.versionColumn;
         const expectedVersions: Array<number | undefined> = Array.from({
           length: payloads.length,
         });
+        const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
         const cloned: Array<Record<string, unknown>> = payloads.map((p, i) => {
-          const c = { ...p } as Record<string, unknown>;
+          const c = clone(p);
           expectedVersions[i] = separateCas(c, versionColumn);
           return c;
         });
@@ -473,6 +647,18 @@ export class AtscriptDbTable<
         };
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, cloned, ctx);
+
+        if (guard) {
+          await guard(
+            new WriteGuardContext<DataType>(
+              _action ?? "updateMany",
+              cloned as DataType[],
+              expectedVersions,
+              this as AtscriptDbTable,
+            ),
+          );
+          validateBatch(validator, cloned, ctx);
+        }
 
         // Preserve originals for FROM/VIA phase (nav fields are stripped in Phase 2)
         const originals = canNest ? cloned.map((p) => ({ ...p })) : [];
@@ -521,15 +707,24 @@ export class AtscriptDbTable<
             assertNoVersionWrites(data, versionColumn);
           }
 
-          // Skip if nothing left to update (e.g. only nav props + PK in payload)
-          if (_isEmptyObj(data)) {
-            matchedCount += 1;
-            modifiedCount += 0;
+          const translatedFilter = this._fieldMapper.translateFilter(filter, this._meta);
+
+          // Empty patch (e.g. only nav props + PK in payload) — three-way split:
+          //  1. empty + `$cas`     → falls through and EXECUTES the CAS statement
+          //     (`UPDATE … SET version = version + 1 WHERE <pk> AND version = ?`):
+          //     the "versioned touch". Hit → { 1, 1 } and a bump; stale/missing
+          //     → { 0, 0 }. A CAS predicate is never silently dropped.
+          //  2. empty + no `$cas`  → no statement (a no-op must not invalidate
+          //     other clients' versions), but `matchedCount` is honest: one
+          //     PK-indexed count tells whether the row exists.
+          //  3. non-empty          → unchanged below.
+          if (isEmptyObject(data) && expectedVersion === undefined) {
+            const exists = await this.adapter.count({ filter: translatedFilter, controls: {} });
+            matchedCount += exists > 0 ? 1 : 0;
             continue;
           }
 
           let result: TDbUpdateResult;
-          const translatedFilter = this._fieldMapper.translateFilter(filter, this._meta);
           if (this.adapter.supportsNativePatch()) {
             // Native patch path: separate top-level ops; patcher handles nested ops internally
             const ops = separateFieldOps(data);
@@ -597,30 +792,39 @@ export class AtscriptDbTable<
    *
    * When the adapter does not support native foreign keys (e.g. MongoDB),
    * cascade and setNull actions are applied before the delete.
+   *
+   * `opts.guard` (since 0.1.128) runs inside the transaction once the id has
+   * resolved to a filter, before cascade / delete — see {@link TDeleteOptions}.
+   * An id that resolves to no filter answers `{ deletedCount: 0 }` without
+   * calling the guard.
    */
-  public async deleteOne(id: IdType): Promise<TDbDeleteResult> {
+  public async deleteOne(id: IdType, opts?: TDeleteOptions<DataType>): Promise<TDbDeleteResult> {
     this._ensureBuilt();
     const filter = this._resolveIdFilter(id);
     if (!filter) {
       return { deletedCount: 0 };
     }
-    if (this._integrity.needsCascade(this._cascadeResolver)) {
-      return remapDeleteFkViolation(this.tableName, () =>
-        this.adapter.withTransaction(async () => {
-          await this._integrity.cascadeBeforeDelete(
-            filter,
-            this.tableName,
-            this._meta,
-            this._cascadeResolver!,
-            (f) => this._fieldMapper.translateFilter(f, this._meta),
-            this.adapter,
-          );
-          return this.adapter.deleteOne(this._fieldMapper.translateFilter(filter, this._meta));
-        }),
-      );
-    }
+    const guard = opts?.guard;
+    const needsCascade = this._integrity.needsCascade(this._cascadeResolver);
+    const translated = this._fieldMapper.translateFilter(filter, this._meta);
+    const run = async (): Promise<TDbDeleteResult> => {
+      if (guard) {
+        await guard(new RemoveGuardContext<DataType>(id, filter, this as AtscriptDbTable));
+      }
+      if (needsCascade) {
+        await this._integrity.cascadeBeforeDelete(
+          filter,
+          this.tableName,
+          this._meta,
+          this._cascadeResolver!,
+          (f) => this._fieldMapper.translateFilter(f, this._meta),
+          this.adapter,
+        );
+      }
+      return this.adapter.deleteOne(translated);
+    };
     return remapDeleteFkViolation(this.tableName, () =>
-      this.adapter.deleteOne(this._fieldMapper.translateFilter(filter, this._meta)),
+      guard || needsCascade ? this.adapter.withTransaction(run) : run(),
     );
   }
 
@@ -628,7 +832,7 @@ export class AtscriptDbTable<
 
   public async updateMany(
     filter: FilterExpr<FlatType>,
-    data: Partial<DataType> & Record<string, unknown>,
+    data: DbPatch<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
@@ -639,7 +843,7 @@ export class AtscriptDbTable<
       this._writeTableResolver,
       true,
     );
-    const dataCopy = { ...data } as Record<string, unknown>;
+    const dataCopy = _cloneWritePayload(data);
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still
@@ -668,28 +872,31 @@ export class AtscriptDbTable<
     const ops = separateFieldOps(update);
     const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
     const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
+    const translatedFilter = this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
+    // Empty patch: nothing to SET (an empty SET list is a SQL syntax error) and
+    // a bulk no-op must not bump versions — report the honest match count only.
+    if (translatedOps === undefined && isEmptyObject(translatedUpdate)) {
+      const matchedCount = await this.adapter.count({ filter: translatedFilter, controls: {} });
+      return { matchedCount, modifiedCount: 0 };
+    }
     return enrichFkViolation(this._meta, () =>
-      this.adapter.updateMany(
-        this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
-        translatedUpdate,
-        translatedOps,
-      ),
+      this.adapter.updateMany(translatedFilter, translatedUpdate, translatedOps),
     );
   }
 
   public async replaceMany(
     filter: FilterExpr<FlatType>,
-    data: Record<string, unknown>,
+    data: DbRow<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
     await this._integrity.validateForeignKeys(
-      [data],
+      [data as Record<string, unknown>],
       this._meta,
       this._fkLookupResolver,
       this._writeTableResolver,
     );
-    const dataCopy = { ...data };
+    const dataCopy = _cloneWritePayload(data);
     await this._encryptItems([dataCopy], "write");
     return enrichFkViolation(this._meta, () =>
       this.adapter.replaceMany(
@@ -746,7 +953,10 @@ export class AtscriptDbTable<
 
   /** Engine-agnostic guard for user-supplied mutation filters (updateMany/deleteMany/…). */
   protected _guardMutationFilter(filter: FilterExpr): void {
+    // Encrypted / geo checks first so `ENC_FIELD_*` codes keep firing, then the
+    // path guard: a JSON-descendant or unknown path must never reach the driver.
     guardFilter(this._meta, this.adapter, filter);
+    guardPaths(this._meta, this.adapter, { filter });
   }
 
   /**
@@ -795,12 +1005,34 @@ export class AtscriptDbTable<
   }
 
   /**
-   * Applies default values for fields that are missing from the payload.
-   * Defaults handled natively by the DB engine are skipped — the field stays
-   * absent so the DB's own DEFAULT clause applies.
+   * Lazy pre-image read for a guard's `current(i)`: `null` when the row has
+   * no identifying key (e.g. an auto-increment insert) or the key cannot be
+   * resolved — never throws for a missing key.
+   * @internal
+   */
+  async _readPreImage(row: unknown): Promise<DataType | null> {
+    if (!row) return null;
+    let filter: FilterExpr | null;
+    try {
+      filter = this._resolveIdFilter(row);
+    } catch {
+      return null;
+    }
+    if (!filter) return null;
+    return (await this.findOne({ filter, controls: {} } as never)) as DataType | null;
+  }
+
+  /**
+   * Applies `@db.default` values in place to a row's absent fields — the
+   * defaults pass every insert / replace path runs before validation.
+   * Static value defaults (`@db.default 'x'`) are filled on EVERY adapter
+   * (since 0.1.128 — writing the column's own default explicitly is
+   * equivalent to leaving it to the DDL `DEFAULT`, and write guards see the
+   * full row). Function defaults (`now` / `uuid` / `increment` / custom) the
+   * adapter handles natively are NOT filled — the field stays absent so the
+   * engine's own default applies. The version column is never touched.
    */
   protected _applyDefaults(data: Record<string, unknown>): Record<string, unknown> {
-    const nativeValues = this.adapter.supportsNativeValueDefaults();
     const nativeFns = this.adapter.nativeDefaultFns();
     const versionField = this._meta.versionField;
     for (const [field, def] of this._meta.defaults.entries()) {
@@ -810,11 +1042,8 @@ export class AtscriptDbTable<
       // update/replace paths where the field MUST stay absent from the payload.
       if (field === versionField) continue;
       if (data[field] === undefined) {
-        if (def.kind === "value" && !nativeValues) {
-          const fieldType = this._meta.flatMap?.get(field);
-          const designType =
-            fieldType?.type.kind === "" && (fieldType.type as { designType: string }).designType;
-          data[field] = designType === "string" ? def.value : JSON.parse(def.value);
+        if (def.kind === "value") {
+          data[field] = this._parseValueDefault(field, def.value);
         } else if (def.kind === "fn" && !nativeFns.has(def.fn)) {
           switch (def.fn) {
             case "now": {
@@ -831,6 +1060,24 @@ export class AtscriptDbTable<
       }
     }
     return data;
+  }
+
+  /**
+   * The JS value for a `@db.default 'literal'`: strings (including unions of
+   * string literals) are used as-is, every other design type is parsed as
+   * JSON — the same value the SQL adapters put into the DDL `DEFAULT` clause.
+   * A literal that is not valid JSON falls back to the raw string so the
+   * validator reports it against the field instead of a bare `SyntaxError`.
+   */
+  private _parseValueDefault(field: string, literal: string): unknown {
+    const fieldType = this._meta.flatMap?.get(field);
+    const designType = fieldType ? resolveDesignType(fieldType) : "string";
+    if (designType === "string") return literal;
+    try {
+      return JSON.parse(literal) as unknown;
+    } catch {
+      return literal;
+    }
   }
 
   /**
@@ -975,7 +1222,8 @@ export class AtscriptDbTable<
     // unannotated but whose parent's limit admits them.
     const validator = this.getValidator("insert");
     const ctx: DbValidationContext = { mode: "insert", navFields: this._meta.navFields };
-    const prepared = items.map((raw) => this._applyDefaults({ ...raw }));
+    // Children arrive from an already deep-pruned root payload: own keys only.
+    const prepared = items.map((raw) => this._applyDefaults(_shallowPrunedClone(raw)));
     validateBatch(validator, prepared, ctx);
 
     // FK validation
@@ -1001,30 +1249,12 @@ export class AtscriptDbTable<
   protected _buildValidator(purpose: string): Validator<T, DataType> {
     const adapterPlugins = this.adapter.getValidatorPlugins();
 
-    // Standard modes use the shared builder. The version column is
-    // server-managed — make it optional in insert/replace so callers don't
-    // have to supply a meaningless value (the adapter auto-sets/auto-bumps).
+    // Standard modes use the shared builder — the same one `@atscript/db-client`
+    // runs, so server and client preflight cannot drift. Server-managed fields
+    // (`@db.default*`, `@db.rel.FK`, `@db.column.version`) are accepted when
+    // absent by the shared plugin's skip list, at every nesting depth.
     if (purpose === "insert" || purpose === "patch" || purpose === "bulkReplace") {
       const mode: ValidatorMode = purpose === "bulkReplace" ? "replace" : purpose;
-      const versionField = this._meta.versionField;
-      if (versionField !== undefined) {
-        const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
-        return this.createValidator({
-          plugins,
-          partial: mode === "patch" ? buildPatchPartial(this._meta.navFields) : false,
-          // Make the version field optional in the type tree (server-managed:
-          // the adapter sets it on insert and auto-bumps on update; callers
-          // must NOT supply it). The replace callback fires per def node and
-          // the validator caches the result.
-          replace: (def, path) => {
-            const transformed = forceNavNonOptional(def);
-            if (path === versionField && !transformed.optional) {
-              return { ...transformed, optional: true };
-            }
-            return transformed;
-          },
-        });
-      }
       return buildDbValidator(this.type, mode, adapterPlugins) as Validator<T, DataType>;
     }
 

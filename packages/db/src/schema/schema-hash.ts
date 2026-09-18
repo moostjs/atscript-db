@@ -1,5 +1,6 @@
 import type { AtscriptDbReadable } from "../table/db-readable";
 import type { AtscriptDbView } from "../table/db-view";
+import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "../query/query-tree";
 import type {
   TDbDefaultValue,
   TDbFieldMeta,
@@ -46,12 +47,31 @@ export interface TTableSnapshot {
   tableOptions?: TExistingTableOption[];
 }
 
+/**
+ * One join of a managed view as stored in its snapshot.
+ * @since 0.1.128 — `joinTables` elements were bare target-table names before;
+ * the ON predicate is now part of the view definition.
+ */
+export interface TViewJoinSnapshot {
+  targetTable: string;
+  /** Canonical JSON of the join condition (see {@link canonicalizeQueryNode}). */
+  condition: string;
+  /** Reserved for optional joins; absent today so it does not perturb the hash. */
+  kind?: "inner" | "left";
+}
+
 export interface TViewSnapshot {
   tableName: string;
   viewType: "V" | "M" | "E";
   entryTable?: string;
-  joinTables?: string[];
+  /**
+   * Joins in declaration order. The key keeps its historical name so a
+   * join-less view (`[]`) serializes byte-identically to older snapshots.
+   */
+  joinTables?: TViewJoinSnapshot[];
   filterHash?: string;
+  /** @since 0.1.128 — hash of the canonical `@db.view.having` predicate. */
+  havingHash?: string;
   materialized?: boolean;
   fields: TFieldSnapshot[];
 }
@@ -156,23 +176,80 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
   }
 
   const plan = view.viewPlan;
+  // Same table rule as the SQL renderers (`@db.table` of the referenced type,
+  // entry table for an unqualified ref) — unquoted, as `"<table>.<field>"`.
+  const qualify = (ref: AtscriptQueryFieldRef): string => view.resolveFieldRef(ref, (n) => n);
   const result: TViewSnapshot = {
     tableName: view.tableName,
     viewType: plan.materialized ? "M" : "V",
     entryTable: plan.entryTable,
-    joinTables: plan.joins.map((j) => j.targetTable),
+    joinTables: plan.joins.map((j) => ({
+      targetTable: j.targetTable,
+      condition: JSON.stringify(canonicalizeQueryNode(j.condition, qualify)),
+    })),
     materialized: plan.materialized || undefined,
     fields,
   };
 
   if (plan.filter) {
-    // Hash the filter — AtscriptQueryNode may contain function refs
-    result.filterHash = fnv1a(
-      JSON.stringify(plan.filter, (_, v) => (typeof v === "function" ? "[fn]" : v)),
-    );
+    result.filterHash = fnv1a(JSON.stringify(canonicalizeQueryNode(plan.filter, qualify)));
+  }
+  if (plan.having) {
+    result.havingHash = fnv1a(JSON.stringify(canonicalizeQueryNode(plan.having, qualify)));
   }
 
   return result;
+}
+
+// ── Query-node canonicalization ───────────────────────────────────────────
+
+/** Canonical (table-qualified, fixed-key-order) form of a view predicate. */
+export type TCanonicalQueryNode =
+  | { and: TCanonicalQueryNode[] }
+  | { or: TCanonicalQueryNode[] }
+  | { not: TCanonicalQueryNode }
+  /** `r` is `{ f: "<table>.<field>" }` for a field-to-field comparison, else the literal. */
+  | { l: string; op: string; r?: unknown };
+
+/**
+ * Converts a view predicate (join condition, `@db.view.filter`,
+ * `@db.view.having`) into a serializable structure whose JSON is a stable
+ * function of its MEANING: field refs become `qualify(ref)` — the view's
+ * `resolveFieldRef(ref, (n) => n)`, i.e. `"<table>.<field>"`, so a predicate
+ * retargeted to another table with the same field name changes — operators
+ * and literal values are kept as-is, `$and`/`$or` keep declaration order, and
+ * no function references survive. Two identical models produce byte-identical
+ * JSON.
+ * @since 0.1.128
+ */
+export function canonicalizeQueryNode(
+  node: AtscriptQueryNode,
+  qualify: (ref: AtscriptQueryFieldRef) => string,
+): TCanonicalQueryNode {
+  if ("$and" in node) {
+    return {
+      and: (node as { $and: AtscriptQueryNode[] }).$and.map((n) =>
+        canonicalizeQueryNode(n, qualify),
+      ),
+    };
+  }
+  if ("$or" in node) {
+    return {
+      or: (node as { $or: AtscriptQueryNode[] }).$or.map((n) => canonicalizeQueryNode(n, qualify)),
+    };
+  }
+  if ("$not" in node) {
+    return { not: canonicalizeQueryNode((node as { $not: AtscriptQueryNode }).$not, qualify) };
+  }
+  const comp = node as { left: AtscriptQueryFieldRef; op: string; right?: unknown };
+  const out: { l: string; op: string; r?: unknown } = { l: qualify(comp.left), op: comp.op };
+  if (comp.right !== undefined) {
+    out.r =
+      comp.right !== null && typeof comp.right === "object" && "field" in (comp.right as object)
+        ? { f: qualify(comp.right as AtscriptQueryFieldRef) }
+        : comp.right;
+  }
+  return out;
 }
 
 // ── Hash functions ────────────────────────────────────────────────────────

@@ -145,6 +145,25 @@ export class TableMetadata {
   /** Leaf field descriptors indexed by logical path (write/patch/filter paths). */
   leafByLogical = new Map<string, TDbFieldMeta>();
 
+  // ── Query-guard indexes — derived from fieldDescriptors for EVERY adapter ──
+
+  /**
+   * Non-ignored field descriptors keyed by logical path, excluding navigation
+   * relations and their descendants. Unlike `leafByLogical` (relational
+   * adapters only) this is built for every adapter, so the core path guard
+   * (`guardPaths`) can answer "does this path have physical storage here?"
+   * on nested-object adapters too.
+   */
+  descriptorByPath = new Map<string, TDbFieldMeta>();
+  /**
+   * Logical paths stored as a single JSON column (`storage === 'json'`,
+   * non-ignored descriptors). Retained after build — unlike the build-time
+   * `jsonFields` set — so the path guard can classify JSON descendants on
+   * relational adapters. Empty on nested-object adapters (they keep native
+   * dotted paths as descriptors).
+   */
+  jsonParents: ReadonlySet<string> = new Set<string>();
+
   // ── Build state ──────────────────────────────────────────────────────────
 
   private _built = false;
@@ -247,6 +266,9 @@ export class TableMetadata {
     // even for adapters that support nested objects (e.g. MongoDB).
     // _buildFieldDescriptors() already handles skipFlattening internally.
     this._buildFieldDescriptors(adapter);
+
+    // Path-guard indexes are adapter-independent: every adapter has descriptors.
+    this._buildGuardIndexes();
 
     // Build leaf field indexes for unified read/write classification
     if (!this.nestedObjects) {
@@ -760,6 +782,36 @@ export class TableMetadata {
   private _flattenedPrefix(path: string): string {
     const lastDot = path.lastIndexOf(".");
     return lastDot >= 0 ? `${path.slice(0, lastDot).replace(/\./g, "__")}__` : "";
+  }
+
+  // ── Query-guard helpers ──────────────────────────────────────────────────
+
+  /** Nearest `@db.encrypted` ancestor of `path` (exclusive), or `undefined`. */
+
+  /**
+   * Indexes non-ignored descriptors by logical path and retains the JSON-parent
+   * set. Navigation relations and their descendants are skipped even when the
+   * adapter keeps them as descriptors (nested-object adapters do) — they are
+   * loaded with `$with`, never addressed as columns of this table.
+   */
+  private _buildGuardIndexes(): void {
+    const jsonParents = new Set<string>();
+    for (const fd of this.fieldDescriptors) {
+      if (fd.ignored) {
+        continue;
+      }
+      // Nav props and their descendants are never columns of this table (nav
+      // descriptors are `ignored` on both adapter families, but the guard
+      // index is nav-free by construction, not by that invariant).
+      if (this.navFields.has(fd.path) || findAncestorInSet(fd.path, this.navFields) !== undefined) {
+        continue;
+      }
+      this.descriptorByPath.set(fd.path, fd);
+      if (fd.storage === "json") {
+        jsonParents.add(fd.path);
+      }
+    }
+    this.jsonParents = jsonParents;
   }
 
   // ── Private: leaf field indexes ──────────────────────────────────────────
