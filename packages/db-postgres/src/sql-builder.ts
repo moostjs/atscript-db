@@ -57,6 +57,12 @@ export interface TPgTableOptions {
   autoIncrementStart?: number;
   /** Optional type mapper override (e.g., for vector field support). Falls back to `pgTypeFromField`. */
   typeMapper?: (field: TDbFieldMeta) => string;
+  /**
+   * Target tables whose inline FOREIGN KEY constraints are omitted (added by
+   * `syncForeignKeys` once every member of a foreign-key cycle exists).
+   * @since 0.1.128
+   */
+  deferForeignKeysTo?: ReadonlySet<string>;
 }
 
 // ── Identifier quoting ──────────────────────────────────────────────────────
@@ -457,9 +463,14 @@ export function buildCreateTable(
     colDefs.push(`PRIMARY KEY (${pkCols})`);
   }
 
-  // Foreign key constraints
+  // Foreign key constraints — members of a foreign-key cycle are created
+  // without the inline constraints to each other (schema sync adds them
+  // afterwards via syncForeignKeys once every member exists).
   if (foreignKeys) {
     for (const fk of foreignKeys.values()) {
+      if (options?.deferForeignKeysTo?.has(fk.targetTable)) {
+        continue;
+      }
       const localCols = fk.fields.map((f) => qi(f)).join(", ");
       const targetCols = fk.targetFields.map((f) => qi(f)).join(", ");
       let constraint = `FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;

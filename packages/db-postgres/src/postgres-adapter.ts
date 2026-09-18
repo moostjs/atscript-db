@@ -1,5 +1,12 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
+import { BaseDbAdapter, DbError } from "@atscript/db";
+import type {
+  AtscriptDbView,
+  TDbObjectKind,
+  TEnsureTableOptions,
+  TPrimaryKeyChange,
+  TReferencingForeignKey,
+} from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import type {
   TDbDeleteResult,
@@ -18,9 +25,11 @@ import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  fillReplacePayload,
   geoWindowFromControls,
   normalizeGeoPointValue,
   renameGeoDistance,
+  replaceColumnsFor,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -110,9 +119,15 @@ export class PostgresAdapter extends BaseDbAdapter {
   /** Default similarity thresholds per vector field (from @db.search.vector.threshold). */
   private _vectorThresholds = new Map<string, number>();
 
-  /** Schema name for queries (null falls through to 'public'). */
+  /**
+   * Schema name for catalog queries and qualification — `@db.schema` of the
+   * bound table, or `null` (→ `'public'`, the same default the bound path
+   * uses) when the table declares none or the adapter is an administrative
+   * one with no readable (the name-taking schema-sync primitives run on such
+   * an adapter).
+   */
   private get _schema(): string | null {
-    return this._table.schema ?? null;
+    return this._table?.schema ?? null;
   }
 
   constructor(protected readonly driver: TPgDriver) {
@@ -120,6 +135,16 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   // ── Transaction primitives ──────────────────────────────────────────────
+
+  /** Every adapter over this pool shares one transaction (since 0.1.128). */
+  protected override _transactionOwner(): unknown {
+    return this.driver;
+  }
+
+  /** The dedicated connection of this pool's open transaction, if any. */
+  private _txConnection(): TPgConnection | undefined {
+    return this._getTransactionState() as TPgConnection | undefined;
+  }
 
   protected override async _beginTransaction(): Promise<TPgConnection> {
     const conn = await this.driver.getConnection();
@@ -158,8 +183,7 @@ export class PostgresAdapter extends BaseDbAdapter {
    * otherwise the pool-based driver.
    */
   private _exec(): Pick<TPgDriver, "run" | "all" | "get" | "exec"> {
-    const txState = this._getTransactionState() as TPgConnection | undefined;
-    return txState ?? this.driver;
+    return this._txConnection() ?? this.driver;
   }
 
   // ── Capability flags ──────────────────────────────────────────────────────
@@ -544,8 +568,17 @@ export class PostgresAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
-    return this.updateOne(filter, data, undefined, expectedVersion);
+    // Use UPDATE instead of DELETE+INSERT to avoid triggering CASCADE deletes.
+    // Full replace (since 0.1.128): every column is assigned — omitted ones
+    // become NULL, native function defaults (`now` / `uuid` / `increment`)
+    // re-apply their DDL DEFAULT — matching the document adapters' whole-row
+    // replace instead of silently merging with the old row.
+    const full = fillReplacePayload(
+      data,
+      replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
+      this._table.versionColumn,
+    );
+    return this.updateOne(filter, full, undefined, expectedVersion);
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
@@ -593,7 +626,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     return this._table.fieldDescriptors.some((fd) => fd.isGeoPoint && !fd.encrypted);
   }
 
-  async ensureTable(): Promise<void> {
+  async ensureTable(opts?: TEnsureTableOptions): Promise<void> {
     // Provision citext extension for @db.collate 'nocase' columns (once per instance)
     if (this._nocaseColumns.size > 0 && !this._citextProvisioned) {
       try {
@@ -614,7 +647,9 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (this._schema) {
       await this._exec().exec(`CREATE SCHEMA IF NOT EXISTS ${qi(this._schema)}`);
     }
-    if (this._table instanceof AtscriptDbView) {
+    // Structural check (never `instanceof`): a bundle may carry two copies of
+    // @atscript/db, and a false `instanceof` would create an empty table here.
+    if (this._table.isView) {
       return this._ensureView();
     }
     const sql = buildCreateTable(
@@ -625,10 +660,126 @@ export class PostgresAdapter extends BaseDbAdapter {
         incrementFields: this._incrementFields,
         autoIncrementStart: this._autoIncrementStart,
         typeMapper: (field) => this.typeMapper(field),
+        deferForeignKeysTo: opts?.deferForeignKeysTo,
       },
     );
     this._log(sql);
     await this._exec().exec(sql);
+  }
+
+  // ── Schema sync primitives (since 0.1.128) ─────────────────────────────
+
+  /** `schema.name` when the adapter targets a named schema. */
+  private _qualify(name: string): string {
+    return quoteTableName(this._schema ? `${this._schema}.${name}` : name);
+  }
+
+  async hasRows(tableName?: string): Promise<boolean> {
+    const target = tableName ? this._qualify(tableName) : quoteTableName(this.resolveTableName());
+    const sql = `SELECT EXISTS (SELECT 1 FROM ${target}) AS "present"`;
+    this._log(sql);
+    const row = await this._exec().get<{ present: boolean }>(sql, []);
+    return row?.present ?? false;
+  }
+
+  /**
+   * Live foreign keys referencing `tableName`, via `pg_constraint` — exact for
+   * composite keys (`conkey`/`confkey` are positionally aligned, unlike the
+   * `key_column_usage` ordinal join).
+   */
+  async getReferencingForeignKeys(tableName: string): Promise<TReferencingForeignKey[]> {
+    const rows = await this._exec().all<{
+      table_name: string;
+      constraint_name: string;
+      columns: string[] | null;
+      ref_columns: string[] | null;
+    }>(
+      `SELECT cl.relname AS table_name, c.conname AS constraint_name,
+              (SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS columns,
+              (SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS ref_columns
+       FROM pg_constraint c
+       JOIN pg_class cl ON cl.oid = c.conrelid
+       JOIN pg_class rcl ON rcl.oid = c.confrelid
+       JOIN pg_namespace rn ON rn.oid = rcl.relnamespace
+       WHERE c.contype = 'f' AND rcl.relname = $1 AND rn.nspname = COALESCE($2, 'public')
+       ORDER BY cl.relname, c.conname`,
+      [tableName, this._schema],
+    );
+    return rows.map((r) => ({
+      table: r.table_name,
+      fields: r.columns ?? [],
+      targetFields: r.ref_columns ?? [],
+    }));
+  }
+
+  async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
+    const row = await this._exec().get<{ relkind: string }>(
+      `SELECT c.relkind FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE c.relname = $1 AND n.nspname = COALESCE($2, 'public')
+         AND c.relkind IN ('r', 'p', 'v', 'm')`,
+      [name, this._schema],
+    );
+    switch (row?.relkind) {
+      case "r":
+      case "p": {
+        return "table";
+      }
+      case "v": {
+        return "view";
+      }
+      case "m": {
+        return "materialized";
+      }
+      default: {
+        return undefined;
+      }
+    }
+  }
+
+  /** One multi-table `DROP TABLE a, b` — PostgreSQL resolves the mutual FKs inside the set. No CASCADE. */
+  override async dropTablesByName(tableNames: string[]): Promise<void> {
+    if (tableNames.length === 0) {
+      return;
+    }
+    const ddl = `DROP TABLE IF EXISTS ${tableNames.map((n) => this._qualify(n)).join(", ")}`;
+    this._log(ddl);
+    await this._exec().exec(ddl);
+  }
+
+  /**
+   * `ALTER TABLE … DROP CONSTRAINT <pk>, ADD PRIMARY KEY (…)` in ONE statement
+   * (atomic). Called on an empty table only; `ADD PRIMARY KEY` makes the new
+   * key columns NOT NULL. A demoted identity column is handled by the
+   * `defaultChanged` diff (`DROP IDENTITY`).
+   */
+  async rebuildPrimaryKey(change: TPrimaryKeyChange): Promise<void> {
+    const clauses: string[] = [];
+    if (change.from.length > 0) {
+      const row = await this._exec().get<{ conname: string }>(
+        `SELECT c.conname FROM pg_constraint c
+         JOIN pg_class cl ON cl.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = cl.relnamespace
+         WHERE c.contype = 'p' AND cl.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
+        [this._table.tableName, this._schema],
+      );
+      if (row?.conname) {
+        clauses.push(`DROP CONSTRAINT ${qi(row.conname)}`);
+      }
+    }
+    if (change.to.length > 0) {
+      clauses.push(`ADD PRIMARY KEY (${change.to.map((c) => qi(c)).join(", ")})`);
+    }
+    if (clauses.length === 0) {
+      return;
+    }
+    const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ${clauses.join(", ")}`;
+    this._log(ddl);
+    await this._exec().exec(ddl);
   }
 
   private async _ensureView(): Promise<void> {
@@ -795,24 +946,43 @@ export class PostgresAdapter extends BaseDbAdapter {
       await this._exec().exec(ddl);
     }
 
-    // Default value changes
-    for (const { field } of diff.defaultChanged ?? []) {
-      let ddl: string;
-      if (field.defaultValue?.kind === "value") {
-        ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${qi(field.physicalName)} SET DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-      } else if (field.defaultValue?.kind === "fn") {
-        const fnExpr =
-          field.defaultValue.fn === "now"
-            ? "(extract(epoch from now()) * 1000)::bigint"
-            : field.defaultValue.fn === "uuid"
-              ? "gen_random_uuid()"
-              : `${field.defaultValue.fn}()`;
-        ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${qi(field.physicalName)} SET DEFAULT ${fnExpr}`;
+    // Default value changes. Identity columns (`@db.default.increment`) are
+    // not defaults: introspection reports them as `fn:increment`, and they
+    // are added/removed with ADD GENERATED / DROP IDENTITY — SET/DROP DEFAULT
+    // is rejected on them.
+    for (const { field, oldDefault } of diff.defaultChanged ?? []) {
+      const col = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${qi(field.physicalName)}`;
+      const wasIdentity = oldDefault === "fn:increment";
+      const statements: string[] = [];
+      if (field.defaultValue?.kind === "fn" && field.defaultValue.fn === "increment") {
+        if (!wasIdentity) {
+          if (oldDefault !== undefined) {
+            statements.push(`${col} DROP DEFAULT`);
+          }
+          statements.push(`${col} SET NOT NULL`, `${col} ADD GENERATED BY DEFAULT AS IDENTITY`);
+        }
       } else {
-        ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${qi(field.physicalName)} DROP DEFAULT`;
+        if (wasIdentity) {
+          statements.push(`${col} DROP IDENTITY IF EXISTS`);
+        }
+        if (field.defaultValue?.kind === "value") {
+          statements.push(
+            `${col} SET DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`,
+          );
+        } else if (field.defaultValue?.kind === "fn") {
+          const fnExpr =
+            field.defaultValue.fn === "now"
+              ? "(extract(epoch from now()) * 1000)::bigint"
+              : "gen_random_uuid()";
+          statements.push(`${col} SET DEFAULT ${fnExpr}`);
+        } else if (!wasIdentity) {
+          statements.push(`${col} DROP DEFAULT`);
+        }
       }
-      this._log(ddl);
-      await this._exec().exec(ddl);
+      for (const ddl of statements) {
+        this._log(ddl);
+        await this._exec().exec(ddl);
+      }
     }
 
     return { added, renamed };
@@ -1017,8 +1187,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     return row?.exists ?? false;
   }
 
+  /**
+   * No CASCADE: when something outside the sync inventory (a user view, an
+   * unmanaged FK) still depends on the table PostgreSQL refuses, and schema
+   * sync reports that as an error entry instead of silently dropping the
+   * dependents.
+   */
   async dropTable(): Promise<void> {
-    const ddl = `DROP TABLE IF EXISTS ${quoteTableName(this.resolveTableName())} CASCADE`;
+    const ddl = `DROP TABLE IF EXISTS ${quoteTableName(this.resolveTableName())}`;
     this._log(ddl);
     await this._exec().exec(ddl);
   }
@@ -1053,7 +1229,7 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   async dropTableByName(tableName: string): Promise<void> {
-    const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)} CASCADE`;
+    const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
   }
