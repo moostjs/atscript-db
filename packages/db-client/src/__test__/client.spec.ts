@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vite-plus/test";
 import { serializeAnnotatedType, type TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { Client } from "../client";
-import { ClientError } from "../client-error";
+import { ClientError, TransportError } from "../client-error";
 
 let UserType: TAtscriptAnnotatedType;
 let serializedMeta: Record<string, unknown>;
@@ -382,6 +382,108 @@ describe("Client", () => {
     });
     const client = new Client("/api/users", { fetch: fn });
     await expect(client.query()).rejects.toThrow("Bad Gateway");
+  });
+
+  it("non-JSON error with an empty statusText falls back to `HTTP <status>` in message and body", async () => {
+    const fn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: "",
+      json: () => Promise.reject(new Error("not json")),
+    });
+    const client = new Client("/api/users", { fetch: fn });
+    const err = await client.query().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClientError);
+    expect((err as ClientError).status).toBe(502);
+    expect((err as ClientError).message).toBe("HTTP 502");
+    expect((err as ClientError).body).toEqual({ message: "HTTP 502", statusCode: 502 });
+  });
+
+  // ── TransportError: no server verdict ─────────────────────────────────
+
+  it("fetch rejection → TransportError with cause, method and url", async () => {
+    const cause = new TypeError("fetch failed");
+    const fn = vi.fn().mockRejectedValue(cause);
+    const client = new Client("/api/users", { fetch: fn });
+    const err = await client.query().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportError);
+    expect(err).not.toBeInstanceOf(ClientError);
+    const t = err as TransportError;
+    expect(t.name).toBe("TransportError");
+    expect(t.cause).toBe(cause);
+    expect(t.method).toBe("GET");
+    expect(t.url).toBe("/api/users/query");
+    expect(t.message).toBe("GET /api/users/query: fetch failed");
+  });
+
+  it("an aborted fetch keeps cause.name === 'AbortError' and the POST method", async () => {
+    const abort = new DOMException("The operation was aborted", "AbortError");
+    const fn = vi.fn().mockImplementation((url: string) =>
+      url.endsWith("/meta")
+        ? Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            json: () => Promise.resolve(serializedMeta),
+          })
+        : Promise.reject(abort),
+    );
+    const client = new Client("/api/users", { fetch: fn });
+    const err = await client.insert({ name: "Ada" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportError);
+    expect((err as TransportError).cause).toBe(abort);
+    expect(((err as TransportError).cause as Error).name).toBe("AbortError");
+    expect((err as TransportError).method).toBe("POST");
+    expect((err as TransportError).url).toBe("/api/users");
+  });
+
+  it("2xx with an unparsable required body → TransportError (not ClientError)", async () => {
+    const parse = new SyntaxError("Unexpected token <");
+    const fn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: { get: () => null },
+      json: () => Promise.reject(parse),
+    });
+    const client = new Client("/api/users", { fetch: fn });
+    const err = await client.query().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportError);
+    expect((err as TransportError).cause).toBe(parse);
+    expect((err as TransportError).message).toContain("HTTP 200 body is not JSON");
+  });
+
+  it("204 on an action (allowEmpty path) is unchanged: undefined, no TransportError", async () => {
+    const meta = {
+      ...serializedMeta,
+      actions: [
+        {
+          name: "block",
+          label: "Block",
+          level: "row",
+          processor: "backend",
+          value: "/api/users/actions/block",
+        },
+      ],
+    };
+    const fn = vi.fn().mockImplementation((url: string) =>
+      url.endsWith("/meta")
+        ? Promise.resolve({
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            json: () => Promise.resolve(meta),
+          })
+        : Promise.resolve({
+            ok: true,
+            status: 204,
+            statusText: "No Content",
+            headers: { get: () => null },
+            json: () => Promise.reject(new Error("no body")),
+          }),
+    );
+    const client = new Client("/api/users", { fetch: fn });
+    await expect(client.action("block", { id: 1 })).resolves.toBeUndefined();
   });
 
   // ── URL encoding ───────────────────────────────────────────────────────

@@ -90,6 +90,30 @@ export class VersionMismatchError extends ClientError {
   }
 }
 
+/**
+ * Thrown by `Client` when NO server verdict was obtained: `fetch` itself
+ * rejected (network down, DNS, CORS, `AbortError`, …) or a 2xx response
+ * carried a body that is not JSON. Unlike {@link ClientError} — where the
+ * server answered and rejected — the request's outcome is unknown: a write
+ * may have committed. Reload before retrying a non-idempotent write.
+ * The underlying error is the standard `cause`.
+ */
+export class TransportError extends Error {
+  override name = "TransportError";
+
+  constructor(
+    /** HTTP method of the failed request. */
+    public readonly method: string,
+    /** Full request URL. */
+    public readonly url: string,
+    /** What went wrong; the message is `<method> <url>: <detail>`. */
+    detail: string,
+    cause?: unknown,
+  ) {
+    super(`${method} ${url}: ${detail}`, { cause });
+  }
+}
+
 /** Thrown by `Client.action()` when the action name is not present in `/meta`. */
 export class ActionNotFoundError extends Error {
   override name = "ActionNotFoundError";

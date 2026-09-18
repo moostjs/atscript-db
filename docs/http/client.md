@@ -630,6 +630,33 @@ try {
 
 `one()` is the exception — it returns `null` on 404 instead of throwing.
 
+When the error response is not JSON (a proxy or gateway page), `e.body` is `{ message, statusCode }` with `message` = the HTTP status text, or `HTTP <status>` when the response carries none (HTTP/2 has no status text) — `e.body.message` is never empty.
+
+### `TransportError` — no server verdict {#transport-error}
+
+A `ClientError` means the server **answered and rejected**. A `TransportError` (since 0.1.129) means there is **no verdict at all**: `fetch` itself rejected (network down, DNS, CORS, an `AbortError` from an `AbortSignal`), or a 2xx response carried a body that is not JSON. The request may or may not have reached the server, so **a write may have committed** — reload the row before retrying a non-idempotent write instead of blindly re-sending it.
+
+```typescript
+import { Client, ClientError, TransportError } from "@atscript/db-client";
+
+try {
+  await users.update({ id: 7, status: "active", version: 3 });
+} catch (e) {
+  if (e instanceof ClientError) {
+    // the server rejected — e.status / e.errors are authoritative
+  } else if (e instanceof TransportError) {
+    e.method; // "PATCH"
+    e.url; // full request URL
+    e.cause; // the original error (e.g. cause.name === "AbortError")
+    // unknown outcome: re-read the row, then decide whether to retry
+    const current = await users.one(7);
+    if (current?.version === 3) await users.update({ id: 7, status: "active", version: 3 });
+  }
+}
+```
+
+`TransportError` does not extend `ClientError`; it exposes `method`, `url` and the standard `cause`.
+
 ## Client-Side Validation {#validation}
 
 Write methods (`insert`, `update`, `replace`) automatically validate data client-side against the Atscript type fetched from `/meta`. This catches type errors before they reach the server.
@@ -697,6 +724,7 @@ All error classes — generic and action-specific — are exported as runtime va
 
 - `ClientError` — base class for every non-2xx response. `status`, `body`, `errors` accessors.
 - `ActionDisabledError extends ClientError` — HTTP 409 from the server-side action gate. Typed `action`, `id`, `ids` accessors.
+- `TransportError` — no server verdict: `fetch` rejected, or a 2xx body was not JSON. `method`, `url`, `cause`. Does **not** extend `ClientError`. See [TransportError](#transport-error).
 - `ActionNotFoundError` — `Client.action(name)` called with a name not present in `/meta`.
 - `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option.
 - `ClientValidationError` (type) — thrown by client-side validation on `insert` / `update` / `replace` before sending. Type export — the runtime class lives in `@atscript/db-client/validator`.
@@ -704,6 +732,7 @@ All error classes — generic and action-specific — are exported as runtime va
 ```typescript
 import {
   ClientError,
+  TransportError,
   ActionDisabledError,
   ActionNotFoundError,
   ActionUnsupportedError,

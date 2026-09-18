@@ -183,7 +183,8 @@ Throws:
 - `ActionUnsupportedError` — `'custom'` processor (UI dispatches the event itself); or `'navigate'` with no browser + no `navigate` option.
 - `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.id` / `e.ids` accessors. See [actions.md § Server-side gate](actions.md#server-side-gate).
 - `VersionMismatchError` — HTTP 409 from OCC `$cas` mismatch. `extends ClientError`; adds typed `e.currentVersion: number` accessor. Auto-dispatched when the server response body has `kind: "version_mismatch"`. See [versioning.md § Handling 409](versioning.md#handling-409).
-- `ClientError` — server non-2xx (other). `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works.
+- `ClientError` — server non-2xx (other). `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works. Non-JSON error body → `e.body = { message, statusCode }` with `message` = statusText or `HTTP <status>` (never empty).
+- `TransportError` (since 0.1.129) — NO server verdict: `fetch` rejected (network, DNS, CORS, `AbortError`) or a 2xx body was not JSON. `e.method`, `e.url`, standard `e.cause` (an abort keeps `cause.name === "AbortError"`). Does NOT extend `ClientError`. A write may have committed — reload the row before retrying a non-idempotent write.
 - `TypeError` — client-side shape validation (non-object on row, non-array on rows).
 
 ## Typed filters
@@ -217,7 +218,12 @@ Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$
 ## Error handling
 
 ```ts
-import { ClientError, ActionDisabledError, VersionMismatchError } from "@atscript/db-client";
+import {
+  ClientError,
+  ActionDisabledError,
+  VersionMismatchError,
+  TransportError,
+} from "@atscript/db-client";
 
 try {
   await users.insert({ email: "bad" });
@@ -237,6 +243,11 @@ try {
     e.status; // HTTP status
     e.body; // parsed JSON body from the server (includes `errors[]`)
     e.errors; // convenience: `body.errors ?? []`
+  } else if (e instanceof TransportError) {
+    // no verdict: fetch rejected or the 2xx body was not JSON — the insert MAY have committed.
+    e.method;
+    e.url;
+    e.cause; // re-read before retrying a non-idempotent write
   }
 }
 ```

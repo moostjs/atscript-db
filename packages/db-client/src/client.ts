@@ -19,6 +19,7 @@ import {
   ActionNotFoundError,
   ActionUnsupportedError,
   ClientError,
+  TransportError,
   type ActionDisabledErrorBody,
   type VersionMismatchErrorBody,
 } from "./client-error";
@@ -555,13 +556,22 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   }
 
   private async _send(url: string, init: RequestInit, allowEmpty: boolean): Promise<unknown> {
-    const res = await this._fetch(url, init);
+    const method = init.method ?? "GET";
+    let res: Awaited<ReturnType<typeof globalThis.fetch>>;
+    try {
+      res = await this._fetch(url, init);
+    } catch (cause) {
+      // No verdict: the request may or may not have reached the server.
+      throw new TransportError(method, url, describeCause(cause), cause);
+    }
     if (!res.ok) {
       let errorBody: Record<string, unknown>;
       try {
         errorBody = (await res.json()) as Record<string, unknown>;
       } catch {
-        errorBody = { message: res.statusText, statusCode: res.status };
+        // Non-JSON error page (proxy / gateway): keep `body.message` non-empty
+        // even when the response carries no statusText (HTTP/2 has none).
+        errorBody = { message: res.statusText || `HTTP ${res.status}`, statusCode: res.status };
       }
       if (errorBody.name === "ActionDisabledError") {
         throw new ActionDisabledError(res.status, errorBody as unknown as ActionDisabledErrorBody);
@@ -574,7 +584,20 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       }
       throw new ClientError(res.status, errorBody as never);
     }
-    if (!allowEmpty) return res.json();
+    if (!allowEmpty) {
+      try {
+        return await res.json();
+      } catch (cause) {
+        // A 2xx whose required body is not JSON — the server answered, but
+        // its answer is unreadable, so the caller has no usable verdict.
+        throw new TransportError(
+          method,
+          url,
+          `HTTP ${res.status} body is not JSON (${describeCause(cause)})`,
+          cause,
+        );
+      }
+    }
     if (res.status === 204 || res.headers.get("content-length") === "0") return undefined;
     try {
       return await res.json();
@@ -582,6 +605,12 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       return undefined;
     }
   }
+}
+
+/** One-line rendering of a thrown value for a `TransportError` message. */
+function describeCause(cause: unknown): string {
+  if (cause instanceof Error) return cause.message || cause.name;
+  return String(cause);
 }
 
 /**

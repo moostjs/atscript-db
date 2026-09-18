@@ -5,6 +5,7 @@ export {
   ActionUnsupportedError,
   ActionDisabledError,
   VersionMismatchError,
+  TransportError,
 } from "./client-error";
 export type { ActionDisabledErrorBody, VersionMismatchErrorBody } from "./client-error";
 
