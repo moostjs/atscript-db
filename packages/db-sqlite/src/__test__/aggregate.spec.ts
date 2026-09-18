@@ -180,6 +180,39 @@ describe("SqliteAdapter aggregate", () => {
     expect(result).toEqual([{ count: 2 }]); // active+cancelled both have USD
   });
 
+  it("$count with $having counts the groups that survive HAVING (since 0.1.129)", async () => {
+    const result = await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["currency"],
+        $select: ["currency", { $fn: "sum", $field: "amount", $as: "total" }] as any,
+        $having: { total: { $gt: 300 } } as any,
+        $count: true,
+      },
+    });
+
+    // USD: 350 passes; EUR: 225 does not
+    expect(result).toEqual([{ count: 1 }]);
+  });
+
+  it("$count with $having and no $groupBy treats the table as one group (0 or 1)", async () => {
+    const count = (gt: number) =>
+      table.aggregate({
+        filter: {},
+        controls: {
+          $groupBy: [] as any,
+          $select: [{ $fn: "sum", $field: "amount", $as: "total" }] as any,
+          $having: { total: { $gt: gt } } as any,
+          $count: true,
+        },
+      });
+
+    // Whole table: 575. SQLite rejects `SELECT 1 … HAVING` without GROUP BY,
+    // so the inner select is itself an aggregate.
+    expect(await count(500)).toEqual([{ count: 1 }]);
+    expect(await count(1000)).toEqual([{ count: 0 }]);
+  });
+
   it("count(*) vs count(field) produce correct results", async () => {
     const result = await table.aggregate({
       filter: {},

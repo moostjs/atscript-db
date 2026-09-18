@@ -221,6 +221,44 @@ describe("buildAggregateCount", () => {
     expect(result.sql).toBe("SELECT COUNT(*) AS [count] FROM [orders] WHERE 1=1");
     expect(result.params).toEqual([]);
   });
+
+  // `$count` + `$having` = the number of groups that survive HAVING — the
+  // same predicate the row query renders (alias → aggregate expression).
+  it("$having on an alias renders the aggregate expression inside the subquery, params in order", () => {
+    const where: TSqlFragment = { sql: "[active] = ?", params: [1] };
+    const result = buildAggregateCount(mockDialect, "orders", where, {
+      $groupBy: ["currency"],
+      $select: makeSelect(["currency", { $fn: "sum", $field: "amount", $as: "total" }]),
+      $having: { total: { $gt: 100 } },
+    });
+    expect(result.sql).toBe(
+      "SELECT COUNT(*) AS [count] FROM (SELECT 1 FROM [orders] WHERE [active] = ? GROUP BY [currency] HAVING SUM([amount]) > ?) AS [_groups]",
+    );
+    expect(result.params).toEqual([1, 100]);
+  });
+
+  it("$having on a grouped key renders the column", () => {
+    const result = buildAggregateCount(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["currency"],
+      $select: makeSelect(["currency", { $fn: "sum", $field: "amount", $as: "total" }]),
+      $having: { currency: "USD", total: { $gt: 100 } },
+    });
+    expect(result.sql).toBe(
+      "SELECT COUNT(*) AS [count] FROM (SELECT 1 FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING [currency] = ? AND SUM([amount]) > ?) AS [_groups]",
+    );
+    expect(result.params).toEqual(["USD", 100]);
+  });
+
+  it("$having without $groupBy counts the whole table as one group (0 or 1)", () => {
+    const result = buildAggregateCount(mockDialect, "orders", emptyWhere, {
+      $select: makeSelect([{ $fn: "sum", $field: "amount", $as: "total" }]),
+      $having: { total: { $gt: 100 } },
+    });
+    expect(result.sql).toBe(
+      "SELECT COUNT(*) AS [count] FROM (SELECT COUNT(*) FROM [orders] WHERE 1=1 HAVING SUM([amount]) > ?) AS [_groups]",
+    );
+    expect(result.params).toEqual([100]);
+  });
 });
 
 // ── Finding 34: $having with a mixed comparison + logical node ────────────────

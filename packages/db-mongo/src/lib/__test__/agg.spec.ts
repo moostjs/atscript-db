@@ -334,11 +334,45 @@ describe("buildCountPipeline", () => {
     });
     const pipeline = buildCountPipeline(query);
 
-    // $group → $project (flatten _id) → $match (having) → $count
-    expect(pipeline).toContainEqual({ $match: { total: { $gt: 100 } } });
-    // $count must come after $having
-    const havingIdx = pipeline.findIndex((s: any) => s.$match?.total);
-    const countIdx = pipeline.findIndex((s: any) => s.$count);
-    expect(countIdx).toBeGreaterThan(havingIdx);
+    // With $having the count pipeline runs the SAME accumulators as the row
+    // pipeline — without `total` in $group an alias $having matches nothing
+    // and `$count` reports 0 groups. Order: $group → $project → $match(having) → $count.
+    expect(pipeline).toEqual([
+      { $match: {} },
+      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" } } },
+      { $project: { _id: 0, currency: "$_id.currency", total: 1 } },
+      { $match: { total: { $gt: 100 } } },
+      { $count: "count" },
+    ]);
+  });
+
+  it("$having on a grouped key + an alias — both resolvable after $project", () => {
+    const query = makeQuery({
+      groupBy: ["currency"],
+      select: ["currency", { $fn: "count", $field: "*", $as: "cnt" }],
+      having: { currency: "USD", cnt: { $gte: 2 } },
+      count: true,
+    });
+    expect(buildCountPipeline(query)).toEqual([
+      { $match: {} },
+      { $group: { _id: { currency: "$currency" }, cnt: { $sum: 1 } } },
+      { $project: { _id: 0, currency: "$_id.currency", cnt: 1 } },
+      { $match: { $and: [{ currency: "USD" }, { cnt: { $gte: 2 } }] } },
+      { $count: "count" },
+    ]);
+  });
+
+  it("count pipeline equals the row pipeline up to $count (no sort/skip/limit)", () => {
+    const opts = {
+      filter: { status: "active" },
+      groupBy: ["currency"],
+      select: ["currency", { $fn: "sum", $field: "amount", $as: "total" }] as any[],
+      having: { total: { $gt: 100 } },
+    };
+    const rows = buildAggregatePipeline(makeQuery({ ...opts, sort: { total: -1 }, limit: 5 }));
+    const count = buildCountPipeline(makeQuery({ ...opts, count: true }));
+    expect(count.slice(0, -1)).toEqual(rows.slice(0, count.length - 1));
+    expect(count.at(-1)).toEqual({ $count: "count" });
+    expect(rows.slice(count.length - 1)).toEqual([{ $sort: { total: -1 } }, { $limit: 5 }]);
   });
 });

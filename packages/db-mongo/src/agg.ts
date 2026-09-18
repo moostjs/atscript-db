@@ -76,28 +76,39 @@ function buildPrefix(query: DbQuery): {
 }
 
 /**
- * Builds a full MongoDB aggregation pipeline for GROUP BY queries.
+ * The stages every grouped query shares: `$match(filter)` → `$group`
+ * (dimensions + accumulators) → `$project` (flatten `_id`, keep aliases) →
+ * `$match($having)`. The row pipeline appends sort/skip/limit, the count
+ * pipeline appends `$count`, so both see exactly the same group set.
  *
- * Pipeline: $match → $group → $project → $match(having) → $sort → $skip → $limit
+ * With `accumulators: false` only the `$group._id` dimensions are emitted
+ * (no accumulators, no `$project`, no `$having`) — the cheapest shape for a
+ * plain group count, where no alias has to be resolvable.
  */
-export function buildAggregatePipeline(query: DbQuery): Document[] {
+function buildGroupedStages(
+  query: DbQuery,
+  { accumulators }: { accumulators: boolean },
+): {
+  pipeline: Document[];
+  controls: DbQuery["controls"];
+} {
   const { pipeline, groupId, groupKeys, controls } = buildPrefix(query);
 
-  // $group: dimensions + accumulators
   const groupStage: Document = { _id: groupId };
-  const project: Document = { _id: 0 };
-  const aggregates = controls.$select?.aggregates;
+  if (!accumulators) {
+    pipeline.push({ $group: groupStage });
+    return { pipeline, controls };
+  }
 
   // Build $group accumulators and $project in a single pass over groupBy + aggregates
+  const project: Document = { _id: 0 };
   for (const [field, idKey] of groupKeys) {
     project[field] = `$_id.${idKey}`;
   }
-  if (aggregates) {
-    for (const expr of aggregates) {
-      const alias = resolveAlias(expr);
-      groupStage[alias] = toAccumulator(expr);
-      project[alias] = 1;
-    }
+  for (const expr of controls.$select?.aggregates ?? []) {
+    const alias = resolveAlias(expr);
+    groupStage[alias] = toAccumulator(expr);
+    project[alias] = 1;
   }
   pipeline.push({ $group: groupStage });
   pipeline.push({ $project: project });
@@ -106,6 +117,17 @@ export function buildAggregatePipeline(query: DbQuery): Document[] {
   if (controls.$having) {
     pipeline.push({ $match: buildMongoFilter(controls.$having) });
   }
+
+  return { pipeline, controls };
+}
+
+/**
+ * Builds a full MongoDB aggregation pipeline for GROUP BY queries.
+ *
+ * Pipeline: $match → $group → $project → $match(having) → $sort → $skip → $limit
+ */
+export function buildAggregatePipeline(query: DbQuery): Document[] {
+  const { pipeline, controls } = buildGroupedStages(query, { accumulators: true });
 
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
@@ -121,27 +143,18 @@ export function buildAggregatePipeline(query: DbQuery): Document[] {
 }
 
 /**
- * Builds a count-only pipeline: returns the number of distinct groups.
+ * Builds a count-only pipeline: the number of groups that survive `$having`
+ * (all groups when there is none). With `$having` it runs the same grouped
+ * stages as the row pipeline — the accumulators must run so an alias
+ * `$having` has a value to match; without it only the `$group._id`
+ * dimensions are needed.
  *
- * Pipeline: $match → $group (just _id) → $project → $match(having) → $count
+ * Pipeline: $match → $group → [$project → $match(having)] → $count
  */
 export function buildCountPipeline(query: DbQuery): Document[] {
-  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query);
-
-  pipeline.push({ $group: { _id: groupId } });
-
-  // Apply $having before counting — count groups that pass the HAVING filter
-  if (controls.$having) {
-    // Need $project to flatten _id so $having aliases resolve
-    const project: Document = { _id: 0 };
-    for (const [field, idKey] of groupKeys) {
-      project[field] = `$_id.${idKey}`;
-    }
-    pipeline.push({ $project: project });
-    pipeline.push({ $match: buildMongoFilter(controls.$having) });
-  }
-
+  const { pipeline } = buildGroupedStages(query, {
+    accumulators: Boolean(query.controls?.$having),
+  });
   pipeline.push({ $count: "count" });
-
   return pipeline;
 }

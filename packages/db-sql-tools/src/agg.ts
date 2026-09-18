@@ -4,7 +4,7 @@ import { resolveAlias } from "@atscript/db/agg";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { EMPTY_AND, finalizeParams } from "./dialect";
-import { buildWhere, createFilterVisitor } from "./filter-builder";
+import { createFilterVisitor } from "./filter-builder";
 
 export const AGG_FN_SQL: Record<string, string> = {
   sum: "SUM",
@@ -26,26 +26,29 @@ function buildAggExpr(dialect: SqlDialect, expr: AggregateExpr): string {
 }
 
 /**
- * Renders `$having`. A key that names an aggregate alias (`$as`, else
- * `fn_field`) renders the aggregate expression itself — `SUM("amount") > ?`
- * — because PostgreSQL does not allow a SELECT alias in HAVING (MySQL and
- * SQLite tolerate it, so the expression form keeps all three identical).
- * Other keys (grouped columns) render as plain columns.
+ * ` HAVING <predicate>` (leading space) + params for `controls.$having`, or
+ * `undefined` when there is nothing to render. Shared by the row and the
+ * count builders so both filter the same group set.
+ *
+ * A key that names an aggregate alias (`$as`, else `fn_field`) renders the
+ * aggregate expression itself — `SUM("amount") > ?` — because PostgreSQL does
+ * not allow a SELECT alias in HAVING (MySQL and SQLite tolerate it, so the
+ * expression form keeps all three identical). Other keys (grouped columns)
+ * render as plain columns.
  */
-function buildHaving(dialect: SqlDialect, controls: DbControls): TSqlFragment {
-  const having = controls.$having!;
-  const aggregates = controls.$select?.aggregates;
-  if (!aggregates?.length) {
-    return buildWhere(dialect, having);
-  }
+function havingClause(dialect: SqlDialect, controls: DbControls): TSqlFragment | undefined {
+  const having = controls.$having;
+  if (!having) return undefined;
   const exprByAlias = new Map<string, string>();
-  for (const expr of aggregates) {
+  for (const expr of controls.$select?.aggregates ?? []) {
     exprByAlias.set(resolveAlias(expr), aggFnSql(dialect, expr));
   }
   const visitor = createFilterVisitor(dialect, {
     columnRef: (field) => exprByAlias.get(field) ?? dialect.quoteIdentifier(field),
   });
-  return walkFilter(having, visitor) ?? EMPTY_AND;
+  const fragment = walkFilter(having, visitor);
+  if (!fragment || fragment.sql === EMPTY_AND.sql) return undefined;
+  return { sql: ` HAVING ${fragment.sql}`, params: fragment.params };
 }
 
 /**
@@ -88,12 +91,10 @@ export function buildAggregateSelect(
   }
 
   // HAVING
-  if (controls.$having) {
-    const havingFragment = buildHaving(dialect, controls);
-    if (havingFragment.sql !== EMPTY_AND.sql) {
-      sql += ` HAVING ${havingFragment.sql}`;
-      params.push(...havingFragment.params);
-    }
+  const having = havingClause(dialect, controls);
+  if (having) {
+    sql += having.sql;
+    params.push(...having.params);
   }
 
   // ORDER BY
@@ -125,8 +126,10 @@ export function buildAggregateSelect(
 }
 
 /**
- * Builds a COUNT query for the number of distinct groups.
- * Returns `{ count: N }` when executed.
+ * Builds a COUNT query for the number of distinct groups — the groups that
+ * survive `$having` when one is given (the same predicate the row query
+ * renders, so `$count` agrees with the row set). Returns `{ count: N }` when
+ * executed.
  */
 export function buildAggregateCount(
   dialect: SqlDialect,
@@ -135,13 +138,22 @@ export function buildAggregateCount(
   controls: DbControls,
 ): TSqlFragment {
   const groupFields = controls.$groupBy as string[] | undefined;
-  if (!groupFields?.length) {
+  const having = havingClause(dialect, controls);
+  const countCol = `COUNT(*) AS ${dialect.quoteIdentifier("count")}`;
+  if (!groupFields?.length && !having) {
     // No groupBy — just count all matching rows
-    const sql = `SELECT COUNT(*) AS ${dialect.quoteIdentifier("count")} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+    const sql = `SELECT ${countCol} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
     return finalizeParams(dialect, { sql, params: where.params });
   }
 
-  const groupCols = groupFields.map((f) => dialect.quoteIdentifier(f)).join(", ");
-  const sql = `SELECT COUNT(*) AS ${dialect.quoteIdentifier("count")} FROM (SELECT 1 FROM ${dialect.quoteTable(table)} WHERE ${where.sql} GROUP BY ${groupCols}) AS ${dialect.quoteIdentifier("_groups")}`;
-  return finalizeParams(dialect, { sql, params: where.params });
+  // HAVING without GROUP BY treats the whole table as one group (0 or 1).
+  // The inner select must then be an aggregate — SQLite rejects
+  // `SELECT 1 … HAVING` without GROUP BY — so it counts instead of `SELECT 1`;
+  // the subquery keeps the outer COUNT(*) at exactly one row either way.
+  const groupBy = groupFields?.length
+    ? ` GROUP BY ${groupFields.map((f) => dialect.quoteIdentifier(f)).join(", ")}`
+    : "";
+  const inner = groupBy ? "1" : "COUNT(*)";
+  const sql = `SELECT ${countCol} FROM (SELECT ${inner} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
+  return finalizeParams(dialect, { sql, params: [...where.params, ...(having?.params ?? [])] });
 }
