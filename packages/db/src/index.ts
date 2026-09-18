@@ -5,7 +5,7 @@ export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-ma
 export { RelationalFieldMapper } from "./strategies/relational-field-mapper";
 export { IntegrityStrategy, NativeIntegrity } from "./strategies/integrity";
 export { ApplicationIntegrity } from "./strategies/application-integrity";
-export { DbError, CasExhaustedError } from "./db-error";
+export { DbError, CasExhaustedError, CasMismatchError } from "./db-error";
 export type { DbErrorCode } from "./db-error";
 export { DbEncryption } from "./encryption";
 export type { TDbEncryptionOptions } from "./encryption";
@@ -139,6 +139,7 @@ export type {
   TDbRemoveGuard,
   TWriteOptions,
   TDeleteOptions,
+  TTouchManyOptions,
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";

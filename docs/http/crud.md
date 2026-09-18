@@ -504,6 +504,7 @@ The controller automatically transforms errors into appropriate HTTP responses:
 | `ValidatorError`                          | 400         | `{ message, statusCode, errors: [{ path, message }] }`                                                                          |
 | `DbError` (CONFLICT)                      | 409         | `{ message, statusCode, errors }`                                                                                               |
 | `DbError` (TX_WAIT_TIMEOUT — SQLite gate) | 503         | `{ message, statusCode, errors }` — see [SQLite concurrency](/adapters/sqlite#concurrency-and-transactions)                     |
+| `DbError` (CAS_MISMATCH — `touchMany`)    | 409         | `{ message, statusCode, errors: [{ path: "$cas", message }] }` — see [Versioning — Batch touch](/api/versioning#touch-many)     |
 | `DbError` (other)                         | 400         | `{ message, statusCode, errors }`                                                                                               |
 | Version mismatch (OCC)                    | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http)                |
 | `version` + differing `$cas`              | 400         | `{ message, statusCode, errors: [{ path: "$cas", message }] }`                                                                  |

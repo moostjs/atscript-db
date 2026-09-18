@@ -20,3 +20,17 @@ export interface PlainWidgetTable {
 
     name: string
 }
+
+@db.table 'versioned_lines'
+export interface VersionedLineTable {
+    @meta.id
+    orderId: number
+
+    @meta.id
+    lineNo: number
+
+    qty: number
+
+    @db.column.version
+    version: number.int
+}

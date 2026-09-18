@@ -7,6 +7,8 @@ export type DbErrorCode =
   | "DEPTH_EXCEEDED"
   | "VERSION_COLUMN_WRITE"
   | "CAS_EXHAUSTED"
+  // ── touchMany: a key's row is stale or missing (moost-db maps it to 409) ──
+  | "CAS_MISMATCH"
   // ── Field-level encryption (@db.encrypted) ──
   | "ENC_CONFIG_MISSING"
   | "ENC_KEY_INVALID"
@@ -70,5 +72,26 @@ export class CasExhaustedError extends DbError {
       `Optimistic concurrency: exhausted ${attempts} attempts; ` +
       `row kept changing under us (last seen version: ${lastSeenVersion ?? "unknown"})`;
     super("CAS_EXHAUSTED", [{ path: "$cas", message }], message);
+  }
+}
+
+/**
+ * Thrown by `AtscriptDbTable.touchMany` (`require: 'all'`, the default) when
+ * fewer rows than keys matched their expected version — at least one row is
+ * stale or missing. Nothing was written (the pre-count refused before the
+ * first statement, or the SQL transaction rolled every bump back). Surfaced
+ * as HTTP 409 by moost-db.
+ */
+export class CasMismatchError extends DbError {
+  name = "CasMismatchError";
+
+  constructor(
+    /** Rows whose primary key + version matched. */
+    public readonly matched: number,
+    /** Keys passed to `touchMany`. */
+    public readonly expected: number,
+  ) {
+    const message = `touchMany: ${matched} of ${expected} rows matched — stale or missing rows`;
+    super("CAS_MISMATCH", [{ path: "$cas", message }], message);
   }
 }

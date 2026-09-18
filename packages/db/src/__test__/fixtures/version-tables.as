@@ -57,3 +57,30 @@ export interface VersionedPost {
     @db.rel.to
     author?: VersionedUser
 }
+
+@db.table "versioned_lines"
+export interface VersionedLine {
+    @meta.id
+    orderId: number
+
+    @meta.id
+    lineNo: number
+
+    qty: number
+
+    @db.column.version
+    version: number
+}
+
+@db.table "versioned_members"
+export interface VersionedMember {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.index.unique "email"
+    email: string
+
+    @db.column.version
+    version: number
+}

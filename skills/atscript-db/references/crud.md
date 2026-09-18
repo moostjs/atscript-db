@@ -58,6 +58,7 @@ await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion overrid
 - Array ops `$insert/$upsert/$update/$remove/$replace` decompose per-adapter.
 - `undefined` value = key not sent (never in the SET list); `null` = SET NULL (optional columns; typed — since 0.1.128 filters on optional columns accept `null` too, see `queries.md § Null values`). Non-merge nested object: undefined optional leaf ≡ omitted (null-filled); merge block: untouched.
 - Empty patch (PK only, no `$cas`) → no statement, `{ matchedCount: 1|0, modifiedCount: 0 }`; PK + `$cas` → versioned touch (executes, bumps) — see `versioning.md`. `updateMany(filter, {})` → count only.
+- `touchMany(keys, { require })` (since 0.1.129, versioned tables): batch versioned touch — each key = primary key (composite ok, not a unique index) + version, no payload; `'all'` (default) pre-counts and throws `CasMismatchError` (`CAS_MISMATCH`, 409) on a stale/missing row, bumps in ≤ 500-key `$or` chunks inside one transaction; `'any'` bumps what matches. Not on the REST surface. See `versioning.md § Batch touch`.
 
 ## Optimistic concurrency
 

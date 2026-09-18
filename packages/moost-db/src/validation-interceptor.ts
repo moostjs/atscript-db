@@ -9,6 +9,9 @@ export type { THttpErrorEntry } from "./http-errors";
 
 const dbErrorCodeToStatus: Record<string, number> = {
   CONFLICT: 409,
+  // touchMany: a key's row is stale or missing — the caller's view is out of
+  // date, the same verdict a `$cas` mismatch gets.
+  CAS_MISMATCH: 409,
   // SQLite transaction-gate waiter timed out (`transactionWaitTimeoutMs`) —
   // the store is busy, not the request malformed.
   TX_WAIT_TIMEOUT: 503,

@@ -252,6 +252,12 @@ When a deleted record is referenced by other tables via foreign keys, cascade an
 
 For batched writes that apply different changes to each record (vs. `updateMany`, which applies the same change to many rows), use `bulkUpdate` and `bulkReplace`. Both accept an array of payloads (each identified by its primary key) and an optional `{ maxDepth, guard }` options object (see [Write guards](#write-guards)), and they participate in the surrounding transaction.
 
+| Method                      | Purpose                                                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `bulkUpdate(items, opts?)`  | A different patch per row                                                                                                |
+| `bulkReplace(items, opts?)` | A different full replacement per row                                                                                     |
+| `touchMany(keys, opts?)`    | Batch versioned touch (since 0.1.129, versioned tables only). See [Versioning — Batch touch](/api/versioning#touch-many) |
+
 ```typescript
 import { $dec } from "@atscript/db/ops";
 
@@ -335,16 +341,17 @@ if (!validator.validate(data, true)) {
 
 Database operations throw `DbError` with a `code` property indicating the error type:
 
-| Code                   | Meaning                                                                                                                         |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `CONFLICT`             | Unique constraint violation                                                                                                     |
-| `FK_VIOLATION`         | Foreign key constraint violated                                                                                                 |
-| `NOT_FOUND`            | Record not found                                                                                                                |
-| `CASCADE_CYCLE`        | Circular cascade detected                                                                                                       |
-| `INVALID_QUERY`        | Malformed query or filter                                                                                                       |
-| `DEPTH_EXCEEDED`       | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                         |
-| `VERSION_COLUMN_WRITE` | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)    |
-| `CAS_EXHAUSTED`        | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror) |
+| Code                   | Meaning                                                                                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CONFLICT`             | Unique constraint violation                                                                                                                                                                            |
+| `FK_VIOLATION`         | Foreign key constraint violated                                                                                                                                                                        |
+| `NOT_FOUND`            | Record not found                                                                                                                                                                                       |
+| `CASCADE_CYCLE`        | Circular cascade detected                                                                                                                                                                              |
+| `INVALID_QUERY`        | Malformed query or filter                                                                                                                                                                              |
+| `DEPTH_EXCEEDED`       | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                                                                                                |
+| `VERSION_COLUMN_WRITE` | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
+| `CAS_EXHAUSTED`        | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
+| `CAS_MISMATCH`         | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
 
 Handle errors by checking the code:
 

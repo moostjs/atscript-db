@@ -11,7 +11,7 @@ import {
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError } from "../db-error";
+import { CasMismatchError, DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import type { TableMetadata } from "./table-metadata";
@@ -60,6 +60,7 @@ import type {
   TFkLookupResolver,
   TTableResolver,
   TWriteOptions,
+  TTouchManyOptions,
   TWriteTableResolver,
   NullableOptional,
 } from "../types";
@@ -229,6 +230,14 @@ function _translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
     inc: ops.inc ? _translateOpsRecord(ops.inc, meta) : undefined,
     mul: ops.mul ? _translateOpsRecord(ops.mul, meta) : undefined,
   };
+}
+
+/** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
+const TOUCH_MANY_CHUNK = 500;
+
+/** `touchMany` input rejection — always `INVALID_QUERY`, path names the key. */
+function invalidTouchKey(path: string, message: string): DbError {
+  return new DbError("INVALID_QUERY", [{ path, message }]);
 }
 
 export class AtscriptDbTable<
@@ -784,6 +793,113 @@ export class AtscriptDbTable<
         return { matchedCount, modifiedCount };
       }),
     );
+  }
+
+  /**
+   * Batch versioned touch (since 0.1.129): bumps the version of every listed
+   * row by exactly one, each row guarded by its own expected version. This is
+   * the batch fence `updateMany(orFilter, {})` used to be before 0.1.128 (an
+   * empty patch is a no-op since then and takes no lock).
+   *
+   * Each key carries the primary key field(s) (composite supported) plus the
+   * version column and NOTHING else — a touch has no payload. Unique indexes
+   * do not identify a touch key. `undefined`-valued properties are ignored,
+   * like in every write payload. Empty `keys` → `{ 0, 0 }` without a statement.
+   *
+   * `require: 'all'` (default): one count over the whole key set runs FIRST;
+   * a stale or missing row throws {@link CasMismatchError} before any write.
+   * The bumps then run as `updateMany(orFilter, {})` chunks of at most
+   * {@link TOUCH_MANY_CHUNK} keys inside one adapter transaction; a summed
+   * `matchedCount` short of `keys.length` (a row moved between the count and
+   * the bump) throws the same error — SQL engines roll every bump back. The
+   * pre-count is therefore a deliberate double check on SQL: it is what makes
+   * the guarantee hold on adapters whose `withTransaction` is a passthrough
+   * (the memory adapter, a Mongo standalone topology) — there it covers the
+   * common stale case and the residual race window is accepted.
+   * `require: 'any'`: no pre-count, the honest summed result is returned.
+   *
+   * No `guard`, no `onWrite`; not exposed over HTTP.
+   */
+  public async touchMany(
+    keys: Array<DbPatch<DataType>>,
+    opts?: TTouchManyOptions,
+  ): Promise<TDbUpdateResult> {
+    this._ensureBuilt();
+    const versionField = this._meta.versionField;
+    if (versionField === undefined) {
+      throw invalidTouchKey("", "touchMany requires @db.column.version");
+    }
+    if (keys.length === 0) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
+
+    const pkFields = this.primaryKeys;
+    const seen = new Set<string>();
+    const pairs: FilterExpr[] = [];
+    for (const [i, key] of (keys as Array<Record<string, unknown>>).entries()) {
+      const pair: Record<string, unknown> = {};
+      for (const pk of pkFields) {
+        if (key[pk] === undefined) {
+          throw invalidTouchKey(`[${i}].${pk}`, `touchMany: each key must carry its "${pk}"`);
+        }
+        pair[pk] = key[pk];
+      }
+      const version = key[versionField];
+      if (typeof version !== "number" || !Number.isFinite(version)) {
+        throw invalidTouchKey(
+          `[${i}].${versionField}`,
+          `touchMany: each key must carry its expected "${versionField}" (number)`,
+        );
+      }
+      for (const [prop, value] of Object.entries(key)) {
+        if (value !== undefined && prop !== versionField && !(prop in pair)) {
+          throw invalidTouchKey(
+            `[${i}].${prop}`,
+            `touchMany: a touch carries no payload — keys hold the primary key and "${versionField}" only, got "${prop}"`,
+          );
+        }
+      }
+      const identity = JSON.stringify(pair);
+      if (seen.has(identity)) {
+        throw invalidTouchKey(`[${i}]`, `touchMany: duplicate key ${identity}`);
+      }
+      seen.add(identity);
+      pair[versionField] = version;
+      pairs.push(pair as FilterExpr);
+    }
+
+    const orFilter: FilterExpr = { $or: pairs };
+    this._guardMutationFilter(orFilter);
+    // Translate the pairs once; the count and every chunk reuse them.
+    const translated = (
+      this._fieldMapper.translateFilter(orFilter, this._meta) as { $or: FilterExpr[] }
+    ).$or;
+    const requireAll = (opts?.require ?? "all") === "all";
+
+    if (requireAll) {
+      const matched = await this.adapter.count({ filter: { $or: translated }, controls: {} });
+      if (matched < keys.length) {
+        throw new CasMismatchError(matched, keys.length);
+      }
+    }
+
+    return this.adapter.withTransaction(async () => {
+      let matchedCount = 0;
+      let modifiedCount = 0;
+      for (let start = 0; start < translated.length; start += TOUCH_MANY_CHUNK) {
+        const chunk = translated.slice(start, start + TOUCH_MANY_CHUNK);
+        // Direct adapter call: an empty patch on a versioned table renders
+        // exactly `SET version = version + 1` (Mongo: `$inc`); the table's
+        // own `updateMany` short-circuits empty patches on purpose.
+        const result = await this.adapter.updateMany({ $or: chunk }, {}, undefined);
+        matchedCount += result.matchedCount;
+        modifiedCount += result.modifiedCount;
+      }
+      if (requireAll && matchedCount !== keys.length) {
+        throw new CasMismatchError(matchedCount, keys.length);
+      }
+      return { matchedCount, modifiedCount };
+    });
   }
 
   /**

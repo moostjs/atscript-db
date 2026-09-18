@@ -741,6 +741,16 @@ export type TDbRemoveGuard<Row = Record<string, unknown>> = (
   ctx: TDbRemoveGuardContext<Row>,
 ) => void | Promise<void>;
 
+/** Options of `AtscriptDbTable.touchMany` (since 0.1.129). */
+export interface TTouchManyOptions {
+  /**
+   * `'all'` (default): every key must match its stored version — a stale or
+   * missing row throws `DbError("CAS_MISMATCH")` and no version moves.
+   * `'any'`: bump whatever matches and report the honest counts.
+   */
+  require?: "all" | "any";
+}
+
 /** Options of `insertOne/Many`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate`. */
 export interface TWriteOptions<Row = Record<string, unknown>> {
   /** Nested-relation write recursion limit (default 3). */

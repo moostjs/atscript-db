@@ -115,6 +115,28 @@ await tasks.replaceOne({
 });
 ```
 
+### Batch touch — `touchMany` {#touch-many}
+
+`touchMany(keys, opts?)` (since 0.1.129) is the batch form of the versioned touch: it bumps the version of every listed row by exactly one, each row guarded by its own expected version. Every key carries the primary key (composite supported — a unique index does not identify a touch key) plus the version column and **nothing else** — a touch has no payload; `undefined`-valued properties are ignored, as in every write payload.
+
+```typescript
+const result = await orders.touchMany([
+  { id: 1, version: 4 },
+  { id: 2, version: 0 },
+  { id: 3, version: 9 },
+]);
+// { matchedCount: 3, modifiedCount: 3 } — every version + 1
+```
+
+- **`require: 'all'`** (default): the table counts the matching rows **first** and throws [`CasMismatchError`](#casmismatcherror) (`code === "CAS_MISMATCH"`, `errors[0] = { path: "$cas", message: "touchMany: 2 of 3 rows matched — stale or missing rows" }`) before any write when a row is stale or missing. The bumps then run as `UPDATE … SET version = version + 1 WHERE (pk AND version = ?) OR …` statements in chunks of at most 500 keys inside one adapter transaction; a row that moves between the count and the bump throws the same error and, on SQL engines, the transaction rolls every bump back. The memory adapter and a MongoDB standalone topology run `withTransaction` as a passthrough: there the pre-count covers the common stale case and the residual race window is accepted.
+- **`require: 'any'`**: no pre-count; whatever matches is bumped and the honest summed `{ matchedCount, modifiedCount }` is returned.
+- Validation (`DbError("INVALID_QUERY")`, before any statement): a table without `@db.column.version` (path `""`), a key missing a primary-key field (`[i].<pk>`), a key with a missing / non-numeric version (`[i].version`), a key carrying any other property (`[i].<prop>`), a duplicate primary key (`[i]`). Empty `keys` → `{ 0, 0 }` without a statement.
+- No `guard`, no `onWrite`, and **not exposed over HTTP** — an app that needs it adds its own route on the controller. `@atscript/moost-db` maps `CAS_MISMATCH` to `409`.
+
+::: warning UPGRADE NOTE
+Up to 0.1.127 an empty `updateMany(orFilter, {})` bumped the matched versions, and some code used it as a batch lock. Since 0.1.128 that call is a no-op that still reports the full `matchedCount` — it takes no lock. Use `touchMany`.
+:::
+
 ### `$cas` is NOT supported on `updateMany`
 
 `updateMany(filter, data)` always writes through, auto-bumping the version but never checking it. A single `expectedVersion` cannot sensibly match N rows with different versions. Per-row version locking is the job of `bulkUpdate` (see above).
@@ -243,6 +265,24 @@ try {
 
 `CasExhaustedError` extends `DbError` with `code === "CAS_EXHAUSTED"`.
 
+## `CasMismatchError`
+
+Thrown by [`touchMany`](#touch-many) with `require: 'all'` (the default) when fewer rows than keys matched their expected version — at least one key is stale or missing. Nothing was written: the pre-count refused before the first statement, or (a row moved in between) the SQL transaction rolled every bump back. The error carries the counts:
+
+```typescript
+import { CasMismatchError } from "@atscript/db";
+
+try {
+  await orders.touchMany(keys);
+} catch (err) {
+  if (err instanceof CasMismatchError) {
+    console.warn(`${err.matched} of ${err.expected} rows were current — reload and retry`);
+  }
+}
+```
+
+`CasMismatchError` extends `DbError` with `code === "CAS_MISMATCH"`; `@atscript/moost-db` maps it to HTTP 409.
+
 ## Edge Cases & Gotchas
 
 ### `updateMany` never CAS-checks
@@ -263,7 +303,7 @@ This is a [locked design decision](#alternatives-considered). A single `expected
 
 ### Empty patches
 
-`updateOne({ id })` (identifying fields only, no `$cas`) executes nothing and reports the row's existence; `updateMany(filter, {})` likewise counts the matches and writes nothing — neither bumps a version. Add `$cas` to turn the single-row form into a [versioned touch](#versioned-touch).
+`updateOne({ id })` (identifying fields only, no `$cas`) executes nothing and reports the row's existence; `updateMany(filter, {})` likewise counts the matches and writes nothing — neither bumps a version. Add `$cas` to turn the single-row form into a [versioned touch](#versioned-touch); for a keyed batch use [`touchMany`](#touch-many).
 
 ### External writers do not auto-bump
 
