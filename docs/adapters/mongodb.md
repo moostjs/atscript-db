@@ -227,6 +227,8 @@ const result = await users.findMany({
 The `@db.json` annotation has no effect on MongoDB — there is no flattening to override. You can still use it for documentation purposes, but it does not change storage behavior.
 :::
 
+Dotted paths into `@db.json` objects and arrays of objects (`prefs.theme`, `items.sku`) are real query paths here: they are listed in `/meta.fields` and accepted by filters, `$sort`, `$select` and `$groupBy` (SQL adapters reject them with 400). The array / `@db.json` column itself is filterable (implicit `$in` on arrays) but **never sortable** — since 0.1.128 `$sort=tags` / `$sort=prefs` is rejected with 400 (`canSortField` vetoes array and JSON design types; min/max-element ordering is a footgun for generic sort headers), and `/meta` says `sortable: false`. Navigation descendants (`author.name`) are no longer listed in `/meta.fields` since 0.1.128 — load relations with `$with`.
+
 ## Native Patch Pipelines
 
 MongoDB uses aggregation pipelines for array patch operations instead of the read-modify-write cycle used by relational adapters. All five patch operators are supported:

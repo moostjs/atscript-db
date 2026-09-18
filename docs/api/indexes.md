@@ -78,6 +78,10 @@ email: string
 
 This creates a single index spanning both `name` and `email`, which speeds up queries that filter on both fields simultaneously.
 
+::: info MySQL key length
+MySQL/InnoDB limits an index key part to 3072 bytes — 768 characters on `utf8mb4`. Since 0.1.128 the MySQL adapter prefixes only the members that need it: `VARCHAR(n)`/`CHAR(n)` within the limit are indexed in full, longer ones get a `(768)` prefix, `TEXT` columns always get `(255)`. A prefix on a **unique** index enforces uniqueness over the prefix only, so declare `@expect.maxLength` on unique string fields (they map to `VARCHAR(n)`) to keep uniqueness exact. See [MySQL — Limitations](/adapters/mysql#limitations).
+:::
+
 ## Multiple Indexes Per Field
 
 A single field can participate in more than one index. Simply stack multiple `@db.index.*` annotations:

@@ -65,12 +65,13 @@ Metadata is built lazily on first access — safe to reference from peer tables.
 
 ## AtscriptDbView — extra surface
 
-| Member                         | Purpose                                                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------ |
-| `isView: true`                 | Differentiator from tables.                                                          |
-| `viewPlan`                     | Computed plan (entry table + joins + filter + groupBy).                              |
-| `isExternal`                   | True when neither `@db.view.for` nor joins are present — assumed pre-existing in DB. |
-| `findOne/Many/count/aggregate` | Read-only ops; writes throw.                                                         |
+| Member                         | Purpose                                                                                                                                                                                                                                                          |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isView: true`                 | Differentiator from tables. Adapters branch on THIS (or `isAtscriptDbView(readable)`, exported from `@atscript/db`, 0.1.128) — never `instanceof AtscriptDbView` (two copies of the core in a bundle ⇒ false ⇒ an empty table is created under the view's name). |
+| `viewPlan`                     | Computed plan (entry table + joins + filter + groupBy).                                                                                                                                                                                                          |
+| `isExternal`                   | True when neither `@db.view.for` nor joins are present — assumed pre-existing in DB.                                                                                                                                                                             |
+| `getViewColumnMappings()`      | View column → source table/column; `@db.ignore` fields are excluded (0.1.128) so they never reach `CREATE VIEW`.                                                                                                                                                 |
+| `findOne/Many/count/aggregate` | Read-only ops; writes throw.                                                                                                                                                                                                                                     |
 
 ### View kinds
 
@@ -91,6 +92,10 @@ interface ActiveTask {
     assigneeName?: User.name
 }
 ```
+
+View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `tasks.id`); over HTTP, `/meta` resolves a chained ref to its terminal field (a view's `assigneeId: Task.assigneeId` → `User.id` with `db.rel.FK` inherited, since 0.1.128) so value-help works on view fields — see `relations.md § Meta FK ref shape`. `@db.ignore`d view fields have no column: excluded from `CREATE VIEW`, from the definition hash and from queries (400); JSON-source paths are not queryable (400).
+
+Sync detail (0.1.128): a view's definition = entry table + joins WITH their ON conditions + filter + having + materialized flag + fields; a physical table already sitting under a managed view's name is a pre-flight refusal, not a silent skip. See `schema-sync.md § View sync`.
 
 ## Aggregate views
 

@@ -113,7 +113,7 @@ The storage mode determines what you can query:
 **Flattened fields** are fully queryable — they are real columns with their own types, indexes, and constraints. You can filter, sort, and index them like any other field.
 
 **JSON fields** have limited, adapter-dependent queryability — see your
-[adapter docs](/adapters/) for the specifics.
+[adapter docs](/adapters/) for the specifics. Since 0.1.128 the limit is enforced rather than discovered in the database: on SQL adapters a descendant path of a `@db.json` / array column (`preferences.theme`) in a filter, `$sort`, `$select`, `$groupBy` or aggregate field throws `DbError("INVALID_QUERY")` (HTTP 400) before any SQL is built, and `/meta.fields` does not list it — select the parent and read the value client-side. MongoDB and the memory adapter address such paths natively (listed and queryable; never sortable as a whole column). Encrypted objects behave like JSON: select the encrypted parent.
 
 ::: info
 If you need to filter on a field, prefer flattened storage (the default for objects). Use `@db.json` only when you treat the object as an opaque blob that is read and written as a whole.

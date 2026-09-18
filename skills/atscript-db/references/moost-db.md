@@ -183,9 +183,17 @@ export class UsersController extends AsDbController<typeof User> {
   }
   protected async onWrite(action, data) {
     return this.sanitize(data);
-  } // return undefined to abort
+  } // untrusted body, OUTSIDE any tx; return undefined → 500, return/throw an Error → that error
   protected async onRemove(id) {
     return id;
+  }
+  protected async guardWrite(ctx: TDbWriteGuardContext<User>) {
+    // validated rows, INSIDE the table's own tx (the override becomes the table's `guard` option)
+    if ((await ctx.current(0))?.locked) throw new HttpError(409, "locked");
+    ctx.rows[0].updatedBy = useUserId(); // enrich in place; the table re-validates afterwards
+  }
+  protected async guardRemove(ctx: TDbRemoveGuardContext<User>) {
+    if ((await ctx.current())?.isFallback) throw new HttpError(409);
   }
   protected computeEmbedding(text: string) {
     return myEmbed.embed(text);
@@ -196,7 +204,13 @@ export class UsersController extends AsDbController<typeof User> {
 - `transformFilter` / `transformOne` / `transformProjection` may be async (session / ACL lookups).
 - `transformOne(filter)` — gates `/one/:id` and `/one?…` reads. Defaults to `transformFilter`, so any row-level read overlay also applies to id-based reads (existence not leaked via `findById`). Override to scope `/one` differently.
 - The framework unions `preferredId` into the projection AFTER `transformProjection()` resolves — overrides cannot suppress preferred-id fields (see § Read-response baseline). Quantity-ref projection (`@db.amount.currency.ref` / `@db.unit.ref`) also auto-widens `$select` so currency/unit ref fields are present.
-- `onWrite` / `onRemove` returning `undefined` aborts with HTTP 500 (override to throw a richer error).
+- `onWrite` / `onRemove` returning `undefined` aborts with HTTP 500; returning an `Error` instance throws it (since 0.1.128 — was passed on as data).
+- Write pipeline (since 0.1.128): shape gate 400 (`errors[{ path: "" | "[i]", message: "Expected an object" }]`, body must be an object / array of objects, hooks not called) → `onWrite` (outside tx; must return the shape it received — object / array of objects — else 500 "Not saved") → table op (the TABLE's own tx: validate → guard, only when `guardWrite` / `guardRemove` is overridden → re-validate → write) → 404/409 disambiguation AFTER the table call. Unmodified controllers: the table is called exactly as before, no guard, no double validation. There is no `transactionalWrites` flag — overriding a guard is the switch.
+- `guardWrite(ctx)` = the table's `TWriteOptions.guard` (see `crud.md`): `ctx.action`, `ctx.rows` (validated; `undefined` props pruned; defaults applied on insert/replace; `$cas` stripped on update — mutate in place, re-validated), `ctx.expectedVersions[i]`, `ctx.current(i)` (lazy memoised pre-image inside the tx; `null` when missing or no key yet, never throws). `guardRemove(ctx)` = `deleteOne`'s `TDeleteOptions.guard`: `ctx.id`, `ctx.filter`, `ctx.current()` — a missing row still reaches the guard (`current()` → `null`; the 404 comes AFTER the guard); only an id that resolves to no filter (malformed for the key type) is 404 BEFORE the guard. Reject by THROWING (`HttpError`) — the table rolls back, the error propagates unchanged.
+- Guard rules: never swallow `DbError` (PG aborted tx); never await external I/O on SQLite (holds the only connection → deadlock, 503 only with `transactionWaitTimeoutMs`); Mongo replica set may RE-RUN the guard (idempotent); standalone Mongo / memory adapter: no rollback. A guard writing the same row bumps its version twice.
+- `this.withTransaction(fn)` — one tx across table ops in custom routes/actions (`this.table.getAdapter().withTransaction`).
+- `version` + differing `$cas` → 400 at `$cas` (`Ambiguous version: "version" and "$cas.version" differ`, `[i].$cas` in bulk); a malformed `$cas` beside `version` reports `separateCas`'s own message (shared `reconcileCas` from `@atscript/db`).
+- Built-in write failures are THROWN `HttpError`s (wire-identical; a throw also rolls back a wrapper `withTransaction` around `super.update()`; on a throw the router may fall through to a later matching route).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
 
 ## Optimistic concurrency over HTTP
@@ -219,6 +233,8 @@ Clients use this pointer to decide whether to round-trip `version`. UI generator
 
 - `version` present in the body → stripped from SET, lifted to `$cas: { version: N }`, dispatched to `updateOne` / `replaceOne`.
 - `version` absent → write goes through with no `$cas` (last-write-wins; client opted out).
+- Raw `$cas: { version: N }` accepted as sent (since 0.1.128; same 404/409 disambiguation). `version` + DIFFERENT `$cas` → 400 at `$cas` / `[i].$cas`.
+- PK-only `PATCH { id, version }` = versioned touch: executes, bumps (409/404 on stale/missing). `PATCH { id }` → `{ 1|0, 0 }`, no write.
 
 Presence-based policy. No 428 "Precondition Required" gate.
 
@@ -263,18 +279,24 @@ Detect partial failure with `matchedCount < items.length`. **Per-item conflict s
 | Code  | When                                                             | Body                                            |
 | ----- | ---------------------------------------------------------------- | ----------------------------------------------- |
 | `200` | PATCH/PUT success (CAS hit or no CAS)                            | usual write response                            |
+| `400` | `version` and `$cas` present with different values               | `errors[0].path === "$cas"`                     |
 | `404` | CAS-bearing single-row PATCH/PUT on a missing row                | usual 404                                       |
 | `409` | CAS-bearing single-row PATCH/PUT on a row whose version moved on | `kind: "version_mismatch"`, `currentVersion: N` |
 
-## Gate mode
+## Gate mode (capability index, since 0.1.128)
 
-- `@db.table.filterable 'manual'` + `@db.column.filterable` → server rejects any `/query` filter referencing fields lacking the field-level annotation. HTTP 400 with `path` pointing to the offending field.
-- `@db.table.sortable 'manual'` + `@db.column.sortable` → same for sort keys.
-- **Auto mode has NO sort/filter query gate** — the server accepts `$sort`/filter on any adapter-capable field. Only `'manual'` mode 400s a disallowed key. So `/meta` `sortable: false` in auto mode is an advisory UI hint, **not** an enforced restriction (the divergence: a `$sort` on a non-advertised field still succeeds in auto mode).
-- `/meta` `fields[<path>]` capability hint per mode:
-  - `filterable` — auto: every adapter-capable field (`true`); manual: only `@db.column.filterable` fields.
-  - `sortable` — auto: only **index-backed** fields = in an explicit `@db.index*` **OR** a primary key **OR** a unique field (`TDbFieldMeta.isIndexed`, which now folds in PK + unique — so Mongo `_id` and SQL PK/unique columns advertise `sortable: true` without an explicit `@db.index`); manual: only `@db.column.sortable` fields.
-- **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` / `canSortField(fd)` defaults to `fd.storage !== 'json'`, so on SQL adapters (sqlite/postgres/mysql) `@db.json` fields and array fields (both `storage: 'json'`) report `{ filterable: false, sortable: false }` regardless of mode — even when explicitly annotated `@db.column.filterable`. MongoAdapter overrides `canFilterField` to `true` (native dot-paths and array filters), so `@db.json` and array fields are filterable on Mongo, but still not sortable (min/max-element sort is a footgun).
+`/meta.fields` and the request gate are two projections of ONE per-controller `FieldCapabilityIndex` — parity is structural: `fields[P].sortable === ($sort=P accepted)`, `fields[P].filterable === (filter on P accepted)`, on every adapter, mode and field kind. Every root path a request uses (filter tree, `$sort`, `$select`, `$groupBy`, `$having` keys minus aggregate aliases, aggregate `$field`) is checked BEFORE `transformFilter` / `transformProjection`; rejections are the structured envelope `{ message, statusCode: 400, errors: [{ path, message }] }`.
+
+- `fields[<path>]` = `{ filterable, sortable, indexed?, encrypted?, geo?, writeOnly? }`:
+  - `filterable` — adapter `canFilterField(fd)` ∧ ¬`@db.writeOnly` ∧ ¬`@db.encrypted`; in `@db.table.filterable 'manual'` additionally only `@db.column.filterable` fields.
+  - `sortable` — adapter `canSortField(fd)` ∧ ¬writeOnly ∧ ¬encrypted; in `@db.table.sortable 'manual'` additionally only `@db.column.sortable` fields. Auto mode advertises EVERY adapter-sortable field (before 0.1.128 only index-backed ones).
+  - `indexed` — present when index-backed (explicit `@db.index*`, PK, unique). Advisory; never affects acceptance.
+- **Manual-mode policy applies to filters and `$sort` only.** `$groupBy`, `$having` field keys and aggregate `$field` use the physical capability (adapter ∧ ¬writeOnly ∧ ¬encrypted) — `@db.column.filterable` is not required to group by a column. `$having` keys must additionally be aggregate aliases or `$groupBy` fields (core `checkHavingKeys`, answered by the gate with the same wording): a real but non-grouped column is a 400 `$having key "<key>" must be an aggregate alias or a $groupBy field` (since 0.1.128).
+- **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` defaults to `fd.storage !== 'json'`; `canSortField(fd)` vetoes `storage === 'json'` AND `designType 'json' | 'array'` (so Mongo/memory, which keep arrays inline as `column`, report `sortable: false` and 400 `$sort=tags` since 0.1.128). Mongo/memory override `canFilterField` to `!fd.encrypted`.
+- **Never listed, always rejected for filter/sort/groupBy:** nested-object parents (`contact` — 400 names its leaves), navigation properties and their descendants (`assignee`, `assignee.name` — 400 says `use $with=assignee(...)`; since 0.1.128 Mongo/memory no longer list nav descendants), JSON descendants on SQL adapters (`prefs.theme` — 400 says select the parent; Mongo/memory list and accept them), `@db.ignore`d fields, unknown fields (`Unknown field "x"`).
+- `$select`: listed fields, flattened parents (expand), JSON parents (whole value) and `@db.writeOnly` fields (stripped by the seal after the gate) pass; JSON descendants on SQL, encrypted descendants, root nav paths and unknown fields → 400. Applies to `/query`, `/pages`, `/geo`, `/one/:id` and `/one?…` (the composite endpoint was unvalidated before 0.1.128).
+- Messages (locked): `Filtering on field "x" is not permitted — add @db.column.filterable to enable.` / `… — adapter cannot filter on this storage type.` / `… — field is @db.writeOnly.`; `Sorting on field "x" is not permitted — …`; `"contact" is a nested object — filter or sort on one of its leaves (contact.email, …)`; `"assignee.name" is a navigation path — use $with=assignee(...) …`; `"prefs.theme" is inside JSON-stored column "prefs" — this adapter cannot filter JSON paths; select "prefs" and read the value client-side.`; `Unsupported filter operator "$nor" — use $and, $or or $not` (one wording with the core `guardPaths`, from `unsupportedOperatorMessage`); `$having key "region" must be an aggregate alias or a $groupBy field`.
+- The core layer (`@atscript/db`) runs the same existence + physical checks in `guardPaths` for every read, aggregate, `updateMany` / `deleteMany` (`DbError("INVALID_QUERY")`), so programmatic callers and `transformFilter` overlays hit the same wall — physical column names (`contact__email`) are no longer accepted anywhere.
 
 ## Errors
 
@@ -294,6 +316,8 @@ Status-code mapping (`validation-interceptor.ts`):
 | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `ValidatorError`                                                                                                                   | 400                                                                                                               |
 | `DbError` code `CONFLICT`                                                                                                          | 409                                                                                                               |
+| `DbError` code `TX_WAIT_TIMEOUT` (SQLite gate waiter timed out — `transactionWaitTimeoutMs`)                                       | 503                                                                                                               |
+| Write body not an object / array of objects (shape gate, since 0.1.128)                                                            | 400 with `errors[{ path: "" \| "[i]", message: "Expected an object" }]`                                           |
 | `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`, `VERSION_COLUMN_WRITE`) | 400                                                                                                               |
 | CAS version mismatch on PATCH/PUT (`@db.column.version` table)                                                                     | 409 with `kind: "version_mismatch"` — see [§ Optimistic concurrency over HTTP](#optimistic-concurrency-over-http) |
 | `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                                           | 409                                                                                                               |
@@ -356,8 +380,8 @@ interface TMetaResponse {
   preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
   versionColumn?: string; // logical field name of the `@db.column.version` field; omitted when none. See versioning.md.
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
-  fields: Record<string, { sortable; filterable }>;
-  type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; see relations.md)
+  fields: Record<string, { sortable; filterable; indexed?; encrypted?; geo?; writeOnly? }>; // exact — see Gate mode
+  type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; chained refs resolve to the terminal field — see relations.md)
   actions: TDbActionInfo[]; // declared actions; `[]` when none. See actions.md.
   crud: TCrudPermissions; // built-in CRUD surface; key absent = denied
 }

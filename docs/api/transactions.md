@@ -109,12 +109,23 @@ If the rollback itself fails, the rollback error is swallowed and the original e
 
 ## Adapter Behavior
 
-| Adapter    | DML transactions | Transactional DDL | Notes                                                                                      |
-| ---------- | ---------------- | ----------------- | ------------------------------------------------------------------------------------------ |
-| PostgreSQL | ✅               | ✅                | Best support; CREATE / ALTER TABLE roll back on failure                                    |
-| SQLite     | ✅               | ❌                | Schema changes commit immediately                                                          |
-| MySQL      | ✅ (InnoDB)      | ❌                | DDL auto-commits                                                                           |
-| MongoDB    | ✅               | n/a               | **Requires a replica set**; falls back to no-op on standalone (same code works dev → prod) |
+| Adapter    | DML transactions | Transactional DDL | Notes                                                                                                                                                            |
+| ---------- | ---------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | ✅               | ✅                | Best support; CREATE / ALTER TABLE roll back on failure. A dedicated pooled connection is held for the whole `withTransaction` span                              |
+| SQLite     | ✅ (serialised)  | ❌                | One connection per driver: transactions queue behind each other and plain statements wait for `COMMIT` — see [SQLite serialisation](#sqlite-serialisation)       |
+| MySQL      | ✅ (InnoDB)      | ❌                | DDL auto-commits. A dedicated pooled connection is held for the whole `withTransaction` span                                                                     |
+| MongoDB    | ✅               | n/a               | **Requires a replica set**; falls back to no-op on standalone (same code works dev → prod). The callback may **re-run** on transient errors — keep it idempotent |
+| Memory     | ❌               | n/a               | `withTransaction` runs the callback; nothing rolls back. Test rollback behaviour on SQLite `:memory:` or with adapter spies                                      |
+
+### SQLite serialisation {#sqlite-serialisation}
+
+Since 0.1.128 the SQLite adapter serialises transactions through a per-driver FIFO gate: `withTransaction` takes the gate before `BEGIN IMMEDIATE` and releases it on `COMMIT` / `ROLLBACK`; every plain read or write from another async context waits until the transaction is over instead of executing inside it. Two concurrent `withTransaction` calls therefore both succeed, one after the other, where they used to fail with `cannot start a transaction within a transaction`. Never await external I/O (an HTTP call, another connection) inside a SQLite transaction — the whole connection waits with you — and note that schema operations take the same connection gate (since 0.1.128), so they never land inside a request's transaction. Options, timeouts and the full posture are on the [SQLite adapter page](/adapters/sqlite#concurrency-and-transactions).
+
+### Transaction state is per adapter family
+
+Transaction state is branded by the connection it belongs to — the driver, pool or client every adapter of a space shares (since 0.1.128). Nested `withTransaction` calls on adapters over the same connection join the open transaction; a nested call on a _different_ family or connection (a MongoDB write inside a SQLite transaction, a SQLite write inside a MySQL one, a second pool) opens its **own** transaction on top of the outer one, and a bare statement of another family runs autocommit — with SQLite statements still queued behind SQLite's own transactions. The outer family's statements issued inside the inner callback still belong to the outer transaction. Cross-engine atomicity is not provided.
+
+Schema sync is not one transaction either: each step (`getExistingColumns`, `syncColumns`, `syncIndexes`, …) is its own statement group — on SQLite each step takes and releases the connection gate — so a request served between two steps can observe a half-synced table. Run `syncSchema` before serving traffic.
 
 ## When to Use Explicit Transactions
 
@@ -129,6 +140,8 @@ If the rollback itself fails, the rollback error is swallowed and the original e
 - Single record operations (already atomic)
 - Deep operations with nested data (auto-wrapped)
 - Read-only queries (no mutations to protect)
+
+**Inside a keyed write**, pass `{ guard }` to run validated checks inside the table's own transaction — see [Write guards](/api/crud#write-guards). **In a `moost-db` controller**, override `guardWrite` / `guardRemove` (the override becomes that guard) and use `this.withTransaction(fn)` for custom actions — see [Customization — Write Hooks](/http/customization#write-hooks).
 
 ## Next Steps
 

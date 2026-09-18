@@ -142,8 +142,13 @@ export interface TaskSummary {
     taskId: Task.id           // aliased — "taskId" maps to Task.id
     title: Task.title         // same name
     assignee: User.name       // aliased — "assignee" maps to User.name
+
+    @db.ignore
+    displayLabel?: string     // no column: excluded from CREATE VIEW (since 0.1.128)
 }
 ```
+
+A view field annotated with `@db.ignore` has no column anywhere — it is excluded from the generated `SELECT` list, from the view's definition hash and from queries, exactly like an ignored table field.
 
 ## Complete Example
 

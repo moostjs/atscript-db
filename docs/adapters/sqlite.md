@@ -110,6 +110,8 @@ const results = await contacts.findMany({
 
 To store an entire nested object as a single JSON column instead of flattening, annotate it with `@db.json`. Arrays are always stored as JSON.
 
+JSON-stored values are opaque to queries on SQLite: a descendant path (`preferences.theme`, `tags.0`) in a filter, `$sort`, `$select`, `$groupBy` or an aggregate field is rejected with `INVALID_QUERY` (HTTP 400 over moost-db) before any SQL is built (since 0.1.128); select the parent column and read the value client-side. `/meta.fields` lists JSON and array columns as `filterable: false, sortable: false` and does not list their descendants.
+
 ### Foreign Key Enforcement
 
 SQLite foreign keys are enforced natively. The adapter enables `PRAGMA foreign_keys = ON` at connection time, so referential integrity is always active. Cascade and set-null behaviors are controlled via `@db.rel.onDelete` and `@db.rel.onUpdate` — see [Referential Actions](/relations/referential-actions).
@@ -338,6 +340,31 @@ const adapter = new SqliteAdapter(driver);
 ```
 
 See the [better-sqlite3 README](https://github.com/WiseLibs/better-sqlite3) for the full list of pragmas.
+
+## Concurrency and transactions {#concurrency-and-transactions}
+
+A SQLite driver is **one synchronous connection**, shared by every table of the space. Two async contexts cannot each own a transaction on it, and — worse — a statement from another request that runs while a transaction is open executes _inside_ that transaction (it sees uncommitted rows and is undone by a rollback). Since 0.1.128 the adapter serialises the connection through a per-driver FIFO gate:
+
+- `withTransaction` takes the gate, runs `BEGIN IMMEDIATE` (the write lock is taken up front, so a concurrent _process_ waits on `busy_timeout` instead of failing mid-transaction), and releases the gate on `COMMIT` / `ROLLBACK`. Concurrent `withTransaction` calls queue and run one after the other — no more `cannot start a transaction within a transaction`.
+- Every read and write outside a transaction waits until no transaction is open, then runs autocommit. Inside your own transaction, statements run immediately (nested calls join as before).
+- The gate is keyed by driver instance: construct **one driver per database** (two `BetterSqlite3Driver` wrappers around one `Database` would get two gates).
+
+```typescript
+const db = createAdapter("./data.db", {
+  transactionWaitTimeoutMs: 10_000, // waiters give up after 10 s (default: wait forever)
+  transactionWaitWarnMs: 2_000, // warn through the adapter logger after 2 s (default 5000; 0 = off)
+});
+// or: new SqliteAdapter(driver, { transactionWaitTimeoutMs, transactionWaitWarnMs })
+```
+
+A waiter that exceeds `transactionWaitTimeoutMs` rejects with `DbError("TX_WAIT_TIMEOUT")`, which `@atscript/moost-db` maps to **503**. The timeout bounds the waiter's _total_ wait, however many transactions run ahead of it. The default is unbounded (like the mysql2 / pg pool defaults): a slow bulk import then delays concurrent requests instead of failing them. `transactionWaitTimeoutMs: 0` is a fail-fast mode — a statement or transaction that finds the connection busy rejects immediately instead of queueing.
+
+**DO / DON'T**
+
+- **Don't await external I/O inside `withTransaction`** (or inside a `moost-db` [`guardWrite`](/http/customization#guardwrite)) — a self-call to your own API from inside a transaction waits for itself, forever by default. Set `transactionWaitTimeoutMs` when you cannot rule that out.
+- **Schema operations take the same connection gate** (since 0.1.128): `ensureTable`, `syncColumns`, `recreateTable`, `dropTablesByName` and the other schema methods hold the connection exclusively _without_ opening a transaction — they wait for an open transaction to finish, requests wait for them, and their `PRAGMA foreign_keys` toggles stay effective because the DDL never lands inside a request's transaction. The gate protects each step, not a whole `syncSchema` run: a multi-step sync releases the connection between steps, so run schema sync before serving traffic.
+- **Do** keep `journal_mode = WAL` + `busy_timeout` for multi-process deployments (see [WAL mode and pragma tuning](#wal-mode-and-pragma-tuning)); the gate only covers one process, and `BEGIN IMMEDIATE` blocks the event loop for up to `busy_timeout` under cross-process contention.
+- A transaction on another adapter family (MySQL, MongoDB) is **not** a SQLite transaction: SQLite statements issued inside it still queue behind SQLite's own transactions and run autocommit — see [Transactions](/api/transactions#transaction-state-is-per-adapter-family).
 
 ## Limitations
 

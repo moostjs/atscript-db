@@ -56,6 +56,13 @@ Tables present in the database but no longer defined in your `.as` schema are dr
 Dropping a table destroys all data in it. Use `--safe` mode to prevent table drops, or use `--dry-run` to preview what will be removed before applying changes.
 :::
 
+Since 0.1.128 drops are **dependency-ordered and refused when unsafe**:
+
+- **Order** — removed tables are dropped children before parents, using the live foreign keys of the database (the stored snapshot is the fallback for adapters that cannot introspect them). Removed views are dropped first of all, before any table change. Mutually referencing tables (a foreign-key cycle) are dropped as one group (`entry.dropGroup`): SQLite disables FK enforcement around the group, MySQL drops with `FOREIGN_KEY_CHECKS=0` on a dedicated connection, PostgreSQL issues one multi-table `DROP TABLE a, b`.
+- **Refusal** — a removed table that a model or managed view still in the inventory references is refused before any DDL (`Cannot drop "<table>": it is still referenced by …`). This is the partial-inventory mistake the [model manifest](./model-manifest) exists to prevent; dropping the parent is never the right default.
+- **Unmanaged referencers** — at drop time the live foreign keys are checked again; if a table outside the inventory (or a table whose earlier step errored) still references the one being dropped, that entry becomes an `error` entry, stays tracked, and the hash is withheld — no cascading drop, no dangling constraint.
+- **Safe mode** — drops are skipped and the objects **stay tracked**, so the next executing run (`--force` or the next schema change) drops them.
+
 ## Columns
 
 Column-level changes are detected by `computeColumnDiff()`, which compares the desired field definitions from your `.as` types against the existing columns in the database. Six change types are tracked:
@@ -119,13 +126,17 @@ bio?: string
 bio: string
 ```
 
-Adapters with `supportsColumnModify` handle this in-place. On SQLite, nullable changes require table recreation (see [Structural Changes](#structural-changes)).
+Adapters with `supportsColumnModify` handle this in-place. On SQLite, nullable changes require table recreation (see [Structural Changes](#structural-changes)). In `--safe` mode neither runs: on an adapter that needs DDL for the change it is skipped and pending (`entry.skipped` includes `'nullable-defaults'`, the table's snapshot and the hash are withheld until a run without `--safe`); a snapshot-only adapter just records the new shape. Default changes follow the same rule.
 
 ### Default Change
 
 Changes to `@db.default.*` values are detected when the existing column already has a recorded default. If the column had no default previously (no baseline exists), changes cannot be detected.
 
 Some adapters handle default changes in-place; others require table recreation.
+
+::: info MySQL
+"No model default" is rendered as **no `DEFAULT` clause at all** — never `DEFAULT NULL` (since 0.1.128). A required column added to a populated table is filled through an invented type default that is dropped again immediately, so a later default change never trips over a default the adapter itself invented. See [MySQL — In-Place Column Modification](/adapters/mysql#in-place-column-modification).
+:::
 
 ### Drop
 
@@ -235,6 +246,13 @@ How FK changes are applied depends on the adapter:
 - **MySQL, PostgreSQL** — support standalone FK operations via `syncForeignKeys()`. Stale or changed FKs are dropped first (to unblock column alterations), then all desired FKs are synced after column operations complete.
 - **SQLite** — cannot `ALTER` foreign keys. Any FK change requires full table recreation. Sync handles this automatically when FK changes are detected on an adapter without `syncForeignKeys` support.
 
+### Creation Order, Cycles and Unknown Targets
+
+Since 0.1.128 tables are created and altered **parents before children**, whatever the order of the sync inventory — MySQL and PostgreSQL emit inline `FOREIGN KEY` constraints, so a child created before its parent used to fail on those engines. The order is a pure function of the model's foreign keys (`entry.dependsOn` lists it), so every pod computes the same plan.
+
+- **Cycles** (`A.bId → B`, `B.aId → A`) are created without the inline constraints to each other and the constraints are added in a deferred pass once every member exists. SQLite accepts forward references and needs no deferral.
+- **Unknown targets** — a `@db.rel.FK` whose target table is neither in the inventory nor present in the database is refused before any DDL (`FK <table>.<cols> references "<target>" which is neither in the sync inventory nor present in the database`). A target that exists in the database but is not managed by sync (an unmanaged table) is allowed.
+
 For more on foreign key annotations, see [Foreign Keys](/relations/).
 
 ## Table Options
@@ -244,7 +262,7 @@ Table-level options are adapter-specific settings detected by `computeTableOptio
 Table option changes fall into two categories:
 
 - **Non-destructive** — applied in-place via `ALTER TABLE` (e.g., changing MySQL engine or charset). These are safe and do not affect data.
-- **Destructive** — require the table to be recreated (e.g., changing MongoDB capped collection size). With `@db.sync.method 'recreate'`, data is preserved via server-side copy; with `'drop'`, data is lost. See [Structural Changes](#structural-changes).
+- **Destructive** — require the table to be recreated (e.g., changing MongoDB capped collection size). With `@db.sync.method 'recreate'`, data is preserved via server-side copy; with `'drop'` (or no method), the table is dropped and recreated and data is lost. See [Structural Changes](#structural-changes). Like a type change under `'drop'`, a drop-and-recreate for a destructive option change is covered by the [execution order](/sync/#how-it-works): removed tables that still reference the table are dropped right before it (since 0.1.128). In `--safe` mode the recreate is skipped and pending (`entry.skipped` includes `'table-options'`; the table's snapshot and the hash are withheld until a run without `--safe`).
 
 ### MySQL
 
@@ -262,12 +280,24 @@ Schema sync manages views according to their type (see [View Types](/views/view-
 - **Materialized views** — same lifecycle as managed views, but created with the materialized flag where supported.
 - **External views** — validated only (existence + column check). Never created, modified, or dropped by sync. A failed check reports an `'error'` entry but is advisory — it does not block hash persistence or wedge re-runs.
 
-Views whose definition changed (or that are being renamed) are dropped
-**before** table changes apply and recreated after. This matters when a sync
+A view's **definition** is its entry table, its joins **including their `ON` conditions**, its `@db.view.filter`, its `@db.view.having`, the materialized flag and its field set (since 0.1.128 — earlier releases only hashed the join _targets_, so a change to a join condition or a filter retargeted to another table with the same field name went unnoticed). `@db.ignore` fields are excluded from the definition and from the generated `SELECT`.
+
+::: warning Upgrading to 0.1.128
+Managed views that have joins, a filter or a having clause hash differently after the upgrade and are recreated **once** on the first sync (plain views without any of those are untouched). Three consequences to plan for:
+
+- **PostgreSQL** — `DROP VIEW` + `CREATE VIEW` discards the view's `GRANT`s; re-grant read-only roles after the first sync.
+- **PostgreSQL** — sync never drops with `CASCADE`, so a _user-created_ view that depends on a managed view makes the recreate fail with an `error` entry (and the hash is withheld) until that dependent view is dropped or the managed view is excluded from the inventory.
+- **MongoDB** — `@db.view.materialized` views are plain views on MongoDB, so the recreate is metadata-only.
+  :::
+
+Views whose definition changed (or that are being renamed), **and views removed from the schema**, are dropped
+**before** table changes apply; changed ones are recreated after. This matters when a sync
 both drops a column and updates a view that referenced it: without the early
 drop, SQLite and PostgreSQL would refuse the column drop while the old view
 definition still depends on it. Update the view definition in the same deploy
 that removes the column.
+
+Before creating a managed view, sync checks what already exists under that name: a **physical table** there (typically left behind by an older build that mistook the view for a table) is a pre-flight refusal, not a silent no-op — and symmetrically a view under a declared table's name.
 
 ### View Renames
 
@@ -419,6 +449,25 @@ Structural changes are required in the following scenarios:
 | Destructive table option change | All               | `'recreate'` or `'drop'` |
 
 Adapters with `supportsColumnModify` (MySQL, PostgreSQL) can handle type, nullable, and default changes in-place without requiring `@db.sync.method`.
+
+### Primary Key Changes
+
+Since 0.1.128 sync detects a change of the **primary-key field set** — `@meta.id` moved to another field, a single key becoming composite, a composite key losing or gaining a member (set semantics: reordering a composite key is not a change, consistent with the schema hash; a `@db.column.renamed` key column is compared under its new name). The plan shows it as `! PK (id) → (code) — rebuild (table is empty)`, and `entry.pkChange = { from, to, rebuild }`.
+
+- **Empty table** — the key is rebuilt in place, after new columns are added and before stale columns are dropped (a key column removed in the same sync is dropped after the swap). The rebuild counts as destructive in the plan.
+- **Populated table** — **refused** before any DDL, in every mode: the framework cannot invent key values for existing rows or re-point the rows other tables reference. Migrate manually (or empty the table) and re-run. The populated check is exact at pre-flight time; a row inserted by the application between pre-flight and the swap fails the engine's uniqueness check rather than corrupting anything.
+- **Inbound foreign keys** — every live foreign key that references the old key must be retargeted to the new key by a model in the same sync (its own `fkChanged`); otherwise the run is refused. A referencing table that is removed in the same sync is not a blocker: it is dropped right before the rebuild. Sync drops those constraints before any table operation and the children re-add them afterwards (children run after parents). A referencing table that is itself renamed (`@db.table.renamed`) in the same sync is refused as well — rename it in a separate run first, then retarget.
+- **Renamed table** — the populated check probes the table under its old name; an adapter whose `hasRows` cannot answer for another name (the base-class default) is refused rather than guessed at.
+- **Auto-increment** — a `@db.default.increment` column that leaves the key is refused (MySQL cannot keep `AUTO_INCREMENT` off a key; the compiler warns about `@db.default.increment` without `@meta.id`).
+- **Safe mode** — the rebuild is skipped with a warning; `pkChange.rebuild` is `false` and `entry.skipped` includes `'pk-rebuild'` in both the plan and the result (the populated-table refusal still applies). The table's snapshot and the schema hash are withheld, so the next run without `--safe` rebuilds the key (no `--force` needed).
+
+| Adapter    | Rebuild on an empty table                                                                                                                                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL      | One `ALTER TABLE … MODIFY <new key columns> NOT NULL[, MODIFY <old key column without AUTO_INCREMENT>], DROP PRIMARY KEY, ADD PRIMARY KEY (…)` — a new increment key column is added without `AUTO_INCREMENT` and receives it here |
+| PostgreSQL | One `ALTER TABLE … DROP CONSTRAINT <pk>, ADD PRIMARY KEY (…)`; a demoted identity column gets `ALTER COLUMN … DROP IDENTITY`                                                                                                       |
+| SQLite     | Table recreation (`@db.sync.method 'recreate'` is required when the demoted numeric key also changes type — non-key numbers are `REAL`)                                                                                            |
+| MongoDB    | No physical key: `_id` is fixed and a `@meta.id` move is an index change reconciled by index sync; the populated refusal still applies                                                                                             |
+| Memory     | Not applicable (no column introspection)                                                                                                                                                                                           |
 
 ### Method Comparison
 

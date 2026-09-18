@@ -54,6 +54,8 @@ Nothing syncs automatically — you pass the arrays to [`syncSchema`](./programm
 - **Exclude**: `syncSchema(db, atscriptModels.filter(m => m !== LegacyTable))` — an intentional exclusion is a visible, greppable filter, while doing nothing safely defaults to "synced".
 - **Extend**: models from external npm packages are outside your project's `.as` build — append them: `syncSchema(db, [...atscriptModels, AsPresetEntry])`.
 
+A **partial inventory no longer drops what it forgot** (since 0.1.128): if a table left out of the list is still referenced by a `@db.rel.FK` or a managed view of a model that _is_ in the list, sync refuses the whole run before any DDL (`Cannot drop "<table>": it is still referenced by …`) instead of dropping the referenced table. The manifest remains the way to never get there.
+
 ## Multi-database apps: `@db.space`
 
 `@db.space "analytics"` on a model (interface-level, sibling of `@db.schema`) assigns it to a named space. Absent → `"default"`. The manifest groups by it, so a mixed Mongo + Postgres startup is mechanical:

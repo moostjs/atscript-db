@@ -48,7 +48,7 @@ await jobs.findMany({
 
 | Capability                                      | Status                                                                              |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Transactions                                    | No — stored batch writes are non-atomic (no rollback).                              |
+| Transactions                                    | No — `withTransaction` runs `fn` with NO rollback; stored batch writes non-atomic.  |
 | Foreign keys                                    | App-level cascade / set-null (via `updateMany`/`deleteMany`); no native constraint. |
 | Full-text / Vector / Geo search                 | No.                                                                                 |
 | Collation (`@db.column.collate`)                | No — JS-native code-point comparison.                                               |
@@ -62,7 +62,7 @@ await jobs.findMany({
 | Unique / PK enforcement                         | Yes — duplicate → `DbError('CONFLICT')`.                                            |
 | Increment / defaults                            | Yes — `@db.default.increment` (per-instance counter), `now`, static.                |
 
-`canFilterField` mirrors Mongo (`!fd.encrypted`) — nested/JSON fields report `filterable: true` on `/meta`. `canSortField` keeps the conservative base default (JSON veto). Field ops `$inc`/`$dec`/`$mul` and `prepareId` coercion are supported — see [patch.md](patch.md), [crud.md](crud.md).
+`canFilterField` mirrors Mongo (`!fd.encrypted`) — nested/JSON fields and their dotted descendants report `filterable: true` on `/meta` and are accepted by the gate. `canSortField` keeps the conservative base default, which since 0.1.128 vetoes `designType 'json' | 'array'` too (arrays are stored inline as `column` here): `$sort=tags` → `INVALID_QUERY` / 400 and `/meta` says `sortable: false`; nested leaves (`address.zip`) sort fine. Navigation descendants are not listed in `/meta.fields` (since 0.1.128). Field ops `$inc`/`$dec`/`$mul` and `prepareId` coercion are supported — see [patch.md](patch.md), [crud.md](crud.md).
 
 ## Invariants
 
@@ -77,7 +77,7 @@ await jobs.findMany({
 | 7   | Stored **batch writes are non-atomic** (`insertMany`/`updateMany`/`replaceMany`/`deleteMany`) — a mid-batch conflict leaves earlier items written. Single writes are safe.                                                                                                                                                                         |
 | 8   | Default order is **insertion order** (stored mode); provider order is provider-owned. Provider tables have **no cross-request pagination stability** — page 1 and page 2 are separate snapshots.                                                                                                                                                   |
 | 9   | Aggregation (`$groupBy`) throws typed `INVALID_QUERY` (4xx). FTS / vector / geo / `$search` / DB views are documented non-goals — unsupported.                                                                                                                                                                                                     |
-| 10  | OCC stale `$cas`/expectedVersion → `matchedCount: 0` (**no throw**); the row is left unchanged.                                                                                                                                                                                                                                                    |
+| 10  | OCC stale `$cas`/expectedVersion → `matchedCount: 0` (**no throw**); the row is left unchanged. PK-only `$cas` = versioned touch (bumps); PK-only without `$cas` = no write, honest count (since 0.1.128).                                                                                                                                         |
 | 11  | The filter/sort/projection engine (`buildMemoryPredicate` + `sortRows` + `projectRow`) is **shared**: it also backs `@atscript/moost-db`'s `AsJsonValueHelpController` (static value-help). Same JS-native semantics (Mongo-like null model, `/pat/flags` regex, dot-paths) apply there — see [moost-db.md § Value-help controllers](moost-db.md). |
 
 Also: no Mongo-style implicit array-element / `$elemMatch` matching — the dot-path getter reaches scalars and nested-object paths only. Semantics are JS-native, deliberately NOT SQL-identical; not a production datastore.

@@ -32,7 +32,9 @@ const result = await users.insertOne({
 // result: { insertedId: 1 }
 ```
 
-Fields with `@db.default.*` annotations (`@db.default.increment`, `@db.default.uuid`, `@db.default.now`, or `@db.default 'value'`) are applied automatically — you can omit them from the input.
+Fields with `@db.default.*` annotations (`@db.default.increment`, `@db.default.uuid`, `@db.default.now`, or `@db.default 'value'`) are applied automatically — you can omit them from the input. An `undefined` value counts as omitted (since 0.1.128); `null` is an explicit NULL — see [Defaults](/api/defaults#how-defaults-interact-with-inserts).
+
+Write payloads are typed as `DbPatch<Row>` (insert / patch: every key optional) and `DbRow<Row>` (replace: required keys stay required); both accept `null` on optional columns. Defaults are applied before validation: static `@db.default 'x'` values are filled on every adapter, function defaults (`now` / `uuid` / `increment`) only when the adapter does not generate them natively (since 0.1.128; before, SQL adapters left static defaults to the DDL `DEFAULT` clause). To see or enrich the defaulted, validated rows before they are written, pass a [write guard](#write-guards).
 
 ::: info `insertedId` typing
 `insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`.
@@ -144,6 +146,10 @@ const result = await users.updateOne({
 // result: { matchedCount: 1, modifiedCount: 1 }
 ```
 
+`matchedCount` is what the identifying filter (plus `$cas`, when present) matched at execution time — never assumed. A payload with only the identifying fields writes nothing and reports `{ 1, 0 }` when the row exists or `{ 0, 0 }` when it does not; an `undefined` value is treated as absent (since 0.1.128). See [Update & Patch](/api/update-patch#simple-updates).
+
+`null` clears an optional column (`updateOne({ id, note: null })` → `NULL`), an omitted key keeps it. Since 0.1.128 the readable's filter types admit `null` for optional columns too (`findMany({ filter: { note: null } })`, `{ note: { $ne: null } }`) — see [Queries — Null Values](/api/queries#null-values).
+
 ::: info Patch Operators & Field Operations
 For atomic increments/decrements (`$inc`, `$dec`, `$mul`) and embedded array patch operators (`$insert`, `$remove`, etc.), see [Update & Patch](/api/update-patch).
 :::
@@ -175,13 +181,13 @@ const result = await users.updateMany(
 // result: { matchedCount: 5, modifiedCount: 5 }
 ```
 
-`updateMany` does not support nested relation operations — only own fields.
+`updateMany` does not support nested relation operations — only own fields. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version.
 
 ## Replacing Records
 
 ### Replace One
 
-Replace an entire record by primary key. Unlike `updateOne`, **all fields must be provided** — missing fields are not preserved:
+Replace an entire record by primary key. Unlike `updateOne`, **all fields must be provided** — missing fields are not preserved: an omitted optional column becomes `NULL` (absent on document stores) on every adapter. Since 0.1.128 this holds on SQLite, PostgreSQL and MySQL too — their `UPDATE`-based replace now assigns every column (a column whose function default the engine owns, e.g. a native `@db.default.now`, is reset to its `DEFAULT`); before, an omitted column silently kept its old value there.
 
 ```typescript
 const result = await users.replaceOne({
@@ -202,7 +208,7 @@ const result = await users.replaceOne({
 
 ### Replace Many
 
-Replace every record matching a filter with the **same** full payload — the replace counterpart of `updateMany`. As with `replaceOne`, all required fields must be provided; omitted optional fields are not preserved:
+Replace every record matching a filter with the **same** payload — the filter-based sibling of `updateMany`. Unlike `replaceOne`, it does **not** null-fill: on every adapter it assigns the given columns on each matched row (a `$set`-style merge — SQL `UPDATE … SET`, MongoDB `updateMany` + `$set`, memory merge), so omitted optional fields keep their stored values. All required fields must still be provided (the payload is validated in `replace` mode); a versioned table bumps `version` on every matched row:
 
 ```typescript
 const result = await users.replaceMany(
@@ -225,7 +231,7 @@ const result = await users.deleteOne(1);
 // result: { deletedCount: 1 }
 ```
 
-`deleteOne` accepts the same flexible ID format as `findById` — primary key, composite key object, or unique index value.
+`deleteOne` accepts the same flexible ID format as `findById` — primary key, composite key object, or unique index value. An optional `{ guard }` runs inside the delete's transaction once the id has resolved to a filter — see [Write guards](#write-guards).
 
 ### Delete Many
 
@@ -244,7 +250,7 @@ When a deleted record is referenced by other tables via foreign keys, cascade an
 
 ## Bulk Operations
 
-For batched writes that apply different changes to each record (vs. `updateMany`, which applies the same change to many rows), use `bulkUpdate` and `bulkReplace`. Both accept an array of payloads (each identified by its primary key) and an optional `{ maxDepth }` option, and they participate in the surrounding transaction.
+For batched writes that apply different changes to each record (vs. `updateMany`, which applies the same change to many rows), use `bulkUpdate` and `bulkReplace`. Both accept an array of payloads (each identified by its primary key) and an optional `{ maxDepth, guard }` options object (see [Write guards](#write-guards)), and they participate in the surrounding transaction.
 
 ```typescript
 import { $dec } from "@atscript/db/ops";
@@ -266,6 +272,40 @@ See [Update & Patch](/api/update-patch) for the full operator catalog and per-pa
 ::: warning Nested writes need `@db.depth.limit`
 Insert / replace / patch payloads that nest into `@db.rel.from` or `@db.rel.via` children are rejected at the validator boundary unless the table declares [`@db.depth.limit N`](/relations/deep-operations) with `N >= 1`. The default — annotation absent — is `0`, which blocks every nested write. See [Relations — Deep Operations](/relations/deep-operations).
 :::
+
+## Write Guards {#write-guards}
+
+Since 0.1.128 every keyed write — `insertOne` / `insertMany`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate` — accepts `{ guard }` in its options, and `deleteOne(id, { guard })` too. The table invokes the guard **exactly once, inside its own transaction**, after `undefined` props were pruned, defaults applied and the rows validated, and before encryption and the nested-relation phases. It is the validated stage: what the guard sees is what the table is about to write.
+
+```typescript
+import type { TDbWriteGuardContext } from "@atscript/db";
+
+await orders.insertMany(rows, {
+  guard: async (ctx: TDbWriteGuardContext<Order>) => {
+    // ctx.action: 'insert' | 'insertMany' | 'replace' | 'replaceMany' | 'update' | 'updateMany'
+    for (let i = 0; i < ctx.rows.length; i++) {
+      const row = ctx.rows[i]; // validated, defaults applied (insert / replace), `$cas` removed (update)
+      row.updatedBy = currentUserId(); // enrich in place — the table validates the rows again
+      const before = await ctx.current(i); // lazy, memoised pre-image read inside the transaction
+      if (before?.locked) throw new Error("locked"); // rolls the transaction back, propagates unchanged
+      // ctx.expectedVersions[i]: the version a `$cas` predicate expects, or undefined
+    }
+  },
+});
+
+await orders.deleteOne(id, {
+  guard: async (ctx) => {
+    // ctx.id, ctx.filter (the resolved identifying filter), ctx.current() → the row or null
+    if ((await ctx.current())?.isFallback) throw new Error("cannot delete the fallback row");
+  },
+});
+```
+
+- `ctx.current(i)` never throws for a row without an identifying key (an auto-increment insert): it resolves to `null`.
+- A throw rolls the table's transaction back — including anything the guard itself wrote through other tables that joined it — and the same error propagates to the caller.
+- The guard runs for the root call only, never for the nested re-entries a deep write performs on related tables.
+- An id that resolves to no filter makes `deleteOne` answer `{ deletedCount: 0 }` without calling the guard.
+- In `@atscript/moost-db`, overriding `guardWrite` / `guardRemove` on a controller passes that override as the guard — see [Customization — Write Hooks](/http/customization#write-hooks).
 
 ## Validation
 

@@ -23,10 +23,16 @@ Because sync is hash-gated, calling it on every deployment or application startu
 ## How It Works
 
 ```
-.as files → compile → hash check → (if changed) lock → diff → apply → store hash
+.as files → compile → hash check → (if changed) lock → discover → pre-flight → execute → store hash
 ```
 
-On every run, schema sync hashes the full compiled schema and compares against the hash from the last successful sync. If it matches, sync exits as `up-to-date` after a single lightweight read — no introspection, no DDL, no lock acquired. Otherwise it acquires a distributed lock in `__atscript_control`, diffs the desired schema against either live introspection (SQL adapters) or the stored per-table snapshot (MongoDB), applies the DDL, and writes the new hash.
+On every run, schema sync hashes the full compiled schema and compares against the hash from the last successful sync. If it matches, sync exits as `up-to-date` after a single lightweight read — no introspection, no DDL, no lock acquired. Otherwise it acquires a distributed lock in `__atscript_control` and runs three phases (since 0.1.128):
+
+1. **Discover** (read-only) — introspects every table once (live columns on SQL adapters, the stored per-table snapshot on MongoDB), reads the tracked-object list, and builds the dependency graph from foreign keys and view definitions.
+2. **Pre-flight** (pure validation) — every change that no order of DDL could apply safely becomes a [refusal](#pre-flight-refusals), and one refusal stops the whole run before any DDL.
+3. **Execute** — in dependency order: stale and removed views first, then the live foreign keys that reference a primary key about to be rebuilt, then tables (parents before children; a foreign-key cycle is created with its constraints deferred; a removed table that references a table this run drops and recreates (`@db.sync.method 'drop'` on a type change, or a destructive table-option change) or whose primary key it rebuilds is dropped right before that table), then managed views and the external-view check, then the remaining removed tables (children before parents), then snapshots, tracking and the hash.
+
+The only DDL that runs before pre-flight is `CREATE TABLE IF NOT EXISTS __atscript_control` — sync's own bookkeeping table.
 
 The `__atscript_control` table is created and maintained automatically — you never need to touch it. It stores the current schema hash, the lock entry, the tracked-table list, and per-table snapshots used for diffing on snapshot-based adapters.
 
@@ -69,12 +75,31 @@ Each table or view in the sync plan receives a status indicating what action wil
 | `in-sync` | No changes needed                                                           |
 | `error`   | Conflicts detected that prevent sync                                        |
 
+Entries are listed in **execution order** (since 0.1.128): tables parents-first, then views, then drops children-first — except that a removed table that references a table this run drops and recreates (`@db.sync.method 'drop'` on a type change, or a destructive table-option change) or whose primary key it rebuilds is dropped right before that table, and its `drop` entry is listed there. `entry.dependsOn` names the tables an entry waits for (for such a table, the removed tables dropped first are included); `entry.dropGroup` is set when a foreign-key cycle is dropped as one group.
+
 ### What Triggers `error` Status
 
 A sync entry is marked as `error` when sync cannot proceed safely:
 
 - **Rename collision** — a `@db.column.renamed` annotation attempts to rename column `A` to `B`, but column `B` already exists in the database.
 - **Type change without sync method** — a column's type changed (e.g., `TEXT` to `INTEGER`) but the table has no `@db.sync.method` annotation and the adapter does not support in-place column modification. Sync cannot determine whether to drop the table (`'drop'`) or recreate it with data preservation (`'recreate'`), so it flags the entry for manual resolution.
+
+### Pre-flight refusals
+
+Since 0.1.128 a second class of `error` entries exists: **refusals** (`entry.refused === true`). This is the contract, stated once: a refusal is found in pre-flight, before any DDL; the run returns `status: 'refused'`; **no DDL is issued on any managed table or view**; tracking, snapshots and the hash are left untouched; the lock is released; every pod that hits the same schema refuses identically, so nothing is ever half-applied. The plan prints a refused entry as `✖ refused: <name>`:
+
+| Refusal                                                                                                                    | Message                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Primary-key field set changed on a **populated** table                                                                     | `Primary key of "<table>" changed (<from> → <to>) but the table has rows; schema sync cannot rebuild a populated primary key. Migrate manually (or empty the table) and re-run.`                                                 |
+| Primary-key change on a table renamed in the same sync when the adapter's `hasRows` cannot probe the old name              | `Primary key of "<table>" changed (<from> → <to>) but the adapter cannot tell whether the table has rows under its old name "<old>" — implement hasRows(tableName) on the adapter, or rename the table in a separate run first.` |
+| Primary-key change while a live foreign key from a table that is not removed in the same sync still references the old key | `Primary key of "<table>" changed (<from> → <to>) but "<child>.<cols>" still references the old key — retarget the foreign key (or migrate manually) and re-run.`                                                                |
+| Primary-key change while a retargeting child table is itself renamed (`@db.table.renamed`) in the same sync                | `Primary key of "<table>" changed (<from> → <to>) but the referencing table "<child>" is renamed in the same run (from "<old>") — rename it in a separate run first, then retarget the foreign key and re-run.`                  |
+| An auto-increment column leaves the primary key                                                                            | `"<table>.<field>" is auto-increment but no longer part of the primary key; auto-increment columns must be primary-key columns.`                                                                                                 |
+| A removed table is still referenced by a model or managed view in the inventory                                            | `Cannot drop "<table>": it is still referenced by <child>.<cols> (@db.rel.FK) / view "<view>". Add "<table>" to the sync inventory or remove the reference.`                                                                     |
+| A foreign key targets a table that is neither in the inventory nor in the database                                         | `FK <table>.<cols> references "<target>" which is neither in the sync inventory nor present in the database`                                                                                                                     |
+| A physical table exists under a managed view's name (or a view under a table's name)                                       | `A physical table "<name>" exists where managed view "<name>" is declared — drop or rename it` / `A view "<name>" exists where table "<name>" is declared — drop or rename it`                                                   |
+
+`plan()` reports the same entries (its status stays `changes-needed`); a refusal is therefore visible in `--dry-run` before it can hit a deployment.
 
 ### Alter Details
 
@@ -111,11 +136,14 @@ The `--safe` flag suppresses all destructive operations during sync:
 
 - Column drops are skipped
 - Table and view drops are skipped
-- Type changes that require table recreation are skipped
-- Table option changes that require recreation are skipped
-- Nullable and default changes that would require table recreation are skipped
+- `@db.sync.method 'drop'` recreates for type changes are skipped (since 0.1.128 — earlier releases dropped the table, data and all, even in safe mode; `'recreate'` and in-place `MODIFY COLUMN` still apply): both the plan and the result keep `typeChanges`, `entry.skipped` includes `'recreate'`, printed as `! type priority (REAL → string) — skipped (safe mode)`, and it does not count as destructive
+- Table option changes that require recreation are skipped: `optionChanges` is kept, `entry.skipped` includes `'table-options'`, printed as `! option capped: 1000 → 2000 — skipped (safe mode)`, not destructive (non-destructive option changes are not applied in safe mode either, and are not reported)
+- Nullable and default changes are skipped on adapters that need DDL for them (in-place `MODIFY COLUMN` or a table recreation): `nullableChanges` / `defaultChanges` are kept, `entry.skipped` includes `'nullable-defaults'`, printed as `~ bio — non-nullable — skipped (safe mode)`; a snapshot-only adapter (MongoDB without a recreate) just records the change and nothing is pending
+- Primary-key rebuilds are skipped (logged as a warning; both the plan and the result show `pkChange` with `rebuild: false` and `entry.skipped` includes `'pk-rebuild'`, printed as `! PK (id) → (code) — skipped (safe mode)`, and it does not count as destructive; a populated-table key change is still refused)
 
-Only additive and non-destructive changes are applied: new tables, new columns, column renames, index updates, and foreign key additions.
+Only additive and non-destructive changes are applied: new tables, new columns, column renames, index updates, and foreign key additions. `entry.skipped` (since 0.1.128) lists the work a safe run skipped — `'pk-rebuild'`, `'recreate'`, `'table-options'`, `'nullable-defaults'` — identically in the plan and in the result, so `plan({ safe: true })` shows exactly what `run({ safe: true })` leaves pending; `entry.pending` is `true` for such an entry (and for an `error` entry).
+
+Objects skipped by safe mode **stay tracked** (since 0.1.128): a removed table or view that safe mode did not drop remains in `synced_tables` with its snapshot, and is dropped by the next run that actually executes — a `--force` run or the next schema change. The schema hash is still written after a safe run, so a safe production boot does not re-plan on every start — with one exception (since 0.1.128): when the run skipped work on a desired table (a primary-key rebuild, a `'drop'` recreate, a destructive table-option recreate or nullable/default DDL — `entry.pending`), that change is still pending, so the table's snapshot and the hash are withheld exactly as for an `error` entry, with a warning per table: `Safe mode: "projects" — nullable/default change skipped, snapshot and hash withheld; the next run without safe applies it`. The next run without `--safe` applies it (no `--force` needed), and a safe-only deployment re-plans and repeats the warning on every start until it does.
 
 Safe mode is designed for production CI/CD pipelines where you want automatic sync for additive changes but want to manually review and approve any destructive operations.
 
@@ -130,15 +158,16 @@ Safe mode does not prevent all data loss scenarios. Column renames are still app
 
 ## Sync Result Statuses
 
-The `run()` method returns a result object with one of three statuses:
+The `run()` method returns a result object with one of four statuses:
 
-| Status           | Meaning                                                                     |
-| ---------------- | --------------------------------------------------------------------------- |
-| `up-to-date`     | Schema hash matched — no introspection or DDL was performed                 |
-| `synced`         | Changes were detected and applied successfully                              |
-| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock |
+| Status           | Meaning                                                                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `up-to-date`     | Schema hash matched — no introspection or DDL was performed                                                                                          |
+| `synced`         | Changes were detected and applied (inspect `entries` — an `error` entry means that table did not converge and the hash was withheld)                 |
+| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock                                                                          |
+| `refused`        | A [pre-flight refusal](#pre-flight-refusals) stopped the run (since 0.1.128); `entries` is the full plan with the refused entries as `error` entries |
 
-Both `up-to-date` and `synced-by-peer` are success statuses that indicate no work was needed by the current instance. The `synced` status includes a list of `SyncEntry` objects detailing what was changed.
+Both `up-to-date` and `synced-by-peer` are success statuses that indicate no work was needed by the current instance. The `synced` status includes a list of `SyncEntry` objects detailing what was changed. A `refused` run follows the `onError` policy: `"warn"` (default) logs every refusal at error level and returns normally, `"throw"` throws, `"silent"` returns — a boot script that only checks `status === "synced"` should treat `refused` as a failed migration.
 
 ## Next Steps
 

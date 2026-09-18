@@ -100,9 +100,11 @@ await contacts.findMany({
 });
 ```
 
+Dotted paths into `@db.json` objects and arrays are listed in `/meta.fields` and accepted by filters, `$sort`, `$select` (SQL adapters reject them). The array / `@db.json` column itself is filterable but **never sortable** — since 0.1.128 `$sort=tags` is rejected with `INVALID_QUERY` / 400 instead of ordering by the stringified array, and `/meta` says `sortable: false`. Navigation descendants are not listed in `/meta.fields` (since 0.1.128) — load relations with `$with`.
+
 ### Optimistic Concurrency
 
-Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale version yields `matchedCount: 0` (no throw), and the version column auto-bumps on every versioned write. See [Optimistic Concurrency](/api/versioning).
+Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale version yields `matchedCount: 0` (no throw), and the version column auto-bumps on every versioned write — including the PK-only [versioned touch](/api/versioning#versioned-touch). See [Optimistic Concurrency](/api/versioning).
 
 ### Field Operations & Defaults
 
@@ -138,8 +140,10 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 
 - **JS-native regex / null semantics** — not byte-identical to any SQL engine (see [Comparison semantics](#comparison-semantics)).
 - **No collation** — `@db.column.collate` (nocase / unicode) is not honored; `$eq` and sort are code-point / JS-native.
+- **No sort on array / `@db.json` columns** — `$sort` on them is rejected (400 / `INVALID_QUERY`, since 0.1.128); sort by a nested leaf (`address.zip`) instead.
 - **No array-element matching** — the dot-path getter matches scalars and nested-object paths; Mongo-style implicit array-element / `$elemMatch` matching is not provided.
 - **Non-atomic stored batch writes** — `insertMany` / `updateMany` / `replaceMany` / `deleteMany` apply sequentially with no rollback; a mid-batch conflict leaves earlier items written. Single writes are safe.
+- **No transactions** — `withTransaction` runs the callback but nothing rolls back on a throw. Rollback behaviour (including `moost-db` write guards) is not observable on this adapter; assert it on SQLite `:memory:` or with adapter spies. See [Transactions](/api/transactions#adapter-behavior).
 - **Provider tables are read-only** — writes throw, and there is no cross-request pagination stability (page 1 and page 2 are separate requests over separate snapshots).
 - **No native aggregation** — `$groupBy` throws a typed `INVALID_QUERY` (a clean 4xx, not a 500).
 - **Relations `$with`** — resolved by core's app-level batch loading (`supportsNativeRelations()` is `false`), not natively.

@@ -129,16 +129,30 @@ Aggregate: revenue by category where status = paid:
 GET /orders/query?status=paid&$groupBy=category&$select=category,sum(amount),count()
 ```
 
-## Gate enforcement
+## Gate enforcement (since 0.1.128)
 
-When `@db.table.filterable 'manual'` is set, a filter referencing a field without `@db.column.filterable` returns:
+Every root path of a request — filter keys, `$sort` keys, `$select` entries, `$groupBy`, `$having` keys (minus aggregate aliases), aggregate `$field`s — is checked against the controller's capability index (the same one `/meta.fields` is projected from) before anything reaches the database. Rejections:
 
 ```json
 HTTP/1.1 400 Bad Request
-{ "statusCode": 400, "errors": [{ "path": "ssn", "message": "Field not filterable" }] }
+{
+  "statusCode": 400,
+  "message": "Filtering on field \"ssn\" is not permitted — add @db.column.filterable to enable.",
+  "errors": [{ "path": "ssn", "message": "Filtering on field \"ssn\" is not permitted — add @db.column.filterable to enable." }]
+}
 ```
 
-Same mechanism for `@db.table.sortable 'manual'` with `@db.column.sortable`.
+| Path                                          | Filter / `$sort` / `$groupBy`                                     | `$select`                                                        |
+| --------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
+| listed field (`title`, `contact.email`)       | per `/meta.fields` flags (manual-mode policy on filter/sort only) | ok                                                               |
+| flattened object parent (`contact`)           | 400 `"contact" is a nested object — … leaves (contact.email, …)`  | ok (expands)                                                     |
+| JSON parent (`prefs`, arrays)                 | filter: adapter-dependent (SQL 400); `$sort`: 400 everywhere      | ok (whole value)                                                 |
+| JSON descendant (`prefs.theme`)               | SQL: 400 `… inside JSON-stored column "prefs" …`; Mongo/memory ok | same                                                             |
+| navigation path (`assignee`, `assignee.name`) | 400 `… use $with=assignee(...)`                                   | 400 — use `$with=assignee($select=name)`                         |
+| `@db.writeOnly` / `@db.encrypted`             | 400                                                               | writeOnly: stripped; encrypted leaf ok; encrypted descendant 400 |
+| unknown                                       | 400 `Unknown field "x"`                                           | 400                                                              |
+
+`$with` sub-controls (`$with=assignee($select=name)`) are validated per relation, not at the root. `$having=<alias>` is accepted for every aggregate alias (`sum(amount):total` → `total`; unnamed → `sum_amount`). Any other `$having` key must be a `$groupBy` field — a real but non-grouped column is a 400 `$having key "region" must be an aggregate alias or a $groupBy field` (since 0.1.128). Grouped flattened-object keys come back nested (`$groupBy=stats.views` → `{ "stats": { "views": 10 }, "cnt": 2 }`). Filter nodes carrying anything but `$and` / `$or` / `$not` (e.g. a programmatic `$nor`) → 400.
 
 ## Read-response baseline (preferred-id fields always present)
 
@@ -147,3 +161,5 @@ The server unions the table's `preferredId` field set into `$select` on every ro
 ## Encoding
 
 Use `encodeURIComponent` on values with reserved chars (`& + = , { } | < > ~ /`). The parser handles RFC 3986 percent-encoding. Commas inside `{…}` or parens are structural — encode literal commas as `%2C`.
+
+**Quote string values that are not plain words.** A bare value lexes only letters, digits, `_`, `.` (and `%20`); a hyphen (`name=json-w1`, `2026-01-01`), `/`, `:`, `@` … must be single-quoted: `?name='json-w1'`. Since 0.1.128 an unparsable query string is HTTP 400 with the envelope `{ message: "Malformed query string: …", statusCode: 400, errors: [{ path: "", message }] }` on every read endpoint (was a 500).

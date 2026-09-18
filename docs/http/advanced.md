@@ -326,6 +326,8 @@ The standard SQL aggregate functions are available: `count(*)`, `sum(field)`, `a
 
 - **Cannot combine with `$with`** — using `$groupBy` and `$with` together returns `400`
 - Plain fields in `$select` must also appear in `$groupBy`
+- `$having` keys must be aggregate aliases or `$groupBy` fields — `$having=region>1` on a non-grouped column returns `400` with `$having key "region" must be an aggregate alias or a $groupBy field` (since 0.1.128)
+- Grouped keys of a flattened nested object come back nested — `$groupBy=stats.views` returns `{ "stats": { "views": 10 }, "cnt": 2 }` on every adapter (since 0.1.128)
   :::
 
 ## Nested Writes via HTTP {#nested-writes}

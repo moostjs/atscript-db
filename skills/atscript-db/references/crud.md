@@ -20,9 +20,11 @@ await users.insertMany(rows, { maxDepth: 5 }); // override nested-write recursio
 ```
 
 - Server validates with mode `'insert'` (optional + required, plus `@db.rel.FK` existence check via the application integrity layer or native DB constraint).
-- Defaults from `@db.default*` are applied when the adapter doesn't do so natively (see `base-adapter.ts:nativeDefaultFns`).
+- `undefined` ≡ absent at every plain-object depth (since 0.1.128): pruned before defaults/validation → a defaulted column gets its DEFAULT, an optional column stays absent. `null` ≡ explicit NULL. Array elements are never dropped; class instances (`Date`, `Buffer`, `ObjectId`) untouched.
+- Payload types: `DbPatch<Row>` (insert/patch — all keys optional, optional columns accept `null`), `DbRow<Row>` (replace). Defaults pass before validation: static `@db.default 'x'` values on EVERY adapter (since 0.1.128 — also where the DDL carries the same `DEFAULT`; guards/validators see the full row), function defaults (`now`/`uuid`/`increment`) only when not in the adapter's `nativeDefaultFns()`. No public `applyDefaults` — observe / enrich the defaulted rows through a write guard.
+- Static defaults are typed per design type (string / string-literal union → raw string; boolean, number, JSON → `JSON.parse` of the literal).
 - Nested writes (insert / replace / patch into `@db.rel.from` arrays) are rejected unless `@db.depth.limit N` is set for the right depth; `@db.depth.limit 0` rejects any nesting with HTTP 400.
-- **`opts?: { maxDepth?: number }`** on `insertMany` / `bulkUpdate` / `bulkReplace` caps recursive nested-write depth at this call (default `3`). `@db.depth.limit` is the server-side acceptance gate; `maxDepth` is the in-call recursion budget for the table's own batch processing.
+- **`opts?: { maxDepth?: number; guard? }`** (`TWriteOptions`) on `insertOne/Many` / `updateOne` / `bulkUpdate` / `replaceOne` / `bulkReplace`: `maxDepth` caps recursive nested-write depth at this call (default `3`; `@db.depth.limit` is the server-side acceptance gate, `maxDepth` the in-call recursion budget). `guard(ctx)` (since 0.1.128) runs EXACTLY ONCE inside the table's own transaction after `undefined`-pruning + defaults + validation, before encryption / nested phases, never for nested re-entries: `ctx.action` (`insert|insertMany|replace|replaceMany|update|updateMany`), `ctx.rows` (validated plaintext rows, nav data attached; `$cas` removed on update — mutate in place, re-validated afterwards), `ctx.expectedVersions[i]`, `ctx.current(i)` (lazy memoised pre-image read inside the tx; `null` without an identifying key, never throws). A throw rolls back and propagates unchanged. `deleteOne(id, { guard })` (`TDeleteOptions`): `ctx.id`, `ctx.filter`, `ctx.current()`; an id that resolves to no filter → `{ deletedCount: 0 }`, guard not called. moost-db's `guardWrite` / `guardRemove` overrides are these guards.
 
 ## Replaces (full-record)
 
@@ -37,7 +39,7 @@ await users.bulkReplace([{ id: 1, ... }, { id: 2, ... }])
 await users.bulkReplace(rows, { maxDepth: 5 })                    // nested-write recursion override
 ```
 
-Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. Replace is FULL — omitted optional fields end up `null` in storage.
+Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. `replaceOne` / `bulkReplace` are FULL — omitted optional fields end up `null` in storage on every adapter (since 0.1.128 the SQL adapters assign every column in their `UPDATE`-based replace — `NULL`, or `DEFAULT` for a column whose function default the engine owns; before, an omitted column silently kept its old value on SQLite/PostgreSQL/MySQL). `replaceMany` is NOT a full replace: on every adapter it is a `$set`-style merge of the given columns on each matched row (SQL `UPDATE … SET`, Mongo `updateMany` + `$set`, memory merge) — omitted optional fields KEEP their stored values; versioned tables bump `version` per matched row.
 
 ## Updates / patches
 
@@ -54,6 +56,8 @@ await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion overrid
 - Mode `'patch'`: only supplied fields validated (partial).
 - Field ops `$inc/$dec/$mul` atomic at DB level (see `patch.md`).
 - Array ops `$insert/$upsert/$update/$remove/$replace` decompose per-adapter.
+- `undefined` value = key not sent (never in the SET list); `null` = SET NULL (optional columns; typed — since 0.1.128 filters on optional columns accept `null` too, see `queries.md § Null values`). Non-merge nested object: undefined optional leaf ≡ omitted (null-filled); merge block: untouched.
+- Empty patch (PK only, no `$cas`) → no statement, `{ matchedCount: 1|0, modifiedCount: 0 }`; PK + `$cas` → versioned touch (executes, bumps) — see `versioning.md`. `updateMany(filter, {})` → count only.
 
 ## Optimistic concurrency
 
@@ -131,8 +135,12 @@ await users.withTransaction(async () => {
 ```
 
 - Uses `AsyncLocalStorage` so peer tables in the same space participate in the outer tx automatically.
-- Adapters that don't implement `_beginTransaction` run `fn` in a no-op context.
+- Adapters that don't implement `_beginTransaction` run `fn` in a no-op context (memory adapter: NO rollback).
 - On throw: the adapter rolls back; the original error is re-thrown.
+- The tx state is branded by connection (driver / pool / client; since 0.1.128): adapters over the same connection join one transaction; a nested `withTransaction` on ANOTHER family or connection (Mongo inside SQLite, a second pool, …) opens its OWN transaction on top — the outer family's statements inside it still belong to the outer tx; bare statements of another family run autocommit. Never atomic across engines.
+- Schema sync is not one transaction: each step takes its own statement group (on SQLite its own gate hold), so run `syncSchema` before serving traffic.
+- SQLite (since 0.1.128): transactions are serialised per driver (`BEGIN IMMEDIATE` behind a FIFO gate; plain statements wait for COMMIT). Never await external I/O inside; see `adapters-sqlite.md`.
+- In `moost-db` controllers use `this.withTransaction(fn)` / override `guardWrite` — see `moost-db.md`.
 
 ## DbError
 

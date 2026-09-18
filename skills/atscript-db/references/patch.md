@@ -21,6 +21,8 @@ await users.updateMany({ status: "active" }, { points: $inc(100) });
 
 The `separateFieldOps()` helper strips these from the data payload before regular value handling. Mix with scalar assignments freely.
 
+`undefined` props (since 0.1.128): pruned at every plain-object depth before decomposition — never `SET col = NULL`; `null` is the explicit NULL (optional columns; the readable's filter types admit `null` for them as well — `queries.md § Null values`). `{ $inc: undefined }` prunes to `{}` and fails validation like `{}` would. Empty patch → no statement (see `crud.md`).
+
 ## Array ops
 
 ```ts

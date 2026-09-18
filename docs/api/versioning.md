@@ -71,6 +71,23 @@ The map shape (`{ [versionColumn]: N }`) keys by the table's version column name
 Throwing creates an asymmetry where every retry path needs `try/catch` instead of a clean `if (!result.matchedCount)`. Distinguish "row missing" from "version mismatch" with an extra `findOne` if you care; for the dominant retry-on-conflict use case both states warrant the same response.
 :::
 
+### PK-only `$cas` — the versioned touch {#versioned-touch}
+
+A payload that carries only the identifying fields and `$cas` is a **real write** (since 0.1.128): the adapter executes `UPDATE … SET version = version + 1 WHERE pk AND version = ?` (Mongo: `$inc`), so a hit bumps the version and reports `{ matchedCount: 1, modifiedCount: 1 }`, and a stale or missing row reports `{ 0, 0 }`. The CAS predicate is never silently dropped.
+
+```typescript
+// Fence a parent row for the rest of the surrounding transaction: on SQL
+// engines the conditional UPDATE takes the row lock; concurrent touchers with
+// the same expected version lose the race and see matchedCount === 0.
+const fence = await orders.updateOne({ id, $cas: { version: order.version } });
+if (fence.matchedCount === 0) throw new Error("order moved on");
+```
+
+Two consequences to keep in mind:
+
+- **Every touch invalidates every other holder's version.** A form that re-submits an unchanged record together with its `version` bumps it and makes the other open editors conflict. Strip `version` (or don't send the PATCH) when nothing changed.
+- **Without `$cas`, an empty patch is a no-op** — no statement runs, the version does not move, and `matchedCount` honestly reports whether the row exists (`{ 1, 0 }` / `{ 0, 0 }`). Before 0.1.128 both shapes returned a fabricated `{ 1, 0 }` without touching the store.
+
 ### `$cas` with `bulkUpdate`
 
 Each payload in `bulkUpdate` carries its own `$cas`. Rows with matching versions are updated; rows that mismatch (or do not exist) are **silently skipped**. `modifiedCount` reflects how many actually applied.
@@ -153,6 +170,8 @@ What it does, in order:
 3. `updateOne({ ...filter, ...patch, $cas: { [versionColumn]: row.version } })`.
 4. On `matchedCount === 0`, retry from step 1 up to `maxAttempts` times.
 5. After `maxAttempts` consecutive conflicts, throw [`CasExhaustedError`](#casexhaustederror).
+
+**Explicit no-write (since 0.1.128).** A mutator that returns `undefined` or an empty object `{}` decided there is nothing to change: the helper resolves `{ matchedCount: 1, modifiedCount: 0 }` without writing, and the version does not move — N concurrent loops that all decide "nothing to do" never bump each other into `CasExhaustedError`. Callers who want the fence instead call the [versioned touch](#versioned-touch) directly.
 
 The second parameter is a **filter** (not just an id) so composite-key and non-id tables work without contortion. The helper requires the table to declare `@db.column.version` — otherwise it throws `DbError("INVALID_QUERY")` (silently degrading to last-write-wins would defeat the purpose).
 
@@ -240,7 +259,11 @@ This is a [locked design decision](#alternatives-considered). A single `expected
 
 ### Version on insert
 
-`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults). You do not need to add `@db.default '0'` explicitly.
+`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults). You do not need to add `@db.default '0'` explicitly, and you do not need to send the field: the shared validator treats it as server-managed (like `@db.default*`) on insert and replace, at any nesting depth — so nested inserts of versioned related rows omit it too (since 0.1.128). A `version` value supplied on insert is accepted as a plain number.
+
+### Empty patches
+
+`updateOne({ id })` (identifying fields only, no `$cas`) executes nothing and reports the row's existence; `updateMany(filter, {})` likewise counts the matches and writes nothing — neither bumps a version. Add `$cas` to turn the single-row form into a [versioned touch](#versioned-touch).
 
 ### External writers do not auto-bump
 
@@ -321,6 +344,8 @@ try {
 ```
 
 `instanceof VersionMismatchError` is the recommended discriminator. On older db-client releases (pre-0.1.84), fall back to inspecting `err.body?.kind === "version_mismatch"` and reading `err.body.currentVersion` directly — the wire shape is unchanged, only the typed marker is new.
+
+Since 0.1.128 the client also accepts the SDK shape — `users.update({ id, $cas: { version: row.version } })` — and lifts it to the wire `version` field before preflight; a raw `$cas` body sent by any client is accepted by the server too. See [HTTP Client — update](/http/client#update).
 
 ## Alternatives Considered
 

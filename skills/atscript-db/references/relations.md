@@ -115,6 +115,8 @@ Server runs nested writes in the same transaction as the parent; on failure the 
 
 `GET /meta` serializes the bound type with a fixed `refDepth: 0.5`, independent of `@db.depth.limit` (which governs write acceptance, not serialization). Each FK's `ref.type` is the shallow `{ id, metadata }` shape, carrying the target's `db.http.path` so clients can resolve the target endpoint for value-help pickers and lazy-fetch the target's own `/meta` when deeper structure is needed. Nav-prop trees (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) are not `.ref` nodes and always fully expand in meta regardless — the shape clients need to construct nested-insert payloads is always present.
 
+**Terminal refs (since 0.1.128).** A prop declared through a reference chain — a view field `code: Issue.code` where `Issue.code: Dict.code` carries `@db.rel.FK`, or a table column / form field declared the same way — serializes with `ref` pointing at the chain's TERMINAL field (`{ field: 'code', type: { id: 'Dict', metadata } }`, still shallow) and gains `db.rel.FK: true` when any hop is an FK (the marker never travels through references at runtime — `passedWhenReferred: false`). Direct FKs and PK targets are unchanged; a chain that passes no FK is re-pointed but not marked; nav subtrees are left alone. Applies to `/meta` and `/meta/form/:name` on every readable controller (`applyTerminalRefs` / `resolveTerminalRef` are exported from `@atscript/moost-db`). The DB layer keeps the first hop (it is the source column); the runtime type is never mutated.
+
 ## Composite FK targets
 
 When the target table has a composite PK, chain refs span the composite:

@@ -96,15 +96,16 @@ Semantics:
 - The two gates are independent: a table can opt into strict filtering while leaving sort open, or vice versa.
 - Without the annotation, behaviour is unchanged from previous releases — all columns are filterable/sortable.
 
-The `/meta` endpoint exposes a per-field capability hint in `fields[<path>]` so clients can show or hide query controls per column:
+The `/meta` endpoint exposes a per-field capability entry in `fields[<path>]` so clients can show or hide query controls per column. Since 0.1.128 `fields` and the request gate are two projections of **one capability index**, so what `/meta` advertises is exactly what the server accepts:
 
-- **`filterable`** — in `'auto'` mode, `true` for every adapter-capable field; in `'manual'` mode, only fields carrying `@db.column.filterable`.
-- **`sortable`** — in `'auto'` mode, `true` only for **index-backed** fields: those in an explicit `@db.index*`, **primary keys**, and **unique** fields. (A primary key or unique column is index-backed on every adapter — Mongo `_id`, SQL PK/unique constraints — so it is sortable without an explicit `@db.index`.) In `'manual'` mode, only fields carrying `@db.column.sortable`.
+- **`filterable`** — `true` when the adapter can filter the column (`canFilterField`) and the field is neither `@db.writeOnly` nor `@db.encrypted`; in `'manual'` mode additionally only for fields carrying `@db.column.filterable`.
+- **`sortable`** — `true` when the adapter can sort the column (`canSortField`) and the field is neither `@db.writeOnly` nor `@db.encrypted`; in `'manual'` mode additionally only for fields carrying `@db.column.sortable`. In `'auto'` mode every adapter-sortable column is advertised (before 0.1.128 only index-backed fields were, although `$sort` on the others succeeded).
+- **`indexed`** — present (`true`) when the field is index-backed (explicit `@db.index*`, primary key, unique). Advisory only: a hint for UIs that prefer cheap sort keys; it never changes whether a `$sort` is accepted.
 
-Both flags are additionally gated by adapter capability — `@db.json` and array columns are never sortable on SQL adapters regardless of mode (see the [moost-db gate mode](../http/crud)).
+Adapter capability is a hard gate over the annotation policy: `@db.json` and array columns are never sortable on any adapter (SQL adapters cannot filter them either; MongoDB and the memory adapter can). Nested-object parents (`contact`) and navigation paths (`assignee`, `assignee.name`) are never listed; on SQL adapters the descendants of a JSON column (`prefs.theme`) are not listed either — they are on MongoDB / memory, where dotted paths are native.
 
-::: tip Auto-mode sort is open at the query layer
-In `'auto'` mode there is no sort gate, so the server still _accepts_ a `$sort` on any adapter-capable column — `sortable: false` in `/meta` is an advertisement (steering UIs toward indexed sort keys), not an enforced restriction. Opt into `@db.table.sortable 'manual'` if you need sort keys rejected with HTTP 400.
+::: tip Parity is enforced (since 0.1.128)
+`sortable: true` ⇔ `$sort=<path>` is accepted and `filterable: true` ⇔ a filter on `<path>` is accepted — on every adapter, mode and field kind. Everything else, and every path that is not listed, is rejected with HTTP 400 and the envelope `{ message, statusCode: 400, errors: [{ path, message }] }` naming the reason: missing annotation, adapter storage type, `@db.writeOnly`, navigation path (use `$with`), JSON descendant (select the parent), nested object (use one of its leaves). `$groupBy`, `$having` keys and aggregate fields use the physical capability only — the `'manual'` policy applies to filters and `$sort`.
 :::
 
 ## HTTP
@@ -285,6 +286,8 @@ interface Task {
 - On any other interface (value-help dictionaries, WF forms, plain interfaces) it acts purely as the **value-help indicator**: the client-side picker resolver reads `@db.rel.FK` to decide which fields render a value-help picker, and the URL for the picker comes from the target's `@db.http.path`.
 
 The host-restriction rule was relaxed so the same annotation covers both cases — authors don't need a separate marker for value-help. All other validation rules still apply (the target must be a chain reference to a `@meta.id` or `@db.index.unique` field).
+
+Since 0.1.128 the marker also travels through **reference chains** in `/meta` and `/meta/form/:name`: a field declared as `code: Issue.code`, where `Issue.code: Dict.code` carries `@db.rel.FK`, is serialized with `ref` pointing at the terminal field (`Dict.code`, shallow `{ id, metadata }` at the unchanged `refDepth: 0.5`) and `db.rel.FK: true` — so value-help pickers on view fields target the dictionary, not the intermediate table. Only the serialized meta changes; the runtime type and the database constraints are untouched.
 
 ### Referential Action Values
 

@@ -75,14 +75,14 @@ Each adapter page covers detailed setup, driver options, and adapter-specific co
 
 Adapters declare their capabilities via boolean flags on the `BaseDbAdapter` class. The generic DB layer reads these flags and adapts its behavior automatically — for example, skipping client-side object flattening when the adapter stores nested objects natively, or falling back to application-level cascade logic when the database does not enforce foreign keys.
 
-| Flag                          | Description                    | PG  | SQLite | Mongo | MySQL | Memory |
-| ----------------------------- | ------------------------------ | :-: | :----: | :---: | :---: | :----: |
-| `supportsNativeForeignKeys`   | DB enforces FK constraints     | Yes |  Yes   |  No   |  Yes  |   No   |
-| `supportsNestedObjects`       | Stores nested objects natively | No  |   No   |  Yes  |  No   |  Yes   |
-| `supportsNativePatch`         | Has native array operations    | No  |   No   |  Yes  |  No   |   No   |
-| `supportsNativeRelations`     | Joins relations in one query   | No  |   No   |  Yes  |  No   |   No   |
-| `supportsNativeValueDefaults` | DB handles default values      | Yes |  Yes   |  No   |  Yes  |   No   |
-| `supportsColumnModify`        | ALTER COLUMN type changes      | Yes |   No   |  N/A  |  Yes  |  N/A   |
+| Flag                          | Description                                                            | PG  | SQLite | Mongo | MySQL | Memory |
+| ----------------------------- | ---------------------------------------------------------------------- | :-: | :----: | :---: | :---: | :----: |
+| `supportsNativeForeignKeys`   | DB enforces FK constraints                                             | Yes |  Yes   |  No   |  Yes  |   No   |
+| `supportsNestedObjects`       | Stores nested objects natively                                         | No  |   No   |  Yes  |  No   |  Yes   |
+| `supportsNativePatch`         | Has native array operations                                            | No  |   No   |  Yes  |  No   |   No   |
+| `supportsNativeRelations`     | Joins relations in one query                                           | No  |   No   |  Yes  |  No   |   No   |
+| `supportsNativeValueDefaults` | DDL carries static defaults (deprecated 0.1.128 — no longer consulted) | Yes |  Yes   |  No   |  Yes  |   No   |
+| `supportsColumnModify`        | ALTER COLUMN type changes                                              | Yes |   No   |  N/A  |  Yes  |  N/A   |
 
 ::: info How the generic layer uses these flags
 When `supportsNativeForeignKeys` is `false`, the generic layer implements cascade and set-null behavior in application code before deleting parent records. When `supportsNestedObjects` is `false`, nested objects are automatically flattened to `__`-separated column names (e.g., `address__city`). When `supportsNativePatch` is `true`, patch operations like array `$push`/`$pull` are delegated directly to the adapter instead of being decomposed into read-modify-write cycles.

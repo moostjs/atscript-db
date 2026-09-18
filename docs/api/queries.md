@@ -174,6 +174,8 @@ You can also filter for null directly:
 // WHERE assigneeId IS NULL
 ```
 
+Since 0.1.128 the filter types admit this: the readable's flat and own-props shapes are wrapped in `NullableOptional`, so every optional property accepts `null` in bare, `$eq`, `$ne` and `$in` positions (`{ note: null }`, `{ note: { $ne: null } }` type-check; `null` on a required property does not). `$in: [null]` never matches on SQL adapters (`IN (NULL)`), use the bare form. Optional columns read back as `null` (SQL) or are absent (MongoDB) — compare with `== null`.
+
 ## Logical Operators
 
 ### Implicit AND
@@ -250,6 +252,20 @@ Atscript automatically flattens nested objects into `__`-separated column names 
 
 This works with all operators — comparisons, `$regex`, `$exists`, and logical combinators.
 
+::: warning Paths are validated before translation (since 0.1.128)
+Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key and aggregate `$field` must resolve to physical storage on the adapter in use, or the call throws `DbError("INVALID_QUERY")` (HTTP 400 through moost-db) before any SQL or pipeline is built:
+
+- physical column names (`contact__email`, `@db.column`-renamed names) are no longer accepted — use logical paths;
+- descendants of a `@db.json` / array column (`prefs.theme`) are rejected on SQL adapters (MongoDB and memory address them natively);
+- navigation paths (`assignee.name`) are rejected — load relations with `$with`;
+- a flattened object parent (`contact`) can be selected but not filtered or sorted — use a leaf;
+- `$sort` on a JSON / array column is rejected on every adapter (`canSortField`);
+- filter nodes may only carry `$and`, `$or`, `$not` — `$nor` is rejected.
+- `$having` keys must be aggregate aliases (`$as`, else `fn_field`) or `$groupBy` fields — a real but non-grouped column throws `$having key "region" must be an aggregate alias or a $groupBy field` (before 0.1.128 PostgreSQL / MySQL raised an engine error, SQLite ignored the key and MongoDB returned no rows).
+
+This includes `updateMany` / `deleteMany` filters and `transformFilter` overlays in moost-db.
+:::
+
 ## Query Controls
 
 The `controls` object determines how the result set is shaped.
@@ -314,6 +330,10 @@ controls: {
 
 ::: info Aggregate expressions
 The include array can also contain `AggregateExpr` objects from `@uniqu/core` (`{ $fn: 'sum', $field: 'amount' }` etc.) for computed columns. They are extracted and routed to the adapter's aggregation pipeline. See the [@uniqu/core types](https://github.com/moostjs/uniqu) for the full operator list.
+:::
+
+::: tip Aggregate rows are reverse-mapped like regular rows (since 0.1.128)
+Aggregate rows go through the same reverse mapping as regular rows: grouping by a flattened nested-object leaf (`$groupBy: ['stats.views']`) returns `{ stats: { views: 1 }, cnt: 2 }` on every adapter — SQL adapters used to return the dotted key `'stats.views'` while MongoDB nested it — and grouped boolean, decimal and `@db.json` columns are coerced exactly as in `findMany` (a grouped boolean is `true` / `false`, not the stored `0` / `1`). Aggregate aliases (`total`, `sum_amount`, `count_star`) and plain grouped columns are unchanged.
 :::
 
 ::: tip FK Fields Auto-Included

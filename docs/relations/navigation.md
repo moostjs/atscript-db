@@ -41,6 +41,10 @@ assigneeId?: User.id
 assignee?: User
 ```
 
+::: tip Navigation paths are loaded, not queried
+`assignee.name` is not a column of `tasks`: filtering, sorting or selecting it at the root of a query is rejected (HTTP 400 / `INVALID_QUERY` since 0.1.128). Use `$with=assignee(...)` — `$with=assignee($select=name)` to project, `$with=assignee(name=x)` to filter the related rows. In `/meta`, `@db.rel.FK` also follows reference chains to their terminal field (see [annotations — dual role](../adapters/annotations#db-rel-fk-dual-role)).
+:::
+
 ### Alias Matching for TO
 
 When multiple FKs point to the same target type, Atscript can't infer which FK a navigation property should follow. Use aliases to disambiguate:

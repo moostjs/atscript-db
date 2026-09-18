@@ -24,7 +24,11 @@ await users.updateOne({
 });
 ```
 
-Only the provided fields are changed — other fields remain untouched.
+Only the provided fields are changed — other fields remain untouched. A key whose value is `undefined` counts as _not provided_ (since 0.1.128): it never reaches the `SET` list, so the stored value stays as it was; send `null` to clear a column (optional columns only — the validator accepts `null` for every optional prop, and since 0.1.128 the read-side filter types admit `null` for them as well, so a cleared row is found with `{ note: null }` and excluded with `{ note: { $ne: null } }`). Inside a nested object without [`@db.patch.strategy 'merge'`](#replace-strategy-default) the block is replaced as a whole, so an `undefined` optional leaf behaves exactly like omitting it (the leaf is null-filled) — with the merge strategy it is left untouched.
+
+::: tip Empty patches
+A payload with only the identifying fields writes nothing and reports whether the row exists (`{ matchedCount: 1 | 0, modifiedCount: 0 }`); the version column does not move. Add `$cas` to turn it into a [versioned touch](./versioning#versioned-touch).
+:::
 
 ## Field Operations {#field-ops}
 
@@ -109,7 +113,7 @@ if (ok.matchedCount === 0) {
 }
 ```
 
-On a mismatch the call returns `{ matchedCount: 0, modifiedCount: 0 }` — no exception, no partial write. `$cas` composes atomically with `$inc` / `$dec` / `$mul` in the same payload (single statement on SQL, single `findOneAndUpdate` on Mongo).
+On a mismatch the call returns `{ matchedCount: 0, modifiedCount: 0 }` — no exception, no partial write. `$cas` composes atomically with `$inc` / `$dec` / `$mul` in the same payload (single statement on SQL, single `findOneAndUpdate` on Mongo). With no other fields at all it is the [versioned touch](./versioning#versioned-touch) — a conditional bump that fences the row.
 
 `$cas` is **not** supported on `updateMany` (a single `expectedVersion` cannot sensibly match N rows). Per-row version locking goes through `bulkUpdate` where each payload carries its own `$cas`.
 

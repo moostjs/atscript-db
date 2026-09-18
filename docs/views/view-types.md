@@ -100,8 +100,8 @@ This is useful when you have views created by migration scripts, DBAs, or other 
 
 Schema sync manages the lifecycle of managed and materialized views:
 
-- **Creation** — managed views are created as `CREATE VIEW` statements during sync
-- **Updates** — views are dropped and recreated when their definition changes (there is no `ALTER VIEW`)
+- **Creation** — managed views are created as `CREATE VIEW` statements during sync. If a **physical table** already exists under the view's name, sync refuses the run instead of skipping the view (since 0.1.128).
+- **Updates** — views are dropped and recreated when their definition changes (there is no `ALTER VIEW`). The definition is the entry table, the joins **and their `ON` conditions**, `@db.view.filter`, `@db.view.having`, the materialized flag and the field set (since 0.1.128; before, join conditions and `having` were not part of it). `@db.ignore` fields are not part of the definition and are not selected by the generated `CREATE VIEW`.
 - **Renames** — track view renames with `@db.view.renamed` so sync drops the view under its old name and creates it under the new one (instead of leaving the old view behind):
 
 ```atscript
@@ -116,6 +116,10 @@ export interface PremiumUsers {
 ```
 
 - **External views** — ignored by sync entirely
+
+::: warning Upgrading to 0.1.128
+Because join conditions and `having` now participate in the definition hash, every managed view that has joins, a filter or a having clause is recreated **once** on the first sync after upgrading. On PostgreSQL that discards the view's `GRANT`s (re-grant them), and a user-created view depending on a managed view makes the recreate fail with an `error` entry until it is dropped or the managed view is excluded from the inventory — sync never drops with `CASCADE`. On MongoDB materialized views are plain views, so the recreate is metadata-only.
+:::
 
 For full details on the sync process, see [Schema Sync](/sync/).
 

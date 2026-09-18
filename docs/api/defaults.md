@@ -97,7 +97,9 @@ Every successful write thereafter increments the column by `1`, server-side. See
 Understanding when defaults apply:
 
 - **Omitted fields** — the default value is used. This is the primary use case.
+- **`undefined` values ≡ omitted** (since 0.1.128) — a key whose value is `undefined` is dropped before defaults and validation run, at every nesting depth, so `{ cap: undefined }` gets the default exactly like leaving `cap` out. Before 0.1.128 SQL adapters bound it as `NULL` (a constraint error on `NOT NULL` columns). `null` remains an explicit NULL.
 - **Explicit values** — if you pass a value for a field with a default, your value takes precedence. The default is only a fallback.
+- **Static defaults are filled SDK-side on every adapter** (since 0.1.128) — `@db.default 'x'` is written explicitly into the row before validation, also on SQL adapters whose DDL carries the same `DEFAULT` clause (writing the column's own default is equivalent to leaving it out). Rows therefore reach validators and [write guards](/api/crud#write-guards) complete. Function defaults (`@db.default.now` / `.uuid` / `.increment`) stay adapter-native: they are generated SDK-side only when the adapter does not handle them in the engine (see each adapter's page).
 - **Optional fields without defaults** — become `NULL` if omitted from the insert.
 - **Fields with `@db.default.increment`** — typically omitted from inserts entirely. The database generates the next value.
 - **Non-optional fields without defaults** — must always be provided. `@db.default` does not make a field optional in TypeScript — you still need `?` if you want to omit it from inserts.

@@ -144,8 +144,8 @@ export interface User {
 | `boolean`                             | `TINYINT(1)`                              | Stored as `0` / `1`                                                                           |
 | `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                   |
 | Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                        |
-| `@db.json`                            | `JSON`                                    | Stored as a single JSON column                                                                |
-| Arrays                                | `JSON`                                    |                                                                                               |
+| `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)        |
+| Arrays                                | `JSON`                                    | Same — filter/sort/select the column as a whole                                               |
 | `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`                                               |
 | `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                            |
 | `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                 |
@@ -276,6 +276,20 @@ ALTER TABLE `users` MODIFY COLUMN `age` INT UNSIGNED NOT NULL
 
 This means most schema changes do not require full table recreation. You only need `@db.sync.method 'recreate'` for rare structural changes that MySQL cannot handle in-place (e.g., reordering primary key columns).
 
+### Column definitions (since 0.1.128)
+
+`CREATE TABLE`, `ADD COLUMN` and `MODIFY COLUMN` all render a column through one definition builder, so a `MODIFY` never silently resets an attribute it did not mention:
+
+- **No model default → no `DEFAULT` clause.** `DEFAULT NULL` is never emitted (it is the implicit default of a nullable column, and `NOT NULL DEFAULT NULL` is MySQL error 1067). Removing a `@db.default` from a required column renders as `MODIFY COLUMN … NOT NULL` without a `DEFAULT`.
+- **Required column added to a populated table** gets an invented, **type-aware** default so existing rows can be filled — `0` for numeric, `''` for `VARCHAR`/`CHAR`, `('')` for `TEXT`/`BLOB`, `('{}')` for `JSON`, `(ST_SRID(POINT(0, 0), 4326))` for geometry, `CURRENT_TIMESTAMP` for `TIMESTAMP`/`DATETIME` — followed immediately by `ALTER TABLE … ALTER COLUMN … DROP DEFAULT`, so the live column ends in the canonical "no default" state whatever the `sql_mode`.
+- **Nullable → `NOT NULL`** backfills existing `NULL`s first (`UPDATE … SET col = <model default or type default> WHERE col IS NULL`) — strict `sql_mode` would otherwise reject the `MODIFY`.
+- **Several changes on one column** (type + nullability + default) collapse into **one** `MODIFY COLUMN` carrying the full definition — `DEFAULT`, `COLLATE` and `ON UPDATE` are preserved.
+- **Expression defaults** — `TEXT`/`BLOB`/`JSON`/geometry columns can only carry a default in the expression form `DEFAULT ('…')`, which requires **MySQL ≥ 8.0.13** (MariaDB ≥ 10.2.1). Older servers cannot default those types at all.
+- **Primary-key change** on an empty table is one statement: `ALTER TABLE … MODIFY <new key columns> NOT NULL[, MODIFY <demoted column without AUTO_INCREMENT>], DROP PRIMARY KEY, ADD PRIMARY KEY (…)`. The primary key is introspected from the `PRIMARY` constraint, not from `COLUMN_KEY = 'PRI'` (which MySQL also reports for the first `NOT NULL UNIQUE` index of a key-less table).
+- **`AUTO_INCREMENT` is never emitted by `ADD COLUMN`.** MySQL only accepts it together with a key in the same statement, so an increment column joining the key is added as a plain `NOT NULL` column, its `MODIFY` is left to the key rebuild, and the rebuild statement above declares `AUTO_INCREMENT` together with `ADD PRIMARY KEY`. There is no temporary helper index; a `--safe` run (rebuild skipped) therefore leaves a valid schema and the next executing run completes the swap. A `@db.default.increment` column that is not a key column consequently gets no `AUTO_INCREMENT` when added to an existing table (the compiler warns about `@db.default.increment` without `@meta.id`).
+
+Under `explicit_defaults_for_timestamp = OFF` a required `TIMESTAMP` column without a model default (only reachable through `@db.mysql.type "TIMESTAMP"`) receives an implicit `CURRENT_TIMESTAMP` default from the server, which the diff then reports as a default change on every run — declare `@db.default.now` on such columns.
+
 ## Driver Type Casting
 
 `Mysql2Driver` installs a custom `typeCast` and a few pool defaults so query results are predictable JS values, not driver-default strings:
@@ -305,6 +319,8 @@ MySQL InnoDB enforces foreign key constraints natively. The adapter manages FK l
 1. **Before column operations**: Existing FK constraints are dropped to unblock `ALTER TABLE` operations that would otherwise fail due to FK dependencies
 2. **After column sync**: FK constraints are re-added based on the current schema definition
 
+Since 0.1.128 tables are synced parents-first, a foreign-key cycle is created with its inline constraints deferred to the FK pass, removed tables are dropped children-first (`FOREIGN_KEY_CHECKS=0` on a dedicated connection — the same connection `recreateTable` now uses for its whole copy-and-swap), and a removed table that an **unmanaged** table still references is reported as an `error` entry instead of being dropped underneath the constraint.
+
 Standalone FK sync is available via `syncForeignKeys()`, which reconciles existing FK constraints against the desired schema — dropping stale constraints and adding missing ones.
 
 When a foreign key constraint is violated, the adapter raises a `DbError` with the appropriate code:
@@ -331,7 +347,7 @@ All rows within a batch insert are wrapped in a transaction for atomicity.
 - **No RETURNING clause** — MySQL does not support `RETURNING` on INSERT. The adapter uses `insertId` from the result header for auto-increment columns and client-side IDs for everything else
 - **Auto-increment gaps in batch inserts** — with `innodb_autoinc_lock_mode=2` (the MySQL 8.0+ default), concurrent inserts may cause gaps in auto-increment sequences during multi-row inserts
 - **No native boolean** — booleans are stored as `TINYINT(1)` (`0`/`1`)
-- **Key length prefix for TEXT indexes** — non-FULLTEXT indexes on string fields that map to `TEXT` columns require a key length prefix, which the adapter adds automatically (`(255)`)
+- **Key length prefix** — InnoDB limits an index key part to 3072 bytes (`ROW_FORMAT=DYNAMIC`/`COMPRESSED`, the default since 5.7.7), i.e. **768 characters on `utf8mb4`** (1024 on `utf8mb3`, 3072 on `latin1`). Since 0.1.128 the adapter derives the prefix from the **mapped column type**: `VARCHAR(n)`/`CHAR(n)` within the limit get **no prefix**; longer ones get the full limit (`(768)` on utf8mb4); `TEXT`/`BLOB` families always get `(255)`; numeric, `ENUM`, `JSON`, `VECTOR`, geometry and `FULLTEXT` members never get one. Earlier releases put `(255)` on every string member — which failed on `VARCHAR(128)`/`CHAR(1)` (`ER_WRONG_SUB_KEY`) and, on a **unique** index over a `VARCHAR(300)`, silently enforced uniqueness over the first 255 characters only. Live indexes whose prefix differs from the rule (`INFORMATION_SCHEMA.STATISTICS.SUB_PART`, with a prefix equal to the column's declared length treated as none) are rebuilt once. Declare `@expect.maxLength` on unique string fields so they map to `VARCHAR(n)` and are indexed in full; a composite index whose members exceed 3072 bytes in total fails with the engine's `ER_TOO_LONG_KEY` as an `error` entry
 
 ## See Also
 

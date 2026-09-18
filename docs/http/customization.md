@@ -21,8 +21,11 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `transformProjection(projection)`      | Both           | Before every read                | Restrict visible fields                                           |
 | `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
-| `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data                                    |
+| `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
 | `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
+| `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
+| `guardRemove(ctx)`                     | AsDbController | Inside the table's tx, id known  | Validated-stage delete checks (since 0.1.128)                     |
+| `withTransaction(fn)`                  | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
 | `meta()`                               | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
 | `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
 | `init()`                               | Both           | On controller construction       | One-time setup                                                    |
@@ -142,9 +145,23 @@ See [Vector Search in URLs](./advanced#vector-search) for how this hook integrat
 
 ## Write Hooks
 
+Every built-in write endpoint runs the same pipeline (since 0.1.128):
+
+```
+shape gate (400)  →  onWrite / onRemove (untrusted body, outside any transaction)
+  →  table op — the table's own transaction:
+       validate → guardWrite / guardRemove (only when overridden) → re-validate → write
+  →  404 / 409 disambiguation
+```
+
+- **Shape gate** — the body must be a plain object (`POST`/`PUT`/`PATCH` with an object) or an array of plain objects (array bodies). `null`, primitives and `[1, "x"]` answer `400` with `errors: [{ path: "" | "[i]", message: "Expected an object" }]` before any hook runs. The gate is applied again to what `onWrite` returns: a hook that returns a non-object (or an object for a `*Many` action) aborts with `500 "Not saved"`, like returning `undefined`.
+- **`onWrite` / `onRemove`** keep their contract and run _outside_ any transaction (they coerce untrusted input; on MongoDB a transaction callback may re-run, so hooks with side effects stay out of it).
+- **`guardWrite` / `guardRemove`** are the table's [write guards](/api/crud#write-guards): the override is passed as the `guard` option of the table call and runs _inside the table's transaction_, after defaults + validation. Overriding a guard is the switch — unmodified controllers pass no guard and pay nothing: the table is called exactly as before, no second validation.
+- **Built-in failures are thrown** as `HttpError` — see [Thrown errors](#thrown-errors).
+
 ### onWrite {#onwrite}
 
-Intercepts all write operations before they reach the database. Return the (possibly modified) data to proceed, or `undefined` to abort (returns HTTP `500`).
+Intercepts all write operations before they reach the database. Return the (possibly modified) data to proceed — in the shape received: an object for the single actions, an array of objects for the `*Many` actions — or `undefined` to abort (HTTP `500 "Not saved"`; any other non-conforming return value aborts the same way). Return an `Error` instance (an `HttpError` for a chosen status) to respond with that error — since 0.1.128; it used to be passed on as data — or throw one.
 
 The `action` parameter identifies the operation:
 
@@ -197,7 +214,7 @@ protected async onWrite(action: string, data: unknown) {
 
 ### onRemove {#onremove}
 
-Intercepts DELETE requests. Receives the record ID (a string for single-key tables, or an object for composite keys). Return the ID to proceed with deletion, or `undefined` to abort (returns HTTP `500`).
+Intercepts DELETE requests. Receives the record ID (a string for single-key tables, or an object for composite keys). Return the ID to proceed with deletion, or `undefined` to abort (returns HTTP `500`); return or throw an `Error` to respond with it.
 
 **Delete guard:**
 
@@ -265,6 +282,85 @@ protected transformFilter(filter: FilterExpr): FilterExpr {
 ::: tip Why not just `return undefined` from `onRemove`?
 The original "soft delete inside `onRemove`, return `undefined`" recipe still succeeds at the DB level — the row IS soft-deleted — but the HTTP response is `500 "Not deleted"`. Clients (including `@atscript/db-client`) treat that as a server error and may surface a generic failure toast. Use one of the patterns above to keep the wire response consistent with the actual outcome.
 :::
+
+### guardWrite / guardRemove {#guardwrite}
+
+The validated stage (since 0.1.128). Override `guardWrite(ctx)` to check or enrich rows _after_ defaults and validation and _before_ the write, inside the table's own transaction: the override becomes the `guard` option of the table call ([`TWriteOptions.guard`](/api/crud#write-guards)), so it runs exactly once per endpoint call, and the table validates the rows again after it. A throw rolls the table's transaction back — including any rows the guard itself wrote through tables that joined it — and the error propagates unchanged. The OCC 404/409 disambiguation runs after the table call.
+
+```typescript
+import { HttpError } from "@moostjs/event-http";
+import { AsDbController, TableController } from "@atscript/moost-db";
+import type { TDbWriteGuardContext, TDbRemoveGuardContext } from "@atscript/moost-db";
+
+@TableController(rulesTable)
+export class RulesController extends AsDbController<typeof Rule> {
+  protected override async guardWrite(ctx: TDbWriteGuardContext<Rule>) {
+    for (let i = 0; i < ctx.rows.length; i++) {
+      const row = ctx.rows[i];
+      // Enrich in place — the table op re-validates what it receives.
+      row.updatedBy = this.currentUserId();
+      // Lazy, memoised pre-image (read inside the transaction; null for inserts without a key).
+      const before = await ctx.current(i);
+      if (before?.locked) throw new HttpError(409, "rule is locked");
+      // Same transaction: an audit row rolls back with the write.
+      await auditTable.insertOne({ ruleId: row.id, action: ctx.action });
+    }
+  }
+
+  protected override async guardRemove(ctx: TDbRemoveGuardContext<Rule>) {
+    const row = await ctx.current();
+    if (row?.isFallback) throw new HttpError(409, "cannot delete the fallback rule");
+  }
+}
+```
+
+`ctx.action` is the endpoint's action (`insert` … `updateMany`); `ctx.rows` are the validated rows — defaults applied on insert/replace (static `@db.default 'x'` values are filled on every adapter, so the guard sees the full row; native function defaults such as a SQL `@db.default.now` stay absent until the engine fills them), identifying fields present and `$cas` removed on update; `ctx.expectedVersions[i]` is the version lifted from `version` / raw `$cas` (or `undefined`). For deletes, `ctx.id` is the id after `onRemove`, `ctx.filter` its resolved filter and `ctx.current()` the row about to be deleted. A missing row reaches `guardRemove` with `current()` resolving to `null`; the `404` comes after the guard — unless the id itself is malformed (it cannot be resolved to a filter, e.g. a non-numeric value for a numeric key), which is a `404` before the guard.
+
+Overriding a guard is the only switch: there is no separate flag, and a no-op override still passes a guard (the table then validates twice). For a transaction around several table operations in a custom route, use [`withTransaction`](#withtransaction).
+
+**DO / DON'T**
+
+- **Do reject by throwing** (`HttpError` for a chosen status) — a returned value is ignored.
+- **Don't swallow `DbError`s** inside a guard: on PostgreSQL the transaction is aborted after a failed statement, and the next statement fails with "current transaction is aborted".
+- **Don't await external I/O on SQLite** — the guard holds the only connection; a self-call to your own API waits forever by default. See [SQLite concurrency](/adapters/sqlite#concurrency-and-transactions).
+- **MongoDB replica sets may re-run the callback** on transient errors — a guard may execute more than once; keep it idempotent. On standalone MongoDB and on the memory adapter there is no transaction, so guard side effects are not rolled back.
+- **A guard that writes the same row** (e.g. a [versioned touch](/api/versioning#versioned-touch) as a fence) bumps the version twice — once for the touch, once for the main write.
+- Guard rows are validated twice (once before the guard, once after it): that cost exists only when a guard is overridden.
+
+### withTransaction {#withtransaction}
+
+`this.withTransaction(fn)` runs `fn` inside the bound table's adapter transaction — the same nesting rules as [`adapter.withTransaction`](/api/transactions). Use it for custom routes and actions that must be atomic across several table operations:
+
+```typescript
+@Post("actions/close")
+@DbAction("close", { label: "Close" })
+async close(@DbActionID() id: { id: number }) {
+  return this.withTransaction(async () => {
+    await this.table.updateOne({ id: id.id, status: "closed" });
+    await auditTable.insertOne({ orderId: id.id, action: "close" });
+    return { message: "Closed" };
+  });
+}
+```
+
+### Thrown errors {#thrown-errors}
+
+Since 0.1.128 every built-in write failure is **thrown** as an `HttpError` — `500 "Not saved"` / `"Not deleted"`, `404`, the OCC `409`, the shape gate `400` — instead of being returned. The response is identical (Moost renders returned and thrown `HttpError`s the same way), but a throw also rolls back a transaction a subclass opened around `super.update()`. One nuance: when a handler _throws_, the HTTP router may fall through to a later route that also matches the request before responding; a _returned_ error responds immediately. This only matters when a catch-all route shadows a controller path.
+
+| Case                                                       | Status                | Table transaction                                 |
+| ---------------------------------------------------------- | --------------------- | ------------------------------------------------- |
+| Body not an object / array of objects                      | 400                   | not opened                                        |
+| `onWrite` / `onRemove` returns `undefined` or a non-object | 500                   | not opened                                        |
+| `onWrite` / `onRemove` returns or throws an error          | that                  | not opened                                        |
+| `version` + differing `$cas`, malformed `$cas`             | 400                   | not opened                                        |
+| Validation fails before the guard                          | 400                   | rolled back                                       |
+| Guard throws                                               | that                  | rolled back — nothing written                     |
+| Re-validation after the guard fails                        | 400                   | rolled back                                       |
+| OCC mismatch / missing row                                 | 409 / 404             | committed with no match; the `findOne` runs after |
+| DELETE of a missing row (guard ran, `current()` = null)    | 404                   | committed with no match                           |
+| DELETE with an id that resolves to no filter               | 404                   | not opened, guard not called                      |
+| SQLite transaction-gate wait timeout                       | 503                   | n/a                                               |
+| Success (POST / PUT / PATCH / DELETE)                      | 201 / 201 / 202 / 202 | committed                                         |
 
 ## Metadata Hook
 

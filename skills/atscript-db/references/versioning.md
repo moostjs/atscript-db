@@ -134,6 +134,16 @@ The filter argument is a full `FilterExpr` (not just an id) so composite keys an
 
 For custom retry policies (exponential backoff, jitter, custom logging) just write the loop by hand — `$cas` is a 3-line primitive.
 
+### PK-only `$cas` = versioned touch (since 0.1.128)
+
+| #   | Rule                                                                                                                                                                                                                                                                  |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `updateOne({ ...pk, $cas: { version } })` with no other fields EXECUTES `UPDATE … SET version = version + 1 WHERE pk AND version = ?` — hit `{ 1, 1 }` + bump, stale/missing `{ 0, 0 }`. Use as a row fence inside `withTransaction` (SQL engines take the row lock). |
+| 2   | `updateOne({ ...pk })` without `$cas` writes NOTHING: honest existence count `{ 1 \| 0, 0 }`, no bump. `updateMany(filter, {})` → count only, no empty `SET`.                                                                                                         |
+| 3   | `withOptimisticRetry` mutator returning `undefined` OR `{}` = explicit no-write → `{ matchedCount: 1, modifiedCount: 0 }`, no bump. Want the fence? Call the touch directly.                                                                                          |
+| 4   | Every touch invalidates every other holder's version — never re-submit an unchanged form with its `version`.                                                                                                                                                          |
+| 5   | The version column is server-managed on insert/replace at ANY depth (shared validator skip list) — omit it in nested inserts too; a supplied value is stored as a plain number.                                                                                       |
+
 ## HTTP — moost-db auto-lift
 
 `@atscript/moost-db` makes OCC seamless for REST clients on versioned tables: the controller auto-lifts a `version` field in the body to `$cas`.
@@ -161,6 +171,9 @@ Controller behavior:
 
 - `version` present → stripped from SET, lifted to `$cas: { version: 4 }`, dispatched to `updateOne` / `replaceOne`.
 - `version` absent → write goes through with no `$cas` (last-write-wins; client opted out).
+- Raw `$cas: { version: N }` in the body → accepted as sent, same 404/409 disambiguation (since 0.1.128).
+- `version` + `$cas` with DIFFERENT values → 400, `errors[0].path === "$cas"` (`[i].$cas` in arrays); identical values pass.
+- PK-only `PATCH { id, version }` is a WRITE (versioned touch → bump); `PATCH { id }` writes nothing and reports `{ 1|0, 0 }`.
 
 Policy is presence-based. No 428 "Precondition Required" gate.
 
@@ -187,7 +200,7 @@ Standard usage from a client: catch 409, re-GET the row, re-apply changes, retry
 
 ### Handling 409
 
-With `@atscript/db-client`, catch the typed `VersionMismatchError` subclass — the client auto-dispatches it when the response body has `kind: "version_mismatch"`:
+With `@atscript/db-client`, catch the typed `VersionMismatchError` subclass — the client auto-dispatches it when the response body has `kind: "version_mismatch"`. The client also accepts the SDK shape `update({ id, $cas: { version } })` and lifts it to the wire `version` (since 0.1.128; `$cas` on `insert()` / on a non-versioned table / disagreeing with `version` → `ClientValidationError` at `$cas` before any request):
 
 ```ts
 import { VersionMismatchError } from "@atscript/db-client";

@@ -31,7 +31,8 @@ await users.aggregate({ controls: { $groupBy: ["role"], $select: [...] } });
 await users.insert({ name: "Alice", email: "a@e.com" });
 await users.insert([{ ... }, { ... }]); // array body → insertMany
 await users.update({ id: 1, status: "active" }); // PATCH
-await users.replace({ id: 1, ...full }); // PUT
+await users.update({ id: 1, $cas: { version: row.version } }); // SDK shape → sent as { id, version } (since 0.1.128); PK-only = versioned touch (bumps)
+await users.replace({ id: 1, ...full }); // PUT — version column optional (server-managed)
 await users.remove(42); // DELETE
 await users.remove({ orderId: 1, productId: 2 }); // composite → DELETE /?orderId=1&productId=2
 
@@ -227,8 +228,11 @@ try {
     e.id; // row-level rejection — Record<string, unknown> (the submitted identifier object)
     e.ids; // rows-level rejection — Record<string, unknown>[]
   } else if (e instanceof VersionMismatchError) {
-    // HTTP 409 from OCC $cas mismatch (PATCH/PUT with `version` in body).
+    // HTTP 409 from OCC $cas mismatch (PATCH/PUT with `version` or `$cas` in body).
     e.currentVersion; // row's now-stored version — refresh + retry
+  } else if (e instanceof ClientValidationError) {
+    // preflight, no request sent: type errors; `$cas` on insert / non-versioned table /
+    // disagreeing with `version` (path "$cas", arrays "[i].$cas") — same messages as the server
   } else if (e instanceof ClientError) {
     e.status; // HTTP status
     e.body; // parsed JSON body from the server (includes `errors[]`)
@@ -241,7 +245,8 @@ try {
 
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response.
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.
-- The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`.
+- The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`. Since 0.1.128 a prop declared through a reference chain carries the terminal `ref` (e.g. the dictionary, not the intermediate table) plus `db.rel.FK: true` — `deserializeAnnotatedType` yields `prop.ref.type().metadata.get('db.http.path')` of the dictionary.
+- `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128).
 - The meta envelope carries `crud: TCrudPermissions` (see [moost-db.md](moost-db.md) for the full shape) — built-in CRUD discoverability surface. Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). There is no `readOnly` field; consumers compute it inline as `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
 - `TCrudOp` and `TCrudPermissions` are re-exported from `@atscript/db-client` for consumer convenience.
 

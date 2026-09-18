@@ -79,7 +79,7 @@ Use `this._resolveInsertedId(data, dbGeneratedId)` in your `insertOne` implement
 
 ### Schema
 
-- **`ensureTable()`** — Create the table/collection if it does not exist. Use `this._table.tableName`, `this._table.fieldDescriptors`, and `this._table.foreignKeys` to build the DDL.
+- **`ensureTable(opts?)`** — Create the table/collection if it does not exist. Use `this._table.tableName`, `this._table.fieldDescriptors`, and `this._table.foreignKeys` to build the DDL. Branch on **`this._table.isView`** (or the exported `isAtscriptDbView()` guard) to create a view — never `instanceof AtscriptDbView`: a bundle can carry two copies of `@atscript/db`, and a false `instanceof` would create an empty physical table under the view's name. If your engine emits inline `FOREIGN KEY` constraints, omit those whose target is in `opts.deferForeignKeysTo` (since 0.1.128 — schema sync creates a foreign-key cycle that way and adds the constraints through `syncForeignKeys()` once every member exists).
 - **`syncIndexes()`** — Synchronize indexes between Atscript definitions and the database. Use `this._table.indexes` for the desired index state.
 
 ::: tip
@@ -106,9 +106,9 @@ Return `true` if your database enforces FK constraints at the engine level (e.g.
 
 Return `true` to handle `$with` relation loading natively via database features like SQL JOINs or MongoDB `$lookup`. When `false`, the table layer uses application-level batch loading — issuing separate queries per relation and stitching results together.
 
-### `supportsNativeValueDefaults()`
+### `supportsNativeValueDefaults()` (deprecated)
 
-Return `true` if the database handles static `@db.default "value"` natively via column-level `DEFAULT` clauses in `CREATE TABLE`. When `true`, the table layer's `_applyDefaults()` skips client-side value defaults, letting the DB apply its own DEFAULT. SQL adapters typically return `true`; document stores (MongoDB) return `false`.
+Deprecated since 0.1.128 and no longer consulted by the generic layer: static `@db.default "value"` values are filled SDK-side on every adapter before validation (so validators and write guards see the full row), and the SQL adapters emit their DDL `DEFAULT` clauses regardless of this flag. The built-in SQL adapters still return `true` as a capability hint for tooling; a new adapter can leave the default `false`.
 
 ### `nativeDefaultFns()`
 
@@ -120,7 +120,7 @@ nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
 }
 ```
 
-The generic layer checks this in `_applyDefaults()` to decide whether to generate the value client-side or leave it for the DB.
+The generic layer checks this in its defaults pass to decide whether to generate the value client-side or leave it for the DB.
 
 ### `supportsColumnModify`
 
@@ -271,9 +271,9 @@ Same as `getExistingColumns()` but for an arbitrary table name (not the adapter'
 
 Return whether the table/collection exists in the database. Used by schema-less adapters (e.g., MongoDB) that skip column introspection. The sync system uses this to determine create vs. in-sync status.
 
-#### `getExistingTableOptions()`
+#### `getExistingTableOptions(tableName?)`
 
-Return the current table-level options from the live database. This is the primary source for option diffing (DB-first strategy). Returns an array of `TExistingTableOption` (key-value pairs) or `undefined` if the adapter cannot introspect table options.
+Return the current table-level options from the live database. This is the primary source for option diffing (DB-first strategy). Returns an array of `TExistingTableOption` (key-value pairs) or `undefined` if the adapter cannot introspect table options. `tableName` (since 0.1.128) is the OLD name of a table about to be renamed — schema sync introspects a pending `@db.table.renamed` table under that name, as it does with `getExistingColumnsForTable()`; default to the adapter's own table when it is omitted.
 
 #### `getDesiredTableOptions()`
 
@@ -289,6 +289,18 @@ destructiveOptionKeys(): ReadonlySet<string> {
   return new Set(['engine'])
 }
 ```
+
+#### `hasRows(tableName?)` — since 0.1.128
+
+Whether the table has at least one row (`SELECT EXISTS`/`LIMIT 1`, not a count). Schema sync uses it in its pre-flight phase to refuse a primary-key change on a populated table; `tableName` is the OLD name of a table about to be renamed. The base class provides a default — `count() > 0` for the adapter's own table, a full scan on some engines — that returns `undefined` ("cannot tell") for any other `tableName`, which schema sync turns into a refusal asking for an override. Override it with a probe that accepts a table name.
+
+#### `getReferencingForeignKeys(tableName)` — since 0.1.128
+
+Live foreign keys that **reference** `tableName` from any table in the database, as `{ table, fields, targetFields }[]` — including tables whose models are no longer in the inventory. Schema sync uses it to drop removed tables children-first, to refuse dropping a table an unmanaged table still references, and to refuse a primary-key change a live constraint depends on. Omit it on engines without physical foreign keys.
+
+#### `getObjectKind(name)` — since 0.1.128
+
+`'table' | 'view' | 'materialized' | undefined` for the object stored under `name`. Schema sync refuses a run when a physical table sits where a managed view is declared (or a view where a table is declared), and uses it to check whether an FK target outside the inventory exists at all. Adapters without it skip the check.
 
 ### Applying Changes
 
@@ -312,7 +324,13 @@ Post-sync hook called after all table operations (columns, indexes, FKs) are com
 
 Apply non-destructive table option changes. Called for each changed option that is not in `destructiveOptionKeys()`. Destructive changes go through `dropTable()` + `ensureTable()` or `recreateTable()` instead.
 
+#### `rebuildPrimaryKey(change)` — since 0.1.128
+
+Rewrite the table's primary key from `change.from` to `change.to` (physical column names). Called only on an **empty** table, after new columns were added and before stale ones are dropped, so both column sets exist. Adapters without it fall back to `recreateTable()`. Keep it to one atomic statement where the engine allows (MySQL `ALTER TABLE … DROP PRIMARY KEY, ADD PRIMARY KEY (…)`, PostgreSQL `DROP CONSTRAINT …, ADD PRIMARY KEY (…)`).
+
 ### Destructive Operations
+
+Sync-owned drops must **never cascade**: if something outside the inventory depends on the table, fail — schema sync turns the failure into an `error` entry and keeps the table tracked.
 
 #### `dropTable()`
 
@@ -321,6 +339,10 @@ Drop the adapter's own table. Used by `@db.sync.method "drop"` for tables with e
 #### `dropTableByName(name)`
 
 Drop a table by name, without needing a registered readable. Used by schema sync to remove tables that are no longer present in the schema.
+
+#### `dropTablesByName(names)` — since 0.1.128
+
+Drop a group of mutually referencing tables (a foreign-key cycle whose members are all being removed) as one operation. The base class loops over `dropTableByName()`; override when your engine needs the group in one statement (PostgreSQL `DROP TABLE a, b`) or FK enforcement toggled around it (SQLite `PRAGMA foreign_keys`).
 
 #### `dropColumns(columns)`
 
@@ -334,7 +356,7 @@ Drop managed (`atscript__`-prefixed) indexes that reference any of the given col
 
 #### `ensureView(view)`
 
-Create or update a database view. Called when the adapter's readable is an `AtscriptDbView`. The `view` parameter contains the view definition, including the source table, joins, and filter expressions.
+Create or update a database view. Called when the adapter's readable is a view — detect that structurally with `this._table.isView` / `isAtscriptDbView(this._table)`, never with `instanceof AtscriptDbView` (see [Schema](#schema)). The `view` parameter contains the view definition, including the source table, joins, and filter expressions; `view.getViewColumnMappings()` already excludes `@db.ignore` fields.
 
 #### `dropViewByName(name)`
 

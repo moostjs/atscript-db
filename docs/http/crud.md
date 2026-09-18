@@ -181,19 +181,19 @@ curl http://localhost:3000/todos/meta
 }
 ```
 
-| Field              | Description                                                                                                                                                                                                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                                                                                           |
-| `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                                                                                             |
-| `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                                                                             |
-| `primaryKeys`      | Primary key field names (logical, not column names)                                                                                                                                                                                                                                     |
-| `preferredId`      | Logical field names of the preferred identifier (PK or `@db.table.preferredId.uniqueIndex` group). See [Preferred row identifier](./actions#preferred-id)                                                                                                                               |
-| `versionColumn`    | Logical field name of the `@db.column.version` column, if the table declares one. **Absent** (undefined) otherwise. See [OCC over HTTP](#occ-over-http)                                                                                                                                 |
-| `relations`        | Available navigation properties                                                                                                                                                                                                                                                         |
-| `fields`           | Per-field capability flags (`sortable`, `filterable`). In `'auto'` mode `filterable` covers every adapter-capable field while `sortable` is advertised only for index-backed fields (explicit `@db.index*`, primary keys, unique). See [Query Gate](../adapters/annotations#query-gate) |
-| `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields ship as shallow refs (`{ id, metadata }`) — enough to resolve the target's URL via `db.http.path`; deeper structure is reachable through the target's own `/meta` (see below)                      |
-| `actions`          | Declared domain actions — see [Actions](./actions)                                                                                                                                                                                                                                      |
-| `crud`             | Built-in CRUD permissions / control whitelists — see [Permissions](./permissions)                                                                                                                                                                                                       |
+| Field              | Description                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `searchable`       | Whether the table has fulltext search indexes                                                                                                                                                                                                                                                                                                                                                                                             |
+| `vectorSearchable` | Whether the table has vector search indexes                                                                                                                                                                                                                                                                                                                                                                                               |
+| `searchIndexes`    | Array of available search index definitions                                                                                                                                                                                                                                                                                                                                                                                               |
+| `primaryKeys`      | Primary key field names (logical, not column names)                                                                                                                                                                                                                                                                                                                                                                                       |
+| `preferredId`      | Logical field names of the preferred identifier (PK or `@db.table.preferredId.uniqueIndex` group). See [Preferred row identifier](./actions#preferred-id)                                                                                                                                                                                                                                                                                 |
+| `versionColumn`    | Logical field name of the `@db.column.version` column, if the table declares one. **Absent** (undefined) otherwise. See [OCC over HTTP](#occ-over-http)                                                                                                                                                                                                                                                                                   |
+| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly` markers). Since 0.1.128 they are exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted; unlisted paths (nested-object parents, navigation paths, JSON descendants on SQL adapters) are rejected with 400. See [Query Gate](../adapters/annotations#query-gate)                                |
+| `type`             | Full serialized Atscript type (field names, types, annotations, metadata). FK fields ship as shallow refs (`{ id, metadata }`) — enough to resolve the target's URL via `db.http.path`; deeper structure is reachable through the target's own `/meta` (see below). Since 0.1.128 a field declared through a reference chain carries the **terminal** ref (and inherits `db.rel.FK`), so value-help on view fields targets the dictionary |
+| `actions`          | Declared domain actions — see [Actions](./actions)                                                                                                                                                                                                                                                                                                                                                                                        |
+| `crud`             | Built-in CRUD permissions / control whitelists — see [Permissions](./permissions)                                                                                                                                                                                                                                                                                                                                                         |
 
 For the full payload shape including `actions[]` entries and complete `crud` whitelists, see [HTTP Client — Metadata](./client#meta).
 
@@ -256,7 +256,7 @@ Default values from `@db.default` and generated defaults (`@db.default.increment
 
 ### PUT / {#put-replace}
 
-Full replace by primary key. The body must include all required fields and the primary key field(s).
+Full replace by primary key. The body must include all required fields and the primary key field(s). Optional fields you omit are cleared (`NULL` / absent) on every adapter — since 0.1.128 also on the SQL adapters, which previously kept the old value of an omitted column. Send the whole row you want stored.
 
 **Single replace:**
 
@@ -293,7 +293,7 @@ Nested relation data is supported per item — each record goes through the [dee
 
 ### PATCH / {#patch-update}
 
-Partial update by primary key. Only the provided fields are changed.
+Partial update by primary key. Only the provided fields are changed: send `null` to clear an optional column, omit the key to keep its value (an empty string is a value, not a clear). Since 0.1.128 the read-side filter types admit `null` for optional columns as well, so `?description=null` and `{ description: { $ne: null } }` are typed like the runtime.
 
 **Single update:**
 
@@ -343,8 +343,22 @@ The controller intercepts every write payload on a table whose `/meta` exposes a
 
 - **If `version` is present in the body:** it is **stripped** from the SET payload and lifted to `$cas: { version: N }`. The auto-bump still applies — the stored row ends up at `N + 1`, never at the value the client sent.
 - **If `version` is absent:** the write proceeds with no `$cas` — last-write-wins semantics (client opted out by stripping it).
+- **A raw SDK-shaped `$cas: { version: N }` is accepted as sent** (since 0.1.128) and gets the same 404 / 409 disambiguation. Sending both `version` and `$cas` with **different** values is ambiguous → `400` with `errors: [{ path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' }]` (`[i].$cas` in an array body); identical values are accepted.
 
 Policy is **presence-based**, not enforced. There is no `428 Precondition Required` gate.
+
+::: warning A PK-only PATCH carrying a version is a write
+`PATCH { "id": 1, "version": 4 }` with no other fields executes the conditional `UPDATE` — the [versioned touch](/api/versioning#versioned-touch) — and bumps the row to version 5 (since 0.1.128; it used to answer `{ 1, 0 }` without touching the store). A stale version answers `409`, a missing row `404`. Re-submitting an unchanged form together with its `version` therefore invalidates every other open editor's version: strip `version` (or skip the request) when nothing changed. Without a version, `PATCH { "id": 1 }` writes nothing and reports `{ "matchedCount": 1, "modifiedCount": 0 }` (`{ 0, 0 }` when the row does not exist).
+:::
+
+| Request (row at version 4)                       | Response                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| `PATCH { id, version: 4 }`                       | `202 { matchedCount: 1, modifiedCount: 1 }`, row → version 5 |
+| `PATCH { id, version: 3 }` (stale)               | `409 version_mismatch`, `currentVersion: 4`                  |
+| `PATCH { id: 999, version: 4 }` (missing)        | `404`                                                        |
+| `PATCH { id }` / `PATCH { id: 999 }`             | `202 { 1, 0 }` / `202 { 0, 0 }`, version unchanged           |
+| `PATCH { id, $cas: { version: 3 } }`             | `409` (raw `$cas` accepted)                                  |
+| `PATCH { id, version: 4, $cas: { version: 3 } }` | `400` at path `$cas`                                         |
 
 ```bash
 # Read the row — version comes back.
@@ -484,13 +498,18 @@ curl -X DELETE "http://localhost:3000/task-tags/?taskId=1&tagId=2"
 
 The controller automatically transforms errors into appropriate HTTP responses:
 
-| Error                  | HTTP Status | Response Body                                                                                                    |
-| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ValidatorError`       | 400         | `{ message, statusCode, errors: [{ path, message }] }`                                                           |
-| `DbError` (CONFLICT)   | 409         | `{ message, statusCode, errors }`                                                                                |
-| `DbError` (other)      | 400         | `{ message, statusCode, errors }`                                                                                |
-| Version mismatch (OCC) | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http) |
-| Not found              | 404         | Standard 404                                                                                                     |
+| Error                                     | HTTP Status | Response Body                                                                                                                   |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Body not an object / array of objects     | 400         | `{ message: "Expected an object", statusCode, errors: [{ path: "" \| "[i]", message: "Expected an object" }] }` (since 0.1.128) |
+| `ValidatorError`                          | 400         | `{ message, statusCode, errors: [{ path, message }] }`                                                                          |
+| `DbError` (CONFLICT)                      | 409         | `{ message, statusCode, errors }`                                                                                               |
+| `DbError` (TX_WAIT_TIMEOUT — SQLite gate) | 503         | `{ message, statusCode, errors }` — see [SQLite concurrency](/adapters/sqlite#concurrency-and-transactions)                     |
+| `DbError` (other)                         | 400         | `{ message, statusCode, errors }`                                                                                               |
+| Version mismatch (OCC)                    | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http)                |
+| `version` + differing `$cas`              | 400         | `{ message, statusCode, errors: [{ path: "$cas", message }] }`                                                                  |
+| Not found                                 | 404         | Standard 404                                                                                                                    |
+
+Built-in write failures are **thrown** as `HttpError` (since 0.1.128) rather than returned — the wire response is identical, and a throw also rolls back any transaction a subclass wrapped around `super.update()`. See [Customization — thrown errors](/http/customization#thrown-errors).
 
 **Validation error example:**
 

@@ -240,6 +240,8 @@ const { insertedId } = await users.insert({
 const { insertedCount } = await users.insert([{ name: "Alice" }, { name: "Bob" }]);
 ```
 
+Payloads are typed as `PatchOf<T>` — every key optional, optional columns also accept `null` (explicit NULL). On a versioned table the `version` column is server-managed: leave it out (preflight accepts its absence since 0.1.128) — a value passes through and is stored as sent. `$cas` is rejected on insert with a `ClientValidationError` at path `$cas`.
+
 ### update {#update}
 
 `PATCH /` — partial update. Include the primary key and changed fields only. See [CRUD — PATCH /](./crud#patch-update).
@@ -279,6 +281,18 @@ try {
 
 The client throws `VersionMismatchError` (a `ClientError` subclass) automatically whenever the server response carries `kind: "version_mismatch"` — `instanceof` is the recommended discriminator since `@atscript/db-client` 0.1.84. On older versions, inspect `err.body?.kind === "version_mismatch"` and `err.body.currentVersion` directly.
 
+Since 0.1.128 the SDK shape works too: `users.update({ id, $cas: { version: row.version } })` is lifted to the wire `version` field before preflight and sending, so code shared with the server SDK needs no rewrite. The lift is validated with the same rules as the server (`ClientValidationError` before any request is sent):
+
+| Payload                                                 | Result                                                                 |
+| ------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `{ id, $cas: { version: 4 } }`                          | sent as `{ id, version: 4 }`                                           |
+| `{ id, version: 4, $cas: { version: 3 } }`              | `ClientValidationError` at `$cas` (`Ambiguous version: … differ`)      |
+| `{ id, $cas: { version: 4 } }` on a non-versioned table | `ClientValidationError` at `$cas` (no `@db.column.version`)            |
+| `{ id, $cas: { v: 4 } }` / non-integer value            | `ClientValidationError` at `$cas.v` / `$cas.version` (shared messages) |
+| array bodies                                            | per item; paths are prefixed `[i].`                                    |
+
+A PK-only `update({ id, version })` (or `$cas`) is a real write — the server bumps the version on a hit. See [OCC over HTTP](./crud#occ-over-http).
+
 ### replace {#replace}
 
 `PUT /` — full document replace. All required fields must be present. See [CRUD — PUT /](./crud#put-replace).
@@ -295,7 +309,7 @@ await users.replace({
 await users.replace([...]);
 ```
 
-`replace` accepts the same `version` round-trip as `update` — same 409 behavior, same `$cas` semantics. Catch conflicts with `instanceof VersionMismatchError` exactly as shown above.
+`replace` accepts the same `version` round-trip as `update` — same 409 behavior, same `$cas` semantics (and the same `$cas` lift). Catch conflicts with `instanceof VersionMismatchError` exactly as shown above. Payloads are typed as `RowOf<T>`: required columns stay required, optional ones also accept `null`; the version column itself is optional in replace preflight.
 
 ### remove {#remove}
 
@@ -382,18 +396,18 @@ const meta = await users.meta();
 }
 ```
 
-| Field              | Description                                                                                                                                                                                                                                                                                                                    |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                              |
-| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                |
-| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                             |
-| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                        |
-| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)). |
-| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                |
-| `fields`           | Per-field capability flags (sortable, filterable). In `'auto'` mode `filterable` covers every adapter-capable field; `sortable` is `true` only for index-backed fields (explicit `@db.index*`, primary keys, unique) — so `name` above is filterable but not sortable. See [Query Gate](../adapters/annotations#query-gate)    |
-| `type`             | Full serialized Atscript type definition                                                                                                                                                                                                                                                                                       |
-| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                           |
-| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                      |
+| Field              | Description                                                                                                                                                                                                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                                            |
+| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                              |
+| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                                           |
+| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                                      |
+| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)).               |
+| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                              |
+| `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly`). Since 0.1.128 exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted — so `name` above is sortable (not index-backed, hence no `indexed`). See [Query Gate](../adapters/annotations#query-gate) |
+| `type`             | Full serialized Atscript type definition. Fields declared through a reference chain carry the terminal `ref` (and inherit `db.rel.FK`) since 0.1.128 — value-help resolves to the dictionary                                                                                                                                                 |
+| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                                         |
+| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                                    |
 
 > **Read-only check:** consumers derive the boolean from `crud` inline:
 > `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.

@@ -202,7 +202,7 @@ await expect(
 expect(await users.count({})).toBe(previousCount);
 ```
 
-MongoDB requires a replica-set test server for this to work.
+MongoDB requires a replica-set test server for this to work. The memory adapter (`provideTestDbSpace`) has NO rollback — `withTransaction` runs the callback and keeps every write; assert rollback (incl. moost-db `guardWrite` rollback) on SQLite `:memory:` or with adapter spies on `_beginTransaction` / `_rollbackTransaction`.
 
 ## Testing FK cascades
 

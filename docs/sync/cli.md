@@ -70,14 +70,17 @@ npx asc db sync --safe
 
 The CLI displays a structured plan grouped by tables and views. Each entry shows a status indicator:
 
-| Symbol | Color | Meaning                                      |
-| ------ | ----- | -------------------------------------------- |
-| `+`    | Green | New table/column/FK will be created          |
-| `~`    | Cyan  | Existing table will be modified              |
-| `-`    | Red   | Table/column/FK will be dropped              |
-| `!`    | Red   | Type change or destructive operation         |
-| `✓`    | Green | Already in sync                              |
-| `✗`    | Red   | Error (rename conflict, missing sync method) |
+| Symbol | Color | Meaning                                                                  |
+| ------ | ----- | ------------------------------------------------------------------------ |
+| `+`    | Green | New table/column/FK will be created                                      |
+| `~`    | Cyan  | Existing table will be modified                                          |
+| `-`    | Red   | Table/column/FK will be dropped                                          |
+| `!`    | Red   | Type change or destructive operation                                     |
+| `✓`    | Green | Already in sync                                                          |
+| `✗`    | Red   | Error (rename conflict, missing sync method)                             |
+| `✖`    | Red   | `refused:` — pre-flight refusal; the run applies nothing (since 0.1.128) |
+
+Entries are printed in execution order (tables parents-first, drops children-first); `· after: …` lines show the dependencies, `! PK (id) → (code) — rebuild (table is empty)` a primary-key change (`— skipped (safe mode)` under `--safe`), `· dropped with: …` a foreign-key cycle dropped as one group.
 
 ### Example output
 
@@ -164,6 +167,8 @@ The CLI exits with a non-zero code when:
 - **Adapter not found** — the specified adapter package is not installed
 
 When errors are detected in the plan, the CLI prints the errors and exits without applying any changes.
+
+Pre-flight refusals (since 0.1.128 — a populated table's primary key changing, a removed table still referenced by a model, a foreign key to a table that exists nowhere, a physical table under a managed view's name, …) appear in the plan as `✖ refused: <name>` with the reason below it. Such a run applies **nothing**: no DDL, no tracking, no hash. See [Pre-flight refusals](./#pre-flight-refusals) for every message.
 
 ### Exit Codes
 

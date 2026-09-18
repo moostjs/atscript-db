@@ -30,7 +30,7 @@ const db = createAdapter("./app.db", { vector: true });
 
 | Capability                                      | Status                                                                                                                                                                  |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Transactions                                    | Native `BEGIN` / `COMMIT` / `ROLLBACK`.                                                                                                                                 |
+| Transactions                                    | `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`, serialised per driver by a FIFO gate (since 0.1.128) — see § Pragmas / concurrency.                                          |
 | Foreign keys (`supportsNativeForeignKeys`)      | Yes — `PRAGMA foreign_keys = ON` at connect. Referential actions enforced by SQLite.                                                                                    |
 | Full-text search                                | **FTS5** virtual tables for `@db.index.fulltext`. `search()` uses `MATCH` with ranking.                                                                                 |
 | Collation (`@db.column.collate`)                | `'binary'` → `BINARY`, `'nocase'` → `NOCASE`, `'unicode'` → `unicode61` tokenizer for FTS. Applied in `WHERE` via `COLLATE`.                                            |
@@ -137,7 +137,13 @@ Callers building regex from user input should pass it through `escapeRegex(liter
 ## Pragmas / concurrency / limits
 
 - `PRAGMA foreign_keys = ON` (always); set WAL / `synchronous = NORMAL` via your driver options.
-- `better-sqlite3` is single-writer — writes serialize per process. Avoid long `await` inside `withTransaction(fn)`.
+- One connection per driver → a per-driver FIFO gate (since 0.1.128): `withTransaction` takes it before `BEGIN IMMEDIATE`, releases on COMMIT/ROLLBACK; every plain read/write from another context WAITS for the open transaction (never runs inside it). Concurrent `withTransaction` calls queue instead of failing with "cannot start a transaction within a transaction".
+- Options (`createAdapter(path, opts)` / `new SqliteAdapter(driver, opts)`): `transactionWaitTimeoutMs` (default unbounded; bounds the waiter's TOTAL wait; waiter rejects `DbError("TX_WAIT_TIMEOUT")` → moost-db 503; `0` = fail-fast: reject immediately when the connection is busy), `transactionWaitWarnMs` (default 5000; logs a warning through the adapter logger; 0 = off).
+- NEVER await external I/O (self-HTTP call, another connection) inside `withTransaction` / `guardWrite` on SQLite — it waits for itself, forever by default. Set `transactionWaitTimeoutMs` if you cannot rule it out.
+- Schema operations (`ensureTable`, `syncColumns`, `recreateTable`, `dropTablesByName`, …) take the same connection gate (since 0.1.128): they hold the connection exclusively WITHOUT a transaction, wait for an open transaction, make concurrent requests wait, and never land inside a request's transaction (where `PRAGMA foreign_keys` would be a no-op). The gate protects each STEP, not a whole `syncSchema` run (released between steps) — run schema sync before serving traffic.
+- A transaction of another adapter family / driver is "no transaction of mine" (state branded by driver since 0.1.128): SQLite statements inside it are still gated and a nested SQLite `withTransaction` opens its own (queued) transaction.
+- One driver per `Database` — two `BetterSqlite3Driver` wrappers around one instance get two gates.
+- A transaction on another adapter family is NOT a SQLite transaction: SQLite statements inside it queue behind SQLite transactions and run autocommit.
 - No `ALTER COLUMN`; type changes need `@db.sync.method 'recreate'` or `'drop'`.
 - No native `CHECK` from annotations — validation is server-side.
 - Vector search requires `sqlite-vec` peer + `{ vector: true }`; without it vectors degrade to `TEXT` and `vectorSearch` throws.

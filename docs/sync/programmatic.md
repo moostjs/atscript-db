@@ -85,7 +85,7 @@ interface TSyncPlan {
 }
 ```
 
-When `status` is `'up-to-date'`, the entries still list all tables/views with their `'in-sync'` status — useful for displaying a full schema overview.
+When `status` is `'up-to-date'`, the entries still list all tables/views (normally `'in-sync'`) — useful for displaying a full schema overview. The `safe` option is honoured here too (since 0.1.128): a table or view that an earlier safe run retained shows as a pending `drop` unless `safe` is set.
 
 ## TSyncResult
 
@@ -93,17 +93,20 @@ Returned by `sync.run()` and `syncSchema()`:
 
 ```typescript
 interface TSyncResult {
-  status: "up-to-date" | "synced" | "synced-by-peer";
+  status: "up-to-date" | "synced" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
 }
 ```
 
-| Status             | Meaning                                                                |
-| ------------------ | ---------------------------------------------------------------------- |
-| `'up-to-date'`     | Schema hash matched, no sync needed                                    |
-| `'synced'`         | This process applied changes                                           |
-| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock |
+| Status             | Meaning                                                                                                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'up-to-date'`     | Schema hash matched, no sync needed                                                                                                                                                            |
+| `'synced'`         | This process applied changes                                                                                                                                                                   |
+| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock                                                                                                                         |
+| `'refused'`        | Pre-flight refused the run (since 0.1.128): **no DDL ran**, nothing was persisted, the lock was released. `entries` is the full plan; refused entries are `error` entries with `refused: true` |
+
+`'refused'` follows the `onError` policy like error entries do — `"warn"` (default) logs each refusal at error level and returns, `"throw"` throws after the lock is released, `"silent"` returns. `plan()` reports the same refusals with its status unchanged (`'changes-needed'`).
 
 ## SyncEntry
 
@@ -135,12 +138,21 @@ interface SyncEntry {
   errors: string[];
   renamedFrom?: string;
 
+  // Since 0.1.128
+  pkChange?: { from: string[]; to: string[]; rebuild: boolean }; // primary-key field set change; rebuild=false when safe mode skipped it
+  dependsOn: string[]; // tables this entry's DDL waits for (FK parents / view sources / referencing children of a drop)
+  dropGroup?: string[]; // set when a foreign-key cycle is dropped as one group
+  refused: boolean; // this `error` entry is a pre-flight refusal — no DDL ran
+  toInit(): TSyncEntryInit; // the init object, for deriving a modified copy
+
   // Computed properties
-  destructive: boolean; // involves drops, type changes, or recreation
+  destructive: boolean; // involves drops, type changes, recreation, or a primary-key rebuild
   hasChanges: boolean; // status is not 'in-sync' or 'error'
   hasErrors: boolean; // status is 'error' or errors array is non-empty
 }
 ```
+
+Entries come back in **execution order** — tables parents-first, then views, then drops children-first — identically from `plan()` and `run()`. Safe mode is reported identically as well: a skipped primary-key rebuild is `pkChange: { from, to, rebuild: false }` in both (printed `! PK … — skipped (safe mode)`, not destructive).
 
 ## Plan-Then-Decide Pattern
 
