@@ -32,7 +32,11 @@ export type {
   NavOf,
   IdOf,
   ClientResponse,
+  PatchOf,
+  RowOf,
   // Re-exported from @atscript/db
+  DbPatch,
+  DbRow,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,

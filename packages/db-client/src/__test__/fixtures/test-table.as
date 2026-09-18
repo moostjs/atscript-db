@@ -27,3 +27,15 @@ export interface User {
     age?: number
   }
 }
+
+@db.table "versioned_users"
+export interface VersionedUser {
+  @meta.id
+  @db.default.increment
+  id: number
+
+  name: string
+
+  @db.column.version
+  version: number
+}

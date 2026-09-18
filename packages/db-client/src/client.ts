@@ -27,17 +27,17 @@ import type {
   AtscriptClientShape,
   ClientOptions,
   ClientResponse,
-  DataOf,
   IdOf,
   MetaResponse,
   NavOf,
   OwnOf,
   PageResult,
+  PatchOf,
+  RowOf,
 } from "./types";
 
 type Own<T> = OwnOf<T>;
 type Nav<T> = NavOf<T>;
-type Data<T> = DataOf<T>;
 type Id<T> = IdOf<T>;
 type Response<T, Q> = ClientResponse<T, Q>;
 
@@ -215,36 +215,49 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   // ── POST / ─────────────────────────────────────────────────────────────────
 
   /**
-   * `POST /` — insert one record.
+   * `POST /` — insert one record. The version column (if any) is optional —
+   * the server initialises it; `$cas` is rejected (no meaning on insert).
    */
-  async insert(data: Partial<Data<T>>): Promise<TDbInsertResult>;
+  async insert(data: PatchOf<T>): Promise<TDbInsertResult>;
   /**
    * `POST /` — insert many records.
    */
-  async insert(data: Partial<Data<T>>[]): Promise<TDbInsertManyResult>;
-  async insert(data: Partial<Data<T>> | Partial<Data<T>>[]): Promise<unknown> {
-    await this._validateData(data, "insert");
-    return this._request("POST", "", data);
+  async insert(data: PatchOf<T>[]): Promise<TDbInsertManyResult>;
+  async insert(data: PatchOf<T> | PatchOf<T>[]): Promise<unknown> {
+    return this._request("POST", "", await this._prepareWrite(data, "insert"));
   }
 
   // ── PATCH / ────────────────────────────────────────────────────────────────
 
   /**
    * `PATCH /` — partial update one or many records by primary key.
+   *
+   * Accepts both OCC shapes (since 0.1.128): a bare `version: N` (the wire
+   * contract) or the SDK `$cas: { version: N }`, which is lifted to `version`
+   * before preflight and sending. A stale version surfaces as
+   * {@link VersionMismatchError}; a PK-only body with a version is a real
+   * write (the server bumps the version).
    */
-  async update(data: Partial<Data<T>> | Partial<Data<T>>[]): Promise<TDbUpdateResult> {
-    await this._validateData(data, "patch");
-    return this._request("PATCH", "", data) as Promise<TDbUpdateResult>;
+  async update(data: PatchOf<T> | PatchOf<T>[]): Promise<TDbUpdateResult> {
+    return this._request(
+      "PATCH",
+      "",
+      await this._prepareWrite(data, "patch"),
+    ) as Promise<TDbUpdateResult>;
   }
 
   // ── PUT / ──────────────────────────────────────────────────────────────────
 
   /**
-   * `PUT /` — full replace one or many records by primary key.
+   * `PUT /` — full replace one or many records by primary key. Same OCC
+   * shapes as {@link update}; the version column itself is optional.
    */
-  async replace(data: Data<T> | Data<T>[]): Promise<TDbUpdateResult> {
-    await this._validateData(data, "replace");
-    return this._request("PUT", "", data) as Promise<TDbUpdateResult>;
+  async replace(data: RowOf<T> | RowOf<T>[]): Promise<TDbUpdateResult> {
+    return this._request(
+      "PUT",
+      "",
+      await this._prepareWrite(data, "replace"),
+    ) as Promise<TDbUpdateResult>;
   }
 
   // ── DELETE /:id ────────────────────────────────────────────────────────────
@@ -389,9 +402,12 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     return this._getValidator();
   }
 
-  private async _validateData(data: unknown, mode: ValidatorMode): Promise<void> {
+  /** Lifts `$cas` to the wire shape, then runs the preflight validator on the result. */
+  private async _prepareWrite(data: unknown, mode: ValidatorMode): Promise<unknown> {
     const validator = await this._getValidator();
-    validator.validate(data, mode);
+    const normalized = validator.liftCas(data, mode);
+    validator.validate(normalized, mode);
+    return normalized;
   }
 
   private _getValidator(): Promise<ClientValidator> {

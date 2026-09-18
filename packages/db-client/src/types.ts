@@ -7,7 +7,9 @@ import type {
   TypedWithRelation,
 } from "@uniqu/core";
 import type {
+  DbPatch,
   DbResponse,
+  DbRow,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
@@ -32,6 +34,20 @@ export type {
 // ── Re-export CRUD result types from @atscript/db ───────────────────────────
 
 export type { TDbInsertResult, TDbInsertManyResult, TDbUpdateResult, TDbDeleteResult };
+
+// ── Write payload aliases (since 0.1.128) ───────────────────────────────────
+
+export type { DbPatch, DbRow };
+
+/**
+ * Write payload for `insert()` / `update()`: every key optional, optional
+ * columns additionally accept `null` (explicit NULL). `$cas` is accepted on
+ * `update()` / `replace()` through the open index signature.
+ */
+export type PatchOf<T> = DbPatch<DataOf<T>>;
+
+/** Write payload for `replace()`: full row; optional columns additionally accept `null`. */
+export type RowOf<T> = DbRow<DataOf<T>>;
 
 // ── Client Options ──────────────────────────────────────────────────────────
 
