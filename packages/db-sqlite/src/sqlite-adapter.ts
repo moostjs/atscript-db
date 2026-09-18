@@ -1,6 +1,12 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, AtscriptDbView, DbError } from "@atscript/db";
-import type { TFieldOps } from "@atscript/db";
+import { BaseDbAdapter, DbError } from "@atscript/db";
+import type {
+  AtscriptDbView,
+  TDbObjectKind,
+  TEnsureTableOptions,
+  TFieldOps,
+  TReferencingForeignKey,
+} from "@atscript/db";
 import type {
   TDbDeleteResult,
   TDbFieldMeta,
@@ -18,8 +24,10 @@ import type { DbQuery, FilterExpr } from "@atscript/db";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  fillReplacePayload,
   geoWindowFromControls,
   renameGeoDistance,
+  replaceColumnsFor,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
@@ -41,6 +49,13 @@ import {
   sqliteTypeFromDesignType,
   thresholdToVecDistance,
 } from "./sql-builder";
+import {
+  getSqliteTxGate,
+  SqliteTxState,
+  type SqliteAdapterOptions,
+  type SqliteTxGate,
+  type SqliteTxWaitOptions,
+} from "./tx-gate";
 import type { TSqliteDriver } from "./types";
 
 /**
@@ -78,8 +93,17 @@ export class SqliteAdapter extends BaseDbAdapter {
   /** Partition filter fields per vector index (from @db.search.filter). Field paths. */
   private _vectorPartitionFields = new Map<string, string[]>();
 
-  constructor(protected readonly driver: TSqliteDriver) {
+  /** Per-driver transaction gate (shared by every adapter over this driver). */
+  private readonly _gate: SqliteTxGate;
+  private readonly _txOptions: SqliteAdapterOptions;
+
+  constructor(
+    protected readonly driver: TSqliteDriver,
+    options?: SqliteAdapterOptions,
+  ) {
     super();
+    this._gate = getSqliteTxGate(driver);
+    this._txOptions = { ...options };
     this.driver.exec("PRAGMA foreign_keys = ON");
   }
 
@@ -183,21 +207,105 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   // ── Transaction primitives ────────────────────────────────────────────────
+  //
+  // One synchronous connection per driver → at most one transaction may be
+  // open at a time, and no statement from another async context may run
+  // while it is (it would execute INSIDE that transaction). `_beginTransaction`
+  // takes the per-driver FIFO gate before `BEGIN IMMEDIATE`; every CRUD /
+  // read / aggregate / search statement goes through `_stmt`, which waits
+  // for the gate unless the current context owns the transaction (or holds
+  // the connection exclusively). The same rule applies to schema methods:
+  // a method whose body is synchronous from the gate check to its last
+  // statement goes through `_stmt` too (nothing can interleave with a
+  // synchronous segment); only methods that `await` between statements or
+  // flip connection-level PRAGMAs hold the connection with
+  // `_withExclusiveConnection`.
 
-  protected override async _beginTransaction(): Promise<unknown> {
-    this._log("BEGIN");
-    this.driver.exec("BEGIN");
-    return undefined;
+  private _waitOpts(): SqliteTxWaitOptions {
+    return { ...this._txOptions, logger: this.logger };
   }
 
-  protected override async _commitTransaction(): Promise<void> {
-    this._log("COMMIT");
-    this.driver.exec("COMMIT");
+  /** Every adapter over this driver shares one transaction — and one gate (since 0.1.128). */
+  protected override _transactionOwner(): unknown {
+    return this.driver;
   }
 
-  protected override async _rollbackTransaction(): Promise<void> {
-    this._log("ROLLBACK");
-    this.driver.exec("ROLLBACK");
+  /** Inside our own transaction, or holding the connection exclusively. */
+  private _ownsConnection(): boolean {
+    return this._getTransactionState() !== undefined || this._gate.heldByCurrentContext;
+  }
+
+  /**
+   * Runs one synchronous driver statement. Inside our own transaction (or an
+   * exclusive hold) it runs immediately; otherwise it waits until no
+   * transaction is open on the connection. The `held` check and the statement
+   * run in the same synchronous segment, so they cannot interleave with a
+   * `BEGIN` from another context.
+   */
+  private async _stmt<R>(fn: () => R): Promise<R> {
+    // Fast path first: when nothing holds the gate there is no ownership
+    // question to answer (no async-local lookups).
+    if (!this._gate.held || this._ownsConnection()) {
+      return fn();
+    }
+    return this._gate.runWhenFree(fn, this._waitOpts());
+  }
+
+  /**
+   * Holds the connection for the duration of `fn` WITHOUT opening a
+   * transaction: no other context's statement or transaction can interleave.
+   * Meant for the schema entry points that `await` mid-body or toggle
+   * connection-level PRAGMAs (`ensureTable`, `recreateTable`, `dropColumns`,
+   * `dropTablesByName`, `syncIndexes`) — their DDL must not land inside a
+   * request's transaction (PRAGMA changes are no-ops inside one). Inside our
+   * own transaction `fn` runs directly; re-entrant for the same async
+   * context; nested `withTransaction` calls inside `fn` still BEGIN/COMMIT
+   * on the held connection.
+   */
+  protected async _withExclusiveConnection<T>(fn: () => Promise<T>): Promise<T> {
+    if (this._getTransactionState() !== undefined) {
+      return fn();
+    }
+    return this._gate.runExclusive(fn, this._waitOpts());
+  }
+
+  protected override async _beginTransaction(): Promise<SqliteTxState> {
+    // Inside an exclusive hold the connection is already ours — no re-acquire.
+    const holdsGate = !this._gate.heldByCurrentContext;
+    if (holdsGate) {
+      await this._gate.acquire(this._waitOpts());
+    }
+    const state = new SqliteTxState(this._gate, holdsGate);
+    try {
+      // IMMEDIATE: take the RESERVED lock up front so a cross-process writer
+      // waits on busy_timeout instead of failing mid-transaction on upgrade.
+      this._log("BEGIN IMMEDIATE");
+      this.driver.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      state.release();
+      throw error;
+    }
+    return state;
+  }
+
+  // The base class only ever hands back the state `_beginTransaction` returned
+  // for THIS driver (transaction state is branded by owner).
+  protected override async _commitTransaction(state: unknown): Promise<void> {
+    try {
+      this._log("COMMIT");
+      this.driver.exec("COMMIT");
+    } finally {
+      (state as SqliteTxState).release();
+    }
+  }
+
+  protected override async _rollbackTransaction(state: unknown): Promise<void> {
+    try {
+      this._log("ROLLBACK");
+      this.driver.exec("ROLLBACK");
+    } finally {
+      (state as SqliteTxState).release();
+    }
   }
 
   /** SQLite does not use schemas — override to always exclude schema. */
@@ -246,7 +354,9 @@ export class SqliteAdapter extends BaseDbAdapter {
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
     const { sql, params } = buildInsert(this.resolveTableName(), data);
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { insertedId: this._resolveInsertedId(data, result.lastInsertRowid) };
   }
 
@@ -256,7 +366,9 @@ export class SqliteAdapter extends BaseDbAdapter {
       for (const row of data) {
         const { sql, params } = buildInsert(this.resolveTableName(), row);
         this._log(sql, params);
-        const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+        const result = await this._stmt(() =>
+          this._wrapConstraintError(() => this.driver.run(sql, params)),
+        );
         ids.push(this._resolveInsertedId(row, result.lastInsertRowid));
       }
       return { insertedCount: ids.length, insertedIds: ids };
@@ -270,14 +382,14 @@ export class SqliteAdapter extends BaseDbAdapter {
     const controls = { ...query.controls, $limit: 1 };
     const { sql, params } = buildSelect(this.resolveTableName(), where, controls);
     this._log(sql, params);
-    return this.driver.get(sql, params);
+    return this._stmt(() => this.driver.get(sql, params));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
     const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
     this._log(sql, params);
-    return this.driver.all(sql, params);
+    return this._stmt(() => this.driver.all(sql, params));
   }
 
   async count(query: DbQuery): Promise<number> {
@@ -285,7 +397,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
     const sql = `SELECT COUNT(*) as cnt FROM "${esc(tableName)}" WHERE ${where.sql}`;
     this._log(sql, where.params);
-    const row = this.driver.get<{ cnt: number }>(sql, where.params);
+    const row = await this._stmt(() => this.driver.get<{ cnt: number }>(sql, where.params));
     return row?.cnt ?? 0;
   }
 
@@ -296,13 +408,13 @@ export class SqliteAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = this.driver.get<{ count: number }>(sql, params);
+      const row = await this._stmt(() => this.driver.get<{ count: number }>(sql, params));
       return [{ count: row?.count ?? 0 }];
     }
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return this.driver.all(sql, params);
+    return this._stmt(() => this.driver.all(sql, params));
   }
 
   // ── CRUD: Update ───────────────────────────────────────────────────────────
@@ -329,7 +441,9 @@ export class SqliteAdapter extends BaseDbAdapter {
       expectedVersion,
     );
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
@@ -342,7 +456,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const versionColumn = this._table.versionColumn;
     const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
@@ -356,21 +472,31 @@ export class SqliteAdapter extends BaseDbAdapter {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
     const versionColumn = this._table.versionColumn;
-    // Use UPDATE (set all columns) instead of DELETE+INSERT to avoid triggering CASCADE deletes
+    // Use UPDATE instead of DELETE+INSERT to avoid triggering CASCADE deletes.
+    // Full replace (since 0.1.128): every column is assigned — omitted ones
+    // become NULL — so the result matches the whole-row replace of the
+    // document adapters instead of silently merging with the old row.
+    const full = fillReplacePayload(
+      data,
+      replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
+      versionColumn,
+    );
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
     };
     const { sql, params } = buildUpdate(
       tableName,
-      data,
+      full,
       limitedWhere,
       undefined,
       versionColumn,
       expectedVersion,
     );
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
@@ -386,7 +512,9 @@ export class SqliteAdapter extends BaseDbAdapter {
       versionColumn,
     );
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
@@ -397,7 +525,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
     const sql = `DELETE FROM "${esc(tableName)}" WHERE rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`;
     this._log(sql, where.params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, where.params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, where.params)),
+    );
     return { deletedCount: result.changes };
   }
 
@@ -405,27 +535,37 @@ export class SqliteAdapter extends BaseDbAdapter {
     const where = buildWhere(filter);
     const { sql, params } = buildDelete(this.resolveTableName(), where);
     this._log(sql, params);
-    const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+    const result = await this._stmt(() =>
+      this._wrapConstraintError(() => this.driver.run(sql, params)),
+    );
     return { deletedCount: result.changes };
   }
 
   // ── Schema ─────────────────────────────────────────────────────────────────
 
-  async ensureTable(): Promise<void> {
-    if (this._table instanceof AtscriptDbView) {
-      return this.ensureView();
-    }
-    const sql = buildCreateTable(
-      this.resolveTableName(),
-      this._table.fieldDescriptors,
-      this._table.foreignKeys,
-      { typeMapper: (field) => this.typeMapper(field) },
-    );
-    this._log(sql);
-    this.driver.exec(sql);
+  /**
+   * SQLite accepts forward FK references, so a foreign-key cycle is created
+   * inline in any order — `opts.deferForeignKeysTo` is accepted and ignored.
+   */
+  async ensureTable(_opts?: TEnsureTableOptions): Promise<void> {
+    return this._withExclusiveConnection(async () => {
+      // Structural check (never `instanceof`): a bundle may carry two copies of
+      // @atscript/db, and a false `instanceof` would create an empty table here.
+      if (this._table.isView) {
+        return this.ensureView();
+      }
+      const sql = buildCreateTable(
+        this.resolveTableName(),
+        this._table.fieldDescriptors,
+        this._table.foreignKeys,
+        { typeMapper: (field) => this.typeMapper(field) },
+      );
+      this._log(sql);
+      this.driver.exec(sql);
 
-    // Seed sqlite_sequence for @db.default.increment with start value
-    this._seedIncrementStart();
+      // Seed sqlite_sequence for @db.default.increment with start value
+      this._seedIncrementStart();
+    });
   }
 
   private _incrementSeeded = false;
@@ -452,15 +592,17 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   async ensureView(): Promise<void> {
-    const view = this._table as AtscriptDbView;
-    const sql = buildCreateView(
-      this.resolveTableName(),
-      view.viewPlan,
-      view.getViewColumnMappings(),
-      (ref) => view.resolveFieldRef(ref),
-    );
-    this._log(sql);
-    this.driver.exec(sql);
+    return this._stmt(() => {
+      const view = this._table as AtscriptDbView;
+      const sql = buildCreateView(
+        this.resolveTableName(),
+        view.viewPlan,
+        view.getViewColumnMappings(),
+        (ref) => view.resolveFieldRef(ref),
+      );
+      this._log(sql);
+      this.driver.exec(sql);
+    });
   }
 
   async getExistingColumns(): Promise<TExistingColumn[]> {
@@ -468,187 +610,286 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
-    const tableName = this.resolveTableName();
-    const added: string[] = [];
-    const renamed: string[] = [];
+    return this._stmt(() => {
+      const tableName = this.resolveTableName();
+      const added: string[] = [];
+      const renamed: string[] = [];
 
-    // Renames first (before adds, in case a renamed column is referenced)
-    for (const { field, oldName } of diff.renamed ?? []) {
-      const ddl = `ALTER TABLE "${esc(tableName)}" RENAME COLUMN "${esc(oldName)}" TO "${esc(field.physicalName)}"`;
-      this._log(ddl);
-      this.driver.exec(ddl);
-      renamed.push(field.physicalName);
-    }
+      // Renames first (before adds, in case a renamed column is referenced)
+      for (const { field, oldName } of diff.renamed ?? []) {
+        const ddl = `ALTER TABLE "${esc(tableName)}" RENAME COLUMN "${esc(oldName)}" TO "${esc(field.physicalName)}"`;
+        this._log(ddl);
+        this.driver.exec(ddl);
+        renamed.push(field.physicalName);
+      }
 
-    // Adds
-    for (const field of diff.added) {
-      const sqlType = this.typeMapper(field);
-      let ddl = `ALTER TABLE "${esc(tableName)}" ADD COLUMN "${esc(field.physicalName)}" ${sqlType}`;
-      if (!field.optional && !field.isPrimaryKey) {
-        ddl += " NOT NULL";
+      // Adds
+      for (const field of diff.added) {
+        const sqlType = this.typeMapper(field);
+        let ddl = `ALTER TABLE "${esc(tableName)}" ADD COLUMN "${esc(field.physicalName)}" ${sqlType}`;
+        if (!field.optional && !field.isPrimaryKey) {
+          ddl += " NOT NULL";
+        }
+        // SQLite ADD COLUMN with NOT NULL requires a DEFAULT; also emit explicit @db.default
+        if (field.defaultValue?.kind === "value") {
+          ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
+        } else if (!field.optional && !field.isPrimaryKey) {
+          ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
+        }
+        if (field.collate) {
+          ddl += ` COLLATE ${field.collate.toUpperCase()}`;
+        }
+        this._log(ddl);
+        this.driver.exec(ddl);
+        added.push(field.physicalName);
       }
-      // SQLite ADD COLUMN with NOT NULL requires a DEFAULT; also emit explicit @db.default
-      if (field.defaultValue?.kind === "value") {
-        ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-      } else if (!field.optional && !field.isPrimaryKey) {
-        ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
-      }
-      if (field.collate) {
-        ddl += ` COLLATE ${field.collate.toUpperCase()}`;
-      }
-      this._log(ddl);
-      this.driver.exec(ddl);
-      added.push(field.physicalName);
-    }
 
-    return { added, renamed };
+      return { added, renamed };
+    });
   }
 
   async recreateTable(): Promise<void> {
-    const tableName = this.resolveTableName();
-    const tempName = `${tableName}__tmp_${Date.now()}`;
-
-    // Drop FTS / vec shadow tables before rebuild — syncIndexes() will recreate them
-    this._dropAllFtsTables(tableName);
-    this._dropAllVecTables(tableName);
-
-    // Disable FK checks during recreation — referenced tables may be mid-sync
-    this.driver.exec("PRAGMA foreign_keys = OFF");
-    this.driver.exec("PRAGMA legacy_alter_table = ON");
-    try {
-      // 1. Create new table with temp name
-      const createSql = buildCreateTable(
-        tempName,
-        this._table.fieldDescriptors,
-        this._table.foreignKeys,
-        { typeMapper: (field) => this.typeMapper(field) },
-      );
-      this._log(createSql);
-      this.driver.exec(createSql);
-
-      // 2. Get columns that exist in both old and new
-      const oldCols = (await this.getExistingColumns()).map((c) => c.name);
-      const newCols = this._table.fieldDescriptors
-        .filter((f) => !f.ignored)
-        .map((f) => f.physicalName);
-      const oldColSet = new Set(oldCols);
-      const commonCols = newCols.filter((c) => oldColSet.has(c));
-
-      if (commonCols.length > 0) {
-        // 3. Copy data — use COALESCE for columns that became NOT NULL
-        const fieldsByName = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
-        const colNames = commonCols.map((c) => `"${esc(c)}"`).join(", ");
-        const selectExprs = commonCols
-          .map((c) => {
-            const field = fieldsByName.get(c);
-            if (field && !field.optional && !field.isPrimaryKey) {
-              const fallback =
-                field.defaultValue?.kind === "value"
-                  ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
-                  : defaultValueForType(field.designType);
-              return `COALESCE("${esc(c)}", ${fallback}) AS "${esc(c)}"`;
-            }
-            return `"${esc(c)}"`;
-          })
-          .join(", ");
-        const copySql = `INSERT INTO "${esc(tempName)}" (${colNames}) SELECT ${selectExprs} FROM "${esc(tableName)}"`;
-        this._log(copySql);
-        this.driver.exec(copySql);
-      }
-
-      // 4. Rename old table out of the way, rename new into place, drop old
-      const oldName = `${tableName}__old_${Date.now()}`;
-      this.driver.exec(`ALTER TABLE "${esc(tableName)}" RENAME TO "${esc(oldName)}"`);
-      this.driver.exec(`ALTER TABLE "${esc(tempName)}" RENAME TO "${esc(tableName)}"`);
-      this.driver.exec(`DROP TABLE IF EXISTS "${esc(oldName)}"`);
-    } finally {
-      this.driver.exec("PRAGMA legacy_alter_table = OFF");
-      this.driver.exec("PRAGMA foreign_keys = ON");
-    }
-  }
-
-  async dropTable(): Promise<void> {
-    const tableName = this.resolveTableName();
-    this._dropAllFtsTables(tableName);
-    this._dropAllVecTables(tableName);
-    const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
-    this._log(ddl);
-    this.driver.exec(ddl);
-  }
-
-  async dropColumns(columns: string[]): Promise<void> {
-    await this.withTransaction(async () => {
+    return this._withExclusiveConnection(async () => {
       const tableName = this.resolveTableName();
-      for (const col of columns) {
-        const ddl = `ALTER TABLE "${esc(tableName)}" DROP COLUMN "${esc(col)}"`;
-        this._log(ddl);
-        this.driver.exec(ddl);
+      const tempName = `${tableName}__tmp_${Date.now()}`;
+
+      // Drop FTS / vec shadow tables before rebuild — syncIndexes() will recreate them
+      this._dropAllFtsTables(tableName);
+      this._dropAllVecTables(tableName);
+
+      // Disable FK checks during recreation — referenced tables may be mid-sync
+      this.driver.exec("PRAGMA foreign_keys = OFF");
+      this.driver.exec("PRAGMA legacy_alter_table = ON");
+      try {
+        // 1. Create new table with temp name
+        const createSql = buildCreateTable(
+          tempName,
+          this._table.fieldDescriptors,
+          this._table.foreignKeys,
+          { typeMapper: (field) => this.typeMapper(field) },
+        );
+        this._log(createSql);
+        this.driver.exec(createSql);
+
+        // 2. Get columns that exist in both old and new
+        const oldCols = (await this.getExistingColumns()).map((c) => c.name);
+        const newCols = this._table.fieldDescriptors
+          .filter((f) => !f.ignored)
+          .map((f) => f.physicalName);
+        const oldColSet = new Set(oldCols);
+        const commonCols = newCols.filter((c) => oldColSet.has(c));
+
+        if (commonCols.length > 0) {
+          // 3. Copy data — use COALESCE for columns that became NOT NULL
+          const fieldsByName = new Map(
+            this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+          );
+          const colNames = commonCols.map((c) => `"${esc(c)}"`).join(", ");
+          const selectExprs = commonCols
+            .map((c) => {
+              const field = fieldsByName.get(c);
+              if (field && !field.optional && !field.isPrimaryKey) {
+                const fallback =
+                  field.defaultValue?.kind === "value"
+                    ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
+                    : defaultValueForType(field.designType);
+                return `COALESCE("${esc(c)}", ${fallback}) AS "${esc(c)}"`;
+              }
+              return `"${esc(c)}"`;
+            })
+            .join(", ");
+          const copySql = `INSERT INTO "${esc(tempName)}" (${colNames}) SELECT ${selectExprs} FROM "${esc(tableName)}"`;
+          this._log(copySql);
+          this.driver.exec(copySql);
+        }
+
+        // 4. Rename old table out of the way, rename new into place, drop old
+        const oldName = `${tableName}__old_${Date.now()}`;
+        this.driver.exec(`ALTER TABLE "${esc(tableName)}" RENAME TO "${esc(oldName)}"`);
+        this.driver.exec(`ALTER TABLE "${esc(tempName)}" RENAME TO "${esc(tableName)}"`);
+        this.driver.exec(`DROP TABLE IF EXISTS "${esc(oldName)}"`);
+      } finally {
+        this.driver.exec("PRAGMA legacy_alter_table = OFF");
+        this.driver.exec("PRAGMA foreign_keys = ON");
       }
     });
   }
 
+  async dropTable(): Promise<void> {
+    return this._stmt(() => {
+      const tableName = this.resolveTableName();
+      this._dropAllFtsTables(tableName);
+      this._dropAllVecTables(tableName);
+      const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
+      this._log(ddl);
+      this.driver.exec(ddl);
+    });
+  }
+
+  async dropColumns(columns: string[]): Promise<void> {
+    return this._withExclusiveConnection(async () => {
+      await this.withTransaction(async () => {
+        const tableName = this.resolveTableName();
+        for (const col of columns) {
+          const ddl = `ALTER TABLE "${esc(tableName)}" DROP COLUMN "${esc(col)}"`;
+          this._log(ddl);
+          this.driver.exec(ddl);
+        }
+      });
+    });
+  }
+
   async dropIndexesForColumns(columns: string[]): Promise<void> {
-    const tableName = this.resolveTableName();
-    const dropped = new Set(columns);
-    const indexes = this.driver
-      .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
-      .filter((i) => i.name.startsWith("atscript__"));
-    for (const index of indexes) {
-      const cols = this.driver.all<{ name: string | null }>(
-        `PRAGMA index_info("${esc(index.name)}")`,
-      );
-      if (cols.some((c) => c.name !== null && dropped.has(c.name))) {
-        const sql = `DROP INDEX IF EXISTS "${esc(index.name)}"`;
-        this._log(sql);
-        this.driver.exec(sql);
+    return this._stmt(() => {
+      const tableName = this.resolveTableName();
+      const dropped = new Set(columns);
+      const indexes = this.driver
+        .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
+        .filter((i) => i.name.startsWith("atscript__"));
+      for (const index of indexes) {
+        const cols = this.driver.all<{ name: string | null }>(
+          `PRAGMA index_info("${esc(index.name)}")`,
+        );
+        if (cols.some((c) => c.name !== null && dropped.has(c.name))) {
+          const sql = `DROP INDEX IF EXISTS "${esc(index.name)}"`;
+          this._log(sql);
+          this.driver.exec(sql);
+        }
       }
-    }
 
-    // FTS5 shadow tables: their sync triggers reference indexed columns as
-    // new."col"/old."col", which makes SQLite reject the column drop. Drop
-    // any FTS artifacts touching a dropped column — _syncFtsIndexes recreates
-    // (and rebuilds) whatever the model still declares.
-    for (const name of this._listShadowTables(tableName, "fts")) {
-      const cols = this.driver.all<{ name: string }>(`PRAGMA table_info("${esc(name)}")`);
-      if (cols.some((c) => dropped.has(c.name))) {
-        this._dropFtsTable(name);
+      // FTS5 shadow tables: their sync triggers reference indexed columns as
+      // new."col"/old."col", which makes SQLite reject the column drop. Drop
+      // any FTS artifacts touching a dropped column — _syncFtsIndexes recreates
+      // (and rebuilds) whatever the model still declares.
+      for (const name of this._listShadowTables(tableName, "fts")) {
+        const cols = this.driver.all<{ name: string }>(`PRAGMA table_info("${esc(name)}")`);
+        if (cols.some((c) => dropped.has(c.name))) {
+          this._dropFtsTable(name);
+        }
       }
-    }
 
-    // vec0 shadow tables: same trigger problem. The source column appears only
-    // in the trigger SQL (the vec table's own column is always "embedding"),
-    // so match against the AFTER INSERT trigger body.
-    for (const name of this._listShadowTables(tableName, "vec")) {
-      const trigger = this.driver.all<{ sql: string }>(
-        `SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`,
-        [`${name}__ai`],
-      );
-      const triggerSql = trigger[0]?.sql ?? "";
-      if (columns.some((c) => triggerSql.includes(`"${esc(c)}"`))) {
-        this._dropVecTable(name);
+      // vec0 shadow tables: same trigger problem. The source column appears only
+      // in the trigger SQL (the vec table's own column is always "embedding"),
+      // so match against the AFTER INSERT trigger body.
+      for (const name of this._listShadowTables(tableName, "vec")) {
+        const trigger = this.driver.all<{ sql: string }>(
+          `SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`,
+          [`${name}__ai`],
+        );
+        const triggerSql = trigger[0]?.sql ?? "";
+        if (columns.some((c) => triggerSql.includes(`"${esc(c)}"`))) {
+          this._dropVecTable(name);
+        }
       }
-    }
+    });
   }
 
   async dropTableByName(tableName: string): Promise<void> {
-    this._dropAllFtsTables(tableName);
-    this._dropAllVecTables(tableName);
-    const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
-    this._log(ddl);
-    this.driver.exec(ddl);
+    return this._stmt(() => {
+      this._dropAllFtsTables(tableName);
+      this._dropAllVecTables(tableName);
+      const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
+      this._log(ddl);
+      this.driver.exec(ddl);
+    });
   }
 
   async dropViewByName(viewName: string): Promise<void> {
-    const ddl = `DROP VIEW IF EXISTS "${esc(viewName)}"`;
-    this._log(ddl);
-    this.driver.exec(ddl);
+    return this._stmt(() => {
+      const ddl = `DROP VIEW IF EXISTS "${esc(viewName)}"`;
+      this._log(ddl);
+      this.driver.exec(ddl);
+    });
+  }
+
+  // ── Schema sync primitives (since 0.1.128) ─────────────────────────────
+
+  /**
+   * Drops a group of mutually referencing tables with FK enforcement off for
+   * the duration (`PRAGMA foreign_keys` is a no-op inside a transaction, so
+   * the exclusive connection hold — not a `BEGIN` — keeps another context's
+   * transaction from overlapping it). Safe because schema sync only passes
+   * groups whose referrers are all inside the group.
+   */
+  override async dropTablesByName(tableNames: string[]): Promise<void> {
+    return this._withExclusiveConnection(async () => {
+      this.driver.exec("PRAGMA foreign_keys = OFF");
+      try {
+        for (const name of tableNames) {
+          await this.dropTableByName(name);
+        }
+      } finally {
+        this.driver.exec("PRAGMA foreign_keys = ON");
+      }
+    });
+  }
+
+  async hasRows(tableName?: string): Promise<boolean> {
+    return this._stmt(() => {
+      const sql = `SELECT 1 AS one FROM "${esc(tableName ?? this.resolveTableName())}" LIMIT 1`;
+      this._log(sql);
+      return this.driver.get<{ one: number }>(sql) != null;
+    });
+  }
+
+  /**
+   * Live foreign keys referencing `tableName`: `PRAGMA foreign_key_list` is
+   * outbound-only, so the tables in `sqlite_master` are scanned (a loop
+   * rather than the `pragma_foreign_key_list` table-valued function, which
+   * not every bundled SQLite exposes). Only tables whose CREATE text contains
+   * `REFERENCES` can declare a foreign key — the prefilter is a superset, a
+   * false positive just costs one PRAGMA.
+   */
+  async getReferencingForeignKeys(tableName: string): Promise<TReferencingForeignKey[]> {
+    return this._stmt(() => {
+      const out: TReferencingForeignKey[] = [];
+      const tables = this.driver.all<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql LIKE '%REFERENCES%'`,
+      );
+      for (const { name } of tables) {
+        const rows = this.driver.all<{ id: number; table: string; from: string; to: string }>(
+          `PRAGMA foreign_key_list("${esc(name)}")`,
+        );
+        const byId = new Map<number, TReferencingForeignKey>();
+        for (const row of rows) {
+          if (row.table !== tableName) {
+            continue;
+          }
+          let fk = byId.get(row.id);
+          if (!fk) {
+            fk = { table: name, fields: [], targetFields: [] };
+            byId.set(row.id, fk);
+          }
+          fk.fields.push(row.from);
+          fk.targetFields.push(row.to);
+        }
+        out.push(...byId.values());
+      }
+      return out;
+    });
+  }
+
+  async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
+    return this._stmt(() => {
+      const row = this.driver.get<{ type: string }>(
+        `SELECT type FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')`,
+        [name],
+      );
+      if (!row) {
+        return undefined;
+      }
+      return row.type === "view" ? "view" : "table";
+    });
   }
 
   async renameTable(oldName: string): Promise<void> {
-    const newName = this.resolveTableName();
-    const ddl = `ALTER TABLE "${esc(oldName)}" RENAME TO "${esc(newName)}"`;
-    this._log(ddl);
-    this.driver.exec(ddl);
+    return this._stmt(() => {
+      const newName = this.resolveTableName();
+      const ddl = `ALTER TABLE "${esc(oldName)}" RENAME TO "${esc(newName)}"`;
+      this._log(ddl);
+      this.driver.exec(ddl);
+    });
   }
 
   typeMapper(field: TDbFieldMeta): string {
@@ -667,61 +908,65 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   async getExistingColumnsForTable(tableName: string): Promise<TExistingColumn[]> {
-    const rows = this.driver.all<{
-      name: string;
-      type: string;
-      notnull: number;
-      pk: number;
-      dflt_value: string | null;
-    }>(`PRAGMA table_info("${esc(tableName)}")`);
-    return rows.map((r) => ({
-      name: r.name,
-      type: r.type,
-      notnull: r.notnull === 1,
-      pk: r.pk > 0,
-      dflt_value: normalizeSqliteDefault(r.dflt_value),
-    }));
+    return this._stmt(() => {
+      const rows = this.driver.all<{
+        name: string;
+        type: string;
+        notnull: number;
+        pk: number;
+        dflt_value: string | null;
+      }>(`PRAGMA table_info("${esc(tableName)}")`);
+      return rows.map((r) => ({
+        name: r.name,
+        type: r.type,
+        notnull: r.notnull === 1,
+        pk: r.pk > 0,
+        dflt_value: normalizeSqliteDefault(r.dflt_value),
+      }));
+    });
   }
 
   async syncIndexes(): Promise<void> {
-    const tableName = this.resolveTableName();
+    return this._withExclusiveConnection(async () => {
+      const tableName = this.resolveTableName();
 
-    await this.syncIndexesWithDiff({
-      listExisting: async () =>
-        this.driver
-          .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
-          .filter((i) => !i.name.startsWith("sqlite_"))
-          .map((i) => ({
-            name: i.name,
-            columns: this.driver
-              .all<{ name: string | null }>(`PRAGMA index_info("${esc(i.name)}")`)
-              .map((c) => c.name)
-              .filter((n): n is string => n !== null),
-          })),
-      createIndex: async (index: TDbIndex) => {
-        const unique = index.type === "unique" ? "UNIQUE " : "";
-        // Field names are already resolved to physical names by the generic layer
-        const cols = index.fields
-          .map((f) => `"${esc(f.name)}" ${f.sort === "desc" ? "DESC" : "ASC"}`)
-          .join(", ");
-        const sql = `CREATE ${unique}INDEX IF NOT EXISTS "${esc(index.key)}" ON "${esc(tableName)}" (${cols})`;
-        this._log(sql);
-        this.driver.exec(sql);
-      },
-      dropIndex: async (name: string) => {
-        const sql = `DROP INDEX IF EXISTS "${esc(name)}"`;
-        this._log(sql);
-        this.driver.exec(sql);
-      },
-      // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
-      // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
-      shouldSkipType: (type) => type === "fulltext" || type === "geo",
+      await this.syncIndexesWithDiff({
+        listExisting: async () =>
+          this.driver
+            .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
+            .filter((i) => !i.name.startsWith("sqlite_"))
+            .map((i) => ({
+              name: i.name,
+              columns: this.driver
+                .all<{ name: string | null }>(`PRAGMA index_info("${esc(i.name)}")`)
+                .map((c) => c.name)
+                .filter((n): n is string => n !== null),
+            })),
+        createIndex: async (index: TDbIndex) => {
+          const unique = index.type === "unique" ? "UNIQUE " : "";
+          // Field names are already resolved to physical names by the generic layer
+          const cols = index.fields
+            .map((f) => `"${esc(f.name)}" ${f.sort === "desc" ? "DESC" : "ASC"}`)
+            .join(", ");
+          const sql = `CREATE ${unique}INDEX IF NOT EXISTS "${esc(index.key)}" ON "${esc(tableName)}" (${cols})`;
+          this._log(sql);
+          this.driver.exec(sql);
+        },
+        dropIndex: async (name: string) => {
+          const sql = `DROP INDEX IF EXISTS "${esc(name)}"`;
+          this._log(sql);
+          this.driver.exec(sql);
+        },
+        // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
+        // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
+        shouldSkipType: (type) => type === "fulltext" || type === "geo",
+      });
+
+      // Sync FTS5 virtual tables for fulltext indexes
+      this._syncFtsIndexes(tableName);
+
+      this._syncVecIndexes(tableName);
     });
-
-    // Sync FTS5 virtual tables for fulltext indexes
-    this._syncFtsIndexes(tableName);
-
-    this._syncVecIndexes(tableName);
   }
 
   // ── FTS5 Full-Text Search ─────────────────────────────────────────────────
@@ -790,7 +1035,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     }
 
     this._log(sql, params);
-    return this.driver.all(sql, params);
+    return this._stmt(() => this.driver.all(sql, params));
   }
 
   override async searchWithCount(
@@ -807,7 +1052,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const base = this._buildFtsBase(text, query.filter, indexName);
     const countSql = `SELECT COUNT(*) as cnt ${base.fromWhere}`;
     this._log(countSql, base.params);
-    const row = this.driver.get<{ cnt: number }>(countSql, base.params);
+    const row = await this._stmt(() => this.driver.get<{ cnt: number }>(countSql, base.params));
     return { data, count: row?.cnt ?? 0 };
   }
 
@@ -988,7 +1233,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       );
     }
     const base = this._buildVectorSearchBase(vector, query, indexName);
-    return this._runVectorSearch(base);
+    return this._stmt(() => this._runVectorSearch(base));
   }
 
   override async vectorSearchWithCount(
@@ -1002,11 +1247,13 @@ export class SqliteAdapter extends BaseDbAdapter {
       );
     }
     const base = this._buildVectorSearchBase(vector, query, indexName);
-    const data = this._runVectorSearch(base);
     const countSql = `SELECT COUNT(*) AS cnt ${base.fromWhere}`;
-    this._log(countSql, base.params);
-    const row = this.driver.get<{ cnt: number }>(countSql, base.params);
-    return { data, count: row?.cnt ?? 0 };
+    return this._stmt(() => {
+      const data = this._runVectorSearch(base);
+      this._log(countSql, base.params);
+      const row = this.driver.get<{ cnt: number }>(countSql, base.params);
+      return { data, count: row?.cnt ?? 0 };
+    });
   }
 
   private _runVectorSearch(base: {
@@ -1196,7 +1443,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       this._prepareGeoSearch(point, query, indexName),
     );
     this._log(sql, params);
-    const rows = this.driver.all(sql, params);
+    const rows = await this._stmt(() => this.driver.all(sql, params));
     return rows.map((row) => renameGeoDistance(row));
   }
 
@@ -1216,8 +1463,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     this._log(countFrag.sql, countFrag.params);
-    const rows = this.driver.all(sql, params);
-    const countRow = this.driver.get<{ cnt: number }>(countFrag.sql, countFrag.params);
+    const { rows, countRow } = await this._stmt(() => ({
+      rows: this.driver.all(sql, params),
+      countRow: this.driver.get<{ cnt: number }>(countFrag.sql, countFrag.params),
+    }));
     return {
       data: rows.map((row) => renameGeoDistance(row)),
       count: countRow?.cnt ?? 0,

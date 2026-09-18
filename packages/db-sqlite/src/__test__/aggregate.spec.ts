@@ -7,6 +7,7 @@ import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 import { prepareFixtures } from "./test-utils";
 
 let AggOrders: any;
+let AggPages: any;
 
 describe("SqliteAdapter aggregate", () => {
   let driver: BetterSqlite3Driver;
@@ -17,6 +18,7 @@ describe("SqliteAdapter aggregate", () => {
     await prepareFixtures();
     const fixtures = await import("./fixtures/agg-orders.as");
     AggOrders = fixtures.AggOrders;
+    AggPages = fixtures.AggPages;
   });
 
   beforeEach(async () => {
@@ -121,6 +123,24 @@ describe("SqliteAdapter aggregate", () => {
     expect(result[1].total).toBe(125);
   });
 
+  it("$having on an aggregate alias executes (expression form, same SQL as PostgreSQL)", async () => {
+    const result = await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["currency"],
+        $select: [
+          "currency",
+          { $fn: "sum", $field: "amount", $as: "total" },
+          { $fn: "count", $field: "*", $as: "cnt" },
+        ] as any,
+        $having: { total: { $gt: 300 }, $or: [{ currency: "USD" }, { cnt: { $gte: 5 } }] } as any,
+      },
+    });
+
+    // USD: 100 + 200 + 50 = 350 (> 300, currency matches); EUR: 225 (filtered out)
+    expect(result).toEqual([{ currency: "USD", total: 350, cnt: 3 }]);
+  });
+
   it("supports pagination with $limit and $skip", async () => {
     const result = await table.aggregate({
       filter: {},
@@ -176,5 +196,87 @@ describe("SqliteAdapter aggregate", () => {
     const active = result.find((r) => r.status === "active")!;
     expect(active.total_rows).toBe(3);
     expect(active.with_amount).toBe(3); // all active rows have amount
+  });
+
+  // Aggregate rows have the regular-row shape (since 0.1.128): a grouped
+  // flattened leaf (`stats__views`) comes back nested, not as a dotted key.
+  it("grouped flattened-object keys come back nested; $having matches them by logical path", async () => {
+    const pages = new AtscriptDbTable(AggPages, adapter);
+    await pages.ensureTable();
+    await pages.insertMany([
+      { id: 1, title: "a", stats: { views: 10 } },
+      { id: 2, title: "b", stats: { views: 10 } },
+      { id: 3, title: "c", stats: { views: 20 } },
+    ]);
+    const cnt = { $fn: "count", $field: "*", $as: "cnt" };
+
+    const result = await pages.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["stats.views"],
+        $select: ["stats.views", cnt] as any,
+        $sort: { "stats.views": 1 } as any,
+      },
+    });
+    expect(result).toEqual([
+      { stats: { views: 10 }, cnt: 2 },
+      { stats: { views: 20 }, cnt: 1 },
+    ]);
+
+    const having = await pages.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["stats.views"],
+        $select: ["stats.views", cnt] as any,
+        $having: { "stats.views": { $gte: 20 } } as any,
+      },
+    });
+    expect(having).toEqual([{ stats: { views: 20 }, cnt: 1 }]);
+  });
+
+  // Aggregate rows go through the same reverse mapping as regular rows (since
+  // 0.1.128): a grouped boolean column is coerced from the stored 0 / 1.
+  it("a grouped boolean column comes back as true / false", async () => {
+    const pages = new AtscriptDbTable(AggPages, adapter);
+    await pages.ensureTable();
+    await pages.insertMany([
+      { id: 1, title: "a", stats: { views: 1 }, published: true },
+      { id: 2, title: "b", stats: { views: 1 }, published: false },
+      { id: 3, title: "c", stats: { views: 1 }, published: true },
+    ]);
+
+    const result = await pages.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["published"],
+        $select: ["published", { $fn: "count", $field: "*", $as: "cnt" }] as any,
+        $sort: { published: 1 } as any,
+      },
+    });
+    expect(result).toEqual([
+      { published: false, cnt: 1 },
+      { published: true, cnt: 2 },
+    ]);
+  });
+
+  it("$having on a real but non-grouped column is rejected in core before any SQL (since 0.1.128)", async () => {
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: {
+          $groupBy: ["status"],
+          $select: ["status", { $fn: "sum", $field: "amount", $as: "total" }] as any,
+          $having: { amount: { $gt: 1 } } as any,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [
+        {
+          path: "amount",
+          message: '$having key "amount" must be an aggregate alias or a $groupBy field',
+        },
+      ],
+    });
   });
 });

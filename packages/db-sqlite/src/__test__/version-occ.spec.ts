@@ -209,6 +209,74 @@ describe("OCC ($cas + auto-bump) end-to-end via SqliteAdapter + AtscriptDbTable"
     expect(row.version).toBe(1);
   });
 
+  // ── Versioned touch (since 0.1.128) ─────────────────────────────────────
+  // A PK-only patch carrying `$cas` executes the CAS statement instead of the
+  // former fabricated `{ 1, 0 }` short-circuit: hit → bump, stale/missing → 0.
+
+  it("touch: PK-only $cas hit bumps the version and reports { 1, 1 }", async () => {
+    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0 } as any);
+    const result = await users.updateOne({ id: 1, $cas: { version: 0 } } as any);
+    expect(result).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    const row = (await users.findOne({ filter: { id: 1 }, controls: {} })) as any;
+    expect(row.version).toBe(1);
+    expect(row.name).toBe("Ada");
+  });
+
+  it("touch: stale $cas reports { 0, 0 } and leaves the version untouched", async () => {
+    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0 } as any);
+    const result = await users.updateOne({ id: 1, $cas: { version: 99 } } as any);
+    expect(result).toEqual({ matchedCount: 0, modifiedCount: 0 });
+    expect(((await users.findOne({ filter: { id: 1 }, controls: {} })) as any).version).toBe(0);
+  });
+
+  it("touch: missing row reports { 0, 0 }", async () => {
+    const result = await users.updateOne({ id: 404, $cas: { version: 0 } } as any);
+    expect(result).toEqual({ matchedCount: 0, modifiedCount: 0 });
+  });
+
+  it("touch: two sequential touches with the same expected version — the second is stale", async () => {
+    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0 } as any);
+    expect((await users.updateOne({ id: 1, $cas: { version: 0 } } as any)).matchedCount).toBe(1);
+    expect((await users.updateOne({ id: 1, $cas: { version: 0 } } as any)).matchedCount).toBe(0);
+    expect(((await users.findOne({ filter: { id: 1 }, controls: {} })) as any).version).toBe(1);
+  });
+
+  it("PK-only patch without $cas is a no-op: honest match, no bump", async () => {
+    await users.insertOne({ id: 1, name: "Ada", status: "active", counter: 0 } as any);
+    expect(await users.updateOne({ id: 1 } as any)).toEqual({ matchedCount: 1, modifiedCount: 0 });
+    expect(await users.updateOne({ id: 2 } as any)).toEqual({ matchedCount: 0, modifiedCount: 0 });
+    expect(((await users.findOne({ filter: { id: 1 }, controls: {} })) as any).version).toBe(0);
+  });
+
+  it("bulk mixed: touch + stale touch + plain patch aggregate honestly", async () => {
+    await users.insertMany([
+      { id: 1, name: "A", status: "active", counter: 0 },
+      { id: 2, name: "B", status: "active", counter: 0 },
+      { id: 3, name: "C", status: "active", counter: 0 },
+    ] as any[]);
+    const result = await users.bulkUpdate([
+      { id: 1, $cas: { version: 0 } }, // touch → bump
+      { id: 2, $cas: { version: 7 } }, // stale → skipped
+      { id: 3, name: "C2" }, // plain
+    ] as any[]);
+    expect(result).toEqual({ matchedCount: 2, modifiedCount: 2 });
+    const v = async (id: number) =>
+      ((await users.findOne({ filter: { id }, controls: {} })) as any).version;
+    expect(await v(1)).toBe(1);
+    expect(await v(2)).toBe(0);
+    expect(await v(3)).toBe(1);
+  });
+
+  it("updateMany with an empty patch counts matches and never emits an empty SET", async () => {
+    await users.insertMany([
+      { id: 1, name: "A", status: "active", counter: 0 },
+      { id: 2, name: "B", status: "inactive", counter: 0 },
+    ] as any[]);
+    const result = await users.updateMany({ status: "active" }, {} as any);
+    expect(result).toEqual({ matchedCount: 1, modifiedCount: 0 });
+    expect(((await users.findOne({ filter: { id: 1 }, controls: {} })) as any).version).toBe(0);
+  });
+
   // WHY: regression guard — the metadata-layer change (Step 5) must surface
   // in CREATE TABLE DDL as NOT NULL DEFAULT 0. If this drifts, ADD COLUMN
   // backfills break and inserts that omit `version` reject at the DB layer.
