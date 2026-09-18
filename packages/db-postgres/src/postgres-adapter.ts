@@ -82,6 +82,52 @@ function parseCount(value: number | string | undefined): number {
  * const users = space.getTable(UsersType)
  * ```
  */
+/** The suffix PostgreSQL gives an auto-named constraint of each `pg_constraint.contype`. */
+const PG_CONSTRAINT_LABELS: Record<string, string | undefined> = {
+  p: "pkey",
+  u: "key",
+  f: "fkey",
+  n: "not_null",
+};
+
+/** UTF-8 byte length of `s`. */
+function byteLength(s: string): number {
+  return Buffer.byteLength(s, "utf8");
+}
+
+/** Cuts `s` to at most `bytes` UTF-8 bytes (whole characters only). */
+function truncateBytes(s: string, bytes: number): string {
+  let out = s;
+  while (byteLength(out) > bytes) {
+    out = out.slice(0, -1);
+  }
+  return out;
+}
+
+/**
+ * The name PostgreSQL generates for an unnamed constraint (`makeObjectName`):
+ * `<table>_<columns joined by _>_<label>`, with the table and column parts
+ * shortened — the longer one first — until the whole fits 63 bytes
+ * (`NAMEDATALEN - 1`). Used to recognise and to rename the recreated table's
+ * constraints. Ignores the `1`, `2`, … suffix PostgreSQL appends on a clash.
+ */
+export function pgObjectName(table: string, columns: string[], label: string): string {
+  const name2 = columns.join("_");
+  const overhead = label.length + 1 + (name2 ? 1 : 0);
+  const avail = 63 - overhead;
+  let n1 = byteLength(table);
+  let n2 = byteLength(name2);
+  while (n1 + n2 > avail) {
+    if (n1 > n2) {
+      n1--;
+    } else {
+      n2--;
+    }
+  }
+  const head = truncateBytes(table, n1);
+  return name2 ? `${head}_${truncateBytes(name2, n2)}_${label}` : `${head}_${label}`;
+}
+
 export class PostgresAdapter extends BaseDbAdapter {
   override supportsColumnModify = true;
 
@@ -1001,7 +1047,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     try {
       await conn.exec("BEGIN");
 
-      // Save and drop FK constraints from OTHER tables that reference this table
+      // Save and drop FK constraints from OTHER tables that reference this
+      // table — whether they reference its primary key or a UNIQUE
+      // constraint. Rows come ordinal-ordered and each referenced column is
+      // matched by its position in the referenced key, so a multi-column
+      // FK's pairs line up; each is restored below under its captured name.
+      // The table's own self-referencing FKs are not captured: the old table
+      // goes away with them and the executor's `syncForeignKeys` re-adds them
+      // on the recreated table (its CREATE omits them, see below).
       const fkRefs = await conn.all<{
         constraint_name: string;
         table_name: string;
@@ -1021,12 +1074,14 @@ export class PostgresAdapter extends BaseDbAdapter {
            ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
          JOIN information_schema.key_column_usage kcur
            ON kcur.constraint_name = rc.unique_constraint_name AND kcur.table_schema = rc.unique_constraint_schema
-              AND kcur.ordinal_position = kcu.ordinal_position
+              AND kcur.ordinal_position = kcu.position_in_unique_constraint
          WHERE rc.unique_constraint_schema = COALESCE($1, 'public')
            AND rc.unique_constraint_name IN (
              SELECT constraint_name FROM information_schema.table_constraints
-             WHERE table_name = $2 AND table_schema = COALESCE($1, 'public') AND constraint_type = 'PRIMARY KEY'
-           )`,
+             WHERE table_name = $2 AND table_schema = COALESCE($1, 'public')
+               AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+           )
+         ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position`,
         [schema, this._table.tableName],
       );
 
@@ -1042,7 +1097,11 @@ export class PostgresAdapter extends BaseDbAdapter {
           onUpdate: string;
         }
       >();
+      const ownSchema = schema ?? "public";
       for (const fk of fkRefs) {
+        if (fk.table_schema === ownSchema && fk.table_name === this._table.tableName) {
+          continue;
+        }
         let entry = fkByName.get(fk.constraint_name);
         if (!entry) {
           entry = {
@@ -1066,7 +1125,9 @@ export class PostgresAdapter extends BaseDbAdapter {
         await conn.exec(ddl);
       }
 
-      // 1. Create new table with temp name
+      // 1. Create new table with temp name. A self-referencing FK would
+      //    point at the OLD table (and block its drop): it is left out, and
+      //    `syncForeignKeys` adds it to the recreated table afterwards.
       const createSql = buildCreateTable(
         tempName,
         this._table.fieldDescriptors,
@@ -1075,6 +1136,7 @@ export class PostgresAdapter extends BaseDbAdapter {
           incrementFields: this._incrementFields,
           autoIncrementStart: this._autoIncrementStart,
           typeMapper: (field) => this.typeMapper(field),
+          deferForeignKeysTo: new Set([this._table.tableName]),
         },
       );
       this._log(createSql);
@@ -1115,18 +1177,31 @@ export class PostgresAdapter extends BaseDbAdapter {
         await conn.exec(copySql);
       }
 
-      // 4. Drop old, rename new
-      await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)} CASCADE`);
+      // 4. Drop old, rename new. Never CASCADE: an object outside the sync
+      //    inventory (a user view, an unmanaged FK) still depending on the
+      //    table makes PostgreSQL refuse (2BP01) — the transaction rolls back
+      //    and the error names the dependent object (see the catch below).
+      const dropSql = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
+      this._log(dropSql);
+      await conn.exec(dropSql);
       await conn.exec(
         `ALTER TABLE ${quoteTableName(tempName)} RENAME TO ${qi(this._table.tableName)}`,
       );
 
-      // 5. Restore FK constraints from other tables (PG-M5)
+      // The temp table was created with unnamed constraints, so after the
+      // RENAME they still carry PostgreSQL's names for the temp table
+      // (`<tmp>_pkey`, `<tmp>_<col>_fkey`, `<tmp>_<col>_key`); rename them to
+      // the names the final table would have given them. The old table is
+      // gone, so its names are free — a target that still exists is skipped
+      // (logged), never overwritten.
+      await this._renameTempConstraints(conn, baseTempName);
+
+      // 5. Restore FK constraints from other tables under their captured names
       const resolvedTable = this.resolveTableName();
-      for (const [, fk] of fkByName) {
+      for (const [name, fk] of fkByName) {
         const localCols = fk.cols.map((c) => qi(c)).join(", ");
         const refCols = fk.refCols.map((c) => qi(c)).join(", ");
-        let ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} ADD FOREIGN KEY (${localCols}) REFERENCES ${quoteTableName(resolvedTable)} (${refCols})`;
+        let ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} ADD CONSTRAINT ${qi(name)} FOREIGN KEY (${localCols}) REFERENCES ${quoteTableName(resolvedTable)} (${refCols})`;
         if (fk.onDelete !== "NO ACTION") {
           ddl += ` ON DELETE ${fk.onDelete}`;
         }
@@ -1140,14 +1215,90 @@ export class PostgresAdapter extends BaseDbAdapter {
       await conn.exec("COMMIT");
 
       // Reset identity sequences after data copy — the INSERT INTO ... SELECT
-      // uses explicit values, so the sequence doesn't advance.
+      // uses explicit values, so the sequence doesn't advance. Runs on the
+      // pool after COMMIT: a failure here rejects a recreate that has already
+      // committed (accepted — the next run's `afterSyncTable` retries it).
       await this._resetIdentitySequences();
     } catch (err) {
       await conn.exec("ROLLBACK").catch(() => {});
+      // PostgreSQL puts the dependent object of a refused DROP (2BP01) — and
+      // the offending row of a failed FK restore — in `detail`; carry it so
+      // the schema-sync error entry names it (the same error is rethrown, so
+      // `code` / `detail` stay readable on it).
+      const detail = (err as { detail?: unknown }).detail;
+      if (err instanceof Error && typeof detail === "string" && detail.length > 0) {
+        err.message = `${err.message} — ${detail}`;
+      }
       throw err;
     } finally {
       conn.release();
     }
+  }
+
+  /**
+   * Renames the recreated table's auto-named constraints from the temp
+   * table's names to the final table's: `<tmp>_pkey` → `<table>_pkey`,
+   * `<tmp>_<cols>_fkey` → `<table>_<cols>_fkey`, and so on. Runs inside the
+   * recreate transaction, after the RENAME. A constraint is recognised by
+   * its kind and columns — its name equals the one PostgreSQL generates for
+   * the temp table ({@link pgObjectName}, 63-byte truncation included) — so
+   * a long table name matches too. A target name already taken (a primary /
+   * unique constraint's index shares its name with every relation in the
+   * schema; other kinds with the table's constraints) is skipped and logged.
+   */
+  private async _renameTempConstraints(conn: TPgConnection, baseTempName: string): Promise<void> {
+    const table = this._table.tableName;
+    const rows = await conn.all<{ conname: string; contype: string; columns: string[] | null }>(
+      `SELECT c.conname, c.contype,
+              (SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS columns
+       FROM pg_constraint c
+       JOIN pg_class cl ON cl.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = cl.relnamespace
+       WHERE cl.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       ORDER BY c.conname`,
+      [table, this._schema],
+    );
+    const taken = new Set(rows.map((r) => r.conname));
+    for (const { conname, contype, columns } of rows) {
+      const label = PG_CONSTRAINT_LABELS[contype];
+      if (!label) {
+        continue;
+      }
+      const cols = contype === "p" ? [] : (columns ?? []);
+      if (conname !== pgObjectName(baseTempName, cols, label)) {
+        continue;
+      }
+      const target = pgObjectName(table, cols, label);
+      if (target === conname) {
+        // Both names truncate to the same identifier — nothing to rename
+        continue;
+      }
+      const clash =
+        contype === "p" || contype === "u"
+          ? await this._relationExists(conn, target)
+          : taken.has(target);
+      if (clash) {
+        this._log(`-- constraint "${conname}" keeps its name: "${target}" already exists`);
+        continue;
+      }
+      const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} RENAME CONSTRAINT ${qi(conname)} TO ${qi(target)}`;
+      this._log(ddl);
+      await conn.exec(ddl);
+      taken.add(target);
+    }
+  }
+
+  /** Whether a relation (table, index, view, …) named `name` exists in this adapter's schema. */
+  private async _relationExists(conn: TPgConnection, name: string): Promise<boolean> {
+    const row = await conn.get<{ present: boolean }>(
+      `SELECT true AS present FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE c.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
+      [name, this._schema],
+    );
+    return row?.present ?? false;
   }
 
   async afterSyncTable(): Promise<void> {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "vite-plus/test";
 import { AtscriptDbTable, AtscriptDbView, DbSpace } from "@atscript/db";
 import type { TColumnDiff, TDbFieldMeta } from "@atscript/db";
 
-import { PostgresAdapter } from "../postgres-adapter";
+import { PostgresAdapter, pgObjectName } from "../postgres-adapter";
 import { prepareFixtures, createMockDriver } from "./test-utils";
 
 let fx: Record<string, any>;
@@ -299,5 +299,273 @@ describe("PostgresAdapter — administrative adapter (no registered readable)", 
   it("table-scoped operations on an unbound adapter fail with a clear error, not a TypeError", async () => {
     const adapter = new PostgresAdapter(createMockDriver());
     await expect(adapter.hasRows()).rejects.toThrow(/no registered readable/);
+  });
+});
+
+// ── recreateTable (0.1.129): no CASCADE, inbound FKs restored by name, own constraints renamed ──
+
+/** One inbound-FK row as `recreateTable`'s capture query returns it. */
+function fkRow(
+  constraint: string,
+  table: string,
+  col: string,
+  refCol: string,
+  rules: { del?: string; upd?: string } = {},
+) {
+  return {
+    constraint_name: constraint,
+    table_name: table,
+    table_schema: "public",
+    column_name: col,
+    ref_column_name: refCol,
+    delete_rule: rules.del ?? "NO ACTION",
+    update_rule: rules.upd ?? "NO ACTION",
+  };
+}
+
+/** A constraint row of the recreated table as `_renameTempConstraints` reads it. */
+type TConRow = { conname: string; contype: string; columns: string[] | null };
+
+/** A driver that answers the capture, column and constraint queries of a recreate. */
+function recreateDriver(opts: {
+  table: string;
+  inbound: ReturnType<typeof fkRow>[];
+  /** Constraints on the table after the RENAME, given the temp name PostgreSQL named them for. */
+  constraints?: (tmp: string) => TConRow[];
+  /** Relation names present in the schema (the `pg_class` check before a PK/UNIQUE rename). */
+  relations?: string[];
+  execError?: (sql: string) => Error | undefined;
+}) {
+  let tmp = "";
+  const driver = createMockDriver({
+    allResult: (sql, params) => {
+      if (sql.includes("referential_constraints")) {
+        return opts.inbound;
+      }
+      if (sql.includes("information_schema.columns")) {
+        return [{ column_name: "id" }, { column_name: "code" }, { column_name: "label" }];
+      }
+      if (sql.includes("pg_constraint")) {
+        return (
+          opts.constraints ??
+          ((t) => [{ conname: pgObjectName(t, [], "pkey"), contype: "p", columns: ["id"] }])
+        )(tmp);
+      }
+      throw new Error(`unexpected all(): ${sql} ${JSON.stringify(params)}`);
+    },
+    getResult: (sql: string, params?: unknown[]) =>
+      sql.includes("pg_class") && (opts.relations ?? []).includes(params![0] as string)
+        ? { present: true }
+        : null,
+    execError: (sql) => {
+      const m = new RegExp(`CREATE TABLE IF NOT EXISTS "(${opts.table}__tmp_\\d+)"`).exec(sql);
+      if (m) {
+        tmp = m[1];
+      }
+      return opts.execError?.(sql);
+    },
+  });
+  return { driver, execs: () => driver.calls.filter((c) => c.method === "exec").map((c) => c.sql) };
+}
+
+describe("PostgresAdapter — recreateTable", () => {
+  let Rn: Record<string, any>;
+  beforeAll(async () => {
+    Rn = await import("./fixtures/recreate-names.as");
+  });
+
+  it("drops without CASCADE and restores inbound FKs under their captured names (one statement per constraint)", async () => {
+    const { driver, execs } = recreateDriver({
+      table: "pf_tokens",
+      inbound: [
+        // A two-column FK is one constraint, columns in ordinal order
+        fkRow("children_pa_pb_fkey", "children", "pa", "id", { del: "CASCADE" }),
+        fkRow("children_pa_pb_fkey", "children", "pb", "code", { del: "CASCADE" }),
+        fkRow("logs_token_fkey", "logs", "tokenId", "id", { upd: "SET NULL" }),
+      ],
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await adapter.recreateTable();
+
+    const sql = execs();
+    expect(sql).toContain('DROP TABLE IF EXISTS "pf_tokens"');
+    expect(sql.some((s) => s.startsWith("DROP TABLE") && s.includes("CASCADE"))).toBe(false);
+    expect(sql).toContain(
+      'ALTER TABLE "public"."children" DROP CONSTRAINT IF EXISTS "children_pa_pb_fkey"',
+    );
+    expect(sql).toContain(
+      'ALTER TABLE "public"."logs" DROP CONSTRAINT IF EXISTS "logs_token_fkey"',
+    );
+    expect(sql).toContain(
+      'ALTER TABLE "public"."children" ADD CONSTRAINT "children_pa_pb_fkey" FOREIGN KEY ("pa", "pb") REFERENCES "pf_tokens" ("id", "code") ON DELETE CASCADE',
+    );
+    expect(sql).toContain(
+      'ALTER TABLE "public"."logs" ADD CONSTRAINT "logs_token_fkey" FOREIGN KEY ("tokenId") REFERENCES "pf_tokens" ("id") ON UPDATE SET NULL',
+    );
+    expect(sql.filter((s) => s.includes("ADD CONSTRAINT"))).toHaveLength(2);
+    expect(sql.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(s))).toEqual(["BEGIN", "COMMIT"]);
+    // The capture query includes FKs to UNIQUE targets, pairs the referenced
+    // column by its position in the referenced key, ordinal-ordered
+    const capture = driver.calls.find((c) => c.sql.includes("referential_constraints"))!;
+    expect(capture.sql).toContain("constraint_type IN ('PRIMARY KEY', 'UNIQUE')");
+    expect(capture.sql).toContain("kcur.ordinal_position = kcu.position_in_unique_constraint");
+    expect(capture.sql).toContain(
+      "ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position",
+    );
+    expect(capture.params).toEqual([null, "pf_tokens"]);
+  });
+
+  it("a self-referencing FK is neither dropped nor restored; the temp CREATE omits it (syncForeignKeys re-adds it)", async () => {
+    const { driver, execs } = recreateDriver({
+      table: "rn_folders",
+      inbound: [
+        fkRow("rn_folders_parentId_fkey", "rn_folders", "parentId", "id"),
+        fkRow(
+          "rn_long_folderId_fkey",
+          "rn_a_long_table_name_past_the_pg_limit_x_1234",
+          "folderId",
+          "id",
+        ),
+      ],
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(Rn.RnFolder, adapter);
+    await adapter.recreateTable();
+
+    const sql = execs();
+    expect(sql.filter((s) => s.includes("DROP CONSTRAINT"))).toEqual([
+      'ALTER TABLE "public"."rn_a_long_table_name_past_the_pg_limit_x_1234" DROP CONSTRAINT IF EXISTS "rn_long_folderId_fkey"',
+    ]);
+    expect(sql.filter((s) => s.includes("ADD CONSTRAINT"))).toEqual([
+      'ALTER TABLE "public"."rn_a_long_table_name_past_the_pg_limit_x_1234" ADD CONSTRAINT "rn_long_folderId_fkey" FOREIGN KEY ("folderId") REFERENCES "rn_folders" ("id")',
+    ]);
+    const create = sql.find((s) => s.startsWith("CREATE TABLE IF NOT EXISTS"))!;
+    expect(create).not.toContain("REFERENCES");
+  });
+
+  it("renames the recreated table's constraints to the final names and skips a taken name", async () => {
+    const { driver, execs } = recreateDriver({
+      table: "pf_tokens",
+      inbound: [],
+      constraints: (tmp) => [
+        { conname: `${tmp}_pkey`, contype: "p", columns: ["id"] },
+        { conname: `${tmp}_ownerId_fkey`, contype: "f", columns: ["ownerId"] },
+        { conname: `${tmp}_code_key`, contype: "u", columns: ["code"] },
+        // Not PostgreSQL's name for the temp table → left alone
+        { conname: "pf_tokens_code_key", contype: "u", columns: ["code"] },
+        { conname: "tokens_label_check", contype: "c", columns: ["label"] },
+      ],
+      // `pf_tokens_code_key` is an index in the schema too — the UNIQUE rename must not collide
+      relations: ["pf_tokens_code_key"],
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await adapter.recreateTable();
+
+    const sql = execs();
+    const create = sql.find((s) => s.startsWith("CREATE TABLE IF NOT EXISTS"))!;
+    const tmp = /"(pf_tokens__tmp_\d+)"/.exec(create)![1];
+    const renames = sql.filter((s) => s.includes("RENAME CONSTRAINT"));
+    // `<tmp>_code_key` → `pf_tokens_code_key` is skipped (taken); the check constraint is not auto-named
+    expect(renames).toEqual([
+      `ALTER TABLE "pf_tokens" RENAME CONSTRAINT "${tmp}_pkey" TO "pf_tokens_pkey"`,
+      `ALTER TABLE "pf_tokens" RENAME CONSTRAINT "${tmp}_ownerId_fkey" TO "pf_tokens_ownerId_fkey"`,
+    ]);
+    // Renames run after the RENAME TO and before COMMIT
+    const renameTo = sql.findIndex((s) => s.includes(`RENAME TO "pf_tokens"`));
+    expect(sql.indexOf(renames[0])).toBeGreaterThan(renameTo);
+    expect(sql.indexOf(renames[1])).toBeLessThan(sql.indexOf("COMMIT"));
+    // The constraint query targets the renamed table; the PK/UNIQUE targets were checked in pg_class
+    const query = driver.calls.find((c) => c.method === "all" && c.sql.includes("pg_constraint"))!;
+    expect(query.params).toEqual(["pf_tokens", null]);
+    const checks = driver.calls.filter((c) => c.method === "get" && c.sql.includes("pg_class"));
+    expect(checks.map((c) => c.params![0])).toEqual(["pf_tokens_pkey", "pf_tokens_code_key"]);
+  });
+
+  it("recognises and renames the constraints of a table whose auto-names PostgreSQL truncated", async () => {
+    const long = "rn_a_long_table_name_past_the_pg_limit_x_1234";
+    const { driver, execs } = recreateDriver({
+      table: long,
+      inbound: [],
+      constraints: (tmp) => [
+        { conname: pgObjectName(tmp, [], "pkey"), contype: "p", columns: ["id"] },
+        { conname: pgObjectName(tmp, ["folderId"], "fkey"), contype: "f", columns: ["folderId"] },
+        { conname: pgObjectName(tmp, ["code"], "not_null"), contype: "n", columns: ["code"] },
+      ],
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(Rn.RnLongName, adapter);
+    await adapter.recreateTable();
+
+    const sql = execs();
+    const tmp = new RegExp(`"(${long}__tmp_\\d+)"`).exec(
+      sql.find((s) => s.startsWith("CREATE TABLE IF NOT EXISTS"))!,
+    )![1];
+    // The temp-table names exceed 63 bytes before PostgreSQL truncates them,
+    // so a `<tmp>` prefix match would miss them
+    expect(`${tmp}_pkey`.length).toBeGreaterThan(63);
+    const expected = [
+      [pgObjectName(tmp, [], "pkey"), `${long}_pkey`],
+      [pgObjectName(tmp, ["folderId"], "fkey"), `${long}_folderId_fkey`],
+      [pgObjectName(tmp, ["code"], "not_null"), `${long}_code_not_null`],
+    ];
+    for (const [from, to] of expected) {
+      expect(from.length).toBeLessThanOrEqual(63);
+      expect(from.startsWith(tmp)).toBe(false);
+      expect(from).not.toBe(to);
+    }
+    expect(sql.filter((s) => s.includes("RENAME CONSTRAINT"))).toEqual(
+      expected.map(([from, to]) => `ALTER TABLE "${long}" RENAME CONSTRAINT "${from}" TO "${to}"`),
+    );
+  });
+
+  it("a refused DROP (2BP01) rolls back and rethrows the same error with PostgreSQL's detail appended", async () => {
+    const boom = Object.assign(
+      new Error("cannot drop table pf_tokens because other objects depend on it"),
+      { code: "2BP01", detail: "view token_report depends on table pf_tokens" },
+    );
+    const { driver, execs } = recreateDriver({
+      table: "pf_tokens",
+      inbound: [fkRow("logs_token_fkey", "logs", "tokenId", "id")],
+      execError: (sql) => (sql.startsWith("DROP TABLE") ? boom : undefined),
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await expect(adapter.recreateTable()).rejects.toBe(boom);
+    expect(boom.message).toBe(
+      "cannot drop table pf_tokens because other objects depend on it — view token_report depends on table pf_tokens",
+    );
+    expect(boom.code).toBe("2BP01");
+    const sql = execs();
+    expect(sql.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(s))).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(sql.some((s) => s.includes("ADD CONSTRAINT"))).toBe(false);
+    // Nothing ran on the pool after the rollback (no sequence reset)
+    expect(driver.calls.filter((c) => c.method === "run")).toEqual([]);
+  });
+
+  it("an error without detail is rethrown as-is", async () => {
+    const boom = new Error("boom");
+    const { driver } = recreateDriver({
+      table: "pf_tokens",
+      inbound: [],
+      execError: (sql) => (sql.startsWith("DROP TABLE") ? boom : undefined),
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await expect(adapter.recreateTable()).rejects.toBe(boom);
+    expect(boom.message).toBe("boom");
+  });
+});
+
+describe("pgObjectName", () => {
+  it("joins table, columns and label; shortens the longer part first to fit 63 bytes", () => {
+    expect(pgObjectName("users", [], "pkey")).toBe("users_pkey");
+    expect(pgObjectName("users", ["a", "b"], "fkey")).toBe("users_a_b_fkey");
+    const long = "t".repeat(70);
+    expect(pgObjectName(long, [], "pkey")).toBe(`${"t".repeat(58)}_pkey`);
+    const name = pgObjectName(long, ["c".repeat(30)], "key");
+    expect(name.length).toBe(63);
+    expect(name).toBe(`${"t".repeat(29)}_${"c".repeat(29)}_key`);
   });
 });
