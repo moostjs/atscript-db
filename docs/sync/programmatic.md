@@ -223,7 +223,7 @@ try {
 }
 ```
 
-Schema-level errors don't throw — they appear as entries with `status: 'error'` and populated `errors` arrays. This covers rename conflicts, type changes without a sync method, and index/FK DDL failures (e.g. adding a unique index over duplicate data).
+Schema-level errors don't throw — they appear as entries with `status: 'error'` and populated `errors` arrays: rename conflicts, type changes without a sync method and, since 0.1.129, any DDL the engine refuses inside a table's step (`<phase> failed on <table>: …` — the run completes and the other tables are persisted; see [What triggers `error` status](./index.md#what-triggers-error-status)). What still rejects `run()` is what happens outside a table's DDL: lock problems, a connection failure, an error during discovery.
 
 Error entries have retry semantics: the schema hash and the errored table's snapshot are **not** persisted, so the next `run()` (or application boot) attempts the same changes again instead of reporting `'up-to-date'` over a diverged schema. Once the underlying conflict is resolved (data cleaned up, annotation fixed), the retry converges and the hash settles:
 

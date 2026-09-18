@@ -37,7 +37,11 @@ import {
   dropOutdatedView,
   viewPlanStatus,
   willDropRecreate,
-  safeModeSkips,
+  planTableInit,
+  typeChangeStrategy,
+  typeChangeErrors,
+  pkLabel,
+  pkRebuildUnsupported,
   describeTypeChanges,
   describeNullableDefaults,
   type TSyncExecutorDeps,
@@ -82,13 +86,14 @@ export interface TSyncOptions {
    */
   safe?: boolean;
   /**
-   * Logger for sync progress and failures (index/FK DDL errors are logged,
-   * not thrown). Default: NoopLogger — pass `console` to surface them.
+   * Logger for sync progress and failures (DDL errors inside a table's step
+   * are logged and recorded on its entry, not thrown). Default: NoopLogger —
+   * pass `console` to surface them.
    */
   logger?: TGenericLogger;
   /**
-   * What to do when the run finishes with errored entries (failed index/FK
-   * DDL, external-view checks, pre-flight refusals, …):
+   * What to do when the run finishes with errored entries (failed DDL inside
+   * a table's step, external-view checks, pre-flight refusals, …):
    * - `"warn"` (default) — emit a one-line summary plus per-entry error lines
    *   via the configured logger, **falling back to `console` when no logger
    *   is set** (errors are never silently swallowed by the NoopLogger default);
@@ -226,10 +231,6 @@ function buildFkChangeDetails(
     parts.push(`onUpdate ${existing.onUpdate ?? "noAction"} → ${desired.onUpdate ?? "noAction"}`);
   }
   return parts.join(", ");
-}
-
-function pkLabel(change: { from: string[]; to: string[] }): string {
-  return `(${change.from.join(", ")} → ${change.to.join(", ")})`;
 }
 
 function sortedUnique(names: Iterable<string>): string[] {
@@ -601,7 +602,7 @@ export class SchemaSync {
     // Every read below is pure introspection — each phase runs in parallel,
     // results keep inventory order.
     const tableFacts = await Promise.all(
-      tables.map((r) => this.discoverTable(r, trackedNames, probeRecreateInbound)),
+      tables.map((r) => this.discoverTable(r, trackedNames, probeRecreateInbound, safe)),
     );
     const tableNames = new Set(tableFacts.map((t) => t.name));
     const tableByName = new Map(tableFacts.map((t) => [t.name, t]));
@@ -798,11 +799,13 @@ export class SchemaSync {
    * Introspects one desired table and computes its plan entry.
    * `probeRecreateInbound` — whether a drop-and-recreate's live inbound FKs
    * are worth probing (a removed table exists that could block it).
+   * `safe` — safe mode skips the key rebuild, so its plan rule does not apply.
    */
   private async discoverTable(
     readable: AtscriptDbReadable,
     trackedNames: Set<string>,
     probeRecreateInbound: boolean,
+    safe: boolean,
   ): Promise<TTableFacts> {
     const adapter = readable.dbAdapter;
     const name = readable.tableName;
@@ -852,13 +855,7 @@ export class SchemaSync {
       } else if (facts.existing && facts.existing.length > 0) {
         const typeMapper = adapter.typeMapper?.bind(adapter);
         facts.diff = computeColumnDiff(readable.fieldDescriptors, facts.existing, typeMapper);
-        this.populatePlanFromDiff(
-          facts.diff,
-          init,
-          name,
-          readable.syncMethod,
-          adapter.supportsColumnModify,
-        );
+        this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
     } else if (adapter.syncColumns) {
       // Path B: Snapshot-based diffing (MongoDB) — reuses storedSnapshot from above
@@ -877,13 +874,7 @@ export class SchemaSync {
           existing,
           this.resolveTypeMapper(adapter),
         );
-        this.populatePlanFromDiff(
-          facts.diff,
-          init,
-          name,
-          readable.syncMethod,
-          adapter.supportsColumnModify,
-        );
+        this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
     } else if (adapter.tableExists) {
       // Path C: Schema-less, no syncColumns
@@ -1003,13 +994,31 @@ export class SchemaSync {
         if (!safe) {
           // Every live inbound FK must be retargeted to the new key in this
           // run — except one from a removed table, dropped right before the
-          // rebuild (`earlyDrops`).
-          for (const fk of t.inboundFks ?? []) {
+          // rebuild (`earlyDrops`). Step 2 of execute() drops the live FKs
+          // before the walk; a step that then issues no DDL (an errored plan
+          // entry — the parent's own or the child's) would leave the key
+          // unconstrained, so it is refused instead.
+          const liveInbound = (t.inboundFks ?? []).filter((fk) => {
             const removed = d.removedByName.get(fk.table);
-            if (removed && !removed.isView) {
+            return !(removed && !removed.isView);
+          });
+          if (t.planEntry.status === "error" && liveInbound.length > 0) {
+            addRefusal(
+              refusals,
+              t.name,
+              `Primary key of "${t.name}" changed ${label} but the table's own entry has errors — fix them and re-run: ${t.planEntry.errors?.[0] ?? "see its entry"}`,
+            );
+          }
+          for (const fk of liveInbound) {
+            const child = d.tableByDbName.get(fk.table);
+            if (child?.planEntry.status === "error") {
+              addRefusal(
+                refusals,
+                t.name,
+                `Primary key of "${t.name}" changed ${label} but the referencing table "${child.name}" has errors — fix them and re-run: ${child.planEntry.errors?.[0] ?? "see its entry"}`,
+              );
               continue;
             }
-            const child = d.tableByDbName.get(fk.table);
             if (child?.pendingRename) {
               // The child's adapter resolves its NEW name, so its old
               // constraint could not be dropped before the swap.
@@ -1168,25 +1177,12 @@ export class SchemaSync {
         }
         case "table": {
           const t = d.tableByName.get(step.name)!;
-          let init: TSyncEntryInit = { ...t.planEntry, dependsOn: d.tableDependsOn.get(step.name) };
-          // Safe mode skips work — reported exactly as `run({ safe })` reports it
-          const skipped = safe ? safeModeSkips(t) : [];
-          const pk = t.diff?.primaryKeyChanged;
-          if (pk) {
-            init.pkChange = { from: pk.from, to: pk.to, rebuild: !skipped.includes("pk-rebuild") };
-          }
-          if (safe) {
-            // Hide destructive operations in safe mode — except the skipped
-            // ones, which are pending and shown as skipped
-            init = {
-              ...init,
-              columnsToDrop: [],
-              typeChanges: skipped.includes("recreate") ? init.typeChanges : [],
-              skipped: skipped.length > 0 ? skipped : undefined,
-              recreated: false,
-            };
-          }
-          entries.push(withRefusals(init, refusals.get(step.name)));
+          entries.push(
+            withRefusals(
+              planTableInit(t, safe, d.tableDependsOn.get(step.name)),
+              refusals.get(step.name),
+            ),
+          );
           break;
         }
         case "deferred-fks": {
@@ -1230,8 +1226,29 @@ export class SchemaSync {
     //    may reference columns the table sync is about to drop (SQLite and
     //    Postgres refuse DROP COLUMN while a view depends on the column).
     //    Removed-view outcomes are reported at their place in the walk.
+    /** Managed views whose stale definition could not be dropped (→ error entry, not recreated). */
+    const failedViews = new Map<string, string>();
+    /**
+     * Pending renames that did NOT run (the rename failed, or the entry
+     * issued no DDL): the object still exists under its old name, so it stays
+     * tracked there and keeps its old-name snapshot — the next run sees the
+     * rename as pending again. Keyed by the readable's (new) name.
+     */
+    const stillUnderOldName = new Map<string, TTrackedEntry>();
     for (const view of d.views) {
-      await dropOutdatedView(view, d.viewPlans.get(view.tableName)!, this.space);
+      const plan = d.viewPlans.get(view.tableName)!;
+      try {
+        await dropOutdatedView(view, plan, this.space);
+      } catch (error) {
+        failedViews.set(view.tableName, this.stepFailed(error, "View sync", view.tableName));
+        if (plan.isRenamed) {
+          stillUnderOldName.set(view.tableName, {
+            name: view.renamedFrom!,
+            isView: true,
+            viewType: view.viewPlan.materialized ? "M" : "V",
+          });
+        }
+      }
     }
     const droppedViewEntries = new Map<string, SyncEntry>();
     for (const r of d.removed) {
@@ -1262,6 +1279,8 @@ export class SchemaSync {
     //    referencing child is in the inventory (under its live name) and
     //    retargets to the new key, and children run after parents — so their
     //    own `syncForeignKeys` re-adds the constraint.
+    /** FK keys dropped here per child (by its name) — named by a later failure on that child. */
+    const preDroppedFks = new Map<string, string[]>();
     if (!safe) {
       for (const t of d.tables) {
         if (!t.diff?.primaryKeyChanged) {
@@ -1272,7 +1291,11 @@ export class SchemaSync {
           keysByChild.set(fk.table, [...(keysByChild.get(fk.table) ?? []), fkKey(fk.fields)]);
         }
         for (const [childName, fkKeys] of keysByChild) {
-          await d.tableByDbName.get(childName)?.readable.dbAdapter.dropForeignKeys?.(fkKeys);
+          const child = d.tableByDbName.get(childName);
+          if (child?.readable.dbAdapter.dropForeignKeys) {
+            await child.readable.dbAdapter.dropForeignKeys(fkKeys);
+            preDroppedFks.set(child.name, [...(preDroppedFks.get(child.name) ?? []), ...fkKeys]);
+          }
         }
       }
     }
@@ -1298,10 +1321,28 @@ export class SchemaSync {
         }
         case "table": {
           const t = d.tableByName.get(step.name)!;
-          const entry = await executeSyncTable(t, safe, deps, {
-            deferForeignKeysTo: step.cycle,
-            dependsOn: d.tableDependsOn.get(step.name),
-          });
+          const dependsOn = d.tableDependsOn.get(step.name);
+          // An entry discovery already marked as an error issues no DDL
+          // (since 0.1.129): the run reports exactly the plan entry —
+          // before the rename, before the FK drops, before the column
+          // diff — so nothing is dropped ahead of a failure the plan
+          // predicted. Otherwise the executor applies the facts; a DDL
+          // failure inside comes back as an error entry (snapshot and hash
+          // withheld) and the run continues with the next step.
+          const entry =
+            t.planEntry.status === "error"
+              ? new SyncEntry(planTableInit(t, safe, dependsOn))
+              : await executeSyncTable(t, safe, deps, {
+                  deferForeignKeysTo: step.cycle,
+                  dependsOn,
+                  preDroppedFks: preDroppedFks.get(t.name),
+                });
+          // The executor sets `renamedFrom` only once `renameTable` ran; the
+          // plan entry carries the pending rename whether or not it ran.
+          const renamed = t.planEntry.status !== "error" && entry.renamedFrom !== undefined;
+          if (t.pendingRename && !renamed) {
+            stillUnderOldName.set(t.name, { name: t.pendingRename, isView: false });
+          }
           if (step.cycle) {
             deferred.push({ readable: t.readable, index: entries.length });
           }
@@ -1316,7 +1357,18 @@ export class SchemaSync {
           break;
         }
         case "view": {
-          entries.push(await executeSyncView(d.views[step.index], d.viewEntries[step.index]));
+          const view = d.views[step.index];
+          const planned = d.viewEntries[step.index];
+          let msg = failedViews.get(view.tableName);
+          if (msg === undefined) {
+            try {
+              entries.push(await executeSyncView(view, planned));
+              break;
+            } catch (error) {
+              msg = this.stepFailed(error, "View sync", view.tableName);
+            }
+          }
+          entries.push(planned.withError(msg));
           break;
         }
         case "external": {
@@ -1374,15 +1426,20 @@ export class SchemaSync {
       await this.store.deleteTableSnapshot(name);
     }
 
-    // Clean up old-name snapshots after renames
+    // Clean up old-name snapshots after renames — not after one that did not
+    // run: the object is still under its old name and stays tracked there
     for (const readable of allReadables) {
-      if (readable.renamedFrom) {
+      if (readable.renamedFrom && !stillUnderOldName.has(readable.tableName)) {
         await this.store.deleteTableSnapshot(readable.renamedFrom);
       }
     }
 
-    // Tracking = what sync believes exists: current readables + undropped removals
-    await this.store.writeTrackedList(allReadables, retained);
+    // Tracking = what sync believes exists: current readables (a pending
+    // rename that did not run under its OLD name) + undropped removals
+    await this.store.writeTrackedList(
+      allReadables.filter((r) => !stillUnderOldName.has(r.tableName)),
+      [...retained, ...stillUnderOldName.values()],
+    );
 
     // Persist the schema hash only when nothing is pending — an error entry
     // or skipped work means the DB does not match the desired schema, and a
@@ -1447,6 +1504,13 @@ export class SchemaSync {
       droppedNames.add(name);
     }
     return group.map((name) => d.dropEntries.get(name)!);
+  }
+
+  /** The error-entry message of a DDL failure inside a view step, logged at error level. */
+  private stepFailed(error: unknown, phase: string, name: string): string {
+    const msg = `${phase} failed on ${name}: ${(error as Error).message}`;
+    this.logger.error?.(`[schema-sync] ${msg}`);
+    return msg;
   }
 
   /**
@@ -1529,14 +1593,22 @@ export class SchemaSync {
 
   /**
    * Populates plan init from a column diff (shared by Path A and Path B).
+   *
+   * The plan's rule set is canonical (since 0.1.129): every change the
+   * executor cannot apply without DDL it does not have is an `error` entry
+   * here, and `executeSyncTable` returns an errored plan entry untouched —
+   * so the executor's own copies of these rules are reached only when
+   * discovery had no diff (a pending rename whose old name it could not
+   * introspect).
    */
   private populatePlanFromDiff(
     diff: TColumnDiff,
     init: TSyncEntryInit,
-    name: string,
-    syncMethod?: "drop" | "recreate",
-    adapterSupportsModify?: boolean,
+    readable: AtscriptDbReadable,
+    safe: boolean,
   ): void {
+    const name = readable.tableName;
+    const adapter = readable.dbAdapter;
     init.columnsToAdd = diff.added;
     init.columnsToRename = diff.renamed.map((r) => ({ from: r.oldName, to: r.field.physicalName }));
     init.typeChanges = describeTypeChanges(diff);
@@ -1564,19 +1636,25 @@ export class SchemaSync {
         ),
       ];
     }
-    // Type changes without a sync method → error (sync will fail)
-    // Exception: adapters that support in-place column modification (e.g. MySQL MODIFY COLUMN)
-    if (diff.typeChanged.length > 0 && !syncMethod && !adapterSupportsModify) {
+    // Type changes the adapter cannot apply → error: no `@db.sync.method`
+    // on an adapter without in-place modification (MySQL MODIFY COLUMN), a
+    // `'drop'` without `dropTable`, a `'recreate'` without `recreateTable`
+    // (the executor's type-change branches, in its order).
+    if (diff.typeChanged.length > 0 && typeChangeStrategy(readable, diff) === "none") {
       init.status = "error";
-      init.errors = [
-        ...(init.errors ?? []),
-        ...diff.typeChanged.map(
-          (tc) =>
-            `Type change on ${name}.${tc.field.physicalName} ` +
-            `(${tc.existingType} → ${tc.field.designType}). ` +
-            `Add @db.sync.method "recreate" or "drop", or migrate manually.`,
-        ),
-      ];
+      init.errors = [...(init.errors ?? []), ...typeChangeErrors(readable, diff)];
+    }
+    // A key rebuild the adapter has no primitive for → error (safe mode
+    // skips the rebuild instead, see `safeModeSkips`)
+    if (
+      diff.primaryKeyChanged &&
+      !safe &&
+      !adapter.rebuildPrimaryKey &&
+      !adapter.recreateTable &&
+      init.status !== "error"
+    ) {
+      init.status = "error";
+      init.errors = [...(init.errors ?? []), pkRebuildUnsupported(name, diff.primaryKeyChanged)];
     }
   }
 

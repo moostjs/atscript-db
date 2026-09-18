@@ -94,6 +94,12 @@ export interface TTableExecOptions {
   deferForeignKeysTo?: ReadonlySet<string>;
   /** Tables this one's DDL waits for (informational → `entry.dependsOn`). */
   dependsOn?: string[];
+  /**
+   * Foreign keys `SchemaSync.execute()` dropped on this table before the walk
+   * (its live FKs to a key-changing parent) — named by the error entry when
+   * a statement fails before `syncForeignKeys` re-adds them.
+   */
+  preDroppedFks?: string[];
 }
 
 // ── View definition change check ─────────────────────────────────────────
@@ -111,8 +117,109 @@ export async function viewDefinitionChanged(
   return computeTableHash(storedSnapshot) !== currentHash;
 }
 
+// ── Plan entry ───────────────────────────────────────────────────────────
+
+/**
+ * The plan entry of one table as `plan()` reports it (and as `run()` reports
+ * an entry that issues no DDL): the discovery entry plus `dependsOn`, the
+ * key change, and — in safe mode — the destructive parts hidden except the
+ * skipped ones, which are pending and shown as skipped.
+ */
+export function planTableInit(
+  facts: TTableFacts,
+  safe: boolean,
+  dependsOn: string[] | undefined,
+): TSyncEntryInit {
+  const init: TSyncEntryInit = { ...facts.planEntry, dependsOn };
+  const skipped = safe ? safeModeSkips(facts) : [];
+  const pk = facts.diff?.primaryKeyChanged;
+  if (pk) {
+    init.pkChange = { from: pk.from, to: pk.to, rebuild: !skipped.includes("pk-rebuild") };
+  }
+  if (!safe) {
+    return init;
+  }
+  return {
+    ...init,
+    columnsToDrop: [],
+    typeChanges: skipped.includes("recreate") ? init.typeChanges : [],
+    skipped: skipped.length > 0 ? skipped : undefined,
+    recreated: false,
+  };
+}
+
+// ── Shared rules (plan and executor) ─────────────────────────────────────
+
+/**
+ * How a type change is applied on this table, in the executor's order:
+ * `@db.sync.method "drop"` drop-and-recreate, `"recreate"` with data copy,
+ * in-place modification (MySQL `MODIFY COLUMN`), or not at all (`"none"` —
+ * an `error` entry, see {@link typeChangeErrors}).
+ */
+export function typeChangeStrategy(
+  readable: AtscriptDbReadable,
+  diff: TColumnDiff,
+): "drop" | "recreate" | "modify" | "none" {
+  const adapter = readable.dbAdapter;
+  if (willDropRecreate(readable, diff, undefined)) {
+    return "drop";
+  }
+  if (readable.syncMethod === "recreate" && adapter.recreateTable) {
+    return "recreate";
+  }
+  if (adapter.supportsColumnModify && adapter.syncColumns) {
+    return "modify";
+  }
+  return "none";
+}
+
+/**
+ * The error messages of a type change the adapter cannot apply (strategy
+ * `"none"`), one per column: either no `@db.sync.method` is declared, or the
+ * declared one needs a primitive this adapter lacks.
+ */
+export function typeChangeErrors(readable: AtscriptDbReadable, diff: TColumnDiff): string[] {
+  const method = readable.syncMethod;
+  const advice = method
+    ? `@db.sync.method "${method}" is declared but the adapter has no ${method === "recreate" ? "recreateTable" : "dropTable"} — migrate manually.`
+    : `Add @db.sync.method "recreate" or "drop", or migrate manually.`;
+  return diff.typeChanged.map(
+    (tc) =>
+      `Type change on ${readable.tableName}.${tc.field.physicalName} ` +
+      `(${tc.existingType} → ${tc.field.designType}). ${advice}`,
+  );
+}
+
+/** `(a, b → c)` — the key change as the messages print it. */
+export function pkLabel(change: { from: string[]; to: string[] }): string {
+  return `(${change.from.join(", ")} → ${change.to.join(", ")})`;
+}
+
+/** A key rebuild on an adapter with neither `rebuildPrimaryKey` nor `recreateTable`. */
+export function pkRebuildUnsupported(
+  name: string,
+  change: { from: string[]; to: string[] },
+): string {
+  return `Primary key of "${name}" changed ${pkLabel(change)} but the adapter cannot rebuild primary keys. Migrate manually and re-run.`;
+}
+
 // ── Table sync ───────────────────────────────────────────────────────────
 
+/**
+ * Applies one table's discovered facts: rename → column ops (Path A live
+ * introspection, Path B snapshot diff, Path C schema-less) → table options →
+ * indexes / foreign keys / `afterSyncTable`. Never called for an entry the
+ * plan already marks `error` (`SchemaSync.execute()` reports the plan entry
+ * for those without DDL).
+ *
+ * A statement the engine refuses anywhere in those phases (since 0.1.129)
+ * becomes an `error` entry — the plan entry plus `<phase> failed on <table>:
+ * <cause>` — and the run goes on with the next table. The entry names the
+ * foreign keys already dropped ahead of the failure (by `execute()` step 2
+ * for a key-changing parent, or by Path A before the column ops): they stay
+ * gone until the next run's `syncForeignKeys` re-adds the ones the model
+ * still wants. `renamedFrom` on that entry is set only when the rename ran.
+ */
 export async function executeSyncTable(
   facts: TTableFacts,
   safe: boolean,
@@ -121,6 +228,7 @@ export async function executeSyncTable(
 ): Promise<SyncEntry> {
   const { readable, name, storedSnapshot, fkDiff } = facts;
   const adapter = readable.dbAdapter;
+
   const init: TSyncEntryInit = {
     name,
     status: "in-sync",
@@ -130,160 +238,173 @@ export async function executeSyncTable(
   const ensureOpts: TEnsureTableOptions | undefined = exec.deferForeignKeysTo
     ? { deferForeignKeysTo: exec.deferForeignKeysTo }
     : undefined;
+  /** FK keys dropped before the statement that failed — named by the error entry. */
+  const droppedFks: string[] = [...(exec.preDroppedFks ?? [])];
+  let phase = "Rename";
 
-  // Handle table rename first
-  if (facts.pendingRename && adapter.renameTable) {
-    await adapter.renameTable(facts.pendingRename);
-    init.renamedFrom = facts.pendingRename;
-    init.status = "alter";
-  }
+  try {
+    if (facts.pendingRename && adapter.renameTable) {
+      await adapter.renameTable(facts.pendingRename);
+      init.renamedFrom = facts.pendingRename;
+      init.status = "alter";
+    }
 
-  const hasFkChanges = fkDiff ? hasForeignKeyChanges(fkDiff) : false;
-
-  if (adapter.getExistingColumns && adapter.syncColumns) {
-    // Path A: Live introspection (SQLite, MySQL, PostgreSQL). Discovery read
-    // the columns under the table's current name; when it could not (pending
-    // rename the adapter cannot introspect by name), read them now.
-    const existing = facts.existing ?? (await adapter.getExistingColumns());
-    if (existing.length === 0 && !init.renamedFrom) {
-      await adapter.ensureTable(ensureOpts);
-      init.status = "create";
-    } else if (existing.length > 0) {
-      const diff =
-        facts.diff ??
-        computeColumnDiff(readable.fieldDescriptors, existing, adapter.typeMapper?.bind(adapter));
-      // FK changes on adapters without syncForeignKeys (SQLite) require table recreation
-      if (hasFkChanges && !adapter.syncForeignKeys && adapter.recreateTable) {
-        await adapter.recreateTable();
-        init.recreated = true;
-        init.status = "alter";
-        if (diff.primaryKeyChanged) {
-          // The recreated table already carries the new key.
-          init.pkChange = { ...diff.primaryKeyChanged, rebuild: true };
+    phase = "Column sync";
+    const hasFkChanges = fkDiff ? hasForeignKeyChanges(fkDiff) : false;
+    if (adapter.getExistingColumns && adapter.syncColumns) {
+      // Path A: Live introspection (SQLite, MySQL, PostgreSQL). Discovery read
+      // the columns under the table's current name; when it could not (pending
+      // rename the adapter cannot introspect by name), read them now.
+      const existing = facts.existing ?? (await adapter.getExistingColumns());
+      if (existing.length === 0 && !init.renamedFrom) {
+        await adapter.ensureTable(ensureOpts);
+        init.status = "create";
+      } else if (existing.length > 0) {
+        const diff =
+          facts.diff ??
+          computeColumnDiff(readable.fieldDescriptors, existing, adapter.typeMapper?.bind(adapter));
+        // FK changes on adapters without syncForeignKeys (SQLite) require table recreation
+        if (hasFkChanges && !adapter.syncForeignKeys && adapter.recreateTable) {
+          await adapter.recreateTable();
+          init.recreated = true;
+          init.status = "alter";
+          if (diff.primaryKeyChanged) {
+            // The recreated table already carries the new key.
+            init.pkChange = { ...diff.primaryKeyChanged, rebuild: true };
+          }
+        } else {
+          // Drop stale/changed FKs before column ops (MySQL/PG) to unblock
+          // ALTERs. Parents run before children (topological order), so a
+          // parent's key change is never blocked by a child later in the run.
+          if (hasFkChanges && fkDiff && adapter.dropForeignKeys) {
+            const keysToDrop = [
+              ...fkDiff.removed.map((fk) => fkKey(fk.fields)),
+              ...fkDiff.changed.map((fk) => fkKey(fk.desired.fields)),
+            ];
+            if (keysToDrop.length > 0) {
+              await adapter.dropForeignKeys(keysToDrop);
+              droppedFks.push(...keysToDrop);
+              init.status = "alter";
+            }
+          }
+          await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
+        }
+      }
+    } else if (adapter.syncColumns) {
+      // Path B: Snapshot-based diffing (MongoDB)
+      if (!storedSnapshot) {
+        // First sync or no prior snapshot — just ensure table exists
+        const existed = adapter.tableExists ? await adapter.tableExists() : false;
+        await adapter.ensureTable(ensureOpts);
+        if (!existed) {
+          init.status = "create";
         }
       } else {
-        // Drop stale/changed FKs before column ops (MySQL/PG) to unblock
-        // ALTERs. Parents run before children (topological order), so a
-        // parent's key change is never blocked by a child later in the run.
-        if (hasFkChanges && fkDiff && adapter.dropForeignKeys) {
-          const keysToDrop = [
-            ...fkDiff.removed.map((fk) => fkKey(fk.fields)),
-            ...fkDiff.changed.map((fk) => fkKey(fk.desired.fields)),
-          ];
-          if (keysToDrop.length > 0) {
-            await adapter.dropForeignKeys(keysToDrop);
-            init.status = "alter";
-          }
-        }
+        const diff =
+          facts.diff ??
+          computeColumnDiff(
+            readable.fieldDescriptors,
+            snapshotToExistingColumns(storedSnapshot),
+            deps.resolveTypeMapper(adapter),
+          );
         await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
       }
-    }
-  } else if (adapter.syncColumns) {
-    // Path B: Snapshot-based diffing (MongoDB)
-    if (!storedSnapshot) {
-      // First sync or no prior snapshot — just ensure table exists
-      const existed = adapter.tableExists ? await adapter.tableExists() : false;
-      await adapter.ensureTable(ensureOpts);
-      if (!existed) {
-        init.status = "create";
-      }
     } else {
-      const diff =
-        facts.diff ??
-        computeColumnDiff(
-          readable.fieldDescriptors,
-          snapshotToExistingColumns(storedSnapshot),
-          deps.resolveTypeMapper(adapter),
-        );
-      await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
-    }
-  } else {
-    // Path C: Truly schema-less, no syncColumns
-    const existed = adapter.tableExists ? await adapter.tableExists() : true;
-    if (!init.recreated) {
-      await adapter.ensureTable(ensureOpts);
-      if (!existed) {
-        init.status = "create";
-      }
-    }
-  }
-
-  // Apply the table option drift discovery diffed (unified across all paths)
-  const optionDiff = facts.optionDiff;
-  if (
-    init.status !== "create" &&
-    !init.recreated &&
-    init.status !== "error" &&
-    optionDiff &&
-    optionDiff.changed.length > 0
-  ) {
-    const hasDestructive = optionDiff.changed.some((c) => c.destructive);
-    if (safe) {
-      // Safe mode never recreates: a destructive change stays pending (the
-      // table's snapshot and the hash are withheld); non-destructive changes
-      // are not applied either and are not reported.
-      if (hasDestructive) {
-        init.optionChanges = optionDiff.changed;
-        init.status = "alter";
-        markSkipped(init, "table-options");
-        deps.logger.warn?.(
-          `[schema-sync] Destructive table option change on "${name}" — recreate skipped (safe mode)`,
-        );
-      }
-    } else {
-      init.optionChanges = optionDiff.changed;
-      const nonDestructive = optionDiff.changed.filter((c) => !c.destructive);
-
-      // Apply non-destructive changes in-place (e.g., MySQL ALTER TABLE ENGINE=X)
-      if (nonDestructive.length > 0 && adapter.applyTableOptions) {
-        await adapter.applyTableOptions(nonDestructive);
-        init.status = "alter";
-      }
-
-      // Destructive changes require recreation
-      if (hasDestructive) {
-        if (willDropRecreate(readable, undefined, optionDiff)) {
-          deps.logger.warn?.(
-            `[schema-sync] Destructive table option change on "${name}" — dropping and recreating`,
-          );
-          await dropAndRecreate(adapter, init, name, deps.logger, ensureOpts);
-        } else if (readable.syncMethod === "recreate" && adapter.recreateTable) {
-          deps.logger.warn?.(
-            `[schema-sync] Destructive table option change on "${name}" — recreating with data preservation`,
-          );
-          await adapter.recreateTable();
-          init.status = "alter";
-          init.recreated = true;
+      // Path C: Truly schema-less, no syncColumns
+      const existed = adapter.tableExists ? await adapter.tableExists() : true;
+      if (!init.recreated) {
+        await adapter.ensureTable(ensureOpts);
+        if (!existed) {
+          init.status = "create";
         }
       }
     }
-  }
 
-  if (init.status === "error") {
-    return new SyncEntry(init);
-  }
+    // Apply the table option drift discovery diffed (unified across all paths)
+    phase = "Table option sync";
+    const optionDiff = facts.optionDiff;
+    if (
+      init.status !== "create" &&
+      !init.recreated &&
+      init.status !== "error" &&
+      optionDiff &&
+      optionDiff.changed.length > 0
+    ) {
+      const hasDestructive = optionDiff.changed.some((c) => c.destructive);
+      if (safe) {
+        // Safe mode never recreates: a destructive change stays pending (the
+        // table's snapshot and the hash are withheld); non-destructive changes
+        // are not applied either and are not reported.
+        if (hasDestructive) {
+          init.optionChanges = optionDiff.changed;
+          init.status = "alter";
+          markSkipped(init, "table-options");
+          deps.logger.warn?.(
+            `[schema-sync] Destructive table option change on "${name}" — recreate skipped (safe mode)`,
+          );
+        }
+      } else {
+        init.optionChanges = optionDiff.changed;
+        const nonDestructive = optionDiff.changed.filter((c) => !c.destructive);
 
-  // Sync indexes and foreign keys. DDL here can fail on data conflicts
-  // (e.g. CREATE UNIQUE INDEX over duplicate rows) — surface that as an
-  // error entry instead of an unhandled throw, so the run completes and
-  // the schema hash is not persisted (the next boot retries).
-  try {
+        // Apply non-destructive changes in-place (e.g., MySQL ALTER TABLE ENGINE=X)
+        if (nonDestructive.length > 0 && adapter.applyTableOptions) {
+          await adapter.applyTableOptions(nonDestructive);
+          init.status = "alter";
+        }
+
+        // Destructive changes require recreation
+        if (hasDestructive) {
+          if (willDropRecreate(readable, undefined, optionDiff)) {
+            deps.logger.warn?.(
+              `[schema-sync] Destructive table option change on "${name}" — dropping and recreating`,
+            );
+            await dropAndRecreate(adapter, init, name, ensureOpts);
+          } else if (readable.syncMethod === "recreate" && adapter.recreateTable) {
+            deps.logger.warn?.(
+              `[schema-sync] Destructive table option change on "${name}" — recreating with data preservation`,
+            );
+            await adapter.recreateTable();
+            init.status = "alter";
+            init.recreated = true;
+          }
+        }
+      }
+    }
+
+    // The executor's defensive copies of the plan rules (see `applyColumnDiff`)
+    // can still error the entry: no index/FK work on it then.
+    if (init.status === "error") {
+      return new SyncEntry(init);
+    }
+
+    // Indexes and foreign keys. DDL here can fail on data conflicts (e.g.
+    // CREATE UNIQUE INDEX over duplicate rows).
+    phase = "Index/FK sync";
     await adapter.syncIndexes();
-
     // Cycle members add their FKs in the deferred pass, once every member exists.
     if (adapter.syncForeignKeys && !exec.deferForeignKeysTo) {
       await adapter.syncForeignKeys();
     }
-
     // Post-sync finalization (e.g., reset identity sequences after data migration)
     if (adapter.afterSyncTable) {
       await adapter.afterSyncTable();
     }
   } catch (error) {
-    const msg = `Index/FK sync failed on ${name}: ${(error as Error).message}`;
+    const dropped =
+      droppedFks.length > 0
+        ? ` Dropped foreign keys before the failure: ${droppedFks.join(", ")} — the ones still in the model are re-added by the next run's syncForeignKeys.`
+        : "";
+    const msg = `${phase} failed on ${name}: ${(error as Error).message}${dropped}`;
     deps.logger.error?.(`[schema-sync] ${msg}`);
-    init.errors = [...(init.errors ?? []), msg];
-    init.status = "error";
+    const planned = planTableInit(facts, safe, exec.dependsOn);
+    return new SyncEntry({
+      ...planned,
+      status: "error",
+      errors: [...(planned.errors ?? []), msg],
+      renamedFrom: init.renamedFrom,
+      recreated: false,
+    });
   }
 
   return new SyncEntry(init);
@@ -310,7 +431,7 @@ export async function executeDeferredForeignKeys(
   } catch (error) {
     const msg = `FK sync failed on ${readable.tableName}: ${(error as Error).message}`;
     deps.logger.error?.(`[schema-sync] ${msg}`);
-    return new SyncEntry({ ...entry.toInit(), status: "error", errors: [...entry.errors, msg] });
+    return entry.withError(msg);
   }
 }
 
@@ -442,15 +563,11 @@ export function safeModeSkips(facts: TTableFacts): TSyncSkippedWork[] {
   if (fkDiff && hasForeignKeyChanges(fkDiff) && !adapter.syncForeignKeys && adapter.recreateTable) {
     return out;
   }
-  let recreated = false;
-  if (diff && diff.typeChanged.length > 0) {
-    if (willDropRecreate(readable, diff, undefined)) {
-      out.push("recreate");
-    } else if (readable.syncMethod === "recreate" && adapter.recreateTable) {
-      recreated = true;
-    }
-  }
-  if (recreated) {
+  const strategy =
+    diff && diff.typeChanged.length > 0 ? typeChangeStrategy(readable, diff) : "modify";
+  if (strategy === "drop") {
+    out.push("recreate");
+  } else if (strategy === "recreate") {
     return out;
   }
   if (
@@ -490,27 +607,23 @@ export function describeNullableDefaults(
  * `dropTable()` + `ensureTable()` for `@db.sync.method "drop"` and destructive
  * option changes. Sync-owned drops never CASCADE: when something outside the
  * sync inventory (a user view, an unmanaged FK) still depends on the table the
- * engine refuses, and that becomes an error entry for this table — not a
- * thrown run.
+ * engine refuses — rethrown as `Drop of "<table>" failed: <cause>` for the
+ * executor's phase catch, which makes it the table's error entry.
  */
 async function dropAndRecreate(
   adapter: BaseDbAdapter,
   init: TSyncEntryInit,
   name: string,
-  logger: TGenericLogger,
   ensureOpts: TEnsureTableOptions | undefined,
 ): Promise<void> {
   try {
     await adapter.dropTable!();
     await adapter.ensureTable(ensureOpts);
-    init.recreated = true;
-    init.status = "alter";
   } catch (error) {
-    const msg = `Drop of "${name}" failed: ${(error as Error).message}`;
-    logger.error?.(`[schema-sync] ${msg}`);
-    init.errors = [...(init.errors ?? []), msg];
-    init.status = "error";
+    throw new Error(`Drop of "${name}" failed: ${(error as Error).message}`, { cause: error });
   }
+  init.recreated = true;
+  init.status = "alter";
 }
 
 async function applyColumnDiff(
@@ -542,8 +655,8 @@ async function applyColumnDiff(
   // others require @db.sync.method "recreate"/"drop" or error out.
   let needsSyncColumns = false;
   if (diff.typeChanged.length > 0 && init.status !== "error") {
-    const syncMethod = readable.syncMethod;
-    if (willDropRecreate(readable, diff, undefined)) {
+    const strategy = typeChangeStrategy(readable, diff);
+    if (strategy === "drop") {
       if (safe) {
         // Safe mode never drops: the change stays pending, reported like a
         // skipped key rebuild. `SchemaSync.execute()` withholds the table's
@@ -558,26 +671,24 @@ async function applyColumnDiff(
           `[schema-sync] Type change on "${name}" (${cols}) — drop-and-recreate skipped (safe mode)`,
         );
       } else {
-        await dropAndRecreate(adapter, init, name, logger, ensureOpts);
+        await dropAndRecreate(adapter, init, name, ensureOpts);
       }
-    } else if (syncMethod === "recreate" && adapter.recreateTable) {
-      await adapter.recreateTable();
+    } else if (strategy === "recreate") {
+      await adapter.recreateTable!();
       init.recreated = true;
       init.status = "alter";
-    } else if (adapter.supportsColumnModify && adapter.syncColumns) {
+    } else if (strategy === "modify") {
       // Adapter can handle type changes in-place (e.g. MySQL MODIFY COLUMN)
       // Defer to the single syncColumns call below
       needsSyncColumns = true;
       init.status = "alter";
     } else {
-      const errors: string[] = [];
-      for (const change of diff.typeChanged) {
-        const msg =
-          `Type change on ${name}.${change.field.physicalName} ` +
-          `(${change.existingType} → ${change.field.designType}). ` +
-          `Add @db.sync.method "recreate" or "drop", or migrate manually.`;
+      // Defensive copy of the plan rule (`populatePlanFromDiff`): reachable
+      // only when discovery had no diff — a pending rename whose old name
+      // the adapter could not introspect (`facts.existing === undefined`).
+      const errors = typeChangeErrors(readable, diff);
+      for (const msg of errors) {
         logger.error?.(`[schema-sync] ${msg}`);
-        errors.push(msg);
       }
       init.errors = errors;
       init.status = "error";
@@ -642,14 +753,13 @@ async function applyColumnDiff(
   // carries the new key.
   if (diff.primaryKeyChanged && init.status !== "error") {
     const { from, to } = diff.primaryKeyChanged;
-    const label = `(${from.join(", ")} → ${to.join(", ")})`;
     if (init.recreated) {
       // A recreate above (type change / FK change / option change) already
       // built the table with the new key.
       init.pkChange = { from, to, rebuild: true };
     } else if (safe) {
       logger.warn?.(
-        `[schema-sync] Primary key of "${name}" changed ${label} — rebuild skipped (safe mode)`,
+        `[schema-sync] Primary key of "${name}" changed ${pkLabel(diff.primaryKeyChanged)} — rebuild skipped (safe mode)`,
       );
       init.pkChange = { from, to, rebuild: false };
       markSkipped(init, "pk-rebuild");
@@ -664,7 +774,8 @@ async function applyColumnDiff(
       init.pkChange = { from, to, rebuild: true };
       init.status = "alter";
     } else {
-      const msg = `Primary key of "${name}" changed ${label} but the adapter cannot rebuild primary keys. Migrate manually and re-run.`;
+      // Defensive copy of the plan rule (see the type-change branch above).
+      const msg = pkRebuildUnsupported(name, diff.primaryKeyChanged);
       logger.error?.(`[schema-sync] ${msg}`);
       init.errors = [...(init.errors ?? []), msg];
       init.status = "error";

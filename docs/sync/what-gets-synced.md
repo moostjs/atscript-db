@@ -436,6 +436,18 @@ Sync copies the data into a new table with the updated schema and swaps it
 in. Data is preserved wherever the old and new types are compatible;
 incompatible columns may lose data during the copy.
 
+On PostgreSQL (since 0.1.129) the swap keeps the constraint names stable —
+the recreated table's own `<table>_pkey` / `<table>_<col>_fkey` names and
+the inbound foreign keys of other tables, which are captured (whether they
+reference the primary key or a `UNIQUE` column) and restored under their
+original names; a self-referencing foreign key is simply re-added — and it
+never drops with `CASCADE`: a user-created view or
+an unmanaged constraint that depends on the table makes the recreate fail
+inside its transaction, and the table's `error` entry names the dependent
+object (`… — view report_v depends on table users`). Drop it (or exclude the
+table from the inventory) and re-run. MySQL's recreate relinks inbound
+foreign keys but does not preserve their names.
+
 ### When Required
 
 Structural changes are required in the following scenarios:

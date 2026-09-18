@@ -172,6 +172,16 @@ export class SyncEntry {
   }
 
   /**
+   * This entry as an `error` entry with `msg` appended to its errors — the
+   * shape a DDL failure inside the entry's step reports (the planned work is
+   * kept, the status says it did not land).
+   * @since 0.1.129
+   */
+  withError(msg: string): SyncEntry {
+    return new SyncEntry({ ...this.toInit(), status: "error", errors: [...this.errors, msg] });
+  }
+
+  /**
    * Whether desired work is still pending after this entry — DDL that was
    * not issued because the entry errored or safe mode skipped it (see
    * `skipped`). A pending entry withholds its snapshot and the schema hash,

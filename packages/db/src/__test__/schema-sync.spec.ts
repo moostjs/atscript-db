@@ -3699,7 +3699,7 @@ describe("SchemaSync — early drops (a table the run drops never blocks it)", (
     const parent = result.entries[1];
     expect(parent.status).toBe("error");
     expect(parent.errors).toEqual([
-      'Drop of "ed_parents" failed: cannot drop table ed_parents because other objects depend on it (ed_children)',
+      'Column sync failed on ed_parents: Drop of "ed_parents" failed: cannot drop table ed_parents because other objects depend on it (ed_children)',
     ]);
     expect(parent.dependsOn).toEqual(["ed_children"]);
     expect(logged.join("\n")).toContain('Cannot drop "ed_children"');
@@ -3909,5 +3909,487 @@ describe("SchemaSync — safe mode keeps nullable/default DDL pending", () => {
     );
     expect(snapshot.fields.find((f: any) => f.physicalName === "body").optional).toBe(false);
     expect((await sync.run([Sp.SpNoteV2])).status).toBe("up-to-date");
+  });
+});
+
+// ── A DDL failure inside a table is an error entry; errored plan entries issue no DDL (0.1.129) ──
+
+/** Live columns of a fresh `sf_alpha` / `sf_gamma` without the optional `extra`. */
+const sfBaseColumns = (): TExistingColumn[] => [
+  { name: "id", type: "INTEGER", notnull: true, pk: true },
+  { name: "name", type: "TEXT", notnull: true, pk: false },
+];
+
+describe("SchemaSync — a DDL failure inside a table becomes an error entry (0.1.129)", () => {
+  let Sf: Record<string, any>;
+  /** The table whose `syncColumns` throws. */
+  let failingTable = "sf_beta";
+
+  class FailingColumnsAdapter extends MockAdapter {
+    override async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
+      if (this._table.tableName === failingTable) {
+        throw new Error("boom-columns");
+      }
+      return super.syncColumns(diff);
+    }
+  }
+
+  beforeAll(async () => {
+    Sf = await import("./fixtures/sync-failures.as");
+  });
+
+  /** Syncs V1 of the three tables, then seeds live columns that each miss one model column. */
+  async function syncedWithPendingColumns() {
+    const space = createSpaceOf(() => new FailingColumnsAdapter());
+    const sync = new SchemaSync(space);
+    const r1 = await sync.run([Sf.SfAlpha, Sf.SfBetaV1, Sf.SfGamma], {
+      force: true,
+      onError: "silent",
+    });
+    expect(r1.status).toBe("synced");
+    (space.get(Sf.SfAlpha).dbAdapter as MockAdapter).setExistingColumns(sfBaseColumns());
+    (space.get(Sf.SfGamma).dbAdapter as MockAdapter).setExistingColumns(sfBaseColumns());
+    (space.get(Sf.SfBetaV2).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "INTEGER", notnull: true, pk: true },
+      { name: "alphaId", type: "INTEGER", notnull: true, pk: false },
+    ]);
+    // The model of sf_alpha / sf_gamma is unchanged, so a re-written snapshot
+    // would equal the stored one — remove them to prove which run wrote them
+    const control = sharedTables.get("__atscript_control")!;
+    for (const name of ["sf_alpha", "sf_gamma"]) {
+      control.splice(
+        control.findIndex((r) => r._id === `table_snapshot:${name}`),
+        1,
+      );
+    }
+    sharedDdl = [];
+    return { space, sync, hashBefore: controlValueOf("schema_version") };
+  }
+
+  const snapshotOf = (name: string) => JSON.parse(controlValueOf(`table_snapshot:${name}`)!);
+
+  it("syncColumns throwing on B: A and C are altered and persisted, B is an error entry, the hash is withheld", async () => {
+    failingTable = "sf_beta";
+    const { sync, hashBefore } = await syncedWithPendingColumns();
+    const { logger, lines: logged } = captureLogger("error");
+
+    const result = await sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], { force: true, logger });
+    expect(result.status).toBe("synced");
+    expect(result.entries.map(entryShape)).toEqual([
+      ["sf_alpha", "alter", []],
+      ["sf_beta", "error", []],
+      ["sf_gamma", "alter", []],
+    ]);
+
+    const beta = result.entries.find((e) => e.name === "sf_beta")!;
+    // The Path-A FK drop ran before the column op that failed — the message says so
+    expect(beta.errors).toEqual([
+      "Column sync failed on sf_beta: boom-columns Dropped foreign keys before the failure: alphaId — the ones still in the model are re-added by the next run's syncForeignKeys.",
+    ]);
+    expect(beta.pending).toBe(true);
+    // The plan's view of the table is carried on the error entry
+    expect(beta.columnsToAdd.map((f) => f.physicalName)).toEqual(["note"]);
+    expect(beta.fkRemoved).toEqual([{ fields: ["alphaId"], targetTable: "sf_alpha" }]);
+    expect(logged.join("\n")).toContain(
+      "[schema-sync] Column sync failed on sf_beta: boom-columns",
+    );
+
+    // The run continued past the failure, in order
+    expect(sharedDdl.indexOf("dropForeignKeys sf_beta alphaId")).toBeGreaterThan(
+      sharedDdl.indexOf("syncColumns sf_alpha +extra"),
+    );
+    expect(sharedDdl.indexOf("syncColumns sf_gamma +extra")).toBeGreaterThan(
+      sharedDdl.indexOf("dropForeignKeys sf_beta alphaId"),
+    );
+    expect(sharedDdl).toContain("syncForeignKeys sf_gamma");
+    expect(sharedDdl.filter((d) => d.startsWith("syncForeignKeys sf_beta"))).toEqual([]);
+
+    // A and C snapshots are written; B's is withheld (it still records the FK);
+    // the hash is withheld; tracking is written
+    expect(snapshotOf("sf_alpha").fields.some((f: any) => f.physicalName === "extra")).toBe(true);
+    expect(snapshotOf("sf_gamma").fields.some((f: any) => f.physicalName === "extra")).toBe(true);
+    expect(snapshotOf("sf_beta").fields.some((f: any) => f.physicalName === "note")).toBe(false);
+    expect(snapshotOf("sf_beta").foreignKeys).toHaveLength(1);
+    expect(controlValueOf("schema_version")).toBe(hashBefore);
+    expect(controlValueOf("schema_version")).not.toBe(result.schemaHash);
+    expect(JSON.parse(controlValueOf("synced_tables")!).map((t: any) => t.name)).toEqual([
+      "sf_alpha",
+      "sf_beta",
+      "sf_gamma",
+    ]);
+    expect(controlValueOf("sync_lock")).toBeUndefined();
+
+    // The next run retries B (A and C are in sync now)
+    const retry = await sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], { onError: "silent" });
+    expect(retry.status).toBe("synced");
+    expect(retry.entries.map((e) => e.status)).toEqual(["in-sync", "error", "in-sync"]);
+  });
+
+  it('onError: "throw" rejects after the run completed (the other tables were synced)', async () => {
+    failingTable = "sf_beta";
+    const { sync } = await syncedWithPendingColumns();
+    await expect(
+      sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], { force: true, onError: "throw" }),
+    ).rejects.toThrow(
+      /1 entry failed:\n\[schema-sync\] "sf_beta" failed: Column sync failed on sf_beta/,
+    );
+    // Every step ran; the snapshots of the tables that succeeded are persisted
+    expect(sharedDdl).toContain("syncColumns sf_alpha +extra");
+    expect(sharedDdl).toContain("syncColumns sf_gamma +extra");
+    expect(snapshotOf("sf_gamma").fields.some((f: any) => f.physicalName === "extra")).toBe(true);
+    expect(controlValueOf("sync_lock")).toBeUndefined();
+  });
+
+  it("without an FK drop before the failure the message has no dropped-keys suffix", async () => {
+    failingTable = "sf_gamma";
+    const { sync } = await syncedWithPendingColumns();
+    const result = await sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.entries.map((e) => e.status)).toEqual(["alter", "alter", "error"]);
+    expect(result.entries[2].errors).toEqual(["Column sync failed on sf_gamma: boom-columns"]);
+    expect(snapshotOf("sf_beta").foreignKeys).toEqual([]);
+    expect(controlValueOf("table_snapshot:sf_alpha")).toBeDefined();
+    expect(controlValueOf("table_snapshot:sf_gamma")).toBeUndefined();
+    failingTable = "sf_beta";
+  });
+
+  it("a failing view recreate is an error entry too; the run completes", async () => {
+    class FailingViewAdapter extends MockAdapter {
+      override async ensureTable(opts?: TEnsureTableOptions): Promise<void> {
+        if (this._table.isView && this.tables.has("users")) {
+          throw new Error("boom-view");
+        }
+        return super.ensureTable(opts);
+      }
+    }
+    const space = createSpaceOf(() => new FailingViewAdapter());
+    const sync = new SchemaSync(space);
+    const result = await sync.run([UsersTable, ActiveUsersView], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.status).toBe("synced");
+    expect(result.entries.map(entryShape)).toEqual([
+      ["users", "create", []],
+      ["active_users", "error", ["users"]],
+    ]);
+    expect(result.entries[1].errors).toEqual(["View sync failed on active_users: boom-view"]);
+    expect(result.entries[1].viewType).toBe("V");
+    expect(controlValueOf("table_snapshot:users")).toBeDefined();
+    expect(controlValueOf("table_snapshot:active_users")).toBeUndefined();
+    expect(controlValueOf("schema_version")).toBeUndefined();
+  });
+});
+
+describe("SchemaSync — an errored plan entry issues no DDL (0.1.129)", () => {
+  let Sf: Record<string, any>;
+
+  /** Typed columns (REAL/INTEGER/TEXT) but neither `recreateTable` nor `dropTable`. */
+  class TypedNoRecreateAdapter extends MockAdapter {
+    typeMapper(field: { designType: string }): string {
+      return field.designType === "number" ? "REAL" : "TEXT";
+    }
+  }
+
+  beforeAll(async () => {
+    Sf = await import("./fixtures/sync-failures.as");
+  });
+
+  /** Plan and run entries of `name` must be the same entry. */
+  async function expectPlanRunIdentity(sync: SchemaSync, types: any[], name: string) {
+    const plan = await sync.plan(types, { force: true });
+    const planned = plan.entries.find((e) => e.name === name)!;
+    expect(planned.status).toBe("error");
+    sharedDdl = [];
+    const result = await sync.run(types, { force: true, onError: "silent" });
+    expect(result.status).toBe("synced");
+    const entry = result.entries.find((e) => e.name === name)!;
+    expect(entry.toInit()).toEqual(planned.toInit());
+    return { planned, entry };
+  }
+
+  it("rename conflict + removed FK on one table: the FK is not dropped, the run entry is the plan entry", async () => {
+    const space = createSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([Sf.SfAlpha, Sf.SfBetaV1], { force: true, onError: "silent" });
+    (space.get(Sf.SfBetaConflict).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "INTEGER", notnull: true, pk: true },
+      { name: "alphaId", type: "INTEGER", notnull: true, pk: false },
+      { name: "ownerId", type: "INTEGER", notnull: true, pk: false },
+    ]);
+
+    const { entry } = await expectPlanRunIdentity(sync, [Sf.SfAlpha, Sf.SfBetaConflict], "sf_beta");
+    expect(entry.errors).toEqual([
+      'Column rename conflict on sf_beta: cannot rename "alphaId" → "ownerId" because "ownerId" already exists.',
+    ]);
+    expect(entry.pending).toBe(true);
+    // No DDL on the table at all — the live FK stays
+    expect(sharedDdl.filter((d) => / sf_beta/.test(d))).toEqual([]);
+    expect(sharedFks.get("sf_beta")).toEqual([
+      { fields: ["alphaId"], targetTable: "sf_alpha", targetFields: ["id"] },
+    ]);
+    expect(JSON.parse(controlValueOf("table_snapshot:sf_beta")!).foreignKeys).toHaveLength(1);
+  });
+
+  it("type change without a method + removed FK: same — nothing dropped ahead of the error", async () => {
+    const space = createSpaceOf(() => new TypedNoRecreateAdapter());
+    const sync = new SchemaSync(space);
+    await sync.run([Sf.SfAlpha, Sf.SfBetaV1], { force: true, onError: "silent" });
+    // `alphaId` is TEXT live, `number` (→ REAL) in the model; `note` is added
+    (space.get(Sf.SfBetaV2).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "alphaId", type: "TEXT", notnull: true, pk: false },
+    ]);
+
+    const { entry } = await expectPlanRunIdentity(sync, [Sf.SfAlpha, Sf.SfBetaV2], "sf_beta");
+    expect(entry.errors).toEqual([
+      'Type change on sf_beta.alphaId (TEXT → number). Add @db.sync.method "recreate" or "drop", or migrate manually.',
+    ]);
+    expect(entry.typeChanges).toEqual([{ column: "alphaId", fromType: "TEXT", toType: "number" }]);
+    expect(entry.columnsToAdd.map((f) => f.physicalName)).toEqual(["note"]);
+    expect(sharedDdl.filter((d) => / sf_beta/.test(d))).toEqual([]);
+    expect(sharedFks.get("sf_beta")).toHaveLength(1);
+  });
+
+  it("@db.sync.method 'recreate' on an adapter without recreateTable: plan and run error identically", async () => {
+    const space = createSpaceOf(() => new TypedNoRecreateAdapter());
+    const sync = new SchemaSync(space);
+    await sync.run([Sf.SfGamma], { force: true, onError: "silent" });
+    (space.get(Sf.SfGammaRecreate).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "name", type: "REAL", notnull: true, pk: false },
+      { name: "extra", type: "TEXT", notnull: false, pk: false },
+    ]);
+
+    const { planned, entry } = await expectPlanRunIdentity(sync, [Sf.SfGammaRecreate], "sf_gamma");
+    // A declared method the adapter lacks the primitive for gets its own advice
+    const msg =
+      'Type change on sf_gamma.name (REAL → string). @db.sync.method "recreate" is declared but the adapter has no recreateTable — migrate manually.';
+    expect(planned.errors).toEqual([msg]);
+    expect(entry.errors).toEqual([msg]);
+    expect(entry.syncMethod).toBe("recreate");
+    expect(sharedDdl.filter((d) => / sf_gamma/.test(d))).toEqual([]);
+  });
+
+  it("a Path-B key change without a rebuild primitive errors in the plan too (safe mode skips it instead)", async () => {
+    const { space, tables } = createSnapshotSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([UsersTable], { force: true, onError: "silent" });
+    const row = tables.get("__atscript_control")!.find((r) => r._id === "table_snapshot:users")!;
+    const snapshot = JSON.parse(row.value as string);
+    for (const f of snapshot.fields) {
+      f.isPrimaryKey = f.physicalName === "name";
+    }
+    row.value = JSON.stringify(snapshot);
+
+    const msg =
+      'Primary key of "users" changed (name → id) but the adapter cannot rebuild primary keys. Migrate manually and re-run.';
+    const plan = await sync.plan([UsersTable], { force: true });
+    expect(plan.entries.find((e) => e.name === "users")!.errors).toEqual([msg]);
+    const result = await sync.run([UsersTable], { force: true, onError: "silent" });
+    expect(result.entries.find((e) => e.name === "users")!.errors).toEqual([msg]);
+
+    const safePlan = await sync.plan([UsersTable], { force: true, safe: true });
+    const safePlanned = safePlan.entries.find((e) => e.name === "users")!;
+    expect([safePlanned.status, safePlanned.errors, safePlanned.skipped]).toEqual([
+      "alter",
+      [],
+      ["pk-rebuild"],
+    ]);
+    const safe = await sync.run([UsersTable], { force: true, safe: true, onError: "silent" });
+    const safeEntry = safe.entries.find((e) => e.name === "users")!;
+    expect([safeEntry.status, safeEntry.errors, safeEntry.skipped]).toEqual([
+      "alter",
+      [],
+      ["pk-rebuild"],
+    ]);
+  });
+
+  it("refuses a parent's key change when a retargeting child's plan entry has errors — no DDL, the FK stays", async () => {
+    const space = createTypedSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([Pf.PfTokenV1, Pf.PfChildOld], { force: true, onError: "silent" });
+    (space.get(Pf.PfTokenV2).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "code", type: "TEXT", notnull: true, pk: false },
+      { name: "label", type: "TEXT", notnull: true, pk: false },
+    ]);
+    // The child retargets tokenId → code (string) but its live column is
+    // INTEGER: a type change without a method → errored plan entry
+    (space.get(Pf.PfChildNew).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "tokenId", type: "INTEGER", notnull: true, pk: false },
+    ]);
+    sharedDdl = [];
+
+    const result = await sync.run([Pf.PfChildNew, Pf.PfTokenV2], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.status).toBe("refused");
+    const parent = result.entries.find((e) => e.name === "pf_tokens")!;
+    expect(parent.refused).toBe(true);
+    expect(parent.errors).toEqual([
+      'Primary key of "pf_tokens" changed (id → code) but the referencing table "pf_children" has errors — fix them and re-run: Type change on pf_children.tokenId (INTEGER → string). Add @db.sync.method "recreate" or "drop", or migrate manually.',
+    ]);
+    const child = result.entries.find((e) => e.name === "pf_children")!;
+    expect([child.status, child.refused]).toEqual(["error", false]);
+    expect(sharedDdl).toEqual([]);
+    expect(sharedFks.get("pf_children")).toEqual([
+      { fields: ["tokenId"], targetTable: "pf_tokens", targetFields: ["id"] },
+    ]);
+    const plan = await sync.plan([Pf.PfChildNew, Pf.PfTokenV2], { force: true });
+    expect(plan.entries.find((e) => e.name === "pf_tokens")!.errors).toEqual(parent.errors);
+  });
+});
+
+// ── A rename that did not run keeps the table tracked under its old name (0.1.129) ──
+
+describe("SchemaSync — a pending rename that did not run stays tracked under the old name (0.1.129)", () => {
+  /** `renameTable` is refused by the engine (the new name is taken). */
+  class RenameConflictAdapter extends TypedMockAdapter {
+    override async renameTable(oldName: string): Promise<void> {
+      throw new Error(`relation "${this._table.tableName}" already exists (renaming ${oldName})`);
+    }
+  }
+
+  /** `old_users` tracked, with a snapshot and live columns of the given types. */
+  function trackedOldUsers(space: DbSpace, nameType: string): MockAdapter {
+    sharedTables.set("__atscript_control", [
+      { _id: "synced_tables", value: JSON.stringify([{ name: "old_users", isView: false }]) },
+      { _id: "table_snapshot:old_users", value: JSON.stringify({ fields: [], foreignKeys: [] }) },
+    ]);
+    sharedTables.set("old_users", [{ id: 1, name: "n", email: "e" }]);
+    const adapter = space.get(RenamedTable).dbAdapter as MockAdapter;
+    adapter.setExistingColumnsForTable("old_users", [
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "name", type: nameType, notnull: true, pk: false },
+      { name: "email", type: "TEXT", notnull: true, pk: false },
+    ]);
+    return adapter;
+  }
+
+  const trackedNames = () =>
+    JSON.parse(controlValueOf("synced_tables")!).map((t: { name: string }) => t.name);
+
+  it("the rename itself fails: error entry without renamedFrom, old snapshot kept, retried by the next run", async () => {
+    const space = createSpaceOf(() => new RenameConflictAdapter());
+    const sync = new SchemaSync(space);
+    trackedOldUsers(space, "TEXT");
+    const { logger, lines: logged } = captureLogger("error");
+
+    for (const attempt of [1, 2]) {
+      sharedDdl = [];
+      const result = await sync.run([RenamedTable], { force: true, logger });
+      expect(result.status).toBe("synced");
+      const entry = result.entries[0];
+      expect([entry.name, entry.status, entry.renamedFrom, entry.pending]).toEqual([
+        "app_users",
+        "error",
+        undefined,
+        true,
+      ]);
+      expect(entry.errors).toEqual([
+        'Rename failed on app_users: relation "app_users" already exists (renaming old_users)',
+      ]);
+      // The rename was attempted (attempt ${attempt}) and nothing else ran on the table
+      expect(sharedDdl).toEqual([]);
+      expect(sharedTables.has("old_users")).toBe(true);
+      expect(sharedTables.has("app_users")).toBe(false);
+      // Tracking follows reality: still the old name, its snapshot kept, hash withheld
+      expect(trackedNames()).toEqual(["old_users"]);
+      expect(controlValueOf("table_snapshot:old_users")).toBeDefined();
+      expect(controlValueOf("table_snapshot:app_users")).toBeUndefined();
+      expect(controlValueOf("schema_version")).toBeUndefined();
+      expect(
+        logged.filter((l) => l.startsWith("[schema-sync] Rename failed on app_users")),
+      ).toHaveLength(attempt);
+    }
+    // The plan still shows the pending rename
+    const plan = await sync.plan([RenamedTable], { force: true });
+    expect([plan.entries[0].status, plan.entries[0].renamedFrom]).toEqual(["alter", "old_users"]);
+  });
+
+  it("an errored plan entry under a pending rename issues no DDL and stays under the old name", async () => {
+    const space = createTypedSpace();
+    const sync = new SchemaSync(space);
+    // `name` is INTEGER live, string in the model → type change without a method
+    const adapter = trackedOldUsers(space, "INTEGER");
+    const msg =
+      'Type change on app_users.name (INTEGER → string). Add @db.sync.method "recreate" or "drop", or migrate manually.';
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      sharedDdl = [];
+      const plan = await sync.plan([RenamedTable], { force: true });
+      expect([plan.entries[0].status, plan.entries[0].renamedFrom, plan.entries[0].errors]).toEqual(
+        ["error", "old_users", [msg]],
+      );
+      const result = await sync.run([RenamedTable], { force: true, onError: "silent" });
+      const entry = result.entries[0];
+      // The run entry is the plan entry — the rename is still pending
+      expect(entry.toInit()).toEqual(plan.entries[0].toInit());
+      expect(sharedDdl).toEqual([]);
+      expect(adapter.renamedFrom).toEqual([]);
+      expect(sharedTables.has("old_users")).toBe(true);
+      expect(trackedNames()).toEqual(["old_users"]);
+      expect(controlValueOf("table_snapshot:old_users")).toBeDefined();
+      expect(controlValueOf("schema_version")).toBeUndefined();
+    }
+  });
+});
+
+describe("SchemaSync — a key-changing parent whose own entry has errors is refused (0.1.129)", () => {
+  it("refuses before step 2 would drop the children's foreign keys; plan reports the same", async () => {
+    const space = createTypedSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([Pf.PfTokenV1, Pf.PfChildOld], { force: true, onError: "silent" });
+    // PK moves id → code AND `label` is INTEGER live (string in the model):
+    // a type change without a method → the parent's own plan entry errors
+    (space.get(Pf.PfTokenV2).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "code", type: "TEXT", notnull: true, pk: false },
+      { name: "label", type: "INTEGER", notnull: true, pk: false },
+    ]);
+    (space.get(Pf.PfChildNew).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "tokenId", type: "TEXT", notnull: true, pk: false },
+    ]);
+    sharedDdl = [];
+
+    const result = await sync.run([Pf.PfChildNew, Pf.PfTokenV2], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.status).toBe("refused");
+    const parent = result.entries.find((e) => e.name === "pf_tokens")!;
+    expect([parent.status, parent.refused]).toEqual(["error", true]);
+    expect(parent.errors).toEqual([
+      'Type change on pf_tokens.label (INTEGER → string). Add @db.sync.method "recreate" or "drop", or migrate manually.',
+      'Primary key of "pf_tokens" changed (id → code) but the table\'s own entry has errors — fix them and re-run: Type change on pf_tokens.label (INTEGER → string). Add @db.sync.method "recreate" or "drop", or migrate manually.',
+    ]);
+    expect(result.entries.find((e) => e.name === "pf_children")!.status).toBe("alter");
+    expect(sharedDdl).toEqual([]);
+    expect(sharedFks.get("pf_children")).toEqual([
+      { fields: ["tokenId"], targetTable: "pf_tokens", targetFields: ["id"] },
+    ]);
+    const plan = await sync.plan([Pf.PfChildNew, Pf.PfTokenV2], { force: true });
+    expect(plan.entries.find((e) => e.name === "pf_tokens")!.errors).toEqual(parent.errors);
+  });
+
+  it("without a live inbound foreign key the errored parent is an ordinary error entry (no refusal)", async () => {
+    const space = createTypedSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([Pf.PfTokenV1], { force: true, onError: "silent" });
+    (space.get(Pf.PfTokenV2).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "code", type: "TEXT", notnull: true, pk: false },
+      { name: "label", type: "INTEGER", notnull: true, pk: false },
+    ]);
+    const result = await sync.run([Pf.PfTokenV2], { force: true, onError: "silent" });
+    expect(result.status).toBe("synced");
+    const parent = result.entries[0];
+    expect([parent.status, parent.refused, parent.errors.length]).toEqual(["error", false, 1]);
   });
 });
