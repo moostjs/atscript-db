@@ -1,10 +1,10 @@
-import type { AggregateExpr } from "@uniqu/core";
+import { type AggregateExpr, walkFilter } from "@uniqu/core";
 import type { DbControls } from "@atscript/db";
 import { resolveAlias } from "@atscript/db/agg";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { EMPTY_AND, finalizeParams } from "./dialect";
-import { buildWhere } from "./filter-builder";
+import { buildWhere, createFilterVisitor } from "./filter-builder";
 
 export const AGG_FN_SQL: Record<string, string> = {
   sum: "SUM",
@@ -14,11 +14,38 @@ export const AGG_FN_SQL: Record<string, string> = {
   max: "MAX",
 };
 
-function buildAggExpr(dialect: SqlDialect, expr: AggregateExpr): string {
+/** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)`. */
+function aggFnSql(dialect: SqlDialect, expr: AggregateExpr): string {
   const fn = AGG_FN_SQL[expr.$fn] ?? expr.$fn.toUpperCase();
-  const alias = dialect.quoteIdentifier(resolveAlias(expr));
   const field = expr.$field === "*" ? "*" : dialect.quoteIdentifier(expr.$field);
-  return `${fn}(${field}) AS ${alias}`;
+  return `${fn}(${field})`;
+}
+
+function buildAggExpr(dialect: SqlDialect, expr: AggregateExpr): string {
+  return `${aggFnSql(dialect, expr)} AS ${dialect.quoteIdentifier(resolveAlias(expr))}`;
+}
+
+/**
+ * Renders `$having`. A key that names an aggregate alias (`$as`, else
+ * `fn_field`) renders the aggregate expression itself — `SUM("amount") > ?`
+ * — because PostgreSQL does not allow a SELECT alias in HAVING (MySQL and
+ * SQLite tolerate it, so the expression form keeps all three identical).
+ * Other keys (grouped columns) render as plain columns.
+ */
+function buildHaving(dialect: SqlDialect, controls: DbControls): TSqlFragment {
+  const having = controls.$having!;
+  const aggregates = controls.$select?.aggregates;
+  if (!aggregates?.length) {
+    return buildWhere(dialect, having);
+  }
+  const exprByAlias = new Map<string, string>();
+  for (const expr of aggregates) {
+    exprByAlias.set(resolveAlias(expr), aggFnSql(dialect, expr));
+  }
+  const visitor = createFilterVisitor(dialect, {
+    columnRef: (field) => exprByAlias.get(field) ?? dialect.quoteIdentifier(field),
+  });
+  return walkFilter(having, visitor) ?? EMPTY_AND;
 }
 
 /**
@@ -62,7 +89,7 @@ export function buildAggregateSelect(
 
   // HAVING
   if (controls.$having) {
-    const havingFragment = buildWhere(dialect, controls.$having);
+    const havingFragment = buildHaving(dialect, controls);
     if (havingFragment.sql !== EMPTY_AND.sql) {
       sql += ` HAVING ${havingFragment.sql}`;
       params.push(...havingFragment.params);

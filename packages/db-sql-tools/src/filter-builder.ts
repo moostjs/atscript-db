@@ -4,17 +4,31 @@ import { DbError } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "./dialect";
 import { EMPTY_AND, EMPTY_OR } from "./dialect";
 
+export interface TFilterVisitorOptions {
+  /**
+   * Renders a filter key as its SQL operand. Defaults to
+   * `dialect.quoteIdentifier(field)`; the aggregate builder overrides it so a
+   * `$having` key that names an aggregate alias renders the aggregate
+   * expression (`SUM("amount")`) — PostgreSQL rejects SELECT aliases in HAVING.
+   */
+  columnRef?: (field: string) => string;
+}
+
 /**
  * Creates a dialect-specific filter visitor for `walkFilter`.
  */
-export function createFilterVisitor(dialect: SqlDialect): FilterVisitor<TSqlFragment> {
+export function createFilterVisitor(
+  dialect: SqlDialect,
+  options?: TFilterVisitorOptions,
+): FilterVisitor<TSqlFragment> {
+  const columnRef = options?.columnRef ?? ((field: string) => dialect.quoteIdentifier(field));
   return {
     comparison(field, op, value) {
       if ((op as string) === "$geoWithin") {
         if (dialect.geoWithin) {
           // Circle shape is validated by the core query guards before
           // translation — safe to cast here.
-          return dialect.geoWithin(dialect.quoteIdentifier(field), value as unknown as TGeoCircle);
+          return dialect.geoWithin(columnRef(field), value as unknown as TGeoCircle);
         }
         // No native geo support in this dialect — loud failure,
         // never a silent full scan with wrong semantics.
@@ -22,7 +36,7 @@ export function createFilterVisitor(dialect: SqlDialect): FilterVisitor<TSqlFrag
           { path: field, message: "$geoWithin is not supported by this adapter" },
         ]);
       }
-      const col = dialect.quoteIdentifier(field);
+      const col = columnRef(field);
       const v = dialect.toParam(value);
 
       switch (op) {

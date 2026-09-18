@@ -1,5 +1,6 @@
 import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
+import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
@@ -62,8 +63,77 @@ export function buildSelect(
   return finalizeParams(dialect, { sql, params });
 }
 
+// ── Full replace (since 0.1.128) ────────────────────────────────────────────
+
+/**
+ * Marker value for {@link buildUpdate}: the column is assigned its DDL
+ * `DEFAULT` (`SET "col" = DEFAULT`, no bound parameter). Produced by
+ * {@link fillReplacePayload} for columns whose function default the engine
+ * owns; never appears in a patch.
+ */
+export const SQL_DEFAULT: unique symbol = Symbol("SQL_DEFAULT");
+
+/** One physical column a full replace must assign. */
+export interface TReplaceColumn {
+  /** Physical column name. */
+  name: string;
+  /**
+   * `true` when the engine owns this column's function default (`now`,
+   * `uuid`, `increment` listed in the adapter's `nativeDefaultFns()`): an
+   * omitted value re-applies the DDL `DEFAULT` instead of storing NULL.
+   */
+  useDefault: boolean;
+}
+
+/**
+ * The columns a full replace assigns on a SQL adapter: every non-ignored
+ * descriptor (the same set `CREATE TABLE` emits) except the primary key —
+ * the row is matched by the filter, and an omitted PK must never be nulled
+ * or re-defaulted. Static value defaults are filled SDK-side before the
+ * adapter sees the row, so only native function defaults are flagged.
+ */
+export function replaceColumnsFor(
+  fields: readonly TDbFieldMeta[],
+  nativeFns: ReadonlySet<TDbDefaultFn>,
+): TReplaceColumn[] {
+  const out: TReplaceColumn[] = [];
+  for (const fd of fields) {
+    if (fd.ignored || fd.isPrimaryKey) continue;
+    const def = fd.defaultValue;
+    out.push({
+      name: fd.physicalName,
+      useDefault: def?.kind === "fn" && nativeFns.has(def.fn),
+    });
+  }
+  return out;
+}
+
+/**
+ * Turns a (physical-name) replace payload into a FULL row assignment: every
+ * column in `columns` the payload omits becomes `null` — or {@link SQL_DEFAULT}
+ * when the engine owns its function default — so an UPDATE-based replace never
+ * retains a value the caller left out. This is the SQL counterpart of the
+ * whole-document replace the memory and MongoDB adapters do natively. The
+ * version column is excluded (`buildUpdate` appends the OCC bump itself).
+ * Returns a new object; `data` is not mutated.
+ */
+export function fillReplacePayload(
+  data: Record<string, unknown>,
+  columns: readonly TReplaceColumn[],
+  versionColumn?: string,
+): Record<string, unknown> {
+  const full: Record<string, unknown> = { ...data };
+  for (const col of columns) {
+    if (col.name === versionColumn || col.name in full) continue;
+    full[col.name] = col.useDefault ? SQL_DEFAULT : null;
+  }
+  return full;
+}
+
 /**
  * Builds an UPDATE ... SET ... WHERE statement with optional LIMIT.
+ *
+ * A value of {@link SQL_DEFAULT} renders as `<col> = DEFAULT` (full replace).
  *
  * Optimistic concurrency control (OCC) hooks:
  * - `versionColumn` — when supplied, the builder appends
@@ -90,6 +160,11 @@ export function buildUpdate(
   const params: unknown[] = [];
 
   for (const [key, value] of Object.entries(data)) {
+    if (value === SQL_DEFAULT) {
+      // Full-replace fill: hand the column back to its DDL DEFAULT (no param).
+      setClauses.push(`${dialect.quoteIdentifier(key)} = DEFAULT`);
+      continue;
+    }
     setClauses.push(`${dialect.quoteIdentifier(key)} = ?`);
     params.push(dialect.toValue(value));
   }

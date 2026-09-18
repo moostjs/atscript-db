@@ -1,6 +1,6 @@
 export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
 export { EMPTY_AND, EMPTY_OR, finalizeParams } from "./dialect";
-export { createFilterVisitor, buildWhere } from "./filter-builder";
+export { createFilterVisitor, buildWhere, type TFilterVisitorOptions } from "./filter-builder";
 export type { TGeoWindow } from "./geo";
 export {
   GEO_DISTANCE_ALIAS,
@@ -10,13 +10,17 @@ export {
   normalizeGeoPointValue,
   renameGeoDistance,
 } from "./geo";
+export type { TReplaceColumn } from "./sql-builder";
 export {
+  SQL_DEFAULT,
   buildInsert,
   buildSelect,
   buildUpdate,
   buildDelete,
   buildProjection,
   buildCreateView,
+  fillReplacePayload,
+  replaceColumnsFor,
 } from "./sql-builder";
 export {
   sqlStringLiteral,

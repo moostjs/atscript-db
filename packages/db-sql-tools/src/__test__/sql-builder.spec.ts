@@ -2,12 +2,15 @@
 import { describe, it, expect } from "vite-plus/test";
 
 import {
+  SQL_DEFAULT,
   buildInsert,
   buildSelect,
   buildUpdate,
   buildDelete,
   buildProjection,
   buildCreateView,
+  fillReplacePayload,
+  replaceColumnsFor,
 } from "../sql-builder";
 import type { SqlDialect, TSqlFragment } from "../dialect";
 import type {
@@ -524,5 +527,77 @@ describe("buildCreateView", () => {
     expect(result).toBe(
       "CREATE VIEW [order_stats] AS SELECT [orders].[category] AS [category], SUM([orders].[amount]) AS [totalRevenue], COUNT(*) AS [orderCount], AVG([orders].[amount]) AS [avgAmount] FROM [orders] GROUP BY [orders].[category] HAVING SUM([orders].[amount]) > 100",
     );
+  });
+});
+
+// ── Full replace fill (since 0.1.128) ────────────────────────────────────────
+
+describe("replaceColumnsFor / fillReplacePayload", () => {
+  const fd = (over: Record<string, unknown>) =>
+    ({
+      path: "x",
+      physicalName: "x",
+      designType: "string",
+      optional: true,
+      isPrimaryKey: false,
+      ignored: false,
+      storage: "column",
+      type: {} as never,
+      ...over,
+    }) as never;
+  const fields = [
+    fd({ path: "id", physicalName: "id", isPrimaryKey: true }),
+    fd({ path: "name", physicalName: "name" }),
+    fd({ path: "note", physicalName: "note" }),
+    fd({ path: "contact.email", physicalName: "contact__email", storage: "flattened" }),
+    fd({ path: "createdAt", physicalName: "createdAt", defaultValue: { kind: "fn", fn: "now" } }),
+    fd({ path: "token", physicalName: "token", defaultValue: { kind: "fn", fn: "uuid" } }),
+    fd({ path: "kind", physicalName: "kind", defaultValue: { kind: "value", value: "a" } }),
+    fd({ path: "ghost", physicalName: "ghost", ignored: true }),
+    fd({ path: "version", physicalName: "version" }),
+  ];
+
+  it("lists every non-ignored non-PK column and flags only native function defaults", () => {
+    expect(replaceColumnsFor(fields, new Set(["now"]))).toEqual([
+      { name: "name", useDefault: false },
+      { name: "note", useDefault: false },
+      { name: "contact__email", useDefault: false },
+      { name: "createdAt", useDefault: true },
+      { name: "token", useDefault: false },
+      { name: "kind", useDefault: false },
+      { name: "version", useDefault: false },
+    ]);
+  });
+
+  it("null-fills omitted columns, keeps provided values, uses DEFAULT for native fns, skips the version column", () => {
+    const columns = replaceColumnsFor(fields, new Set(["now"]));
+    const data = { name: "n", kind: "b" };
+    const full = fillReplacePayload(data, columns, "version");
+    expect(full).toEqual({
+      name: "n",
+      kind: "b",
+      note: null,
+      contact__email: null,
+      createdAt: SQL_DEFAULT,
+      token: null,
+    });
+    expect(data).toEqual({ name: "n", kind: "b" }); // input untouched
+  });
+
+  it("buildUpdate renders SQL_DEFAULT as `col = DEFAULT` without a parameter", () => {
+    const { sql, params } = buildUpdate(
+      mockDialect,
+      "items",
+      { name: "n", note: null, createdAt: SQL_DEFAULT },
+      { sql: "[id] = ?", params: [1] },
+      undefined,
+      undefined,
+      "version",
+      3,
+    );
+    expect(sql).toBe(
+      "UPDATE [items] SET [name] = ?, [note] = ?, [createdAt] = DEFAULT, [version] = [version] + 1 WHERE [id] = ? AND [version] = ?",
+    );
+    expect(params).toEqual(["n", null, 1, 3]);
   });
 });

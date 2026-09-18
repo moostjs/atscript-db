@@ -202,3 +202,42 @@ describe("buildWhere", () => {
     expect(result.sql).toContain("OR");
   });
 });
+
+// ── Finding 34: mixed comparison + logical nodes (uniqu ≥ 0.1.8 implicit AND) ──
+// Pre-0.1.8 `walkFilter` returned the LAST member of a node, so a `transformFilter`
+// overlay that spread a scope field next to a URL-produced `$or` silently dropped
+// the scope predicate. Pin the implicit-AND contract in key insertion order.
+describe("buildWhere — mixed comparison + logical nodes", () => {
+  it("keeps sibling predicates when fields are mixed with $or (uniqu ≥ 0.1.8 implicit AND)", () => {
+    const result = buildWhere(mockDialect, {
+      id: 101,
+      nextRefreshAt: { $lte: 5 },
+      $or: [{ a: 1 }, { b: 2 }],
+    } as any);
+    expect(result.sql).toBe("[id] = ? AND [nextRefreshAt] <= ? AND ([a] = ? OR [b] = ?)");
+    expect(result.params).toEqual([101, 5, 1, 2]);
+  });
+
+  it("flattens an $and sibling next to a field (no parentheses around AND children)", () => {
+    const result = buildWhere(mockDialect, { id: 101, $and: [{ x: 1 }, { y: 2 }] } as any);
+    expect(result.sql).toBe("[id] = ? AND [x] = ? AND [y] = ?");
+    expect(result.params).toEqual([101, 1, 2]);
+  });
+
+  it("keeps a $not sibling in key order", () => {
+    const result = buildWhere(mockDialect, { $not: { s: 1 }, id: 101 } as any);
+    expect(result.sql).toBe("NOT ([s] = ?) AND [id] = ?");
+    expect(result.params).toEqual([1, 101]);
+  });
+
+  it("a field with two operators contributes one comparison per operator, ANDed with the $or", () => {
+    const result = buildWhere(mockDialect, {
+      nextRefreshAt: { $gte: 1, $lte: 5 },
+      $or: [{ a: 1 }, { b: 2 }],
+    } as any);
+    expect(result.sql).toBe(
+      "[nextRefreshAt] >= ? AND [nextRefreshAt] <= ? AND ([a] = ? OR [b] = ?)",
+    );
+    expect(result.params).toEqual([1, 5, 1, 2]);
+  });
+});

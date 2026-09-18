@@ -93,16 +93,72 @@ describe("buildAggregateSelect", () => {
     expect(result.params).toEqual([1, 10, 20]);
   });
 
-  it("includes HAVING clause", () => {
+  it("includes HAVING clause — an aggregate alias renders its expression", () => {
+    // PostgreSQL rejects `HAVING "total" > $1` (SELECT aliases are not visible
+    // in HAVING); the expression form is valid on every dialect.
     const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
       $groupBy: ["currency"],
       $select: makeSelect(["currency", { $fn: "sum", $field: "amount", $as: "total" }]),
       $having: { total: { $gt: 100 } },
     });
     expect(result.sql).toBe(
-      "SELECT [currency], SUM([amount]) AS [total] FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING [total] > ?",
+      "SELECT [currency], SUM([amount]) AS [total] FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING SUM([amount]) > ?",
     );
     expect(result.params).toEqual([100]);
+  });
+
+  it("HAVING on a grouped column keeps rendering the column", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["currency"],
+      $select: makeSelect(["currency", { $fn: "sum", $field: "amount", $as: "total" }]),
+      $having: { currency: "EUR" },
+    });
+    expect(result.sql).toBe(
+      "SELECT [currency], SUM([amount]) AS [total] FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING [currency] = ?",
+    );
+    expect(result.params).toEqual(["EUR"]);
+  });
+
+  it("HAVING mixes alias expressions and grouped columns inside $or", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["currency"],
+      $select: makeSelect([
+        "currency",
+        { $fn: "sum", $field: "amount", $as: "total" },
+        { $fn: "count", $field: "*", $as: "cnt" },
+      ]),
+      $having: { $or: [{ total: { $gt: 100 } }, { currency: "EUR" }, { cnt: { $gte: 3 } }] },
+    });
+    expect(result.sql).toBe(
+      "SELECT [currency], SUM([amount]) AS [total], COUNT(*) AS [cnt] FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING (SUM([amount]) > ? OR [currency] = ? OR COUNT(*) >= ?)",
+    );
+    expect(result.params).toEqual([100, "EUR", 3]);
+  });
+
+  it("HAVING on a count() alias renders COUNT(*) / COUNT([field])", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["status"],
+      $select: makeSelect([
+        "status",
+        { $fn: "count", $field: "*", $as: "cnt" },
+        { $fn: "count", $field: "email", $as: "with_email" },
+      ]),
+      $having: { cnt: { $gt: 1 }, with_email: { $gte: 1 } },
+    });
+    expect(result.sql).toBe(
+      "SELECT [status], COUNT(*) AS [cnt], COUNT([email]) AS [with_email] FROM [orders] WHERE 1=1 GROUP BY [status] HAVING COUNT(*) > ? AND COUNT([email]) >= ?",
+    );
+    expect(result.params).toEqual([1, 1]);
+  });
+
+  it("HAVING resolves the implicit fn_field alias", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["status"],
+      $select: makeSelect(["status", { $fn: "sum", $field: "amount" }]),
+      $having: { sum_amount: { $gt: 10 } },
+    });
+    expect(result.sql).toContain("HAVING SUM([amount]) > ?");
+    expect(result.params).toEqual([10]);
   });
 
   it("handles multiple groupBy fields", () => {
@@ -164,5 +220,28 @@ describe("buildAggregateCount", () => {
     const result = buildAggregateCount(mockDialect, "orders", emptyWhere, {});
     expect(result.sql).toBe("SELECT COUNT(*) AS [count] FROM [orders] WHERE 1=1");
     expect(result.params).toEqual([]);
+  });
+});
+
+// ── Finding 34: $having with a mixed comparison + logical node ────────────────
+describe("buildAggregateSelect — mixed $having node", () => {
+  it("keeps the alias predicate next to an $or in HAVING (implicit AND)", () => {
+    const result = buildAggregateSelect(
+      mockDialect,
+      "orders",
+      { sql: "1=1", params: [] },
+      {
+        $groupBy: ["currency"],
+        $select: new UniquSelect([
+          "currency",
+          { $fn: "sum", $field: "amount", $as: "total" },
+        ] as any),
+        $having: { total: { $gt: 100 }, $or: [{ currency: "EUR" }, { currency: "USD" }] } as any,
+      },
+    );
+    expect(result.sql).toBe(
+      "SELECT [currency], SUM([amount]) AS [total] FROM [orders] WHERE 1=1 GROUP BY [currency] HAVING SUM([amount]) > ? AND ([currency] = ? OR [currency] = ?)",
+    );
+    expect(result.params).toEqual([100, "EUR", "USD"]);
   });
 });
