@@ -30,6 +30,10 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
 | `init()`                               | Both           | On controller construction       | One-time setup                                                    |
 
+::: info Deprecated hook
+`checkGates(parsed)` still runs after the field capability gate but is deprecated since 0.1.128: the gate derived from `/meta.fields` already rejects every unlisted or non-sortable / non-filterable path before it. Override the read hooks above, or the table-level `guard` options, instead.
+:::
+
 ## Read Hooks
 
 ### transformFilter {#transformfilter}

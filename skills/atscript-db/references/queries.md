@@ -69,7 +69,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 | flattened parent (`contact`)               | `$select` ok (expands); filter / sort rejected — use a leaf                     |
 | `$sort` on JSON / array column             | rejected on every adapter (`canSortField`)                                      |
 | encrypted descendant in `$select`          | rejected — select the encrypted parent                                          |
-| filter node key other than `$and/$or/$not` | `Unsupported logical operator "$nor"`                                           |
+| filter node key other than `$and/$or/$not` | `Unsupported filter operator "$nor" — use $and, $or or $not`                    |
 
 `ENC_FIELD_*` / geo guards still fire first for encrypted subtrees and `$geoWithin`.
 

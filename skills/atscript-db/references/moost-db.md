@@ -285,7 +285,7 @@ Detect partial failure with `matchedCount < items.length`. **Per-item conflict s
 
 ## Gate mode (capability index, since 0.1.128)
 
-`/meta.fields` and the request gate are two projections of ONE per-controller `FieldCapabilityIndex` — parity is structural: `fields[P].sortable === ($sort=P accepted)`, `fields[P].filterable === (filter on P accepted)`, on every adapter, mode and field kind. Every root path a request uses (filter tree, `$sort`, `$select`, `$groupBy`, `$having` keys minus aggregate aliases, aggregate `$field`) is checked BEFORE `transformFilter` / `transformProjection`; rejections are the structured envelope `{ message, statusCode: 400, errors: [{ path, message }] }`.
+`/meta.fields` and the request gate are two projections of ONE per-controller `FieldCapabilityIndex` — parity is structural: `fields[P].sortable === ($sort=P accepted)`, `fields[P].filterable === (filter on P accepted)`, on every adapter, mode and field kind. Every root path a request uses (filter tree, `$sort`, `$select`, `$groupBy`, `$having` keys minus aggregate aliases, aggregate `$field`) is checked BEFORE `transformFilter` / `transformProjection`; rejections are the structured envelope `{ message, statusCode: 400, errors: [{ path, message }] }`. `checkGates(parsed)` still runs after the gate but is deprecated since 0.1.128 — override the read hooks or table guards instead.
 
 - `fields[<path>]` = `{ filterable, sortable, indexed?, encrypted?, geo?, writeOnly? }`:
   - `filterable` — adapter `canFilterField(fd)` ∧ ¬`@db.writeOnly` ∧ ¬`@db.encrypted`; in `@db.table.filterable 'manual'` additionally only `@db.column.filterable` fields.
