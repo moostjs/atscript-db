@@ -1,5 +1,6 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
 import { BaseDbAdapter, DbError } from "@atscript/db";
+import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
   AtscriptDbView,
   TDbObjectKind,
@@ -22,6 +23,8 @@ import type {
 } from "@atscript/db";
 import type { DbQuery, FilterExpr } from "@atscript/db";
 import {
+  type TSqlFragment,
+  EMPTY_AND,
   buildGeoSearchCount,
   buildGeoSearchSelect,
   fillReplacePayload,
@@ -402,8 +405,14 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    const where = buildWhere(query.filter);
     const tableName = this.resolveTableName();
+    // Grouped-search contract: see `resolveAggregateSearch`. The FTS5 predicate
+    // goes in the pre-aggregation WHERE rather than a JOIN, because the
+    // aggregate builders render their own unaliased FROM.
+    const search = resolveAggregateSearch(query.controls);
+    const where = search
+      ? andWhere(this._buildFtsMatchWhere(search.text, search.indexName), buildWhere(query.filter))
+      : buildWhere(query.filter);
 
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
@@ -1091,6 +1100,28 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   /**
+   * The FTS5 match restated as a standalone WHERE fragment:
+   * `rowid IN (SELECT rowid FROM "<table>__fts__<idx>" WHERE "<table>__fts__<idx>" MATCH ?)`.
+   *
+   * The external-content FTS5 tables this adapter creates carry
+   * `content_rowid='rowid'`, so the virtual table's `rowid` IS the content
+   * table's rowid, and the unqualified `rowid` outside the subquery resolves
+   * against the aggregate's single FROM table. {@link _buildFtsBase} is the
+   * leaf path's JOIN form, which the unaliased aggregate builders cannot take.
+   *
+   * Index resolution goes through {@link _resolveFtsIndex}, as the leaf path
+   * does, so a named `$index` and its "not found" error behave identically.
+   */
+  private _buildFtsMatchWhere(text: string, indexName?: string): TSqlFragment {
+    const ftsTable = this._ftsTableName(this._resolveFtsIndex(indexName).name);
+    const quoted = `"${esc(ftsTable)}"`;
+    return {
+      sql: `rowid IN (SELECT rowid FROM ${quoted} WHERE ${quoted} MATCH ?)`,
+      params: [text],
+    };
+  }
+
+  /**
    * Builds the shared FROM+JOIN+WHERE fragment for FTS5 queries.
    * Both data and count queries reuse this to avoid duplicating index resolution and filter translation.
    */
@@ -1650,6 +1681,18 @@ export class SqliteAdapter extends BaseDbAdapter {
       this._dropVecTable(name);
     }
   }
+}
+
+/**
+ * ANDs two WHERE fragments, keeping `left`'s params first so placeholder order
+ * follows the rendered SQL. An empty `right` — what {@link buildWhere} returns
+ * for no filter — is dropped rather than appended.
+ */
+function andWhere(left: TSqlFragment, right: TSqlFragment): TSqlFragment {
+  if (right.sql === EMPTY_AND.sql) {
+    return left;
+  }
+  return { sql: `${left.sql} AND (${right.sql})`, params: [...left.params, ...right.params] };
 }
 
 /** Normalizes SQLite PRAGMA dflt_value to match serialized format.

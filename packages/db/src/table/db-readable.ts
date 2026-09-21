@@ -774,6 +774,18 @@ export class AtscriptDbReadable<
       }
     }
 
+    // A grouped `$search` must answer for exactly the rows the same term returns
+    // in the leaf list, so it takes the leaf path's two gates before dispatch:
+    // the source must be able to run it, and a blank-but-present term matches
+    // nothing (`search()` returns [] outright) rather than everything.
+    const searchTerm = query.controls.$search;
+    if (typeof searchTerm === "string" && searchTerm) {
+      this._ensureSearchable();
+      if (!searchTerm.trim()) {
+        return query.controls.$count ? [{ count: 0 }] : [];
+      }
+    }
+
     // Encrypted-field guards: $groupBy / aggregate refs / $having / filter
     guardAggregate(this._meta, this.adapter, query);
 

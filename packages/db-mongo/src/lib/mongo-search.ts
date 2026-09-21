@@ -1,6 +1,7 @@
 import type { Collection, Document } from "mongodb";
 import { DbError } from "@atscript/db";
 import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/db";
+import { resolveAggregateSearch } from "@atscript/db/agg";
 import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
 import { buildMongoFilter } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
@@ -51,6 +52,47 @@ export function isVectorSearchableImpl(host: TMongoSearchHost): boolean {
   return false;
 }
 
+/**
+ * Resolves the leading stage for a text search, or throws when no index
+ * answers to `indexName` (the default index when it is omitted).
+ */
+function requireSearchStage(
+  host: TMongoSearchHost,
+  text: string,
+  indexName: string | undefined,
+  controls: DbControls | undefined,
+): { stage: Document; classicText: boolean } {
+  const plan = buildSearchStage(host, text, indexName, controls);
+  if (!plan) {
+    throw new Error(
+      indexName ? `Search index "${indexName}" not found` : "No search index available",
+    );
+  }
+  return plan;
+}
+
+/**
+ * Resolves the leading search stage for a GROUPED aggregate query, or
+ * `undefined` when the query carries no `$search` term (the plain grouped
+ * path). `$index` picks the search index by the same rules as `search()`, and
+ * an unresolvable one throws exactly as the leaf path does.
+ *
+ * `classicText` is deliberately dropped: it only drives the leaf runner's
+ * `_score` projection and relevance `$sort`, and no per-document score
+ * survives `$group`. See `resolveAggregateSearch` in `@atscript/db/agg` for
+ * the normative cross-adapter contract.
+ */
+export function buildAggregateSearchStage(
+  host: TMongoSearchHost,
+  controls: DbControls | undefined,
+): Document | undefined {
+  const search = resolveAggregateSearch(controls);
+  if (!search) {
+    return undefined;
+  }
+  return requireSearchStage(host, search.text, search.indexName, controls).stage;
+}
+
 /** Text search via $search aggregation stage. */
 export async function searchImpl(
   host: TMongoSearchHost,
@@ -58,12 +100,7 @@ export async function searchImpl(
   query: DbQuery,
   indexName?: string,
 ): Promise<Array<Record<string, unknown>>> {
-  const plan = buildSearchStage(host, text, indexName, query.controls);
-  if (!plan) {
-    throw new Error(
-      indexName ? `Search index "${indexName}" not found` : "No search index available",
-    );
-  }
+  const plan = requireSearchStage(host, text, indexName, query.controls);
   return runSearchPipeline(host, plan.stage, query, "search", undefined, plan.classicText);
 }
 
@@ -74,12 +111,7 @@ export async function searchWithCountImpl(
   query: DbQuery,
   indexName?: string,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-  const plan = buildSearchStage(host, text, indexName, query.controls);
-  if (!plan) {
-    throw new Error(
-      indexName ? `Search index "${indexName}" not found` : "No search index available",
-    );
-  }
+  const plan = requireSearchStage(host, text, indexName, query.controls);
   return runSearchWithCountPipeline(
     host,
     plan.stage,

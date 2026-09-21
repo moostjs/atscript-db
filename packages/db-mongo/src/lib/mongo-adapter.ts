@@ -58,6 +58,7 @@ import type { TMongoRelationHost } from "./mongo-relations";
 import { loadRelationsImpl } from "./mongo-relations";
 import type { TMongoGeoHost, TMongoSearchHost } from "./mongo-search";
 import {
+  buildAggregateSearchStage,
   searchImpl,
   searchWithCountImpl,
   vectorSearchImpl,
@@ -288,14 +289,19 @@ export class MongoAdapter extends BaseDbAdapter {
   override async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const { buildAggregatePipeline, buildCountPipeline } = await import("../agg");
 
+    // Grouped-search contract: see `resolveAggregateSearch`. Resolved here
+    // because it needs the adapter's index map, and shared by both builders so
+    // rows and count can never describe different populations.
+    const searchStage = buildAggregateSearchStage(this as any as TMongoSearchHost, query.controls);
+
     if (query.controls?.$count) {
-      const pipeline = buildCountPipeline(query);
+      const pipeline = buildCountPipeline(query, searchStage);
       this._log("aggregate (count)", pipeline);
       const result = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
       return result.length > 0 ? result : [{ count: 0 }];
     }
 
-    const pipeline = buildAggregatePipeline(query);
+    const pipeline = buildAggregatePipeline(query, searchStage);
     this._log("aggregate", pipeline);
     return wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
   }

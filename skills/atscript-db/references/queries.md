@@ -131,6 +131,10 @@ interface AggregateControls<T> {
   $skip?: number;
   $limit?: number;
   $count?: boolean;
+  // Not declared on the interface — they ride the `[key: `$${string}`]: unknown`
+  // pass-through, so they are accepted but not type-checked (0.1.130):
+  //   $search?: string  — text search applied BEFORE grouping, see below
+  //   $index?: string   — named search index, same resolution as search()
 }
 interface AggregateExpr {
   $fn: "sum" | "count" | "avg" | "min" | "max" | string;
@@ -141,6 +145,17 @@ interface AggregateExpr {
 ```
 
 Groups over fields marked `@db.column.dimension`; aggregates over fields marked `@db.column.measure` (or view fields with `@db.agg.*`). `count` accepts `$field: '*'` for `COUNT(*)`.
+
+### `$search` on an aggregate query (since 0.1.130)
+
+Search narrows the ROWS, `$groupBy` shapes what is left — they are orthogonal, so the adapter applies the search predicate BEFORE grouping and a rollup describes exactly the rows the same `$search` returns in the leaf list. `$count` counts the groups those rows form (still after `$having`). Up to 0.1.129 every adapter with native text search silently DISCARDED the term on the aggregate path: the leaf list was filtered, the rollup was not, and no error was raised.
+
+Two rules the leaf search path applies and the grouped path deliberately does not:
+
+- **No implicit relevance ordering.** Relevance is a property of a row; nothing survives `$group`. Grouped results order by `$sort` or not at all. ("Groups ordered by best hit" would be a `max(_score)` aggregate — not offered.)
+- **No implicit row cap.** The leaf Mongo runner caps an unbounded search at 1000 rows; applying that before grouping would silently truncate counts.
+
+`$search` on a source with no search capability throws `DbError("INVALID_QUERY", [{ path: "$search" }])` rather than returning unsearched groups. Over HTTP that case does not arise for tables using the `@db.column.searchable` fallback: `moost-db` rewrites the term into the filter and strips the control before dispatch, so grouped queries are searched there too. `$vector` + `$groupBy` is rejected with 400 — no adapter can group by similarity, and matching the embedding text as ordinary text would answer a different question.
 
 ## Insights
 

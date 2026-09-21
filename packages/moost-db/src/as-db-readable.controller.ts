@@ -636,6 +636,35 @@ export class AsDbReadableController<
       : fragment;
   }
 
+  /**
+   * The controls a grouped query hands to the adapter. `$search` has two
+   * implementations and exactly one layer may consume it:
+   *
+   * - **native text search** — the adapter applies the term before grouping, so
+   *   `$search` / `$index` ride through untouched.
+   * - **no native search** — the term is this layer's to deal with, so the
+   *   controls are dropped before dispatch; leaving them would make the core
+   *   reject a query it has no way to run.
+   *
+   * Note the second case is deliberately broader than `applySearchFallback`:
+   * that method only rewrites the term when `@db.column.searchable` fields
+   * exist, whereas this drops the controls whenever the source is not natively
+   * searchable. On a table with neither, the term is ignored — which is exactly
+   * what the LEAF path already does for the same table (`_resolveReadStrategy`
+   * falls through to `plain`). Rejecting here instead would make a grouped
+   * query 400 where the leaf list happily returns rows: a new divergence, in
+   * the same shape as the one this whole path exists to remove.
+   */
+  private _aggregateControls(controls: Record<string, unknown>): Record<string, unknown> {
+    if (controls.$search === undefined || this.readable.isSearchable()) {
+      return controls;
+    }
+    const rest = { ...controls };
+    delete rest.$search;
+    delete rest.$index;
+    return rest;
+  }
+
   private async _resolveReadStrategy(
     controls: Record<string, unknown>,
   ): Promise<
@@ -727,6 +756,12 @@ export class AsDbReadableController<
     if (groupBy?.length && (controls.$with as unknown[])?.length) {
       return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
     }
+    // `$vector` consumes `$search` as an embedding and no adapter can group by
+    // similarity. Rejecting beats the silent alternative, where the term falls
+    // through to `$search` and is matched as ordinary text instead.
+    if (groupBy?.length && controls.$vector !== undefined) {
+      return new HttpError(400, "Cannot combine $vector and $groupBy in the same query");
+    }
 
     // Aggregate and regular paths share validation: subclass `validateControls`
     // overrides (per-control auth) and `checkCapabilities` (field-level gate) must
@@ -757,7 +792,7 @@ export class AsDbReadableController<
       );
       return this.readable.aggregate({
         filter,
-        controls: controls as any,
+        controls: this._aggregateControls(controls as Record<string, unknown>) as any,
         insights: parsed.insights,
       }) as Promise<any>;
     }

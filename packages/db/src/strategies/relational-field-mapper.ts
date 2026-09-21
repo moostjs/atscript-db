@@ -167,16 +167,18 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
           : controls.$having;
     }
 
+    // Spread-then-override, like the sibling document mapper and this class's own
+    // `translateControls`: only the four keys that carry field PATHS need
+    // translating. An allowlist here silently dropped every other control — which
+    // is how `$search` came to be discarded on grouped queries.
     return {
       filter,
       controls: {
+        ...controls,
         $groupBy: groupBy,
         $select: select ? new UniquSelect(select, meta.allPhysicalFields) : undefined,
         $sort: sort,
         $having: having,
-        $skip: controls.$skip,
-        $limit: controls.$limit,
-        $count: controls.$count,
       },
       insights: query.insights,
     };

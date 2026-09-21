@@ -22,6 +22,7 @@ import type {
   TFieldOps,
 } from "@atscript/db";
 import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
@@ -506,7 +507,13 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    const where = buildWhere(query.filter);
+    // Grouped-search contract: see `resolveAggregateSearch`. `_buildSearchWhere`
+    // is the leaf path's own predicate builder — it contributes a WHERE fragment
+    // only, which the row query and the `$count` subquery then share.
+    const search = resolveAggregateSearch(query.controls);
+    const where = search
+      ? this._buildSearchWhere(search.text, query, search.indexName)
+      : buildWhere(query.filter);
     const tableName = this.resolveTableName();
 
     if (query.controls.$count) {

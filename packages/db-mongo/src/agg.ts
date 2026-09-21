@@ -50,11 +50,19 @@ function groupIdKey(field: string, index: number): string {
 }
 
 /**
- * Builds the common prefix stages: $match + $group._id from groupBy fields.
- * Shared by both full aggregate and count pipelines.
+ * Builds the common prefix stages: [search] + $match + $group._id from groupBy
+ * fields. Shared by both full aggregate and count pipelines.
  * `groupKeys` maps each `$groupBy` path to its `_id` sub-key.
+ *
+ * `searchStage` is the resolved text-search stage (classic `$text` `$match`, or
+ * an Atlas `$search`). Both MUST be the pipeline's FIRST stage, hence its
+ * position in front of the filter `$match`. Resolving it needs adapter state,
+ * so the caller passes it in and this module stays a pure translation.
  */
-function buildPrefix(query: DbQuery): {
+function buildPrefix(
+  query: DbQuery,
+  searchStage: Document | undefined,
+): {
   pipeline: Document[];
   groupId: Document;
   groupKeys: Array<[path: string, idKey: string]>;
@@ -62,7 +70,9 @@ function buildPrefix(query: DbQuery): {
 } {
   const controls = query.controls || {};
   const groupBy = (controls.$groupBy ?? []) as string[];
-  const pipeline: Document[] = [{ $match: buildMongoFilter(query.filter) }];
+  const pipeline: Document[] = searchStage
+    ? [searchStage, { $match: buildMongoFilter(query.filter) }]
+    : [{ $match: buildMongoFilter(query.filter) }];
 
   const groupId: Document = {};
   const groupKeys: Array<[string, string]> = [];
@@ -76,10 +86,12 @@ function buildPrefix(query: DbQuery): {
 }
 
 /**
- * The stages every grouped query shares: `$match(filter)` → `$group`
- * (dimensions + accumulators) → `$project` (flatten `_id`, keep aliases) →
- * `$match($having)`. The row pipeline appends sort/skip/limit, the count
- * pipeline appends `$count`, so both see exactly the same group set.
+ * The stages every grouped query shares: `[search →] $match(filter)` →
+ * `$group` (dimensions + accumulators) → `$project` (flatten `_id`, keep
+ * aliases) → `$match($having)`. The row pipeline appends sort/skip/limit, the
+ * count pipeline appends `$count`, so both see exactly the same group set —
+ * including the same `$search` narrowing, which is why the stage is threaded
+ * through this single seam instead of being appended by each caller.
  *
  * With `accumulators: false` only the `$group._id` dimensions are emitted
  * (no accumulators, no `$project`, no `$having`) — the cheapest shape for a
@@ -87,12 +99,12 @@ function buildPrefix(query: DbQuery): {
  */
 function buildGroupedStages(
   query: DbQuery,
-  { accumulators }: { accumulators: boolean },
+  { accumulators, searchStage }: { accumulators: boolean; searchStage?: Document },
 ): {
   pipeline: Document[];
   controls: DbQuery["controls"];
 } {
-  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query);
+  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query, searchStage);
 
   const groupStage: Document = { _id: groupId };
   if (!accumulators) {
@@ -124,10 +136,15 @@ function buildGroupedStages(
 /**
  * Builds a full MongoDB aggregation pipeline for GROUP BY queries.
  *
- * Pipeline: $match → $group → $project → $match(having) → $sort → $skip → $limit
+ * Pipeline: [search →] $match → $group → $project → $match(having) → $sort →
+ * $skip → $limit
+ *
+ * `searchStage` is the resolved `$search` / `$text` stage (see
+ * `buildAggregateSearchStage`); unlike the leaf runner this path adds no
+ * relevance `$sort` and no default `$limit`.
  */
-export function buildAggregatePipeline(query: DbQuery): Document[] {
-  const { pipeline, controls } = buildGroupedStages(query, { accumulators: true });
+export function buildAggregatePipeline(query: DbQuery, searchStage?: Document): Document[] {
+  const { pipeline, controls } = buildGroupedStages(query, { accumulators: true, searchStage });
 
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
@@ -149,11 +166,15 @@ export function buildAggregatePipeline(query: DbQuery): Document[] {
  * `$having` has a value to match; without it only the `$group._id`
  * dimensions are needed.
  *
- * Pipeline: $match → $group → [$project → $match(having)] → $count
+ * Pipeline: [search →] $match → $group → [$project → $match(having)] → $count
+ *
+ * `searchStage` must be the SAME stage handed to `buildAggregatePipeline` for
+ * the same query — the counted groups are exactly the rows the search matched.
  */
-export function buildCountPipeline(query: DbQuery): Document[] {
+export function buildCountPipeline(query: DbQuery, searchStage?: Document): Document[] {
   const { pipeline } = buildGroupedStages(query, {
     accumulators: Boolean(query.controls?.$having),
+    searchStage,
   });
   pipeline.push({ $count: "count" });
   return pipeline;
