@@ -98,7 +98,7 @@ Detects token + instance bindings; lazy-factory bindings can't name their model 
 
 ## $search fallback + write-only fields
 
-- `@db.column.searchable` fields: `$search` works without native search (escaped case-insensitive substring, `$or` across annotated fields; native search wins when configured; `/meta` reports `searchable: true`).
+- `@db.column.searchable` fields: `$search` works without native search (escaped case-insensitive substring, `$or` across annotated fields; native search wins when configured; `/meta` reports `searchable: true`). "Native search" means TEXT search: a vector-only table (`@db.search.vector` and no `@db.index.fulltext`) reports `searchable: false`, so the fallback applies there and `/meta` still reports `vectorSearchable: true` (since 0.1.131).
 - `@db.writeOnly` fields: settable via insert/update/replace, sealed out of ALL reads (projections force-exclude them; filter/sort/`$groupBy` on them → 400; `/meta` serves the type with `fields[path].writeOnly: true`). Server-side `table.findOne` still sees the value — the seal is HTTP-layer. Related-model writeOnly fields are NOT sealed through `$with` nav loads — seal at that model's own controller/overlay.
 
 ## Testing fixture

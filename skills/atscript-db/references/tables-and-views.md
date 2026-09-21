@@ -46,7 +46,7 @@ new DbSpace(adapterFactory, myLogger);
 | `searchWithCount(text, q?, indexName?)` | `{ data, count }` variant.                                                                                                                                                                                                 |
 | `vectorSearch(vector, q?, indexName?)`  | Vector similarity search. Throws if adapter lacks support.                                                                                                                                                                 |
 | `vectorSearchWithCount(vector, q?, …)`  | `{ data, count }` variant.                                                                                                                                                                                                 |
-| `isSearchable() / isVectorSearchable()` | Adapter-capability probes (guard before calling search).                                                                                                                                                                   |
+| `isSearchable() / isVectorSearchable()` | Adapter-capability probes (guard before calling search). `isSearchable()` counts TEXT indexes only — a table whose only search declaration is `@db.search.vector` reports `false` (since 0.1.131).                         |
 | `getSearchIndexes()`                    | `TSearchIndexInfo[]` — declared search indexes resolved from annotations.                                                                                                                                                  |
 
 Metadata is built lazily on first access — safe to reference from peer tables.

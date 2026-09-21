@@ -19,7 +19,7 @@ export class MockAdapter extends BaseDbAdapter {
   public calls: Array<{ method: string; args: any[] }> = [];
   public store = new Map<string, Array<Record<string, unknown>>>();
 
-  private record(method: string, ...args: any[]) {
+  protected record(method: string, ...args: any[]) {
     this.calls.push({ method, args });
   }
 

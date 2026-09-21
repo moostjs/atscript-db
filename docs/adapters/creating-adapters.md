@@ -492,7 +492,7 @@ Optional dialect hook translating `$geoWithin: { center, radius }` into a SQL pr
 
 #### `isSearchable()`
 
-Whether the adapter supports text search. Defaults to `true` when `getSearchIndexes()` returns any entries. Override for custom logic.
+Whether the adapter can run **text** search. Defaults to `true` when `getSearchIndexes()` returns at least one non-vector entry — see the tagging contract below. Override for custom logic.
 
 #### `isVectorSearchable()`
 
@@ -505,11 +505,13 @@ Return available search indexes for this adapter as `TSearchIndexInfo[]`. Used b
 ```typescript
 getSearchIndexes(): TSearchIndexInfo[] {
   return [
-    { name: 'default', type: 'text', fields: ['title', 'body'] },
-    { name: 'embedding', type: 'vector', fields: ['embedding'] },
+    { name: 'default', type: 'text', description: 'tsvector(title, body)' },
+    { name: 'embedding', type: 'vector', description: 'vector(1536), cosine' },
   ]
 }
 ```
+
+**Tag every vector entry `type: 'vector'`.** `isSearchable()` is derived from this list, so a vector index left untagged makes a vector-only table claim text search it cannot run — `$search` then reaches your adapter, which has no index to answer it with. `type` is optional only for back-compatibility: an entry that omits it is taken as text, because adapters written before the field existed only ever listed text indexes.
 
 ## Optimized Pagination
 

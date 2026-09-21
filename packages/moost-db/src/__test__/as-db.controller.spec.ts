@@ -138,6 +138,13 @@ function createController(tableOverrides: Record<string, any> = {}) {
   return { controller, table, app };
 }
 
+/** `$vector` from text needs an embedding provider; the default one throws 501. */
+class VectorController extends AsDbController {
+  protected override computeEmbedding(): Promise<number[]> {
+    return Promise.resolve([1, 2, 3]);
+  }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe("AsDbController", () => {
@@ -268,6 +275,22 @@ describe("AsDbController", () => {
       await controller.query("/query?$search=hello");
       expect(table.search).not.toHaveBeenCalled();
       expect(table.findMany).toHaveBeenCalled();
+    });
+
+    // A vector-only table reports `isSearchable() === false` — a vector index
+    // answers `vectorSearch()` and never `search()`. `$vector` still has to
+    // reach the vector path, because the term it carries is embedding INPUT,
+    // not a text query: the strategy resolver reads `$vector` before the
+    // text-search gate, and that ordering is what this pins.
+    it("routes $search + $vector to vectorSearch when the table is not text-searchable", async () => {
+      const ctx = createController();
+      ctx.table.isSearchable.mockReturnValue(false);
+      ctx.table.isVectorSearchable.mockReturnValue(true);
+      const vectorController = new VectorController((ctx as any).app, ctx.table as any);
+      await vectorController.query("/query?$search=hello&$vector=embedding");
+      expect(ctx.table.vectorSearch).toHaveBeenCalled();
+      expect(ctx.table.search).not.toHaveBeenCalled();
+      expect(ctx.table.findMany).not.toHaveBeenCalled();
     });
 
     it("should parse filter from URL", async () => {
@@ -465,11 +488,6 @@ describe("AsDbController", () => {
     });
 
     it("widens pages vector-search projection with preferred ID fields", async () => {
-      class VectorController extends AsDbController {
-        protected override computeEmbedding(): Promise<number[]> {
-          return Promise.resolve([1, 2, 3]);
-        }
-      }
       const ctx = createController({ preferredId: ["slug"] });
       const vectorController = new VectorController((ctx as any).app, ctx.table as any);
       vi.spyOn(vectorController as any, "transformProjection").mockReturnValue(["name"]);
@@ -877,6 +895,19 @@ describe("AsDbController", () => {
       expect(result.preferredId).toEqual(["id"]);
       expect(result.type).toBeDefined();
       expect(result.type.$v).toBe(2);
+    });
+
+    // What a client sees for a vector-only table: the index picker still lists
+    // the vector index, the search box stays off.
+    it("reports a vector-only table as vector-searchable but not searchable", async () => {
+      const ctx = createController();
+      ctx.table.isSearchable.mockReturnValue(false);
+      ctx.table.isVectorSearchable.mockReturnValue(true);
+      ctx.table.getSearchIndexes.mockReturnValue([{ name: "embedding", type: "vector" }]);
+      const result = await ctx.controller.meta();
+      expect(result.searchable).toBe(false);
+      expect(result.vectorSearchable).toBe(true);
+      expect(result.searchIndexes).toEqual([{ name: "embedding", type: "vector" }]);
     });
 
     it("should return configured preferred ID fields", async () => {

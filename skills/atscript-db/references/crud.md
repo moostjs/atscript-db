@@ -172,3 +172,5 @@ await users.vectorSearchWithCount(vector, q)            // { data, count }
 ```
 
 Guard with `users.isSearchable()` / `users.isVectorSearchable()` — adapters without override throw.
+
+`isSearchable()` answers for TEXT search only. `getSearchIndexes()` lists vector indexes alongside text ones (it feeds the index picker), but a vector index answers `vectorSearch()` and nothing else, so a table whose only search declaration is `@db.search.vector` reports `isSearchable() === false` and rejects `search()` / `searchWithCount()` / a grouped `$search` with `DbError("INVALID_QUERY", [{ path: "$search" }])`. (since 0.1.131). `vectorSearch()` never took this gate and is unaffected.

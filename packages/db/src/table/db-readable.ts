@@ -287,14 +287,20 @@ export class AtscriptDbReadable<
   }
 
   protected _ensureSearchable(): void {
-    if (!this.adapter.isSearchable()) {
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$search",
-          message: `Table "${this.tableName}" has no search indexes defined`,
-        },
-      ]);
-    }
+    if (this.adapter.isSearchable()) return;
+    // Naming the vector index is the whole diagnostic when one exists — that is
+    // the table whose author believes it is searchable. Which annotation grants
+    // text search is adapter-specific (`@db.index.fulltext`, or Mongo's Atlas
+    // `@db.mongo.search.*`), so the message does not guess at one.
+    const hasVectorIndex = this.adapter.getSearchIndexes().some((i) => i.type === "vector");
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: "$search",
+        message:
+          `Table "${this.tableName}" has no text search index` +
+          (hasVectorIndex ? " — a @db.search.vector index only answers vectorSearch()" : ""),
+      },
+    ]);
   }
 
   /** Engine-agnostic query-time guards (encrypted-field refs, $geoWithin shape). */

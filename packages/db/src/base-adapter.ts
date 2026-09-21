@@ -633,11 +633,18 @@ export abstract class BaseDbAdapter {
   }
 
   /**
-   * Whether this adapter supports text search.
-   * Default: `true` when {@link getSearchIndexes} returns any entries.
+   * Whether this adapter can run TEXT search — `search()`, `searchWithCount()`
+   * and the grouped `$search` path all gate on it. Vector capability is a
+   * separate predicate, {@link isVectorSearchable}.
+   *
+   * Default: `true` when {@link getSearchIndexes} lists at least one non-vector
+   * index. Vector entries are published there for the index picker, but a
+   * vector index answers {@link vectorSearch} and nothing else, so counting one
+   * here would claim a capability the adapter does not have. An entry without
+   * `type` counts as text — adapters predating the field only listed text.
    */
   isSearchable(): boolean {
-    return this.getSearchIndexes().length > 0;
+    return this.getSearchIndexes().some((index) => index.type !== "vector");
   }
 
   /**

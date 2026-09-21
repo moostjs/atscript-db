@@ -45,6 +45,8 @@ articles.getSearchIndexes();
 // [{ name: 'content_idx', description: '...', type: 'text' }]
 ```
 
+`isSearchable()` counts **text** indexes only. `getSearchIndexes()` also lists vector indexes (`type: 'vector'`) so index pickers can offer them, but a vector index answers `vectorSearch()` and nothing else: a table whose only search declaration is `@db.search.vector` reports `isSearchable() === false` and rejects `search()` with `DbError("INVALID_QUERY", [{ path: "$search" }])`. Vector capability has its own probe — `isVectorSearchable()`.
+
 ### Basic Search
 
 ```typescript
