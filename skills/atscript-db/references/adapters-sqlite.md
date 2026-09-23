@@ -26,6 +26,8 @@ const db = createAdapter("./app.db", { vector: true });
 
 `hasVectorExt` is optional on `TSqliteDriver`. `BetterSqlite3Driver` always exposes it (true only when `sqlite-vec` loaded). If a custom driver omits it, the adapter probes via `SELECT vec_version()` once at sync.
 
+`registerFunction?(name, fn, { deterministic })` is optional on `TSqliteDriver` (since 0.1.132) — the adapter registers the deterministic UDF `atscript_bucket` through it at construction for [calendar buckets](calendar-buckets.md) (labels from Node ICU tzdata). `BetterSqlite3Driver` implements it; `node:sqlite` custom driver: `db.function(name, { deterministic }, fn)` (Node ≥ 22.13). Driver without it → no bucket units → `/meta` omits `bucketUnits`, bucket queries `BUCKET_NOT_SUPPORTED` (400). Don't define your own `atscript_bucket` on a shared connection.
+
 ## Capabilities
 
 | Capability                                      | Status                                                                                                                                                                  |

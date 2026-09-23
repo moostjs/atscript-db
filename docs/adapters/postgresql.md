@@ -302,6 +302,12 @@ const result = await table.insertMany(largeDataset);
 
 The `RETURNING` clause returns inserted rows including any generated defaults (auto-increment IDs, UUIDs, timestamps), so `insertedIds` are always populated correctly.
 
+The column list is the union of every row's fields, and a row that omits a column gets its `DEFAULT` — up to 0.1.131 columns absent from the first row were dropped from the whole batch (see [Insert Many](/api/crud#insert-many)).
+
+## Calendar Buckets {#calendar-buckets}
+
+[Calendar buckets](/api/calendar-buckets) (since 0.1.132) use `AT TIME ZONE` with the zone written into the query, so labels do not depend on the session's `TimeZone` setting. Zones come from the server's tz database. A zone the server does not know — typically one newer than its tzdata — fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501): `PostgreSQL does not recognize time zone "…" — update the server's time zone data`.
+
 ## Schema Support
 
 Tables can be placed in PostgreSQL schemas (namespaces) using `@db.pg.schema`:

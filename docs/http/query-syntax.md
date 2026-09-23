@@ -237,6 +237,27 @@ Every `$select` entry is validated before the read (since 0.1.128, on `/query`, 
 | navigation path at the root (`assignee.name`) | 400 — use `$with=assignee($select=name)`                                  |
 | unknown field                                 | 400 `Unknown field "…"`                                                   |
 
+#### Computed entries (grouped queries)
+
+With [`$groupBy`](./advanced#groupby), `$select` also takes computed entries, each with an optional `:alias`:
+
+| Entry                                 | Meaning                                                                                            |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `fn(field)` / `count(*)`              | Aggregate — `count`, `sum`, `avg`, `min`, `max`. Default key `fn_field`; `count(*)` → `count_star` |
+| `bucket(field,unit[,tz][,weekStart])` | [Calendar bucket](/api/calendar-buckets) (since 0.1.132). Default key `unit_field`                 |
+
+```bash
+curl "http://localhost:3000/tickets/query?\$select=status,bucket(openedAt,month,'Europe/Berlin'):month,count(*):n&\$groupBy=status,month&\$having=month>='2026-01-01'"
+```
+
+`bucket()` grammar:
+
+- `unit` is `day`, `week`, `month`, `quarter` or `year`; `weekStart` (`mon` … `sun`) is valid only with `week`.
+- Quote the zone when it contains `/` (`'America/New_York'`); `UTC` may be bare. An empty slot keeps the default zone: `bucket(openedAt,week,,sun)`.
+- A dotted field (`stats.firstSeenAt`) needs an explicit `:alias`.
+- `bucket` is a reserved name. A missing field or unit, a one-argument `bucket(x)` or more than four arguments is a malformed query string (400). An unknown unit, zone or week start parses, then fails validation with 400 and a message naming the problem.
+- Compare a label in `$having` as a quoted string — `$having=month>='2026-01-01'`.
+
 ### Count ($count)
 
 Return only the count of matching records:

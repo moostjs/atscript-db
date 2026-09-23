@@ -53,6 +53,12 @@ const result = await users.insertMany([
 // result: { insertedCount: 3, insertedIds: [1, 2, 3] }
 ```
 
+Rows may carry different sets of fields: each row is stored as `insertOne` would store it, and a column a row omits gets its default (or `NULL`).
+
+::: warning PostgreSQL and MySQL before 0.1.132
+Up to 0.1.131 the PostgreSQL and MySQL adapters built the column list from the **first** row only, so any column absent from row 1 was silently dropped from every row of the batch. If you inserted heterogeneous batches on those adapters, check the affected columns. SQLite, MongoDB and memory were not affected.
+:::
+
 ::: info Nested Creation
 Both `insertOne` and `insertMany` support nested relation data — inserting related records across foreign keys in a single call. This is covered in [Relations — Deep Operations](/relations/deep-operations).
 :::
@@ -341,17 +347,19 @@ if (!validator.validate(data, true)) {
 
 Database operations throw `DbError` with a `code` property indicating the error type:
 
-| Code                   | Meaning                                                                                                                                                                                                |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CONFLICT`             | Unique constraint violation                                                                                                                                                                            |
-| `FK_VIOLATION`         | Foreign key constraint violated                                                                                                                                                                        |
-| `NOT_FOUND`            | Record not found                                                                                                                                                                                       |
-| `CASCADE_CYCLE`        | Circular cascade detected                                                                                                                                                                              |
-| `INVALID_QUERY`        | Malformed query or filter                                                                                                                                                                              |
-| `DEPTH_EXCEEDED`       | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                                                                                                |
-| `VERSION_COLUMN_WRITE` | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
-| `CAS_EXHAUSTED`        | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
-| `CAS_MISMATCH`         | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
+| Code                    | Meaning                                                                                                                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CONFLICT`              | Unique constraint violation                                                                                                                                                                            |
+| `FK_VIOLATION`          | Foreign key constraint violated                                                                                                                                                                        |
+| `NOT_FOUND`             | Record not found                                                                                                                                                                                       |
+| `CASCADE_CYCLE`         | Circular cascade detected                                                                                                                                                                              |
+| `INVALID_QUERY`         | Malformed query or filter                                                                                                                                                                              |
+| `DEPTH_EXCEEDED`        | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                                                                                                |
+| `VERSION_COLUMN_WRITE`  | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
+| `CAS_EXHAUSTED`         | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
+| `CAS_MISMATCH`          | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
+| `BUCKET_NOT_SUPPORTED`  | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit. HTTP 400. Since 0.1.132                                                                                       |
+| `BUCKET_TZ_UNAVAILABLE` | The database cannot convert to the calendar bucket's time zone (e.g. MySQL time zone tables not loaded). HTTP 501. Since 0.1.132                                                                       |
 
 Handle errors by checking the code:
 

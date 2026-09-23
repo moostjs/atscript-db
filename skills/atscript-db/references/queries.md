@@ -79,19 +79,19 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 
 ## Controls
 
-| Control               | Value                                     | Effect                                                                                                                                                                                                                                                                        |
-| --------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$select`             | `string[] \| { [path]: 0 \| 1 }`          | Projection. Array form = include-list; map form = explicit.                                                                                                                                                                                                                   |
-| `$sort`               | `{ [path]: 1 \| -1 }`                     | Ordered keys.                                                                                                                                                                                                                                                                 |
-| `$skip`               | `number`                                  | Offset.                                                                                                                                                                                                                                                                       |
-| `$limit`              | `number`                                  | Row cap.                                                                                                                                                                                                                                                                      |
-| `$page` / `$size`     | `number`                                  | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                                                                                                                                                                                                                  |
-| `$count`              | `true`                                    | Return a count instead of rows. With `$groupBy` it is the number of groups surviving `$having` (since 0.1.129; earlier SQL ignored `$having` here and Mongo returned `0` for alias-based `$having`).                                                                          |
-| `$with`               | `Array<{ name: string; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation.                                                                                                                                                                                                                     |
-| `$groupBy`            | `string[]`                                | Aggregate query. Requires `@db.column.dimension` on keys and `@db.agg.*` on measures.                                                                                                                                                                                         |
-| `$having`             | `FilterExpr`                              | Post-aggregation filter on aggregate aliases (`$as`, else `fn_field`) and `$groupBy` fields ONLY. Unknown keys → `Unknown field`; a real but non-grouped column → `INVALID_QUERY` / 400 `$having key "<key>" must be an aggregate alias or a $groupBy field` (since 0.1.128). |
-| `$search` / `$vector` | `string` / `number[]`                     | Full-text / vector search (adapter must support).                                                                                                                                                                                                                             |
-| `$actions`            | `boolean`                                 | `moost-db` HTTP only. When `true`, server attaches `$actions: string[]` to each returned row — `'row'`/`'rows'`-level action names NOT disabled. NOT widened on `$count`/`$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability).             |
+| Control               | Value                                     | Effect                                                                                                                                                                                                                                                            |
+| --------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$select`             | `string[] \| { [path]: 0 \| 1 }`          | Projection. Array form = include-list; map form = explicit. Computed entries (aggregates, buckets) only with `$groupBy`; any other non-string entry → `INVALID_QUERY` `Unsupported $select entry at index i` (since 0.1.132; was silently dropped).               |
+| `$sort`               | `{ [path]: 1 \| -1 }`                     | Ordered keys.                                                                                                                                                                                                                                                     |
+| `$skip`               | `number`                                  | Offset.                                                                                                                                                                                                                                                           |
+| `$limit`              | `number`                                  | Row cap.                                                                                                                                                                                                                                                          |
+| `$page` / `$size`     | `number`                                  | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                                                                                                                                                                                                      |
+| `$count`              | `true`                                    | Return a count instead of rows. With `$groupBy` it is the number of groups surviving `$having` (since 0.1.129; earlier SQL ignored `$having` here and Mongo returned `0` for alias-based `$having`).                                                              |
+| `$with`               | `Array<{ name: string; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation.                                                                                                                                                                                                         |
+| `$groupBy`            | `string[]`                                | `aggregate()` only → [aggregation.md](aggregation.md).                                                                                                                                                                                                            |
+| `$having`             | `FilterExpr`                              | Post-aggregation filter on aliases and `$groupBy` fields ONLY → [aggregation.md](aggregation.md).                                                                                                                                                                 |
+| `$search` / `$vector` | `string` / `number[]`                     | Full-text / vector search (adapter must support).                                                                                                                                                                                                                 |
+| `$actions`            | `boolean`                                 | `moost-db` HTTP only. When `true`, server attaches `$actions: string[]` to each returned row — `'row'`/`'rows'`-level action names NOT disabled. NOT widened on `$count`/`$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
 
 ## Projection with $with
 
@@ -107,59 +107,7 @@ r[0].content; // still there — only nav props are stripped/added
 
 ## Aggregation
 
-`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery`, not a `Uniquery`. `$groupBy` on `aggregate()` is **required**; on `findMany`'s `UniqueryControls` it is technically declared but only `aggregate()` interprets it, so always route group-by reads through `aggregate()`.
-
-```ts
-await orders.aggregate({
-  filter: { status: "paid" },
-  controls: {
-    $groupBy: ["category"],
-    $select: ["category", { $fn: "sum", $field: "amount" }, { $fn: "count", $field: "*" }],
-  },
-});
-```
-
-Result rows go through the same reverse mapping as `findMany` rows (since 0.1.128): a grouped flattened-object leaf comes back nested (`$groupBy: ["stats.views"]` → `{ stats: { views: 1 }, cnt: 2 }`) on every adapter (SQL adapters used to return the dotted key `"stats.views"`), and grouped boolean / decimal / `@db.json` columns are coerced like regular rows (a grouped boolean is `true` / `false`, not the stored `0` / `1`); aggregate aliases (`total`, `sum_amount`, `count_star`) and plain grouped columns are as-is.
-
-```ts
-interface AggregateQuery<T> {
-  filter?: FilterExpr<T>;
-  controls: AggregateControls<T>; // required (unlike Uniquery.controls)
-  insights?: UniqueryInsights;
-}
-interface AggregateControls<T> {
-  $groupBy: string[]; // required
-  $select?: (string | AggregateExpr)[]; // strings must appear in $groupBy
-  $having?: FilterExpr; // aliases + $groupBy fields ONLY — else INVALID_QUERY '$having key "<key>" must be an aggregate alias or a $groupBy field' (0.1.128)
-  $sort?: Record<string, 1 | -1>;
-  $skip?: number;
-  $limit?: number;
-  $count?: boolean;
-  // Not declared on the interface — they ride the `[key: `$${string}`]: unknown`
-  // pass-through, so they are accepted but not type-checked (0.1.130):
-  //   $search?: string  — text search applied BEFORE grouping, see below
-  //   $index?: string   — named search index, same resolution as search()
-}
-interface AggregateExpr {
-  $fn: "sum" | "count" | "avg" | "min" | "max" | string;
-  $field: string;
-  $as?: string;
-}
-// No $with on aggregate queries.
-```
-
-Groups over fields marked `@db.column.dimension`; aggregates over fields marked `@db.column.measure` (or view fields with `@db.agg.*`). `count` accepts `$field: '*'` for `COUNT(*)`.
-
-### `$search` on an aggregate query (since 0.1.130)
-
-Search narrows the ROWS, `$groupBy` shapes what is left — they are orthogonal, so the adapter applies the search predicate BEFORE grouping and a rollup describes exactly the rows the same `$search` returns in the leaf list. `$count` counts the groups those rows form (still after `$having`). Up to 0.1.129 every adapter with native text search silently DISCARDED the term on the aggregate path: the leaf list was filtered, the rollup was not, and no error was raised.
-
-Two rules the leaf search path applies and the grouped path deliberately does not:
-
-- **No implicit relevance ordering.** Relevance is a property of a row; nothing survives `$group`. Grouped results order by `$sort` or not at all. ("Groups ordered by best hit" would be a `max(_score)` aggregate — not offered.)
-- **No implicit row cap.** The leaf Mongo runner caps an unbounded search at 1000 rows; applying that before grouping would silently truncate counts.
-
-`$search` on a source with no search capability throws `DbError("INVALID_QUERY", [{ path: "$search" }])` rather than returning unsearched groups. Over HTTP that case does not arise for tables using the `@db.column.searchable` fallback: `moost-db` rewrites the term into the filter and strips the control before dispatch, so grouped queries are searched there too. `$vector` + `$groupBy` is rejected with 400 — no adapter can group by similarity, and matching the embedding text as ordinary text would answer a different question.
+Grouped reads go through `table.aggregate()` — controls, SQL semantics, `count_star`, strict mode, `$search` before grouping → [aggregation.md](aggregation.md). Calendar buckets (day/week/month in a time zone) → [calendar-buckets.md](calendar-buckets.md).
 
 ## Insights
 

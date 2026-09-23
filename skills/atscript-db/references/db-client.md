@@ -39,6 +39,29 @@ await users.remove({ orderId: 1, productId: 2 }); // composite → DELETE /?orde
 await users.meta(); // TMetaResponse — cached on the client instance
 ```
 
+## `aggregate()` and calendar buckets (since 0.1.132)
+
+```ts
+import { nextBucketLabel, bucketStartInstant } from "@atscript/db-client";
+
+const weekly = await tickets.aggregate({
+  controls: {
+    $select: [
+      { $bucket: "week", $field: "openedAt", $tz: "Europe/Berlin", $as: "week" }, // serialized to bucket(…)
+      { $fn: "count", $field: "*", $as: "n" },
+    ],
+    $groupBy: ["week"], // ValidGroupBy: an entry that is neither a field nor a $select bucket alias is a TYPE error
+    $sort: { week: 1 },
+  },
+});
+weekly[0].week; // string ("YYYY-MM-DD"); string | null when openedAt is optional
+```
+
+- Result keys typed from `$select` (`AggregateResult`); aggregates `number`, plain fields keep their type.
+- Offer time grouping only when `meta.bucketUnits` has the unit and `meta.fields[path].bucketable === true`.
+- Gap fill with `nextBucketLabel(label, unit, weekStart?)` (tz-free); time axis via `bucketStartInstant(label, tz)`. Semantics, errors (400 / 501) → [calendar-buckets.md](calendar-buckets.md).
+- Type re-exports: `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel`, `ValidGroupBy`.
+
 ## Generic surface
 
 ```ts
@@ -257,7 +280,7 @@ try {
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response.
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.
 - The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`. Since 0.1.128 a prop declared through a reference chain carries the terminal `ref` (e.g. the dictionary, not the intermediate table) plus `db.rel.FK: true` — `deserializeAnnotatedType` yields `prop.ref.type().metadata.get('db.http.path')` of the dictionary.
-- `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone.
+- `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone. `bucketable?: true` (since 0.1.132) marks fields that accept a calendar bucket; top-level `meta.bucketUnits` (absent when none).
 - The meta envelope carries `crud: TCrudPermissions` (see [moost-db.md](moost-db.md) for the full shape) — built-in CRUD discoverability surface. Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). There is no `readOnly` field; consumers compute it inline as `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
 - `TCrudOp` and `TCrudPermissions` are re-exported from `@atscript/db-client` for consumer convenience.
 

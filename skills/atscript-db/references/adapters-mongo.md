@@ -38,6 +38,7 @@ plugins: [ts(), dbPlugin(), MongoPlugin()]; // unlocks @db.mongo.*, mongo.object
 | Vector search           | **Atlas Search** (`$vectorSearch` stage) via `@db.search.vector` (generic, core annotation).                                                                                                                                                                                                                                                    |
 | Column diffing          | N/A — schemaless. `getExistingColumns` is not implemented; sync uses `tableExists()` + snapshot-driven index diffs.                                                                                                                                                                                                                             |
 | JSON / nested           | Native — `@db.json` is a no-op (store as Document). Dotted paths into JSON objects / arrays of objects are listed in `/meta.fields` and queryable (filter, `$sort`, `$select`, `$groupBy`); the array / JSON column itself is filterable but never sortable (`$sort=tags` → 400 since 0.1.128). Nav descendants are not listed (since 0.1.128). |
+| Grouped queries         | `$group` pipeline. `null` + missing = ONE group (since 0.1.132; was two). `sum` over no numerics → `0` (SQL/memory: `null`). Calendar buckets: `$dateToString`/`$dateToParts`/`$dateFromParts` → **MongoDB ≥ 4.0**; unknown zone (code 40485) → `BUCKET_TZ_UNAVAILABLE` 501. → [calendar-buckets.md](calendar-buckets.md)                       |
 
 ## Managed index prefix & physical index names
 
@@ -144,6 +145,7 @@ Requires a replica set. The adapter uses `session.withTransaction()` internally 
 ## Known limits
 
 - **`$exists` is not native key presence (since 0.1.132).** It means "holds a value" like SQL: `{ f: { $exists: true } }` → `{ f: { $ne: null } }`, `false` → `{ f: null }`, so a stored `null` counts as ABSENT. Filters that relied on null-valued keys matching `$exists: true` change results; key presence needs `adapter.collection`. → [queries.md § `$exists`](queries.md)
+- **`@db.column` renames (fixed 0.1.132).** ≤ 0.1.131 reads (`findMany`/`findOne`/`findManyWithCount` + search/vector/geo) dropped a renamed field from `$select`ed rows and silently ignored it in `$sort`; dotted filters under a renamed parent and grouped queries (`$groupBy`, aggregate `$field`, `$sort`, `$having`) mapped wrongly. Now logical names work everywhere (memory had the same `$select`/`$sort` bug).
 - Referential actions (`@db.rel.onDelete 'cascade'` etc.) are application-level; concurrent writes can race.
 - Managed full-text `text` indexes are mutually exclusive per collection — use Atlas Search for multi-index scenarios.
 - `ensureTable()` is a no-op unless `@db.mongo.capped` is set (then `createCollection` with capped options).

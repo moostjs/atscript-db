@@ -37,6 +37,8 @@ Atscript's DB layer is adapter-agnostic. The same `.as` definitions, queries, an
 | In-place column modify       | Yes               | No (recreate)       | N/A                  | Yes            | N/A       |
 | Transactions                 | Full (incl. DDL)  | Yes                 | Replica set required | Yes (no DDL)   | No        |
 | Schema namespaces            | Schemas           | No                  | No                   | Databases      | No        |
+| Grouped queries              | Yes               | Yes                 | Yes                  | Yes            | Yes       |
+| Calendar buckets             | Yes               | Driver hook         | 4.0+                 | tz tables      | Yes       |
 | Adapter-specific annotations | `@db.pg.*`        | None                | `@db.mongo.*`        | `@db.mysql.*`  | None      |
 
 ## Installation Quick Reference
@@ -103,3 +105,4 @@ For general usage that applies to all adapters:
 - [Setup & Configuration](/guide/setup) — initial project setup
 - [CRUD Operations](/api/crud) — create, read, update, delete
 - [Query Filters](/api/queries) — filtering, sorting, pagination
+- [Grouped Queries](/api/aggregation) and [Calendar Buckets](/api/calendar-buckets) — `$groupBy` aggregation and time-period grouping

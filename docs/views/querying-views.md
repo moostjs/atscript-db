@@ -139,7 +139,7 @@ Materialized view refresh is currently an adapter-level operation — there is n
 
 ## See Also: Ad-Hoc Aggregation
 
-Views are the right tool when the aggregation shape is stable. For dynamic, query-time aggregations against a regular `@db.table`, use `table.aggregate()` — pass `$groupBy` and `$select` (with `$fn: 'sum' | 'avg' | 'min' | 'max' | 'count'`) inline per call. See [Queries & Filters](/api/queries) for the runtime-aggregation API.
+Views are the right tool when the aggregation shape is stable. For dynamic, query-time aggregations against a regular `@db.table`, use `table.aggregate()` — pass `$groupBy` and `$select` (with `$fn: 'sum' | 'avg' | 'min' | 'max' | 'count'`, or a [calendar bucket](/api/calendar-buckets)) inline per call. See [Grouped Queries](/api/aggregation).
 
 ## Next Steps
 

@@ -203,6 +203,12 @@ const results = await documents.vectorSearch(queryEmbedding, {
 `sqlite-vec` is a native module — make sure your build target matches the platform you deploy to.
 :::
 
+### Calendar buckets
+
+[Calendar buckets](/api/calendar-buckets) (since 0.1.132) run through a deterministic SQL function, `atscript_bucket`, that the adapter registers on the connection when it is constructed. It computes labels with the Node.js runtime's time zone data.
+
+Registration goes through the driver's optional `registerFunction(name, fn, opts)` hook. `BetterSqlite3Driver` implements it. A [custom driver](#custom-drivers) without it reports no bucket units: `/meta` omits `bucketUnits`, and a bucket query fails with `BUCKET_NOT_SUPPORTED` (HTTP 400). Don't register a function of your own named `atscript_bucket` on a shared connection.
+
 ### Filters
 
 All standard filter operators are supported (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and`, `$or`, `$not`). Regex patterns are converted to SQL `LIKE` expressions:
@@ -256,6 +262,12 @@ interface TSqliteDriver {
   get<T>(sql: string, params?: unknown[]): T | null;
   exec(sql: string): void;
   close(): void;
+  /** Optional — registers a scalar SQL function; needed for calendar buckets (since 0.1.132). */
+  registerFunction?(
+    name: string,
+    fn: (...args: any[]) => unknown,
+    opts?: { deterministic?: boolean },
+  ): void;
   /** Optional — set to `true` if the driver has the `sqlite-vec` extension loaded. */
   readonly hasVectorExt?: boolean;
 }
@@ -288,6 +300,10 @@ const driver = {
   },
   close() {
     nodeDb.close();
+  },
+  // Optional — enables calendar buckets (Node.js ≥ 22.13)
+  registerFunction(name, fn, opts) {
+    nodeDb.function(name, { deterministic: opts?.deterministic ?? false }, fn);
   },
 };
 

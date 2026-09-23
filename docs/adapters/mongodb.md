@@ -233,6 +233,16 @@ Dotted paths into `@db.json` objects and arrays of objects (`prefs.theme`, `item
 `$exists` means "the field holds a value" on every adapter, so a document storing `note: null` no longer matches `{ note: { $exists: true } }` — the adapter sends `{ note: { $ne: null } }` / `{ note: null }` instead of native `$exists`. Filters that counted a `null`-valued key as present now return different rows. See [Existence](/api/queries#existence).
 :::
 
+## Renamed Fields (`@db.column`)
+
+A field renamed with `@db.column 'physical_name'` is addressed by its logical name everywhere. Since 0.1.132 that includes `$select` and `$sort` on `findMany` / `findOne` / `findManyWithCount` and their search, vector and geo variants, filters on dotted paths under a renamed object, and grouped queries (`$groupBy`, aggregate fields, `$sort`, `$having`). Up to 0.1.131 a renamed field was dropped from `$select`ed rows, silently ignored in `$sort`, and mapped to the wrong key in grouped queries.
+
+## Grouped Queries and Calendar Buckets {#calendar-buckets}
+
+[Grouped queries](/api/aggregation) compile to a `$group` pipeline. Since 0.1.132 a `null` and a missing grouped value form one `null` group, as on the SQL adapters (earlier versions returned two groups). One difference remains: `sum` over a group with no numeric values returns `0` here and `null` elsewhere.
+
+[Calendar buckets](/api/calendar-buckets) use `$dateToString`, `$dateToParts` and `$dateFromParts`, so they need **MongoDB 4.0 or later**. Zones come from the server's bundled time zone database; a zone it does not know fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501) — upgrade the server to get newer zone data.
+
 ## Native Patch Pipelines
 
 MongoDB uses aggregation pipelines for array patch operations instead of the read-modify-write cycle used by relational adapters. All five patch operators are supported:

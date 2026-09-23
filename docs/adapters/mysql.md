@@ -338,7 +338,31 @@ The `insertMany` method uses multi-row `INSERT INTO ... VALUES (...), (...)` for
 const result = await table.insertMany(largeDataset);
 ```
 
-All rows within a batch insert are wrapped in a transaction for atomicity.
+All rows within a batch insert are wrapped in a transaction for atomicity. The column list is the union of every row's fields, and a row that omits a column gets its `DEFAULT` — up to 0.1.131 columns absent from the first row were dropped from the whole batch (see [Insert Many](/api/crud#insert-many)).
+
+## Calendar Buckets {#calendar-buckets}
+
+[Calendar buckets](/api/calendar-buckets) (since 0.1.132) convert timestamps with `CONVERT_TZ`, which needs two things from the server for zones other than UTC:
+
+- **Time zone tables.** MySQL ships them empty. Load them from the system zoneinfo, and reload after tzdata updates:
+
+  ```bash
+  mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql -u root mysql
+  ```
+
+  On a managed service, check how it provides named time zones.
+
+- **MySQL 8.0.28 or later, 64-bit.** Earlier versions cannot convert instants after 2038.
+
+`UTC` buckets need neither. The adapter probes each zone once per driver before its first bucket query. When the tables lack the zone or the server cannot convert post-2038 instants, the query fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501) and a message naming the fix — never with `NULL` or UTC labels:
+
+```
+MySQL cannot convert to time zone "Europe/Berlin": its time zone tables are not loaded or lack this zone — load them with mysql_tzinfo_to_sql
+```
+
+::: warning Zone tables built from "slim" zoneinfo
+Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
+:::
 
 ## Limitations
 

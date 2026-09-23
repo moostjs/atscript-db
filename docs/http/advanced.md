@@ -269,7 +269,7 @@ curl "http://localhost:3000/listings/geo?\$center=-122.42,37.77&\$page=1&\$size=
 
 ## Aggregation ($groupBy) {#groupby}
 
-Group records and compute aggregate values using `$groupBy`.
+Group records and compute aggregate values using `$groupBy`. The rules and semantics are those of [Grouped Queries](/api/aggregation); this section covers the URL form.
 
 ### Basic Usage
 
@@ -289,7 +289,7 @@ curl "http://localhost:3000/orders/query?\$groupBy=status&\$select=status,count(
 ]
 ```
 
-Aggregate functions in `$select` use the syntax `fn(field):alias`.
+Aggregate functions in `$select` use the syntax `fn(field):alias`. Without `:alias` the key is `fn_field` — `count(*)` returns `count_star`.
 
 ### With Filters
 
@@ -318,7 +318,24 @@ curl "http://localhost:3000/orders/query?\$groupBy=status&\$select=status,sum(am
 
 ### Aggregate Functions
 
-The standard SQL aggregate functions are available: `count(*)`, `sum(field)`, `avg(field)`, `min(field)`, `max(field)`. See [Aggregation Annotations](/views/aggregations) for the full reference.
+The standard SQL aggregate functions are available: `count(*)`, `sum(field)`, `avg(field)`, `min(field)`, `max(field)`. See [Grouped Queries — Aggregate functions](/api/aggregation#aggregate-functions) for their null handling.
+
+### Calendar Buckets
+
+Group a timestamp field by day, week, month, quarter or year in a time zone with `bucket(field,unit[,tz][,weekStart]):alias` in `$select`, and list the alias in `$groupBy` (since 0.1.132):
+
+```bash
+curl "http://localhost:3000/tickets/query?\$select=bucket(openedAt,week,'Europe/Berlin',sun):week,count(*):n&\$groupBy=week&\$sort=week"
+```
+
+```json
+[
+  { "week": "2026-03-01", "n": 12 },
+  { "week": "2026-03-08", "n": 9 }
+]
+```
+
+Each label is the `YYYY-MM-DD` local date the period starts on. `/meta` advertises the supported units (`bucketUnits`) and the fields that accept a bucket (`fields[path].bucketable`). See [Calendar Buckets](/api/calendar-buckets) for labels, time zones, eligible fields, gap filling and the `400` / `501` errors.
 
 ### Limitations
 
@@ -326,6 +343,7 @@ The standard SQL aggregate functions are available: `count(*)`, `sum(field)`, `a
 
 - **Cannot combine with `$with`** — using `$groupBy` and `$with` together returns `400`
 - Plain fields in `$select` must also appear in `$groupBy`
+- Rows with a `null` or missing grouped value form one group on every adapter (since 0.1.132 — MongoDB used to split them into two groups)
 - `$having` keys must be aggregate aliases or `$groupBy` fields — `$having=region>1` on a non-grouped column returns `400` with `$having key "region" must be an aggregate alias or a $groupBy field` (since 0.1.128)
 - Grouped keys of a flattened nested object come back nested — `$groupBy=stats.views` returns `{ "stats": { "views": 10 }, "cnt": 2 }` on every adapter (since 0.1.128)
 - `$count` on an aggregate query returns `[{ "count": N }]` where `N` is the number of groups that survive `$having` — `$groupBy=category&$select=category,sum(amount):total&$having=total>200&$count` counts the categories over 200 (since 0.1.129; before, SQL adapters ignored `$having` in the count and MongoDB returned `0` for an alias-based `$having`)

@@ -128,7 +128,7 @@ Atscript validates type compatibility at build time — annotating a `string` fi
 
 ## Runtime Aggregation: Quantity Dimensions
 
-The annotations above define **view-time** aggregations: shape baked into the schema. For **ad-hoc** aggregations via `table.aggregate()` at runtime, see [Queries & Filters § Runtime Aggregation](/api/queries).
+The annotations above define **view-time** aggregations: shape baked into the schema. For **ad-hoc** aggregations via `table.aggregate()` at runtime, see [Grouped Queries](/api/aggregation).
 
 One constraint worth knowing here, because it surfaces the same way against view aggregates: when the source column carries `@db.amount.currency.ref` or `@db.unit.ref` (see [Annotations § Quantity Tagging](../adapters/annotations#quantity-tagging-currency-unit)), the runtime rejects ad-hoc aggregations that don't include the referenced dimension in `$groupBy`. Summing rows that mix currencies — or kg with lb — is meaningless, and the guard catches it before it reaches the database.
 

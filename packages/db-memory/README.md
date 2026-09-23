@@ -96,7 +96,7 @@ Deliberate — matching a real engine here is hard or impossible and unnecessary
 - **No array-element matching** — the dot-path getter matches scalars and nested-object paths; Mongo-style implicit array-element / `$elemMatch` matching is not provided.
 - **Non-atomic stored batch writes** — `insertMany`/`updateMany`/`replaceMany`/`deleteMany` apply sequentially with no rollback; a mid-batch conflict leaves earlier items written. Single writes are safe. (Provider tables are read-only, so this never applies to the primary mode.)
 - **Provider tables are read-only, with no cross-request pagination stability** — page 1 and page 2 are separate requests over separate snapshots.
-- **No native aggregation** — `$groupBy` throws a typed `INVALID_QUERY` (clean 4xx, not 500).
+- **Aggregation is an in-process scan** — `$groupBy` / aggregates / calendar buckets / `$having` / `$count` run in JS over one snapshot with SQL semantics (null and missing group together; `sum`/`avg` over no value are `null`). Fine for the small sets this adapter targets; there is no index-backed grouping.
 - **Relations `$with`** — resolved by core's app-level batch loading, not natively.
 - **No FTS / vector / geo / `$search`** — unsupported.
 - **Not a production datastore** — nothing is persisted or shared across processes.

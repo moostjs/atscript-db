@@ -76,6 +76,7 @@ Your application code talks to the Table API. The adapter handles SQL generation
 - **[Views](/views/)** — managed, materialized, and external views defined with `@db.view` annotations
 - **[Text search](/search/)** — full-text search across indexed fields
 - **[Vector search](/search/vector-search)** — similarity search with pgvector and MongoDB Atlas
+- **[Grouped queries](/api/aggregation)** — `$groupBy` with count / sum / avg / min / max, and [calendar buckets](/api/calendar-buckets) that group timestamps by day, week, month, quarter or year in any time zone
 - **Array patch operators** — `$insert`, `$remove`, `$update`, `$upsert`, and `$replace` work across all adapters
 - **[Schema sync](/sync/)** — CLI-driven migrations with FNV-1a drift detection, column renames, and distributed locking
 - **[Transactions](/api/transactions)** — adapter-agnostic transaction support via `AsyncLocalStorage`

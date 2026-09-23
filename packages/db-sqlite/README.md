@@ -39,7 +39,7 @@ await users.insertOne({ name: "John", email: "john@example.com" });
 
 ## Features
 
-- Swappable driver via `TSqliteDriver` interface (5 methods)
+- Swappable driver via `TSqliteDriver` interface (5 methods, plus the optional `registerFunction` hook calendar-bucket grouping needs)
 - Built-in `BetterSqlite3Driver` for immediate use (with optional `{ vector: true }` and `loadExtensions` hooks)
 - MongoDB-style filter translation to parameterized SQL (no injection risk)
 - Automatic schema management from `@db.*` annotations

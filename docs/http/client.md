@@ -171,7 +171,28 @@ const stats = await orders.aggregate({
 });
 ```
 
-When `$groupBy` fields and `$select` are typed, the result type is inferred — `stats[0].total` is `number`, `stats[0].status` preserves the original field type.
+When `$groupBy` fields and `$select` are typed, the result type is inferred — `stats[0].total` is `number`, `stats[0].status` preserves the original field type. A `$groupBy` entry that is neither a field nor a bucket alias from `$select` is a type error (`ValidGroupBy`).
+
+[Calendar buckets](/api/calendar-buckets) go in `$select` in object form; the client serializes them to `bucket(…)` (since 0.1.132):
+
+```typescript
+import { nextBucketLabel } from "@atscript/db-client";
+
+const weekly = await tickets.aggregate({
+  filter: { openedAt: { $gte: from } },
+  controls: {
+    $select: [
+      { $bucket: "week", $field: "openedAt", $tz: "Europe/Berlin", $as: "week" },
+      { $fn: "count", $field: "*", $as: "n" },
+    ],
+    $groupBy: ["week"],
+    $sort: { week: 1 },
+  },
+});
+weekly[0].week; // string — "YYYY-MM-DD" (string | null when openedAt is optional)
+```
+
+`nextBucketLabel(label, unit, weekStart?)` and `bucketStartInstant(label, tz)` are re-exported for filling empty buckets and placing labels on a time axis — see [Filling gaps](/api/calendar-buckets#filling-gaps). Check `meta.bucketUnits` and `meta.fields[path].bucketable` before offering time grouping in a UI.
 
 ### pages {#pages}
 
@@ -396,18 +417,19 @@ const meta = await users.meta();
 }
 ```
 
-| Field              | Description                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                                                                                                                                |
-| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)).                                                                                                    |
-| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly`, and `filterOps` when only narrower operators such as `$exists` pass — since 0.1.132). Since 0.1.128 exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted — so `name` above is sortable (not index-backed, hence no `indexed`). See [Query Gate](../adapters/annotations#query-gate) |
-| `type`             | Full serialized Atscript type definition. Fields declared through a reference chain carry the terminal `ref` (and inherit `db.rel.FK`) since 0.1.128 — value-help resolves to the dictionary                                                                                                                                                                                                                                      |
-| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                                                                                                                              |
-| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                                                                                                                         |
+| Field              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)).                                                                                                                                                               |
+| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly`, `filterOps` when only narrower operators such as `$exists` pass, and `bucketable` on fields that accept a calendar bucket — both since 0.1.132). Since 0.1.128 exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted — so `name` above is sortable (not index-backed, hence no `indexed`). See [Query Gate](../adapters/annotations#query-gate) |
+| `type`             | Full serialized Atscript type definition. Fields declared through a reference chain carry the terminal `ref` (and inherit `db.rel.FK`) since 0.1.128 — value-help resolves to the dictionary                                                                                                                                                                                                                                                                                                 |
+| `bucketUnits`      | Calendar-bucket units the adapter supports; absent when none. Since 0.1.132 — see [Calendar Buckets](/api/calendar-buckets#discovering-support-through-meta)                                                                                                                                                                                                                                                                                                                                 |
+| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                                                                                                                                                                                         |
+| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                                                                                                                                                                                    |
 
 > **Read-only check:** consumers derive the boolean from `crud` inline:
 > `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
@@ -696,11 +718,20 @@ Leave it off elsewhere — strict preflight catches typos. Note that servers on 
 - `Uniquery`, `UniqueryControls` — query and control types
 - `FilterExpr` — filter expression type
 - `AggregateQuery`, `AggregateResult` — aggregation types
+- `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel` — calendar-bucket entry and label types (since 0.1.132)
+- `ValidGroupBy` — the `$groupBy` check `aggregate()` applies (since 0.1.132)
 - `TypedWithRelation` — relation loading type
 
 ```typescript
 import type { FilterExpr, Uniquery } from "@atscript/db-client";
 ```
+
+### Calendar-bucket helpers (from `@uniqu/core`, since 0.1.132)
+
+- `nextBucketLabel(label, unit, weekStart?)` — the label of the following bucket; calendar arithmetic, no time zone
+- `bucketStartInstant(label, tz)` — the first instant (epoch ms) of a label's local date in `tz`
+
+See [Calendar Buckets — Filling gaps](/api/calendar-buckets#filling-gaps).
 
 ### Wire / shape types (from `@atscript/db`)
 

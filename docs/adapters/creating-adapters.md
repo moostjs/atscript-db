@@ -458,6 +458,44 @@ The helper:
 
 You can override the prefix via the `prefix` option (defaults to `'atscript__'`).
 
+## Grouped Queries {#grouped-queries}
+
+### `aggregate(query)`
+
+```typescript
+aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>>
+```
+
+Override to support [grouped queries](/api/aggregation); the default throws. The table validates the query, maps logical names to physical ones, and hands you a `DbQuery` whose `controls.$groupBy` is a `string[]` and whose `controls.$select` is a `UniquSelect`: `asArray` lists the plain grouped fields, `aggregates` the `{ $fn, $field, $as? }` entries, `buckets` the calendar buckets. Since 0.1.132 `UniquSelect` rejects any other `$select` entry when it is constructed (`INVALID_QUERY`, `Unsupported $select entry at index i`), so your translator only ever sees those three kinds.
+
+Return one row per group, with physical names for grouped fields and each computed entry under its output key — `resolveAlias(expr)` from `@atscript/db/agg` (`$as`, else `{fn}_{field}`; `count(*)` → `count_star` since 0.1.132, `count_*` before). The table reverse-maps the rows. Match the portable semantics: `null` and missing values form one group, `count(field)` counts non-null values, `sum` / `avg` ignore nulls. `$count: true` returns `[{ count: N }]`, the number of groups that survive `$having`. SQL adapters get all of this from `buildAggregateSelect` / `buildAggregateCount` in `@atscript/db-sql-tools`.
+
+### Calendar buckets {#calendar-buckets}
+
+```typescript
+calendarBucketUnits(): ReadonlySet<BucketUnit> // 'day' | 'week' | 'month' | 'quarter' | 'year'
+```
+
+The [calendar-bucket](/api/calendar-buckets) units your adapter can group by (since 0.1.132). Return `ALL_BUCKET_UNITS` (exported from `@atscript/db`) when you implement all five. The default is an empty set: the core then rejects bucket queries with `BUCKET_NOT_SUPPORTED` before calling `aggregate()`, and moost-db's `/meta` advertises no `bucketUnits` and no `bucketable` field. moost-db re-reads this method (and `isGeoSearchable()`) when building its capability index, so the answer may change after construction or schema sync.
+
+Returning a unit commits `aggregate()` to handle it:
+
+- **Read the buckets from `controls.$select.buckets`** — `TResolvedBucket` entries (exported from `@atscript/db`) carrying `alias`, `field` (the physical column or document path), `unit`, `tz` (a canonical IANA name, already validated), `weekStart` / `weekStartIso` (1 = Monday … 7 = Sunday), and `fd`, the source field's descriptor.
+- **Resolve keys by alias.** A `$groupBy`, `$sort` or `$having` key that equals a bucket's alias means that bucket: `controls.$select.bucketByAlias(key)` returns it. Aliases never collide with column names.
+- **Produce the label contract.** The value is the `YYYY-MM-DD` local date of the bucket's first day in `tz`; `null` for a `null`, missing or non-numeric source and for instants outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)` (exported by `@uniqu/core`). For an in-process implementation, `bucketer(unit, tz, weekStart)` from `@uniqu/core` returns a labelling function — the memory adapter and the SQLite function use it.
+- **Never fall back silently.** When the engine cannot resolve a zone, throw `bucketTimeZoneUnavailable(message)` from `@atscript/db` — a `DbError("BUCKET_TZ_UNAVAILABLE")` on path `$select`, HTTP 501 — rather than returning `null` or UTC labels.
+
+For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlDialect` members instead:
+
+- **`calendarBucket?(quotedCol: string, b: TResolvedBucket): string`** — the label expression over one column. It must be **parameter-free**: the builders render it in `SELECT`, `GROUP BY` and `HAVING`, and PostgreSQL matches `GROUP BY` expressions structurally. Inline the zone with `sqlTimeZoneLiteral(b.tz)`, which re-checks the name's charset before quoting it. Without this hook the builders throw `BUCKET_NOT_SUPPORTED`.
+- **`bucketAliasInHaving?: boolean`** — render a bucket in `HAVING` by its `SELECT` alias instead of repeating the expression. MySQL needs it (it rejects the raw column there but resolves aliases); PostgreSQL needs the default expression form.
+
+`groupKeySql(dialect, controls, key)` renders a `$groupBy` key — the bucket expression for a bucket alias, the quoted column otherwise.
+
+`@atscript/db` also exports the rules the core and moost-db apply, for custom gates and tooling: `resolveCalendarBuckets(controls, fields, aggregate?)` validates and normalizes the bucket entries of a query (throws `INVALID_QUERY`), `isBucketableField(fd)` tells whether a field is a `number.timestamp` leaf that is not encrypted, `isJsonValueField(fd)` whether a descriptor holds a JSON value (JSON storage, or a `json` / `array` design type), and `jsonValueAncestor(path, jsonValueParents)` returns the outermost such ancestor (from a set of their paths) that disqualifies a nested path.
+
+For multi-row inserts, `buildInsertMany(dialect, table, rows, columns?)` in `@atscript/db-sql-tools` renders one `INSERT … VALUES (…), (…)` over the union of the rows' columns (`insertManyColumns(rows)`), with `DEFAULT` for a column a row lacks — so a heterogeneous batch stores what the same rows inserted one by one would (since 0.1.132; pass `columns` to keep one column list across your own batches).
+
 ## Search and Vector Search
 
 Override these methods to add text search and vector similarity search capabilities to your adapter.

@@ -118,6 +118,14 @@ Unique indexes (recorded from the model at sync time) and primary keys are enfor
 
 `findManyWithCount` computes the data page and the total count from one filtered snapshot, so the count never disagrees with the page — important for provider-backed reads where two separate reads could otherwise observe different snapshots.
 
+### Grouped queries
+
+[Grouped queries](/api/aggregation) — `$groupBy`, `count` / `sum` / `avg` / `min` / `max`, [calendar buckets](/api/calendar-buckets), `$having`, `$sort`, `$skip` / `$limit` and `$count` — work since 0.1.132, in stored and provider mode (before, `$groupBy` threw `INVALID_QUERY`). Groups are computed in process over one snapshot of the rows with the SQL semantics described in [Aggregate functions](/api/aggregation#aggregate-functions): `null` and missing values form one group, and `sum` / `avg` over no values are `null`. Calendar-bucket labels use the Node.js runtime's time zone data.
+
+There is no index-backed grouping: every grouped query scans the matching rows, which suits the small sets this adapter targets.
+
+Fields renamed with `@db.column` are honored in `$select` and `$sort` since 0.1.132; earlier versions dropped them from selected rows and ignored them in `$sort`.
+
 ### Foreign Keys
 
 There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. See [Referential Actions](/relations/referential-actions).
@@ -146,7 +154,6 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 - **Non-atomic stored batch writes** — `insertMany` / `updateMany` / `replaceMany` / `deleteMany` apply sequentially with no rollback; a mid-batch conflict leaves earlier items written. Single writes are safe.
 - **No transactions** — `withTransaction` runs the callback but nothing rolls back on a throw. Rollback behaviour (including `moost-db` write guards) is not observable on this adapter; assert it on SQLite `:memory:` or with adapter spies. See [Transactions](/api/transactions#adapter-behavior).
 - **Provider tables are read-only** — writes throw, and there is no cross-request pagination stability (page 1 and page 2 are separate requests over separate snapshots).
-- **No native aggregation** — `$groupBy` throws a typed `INVALID_QUERY` (a clean 4xx, not a 500).
 - **Relations `$with`** — resolved by core's app-level batch loading (`supportsNativeRelations()` is `false`), not natively.
 - **No FTS / vector / geo / `$search`** — unsupported. No DB views.
 - **In-process only** — nothing is persisted or shared across processes. **Not a production datastore.**
