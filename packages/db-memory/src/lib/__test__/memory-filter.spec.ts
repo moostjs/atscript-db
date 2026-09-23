@@ -3,14 +3,14 @@ import { describe, it, expect } from "vite-plus/test";
 import { DbError } from "@atscript/db";
 import type { FilterExpr } from "@atscript/db";
 
-import { buildMemoryPredicate, getPath, hasPath } from "../memory-filter";
+import { buildMemoryPredicate, getPath } from "../memory-filter";
 
 /** Build the predicate and immediately apply it to `row`. */
 function match(filter: FilterExpr, row: Record<string, unknown>): boolean {
   return buildMemoryPredicate(filter)(row);
 }
 
-describe("getPath / hasPath", () => {
+describe("getPath", () => {
   it("getPath reads nested plain-object values and returns undefined for gaps (why: dot-path traversal)", () => {
     const row = { profile: { age: 30, city: "NYC" } };
     expect(getPath(row, "profile.age")).toBe(30);
@@ -22,14 +22,6 @@ describe("getPath / hasPath", () => {
   it("getPath does not descend into arrays (why: documented v1 limitation)", () => {
     const row = { tags: [{ name: "a" }] };
     expect(getPath(row, "tags.name")).toBeUndefined();
-  });
-
-  it("hasPath distinguishes present-null from absent (why: needed by $exists)", () => {
-    const row = { a: null, b: { c: null } };
-    expect(hasPath(row, "a")).toBe(true); // present, value null
-    expect(hasPath(row, "b.c")).toBe(true); // nested present-null
-    expect(hasPath(row, "missing")).toBe(false);
-    expect(hasPath(row, "b.missing")).toBe(false);
   });
 });
 
@@ -185,16 +177,26 @@ describe("$regex", () => {
 });
 
 describe("$exists", () => {
-  it("$exists:true requires the key to be present, incl. present-null (why: keyed off existence)", () => {
+  it("$exists:true requires a non-null value — present-null counts as absent (why: SQL IS NOT NULL parity)", () => {
     expect(match({ mid: { $exists: true } }, { mid: "x" })).toBe(true);
-    expect(match({ mid: { $exists: true } }, { mid: null })).toBe(true);
+    expect(match({ mid: { $exists: true } }, { mid: 0 })).toBe(true);
+    expect(match({ mid: { $exists: true } }, { mid: {} })).toBe(true);
+    expect(match({ mid: { $exists: true } }, { mid: [] })).toBe(true);
+    expect(match({ mid: { $exists: true } }, { mid: null })).toBe(false);
     expect(match({ mid: { $exists: true } }, {})).toBe(false);
   });
 
-  it("$exists:false requires the key to be absent (why: distinguishes null from missing)", () => {
+  it("$exists:false matches null or missing — the exact complement (why: SQL IS NULL parity)", () => {
     expect(match({ mid: { $exists: false } }, {})).toBe(true);
-    expect(match({ mid: { $exists: false } }, { mid: null })).toBe(false);
+    expect(match({ mid: { $exists: false } }, { mid: null })).toBe(true);
     expect(match({ mid: { $exists: false } }, { mid: "x" })).toBe(false);
+    expect(match({ mid: { $exists: false } }, { mid: {} })).toBe(false);
+  });
+
+  it("nested paths: a null / missing parent means the leaf does not exist", () => {
+    expect(match({ "a.b": { $exists: true } }, { a: { b: 1 } })).toBe(true);
+    expect(match({ "a.b": { $exists: true } }, { a: { b: null } })).toBe(false);
+    expect(match({ "a.b": { $exists: false } }, { a: null })).toBe(true);
   });
 });
 

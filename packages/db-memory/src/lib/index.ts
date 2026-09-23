@@ -9,7 +9,7 @@ export * from "./memory-adapter";
 // so its internal dot-path helpers stay private:
 // - `buildMemoryPredicate` (from `memory-filter`) — the JS-native
 //   `(filter) => (row) => boolean` compiler, the parallel to db-mongo's exported
-//   `buildMongoFilter`. Its module also declares `getPath`/`hasPath`/`valuesEqual`,
+//   `buildMongoFilter`. Its module also declares `getPath`/`valuesEqual`,
 //   which are internals — a blanket `export *` would leak them.
 // - `sortRows` / `projectRow` (from `memory-engine`) — the pure `$sort` and
 //   `$select` engine the `MemoryAdapter` delegates to. Their module also declares

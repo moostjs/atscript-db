@@ -72,6 +72,19 @@ describe.each(["sql", "nested"] as const)(
       }
     });
 
+    it("every listed field: $exists accepted ⇔ filterable ∨ filterOps ∋ $exists (both polarities)", async () => {
+      const { controller } = bind(family, CapRow);
+      const meta = await controller.meta();
+      for (const [path, f] of Object.entries(meta.fields)) {
+        const expected = f.filterable || (f.filterOps ?? []).includes("$exists");
+        if (f.filterable)
+          expect(f.filterOps, `filterOps only when !filterable ("${path}")`).toBe(undefined);
+        for (const url of [`?$exists=${path}`, `?$!exists=${path}`]) {
+          expect(await accepted(() => controller.query(url)), url).toBe(expected);
+        }
+      }
+    });
+
     it("every type path NOT listed is rejected for filter, $sort and $groupBy", async () => {
       const { table, controller } = bind(family, CapRow);
       const meta = await controller.meta();
@@ -81,6 +94,10 @@ describe.each(["sql", "nested"] as const)(
         expect(await accepted(() => controller.query(`?${path}=1`)), `filter "${path}"`).toBe(
           false,
         );
+        expect(
+          await accepted(() => controller.query(`?$exists=${path}`)),
+          `$exists "${path}"`,
+        ).toBe(false);
         expect(await accepted(() => controller.query(`?$sort=${path}`)), `$sort "${path}"`).toBe(
           false,
         );
@@ -140,6 +157,103 @@ describe("/meta contract per adapter family", () => {
     expect(meta.fields.tags).toMatchObject({ filterable: false, sortable: false });
   });
 
+  it("relational: JSON / array / geoPoint columns advertise the narrower predicates they accept", async () => {
+    const { controller } = bind("sql", CapRow);
+    const meta = await controller.meta();
+    expect(meta.fields.prefs).toEqual({
+      filterable: false,
+      sortable: false,
+      filterOps: ["$exists"],
+    });
+    expect(meta.fields.tags.filterOps).toEqual(["$exists"]);
+    expect(meta.fields.items.filterOps).toEqual(["$exists"]);
+    // MockAdapter is not geo-searchable, so `$geoWithin` is not advertised.
+    expect(meta.fields.geo.filterOps).toEqual(["$exists"]);
+    // Vetoes that apply to every predicate leave nothing to advertise.
+    expect(meta.fields.secret.filterOps).toBeUndefined();
+    expect(meta.fields.apiSecret.filterOps).toBeUndefined();
+    expect(meta.fields.title.filterOps).toBeUndefined();
+  });
+
+  it("relational: $geoWithin is advertised in filterOps ⇔ the gate accepts it (geo-searchable or not)", async () => {
+    const geoFilter = { geo: { $geoWithin: { center: [0, 0], radius: 10 } } };
+    for (const geoSearchable of [false, true]) {
+      class GeoMockAdapter extends MockAdapter {
+        override isGeoSearchable(): boolean {
+          return geoSearchable;
+        }
+      }
+      const db = new DbSpace(() => new GeoMockAdapter(), {
+        encryption: { defaultKeyId: "k1", keys: KEYS },
+      });
+      db.getTable(CapTarget);
+      const controller = new AsDbController(makeApp(), db.getTable(CapRow) as any);
+      const meta = await controller.meta();
+      const advertised = (meta.fields.geo.filterOps ?? []).includes("$geoWithin");
+      expect(advertised, `geoSearchable=${geoSearchable}`).toBe(geoSearchable);
+      expect(meta.fields.geo.filterOps).toEqual(
+        geoSearchable ? ["$exists", "$geoWithin"] : ["$exists"],
+      );
+      // `$geoWithin` has no URL syntax — ask the gate with the parsed shape directly.
+      const verdict = (controller as any).checkCapabilities({ filter: geoFilter, controls: {} });
+      expect(verdict === undefined, `gate geoSearchable=${geoSearchable}`).toBe(advertised);
+    }
+  });
+
+  it("relational: existence on a JSON column is judged per occurrence over HTTP", async () => {
+    const { table, controller } = bind("sql", CapRow);
+    const calls: unknown[] = [];
+    const orig = table.findMany.bind(table);
+    (table as any).findMany = (q: Parameters<typeof orig>[0]) => {
+      calls.push(q);
+      return orig(q);
+    };
+    for (const url of [
+      "?$exists=prefs",
+      "?$!exists=prefs,tags",
+      "?title=a&$exists=items",
+      "?(title=a^$exists=prefs)",
+      "?!($exists=prefs)",
+    ]) {
+      expect(await controller.query(url), url).not.toBeInstanceOf(HttpError);
+    }
+    expect(calls.map((q) => (q as { filter: unknown }).filter)).toEqual([
+      { prefs: { $exists: true } },
+      { prefs: { $exists: false }, tags: { $exists: false } },
+      { title: "a", items: { $exists: true } },
+      { $or: [{ title: "a" }, { prefs: { $exists: true } }] },
+      { $not: { prefs: { $exists: true } } },
+    ]);
+    for (const url of [
+      "?$exists=prefs&prefs=x",
+      "?(title=a^prefs=x)&$exists=prefs",
+      "?!(prefs=x)&$exists=prefs",
+      "?prefs!=null",
+    ]) {
+      const res = await controller.query(url);
+      expect(res, url).toBeInstanceOf(HttpError);
+      expect(errorsOf(res)[0], url).toEqual({
+        path: "prefs",
+        message:
+          'Filtering on field "prefs" is not permitted — adapter cannot filter on this storage type (accepted operators: $exists).',
+      });
+    }
+    // Descendants, writeOnly and encrypted stay rejected for existence too.
+    const desc = await controller.query("?$exists=prefs.theme");
+    expect(errorsOf(desc)[0].path).toBe("prefs.theme");
+    expect((desc as HttpError).message).toContain('JSON-stored column "prefs"');
+    const sealed = await controller.query("?$exists=apiSecret");
+    expect(errorsOf(sealed)[0].message).toContain("@db.writeOnly");
+    const enc = await controller.query("?$exists=secret");
+    expect(errorsOf(enc)[0].message).toContain("@db.encrypted");
+    // Sort / groupBy positions are unchanged.
+    expect(await controller.query("?$exists=prefs&$sort=prefs")).toBeInstanceOf(HttpError);
+    expect(
+      await controller.query("?$exists=prefs&$groupBy=prefs&$select=prefs,count()"),
+    ).toBeInstanceOf(HttpError);
+    expect(calls).toHaveLength(5);
+  });
+
   it("nested-object: JSON descendants are listed and queryable; nav descendants are gone (contract change)", async () => {
     const { controller } = bind("nested", CapRow);
     const meta = await controller.meta();
@@ -161,7 +275,18 @@ describe("/meta contract per adapter family", () => {
     const meta = await controller.meta();
     expect(meta.fields.name).toEqual({ filterable: true, sortable: true });
     expect(meta.fields.other).toEqual({ filterable: false, sortable: false });
-    expect(meta.fields.prefs).toEqual({ filterable: false, sortable: false });
+    // Existence obeys the same policy gate: annotated `prefs` accepts `$exists`, `other` does not.
+    expect(meta.fields.prefs).toEqual({
+      filterable: false,
+      sortable: false,
+      filterOps: ["$exists"],
+    });
+    expect(await accepted(() => controller.query("?$exists=prefs"))).toBe(true);
+    const other = await controller.query("?$exists=other");
+    expect(errorsOf(other)[0]).toEqual({
+      path: "other",
+      message: 'Filtering on field "other" is not permitted — add @db.column.filterable to enable.',
+    });
     expect(await accepted(() => controller.query("?other=x"))).toBe(false);
     expect(await accepted(() => controller.query("?$sort=other"))).toBe(false);
     expect(await accepted(() => controller.query("?name=x&$sort=-name"))).toBe(true);

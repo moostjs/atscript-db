@@ -158,11 +158,16 @@ export {
   classifyQueryPath,
   checkHavingKeys,
   unsupportedOperatorMessage,
+  canFilterLeaf,
+  narrowerFilterOps,
+  acceptedOperatorsHint,
 } from "./query/query-guards";
 export type {
   TQueryPathOp,
   TGuardedQuery,
   TQueryPathRefs,
+  TFilterPredicate,
+  TFilterRef,
   TQueryPathKind,
   TQueryPathSource,
 } from "./query/query-guards";

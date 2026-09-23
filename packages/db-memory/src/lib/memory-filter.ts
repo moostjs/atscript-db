@@ -32,29 +32,6 @@ export function getPath(row: Record<string, unknown>, path: string): unknown {
 }
 
 /**
- * Like {@link getPath}, but reports whether the FINAL key EXISTS rather than
- * its value. A key holding `null` counts as present. This is what lets
- * `$exists` distinguish a `null`-valued field (present) from an absent one —
- * a distinction {@link getPath} alone cannot make (both would read back as a
- * nullish value). Same array limitation as {@link getPath}.
- */
-export function hasPath(row: Record<string, unknown>, path: string): boolean {
-  const segments = path.split(".");
-  const last = segments.pop()!; // split() always yields at least one segment
-  let current: unknown = row;
-  for (const seg of segments) {
-    if (current === null || typeof current !== "object" || Array.isArray(current)) {
-      return false;
-    }
-    current = (current as Record<string, unknown>)[seg];
-  }
-  if (current === null || typeof current !== "object" || Array.isArray(current)) {
-    return false;
-  }
-  return Object.prototype.hasOwnProperty.call(current, last);
-}
-
-/**
  * Deep-equality for leaf values, used by `$eq`/`$ne`/`$in`/`$nin`.
  *
  * - `Date`s compare by their instant (`getTime()`), not identity.
@@ -248,10 +225,10 @@ const memoryVisitor: FilterVisitor<Predicate> = {
         };
       }
 
-      // Presence test keyed off key existence (present-null counts as present).
-      // `$exists: true` → path present; `$exists: false` → path absent.
+      // `$exists` = "holds a value" (a stored null counts as absent, as in SQL):
+      // `true` ⇔ `$ne: null`, `false` ⇔ `$eq: null`. See docs/api/queries.md.
       case "$exists":
-        return (row) => value === hasPath(row, field);
+        return (row) => value === !evalEq(row, field, null);
 
       // Any operator outside the ComparisonOp union (e.g. `$geoWithin`) is not
       // representable by an in-memory scan — surface it as an invalid query

@@ -153,7 +153,11 @@ describe("JSON descendant paths — relational adapter", () => {
   it("/meta does not list JSON descendants on relational adapters", async () => {
     const meta = await new AsDbController(makeApp(), makeMockTable("sql")).meta();
     expect(meta.fields["address.city"]).toBeUndefined();
-    expect(meta.fields.address).toEqual({ filterable: false, sortable: false });
+    expect(meta.fields.address).toEqual({
+      filterable: false,
+      sortable: false,
+      filterOps: ["$exists"],
+    });
   });
 });
 

@@ -181,24 +181,32 @@ describe("AsDbController — @db.column.filterable / @db.column.sortable gate", 
 describe("AsDbController — /meta capability flags (adapter-gated)", () => {
   // ── SQL default: JSON storage cannot be filtered or sorted ────────────
 
-  it("SQL adapter: @db.json field is neither filterable nor sortable", async () => {
+  it("SQL adapter: @db.json field is neither filterable nor sortable — only $exists is accepted", async () => {
     const table = makeMockTable({
       fields: { name: {}, address: {} },
       fieldStorage: { address: "json" },
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    expect(meta.fields.address).toEqual({ filterable: false, sortable: false });
+    expect(meta.fields.address).toEqual({
+      filterable: false,
+      sortable: false,
+      filterOps: ["$exists"],
+    });
   });
 
-  it("SQL adapter: array field (storage='json') is neither filterable nor sortable", async () => {
+  it("SQL adapter: array field (storage='json') is neither filterable nor sortable — only $exists is accepted", async () => {
     const table = makeMockTable({
       fields: { name: {}, tags: {} },
       fieldStorage: { tags: "json" },
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    expect(meta.fields.tags).toEqual({ filterable: false, sortable: false });
+    expect(meta.fields.tags).toEqual({
+      filterable: false,
+      sortable: false,
+      filterOps: ["$exists"],
+    });
   });
 
   // Deliberate change (0.1.128, finding 13): auto mode advertises every

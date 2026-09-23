@@ -2,10 +2,17 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbReadable,
   TDbFieldMeta,
+  TFilterPredicate,
   TQueryPathOp,
   TQueryPathSource,
 } from "@atscript/db";
-import { classifyQueryPath, findAncestorInSet } from "@atscript/db";
+import {
+  acceptedOperatorsHint,
+  canFilterLeaf,
+  classifyQueryPath,
+  findAncestorInSet,
+  narrowerFilterOps,
+} from "@atscript/db";
 
 /**
  * Per-path HTTP capability of a DB readable — the single source that both the
@@ -17,10 +24,16 @@ import { classifyQueryPath, findAncestorInSet } from "@atscript/db";
  * `@db.table.filterable / sortable 'manual'` + `@db.column.*`). Policy applies
  * to filters and `$sort` only; `$groupBy`, `$having` keys and aggregate
  * `$field`s use the physical capability alone.
+ *
+ * A filter entry is judged by its predicate class (the core's `canFilterLeaf`):
+ * `filterable` is the value-comparison verdict, `filterOps` the narrower
+ * predicates that still pass where it is `false`.
  */
 export interface TFieldCapability {
-  /** A filter on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
+  /** A value-comparison filter on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
   filterable: boolean;
+  /** Present when `filterable` is `false` yet narrower predicates (`$exists`, `$geoWithin`) pass the gate. */
+  filterOps?: string[];
   /** A `$sort` on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
   sortable: boolean;
   /** The path may appear in `$select`. `@db.writeOnly` fields are selectable — the seal strips them after the gate. */
@@ -50,17 +63,21 @@ export type TCapabilityReadable = Pick<
   | "ignoredFields"
   | "canFilterField"
   | "canSortField"
+  | "isGeoSearchable"
 >;
 
 interface TEntry {
   fd: TDbFieldMeta;
   cap: TFieldCapability;
+  /** Filter verdict per predicate class: `undefined` = accepted, else the reason clause. */
+  filterBy: Record<TFilterPredicate, string | undefined>;
   /** adapter ∧ ¬writeOnly ∧ ¬encrypted — policy-free; what `$groupBy` / `$having` / aggregate `$field` need. */
   physicalFilterable: boolean;
   physicalReason?: string;
 }
 
-const REASON_ADAPTER_FILTER = "adapter cannot filter on this storage type.";
+const ADAPTER_FILTER = "adapter cannot filter on this storage type";
+const REASON_ADAPTER_FILTER = `${ADAPTER_FILTER}.`;
 const REASON_ADAPTER_SORT = "adapter cannot sort on this storage type.";
 const REASON_WRITE_ONLY = "field is @db.writeOnly.";
 const REASON_ENCRYPTED = "field is @db.encrypted (ciphertext cannot be compared or ordered).";
@@ -131,8 +148,6 @@ export class FieldCapabilityIndex implements TQueryPathSource {
   }
 
   constructor(source: TCapabilityReadable, writeOnly: ReadonlySet<string>) {
-    const canFilter = (fd: TDbFieldMeta) => source.canFilterField(fd);
-    const canSort = (fd: TDbFieldMeta) => source.canSortField(fd);
     const tableMeta = source.type.metadata;
     this.filterableManual = tableMeta.get("db.table.filterable") === "manual";
     this.sortableManual = tableMeta.get("db.table.sortable") === "manual";
@@ -171,7 +186,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         this._objectParents.set(fd.path, []);
         continue;
       }
-      this._entries.set(fd.path, this._buildEntry(fd, canFilter, canSort, annotated));
+      this._entries.set(fd.path, this._buildEntry(fd, source, annotated));
     }
 
     // Relational adapters flatten object parents away — they are not
@@ -203,53 +218,58 @@ export class FieldCapabilityIndex implements TQueryPathSource {
 
   private _buildEntry(
     fd: TDbFieldMeta,
-    canFilter: (fd: TDbFieldMeta) => boolean,
-    canSort: (fd: TDbFieldMeta) => boolean,
+    source: TCapabilityReadable,
     annotated: (fd: TDbFieldMeta, key: string) => boolean,
   ): TEntry {
-    const physicalFilter = canFilter(fd);
-    const physicalSort = canSort(fd);
     const isWriteOnly = this.writeOnly.has(fd.path);
-    let filterable = physicalFilter;
-    let sortable = physicalSort;
-    let filterReason = physicalFilter ? undefined : REASON_ADAPTER_FILTER;
-    let sortReason = physicalSort ? undefined : REASON_ADAPTER_SORT;
-    let physicalReason = physicalFilter ? undefined : REASON_ADAPTER_FILTER;
-    if (fd.encrypted) {
-      filterable = false;
-      sortable = false;
-      filterReason = REASON_ENCRYPTED;
-      sortReason = REASON_ENCRYPTED;
-      physicalReason = REASON_ENCRYPTED;
+    const filterPolicyBlocked = this.filterableManual && !annotated(fd, "db.column.filterable");
+    // The one filter verdict: writeOnly (any probe, existence included, would
+    // leak the sealed value) → encrypted → the predicate's physical rule →
+    // manual-mode policy (filters only; `$groupBy` / `$having` skip it).
+    const verdict = (predicate: TFilterPredicate, policy: boolean): string | undefined => {
+      if (isWriteOnly) return REASON_WRITE_ONLY;
+      if (fd.encrypted) return REASON_ENCRYPTED;
+      if (!canFilterLeaf(fd, predicate, source)) return REASON_ADAPTER_FILTER;
+      if (policy && filterPolicyBlocked) return REASON_ANNOTATION_FILTER;
+      return undefined;
+    };
+    const filterBy: Record<TFilterPredicate, string | undefined> = {
+      compare: verdict("compare", true),
+      exists: verdict("exists", true),
+      geo: verdict("geo", true),
+    };
+    // writeOnly / encrypted / policy veto every predicate alike, so narrower
+    // predicates remain only when the adapter's storage veto alone blocks compare.
+    const filterOps =
+      filterBy.compare === REASON_ADAPTER_FILTER && !filterPolicyBlocked
+        ? narrowerFilterOps(fd, source)
+        : [];
+    if (filterOps.length > 0) {
+      filterBy.compare = `${ADAPTER_FILTER}${acceptedOperatorsHint(filterOps)}.`;
     }
-    if (isWriteOnly) {
-      // An equality probe or a sort order would leak the sealed value.
-      filterable = false;
-      sortable = false;
-      filterReason = REASON_WRITE_ONLY;
-      sortReason = REASON_WRITE_ONLY;
-      physicalReason = REASON_WRITE_ONLY;
-    }
-    if (filterable && this.filterableManual && !annotated(fd, "db.column.filterable")) {
-      filterable = false;
-      filterReason = REASON_ANNOTATION_FILTER;
-    }
-    if (sortable && this.sortableManual && !annotated(fd, "db.column.sortable")) {
-      sortable = false;
+    const physicalReason = verdict("compare", false);
+
+    let sortReason = source.canSortField(fd) ? undefined : REASON_ADAPTER_SORT;
+    if (fd.encrypted) sortReason = REASON_ENCRYPTED;
+    // A sort order would leak the sealed value.
+    if (isWriteOnly) sortReason = REASON_WRITE_ONLY;
+    if (!sortReason && this.sortableManual && !annotated(fd, "db.column.sortable")) {
       sortReason = REASON_ANNOTATION_SORT;
     }
     const cap: TFieldCapability = {
-      filterable,
-      sortable,
+      filterable: filterBy.compare === undefined,
+      sortable: sortReason === undefined,
       selectable: true,
       indexed: fd.isIndexed === true,
     };
-    if (filterReason) cap.filterReason = filterReason;
+    if (filterOps.length > 0) cap.filterOps = filterOps;
+    if (filterBy.compare) cap.filterReason = filterBy.compare;
     if (sortReason) cap.sortReason = sortReason;
     return {
       fd,
       cap,
-      physicalFilterable: physicalFilter && !isWriteOnly && !fd.encrypted,
+      filterBy,
+      physicalFilterable: physicalReason === undefined,
       physicalReason,
     };
   }
@@ -278,11 +298,15 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    * an untyped descendant of a JSON column (`address.nope`) is reported as
    * `Unknown field`, not as "inside JSON-stored column" — clients pin that
    * wording, so do not "align" it with the core backstop's text.
+   *
+   * `predicate` is a filter entry's class (`collectQueryPaths` records it per
+   * occurrence); it only matters for `op === "filter"` on a listed leaf.
    */
   check(
     path: string,
     op: TQueryPathOp,
     exists: (path: string) => boolean,
+    predicate: TFilterPredicate = "compare",
   ): TCapabilityVerdict | undefined {
     const { kind, parent } = classifyQueryPath(this, path);
     if (kind === "nav") {
@@ -307,13 +331,12 @@ export class FieldCapabilityIndex implements TQueryPathSource {
           return entry.cap.selectable
             ? undefined
             : { path, message: `Selecting field "${path}" is not permitted.` };
-        case "filter":
-          return entry.cap.filterable
+        case "filter": {
+          const reason = entry.filterBy[predicate];
+          return reason === undefined
             ? undefined
-            : {
-                path,
-                message: `Filtering on field "${path}" is not permitted — ${entry.cap.filterReason}`,
-              };
+            : { path, message: `Filtering on field "${path}" is not permitted — ${reason}` };
+        }
         case "sort":
           return entry.cap.sortable
             ? undefined

@@ -4,7 +4,7 @@ import { AtscriptDbTable } from "@atscript/db";
 import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 
-import { prepareFixtures } from "./test-utils";
+import { prepareFixtures, RecordingDriver } from "./test-utils";
 
 /**
  * Finding 62 on a real engine (since 0.1.128): a descendant of a `@db.json` /
@@ -18,9 +18,8 @@ type Row = Record<string, any>;
 let GateWidget: any;
 
 describe("SQLite — JSON descendant paths are rejected before SQL", () => {
-  let driver: BetterSqlite3Driver;
+  let driver: RecordingDriver;
   let table: AtscriptDbTable<any, Row, any, any, any, any, any>;
-  let executed: string[];
 
   beforeAll(async () => {
     await prepareFixtures();
@@ -28,22 +27,12 @@ describe("SQLite — JSON descendant paths are rejected before SQL", () => {
   });
 
   beforeEach(async () => {
-    driver = new BetterSqlite3Driver(":memory:");
+    driver = new RecordingDriver(new BetterSqlite3Driver(":memory:"));
     const adapter = new SqliteAdapter(driver);
     table = new AtscriptDbTable(GateWidget, adapter);
     await table.ensureTable();
     await table.insertOne({ name: "w1", metadata: { clicks: 1, impressions: 10 }, tags: ["a"] });
-    executed = [];
-    const origAll = driver.all.bind(driver);
-    const origRun = driver.run.bind(driver);
-    (driver as any).all = (sql: string, ...rest: unknown[]) => {
-      executed.push(sql);
-      return (origAll as any)(sql, ...rest);
-    };
-    (driver as any).run = (sql: string, ...rest: unknown[]) => {
-      executed.push(sql);
-      return (origRun as any)(sql, ...rest);
-    };
+    driver.statements.length = 0;
   });
 
   afterEach(() => {
@@ -62,7 +51,7 @@ describe("SQLite — JSON descendant paths are rejected before SQL", () => {
       table.findMany({ filter: {}, controls: { $select: ["id", "metadata.clicks"] } } as any),
       "metadata.clicks",
     );
-    expect(executed).toEqual([]);
+    expect(driver.statements).toEqual([]);
   });
 
   it("filter / $sort / $groupBy / aggregate $field on a JSON descendant → INVALID_QUERY", async () => {
@@ -95,7 +84,7 @@ describe("SQLite — JSON descendant paths are rejected before SQL", () => {
       } as any),
       "metadata.clicks",
     );
-    expect(executed).toEqual([]);
+    expect(driver.statements).toEqual([]);
   });
 
   it("updateMany / deleteMany with a JSON-descendant filter → INVALID_QUERY, rows untouched", async () => {
@@ -107,7 +96,7 @@ describe("SQLite — JSON descendant paths are rejected before SQL", () => {
       table.deleteMany({ "metadata.impressions": 10 } as any),
       "metadata.impressions",
     );
-    expect(executed).toEqual([]);
+    expect(driver.statements).toEqual([]);
     const rows = await table.findMany({ filter: {} });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.name).toBe("w1");

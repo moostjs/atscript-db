@@ -7,8 +7,8 @@ catalog:
   "@atscript/typescript": ^0.1.92
   "@moostjs/event-http": ^0.6.37
   "@types/node": ^24
-  "@uniqu/core": ^0.1.8
-  "@uniqu/url": ^0.1.8
+  "@uniqu/core": ^0.1.9
+  "@uniqu/url": ^0.1.9
   "@wooksjs/event-core": ^0.7.23
   "@wooksjs/event-http": ^0.7.23
   "@wooksjs/http-body": ^0.7.23

@@ -2,6 +2,13 @@ import { randomBytes } from "node:crypto";
 
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
+import {
+  acceptedOperatorsHint,
+  canFilterLeaf,
+  collectQueryPaths,
+  filterPredicateOf,
+  narrowerFilterOps,
+} from "../query/query-guards";
 import { DbSpace } from "../table/db-space";
 import type { AtscriptDbTable } from "../table/db-table";
 import { findAncestorInSet } from "../table/table-metadata";
@@ -112,7 +119,7 @@ describe("TableMetadata — guard indexes are built for every adapter", () => {
     expect(meta.descriptorByPath.has("credentials.user")).toBe(false);
     expect(meta.descriptorByPath.has("target")).toBe(false);
     expect(meta.descriptorByPath.has("target.name")).toBe(false);
-    expect([...meta.jsonParents].toSorted()).toEqual(["ctx", "geo", "items", "tags"]);
+    expect([...meta.jsonParents].toSorted()).toEqual(["ctx", "geo", "items", "tags", "wrap.blob"]);
     expect(findAncestorInSet("credentials.user", meta.encryptedFields)).toBe("credentials");
     expect(findAncestorInSet("credentials", meta.encryptedFields)).toBeUndefined();
   });
@@ -374,5 +381,225 @@ describe("guardPaths — nested-object adapter", () => {
     expect(n.errors[0]!.message).toBe('Unknown field "nope"');
     // Encrypted descendants stay descriptors here → selectable (decrypted on read).
     await table.findMany(q({}, { $select: ["credentials.user"] }));
+  });
+});
+
+// ── Existence-only predicates (since 0.1.132) ───────────────────────────────
+//
+// An entry whose ONLY operator is `$exists: <boolean>` tests whether the
+// stored column holds a value (SQL `IS [NOT] NULL`), never its content, so it
+// needs a stored, non-encrypted column — not the adapter's scalar
+// `canFilterField`. Every other predicate on the same JSON column keeps the
+// veto, judged per occurrence.
+
+/** Adapter-shaped capability stubs for `canFilterLeaf` / `narrowerFilterOps`. */
+const cap = (canFilter: boolean, geo: boolean) => ({
+  canFilterField: () => canFilter,
+  isGeoSearchable: () => geo,
+});
+const findCalls = (adapter: SqlLikeAdapter) =>
+  adapter.calls.filter((c) => c.method === "findMany").length;
+
+describe("filterPredicateOf / canFilterLeaf — the shared classification", () => {
+  it("classifies an entry by the operator class it needs", () => {
+    expect(filterPredicateOf({ $exists: true })).toBe("exists");
+    expect(filterPredicateOf({ $exists: false })).toBe("exists");
+    expect(filterPredicateOf(Object.assign(Object.create(null), { $exists: true }))).toBe("exists");
+    // Anything beside $exists is a value comparison; operand validity is guardFilter's.
+    expect(filterPredicateOf({ $exists: true, $eq: 1 })).toBe("compare");
+    expect(filterPredicateOf({ $exists: true, $ne: null })).toBe("compare");
+    expect(filterPredicateOf({ $exists: 1 })).toBe("exists");
+    expect(filterPredicateOf({ $eq: 1 })).toBe("compare");
+    expect(filterPredicateOf("x")).toBe("compare");
+    expect(filterPredicateOf(null)).toBe("compare");
+    expect(filterPredicateOf([1])).toBe("compare");
+    expect(filterPredicateOf(new Date())).toBe("compare");
+    expect(filterPredicateOf({ $geoWithin: { center: [0, 0], radius: 1 } })).toBe("geo");
+  });
+
+  it("existence needs a stored non-encrypted column; compare defers to the adapter; geo needs a geoPoint on a geo-searchable adapter", () => {
+    const json = { storage: "json", designType: "json" } as unknown as TDbFieldMeta;
+    const enc = { storage: "column", encrypted: true, isGeoPoint: true } as unknown as TDbFieldMeta;
+    const geo = { storage: "json", isGeoPoint: true } as unknown as TDbFieldMeta;
+    expect(canFilterLeaf(json, "exists", cap(false, false))).toBe(true);
+    expect(canFilterLeaf(json, "compare", cap(false, true))).toBe(false);
+    expect(canFilterLeaf(json, "compare", cap(true, false))).toBe(true);
+    expect(canFilterLeaf(json, "geo", cap(true, true))).toBe(false);
+    expect(canFilterLeaf(geo, "geo", cap(false, true))).toBe(true);
+    expect(canFilterLeaf(geo, "geo", cap(true, false))).toBe(false);
+    for (const predicate of ["compare", "exists", "geo"] as const) {
+      expect(canFilterLeaf(enc, predicate, cap(true, true))).toBe(false);
+    }
+    expect(narrowerFilterOps(json, cap(false, true))).toEqual(["$exists"]);
+    expect(narrowerFilterOps(geo, cap(false, true))).toEqual(["$exists", "$geoWithin"]);
+    expect(narrowerFilterOps(geo, cap(false, false))).toEqual(["$exists"]);
+    expect(narrowerFilterOps(enc, cap(true, true))).toEqual([]);
+    expect(acceptedOperatorsHint(["$exists"])).toBe(" (accepted operators: $exists)");
+    expect(acceptedOperatorsHint([])).toBe("");
+  });
+
+  it("collectQueryPaths records every filter entry per occurrence with its class", () => {
+    const refs = collectQueryPaths({
+      filter: {
+        ctx: { $exists: true },
+        $or: [{ ctx: "x" }, { $not: { geo: { $geoWithin: { center: [0, 0], radius: 1 } } } }],
+        $and: [{ ctx: { $exists: false } }, { title: { $exists: true, $ne: "a" } }],
+      } as any,
+    });
+    expect(refs.filter).toEqual([
+      { path: "ctx", predicate: "exists" },
+      { path: "ctx", predicate: "compare" },
+      { path: "geo", predicate: "geo" },
+      { path: "ctx", predicate: "exists" },
+      { path: "title", predicate: "compare" },
+    ]);
+  });
+});
+
+describe("guardPaths — existence-only predicates on JSON-stored columns (relational)", () => {
+  it("$exists true / false on a @db.json object, arrays, a nested JSON column and a geoPoint pass", async () => {
+    const { table, adapter } = sqlTable();
+    for (const filter of [
+      { ctx: { $exists: true } },
+      { ctx: { $exists: false } },
+      { tags: { $exists: true } },
+      { items: { $exists: false } },
+      { "wrap.blob": { $exists: true } },
+      { geo: { $exists: true } },
+    ]) {
+      await table.findMany(q(filter));
+    }
+    expect(findCalls(adapter)).toBe(6);
+  });
+
+  it("composes through $and / $or / $not and with scalar predicates", async () => {
+    const { table, adapter } = sqlTable();
+    await table.findMany(
+      q({
+        $or: [{ ctx: { $exists: true } }, { $not: { tags: { $exists: false } } }],
+        $and: [{ title: "a" }, { "wrap.blob": { $exists: false } }],
+      }),
+    );
+    await table.count(q({ $not: { ctx: { $exists: true } } }));
+    expect(findCalls(adapter)).toBe(1);
+  });
+
+  it("each occurrence is judged on its own: an allowed $exists never exempts another entry on the same column", async () => {
+    const { table, adapter } = sqlTable();
+    for (const filter of [
+      { $and: [{ ctx: { $exists: true } }, { ctx: "x" }] },
+      { $or: [{ ctx: { $exists: true } }, { $not: { ctx: { $eq: 1 } } }] },
+      { $and: [{ ctx: { $exists: false } }], ctx: { $ne: null } },
+      { $or: [{ tags: { $exists: true } }, { tags: { $in: ["a"] } }] },
+    ]) {
+      const err = await rejection(table.findMany(q(filter)));
+      expect(err.code).toBe("INVALID_QUERY");
+      expect(err.errors[0]).toEqual({
+        path: expect.stringMatching(/^(ctx|tags)$/),
+        message: expect.stringContaining("(accepted operators: $exists)"),
+      });
+    }
+    expect(findCalls(adapter)).toBe(0);
+  });
+
+  it("mixed operators on one entry are a value comparison → rejected", async () => {
+    const { table } = sqlTable();
+    for (const value of [{ $exists: true, $eq: 1 }, { $exists: true, $ne: null }, { $eq: null }]) {
+      const err = await rejection(table.findMany(q({ ctx: value })));
+      expect(err.errors[0]).toEqual({
+        path: "ctx",
+        message:
+          'Cannot filter on "ctx" — adapter cannot filter on this storage type (accepted operators: $exists)',
+      });
+    }
+  });
+
+  it("descendants, nested-object parents and navigation paths stay rejected for $exists", async () => {
+    const { table } = sqlTable();
+    const desc = await rejection(table.findMany(q({ "ctx.sub": { $exists: true } })));
+    expect(desc.errors[0]).toMatchObject({
+      path: "ctx.sub",
+      message: expect.stringContaining('JSON-stored column "ctx"'),
+    });
+    const blob = await rejection(table.findMany(q({ "wrap.blob.v": { $exists: true } })));
+    expect(blob.errors[0]!.message).toContain('JSON-stored column "wrap.blob"');
+    const parent = await rejection(table.findMany(q({ contact: { $exists: true } })));
+    expect(parent.errors[0]!.message).toContain("nested object");
+    const nav = await rejection(table.findMany(q({ target: { $exists: false } })));
+    expect(nav.errors[0]!.message).toContain("navigation path");
+  });
+
+  it("a non-boolean $exists operand is INVALID_QUERY on any field (JSON or scalar)", async () => {
+    const { table, adapter } = sqlTable();
+    for (const [path, operand] of [
+      ["ctx", 1],
+      ["ctx", "true"],
+      ["title", 0],
+      ["title", null],
+    ] as const) {
+      const err = await rejection(table.findMany(q({ [path]: { $exists: operand } })));
+      expect(err.code).toBe("INVALID_QUERY");
+      expect(err.errors).toEqual([{ path, message: `$exists on "${path}" expects true or false` }]);
+    }
+    const nested = await rejection(table.findMany(q({ $or: [{ title: { $exists: "no" } }] })));
+    expect(nested.errors[0]!.path).toBe("title");
+    expect(findCalls(adapter)).toBe(0);
+  });
+
+  it("$exists on an @db.encrypted field is still ENC_FIELD_FILTER (encryption guard runs first)", async () => {
+    const { table } = sqlTable();
+    expect((await rejection(table.findMany(q({ credentials: { $exists: true } })))).code).toBe(
+      "ENC_FIELD_FILTER",
+    );
+    expect((await rejection(table.findMany(q({ credentials: { $exists: "x" } })))).code).toBe(
+      "ENC_FIELD_FILTER",
+    );
+  });
+
+  it("$sort / $groupBy / $having / aggregate positions on a JSON column are unchanged", async () => {
+    const { table, adapter } = sqlTable();
+    const s = await rejection(table.findMany(q({ ctx: { $exists: true } }, { $sort: { ctx: 1 } })));
+    expect(s.errors[0]).toMatchObject({
+      path: "ctx",
+      message: expect.stringContaining("cannot sort"),
+    });
+    const agg = (controls: Record<string, unknown>, filter: Record<string, unknown> = {}) =>
+      table.aggregate({ filter, controls } as any);
+    const g = await rejection(
+      agg({ $groupBy: ["ctx"], $select: ["ctx", { $fn: "count", $field: "*" }] }),
+    );
+    expect(g.errors[0]).toMatchObject({
+      path: "ctx",
+      message: expect.stringContaining("group by"),
+    });
+    const h = await rejection(
+      agg({
+        $groupBy: ["title"],
+        $select: ["title", { $fn: "count", $field: "*" }],
+        $having: { ctx: { $exists: true } },
+      }),
+    );
+    expect(h.errors[0]).toMatchObject({ path: "ctx", message: expect.stringContaining("$having") });
+    const a = await rejection(
+      agg({ $groupBy: ["title"], $select: ["title", { $fn: "count", $field: "ctx" }] }),
+    );
+    expect(a.errors[0]).toMatchObject({ path: "ctx" });
+    // The aggregate FILTER is a filter: existence passes there.
+    await agg(
+      { $groupBy: ["title"], $select: ["title", { $fn: "count", $field: "*" }] },
+      { ctx: { $exists: true } },
+    );
+    expect(adapter.calls.filter((c) => c.method === "aggregate")).toHaveLength(1);
+  });
+
+  it("updateMany / deleteMany filters accept existence on a JSON column too", async () => {
+    const { table, adapter } = sqlTable();
+    await table.updateMany({ ctx: { $exists: false } } as any, { title: "y" } as any);
+    await table.deleteMany({ tags: { $exists: true } } as any);
+    const err = await rejection(table.deleteMany({ tags: "a" } as any));
+    expect(err.errors[0]!.message).toContain("(accepted operators: $exists)");
+    expect(
+      adapter.calls.filter((c) => c.method === "updateMany" || c.method === "deleteMany"),
+    ).toHaveLength(2);
   });
 });

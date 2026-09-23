@@ -27,8 +27,14 @@ import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex } from "./meta/field-capabilities";
 import { badRequest } from "./validation-interceptor";
 
-/** The gate positions in check order; `refs[op]` are the paths collected for each. */
-const OPS: readonly TQueryPathOp[] = ["filter", "sort", "select", "groupBy", "having", "aggregate"];
+/** Gate positions checked after the filter entries, in order; `refs[op]` are their paths. */
+const PATH_OPS: readonly Exclude<TQueryPathOp, "filter">[] = [
+  "sort",
+  "select",
+  "groupBy",
+  "having",
+  "aggregate",
+];
 import {
   GEO_CONTROLS,
   ONE_CONTROLS,
@@ -190,16 +196,18 @@ export class AsDbReadableController<
         unsupportedOperatorMessage(refs.unsupportedOperator),
       );
     }
-    for (const op of OPS) {
+    // Each filter entry is judged on its own predicate class — the same
+    // classification the core guard applies — so an existence-only
+    // `{ metrics: { $exists: true } }` never exempts `{ metrics: … }` elsewhere.
+    for (const { path, predicate } of refs.filter) {
+      const verdict = this.capabilities.check(path, "filter", this._exists, predicate);
+      if (verdict) return badRequest(verdict.path, verdict.message);
+    }
+    for (const op of PATH_OPS) {
       for (const path of refs[op]) {
         const verdict = this.capabilities.check(path, op, this._exists);
         if (verdict) return badRequest(verdict.path, verdict.message);
       }
-    }
-    // A `$geoWithin` predicate is a filter on its field like any other at the HTTP layer.
-    for (const path of refs.geoFilter) {
-      const verdict = this.capabilities.check(path, "filter", this._exists);
-      if (verdict) return badRequest(verdict.path, verdict.message);
     }
     // `$having` keys exist (checked above); they must also be aliases or
     // `$groupBy` fields — the core rule, answered here with the same wording.
@@ -1199,6 +1207,11 @@ export class AsDbReadableController<
     const fields: TMetaResponse["fields"] = {};
     for (const [path, cap, fd] of this.capabilities.entries()) {
       const entry: TFieldMeta = { sortable: cap.sortable, filterable: cap.filterable };
+      if (cap.filterOps) {
+        // `filterable: false`, yet these narrower predicates pass the gate
+        // (e.g. `$exists` on a relational adapter's JSON column).
+        entry.filterOps = [...cap.filterOps];
+      }
       if (cap.indexed) {
         // Advisory hint (prefer cheap sort keys) — never affects acceptance.
         entry.indexed = true;

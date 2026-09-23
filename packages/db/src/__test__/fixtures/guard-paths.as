@@ -1,6 +1,7 @@
 // Fixture for query-guards-paths.spec.ts / nullable-types.spec.ts — one table
 // carrying every path kind the core path guard classifies: scalar leaves
-// (indexed and not), a flattened object, a @db.json object, a primitive
+// (indexed and not), a flattened object (one with a nested @db.json child),
+// a @db.json object, a primitive
 // array, an array of objects, an encrypted object, a geo point, an FK and a
 // navigation relation; plus optional string / number / boolean leaves for the
 // nullable-typing checks.
@@ -48,6 +49,16 @@ export interface GuardSource {
         sku: string
         qty: number
     }[]
+
+    // A flattened parent whose child is its own JSON column: the leaf
+    // `wrap.blob` is a JSON-stored descriptor on relational adapters.
+    wrap: {
+        label: string
+        @db.json
+        blob?: {
+            v: number
+        }
+    }
 
     @db.encrypted
     credentials?: {

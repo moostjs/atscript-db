@@ -113,6 +113,7 @@ export function createMockReadable(
     versionColumn: undefined as string | undefined,
     isSearchable: vi.fn().mockReturnValue(false),
     isVectorSearchable: vi.fn().mockReturnValue(false),
+    isGeoSearchable: vi.fn().mockReturnValue(false),
     canFilterField: vi.fn().mockReturnValue(true),
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),

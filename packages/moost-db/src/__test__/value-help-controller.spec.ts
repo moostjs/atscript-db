@@ -250,12 +250,14 @@ describe("AsJsonValueHelpController — shared db-memory engine semantics", () =
     expect(res.count).toBe(1);
   });
 
-  it("$exists treats present-null as present and excludes absent fields", async () => {
+  it("$exists means 'holds a value': present-null counts as absent (cross-adapter semantics)", async () => {
     const type = idOnlyType();
     const rows = [{ id: "has", note: "x" }, { id: "null", note: null }, { id: "absent" }];
     const ctrl = new AsJsonValueHelpController<typeof type, any>(type, rows, makeApp());
-    const res = await callQuery(ctrl, { note: { $exists: true } });
-    expect(res.data.map((r) => r.id)).toEqual(["has", "null"]);
+    const present = await callQuery(ctrl, { note: { $exists: true } });
+    expect(present.data.map((r) => r.id)).toEqual(["has"]);
+    const absent = await callQuery(ctrl, { note: { $exists: false } });
+    expect(absent.data.map((r) => r.id)).toEqual(["null", "absent"]);
   });
 
   it("$regex with /i flag matches case-insensitively (corrected flag parsing)", async () => {

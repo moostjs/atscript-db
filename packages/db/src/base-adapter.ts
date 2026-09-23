@@ -347,6 +347,9 @@ export abstract class BaseDbAdapter {
    * Used by `AsDbReadableController.buildMetaResponse()` to gate the
    * `filterable` flag exposed to UIs — the adapter's answer is a hard gate
    * even when the field carries `@db.column.filterable`.
+   *
+   * Vetoes value comparison only — a sole-`$exists` entry needs just a stored
+   * column (`canFilterLeaf`).
    */
   canFilterField(fd: TDbFieldMeta): boolean {
     if (fd.encrypted) {

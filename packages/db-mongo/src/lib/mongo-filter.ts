@@ -27,6 +27,11 @@ const mongoVisitor: FilterVisitor<Filter<any>> = {
     if (op === "$eq") {
       return { [field]: value };
     }
+    if (op === "$exists") {
+      // `$exists` = "holds a value" (a stored null counts as absent, as in SQL) —
+      // native `$exists` is key presence. See docs/api/queries.md.
+      return value ? { [field]: { $ne: null } } : { [field]: null };
+    }
     if (op === "$regex") {
       const { pattern, flags } = parseRegexString(value);
       return flags

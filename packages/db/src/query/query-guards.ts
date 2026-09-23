@@ -1,9 +1,11 @@
 import type { AggregateExpr, AggregateQuery, FilterExpr } from "@uniqu/core";
+import { isPrimitive } from "@uniqu/core";
 
 import { DbError } from "../db-error";
 import type { BaseDbAdapter } from "../base-adapter";
 import { resolveAlias } from "../agg";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
+import type { TDbFieldMeta } from "../types";
 
 /**
  * Engine-agnostic query-time guards, applied in the core layer BEFORE filter
@@ -16,11 +18,13 @@ import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/
  * - `$geoWithin` on a non-geoPoint field → `FILTER_TYPE_MISMATCH`
  * - `$geoWithin` with a malformed circle → `INVALID_QUERY`
  * - `$geoWithin` on an adapter without geo support → `GEO_NOT_SUPPORTED`
+ * - `$exists` with a non-boolean operand → `INVALID_QUERY`
  * - every filter / `$sort` / `$select` / `$groupBy` / `$having` / aggregate
  *   path must resolve to physical storage on THIS adapter and pass the
- *   adapter's `canFilterField` / `canSortField` → `INVALID_QUERY`
- *   (see {@link guardPaths}). Runs after the checks above so `ENC_*` codes
- *   keep firing first for encrypted subtrees.
+ *   capability its position (for a filter entry: its predicate class, see
+ *   {@link canFilterLeaf}) needs → `INVALID_QUERY` (see {@link guardPaths}).
+ *   Runs after the checks above so `ENC_*` codes keep firing first for
+ *   encrypted subtrees.
  */
 
 /** Validates a `[lng, lat]` tuple (GeoJSON coordinate order). */
@@ -93,7 +97,8 @@ function guardGeoWithin(
 
 /**
  * Walks a filter expression, rejecting encrypted-field references and
- * validating `$geoWithin` operator nodes.
+ * validating operator operands: `$geoWithin` shapes and the boolean
+ * `$exists` operand (this is the one owner of that rule).
  */
 export function guardFilter(
   meta: TableMetadata,
@@ -122,10 +127,14 @@ export function guardFilter(
     if (hasEncrypted && isEncryptedRef(meta, key)) {
       throw encryptedRefError(encCode, key, "filter on");
     }
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    if (!isPrimitive(value)) {
       for (const [op, opValue] of Object.entries(value as Record<string, unknown>)) {
         if (op === "$geoWithin") {
           guardGeoWithin(meta, adapter, key, opValue);
+        } else if (op === "$exists" && typeof opValue !== "boolean") {
+          throw new DbError("INVALID_QUERY", [
+            { path: key, message: `$exists on "${key}" expects true or false` },
+          ]);
         }
       }
     }
@@ -214,18 +223,94 @@ export function sortFieldNames(sort: unknown): string[] {
   return [];
 }
 
+// ── Filter predicate classes (shared by the core guard and the HTTP gate) ─────
+
+/**
+ * The operator class a filter entry needs from its field (since 0.1.132):
+ * - `compare` — value comparison (bare values, `$eq`, `$gt`, `$in`, `$regex`, any mix);
+ * - `geo` — a `$geoWithin` entry;
+ * - `exists` — an entry whose sole operator is `$exists`.
+ */
+export type TFilterPredicate = "compare" | "geo" | "exists";
+
+/** One filter entry, collected per occurrence: its key and the predicate class its operators need. */
+export interface TFilterRef {
+  path: string;
+  predicate: TFilterPredicate;
+}
+
+/** The adapter-shaped capability {@link canFilterLeaf} consults (a `BaseDbAdapter` or a readable). */
+type TFilterCapabilitySource = Pick<BaseDbAdapter, "canFilterField" | "isGeoSearchable">;
+
+/** The operator each non-`compare` predicate class stands for, in `filterOps` order. */
+export const FILTER_PREDICATE_OPS = { exists: "$exists", geo: "$geoWithin" } as const;
+
+/** Classifies one filter entry's value (`{ key: value }`); operand validity is `guardFilter`'s. */
+export function filterPredicateOf(value: unknown): TFilterPredicate {
+  if (isPrimitive(value)) return "compare";
+  const ops = value as Record<string, unknown>;
+  if ("$geoWithin" in ops) return "geo";
+  const keys = Object.keys(ops);
+  return keys.length === 1 && keys[0] === "$exists" ? "exists" : "compare";
+}
+
+/**
+ * Whether a stored leaf physically supports a filter predicate of this class
+ * — the one rule the core path guard and moost-db's HTTP capability index
+ * both apply:
+ *
+ * - `compare` → `adapter.canFilterField(fd)`;
+ * - `exists` → any stored column: it tests whether the column holds a value
+ *   (SQL `IS [NOT] NULL`), never its content, so the scalar veto (JSON /
+ *   array storage on relational adapters) does not apply;
+ * - `geo` → a `db.geoPoint` leaf on a geo-searchable adapter.
+ *
+ * `@db.encrypted` vetoes every class.
+ */
+export function canFilterLeaf(
+  fd: TDbFieldMeta,
+  predicate: TFilterPredicate,
+  adapter: TFilterCapabilitySource,
+): boolean {
+  if (fd.encrypted) return false;
+  switch (predicate) {
+    case "exists":
+      return true;
+    case "geo":
+      return fd.isGeoPoint === true && adapter.isGeoSearchable();
+    default:
+      return adapter.canFilterField(fd);
+  }
+}
+
+/**
+ * The operators of the non-`compare` predicate classes a leaf physically
+ * accepts — named in a value-comparison rejection by the core guard, and
+ * listed (under the HTTP policy) as `/meta.fields[P].filterOps`.
+ */
+export function narrowerFilterOps(fd: TDbFieldMeta, adapter: TFilterCapabilitySource): string[] {
+  const ops: string[] = [];
+  for (const [predicate, op] of Object.entries(FILTER_PREDICATE_OPS)) {
+    if (canFilterLeaf(fd, predicate as TFilterPredicate, adapter)) ops.push(op);
+  }
+  return ops;
+}
+
+/** The rejection suffix naming {@link narrowerFilterOps} — `""` when there are none. */
+export function acceptedOperatorsHint(ops: readonly string[]): string {
+  return ops.length > 0 ? ` (accepted operators: ${ops.join(", ")})` : "";
+}
+
 // ── Structural path collection ───────────────────────────────────────────────
 
 /** Every logical path a parsed query references, grouped by position (since 0.1.128). */
 export interface TQueryPathRefs {
-  /** Filter keys (recursing through `$and` / `$or` / `$not`), minus the geo predicates below. */
-  filter: string[];
   /**
-   * Filter keys whose predicate is `$geoWithin`. Their shape and index support
-   * are validated by `guardFilter`, so the core path guard skips the adapter's
-   * scalar filter veto for them; the HTTP gate checks them like any filter path.
+   * Filter entries (recursing through `$and` / `$or` / `$not`), one per
+   * occurrence, each with its predicate class (since 0.1.132; replaces the
+   * `string[]` + `geoFilter` split).
    */
-  geoFilter: string[];
+  filter: TFilterRef[];
   sort: string[];
   select: string[];
   groupBy: string[];
@@ -243,8 +328,7 @@ export interface TQueryPathRefs {
 
 function collectFilterKeys(
   filter: unknown,
-  out: string[],
-  geo: string[] | undefined,
+  push: (key: string, value: unknown) => void,
   skip: ReadonlySet<string> | undefined,
   refs: TQueryPathRefs,
 ): void {
@@ -253,12 +337,12 @@ function collectFilterKeys(
     if (refs.unsupportedOperator) return;
     if (key === "$and" || key === "$or") {
       if (Array.isArray(value)) {
-        for (const child of value) collectFilterKeys(child, out, geo, skip, refs);
+        for (const child of value) collectFilterKeys(child, push, skip, refs);
       }
       continue;
     }
     if (key === "$not") {
-      collectFilterKeys(value, out, geo, skip, refs);
+      collectFilterKeys(value, push, skip, refs);
       continue;
     }
     if (key.startsWith("$")) {
@@ -266,13 +350,7 @@ function collectFilterKeys(
       return;
     }
     if (skip?.has(key)) continue;
-    const geoPredicate =
-      geo !== undefined &&
-      value !== null &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      "$geoWithin" in (value as Record<string, unknown>);
-    (geoPredicate ? geo : out).push(key);
+    push(key, value);
   }
 }
 
@@ -291,7 +369,6 @@ function collectFilterKeys(
 export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQueryPathRefs {
   const refs: TQueryPathRefs = {
     filter: [],
-    geoFilter: [],
     sort: [],
     select: [],
     groupBy: [],
@@ -299,7 +376,12 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
     aggregate: [],
     aggregateMode: false,
   };
-  collectFilterKeys(query.filter, refs.filter, refs.geoFilter, undefined, refs);
+  collectFilterKeys(
+    query.filter,
+    (path, value) => refs.filter.push({ path, predicate: filterPredicateOf(value) }),
+    undefined,
+    refs,
+  );
   const controls = (query.controls ?? {}) as Record<string, unknown>;
   const rawGroupBy = controls.$groupBy;
   const groupBy = Array.isArray(rawGroupBy)
@@ -330,7 +412,7 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
     if (!aliases.has(name)) refs.sort.push(name);
   }
   if (refs.aggregateMode) {
-    collectFilterKeys(controls.$having, refs.having, undefined, aliases, refs);
+    collectFilterKeys(controls.$having, (path) => refs.having.push(path), aliases, refs);
   }
   return refs;
 }
@@ -419,15 +501,14 @@ function pathSourceOf(meta: TableMetadata): TQueryPathSource {
  * metadata and adapter capability — the classification of
  * {@link classifyQueryPath} plus the position's physical requirement:
  *
- * - a leaf → physical capability (`canFilterField` / `canSortField`;
- *   `$select` always passes);
+ * - a leaf → physical capability (`canSortField` for `$sort`; for a filter
+ *   entry {@link canFilterLeaf} of its `predicate` class; `canFilterField`
+ *   for `$groupBy` / `$having` / aggregate `$field`s; `$select` always passes);
  * - a nested-object parent → only `$select`, and only when it expands to
  *   leaf columns (`selectExpansion`);
  * - everything else is rejected.
  *
- * `geoPredicate` marks a filter entry whose operator is `$geoWithin`: its
- * shape and index support were already validated by {@link guardFilter}, so
- * the adapter's scalar `canFilterField` veto does not apply.
+ * `predicate` is a filter entry's class; other positions leave the default.
  *
  * Messages are the short programmatic forms; the HTTP wording (moost-db's
  * `FieldCapabilityIndex`, with `$with` hints and leaf lists) is what clients
@@ -438,7 +519,7 @@ export function guardPath(
   adapter: BaseDbAdapter,
   path: string,
   op: TQueryPathOp,
-  geoPredicate = false,
+  predicate: TFilterPredicate = "compare",
 ): void {
   const verb = OP_VERB[op];
   const { kind, parent } = classifyQueryPath(pathSourceOf(meta), path);
@@ -457,11 +538,12 @@ export function guardPath(
         }
         return;
       }
-      if (geoPredicate) return;
-      if (!adapter.canFilterField(fd)) {
+      if (!canFilterLeaf(fd, predicate, adapter)) {
+        // Name the narrower predicates that WOULD pass (a JSON column's `$exists`).
+        const hint = op === "filter" ? acceptedOperatorsHint(narrowerFilterOps(fd, adapter)) : "";
         throw pathError(
           path,
-          `Cannot ${verb} "${path}" — adapter cannot filter on this storage type`,
+          `Cannot ${verb} "${path}" — adapter cannot filter on this storage type${hint}`,
         );
       }
       return;
@@ -510,8 +592,7 @@ export function guardPaths(
   if (refs.unsupportedOperator !== undefined) {
     throw pathError(refs.unsupportedOperator, unsupportedOperatorMessage(refs.unsupportedOperator));
   }
-  for (const path of refs.filter) guardPath(meta, adapter, path, "filter");
-  for (const path of refs.geoFilter) guardPath(meta, adapter, path, "filter", true);
+  for (const ref of refs.filter) guardPath(meta, adapter, ref.path, "filter", ref.predicate);
   for (const path of refs.sort) guardPath(meta, adapter, path, "sort");
   for (const path of refs.select) guardPath(meta, adapter, path, "select");
   for (const path of refs.aggregate) guardPath(meta, adapter, path, "aggregate");

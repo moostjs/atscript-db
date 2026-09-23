@@ -13,6 +13,7 @@ import {
 } from "@atscript/typescript/utils";
 
 import type {
+  AggregateExpr,
   AggregateQuery,
   FilterExpr,
   UniqueryControls,
@@ -773,7 +774,7 @@ export class AtscriptDbReadable<
           throw new DbError("INVALID_QUERY", [
             {
               path: "$select",
-              message: `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
+              message: `Aggregate "${(item as AggregateExpr).$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
             },
           ]);
         }

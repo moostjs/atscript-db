@@ -58,3 +58,23 @@ describe("buildMongoFilter — mixed comparison + logical nodes", () => {
     });
   });
 });
+
+// ── $exists: "holds a value" across adapters (since 0.1.132) ──────────────────
+describe("buildMongoFilter — $exists follows the null model (SQL IS [NOT] NULL parity)", () => {
+  it("$exists: true → $ne: null (present and non-null); false → null (null or missing)", () => {
+    expect(buildMongoFilter({ metrics: { $exists: true } })).toEqual({ metrics: { $ne: null } });
+    expect(buildMongoFilter({ metrics: { $exists: false } })).toEqual({ metrics: null });
+  });
+
+  it("composes under $not / $or and beside other operators on the same field", () => {
+    expect(buildMongoFilter({ $not: { a: { $exists: true } } } as any)).toEqual({
+      $nor: [{ a: { $ne: null } }],
+    });
+    expect(buildMongoFilter({ $or: [{ a: { $exists: false } }, { b: 1 }] } as any)).toEqual({
+      $or: [{ a: null }, { b: 1 }],
+    });
+    expect(buildMongoFilter({ a: { $exists: true, $ne: 5 } })).toEqual({
+      $and: [{ a: { $ne: null } }, { a: { $ne: 5 } }],
+    });
+  });
+});

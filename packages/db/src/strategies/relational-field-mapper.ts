@@ -137,7 +137,8 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     if (controls.$select) {
       for (const item of controls.$select) {
         if (typeof item !== "string") {
-          aliases.add(resolveAlias(item));
+          // uniqu 0.1.9 widened `$select` with `BucketExpr`; buckets are not executed yet.
+          aliases.add(resolveAlias(item as AggregateExpr));
         }
       }
     }

@@ -1,5 +1,5 @@
-// Fixtures for json-subfield-gate.spec.ts / mixed-logical-filter.spec.ts /
-// null-semantics.spec.ts (real in-memory SQLite).
+// Fixtures for json-subfield-gate.spec.ts / json-exists.spec.ts /
+// mixed-logical-filter.spec.ts / null-semantics.spec.ts (real in-memory SQLite).
 
 @db.table 'gate_widgets'
 export interface GateWidget {
@@ -48,4 +48,31 @@ export interface Note {
     score?: number
 
     archived?: boolean
+}
+
+// json-exists.spec.ts — optional JSON-stored columns (a @db.json object, a
+// primitive array, and a @db.json child of a flattened object) written as
+// object, `{}` / `[]`, explicit null and absent.
+@db.table 'json_exists_docs'
+export interface JsonExistsDoc {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    label: string
+
+    @db.json
+    metrics?: {
+        value?: number
+    }
+
+    tags?: string[]
+
+    wrap: {
+        title?: string
+        @db.json
+        blob?: {
+            v?: number
+        }
+    }
 }

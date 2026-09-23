@@ -68,6 +68,13 @@ export interface TRelationInfo {
 export interface TFieldMeta {
   sortable: boolean;
   filterable: boolean;
+  /**
+   * Present only when `filterable` is `false` but narrower predicates still
+   * pass the gate: their operators — `$exists` on a relational adapter's JSON
+   * / array column, `$geoWithin` on a geoPoint of a geo-searchable adapter.
+   * Since 0.1.132.
+   */
+  filterOps?: string[];
   /** Present (true) when the field is `@db.encrypted` — stored as ciphertext at rest. */
   encrypted?: boolean;
   /** Present (true) when the field carries a `@db.index.geo` geospatial index. */
