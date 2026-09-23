@@ -145,7 +145,7 @@ export interface User {
 | `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                   |
 | Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                        |
 | `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)        |
-| Arrays                                | `JSON`                                    | Same — filter/sort/select the column as a whole                                               |
+| Arrays                                | `JSON`                                    | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)            |
 | `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`                                               |
 | `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                            |
 | `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                 |

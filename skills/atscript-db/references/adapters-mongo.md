@@ -143,6 +143,7 @@ Requires a replica set. The adapter uses `session.withTransaction()` internally 
 
 ## Known limits
 
+- **`$exists` is not native key presence (since 0.1.132).** It means "holds a value" like SQL: `{ f: { $exists: true } }` → `{ f: { $ne: null } }`, `false` → `{ f: null }`, so a stored `null` counts as ABSENT. Filters that relied on null-valued keys matching `$exists: true` change results; key presence needs `adapter.collection`. → [queries.md § `$exists`](queries.md)
 - Referential actions (`@db.rel.onDelete 'cascade'` etc.) are application-level; concurrent writes can race.
 - Managed full-text `text` indexes are mutually exclusive per collection — use Atlas Search for multi-index scenarios.
 - `ensureTable()` is a no-op unless `@db.mongo.capped` is set (then `createCollection` with capped options).

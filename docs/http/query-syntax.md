@@ -88,12 +88,14 @@ MongoDB supports full PCRE regex. SQLite uses `LIKE`-based approximation for sim
 
 ### Existence
 
-Check whether fields are present (non-null) or absent (null):
+Check whether fields hold a value — a missing field and an explicit `null` both count as absent, on every adapter:
 
 ```bash
-curl "http://localhost:3000/todos/query?\$exists=email,phone"    # fields must not be null
-curl "http://localhost:3000/todos/query?\$!exists=deletedAt"     # field must be null
+curl "http://localhost:3000/todos/query?\$exists=email,phone"    # both hold a value
+curl "http://localhost:3000/todos/query?\$!exists=deletedAt"     # null or missing
 ```
+
+Since 0.1.132 `$exists` is also accepted on `@db.json` object and array columns on SQL adapters, where every other operator is rejected (`/meta` then lists `filterOps: ["$exists"]` for the field). See [Existence](../api/queries#existence) for the full rules.
 
 ### Null Values
 

@@ -285,17 +285,18 @@ Detect partial failure with `matchedCount < items.length`. **Per-item conflict s
 
 ## Gate mode (capability index, since 0.1.128)
 
-`/meta.fields` and the request gate are two projections of ONE per-controller `FieldCapabilityIndex` — parity is structural: `fields[P].sortable === ($sort=P accepted)`, `fields[P].filterable === (filter on P accepted)`, on every adapter, mode and field kind. Every root path a request uses (filter tree, `$sort`, `$select`, `$groupBy`, `$having` keys minus aggregate aliases, aggregate `$field`) is checked BEFORE `transformFilter` / `transformProjection`; rejections are the structured envelope `{ message, statusCode: 400, errors: [{ path, message }] }`. `checkGates(parsed)` still runs after the gate but is deprecated since 0.1.128 — override the read hooks or table guards instead.
+`/meta.fields` and the request gate are two projections of ONE per-controller `FieldCapabilityIndex` — parity is structural: `fields[P].sortable === ($sort=P accepted)`, `fields[P].filterable === (value-comparison filter on P accepted)`, `(fields[P].filterOps ?? []).includes(op)` ⇔ a narrower `op` entry accepted when `filterable` is false, on every adapter, mode and field kind. Every root path a request uses (filter tree, `$sort`, `$select`, `$groupBy`, `$having` keys minus aggregate aliases, aggregate `$field`) is checked BEFORE `transformFilter` / `transformProjection`; rejections are the structured envelope `{ message, statusCode: 400, errors: [{ path, message }] }`. `checkGates(parsed)` still runs after the gate but is deprecated since 0.1.128 — override the read hooks or table guards instead.
 
-- `fields[<path>]` = `{ filterable, sortable, indexed?, encrypted?, geo?, writeOnly? }`:
-  - `filterable` — adapter `canFilterField(fd)` ∧ ¬`@db.writeOnly` ∧ ¬`@db.encrypted`; in `@db.table.filterable 'manual'` additionally only `@db.column.filterable` fields.
+- `fields[<path>]` = `{ filterable, filterOps?, sortable, indexed?, encrypted?, geo?, writeOnly? }`:
+  - `filterable` — value comparisons: adapter `canFilterField(fd)` ∧ ¬`@db.writeOnly` ∧ ¬`@db.encrypted`; in `@db.table.filterable 'manual'` additionally only `@db.column.filterable` fields.
+  - `filterOps` (since 0.1.132) — only when `filterable` is false yet narrower operators pass the same conjunction with the predicate's own physical rule: SQL JSON / array column → `["$exists"]`, SQL `geoPoint` → `["$exists"]` + `"$geoWithin"` only when the adapter is geo-searchable. writeOnly / encrypted / missing manual annotation block every predicate (no `filterOps`; `$exists` would leak whether a sealed value is set). A filter UI must offer only these ops. Each filter entry is judged by its own predicate class (core `canFilterLeaf` / `narrowerFilterOps`) per occurrence — see [queries.md § `$exists`](queries.md).
   - `sortable` — adapter `canSortField(fd)` ∧ ¬writeOnly ∧ ¬encrypted; in `@db.table.sortable 'manual'` additionally only `@db.column.sortable` fields. Auto mode advertises EVERY adapter-sortable field (before 0.1.128 only index-backed ones).
   - `indexed` — present when index-backed (explicit `@db.index*`, PK, unique). Advisory; never affects acceptance.
 - **Manual-mode policy applies to filters and `$sort` only.** `$groupBy`, `$having` field keys and aggregate `$field` use the physical capability (adapter ∧ ¬writeOnly ∧ ¬encrypted) — `@db.column.filterable` is not required to group by a column. `$having` keys must additionally be aggregate aliases or `$groupBy` fields (core `checkHavingKeys`, answered by the gate with the same wording): a real but non-grouped column is a 400 `$having key "<key>" must be an aggregate alias or a $groupBy field` (since 0.1.128).
-- **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` defaults to `fd.storage !== 'json'`; `canSortField(fd)` vetoes `storage === 'json'` AND `designType 'json' | 'array'` (so Mongo/memory, which keep arrays inline as `column`, report `sortable: false` and 400 `$sort=tags` since 0.1.128). Mongo/memory override `canFilterField` to `!fd.encrypted`.
+- **Adapter capability is a hard gate over the annotation policy.** `BaseDbAdapter.canFilterField(fd)` defaults to `fd.storage !== 'json'` (vetoes value comparison only — a sole `$exists` entry bypasses it, `$geoWithin` is checked by the geo guard); `canSortField(fd)` vetoes `storage === 'json'` AND `designType 'json' | 'array'` (so Mongo/memory, which keep arrays inline as `column`, report `sortable: false` and 400 `$sort=tags` since 0.1.128). Mongo/memory override `canFilterField` to `!fd.encrypted`.
 - **Never listed, always rejected for filter/sort/groupBy:** nested-object parents (`contact` — 400 names its leaves), navigation properties and their descendants (`assignee`, `assignee.name` — 400 says `use $with=assignee(...)`; since 0.1.128 Mongo/memory no longer list nav descendants), JSON descendants on SQL adapters (`prefs.theme` — 400 says select the parent; Mongo/memory list and accept them), `@db.ignore`d fields, unknown fields (`Unknown field "x"`).
 - `$select`: listed fields, flattened parents (expand), JSON parents (whole value) and `@db.writeOnly` fields (stripped by the seal after the gate) pass; JSON descendants on SQL, encrypted descendants, root nav paths and unknown fields → 400. Applies to `/query`, `/pages`, `/geo`, `/one/:id` and `/one?…` (the composite endpoint was unvalidated before 0.1.128).
-- Messages (locked): `Filtering on field "x" is not permitted — add @db.column.filterable to enable.` / `… — adapter cannot filter on this storage type.` / `… — field is @db.writeOnly.`; `Sorting on field "x" is not permitted — …`; `"contact" is a nested object — filter or sort on one of its leaves (contact.email, …)`; `"assignee.name" is a navigation path — use $with=assignee(...) …`; `"prefs.theme" is inside JSON-stored column "prefs" — this adapter cannot filter JSON paths; select "prefs" and read the value client-side.`; `Unsupported filter operator "$nor" — use $and, $or or $not` (one wording with the core `guardPaths`, from `unsupportedOperatorMessage`); `$having key "region" must be an aggregate alias or a $groupBy field`.
+- Messages (locked): `Filtering on field "x" is not permitted — add @db.column.filterable to enable.` / `… — adapter cannot filter on this storage type.` (with ` (accepted operators: $exists).` before the period when `filterOps` exists) / `… — field is @db.writeOnly.`; `Sorting on field "x" is not permitted — …`; `"contact" is a nested object — filter or sort on one of its leaves (contact.email, …)`; `"assignee.name" is a navigation path — use $with=assignee(...) …`; `"prefs.theme" is inside JSON-stored column "prefs" — this adapter cannot filter JSON paths; select "prefs" and read the value client-side.`; `Unsupported filter operator "$nor" — use $and, $or or $not` (one wording with the core `guardPaths`, from `unsupportedOperatorMessage`); `$having key "region" must be an aggregate alias or a $groupBy field`.
 - The core layer (`@atscript/db`) runs the same existence + physical checks in `guardPaths` for every read, aggregate, `updateMany` / `deleteMany` (`DbError("INVALID_QUERY")`), so programmatic callers and `transformFilter` overlays hit the same wall — physical column names (`contact__email`) are no longer accepted anywhere.
 
 ## Errors
@@ -351,7 +352,7 @@ Filter, sort, and projection run on the shared `@atscript/db-memory` engine (`bu
 Gained for every static value-help surface (via the shared engine):
 
 - dot-path field access (`a.b.c`) in filters, sort, and `$select`.
-- `$exists`.
+- `$exists` — "holds a value" (`null` ≡ absent since 0.1.132; see [queries.md § `$exists`](queries.md)).
 - Mongo-like null model — `$eq:null` matches null AND missing; `$ne:null` matches only concrete present values.
 - nested-path projection via `$select`.
 
@@ -381,7 +382,10 @@ interface TMetaResponse {
   preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
   versionColumn?: string; // logical field name of the `@db.column.version` field; omitted when none. See versioning.md.
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
-  fields: Record<string, { sortable; filterable; indexed?; encrypted?; geo?; writeOnly? }>; // exact — see Gate mode
+  fields: Record<
+    string,
+    { sortable; filterable; filterOps?; indexed?; encrypted?; geo?; writeOnly? }
+  >; // exact — see Gate mode
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; chained refs resolve to the terminal field — see relations.md)
   actions: TDbActionInfo[]; // declared actions; `[]` when none. See actions.md.
   crud: TCrudPermissions; // built-in CRUD surface; key absent = denied

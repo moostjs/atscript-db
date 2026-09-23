@@ -139,7 +139,7 @@ GET /listings/geo?$center=-122.42,37.77&$maxDistance=50000&$page=1&$size=20
 
 Everything else is the standard [URL query syntax](/http/query-syntax) — filters, `$select`, `$with`, `$skip`/`$limit`. With `$page`/`$size` the response is the `/pages` envelope (`{ data, page, itemsPerPage, pages, count }`); otherwise a plain row array. Each row carries `$distance` (meters). Missing/malformed `$center` → 400; on a non-geo adapter the endpoint returns 400 with `GEO_NOT_SUPPORTED`.
 
-`/meta` reports `geo: true` on geo-indexed fields (with `sortable: false` — distance ordering goes through `/geo`, not `$sort`) and a top-level `geoSearchable` flag.
+`/meta` reports `geo: true` on geo-indexed fields (with `sortable: false` — distance ordering goes through `/geo`, not `$sort`) and a top-level `geoSearchable` flag. On SQL adapters a `geoPoint` column is not value-comparable, so it reports `filterable: false` with `filterOps: ["$exists"]` (since 0.1.132), plus `"$geoWithin"` when the adapter is geo-searchable (`geoSearchable` capability: MySQL, PostgreSQL with PostGIS, SQLite with math functions) — the only operators a filter UI should offer for it.
 
 From the browser client:
 

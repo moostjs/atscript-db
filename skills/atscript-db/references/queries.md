@@ -14,26 +14,18 @@ interface Uniquery<Own, Nav> {
 
 ## Filter operators
 
-All applied per-field unless inside `$and / $or / $not`.
+All applied per-field unless inside `$and / $or / $not`. These ten are the whole set (`ComparisonOp` in `@uniqu/core`) — there is no `$like`, `$between`, `$contains` or `$startsWith`; use `$regex` for patterns and `$gte`+`$lte` for ranges. An unknown operator is rejected.
 
-| Operator            | Example                                      | Meaning                                  |
-| ------------------- | -------------------------------------------- | ---------------------------------------- |
-| equality (implicit) | `{ name: 'Alice' }`                          | `=`                                      |
-| `$eq`               | `{ id: { $eq: 1 } }`                         | `=`                                      |
-| `$ne`               | `{ status: { $ne: 'done' } }`                | `<>`                                     |
-| `$gt / $gte`        | `{ age: { $gt: 18 } }`                       | `>` / `>=`                               |
-| `$lt / $lte`        | `{ age: { $lte: 65 } }`                      | `<` / `<=`                               |
-| `$in / $nin`        | `{ role: { $in: ['admin', 'editor'] } }`     | `IN` / `NOT IN`                          |
-| `$between`          | `{ age: { $between: [18, 65] } }`            | `BETWEEN`                                |
-| `$like`             | `{ name: { $like: 'Al%' } }`                 | `LIKE` (case-sensitive per collation)    |
-| `$ilike`            | `{ name: { $ilike: 'al%' } }`                | Case-insensitive LIKE                    |
-| `$regex`            | `{ name: { $regex: '^Al', $options: 'i' } }` | Regex (per-adapter translation)          |
-| `$exists`           | `{ deletedAt: { $exists: false } }`          | Null / key-presence                      |
-| `$startsWith`       | `{ slug: { $startsWith: 'foo-' } }`          | Prefix                                   |
-| `$endsWith`         | `{ slug: { $endsWith: '-v2' } }`             | Suffix                                   |
-| `$contains`         | `{ title: { $contains: 'foo' } }`            | Substring (case-sensitive per collation) |
-| `$containsAny`      | `{ tags: { $containsAny: ['a', 'b'] } }`     | Array/string contains-any                |
-| `$containsAll`      | `{ tags: { $containsAll: ['a', 'b'] } }`     | Array contains-all                       |
+| Operator            | Example                                        | Meaning                                          |
+| ------------------- | ---------------------------------------------- | ------------------------------------------------ |
+| equality (implicit) | `{ name: 'Alice' }`                            | `=`                                              |
+| `$eq`               | `{ id: { $eq: 1 } }`                           | `=`                                              |
+| `$ne`               | `{ status: { $ne: 'done' } }`                  | `<>`                                             |
+| `$gt / $gte`        | `{ age: { $gt: 18 } }`                         | `>` / `>=`                                       |
+| `$lt / $lte`        | `{ age: { $lte: 65 } }`                        | `<` / `<=`                                       |
+| `$in / $nin`        | `{ role: { $in: ['admin', 'editor'] } }`       | `IN` / `NOT IN`                                  |
+| `$regex`            | `{ name: { $regex: /^al/i } }` (or `'/^al/i'`) | Regex, `string` fields (per-adapter translation) |
+| `$exists`           | `{ deletedAt: { $exists: false } }`            | Holds a value (`null` ≡ absent) — below          |
 
 ## Logical composition
 
@@ -57,6 +49,17 @@ await tasks.updateOne({ id: 1, note: null }); // clears (omit the key to keep)
 
 `$in: [null]` never matches on SQL (`IN (NULL)`) — use the bare form. Optional columns read back as `null` (SQL) or absent (Mongo): compare with `== null`. `NullableOptional` is exported from `@atscript/db`.
 
+## `$exists` (since 0.1.132)
+
+| #   | Rule                                                                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Means "holds a value" on EVERY adapter: missing and explicit `null` → absent; `{}`, `[]`, `""`, `0`, `false` → present. `true` ≡ `$ne: null`, `false` ≡ `$eq: null`.                                                            |
+| 2   | Mongo/memory CHANGED: a stored `null` used to count as present (key presence). Mongo now sends `{ f: { $ne: null } }` / `{ f: null }`. "Key present but null" is not expressible portably — use `adapter.collection`.           |
+| 3   | Operand must be boolean — `1` / `"false"` → `INVALID_QUERY` (`$exists on "x" expects true or false`). Encrypted field → `ENC_FIELD_FILTER` first.                                                                               |
+| 4   | Accepted on any stored, non-encrypted column, incl. `@db.json` objects / arrays on SQL (`IS [NOT] NULL`) — only when `$exists` is the entry's SOLE operator. `{ f: { $exists: true, $ne: null } }` on a JSON column → rejected. |
+| 5   | Judged per occurrence in `$and` / `$or` / `$not` — an `$exists` entry never unlocks another entry on the same path.                                                                                                             |
+| 6   | Still rejected: JSON descendants on SQL (`metrics.value`), flattened parents (`contact`), nav paths. `$sort` / `$groupBy` / `$having` / aggregate positions unchanged.                                                          |
+
 ## Path guard (since 0.1.128)
 
 Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key (minus aggregate aliases) and aggregate `$field` must resolve to physical storage on the adapter in use — checked in `guardPaths` before translation, for reads, `aggregate()`, `updateMany()` and `deleteMany()`. Otherwise `DbError("INVALID_QUERY", [{ path, message }])`:
@@ -65,6 +68,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 | ------------------------------------------ | ------------------------------------------------------------------------------- |
 | physical column name (`contact__email`)    | `Unknown field` — logical paths only (breaking for overlays that used them)     |
 | JSON / array descendant (`prefs.theme`)    | SQL adapters: rejected (`… inside JSON-stored column "prefs"`); Mongo/memory ok |
+| filter on JSON / array column (`prefs`)    | SQL: only a sole-`$exists` entry; else `… (accepted operators: $exists)`        |
 | navigation path (`assignee.name`)          | rejected — load with `$with`                                                    |
 | flattened parent (`contact`)               | `$select` ok (expands); filter / sort rejected — use a leaf                     |
 | `$sort` on JSON / array column             | rejected on every adapter (`canSortField`)                                      |

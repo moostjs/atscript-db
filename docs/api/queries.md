@@ -142,7 +142,7 @@ Check whether a value belongs (or does not belong) to a set:
 
 ### Existence
 
-Test whether a field is present (non-null) or absent (null):
+`$exists` tests whether a field **holds a value** — the same answer on every adapter:
 
 ```typescript
 {
@@ -151,15 +151,31 @@ Test whether a field is present (non-null) or absent (null):
       $exists: true;
     }
   }
-} // WHERE email IS NOT NULL
+} // SQL: WHERE email IS NOT NULL
 {
   filter: {
     email: {
       $exists: false;
     }
   }
-} // WHERE email IS NULL
+} // SQL: WHERE email IS NULL
 ```
+
+| Stored value                                              | `$exists: true` | `$exists: false` |
+| --------------------------------------------------------- | :-------------: | :--------------: |
+| Missing / `undefined`                                     |        —        |      match       |
+| Explicit `null`                                           |        —        |      match       |
+| Any other value, including `{}`, `[]`, `""`, `0`, `false` |      match      |        —         |
+
+Rules (since 0.1.132):
+
+- **The operand must be a boolean.** `{ $exists: 1 }` or `{ $exists: "false" }` throws `DbError("INVALID_QUERY")` — `$exists on "email" expects true or false` (HTTP 400). An `@db.encrypted` field fails with `ENC_FIELD_FILTER` first, as for any filter.
+- **Works on any stored column, including `@db.json` objects and arrays on SQL adapters**, which otherwise reject every filter on the column. Only an entry whose **sole** operator is `$exists` qualifies: `{ metrics: { $exists: true } }` is accepted, `{ metrics: { $exists: true, $ne: null } }` or `{ metrics: { value: 1 } }` is not — the error then names `(accepted operators: $exists)`. Each occurrence inside `$and` / `$or` / `$not` is judged on its own, so an `$exists` entry never unlocks another entry on the same path.
+- **Descendants stay rejected.** `{ "metrics.value": { $exists: true } }` on a SQL JSON column, a flattened object parent (`contact`) and navigation paths fail like any other filter (see the path rules below). `$sort`, `$groupBy`, `$having` and aggregate fields are unaffected.
+
+::: warning MongoDB and memory: `null` counts as absent since 0.1.132
+Before 0.1.132 the MongoDB and memory adapters answered `$exists` by key presence, so a document storing `note: null` matched `$exists: true`. They now match SQL (where a missing value and `NULL` are the same thing): MongoDB translates `{ f: { $exists: true } }` to `{ f: { $ne: null } }` and `$exists: false` to `{ f: null }`. Filters that relied on "key present even if `null`" now return fewer rows (with `$exists: true`) or more (with `false`). Key presence is no longer expressible through the portable filter — `{ note: null }` also matches a missing key — so use the [native collection](/adapters/mongodb#accessing-the-adapter) if you need it.
+:::
 
 ### Null Values
 
@@ -257,6 +273,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 
 - physical column names (`contact__email`, `@db.column`-renamed names) are no longer accepted — use logical paths;
 - descendants of a `@db.json` / array column (`prefs.theme`) are rejected on SQL adapters (MongoDB and memory address them natively);
+- a `@db.json` / array column itself accepts only an [`$exists`](#existence) entry on SQL adapters (since 0.1.132; before, every filter on it was rejected);
 - navigation paths (`assignee.name`) are rejected — load relations with `$with`;
 - a flattened object parent (`contact`) can be selected but not filtered or sorted — use a leaf;
 - `$sort` on a JSON / array column is rejected on every adapter (`canSortField`);

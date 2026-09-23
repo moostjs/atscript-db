@@ -110,7 +110,7 @@ const results = await contacts.findMany({
 
 To store an entire nested object as a single JSON column instead of flattening, annotate it with `@db.json`. Arrays are always stored as JSON.
 
-JSON-stored values are opaque to queries on SQLite: a descendant path (`preferences.theme`, `tags.0`) in a filter, `$sort`, `$select`, `$groupBy` or an aggregate field is rejected with `INVALID_QUERY` (HTTP 400 over moost-db) before any SQL is built (since 0.1.128); select the parent column and read the value client-side. `/meta.fields` lists JSON and array columns as `filterable: false, sortable: false` and does not list their descendants.
+JSON-stored values are opaque to queries on SQLite: a descendant path (`preferences.theme`, `tags.0`) in a filter, `$sort`, `$select`, `$groupBy` or an aggregate field is rejected with `INVALID_QUERY` (HTTP 400 over moost-db) before any SQL is built (since 0.1.128); select the parent column and read the value client-side. `/meta.fields` lists JSON and array columns as `filterable: false, sortable: false, filterOps: ["$exists"]` and does not list their descendants: the column itself accepts only an [`$exists`](/api/queries#existence) entry (`IS [NOT] NULL`, since 0.1.132).
 
 ### Foreign Key Enforcement
 

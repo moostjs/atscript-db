@@ -126,7 +126,7 @@ export interface Event {
 | `decimal`                                   | `NUMERIC(p,s)`                    | Defaults to `NUMERIC(10,2)`                                                             |
 | Nested objects                              | Flattened `__` columns            | `address.city` becomes `address__city`                                                  |
 | `@db.json`                                  | `JSONB`                           | Stored as a single JSONB column; descendant paths are not queryable (400 since 0.1.128) |
-| Arrays                                      | `JSONB`                           | Same — filter/sort/select the column as a whole                                         |
+| Arrays                                      | `JSONB`                           | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)      |
 | `@db.default.uuid`                          | `VARCHAR(255)`                    | `DEFAULT gen_random_uuid()`                                                             |
 | `@db.search.vector`                         | `vector(N)`                       | pgvector extension; falls back to `JSONB`                                               |
 | `db.geoPoint`                               | `geography(Point,4326)`           | PostGIS extension; falls back to `JSONB`. See [Geo Search](/search/geo-search)          |

@@ -132,6 +132,7 @@ Leaf-comparison semantics are **JS-native and documented — deliberately not cl
 
 - **Regex** — a JS `RegExp`, honoring `/pat/flags`. Not translated to SQL `LIKE`.
 - **Null model** — Mongo-like. `{ f: null }` / `$eq: null` matches both an explicit `null` **and** a missing field; `$ne` matches only concrete, present values.
+- **`$exists`** — "holds a value", the same on every adapter: `$exists: true` ⇔ `$ne: null`, `$exists: false` ⇔ `$eq: null`. Before 0.1.132 a key holding `null` counted as present; it now counts as absent. See [Existence](/api/queries#existence).
 - **Ordering** — JS-native (`<` / `>`); strings compare by code point. There is **no collation** or locale awareness.
 
 ## Limitations

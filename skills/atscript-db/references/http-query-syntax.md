@@ -59,9 +59,11 @@ Only `~=` regex form. No `*` wildcard in URL grammar — use regex anchors:
 `$`-prefixed; field list is comma-separated. NOT a filter operator — they are controls.
 
 ```
-?$exists=phone,email     # phone AND email must both be non-null
-?$!exists=deletedAt      # deletedAt must be null
+?$exists=phone,email     # phone AND email both hold a value
+?$!exists=deletedAt      # deletedAt is null or missing
 ```
+
+Semantics (null ≡ absent on every adapter, boolean-only, sole-operator rule on JSON columns) → [queries.md § `$exists`](queries.md). The one filter a SQL JSON / array column accepts (`/meta` → `filterOps: ["$exists"]`, since 0.1.132).
 
 ## Logical operators
 
@@ -105,8 +107,8 @@ Dot notation works for both nav-prop access and embedded / flattened own-props �
 | `$center`      | `$center=-122.42,37.77`                                             | `GET /geo` only (required there). `lng,lat` — longitude FIRST. See [geo-search.md](geo-search.md).                                                                                                                                                                                 |
 | `$maxDistance` | `$maxDistance=50000`                                                | `GET /geo` only. Meters.                                                                                                                                                                                                                                                           |
 | `$minDistance` | `$minDistance=1000`                                                 | `GET /geo` only. Meters (ring queries).                                                                                                                                                                                                                                            |
-| `$exists`      | `$exists=phone,email`                                               | All listed fields must be non-null (AND).                                                                                                                                                                                                                                          |
-| `$!exists`     | `$!exists=deletedAt`                                                | All listed fields must be null.                                                                                                                                                                                                                                                    |
+| `$exists`      | `$exists=phone,email`                                               | All listed fields must hold a value (AND).                                                                                                                                                                                                                                         |
+| `$!exists`     | `$!exists=deletedAt`                                                | All listed fields must be null / missing.                                                                                                                                                                                                                                          |
 | `$actions`     | `$actions=true` (or `1`)                                            | Augment each row with `$actions: string[]` — server-evaluated row/rows-level action availability. Stripped on `$count` / `$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability).                                                                  |
 
 ## Examples
@@ -146,7 +148,7 @@ HTTP/1.1 400 Bad Request
 | --------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
 | listed field (`title`, `contact.email`)       | per `/meta.fields` flags (manual-mode policy on filter/sort only) | ok                                                               |
 | flattened object parent (`contact`)           | 400 `"contact" is a nested object — … leaves (contact.email, …)`  | ok (expands)                                                     |
-| JSON parent (`prefs`, arrays)                 | filter: adapter-dependent (SQL 400); `$sort`: 400 everywhere      | ok (whole value)                                                 |
+| JSON parent (`prefs`, arrays)                 | filter: SQL `$exists` only, else 400; `$sort`: 400 everywhere     | ok (whole value)                                                 |
 | JSON descendant (`prefs.theme`)               | SQL: 400 `… inside JSON-stored column "prefs" …`; Mongo/memory ok | same                                                             |
 | navigation path (`assignee`, `assignee.name`) | 400 `… use $with=assignee(...)`                                   | 400 — use `$with=assignee($select=name)`                         |
 | `@db.writeOnly` / `@db.encrypted`             | 400                                                               | writeOnly: stripped; encrypted leaf ok; encrypted descendant 400 |

@@ -130,6 +130,14 @@ This is a **property** (not a method). Set to `true` if the adapter can handle c
 supportsColumnModify = true;
 ```
 
+### `canFilterField(fd)` / `canSortField(fd)`
+
+Per-field vetoes consulted by the core query guard (every read, `aggregate()`, `updateMany` / `deleteMany`) and by moost-db's `/meta.fields` + request gate — a `false` rejects the path with `INVALID_QUERY` before your translator runs. Defaults: `canFilterField` returns `false` for JSON-stored columns (`fd.storage === 'json'`) and encrypted fields; `canSortField` also vetoes `@db.json` / array design types and `geoPoint`. Override `canFilterField` when your engine can compare inside JSON storage (MongoDB and the memory adapter return `!fd.encrypted`).
+
+`canFilterField` vetoes **value comparison** only. Since 0.1.132 an entry whose sole operator is `$exists: <boolean>` is accepted on any stored, non-encrypted column regardless of it, so your filter translator must handle `$exists` on JSON columns too, with the portable ["holds a value"](/api/queries#existence) meaning: `null` and missing are both absent (SQL `IS [NOT] NULL`; for a document store, `$ne: null` / `null` rather than key presence). A `$geoWithin` entry likewise bypasses it and is validated against `isGeoSearchable()` instead.
+
+`@atscript/db` exports the same rule for custom gates and tooling: `canFilterLeaf(fd, predicate, adapter)` answers whether a leaf accepts a filter entry of class `predicate` (`TFilterPredicate`: `'compare' | 'exists' | 'geo'`) — `adapter` is anything with `canFilterField(fd)` and `isGeoSearchable()` (an adapter or a readable); `geo` needs a `db.geoPoint` leaf on a geo-searchable adapter. `narrowerFilterOps(fd, adapter)` lists the operators of the non-compare classes a leaf accepts (what `/meta` reports as `filterOps`), and `acceptedOperatorsHint(ops)` renders the ` (accepted operators: …)` suffix used in rejections. `collectQueryPaths(query)` returns `filter` as `{ path, predicate }` entries, one per occurrence (since 0.1.132 — it previously returned `filter: string[]` plus a separate `geoFilter` list).
+
 ## Transaction Support
 
 Override three protected methods to enable transactions:

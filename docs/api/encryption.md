@@ -116,7 +116,7 @@ Ciphertext is opaque, so anything that needs to _interpret_ the stored value is 
 
 Plain assignment in updates is allowed — the new value is simply re-encrypted. Over HTTP all of these surface as `400`.
 
-`/meta` reports `encrypted: true` on the field with `filterable: false` and `sortable: false` (the adapter veto wins over any `@db.column.filterable` annotation).
+`/meta` reports `encrypted: true` on the field with `filterable: false`, `sortable: false` and no `filterOps` — even `$exists` is rejected (the adapter veto wins over any `@db.column.filterable` annotation).
 
 ::: warning HTTP responses return decrypted values
 Encryption is **at-rest** protection, not transport-level redaction. Read endpoints return plaintext to authorized callers. Who may see the field over HTTP remains an authorization concern — use projections, `transformProjection()`, or permission guards exactly as you would for any sensitive field.
