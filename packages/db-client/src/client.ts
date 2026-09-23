@@ -1,5 +1,13 @@
 import { buildUrl } from "@uniqu/url/builder";
-import type { AggregateQuery, AggregateResult, Uniquery, UniqueryControls } from "@uniqu/core";
+import type {
+  AggregateExpr,
+  AggregateQuery,
+  AggregateResult,
+  BucketExpr,
+  Uniquery,
+  UniqueryControls,
+  ValidGroupBy,
+} from "@uniqu/core";
 import {
   deserializeAnnotatedType,
   type TAtscriptAnnotatedType,
@@ -114,11 +122,16 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
 
   /**
    * `GET /query` with `$groupBy` — aggregate query with typed dimension/measure fields.
+   *
+   * `$select` may carry calendar buckets (`{ $bucket, $field, $tz?, $weekStart?, $as? }`);
+   * a `$groupBy` entry must be a dimension or a bucket alias (`ValidGroupBy`), and a
+   * bucket's value is typed as its `YYYY-MM-DD` label (`| null` for an optional source).
+   * Gap-fill between labels with `nextBucketLabel` (re-exported here).
    */
-  async aggregate<Q extends AggregateQuery<Own<T>>>(
-    query: Q,
+  async aggregate<const Q extends AggregateQuery<Own<T>>>(
+    query: Q & ValidGroupBy<Own<T>, Q>,
   ): Promise<
-    Q["controls"]["$select"] extends readonly (string | { $fn: string; $field: string })[]
+    Q["controls"]["$select"] extends readonly (string | AggregateExpr | BucketExpr)[]
       ? AggregateResult<Own<T>, Q["controls"]["$select"]>[]
       : Record<string, unknown>[]
   > {

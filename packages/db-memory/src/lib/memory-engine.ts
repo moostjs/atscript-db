@@ -128,6 +128,21 @@ export function sortRows(
     .map((decorated) => decorated.row);
 }
 
+/**
+ * Applies `$skip` then `$limit` (both optional) via a single slice. No-op
+ * pagination (the common unpaginated read) returns the input as-is: callers
+ * pass a fresh, non-store-aliased array and copy what they return, so the
+ * whole-array `.slice` copy that `slice(0, undefined)` would make is skipped.
+ */
+export function paginate<T>(rows: T[], skip?: number, limit?: number): T[] {
+  const start = skip ?? 0;
+  const end = limit === undefined ? undefined : start + limit;
+  if (start === 0 && end === undefined) {
+    return rows;
+  }
+  return rows.slice(start, end);
+}
+
 /** Options for {@link projectRow}. */
 export interface ProjectRowOptions {
   /**

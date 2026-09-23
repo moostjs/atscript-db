@@ -13,13 +13,14 @@ import {
 } from "@atscript/typescript/utils";
 
 import type {
-  AggregateExpr,
   AggregateQuery,
+  BucketUnit,
   FilterExpr,
   UniqueryControls,
   Uniquery,
   WithRelation,
 } from "@uniqu/core";
+import { isAggregateExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError } from "../db-error";
@@ -45,6 +46,7 @@ import type { TRelationLoaderHost } from "../rel/relation-loader";
 import { findFKForRelation, findRemoteFK } from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
 import { assertGeoPoint, guardAggregate, guardQuery } from "../query/query-guards";
+import { resolveCalendarBuckets } from "../query/buckets";
 
 /**
  * Extracts nav prop names from a query's `$with` array.
@@ -709,9 +711,14 @@ export class AtscriptDbReadable<
    * Executes an aggregate query with GROUP BY and aggregate functions.
    *
    * Validates:
+   * - `$select` computed entries and calendar buckets (the shared normalizer,
+   *   `resolveCalendarBuckets`: shapes, unit, zone, alias, grouping)
    * - Plain fields in $select are a subset of $groupBy
    * - When dimensions/measures are defined (strict mode): $groupBy fields
-   *   must be dimensions, aggregate $field values must be measures (or '*')
+   *   must be dimensions (a calendar bucket's source field included),
+   *   aggregate $field values must be measures (or '*')
+   * - the path guard (a bucket source must be a timestamp field) and the
+   *   adapter's calendar-bucket units (`BUCKET_NOT_SUPPORTED`)
    *
    * Translates field names, delegates to adapter.aggregate(),
    * then reverse-maps and applies fromStorage formatters on results.
@@ -719,6 +726,10 @@ export class AtscriptDbReadable<
   public async aggregate(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
     this._ensureBuilt();
     const { $groupBy, $select } = query.controls;
+
+    // Computed-entry shapes + calendar buckets, before any rule reads `$select`
+    // (the rules below then meet only strings, aggregates and valid buckets).
+    const buckets = resolveCalendarBuckets(query.controls, this._meta, true);
 
     // Validate: plain fields in $select must be in $groupBy
     if ($select) {
@@ -741,7 +752,9 @@ export class AtscriptDbReadable<
       const dimSet = new Set(dimensions);
       const measSet = new Set(measures);
 
-      for (const field of $groupBy) {
+      // A bucket alias groups by its source field — that is the dimension.
+      const bucketSource = new Map(buckets.map((b) => [b.alias, b.field]));
+      for (const field of $groupBy.map((key) => bucketSource.get(key) ?? key)) {
         if (!dimSet.has(field)) {
           throw new DbError("INVALID_QUERY", [
             { path: "$groupBy", message: `Field "${field}" is not a dimension` },
@@ -751,7 +764,7 @@ export class AtscriptDbReadable<
 
       if ($select) {
         for (const item of $select) {
-          if (typeof item !== "string" && item.$field !== "*" && !measSet.has(item.$field)) {
+          if (isAggregateExpr(item) && item.$field !== "*" && !measSet.has(item.$field)) {
             throw new DbError("INVALID_QUERY", [
               { path: "$select", message: `Aggregate field "${item.$field}" is not a measure` },
             ]);
@@ -767,14 +780,13 @@ export class AtscriptDbReadable<
     if ($select && quantityRefByField.size > 0) {
       const groupBySet = new Set($groupBy);
       for (const item of $select) {
-        if (typeof item === "string") continue;
-        if (item.$field === "*") continue;
+        if (!isAggregateExpr(item) || item.$field === "*") continue;
         const refField = quantityRefByField.get(item.$field);
         if (refField && !groupBySet.has(refField)) {
           throw new DbError("INVALID_QUERY", [
             {
               path: "$select",
-              message: `Aggregate "${(item as AggregateExpr).$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
+              message: `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
             },
           ]);
         }
@@ -793,22 +805,24 @@ export class AtscriptDbReadable<
       }
     }
 
-    // Encrypted-field guards: $groupBy / aggregate refs / $having / filter
-    guardAggregate(this._meta, this.adapter, query);
+    // Encrypted-field guards: $groupBy / aggregate refs / $having / filter,
+    // then the path guard and the adapter's calendar-bucket units.
+    guardAggregate(this._meta, this.adapter, query, buckets);
 
     // Translate and delegate
-    const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta);
+    const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta, buckets);
     const results = await this.adapter.aggregate(dbQuery);
 
     // Aggregate rows take the same reverse path as regular rows (since
     // 0.1.128): physical → logical names, fromStorage formatters, boolean /
     // decimal / JSON coercion of grouped columns, and a flattened leaf
     // (`stats__views`) nests as `{ stats: { views } }`. Keys that are not
-    // columns — aggregate aliases such as `total` or `count_star` — are
-    // copied as-is by both strategies; an alias that collides with a
-    // physical column name is treated as that column (as the formatter rule
-    // always did). Rows an adapter already returns nested (MongoDB) pass
-    // through unchanged.
+    // columns — aggregate aliases such as `total` or `count_star`, calendar
+    // bucket labels — are copied as-is by both strategies; an aggregate alias
+    // that collides with a physical column name is treated as that column (as
+    // the formatter rule always did). A bucket alias never collides (the
+    // normalizer rejects it), so no formatter ever touches a label. Rows an
+    // adapter already returns nested (MongoDB) pass through unchanged.
     return results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
   }
 
@@ -822,6 +836,11 @@ export class AtscriptDbReadable<
   /** Whether the adapter can filter on a given field (proxies adapter capability). */
   public canFilterField(fd: TDbFieldMeta): boolean {
     return this.adapter.canFilterField(fd);
+  }
+
+  /** Calendar-bucket units the adapter can group by (proxies adapter capability; empty = none). */
+  public calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return this.adapter.calendarBucketUnits();
   }
 
   /** Whether the adapter can sort by a given field (proxies adapter capability). */

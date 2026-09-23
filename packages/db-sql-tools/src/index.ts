@@ -14,6 +14,8 @@ export type { TReplaceColumn } from "./sql-builder";
 export {
   SQL_DEFAULT,
   buildInsert,
+  buildInsertMany,
+  insertManyColumns,
   buildSelect,
   buildUpdate,
   buildDelete,
@@ -24,6 +26,7 @@ export {
 } from "./sql-builder";
 export {
   sqlStringLiteral,
+  sqlTimeZoneLiteral,
   toSqlValue,
   refActionToSql,
   defaultValueForType,
@@ -31,5 +34,5 @@ export {
   queryOpToSql,
   queryNodeToSql,
 } from "./common";
-export { AGG_FN_SQL, buildAggregateSelect, buildAggregateCount } from "./agg";
+export { AGG_FN_SQL, buildAggregateSelect, buildAggregateCount, groupKeySql } from "./agg";
 export { parseRegexString } from "./regex";

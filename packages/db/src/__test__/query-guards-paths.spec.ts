@@ -275,8 +275,8 @@ describe("guardPaths — relational adapter", () => {
         { $fn: "sum", $field: "rank", $as: "total" },
         { $fn: "count", $field: "*" },
       ],
-      $having: { total: { $gt: 1 }, "count_*": { $gt: 0 } },
-      $sort: { total: -1, "count_*": 1 },
+      $having: { total: { $gt: 1 }, count_star: { $gt: 0 } },
+      $sort: { total: -1, count_star: 1 },
     });
     expect(adapter.calls.filter((c) => c.method === "aggregate")).toHaveLength(1);
   });
@@ -312,7 +312,7 @@ describe("guardPaths — relational adapter", () => {
     await agg({
       $groupBy: ["contact.email"],
       $select: ["contact.email", { $fn: "count", $field: "*" }],
-      $having: { "contact.email": "a@b", "count_*": { $gt: 0 } },
+      $having: { "contact.email": "a@b", count_star: { $gt: 0 } },
     });
     expect(adapter.calls.filter((c) => c.method === "aggregate")).toHaveLength(2);
   });

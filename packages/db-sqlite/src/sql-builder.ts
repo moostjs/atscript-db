@@ -2,6 +2,8 @@ import type { TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
+
+import { sqliteCalendarBucket } from "./calendar-bucket";
 import {
   buildInsert as _buildInsert,
   buildSelect as _buildSelect,
@@ -158,6 +160,11 @@ export const sqliteDialect: SqlDialect = {
     const dist = haversineDistanceExpr(quotedCol, circle.center);
     return { sql: `${dist.sql} <= ?`, params: [...dist.params, circle.radius] };
   },
+  // `atscript_bucket(col, unit, tz, weekStart)` — the UDF the adapter registers
+  // on its driver (the `@uniqu/core` kernel). The adapter advertises no bucket
+  // units when its driver cannot register it, so the core rejects bucket
+  // queries before this renders.
+  calendarBucket: sqliteCalendarBucket,
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
 

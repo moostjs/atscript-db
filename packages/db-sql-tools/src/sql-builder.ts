@@ -25,6 +25,52 @@ export function buildInsert(
 }
 
 /**
+ * The columns of a multi-row INSERT: the union of the rows' keys, in
+ * first-seen order (rows may differ in shape — an optional field omitted on
+ * some).
+ */
+export function insertManyColumns(rows: readonly Record<string, unknown>[]): string[] {
+  const columns = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) columns.add(key);
+  }
+  return [...columns];
+}
+
+/**
+ * Builds a multi-row `INSERT … VALUES (…), (…)` statement over `columns`
+ * (default: {@link insertManyColumns} of `rows`). A row lacking a column gets
+ * `DEFAULT` — exactly what a single-row INSERT omitting it stores. Callers
+ * split large inputs into batches themselves (passing the same `columns` to
+ * each) and append any `RETURNING` clause.
+ */
+export function buildInsertMany(
+  dialect: SqlDialect,
+  table: string,
+  rows: readonly Record<string, unknown>[],
+  columns: readonly string[] = insertManyColumns(rows),
+): TSqlFragment {
+  const cols = columns.map((k) => dialect.quoteIdentifier(k)).join(", ");
+  const fullRow = `(${columns.map(() => "?").join(", ")})`;
+  const params: unknown[] = [];
+  const clauses: string[] = [];
+  for (const row of rows) {
+    let missing = false;
+    for (const k of columns) {
+      if (k in row) params.push(dialect.toValue(row[k]));
+      else missing = true;
+    }
+    clauses.push(
+      missing ? `(${columns.map((k) => (k in row ? "?" : "DEFAULT")).join(", ")})` : fullRow,
+    );
+  }
+  return finalizeParams(dialect, {
+    sql: `INSERT INTO ${dialect.quoteTable(table)} (${cols}) VALUES ${clauses.join(", ")}`,
+    params,
+  });
+}
+
+/**
  * Builds a SELECT statement with optional sort, limit, offset, projection.
  */
 export function buildSelect(

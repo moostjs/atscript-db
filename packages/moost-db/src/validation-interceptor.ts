@@ -15,6 +15,10 @@ const dbErrorCodeToStatus: Record<string, number> = {
   // SQLite transaction-gate waiter timed out (`transactionWaitTimeoutMs`) —
   // the store is busy, not the request malformed.
   TX_WAIT_TIMEOUT: 503,
+  // The engine cannot resolve a calendar bucket's time zone (e.g. MySQL time
+  // zone tables not loaded) — a store-configuration condition, not a bad
+  // request. (`BUCKET_NOT_SUPPORTED` stays 400, like `GEO_NOT_SUPPORTED`.)
+  BUCKET_TZ_UNAVAILABLE: 501,
 };
 
 function transformValidationError(error: unknown, reply: (response: unknown) => void) {

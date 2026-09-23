@@ -97,8 +97,12 @@ describe("resolveAlias", () => {
     expect(resolveAlias({ $fn: "sum", $field: "amount", $as: "total" })).toBe("total");
   });
 
-  it("generates fn_field when $as is absent", () => {
-    expect(resolveAlias({ $fn: "count", $field: "*" })).toBe("count_*");
+  it("spells count(*) count_star when $as is absent (uniqu's rule, the URL parser's too)", () => {
+    expect(resolveAlias({ $fn: "count", $field: "*" })).toBe("count_star");
+  });
+
+  it("defaults a calendar bucket to {unit}_{field}", () => {
+    expect(resolveAlias({ $bucket: "week", $field: "openedAt" })).toBe("week_openedAt");
   });
 
   it("generates fn_field for named field", () => {

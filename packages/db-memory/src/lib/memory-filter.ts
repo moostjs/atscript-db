@@ -32,6 +32,27 @@ export function getPath(row: Record<string, unknown>, path: string): unknown {
 }
 
 /**
+ * {@link getPath} compiled for one path: split once, and a single segment is
+ * a direct property read — for callers that read the same path off many rows.
+ */
+export function pathReader(path: string): (row: Record<string, unknown>) => unknown {
+  if (!path.includes(".")) {
+    return (row) => row[path];
+  }
+  const segments = path.split(".");
+  return (row) => {
+    let current: unknown = row;
+    for (const seg of segments) {
+      if (current === null || typeof current !== "object" || Array.isArray(current)) {
+        return undefined;
+      }
+      current = (current as Record<string, unknown>)[seg];
+    }
+    return current;
+  };
+}
+
+/**
  * Deep-equality for leaf values, used by `$eq`/`$ne`/`$in`/`$nin`.
  *
  * - `Date`s compare by their instant (`getTime()`), not identity.

@@ -11,9 +11,11 @@ import type {
 } from "@atscript/db";
 import type { AtscriptDbTable } from "@atscript/db";
 import {
+  DbError,
   checkHavingKeys,
   collectQueryPaths,
   findAncestorInSet,
+  resolveCalendarBuckets,
   unsupportedOperatorMessage,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
@@ -34,6 +36,7 @@ const PATH_OPS: readonly Exclude<TQueryPathOp, "filter">[] = [
   "groupBy",
   "having",
   "aggregate",
+  "bucket",
 ];
 import {
   GEO_CONTROLS,
@@ -86,8 +89,28 @@ export class AsDbReadableController<
    * Per-path capability index (since 0.1.128): the ONE input both `/meta.fields`
    * and the request gate ({@link checkCapabilities}) are computed from, so
    * metadata and runtime can never diverge.
+   *
+   * Built on first use and rebuilt whenever the adapter-level capabilities
+   * change (`FieldCapabilityIndex.adapterSignature`: geo support, calendar
+   * buckets) — PostgreSQL learns PostGIS only during schema sync, which may
+   * run after this controller is constructed, so a constructor-time snapshot
+   * would keep advertising (and gating) the pre-sync answer (since 0.1.132).
    */
-  protected readonly capabilities: FieldCapabilityIndex;
+  protected get capabilities(): FieldCapabilityIndex {
+    const current = this._capabilities;
+    if (current && current.signature === FieldCapabilityIndex.adapterSignature(this.readable)) {
+      return current;
+    }
+    const index = new FieldCapabilityIndex(this.readable, this._writeOnlySet);
+    this._capabilities = index;
+    return index;
+  }
+  private _capabilities?: FieldCapabilityIndex;
+
+  /** `/meta` is a projection of {@link capabilities}: a rebuilt index rebuilds the cached envelope. */
+  protected override metaCacheKey(): unknown {
+    return this.capabilities;
+  }
   /** Bound once: the field-existence check the gate hands to `capabilities.check`. */
   private readonly _exists = (path: string): boolean => this.hasField(path);
   private readonly _preferredIdSet: ReadonlySet<string>;
@@ -119,7 +142,6 @@ export class AsDbReadableController<
     super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
     this.readable = resolved;
     this._writeOnlySet = this._collectAnnotated("db.writeOnly");
-    this.capabilities = new FieldCapabilityIndex(resolved, this._writeOnlySet);
     this._invertibleFields = this._collectInvertibleFields();
     this._searchFallbackFields = this._collectSearchFallbackFields();
     this._preferredIdSet = new Set(resolved.preferredId ?? []);
@@ -181,14 +203,18 @@ export class AsDbReadableController<
    *
    * Rejections use the structured envelope `{ message, statusCode: 400,
    * errors: [{ path, message }] }` — `path` is the offending logical path.
-   * After the per-path checks the core `$having` rule runs (`checkHavingKeys`:
-   * aliases or `$groupBy` fields only), so a readable mock and a real table
-   * answer alike.
+   *
+   * Expects normalized `$select` computed entries ({@link checkComputedSelect}
+   * ran first); a bucket's source is checked like any other path (op
+   * `bucket`). After the per-path checks the core `$having` rule runs
+   * (`checkHavingKeys`: aliases or `$groupBy` fields only), so a readable mock
+   * and a real table answer alike.
    */
   protected checkCapabilities(parsed: {
     filter?: FilterExpr;
     controls?: object;
   }): HttpError | undefined {
+    const capabilities = this.capabilities;
     const refs = collectQueryPaths(parsed);
     if (refs.unsupportedOperator !== undefined) {
       return badRequest(
@@ -200,12 +226,12 @@ export class AsDbReadableController<
     // classification the core guard applies — so an existence-only
     // `{ metrics: { $exists: true } }` never exempts `{ metrics: … }` elsewhere.
     for (const { path, predicate } of refs.filter) {
-      const verdict = this.capabilities.check(path, "filter", this._exists, predicate);
+      const verdict = capabilities.check(path, "filter", this._exists, predicate);
       if (verdict) return badRequest(verdict.path, verdict.message);
     }
     for (const op of PATH_OPS) {
       for (const path of refs[op]) {
-        const verdict = this.capabilities.check(path, op, this._exists);
+        const verdict = capabilities.check(path, op, this._exists);
         if (verdict) return badRequest(verdict.path, verdict.message);
       }
     }
@@ -214,6 +240,33 @@ export class AsDbReadableController<
     const having = checkHavingKeys(refs);
     if (having) return badRequest(having.path, having.message);
     return this.checkGates(parsed);
+  }
+
+  /**
+   * The core's shared normalizer of `$select` computed entries
+   * (`resolveCalendarBuckets`) as a 400 with the core's wording and `path`
+   * (`$select` / `$groupBy`): entry shapes, calendar-bucket unit / zone /
+   * week start / alias, "grouped queries only", "must also appear in
+   * $groupBy", alias collisions with this table's fields. Runs once per
+   * request, before {@link checkCapabilities}: at the head of
+   * {@link validateParsed} — ahead of the controls DTO, which would otherwise
+   * answer a bucket in a non-grouped query with a generic type mismatch — or
+   * explicitly on the endpoint that skips it (`geo`).
+   */
+  protected checkComputedSelect(controls: object | undefined): HttpError | undefined {
+    const capabilities = this.capabilities;
+    try {
+      resolveCalendarBuckets(controls, {
+        flatMap: this.readable.flatMap,
+        physicalNames: capabilities.physicalNames,
+        navFields: capabilities.navFields,
+      });
+    } catch (error) {
+      if (!(error instanceof DbError)) throw error;
+      const [issue] = error.errors;
+      return badRequest(issue.path, issue.message);
+    }
+    return undefined;
   }
 
   /**
@@ -236,11 +289,15 @@ export class AsDbReadableController<
     return undefined;
   }
 
-  /** Validates $with relations against the readable. */
+  /** {@link checkComputedSelect} (before the controls DTO), then $with relations against the readable. */
   protected override validateParsed(
     parsed: Uniquery,
     type: "query" | "pages" | "getOne",
   ): HttpError | undefined {
+    const computedError = this.checkComputedSelect(parsed.controls);
+    if (computedError) {
+      return computedError;
+    }
     const baseError = super.validateParsed(parsed, type);
     if (baseError) {
       return baseError;
@@ -997,6 +1054,11 @@ export class AsDbReadableController<
         return new HttpError(400, insightsError);
       }
     }
+    // The one endpoint that skips `validateParsed` — normalize `$select` here.
+    const computedError = this.checkComputedSelect(controls);
+    if (computedError) {
+      return computedError;
+    }
     const gateError = this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
@@ -1204,8 +1266,9 @@ export class AsDbReadableController<
     // object the request gate reads — so `sortable: true` ⇔ `$sort` accepted
     // and `filterable: true` ⇔ filter accepted, per adapter, mode and field
     // kind. Nested-object parents and navigation paths are never listed.
+    const capabilities = this.capabilities;
     const fields: TMetaResponse["fields"] = {};
-    for (const [path, cap, fd] of this.capabilities.entries()) {
+    for (const [path, cap, fd] of capabilities.entries()) {
       const entry: TFieldMeta = { sortable: cap.sortable, filterable: cap.filterable };
       if (cap.filterOps) {
         // `filterable: false`, yet these narrower predicates pass the gate
@@ -1229,6 +1292,10 @@ export class AsDbReadableController<
         // input; filter/sort are vetoed in the index regardless of annotations.
         entry.writeOnly = true;
       }
+      if (cap.bucketable) {
+        // Exactly when the gate accepts a calendar bucket over this field.
+        entry.bucketable = true;
+      }
       fields[path] = entry;
     }
 
@@ -1250,6 +1317,8 @@ export class AsDbReadableController<
       // without `@db.column.version` — clients use this to decide whether
       // to round-trip the version field and how to render it.
       versionColumn: this.readable.versionColumn,
+      // Calendar-bucket units (`bucket(field,unit,…)` in an aggregate `$select`); omitted when none.
+      ...(capabilities.bucketUnits.length > 0 && { bucketUnits: [...capabilities.bucketUnits] }),
     };
   }
 

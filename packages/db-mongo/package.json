@@ -55,6 +55,7 @@
   "devDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:",
     "mongodb": "^6.17.0",
     "mongodb-memory-server-core": "^10.0.0",
     "unplugin-atscript": "catalog:"
@@ -63,6 +64,7 @@
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
     "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:",
     "mongodb": "^6.17.0"
   }
 }

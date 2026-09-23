@@ -6,7 +6,7 @@ import type {
   TValidatorPlugin,
 } from "@atscript/typescript/utils";
 
-import type { FilterExpr } from "@uniqu/core";
+import { BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
 
 import { DbError } from "./db-error";
 import { createFailureCollector } from "./shared/failure-collector";
@@ -48,6 +48,9 @@ import { NoopLogger } from "./logger";
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const EMPTY_DEFAULT_FNS: ReadonlySet<TDbDefaultFn> = new Set();
+const EMPTY_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set();
+/** Every calendar-bucket unit — what an adapter that renders them all returns from `calendarBucketUnits()`. */
+export const ALL_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set(BUCKET_UNITS);
 
 // ── Transaction context ─────────────────────────────────────────────────────
 
@@ -320,6 +323,24 @@ export abstract class BaseDbAdapter {
    */
   nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
     return EMPTY_DEFAULT_FNS;
+  }
+
+  /**
+   * Calendar-bucket units (`{ $bucket, $field }` in an aggregate `$select`)
+   * this adapter can group by, over IANA time zones. Empty (the default) =
+   * calendar buckets unsupported: the core rejects them with
+   * `BUCKET_NOT_SUPPORTED` before dispatch, and moost-db's `/meta` advertises
+   * no bucketable field.
+   *
+   * A set rather than a boolean (like {@link nativeDefaultFns}) so a unit can
+   * be adopted adapter by adapter. An adapter that returns a unit must group
+   * by the bucket alias in `$groupBy` — see `controls.$select.buckets`
+   * (`TResolvedBucket`: physical `field`, source `fd`) — and return the
+   * `YYYY-MM-DD` label of the bucket's first local day (null for a null or
+   * out-of-range source, uniqu's `bucketLabel` semantics). Since 0.1.132.
+   */
+  calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return EMPTY_BUCKET_UNITS;
   }
 
   /**

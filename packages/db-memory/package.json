@@ -45,11 +45,13 @@
   "devDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:",
     "unplugin-atscript": "catalog:"
   },
   "peerDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
-    "@atscript/typescript": "catalog:"
+    "@atscript/typescript": "catalog:",
+    "@uniqu/core": "catalog:"
   }
 }

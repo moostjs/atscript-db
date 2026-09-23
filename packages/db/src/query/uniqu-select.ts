@@ -1,4 +1,7 @@
 import type { AggregateExpr, UniqueryControls } from "@uniqu/core";
+import { isAggregateExpr } from "@uniqu/core";
+
+import type { TResolvedBucket } from "./buckets";
 
 /**
  * Wraps a raw `$select` value and provides lazy-cached conversions
@@ -8,6 +11,11 @@ import type { AggregateExpr, UniqueryControls } from "@uniqu/core";
  * `controls.$select` is `UniquSelect | undefined`.
  *
  * For exclusion → inclusion inversion, pass `allFields` (physical field names).
+ *
+ * An array `$select` holds plain field names and computed entries —
+ * aggregates (`{ $fn, $field }`, {@link aggregates}) and calendar buckets
+ * (`{ $bucket, $field }`, {@link buckets}). Entries arrive normalized
+ * (`resolveCalendarBuckets` rejects any other shape before translation).
  */
 export class UniquSelect {
   private static readonly UNRESOLVED = Symbol("unresolved");
@@ -17,20 +25,35 @@ export class UniquSelect {
   private _array: string[] | undefined | symbol = UniquSelect.UNRESOLVED;
   private _projection: Record<string, 0 | 1> | undefined | symbol = UniquSelect.UNRESOLVED;
   private _aggregates: AggregateExpr[] | undefined | symbol = UniquSelect.UNRESOLVED;
+  /**
+   * The calendar buckets of an aggregate `$select`, normalized (canonical
+   * zone, week start, alias) with the PHYSICAL source `field` and its
+   * descriptor `fd`. `undefined` when there are none. A `$groupBy` key equal
+   * to a bucket's `alias` groups by that bucket (aliases never collide with
+   * columns). Since 0.1.132.
+   */
+  readonly buckets: readonly TResolvedBucket[] | undefined;
 
-  constructor(raw: UniqueryControls["$select"], allFields?: string[]) {
+  /**
+   * @param raw - the `$select` value (field paths already physical).
+   * @param allFields - physical field names, for exclusion-form inversion.
+   * @param buckets - the resolved calendar buckets of the raw `$select`'s
+   *   `{ $bucket }` entries (the field mappers supply them — physical `field`,
+   *   source `fd`).
+   */
+  constructor(
+    raw: UniqueryControls["$select"],
+    allFields?: string[],
+    buckets?: readonly TResolvedBucket[],
+  ) {
     this._raw = raw;
     this._allFields = allFields;
-  }
-
-  /** Type guard: checks if a value is an AggregateExpr ({$fn, $field}). */
-  private static _isAggregateExpr(v: unknown): v is AggregateExpr {
-    return typeof v === "object" && v !== null && "$fn" in v && "$field" in v;
+    this.buckets = buckets?.length ? buckets : undefined;
   }
 
   /**
    * Resolved inclusion array of plain field names (strings only).
-   * AggregateExpr objects are filtered out.
+   * Computed entries (aggregates, calendar buckets) are filtered out.
    * For exclusion form, inverts using `allFields` from constructor.
    */
   get asArray(): string[] | undefined {
@@ -108,9 +131,7 @@ export class UniquSelect {
       this._aggregates = undefined;
       return undefined;
     }
-    const aggs = (this._raw as unknown[]).filter((v): v is AggregateExpr =>
-      UniquSelect._isAggregateExpr(v),
-    );
+    const aggs = (this._raw as unknown[]).filter(isAggregateExpr);
     this._aggregates = aggs.length > 0 ? aggs : undefined;
     return this._aggregates;
   }
@@ -118,5 +139,10 @@ export class UniquSelect {
   /** Whether the $select contains any AggregateExpr entries. */
   get hasAggregates(): boolean {
     return !!this.aggregates?.length;
+  }
+
+  /** The calendar bucket whose alias is `key`, if any — how adapters resolve a `$groupBy` / `$having` key. */
+  bucketByAlias(key: string): TResolvedBucket | undefined {
+    return this.buckets?.find((b) => b.alias === key);
   }
 }

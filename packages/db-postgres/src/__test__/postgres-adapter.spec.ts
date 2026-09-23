@@ -299,6 +299,28 @@ describe("PostgresAdapter", () => {
       expect(sql).toContain("RETURNING");
       expect(sql).not.toContain("?");
     });
+
+    // Rows may differ in shape (an optional field omitted on some): the
+    // column list is the union, and a row lacking a column gets DEFAULT —
+    // the first row's shape must not silently drop the others' values.
+    it("inserts the union of the rows' columns, DEFAULT where a row lacks one", async () => {
+      const { UsersTable } = await import("./fixtures/test-table.as");
+      const driver = createMockDriver({ runResult: { rows: [{ id: 1 }, { id: 2 }, { id: 3 }] } });
+      const table = new DbSpace(() => new PostgresAdapter(driver)).getTable(UsersTable as any);
+      const adapter = (table as any).adapter as PostgresAdapter;
+
+      await adapter.insertMany([
+        { id: 1, name: "Alice" },
+        { id: 2, name: "Bob", email_address: "b@test.com" },
+        { id: 3, email_address: "c@test.com" },
+      ]);
+
+      const insert = driver.calls.find((c) => c.sql.includes("INSERT"))!;
+      expect(insert.sql).toContain(
+        '("id", "name", "email_address") VALUES ($1, $2, DEFAULT), ($3, $4, $5), ($6, DEFAULT, $7)',
+      );
+      expect(insert.params).toEqual([1, "Alice", 2, "Bob", "b@test.com", 3, "c@test.com"]);
+    });
   });
 
   describe("CRUD operations (adapter-level)", () => {

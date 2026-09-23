@@ -182,6 +182,22 @@ describe("MysqlAdapter + AtscriptDbTable", () => {
       // Multi-row VALUES
       expect(inserts[0].sql).toContain("), (");
     });
+
+    // Rows may differ in shape (an optional field omitted on some): the
+    // column list is the union, and a row lacking a column gets DEFAULT —
+    // the first row's shape must not silently drop the others' values.
+    it("inserts the union of the rows' columns, DEFAULT where a row lacks one", async () => {
+      await adapter.insertMany([
+        { id: 1, name: "A" },
+        { id: 2, name: "B", status: "done" },
+        { id: 3, status: "new" },
+      ]);
+      const insert = driver.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+      expect(insert.sql).toMatch(
+        /\(`id`, `name`, `status`\) VALUES \(\?, \?, DEFAULT\), \(\?, \?, \?\), \(\?, DEFAULT, \?\)$/,
+      );
+      expect(insert.params).toEqual([1, "A", 2, "B", "done", 3, "new"]);
+    });
   });
 
   // ── CRUD: Read ──────────────────────────────────────────────────────────

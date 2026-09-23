@@ -66,6 +66,8 @@ export abstract class AsReadableController<
 
   /** Cached full meta response (computed lazily on first meta() call). */
   private _metaResponse?: TMetaResponse;
+  /** {@link metaCacheKey} the cached response was built for. */
+  private _metaResponseKey?: unknown;
 
   /** Cached serialized form schemas keyed by `FormType.name` — populated lazily by {@link metaForm}. */
   private _formSchemas = new Map<string, TSerializedAnnotatedType>();
@@ -358,15 +360,28 @@ export abstract class AsReadableController<
 
   /**
    * **GET /meta** — returns the bound interface's metadata envelope. The
-   * static envelope is cached; {@link applyMetaOverlay} runs per request so
-   * subclasses can prune the response by principal.
+   * static envelope is cached (rebuilt when {@link metaCacheKey} changes);
+   * {@link applyMetaOverlay} runs per request so subclasses can prune the
+   * response by principal.
    */
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
-    if (!this._metaResponse) {
+    const key = this.metaCacheKey();
+    if (!this._metaResponse || key !== this._metaResponseKey) {
       this._metaResponse = this.buildMetaResponse();
+      this._metaResponseKey = key;
     }
     return this.applyMetaOverlay(this._metaResponse);
+  }
+
+  /**
+   * Identity of the inputs the cached `/meta` envelope is built from — a new
+   * value rebuilds it. Default: constant (built once). The DB readable
+   * controller returns its capability index, which is rebuilt when the
+   * adapter's capabilities change (since 0.1.132).
+   */
+  protected metaCacheKey(): unknown {
+    return undefined;
   }
 
   /**

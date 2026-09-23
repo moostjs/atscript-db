@@ -1,9 +1,10 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
-import type { DbControls } from "@atscript/db";
+import type { DbControls, TResolvedBucket } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
+  buildInsertMany as _buildInsertMany,
   buildSelect as _buildSelect,
   buildUpdate as _buildUpdate,
   buildDelete as _buildDelete,
@@ -11,12 +12,14 @@ import {
   buildAggregateSelect as _buildAggregateSelect,
   buildAggregateCount as _buildAggregateCount,
   sqlStringLiteral,
+  sqlTimeZoneLiteral,
   refActionToSql,
   defaultValueForType as _defaultValueForType,
   defaultValueToSqlLiteral as _defaultValueToSqlLiteral,
   finalizeParams,
   parseRegexString,
 } from "@atscript/db-sql-tools";
+import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
 // Re-export shared utilities for consumers that import from this package
 export { sqlStringLiteral, refActionToSql, finalizeParams };
@@ -137,11 +140,52 @@ export const pgDialect: SqlDialect = {
       params: [circle.center[0], circle.center[1], circle.radius],
     };
   },
+  calendarBucket: pgCalendarBucket,
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {
     return `$${index}`;
   },
 };
+
+// ── Calendar buckets ────────────────────────────────────────────────────────
+
+/**
+ * Calendar-bucket label over an epoch-ms column (BIGINT for
+ * `@db.default.now`, DOUBLE PRECISION otherwise): TEXT `'YYYY-MM-DD'` — the
+ * local date of the bucket's first day in `b.tz` — or NULL for a NULL source
+ * or one outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
+ *
+ * The local date is `(to_timestamp(col / 1000) AT TIME ZONE '<tz>')::date`:
+ * `timestamptz AT TIME ZONE` yields the wall time in that zone, independent
+ * of the session `TimeZone`. Truncation is calendar arithmetic on that date —
+ * the week uses the generic `(isodow - weekStart + 7) % 7` formula
+ * (`date_trunc('week')` is Monday-only). `date_trunc` and `to_char` get an
+ * explicit `::timestamp`: a bare `date` resolves to their `timestamptz`
+ * overloads, which would route through the session zone.
+ *
+ * Parameter-free (the zone is an inlined, charset-checked literal), so the
+ * SELECT and GROUP BY renderings match structurally.
+ */
+export function pgCalendarBucket(quotedCol: string, b: TResolvedBucket): string {
+  const local = `(to_timestamp(${quotedCol}::double precision / 1000) AT TIME ZONE ${sqlTimeZoneLiteral(b.tz)})::date`;
+  let first: string;
+  switch (b.unit) {
+    case "day": {
+      first = local;
+      break;
+    }
+    case "week": {
+      first = `(${local} - ((EXTRACT(ISODOW FROM ${local})::int - ${b.weekStartIso} + 7) % 7))`;
+      break;
+    }
+    default: {
+      // month | quarter | year
+      first = `date_trunc('${b.unit}', ${local}::timestamp)`;
+    }
+  }
+  const text = `to_char(${first}::timestamp, 'YYYY-MM-DD')`;
+  return `CASE WHEN ${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT} THEN ${text} END`;
+}
 
 // ── Geo helpers (PostGIS) ────────────────────────────────────────────────────
 
@@ -191,6 +235,15 @@ export function parseEwkbPointHex(hex: string): [number, number] | undefined {
 
 export function buildInsert(table: string, data: Record<string, unknown>): TSqlFragment {
   return _buildInsert(pgDialect, table, data);
+}
+
+/** Multi-row INSERT over `columns` (a missing column → `DEFAULT`). */
+export function buildInsertMany(
+  table: string,
+  rows: readonly Record<string, unknown>[],
+  columns: readonly string[],
+): TSqlFragment {
+  return _buildInsertMany(pgDialect, table, rows, columns);
 }
 
 export function buildSelect(

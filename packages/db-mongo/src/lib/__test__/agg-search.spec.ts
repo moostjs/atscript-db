@@ -15,6 +15,9 @@ import {
 import { MongoAdapter } from "../mongo-adapter";
 import { createTestSpace, prepareFixtures } from "./test-utils";
 
+/** A plain `$groupBy` key as `$group._id` groups it: missing coalesced into the null group. */
+const nz = (path: string) => ({ $ifNull: [path, null] });
+
 // A grouped query (`$groupBy`) that also carries a `$search` term used to drop
 // the term on the floor: `$search` arrived in `query.controls` and the pipeline
 // builder never looked at it, so the leaf list was filtered by the search while
@@ -88,8 +91,8 @@ describe("[mongo] grouped $search — classic $text pipeline shape", () => {
     expect(lastPipeline()).toEqual([
       { $match: { $text: { $search: "widget" } } },
       { $match: { category: "tools" } },
-      { $group: { _id: { category: "$category" }, cnt: { $sum: 1 } } },
-      { $project: { _id: 0, category: "$_id.category", cnt: 1 } },
+      { $group: { _id: { k0: nz("$category") }, cnt: { $sum: 1 } } },
+      { $project: { _id: 0, category: "$_id.k0", cnt: 1 } },
     ]);
   });
 
@@ -102,7 +105,7 @@ describe("[mongo] grouped $search — classic $text pipeline shape", () => {
     expect(lastPipeline()).toEqual([
       { $match: { $text: { $search: "widget" } } },
       { $match: {} },
-      { $group: { _id: { category: "$category" } } },
+      { $group: { _id: { k0: nz("$category") } } },
       { $count: "count" },
     ]);
   });

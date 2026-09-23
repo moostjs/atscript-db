@@ -22,6 +22,11 @@ export type DbErrorCode =
   | "GEO_INDEX_MISSING"
   | "GEO_NOT_SUPPORTED"
   | "FILTER_TYPE_MISMATCH"
+  // ── Calendar buckets ($select `{ $bucket }`) ──
+  /** The adapter's `calendarBucketUnits()` lacks the requested unit (moost-db: 400). */
+  | "BUCKET_NOT_SUPPORTED"
+  /** The engine cannot resolve the bucket's time zone — a store-configuration condition (moost-db: 501). */
+  | "BUCKET_TZ_UNAVAILABLE"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
   | "TX_WAIT_TIMEOUT";
 
@@ -94,4 +99,14 @@ export class CasMismatchError extends DbError {
     const message = `touchMany: ${matched} of ${expected} rows matched — stale or missing rows`;
     super("CAS_MISMATCH", [{ path: "$cas", message }], message);
   }
+}
+
+/**
+ * The engine cannot resolve a calendar bucket's time zone (`BUCKET_TZ_UNAVAILABLE`,
+ * `path` `$select`; moost-db: 501). The zone already passed the core's IANA
+ * validation, so this is a store-configuration condition — an outdated or
+ * missing server time zone database — never a malformed query. Since 0.1.132.
+ */
+export function bucketTimeZoneUnavailable(message: string): DbError {
+  return new DbError("BUCKET_TZ_UNAVAILABLE", [{ path: "$select", message }]);
 }

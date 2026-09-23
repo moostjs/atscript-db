@@ -1,5 +1,5 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, DbError } from "@atscript/db";
+import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError, bucketTimeZoneUnavailable } from "@atscript/db";
 import type {
   AtscriptDbView,
   TDbObjectKind,
@@ -21,13 +21,14 @@ import type {
   TDbDefaultFn,
   TValueFormatterPair,
 } from "@atscript/db";
-import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import type { BucketUnit, DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
   fillReplacePayload,
   geoWindowFromControls,
+  insertManyColumns,
   normalizeGeoPointValue,
   renameGeoDistance,
   replaceColumnsFor,
@@ -39,6 +40,7 @@ import {
   buildCreateView,
   buildDelete,
   buildInsert,
+  buildInsertMany,
   buildSelect,
   buildUpdate,
   buildAggregateSelect,
@@ -252,6 +254,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     return PostgresAdapter.NATIVE_DEFAULT_FNS;
   }
 
+  /**
+   * Every unit: `pgCalendarBucket` renders them all over any zone in the
+   * server's tz database (an unknown one maps to `BUCKET_TZ_UNAVAILABLE`).
+   */
+  override calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return ALL_BUCKET_UNITS;
+  }
+
   // ── Annotation hooks ──────────────────────────────────────────────────────
 
   override onBeforeFlatten(_type: unknown): void {
@@ -447,44 +457,25 @@ export class PostgresAdapter extends BaseDbAdapter {
       const returningSuffix =
         pkCols.length > 0 ? ` RETURNING ${pkCols.map((pk) => qi(pk)).join(", ")}` : "";
 
-      // Use column keys from the first row (all rows should have the same shape after flattening)
-      const keys = Object.keys(data[0]);
-      const colsClause = keys.map((k) => qi(k)).join(", ");
-
-      // Batch rows into multi-row INSERT statements.
-      // PG max params is ~65535; chunk to stay well under the limit.
-      const paramsPerRow = keys.length;
-      const maxRowsPerBatch = paramsPerRow > 0 ? Math.floor(60000 / paramsPerRow) : data.length;
+      // Batch rows into multi-row INSERT statements over the column union of
+      // ALL rows. PG max params is ~65535; chunk to stay well under the limit.
+      const columns = insertManyColumns(data);
+      const maxRowsPerBatch = columns.length > 0 ? Math.floor(60000 / columns.length) : data.length;
       const allIds: unknown[] = [];
 
       for (let offset = 0; offset < data.length; offset += maxRowsPerBatch) {
-        const batchEnd = Math.min(offset + maxRowsPerBatch, data.length);
-        const batchSize = batchEnd - offset;
-        const params: unknown[] = [];
-        const valuesClauses: string[] = [];
-
-        for (let i = offset; i < batchEnd; i++) {
-          const row = data[i];
-          const rowPlaceholders: string[] = [];
-          for (const k of keys) {
-            params.push(pgDialect.toValue(row[k]));
-            rowPlaceholders.push(`$${params.length}`);
-          }
-          valuesClauses.push(`(${rowPlaceholders.join(", ")})`);
-        }
-
-        const sql = `INSERT INTO ${quoteTableName(tableName)} (${colsClause}) VALUES ${valuesClauses.join(", ")}${returningSuffix}`;
+        const batch = data.slice(offset, offset + maxRowsPerBatch);
+        const insert = buildInsertMany(tableName, batch, columns);
+        const sql = insert.sql + returningSuffix;
+        const params = insert.params;
         this._log(sql, params);
         const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
 
         // Map RETURNING rows back to insertedIds
-        for (let i = 0; i < batchSize; i++) {
+        for (let i = 0; i < batch.length; i++) {
           const returned = result.rows?.[i];
           allIds.push(
-            this._resolveInsertedId(
-              data[offset + i],
-              returned ? Object.values(returned)[0] : undefined,
-            ),
+            this._resolveInsertedId(batch[i], returned ? Object.values(returned)[0] : undefined),
           );
         }
       }
@@ -536,14 +527,41 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = await this._exec().get<{ count: number | string }>(sql, params);
+      const row = await this._wrapBucketZoneError(() =>
+        this._exec().get<{ count: number | string }>(sql, params),
+      );
       const count = parseCount(row?.count);
       return [{ count }];
     }
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return this._wrapBucketZoneError(() => this._exec().all(sql, params));
+  }
+
+  /**
+   * Maps PostgreSQL's unknown-zone error — SQLSTATE 22023
+   * (`invalid_parameter_value`), `time zone "…" not recognized` — raised by a
+   * calendar bucket's `AT TIME ZONE '<tz>'` to `BUCKET_TZ_UNAVAILABLE`. The
+   * zone passed the core's IANA validation, so the server's tz database is
+   * older than the runtime's. Other errors propagate unchanged.
+   */
+  private async _wrapBucketZoneError<R>(fn: () => Promise<R>): Promise<R> {
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      const err = error as { code?: unknown; message?: unknown } | null;
+      const zone =
+        err?.code === "22023" && typeof err.message === "string"
+          ? /time zone "([^"]*)" not recognized/.exec(err.message)?.[1]
+          : undefined;
+      if (zone !== undefined) {
+        throw bucketTimeZoneUnavailable(
+          `PostgreSQL does not recognize time zone "${zone}" — update the server's time zone data`,
+        );
+      }
+      throw error;
+    }
   }
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────

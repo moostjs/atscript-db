@@ -7,6 +7,7 @@ import {
 
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TGenericLogger } from "../logger";
+import { isJsonValueField } from "../query/buckets";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import type {
   TDbCollation,
@@ -163,6 +164,14 @@ export class TableMetadata {
    * dotted paths as descriptors).
    */
   jsonParents: ReadonlySet<string> = new Set<string>();
+  /**
+   * Logical paths holding a JSON value (`isJsonValueField`: JSON-stored, `json`
+   * or `array` design type; non-ignored, nav-free descriptors) — a timestamp
+   * beneath one is never a calendar-bucket source (`jsonValueAncestor`).
+   */
+  jsonValueParents: ReadonlySet<string> = new Set<string>();
+  /** Every field descriptor's `physicalName` — reserved names a bucket alias may not take. */
+  physicalNames: ReadonlySet<string> = new Set<string>();
 
   // ── Build state ──────────────────────────────────────────────────────────
 
@@ -179,6 +188,22 @@ export class TableMetadata {
 
   get isBuilt(): boolean {
     return this._built;
+  }
+
+  /**
+   * Logical field path → its physical path in document storage (nested
+   * objects kept inline). `@db.column` renames apply to the annotated key,
+   * and a document renames the TOP-LEVEL key only — nested keys are stored
+   * as-is — so a dotted path under a renamed top-level object renames its
+   * first segment: `profile.bio` under `@db.column 'prof'` → `prof.bio`.
+   */
+  documentPath(path: string): string {
+    const direct = this.columnMap.get(path);
+    if (direct !== undefined) return direct;
+    const dot = path.indexOf(".");
+    if (dot === -1) return path;
+    const top = this.columnMap.get(path.slice(0, dot));
+    return top === undefined ? path : top + path.slice(dot);
   }
 
   // ── Build pipeline ───────────────────────────────────────────────────────
@@ -304,7 +329,7 @@ export class TableMetadata {
           !this.navFields.has(path) &&
           findAncestorInSet(path, this.navFields) === undefined
         ) {
-          this.allPhysicalFields.push(path);
+          this.allPhysicalFields.push(this.documentPath(path));
         }
       }
     } else {
@@ -790,13 +815,16 @@ export class TableMetadata {
 
   /**
    * Indexes non-ignored descriptors by logical path and retains the JSON-parent
-   * set. Navigation relations and their descendants are skipped even when the
+   * sets (plus every descriptor's physical name). Navigation relations and their descendants are skipped even when the
    * adapter keeps them as descriptors (nested-object adapters do) — they are
    * loaded with `$with`, never addressed as columns of this table.
    */
   private _buildGuardIndexes(): void {
     const jsonParents = new Set<string>();
+    const jsonValueParents = new Set<string>();
+    const physicalNames = new Set<string>();
     for (const fd of this.fieldDescriptors) {
+      physicalNames.add(fd.physicalName);
       if (fd.ignored) {
         continue;
       }
@@ -810,8 +838,13 @@ export class TableMetadata {
       if (fd.storage === "json") {
         jsonParents.add(fd.path);
       }
+      if (isJsonValueField(fd)) {
+        jsonValueParents.add(fd.path);
+      }
     }
     this.jsonParents = jsonParents;
+    this.jsonValueParents = jsonValueParents;
+    this.physicalNames = physicalNames;
   }
 
   // ── Private: leaf field indexes ──────────────────────────────────────────

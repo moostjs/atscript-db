@@ -4,20 +4,29 @@
  * when implementing BaseDbAdapter.aggregate().
  */
 
-import type { AggregateExpr } from "@uniqu/core";
-
 export type {
   AggregateExpr,
   AggregateFn,
   AggregateControls,
   AggregateQuery,
   AggregateResult,
+  BucketExpr,
+  BucketUnit,
+  WeekStart,
+  CalendarBucketLabel,
+  ComputedExpr,
+  ResolvedBucket,
 } from "@uniqu/core";
 
-/** Resolves output alias: $as if provided, otherwise `{fn}_{field}`. */
-export function resolveAlias(expr: AggregateExpr): string {
-  return expr.$as ?? `${expr.$fn}_${expr.$field}`;
-}
+/**
+ * Output alias of a computed `$select` entry: `$as`, else `{fn}_{field}` for an
+ * aggregate or `{unit}_{field}` for a calendar bucket, with `'*'` spelled
+ * `star` (`count(*)` → `count_star`). This is uniqu's rule — the one the URL
+ * parser applies — re-exported so every layer names a column alike (until
+ * 0.1.131 this module spelled `count(*)` as `count_*`).
+ */
+export { resolveAlias, isAggregateExpr, isBucketExpr } from "@uniqu/core";
+export type { TResolvedBucket } from "./query/buckets";
 
 /** The text-search request a grouped query carries, once normalised. */
 interface TAggregateSearch {

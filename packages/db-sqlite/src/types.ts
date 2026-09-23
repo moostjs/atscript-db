@@ -48,6 +48,24 @@ export interface TSqliteDriver {
   close(): void;
 
   /**
+   * Registers a scalar SQL function (a user-defined function) on the
+   * connection. Optional: the adapter registers `atscript_bucket` through it
+   * for calendar-bucket grouping, and a driver without it advertises no
+   * calendar-bucket units (`BUCKET_NOT_SUPPORTED`). The function's arity is
+   * `fn.length`; `deterministic` marks it pure, which lets SQLite use it in
+   * GROUP BY / indexes and fold repeated calls.
+   *
+   * better-sqlite3: `db.function(name, { deterministic }, fn)`;
+   * node:sqlite: `DatabaseSync#function(name, { deterministic }, fn)` (Node ≥ 22.13).
+   * Since 0.1.132.
+   */
+  registerFunction?(
+    name: string,
+    fn: (...args: any[]) => unknown,
+    opts?: { deterministic?: boolean },
+  ): void;
+
+  /**
    * Whether a vector search extension (e.g., `sqlite-vec`) is loaded.
    * Consumers gate vec0 virtual tables and KNN queries on this flag.
    */

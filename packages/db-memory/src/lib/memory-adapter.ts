@@ -1,4 +1,4 @@
-import { BaseDbAdapter, DbError, DbSpace } from "@atscript/db";
+import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError, DbSpace } from "@atscript/db";
 import type {
   DbQuery,
   DbControls,
@@ -15,8 +15,9 @@ import type {
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { buildMemoryPredicate, getPath, valuesEqual } from "./memory-filter";
-import { projectRow, setPath, sortRows } from "./memory-engine";
-import type { UniquSelect } from "@atscript/db";
+import { paginate, projectRow, setPath, sortRows } from "./memory-engine";
+import { aggregateRows } from "./memory-aggregate";
+import type { BucketUnit, UniquSelect } from "@atscript/db";
 
 /**
  * Provider (read-through) backing closure. Recomputes and returns the table's
@@ -318,8 +319,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * Write guard for provider-backed (read-only) mode. Called first in every one
    * of the 8 write methods so all mutation entry points reject identically. Uses
    * `INVALID_QUERY` (moost-db's validation interceptor maps it to HTTP 400, NOT
-   * 500 — the same choice `aggregate()` makes) since there is no dedicated
-   * read-only error code.
+   * 500) since there is no dedicated read-only error code.
    */
   private _assertWritable(): void {
     if (this._provider) {
@@ -664,24 +664,6 @@ export class MemoryAdapter extends BaseDbAdapter {
     return sortRows(rows, $sort, (r) => this.pkKey(r));
   }
 
-  /** Applies `$skip` then `$limit` (both optional) via a single slice. */
-  private _paginate(
-    rows: Record<string, unknown>[],
-    skip?: number,
-    limit?: number,
-  ): Record<string, unknown>[] {
-    const start = skip ?? 0;
-    const end = limit === undefined ? undefined : start + limit;
-    // No-op pagination (the common unpaginated list read) returns the input
-    // as-is: `rows` here is always a fresh, non-store-aliased array and the
-    // caller deep-clones each row on output, so skip the whole-array `.slice`
-    // copy that `slice(0, undefined)` would otherwise make.
-    if (start === 0 && end === undefined) {
-      return rows;
-    }
-    return rows.slice(start, end);
-  }
-
   /**
    * Projects a stored row per `$select` and returns a fresh, deep-cloned object
    * so the store can never be mutated through a returned value.
@@ -770,23 +752,33 @@ export class MemoryAdapter extends BaseDbAdapter {
     const filtered = await this._filteredRows(query);
     const { $sort, $skip, $limit, $select } = this._readControls(query.controls ?? {});
     const sorted = this._sortRows(filtered, $sort);
-    const paged = this._paginate(sorted, $skip, $limit);
+    const paged = paginate(sorted, $skip, $limit);
     const data = paged.map((row) => this._projectAndClone(row, $select));
     return { data, count: filtered.length };
   }
 
   /**
-   * Aggregation (`$groupBy`) is a documented v1 non-goal for the in-memory
-   * adapter. The inherited base default throws a PLAIN `Error`, which a readable
-   * REST controller would surface as an unhandled HTTP 500 when a `?$groupBy=`
-   * query routes here. Throwing a typed {@link DbError} with `INVALID_QUERY`
-   * instead converts that into a clean client error — moost-db's validation
-   * interceptor maps `INVALID_QUERY` → HTTP 400.
+   * Grouped query (`$groupBy` + aggregates, calendar buckets, `$having`,
+   * `$sort`, `$skip` / `$limit`, `$count`) over ONE filtered snapshot — the
+   * pure {@link aggregateRows} engine, so provider (read-through) mode works
+   * unchanged. SQL-adapter semantics: null and missing group together,
+   * `sum` / `avg` over no numeric value are `null`, `$count` counts the groups
+   * that survive `$having`.
+   *
+   * `$search` never reaches here: this adapter is not searchable, so the core
+   * rejects a grouped search before dispatch.
    */
-  override async aggregate(_query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    throw new DbError("INVALID_QUERY", [
-      { path: "", message: "Aggregation ($groupBy) is not supported by the in-memory adapter" },
-    ]);
+  override async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
+    return aggregateRows(await this._filteredRows(query), query.controls ?? {});
+  }
+
+  /**
+   * Every calendar-bucket unit: labels come from the `@uniqu/core` kernel
+   * (Node's ICU zone data — the list the core validates zones against, so
+   * there is no zone this adapter cannot resolve).
+   */
+  override calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return ALL_BUCKET_UNITS;
   }
 
   // ── Batch operations ──────────────────────────────────────────────────────

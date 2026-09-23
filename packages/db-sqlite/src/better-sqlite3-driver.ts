@@ -95,6 +95,14 @@ export class BetterSqlite3Driver implements TSqliteDriver {
     this.db.exec(sql);
   }
 
+  registerFunction(
+    name: string,
+    fn: (...args: any[]) => unknown,
+    opts?: { deterministic?: boolean },
+  ): void {
+    this.db.function(name, { deterministic: opts?.deterministic ?? false }, fn);
+  }
+
   close(): void {
     this.db.close();
   }

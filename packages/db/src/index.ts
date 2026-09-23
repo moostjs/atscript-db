@@ -5,7 +5,12 @@ export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-ma
 export { RelationalFieldMapper } from "./strategies/relational-field-mapper";
 export { IntegrityStrategy, NativeIntegrity } from "./strategies/integrity";
 export { ApplicationIntegrity } from "./strategies/application-integrity";
-export { DbError, CasExhaustedError, CasMismatchError } from "./db-error";
+export {
+  DbError,
+  CasExhaustedError,
+  CasMismatchError,
+  bucketTimeZoneUnavailable,
+} from "./db-error";
 export type { DbErrorCode } from "./db-error";
 export { DbEncryption } from "./encryption";
 export type { TDbEncryptionOptions } from "./encryption";
@@ -51,7 +56,7 @@ export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView } from "./table/db-view";
 export type { TViewColumnMapping } from "./table/db-view";
-export { BaseDbAdapter } from "./base-adapter";
+export { BaseDbAdapter, ALL_BUCKET_UNITS } from "./base-adapter";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
@@ -172,4 +177,21 @@ export type {
   TQueryPathSource,
 } from "./query/query-guards";
 export { findAncestorInSet } from "./table/table-metadata";
+
+// ── Calendar buckets (since 0.1.132) ─────────────────────────────────────────
+export {
+  resolveCalendarBuckets,
+  isBucketableField,
+  isJsonValueField,
+  jsonValueAncestor,
+} from "./query/buckets";
+export type { TResolvedBucket, TBucketFieldSource } from "./query/buckets";
+export type {
+  BucketExpr,
+  BucketUnit,
+  WeekStart,
+  CalendarBucketLabel,
+  ComputedExpr,
+  ResolvedBucket,
+} from "./agg";
 export type { NullableOptional } from "./types";

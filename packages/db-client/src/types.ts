@@ -4,7 +4,12 @@ import type {
   Uniquery,
   AggregateQuery,
   AggregateResult,
+  BucketExpr,
+  BucketUnit,
+  CalendarBucketLabel,
   TypedWithRelation,
+  ValidGroupBy,
+  WeekStart,
 } from "@uniqu/core";
 import type {
   DbPatch,
@@ -28,7 +33,12 @@ export type {
   Uniquery,
   AggregateQuery,
   AggregateResult,
+  BucketExpr,
+  BucketUnit,
+  CalendarBucketLabel,
   TypedWithRelation,
+  ValidGroupBy,
+  WeekStart,
 };
 
 // ── Re-export CRUD result types from @atscript/db ───────────────────────────

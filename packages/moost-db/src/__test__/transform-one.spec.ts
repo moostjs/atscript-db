@@ -47,6 +47,10 @@ function makeTable(rows: Row[]): {
   isView: false;
   isSearchable: ReturnType<typeof vi.fn>;
   isVectorSearchable: ReturnType<typeof vi.fn>;
+  isGeoSearchable: ReturnType<typeof vi.fn>;
+  calendarBucketUnits: ReturnType<typeof vi.fn>;
+  dimensions: string[];
+  measures: string[];
   canFilterField: ReturnType<typeof vi.fn>;
   canSortField: ReturnType<typeof vi.fn>;
   getSearchIndexes: ReturnType<typeof vi.fn>;
@@ -85,6 +89,10 @@ function makeTable(rows: Row[]): {
     isView: false,
     isSearchable: vi.fn().mockReturnValue(false),
     isVectorSearchable: vi.fn().mockReturnValue(false),
+    isGeoSearchable: vi.fn().mockReturnValue(false),
+    calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
+    dimensions: [],
+    measures: [],
     canFilterField: vi.fn().mockReturnValue(true),
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),

@@ -1,5 +1,5 @@
 import type { TAtscriptAnnotatedType, TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, DbError } from "@atscript/db";
+import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError, bucketTimeZoneUnavailable } from "@atscript/db";
 import type {
   AtscriptDbView,
   TDbDeleteResult,
@@ -21,13 +21,14 @@ import type {
   TValueFormatterPair,
   TFieldOps,
 } from "@atscript/db";
-import type { DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import type { BucketUnit, DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
   fillReplacePayload,
   geoWindowFromControls,
+  insertManyColumns,
   normalizeGeoPointValue,
   renameGeoDistance,
   replaceColumnsFor,
@@ -40,6 +41,7 @@ import {
   buildCreateView,
   buildDelete,
   buildInsert,
+  buildInsertMany,
   buildSelect,
   buildUpdate,
   buildAggregateSelect,
@@ -47,6 +49,7 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   geoPointToMysqlInternal,
+  isMysqlTimestampColumn,
   mysqlBytesPerChar,
   mysqlCharLength,
   mysqlDefaultLiteral,
@@ -91,6 +94,31 @@ function epochMsToUtcDatetime(ms: number): string {
   const d = new Date(ms);
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
 }
+
+// ── Calendar-bucket time zone probe ──────────────────────────────────────────
+
+/**
+ * One statement answers both questions `CONVERT_TZ` never raises an error
+ * for: `missing` — the named zone (bound as `?`) converts to NULL, i.e. the
+ * time zone tables are not loaded or lack it; `shift` — a fixed `+01:00`
+ * conversion after 2038 is not applied (0 instead of 60 minutes), i.e. the
+ * server's `CONVERT_TZ` range ends in 2038 (before 8.0.28, or 32-bit).
+ *
+ * The range half deliberately uses a fixed offset, not the named zone: MySQL
+ * tz tables hold no transitions after 2037, so a zone such as `Europe/London`
+ * legitimately converts to +00:00 in June 2040 on a current server — an
+ * "unchanged" named-zone result is not evidence of a limited range.
+ */
+const TZ_PROBE_SQL =
+  "SELECT CONVERT_TZ('2040-06-01 12:00:00', '+00:00', ?) IS NULL AS missing, " +
+  "TIMESTAMPDIFF(MINUTE, '2040-06-01 12:00:00', CONVERT_TZ('2040-06-01 12:00:00', '+00:00', '+01:00')) AS shift";
+
+/**
+ * Zones `CONVERT_TZ` is known to handle, per driver (adapters are per table
+ * and share a driver). Positives only: a failed zone is probed again, so
+ * loading the time zone tables fixes a running server without a restart.
+ */
+const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
 
 /**
  * MySQL adapter for {@link AtscriptDbTable}.
@@ -219,6 +247,14 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   override nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
     return MysqlAdapter.NATIVE_DEFAULT_FNS;
+  }
+
+  /**
+   * Every unit: `mysqlCalendarBucket` renders them all; named zones need the
+   * server's time zone tables (probed per zone in `aggregate()`).
+   */
+  override calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return ALL_BUCKET_UNITS;
   }
 
   // ── Annotation hooks ──────────────────────────────────────────────────────
@@ -350,11 +386,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   override formatValue(
     field: TDbFieldMeta,
   ): TValueFormatterPair | ((value: unknown) => unknown) | undefined {
-    if (
-      field.designType === "number" &&
-      field.defaultValue?.kind === "fn" &&
-      field.defaultValue.fn === "now"
-    ) {
+    if (isMysqlTimestampColumn(field)) {
       return {
         toStorage: (value: unknown) =>
           typeof value === "number" ? epochMsToUtcDatetime(value) : value,
@@ -437,32 +469,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this.withTransaction(async () => {
       const tableName = this.resolveTableName();
 
-      // Use column keys from the first row (all rows should have the same shape after flattening)
-      const keys = Object.keys(data[0]);
-      const colsClause = keys.map((k) => qi(k)).join(", ");
-
-      // Batch rows into multi-row INSERT statements to reduce round-trips.
-      // MySQL's ? placeholders don't need numbering; chunk to stay under max packet size.
-      const paramsPerRow = keys.length;
-      const maxRowsPerBatch = paramsPerRow > 0 ? Math.floor(60000 / paramsPerRow) : data.length;
+      // Batch rows into multi-row INSERT statements over the column union of
+      // ALL rows, to reduce round-trips; chunk to stay under max packet size.
+      const columns = insertManyColumns(data);
+      const maxRowsPerBatch = columns.length > 0 ? Math.floor(60000 / columns.length) : data.length;
       const allIds: unknown[] = [];
 
-      const rowPlaceholderClause = `(${keys.map(() => "?").join(", ")})`;
-
       for (let offset = 0; offset < data.length; offset += maxRowsPerBatch) {
-        const batchEnd = Math.min(offset + maxRowsPerBatch, data.length);
-        const batchSize = batchEnd - offset;
-        const params: unknown[] = [];
-
-        for (let i = offset; i < batchEnd; i++) {
-          const row = data[i];
-          for (const k of keys) {
-            params.push(mysqlDialect.toValue(row[k]));
-          }
-        }
-
-        const valuesClause = Array(batchSize).fill(rowPlaceholderClause).join(", ");
-        const sql = `INSERT INTO ${quoteTableName(tableName)} (${colsClause}) VALUES ${valuesClause}`;
+        const batch = data.slice(offset, offset + maxRowsPerBatch);
+        const { sql, params } = buildInsertMany(tableName, batch, columns);
         this._log(sql, params);
         const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
 
@@ -471,8 +486,8 @@ export class MysqlAdapter extends BaseDbAdapter {
         // With innodb_autoinc_lock_mode = 2 (MySQL 8.0+ default), IDs may have gaps under
         // concurrent inserts. For user-supplied PKs, _resolveInsertedId ignores insertId.
         const firstId = Number(result.insertId);
-        for (let i = 0; i < batchSize; i++) {
-          allIds.push(this._resolveInsertedId(data[offset + i], firstId > 0 ? firstId + i : 0));
+        for (let i = 0; i < batch.length; i++) {
+          allIds.push(this._resolveInsertedId(batch[i], firstId > 0 ? firstId + i : 0));
         }
       }
 
@@ -515,6 +530,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       ? this._buildSearchWhere(search.text, query, search.indexName)
       : buildWhere(query.filter);
     const tableName = this.resolveTableName();
+    for (const bucket of query.controls.$select?.buckets ?? []) {
+      await this._ensureBucketZone(bucket.tz);
+    }
 
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
@@ -526,6 +544,40 @@ export class MysqlAdapter extends BaseDbAdapter {
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
     return this._exec().all(sql, params);
+  }
+
+  /**
+   * Verifies that `CONVERT_TZ` can convert to a calendar bucket's zone before
+   * any bucket SQL runs — MySQL never fails loudly here: it returns NULL when
+   * the time zone tables are not loaded (or lack the zone) and its input
+   * unchanged outside its supported range (before 8.0.28 that range ends in
+   * 2038). One probe ({@link TZ_PROBE_SQL}) detects both and raises
+   * `BUCKET_TZ_UNAVAILABLE` with the fix. `UTC` needs no probe — its
+   * expression skips `CONVERT_TZ`. Successes are cached per driver.
+   */
+  private async _ensureBucketZone(tz: string): Promise<void> {
+    if (tz === "UTC" || convertibleZones.get(this.driver)?.has(tz)) {
+      return;
+    }
+    this._log(TZ_PROBE_SQL, [tz]);
+    const row = await this._exec().get<{ missing: unknown; shift: unknown }>(TZ_PROBE_SQL, [tz]);
+    let problem: string | undefined;
+    if (!row || Number(row.missing) !== 0) {
+      problem =
+        "its time zone tables are not loaded or lack this zone — load them with mysql_tzinfo_to_sql";
+    } else if (Number(row.shift) !== 60) {
+      problem =
+        "its CONVERT_TZ does not convert instants after 2038 — MySQL 8.0.28 or later (64-bit) is required";
+    }
+    if (problem) {
+      throw bucketTimeZoneUnavailable(`MySQL cannot convert to time zone "${tz}": ${problem}`);
+    }
+    let zones = convertibleZones.get(this.driver);
+    if (!zones) {
+      zones = new Set();
+      convertibleZones.set(this.driver, zones);
+    }
+    zones.add(tz);
   }
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────

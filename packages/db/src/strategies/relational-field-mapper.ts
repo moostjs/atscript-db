@@ -1,12 +1,5 @@
-import type {
-  AggregateExpr,
-  AggregateQuery,
-  FilterExpr,
-  Uniquery,
-  UniqueryControls,
-} from "@uniqu/core";
+import type { FilterExpr, Uniquery, UniqueryControls } from "@uniqu/core";
 
-import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
 import { UniquSelect } from "../query/uniqu-select";
 import type { DbControls, DbQuery } from "../types";
@@ -99,90 +92,9 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     };
   }
 
-  translateAggregateQuery(query: AggregateQuery, meta: TableMetadata): DbQuery {
-    const controls = query.controls;
-
-    // Translate filter (pre-aggregation WHERE clause)
-    const filter = meta.requiresMappings
-      ? this.translateFilterWithRename((query.filter ?? {}) as FilterExpr, meta)
-      : meta.toStorageFormatters
-        ? this.translateFilter((query.filter ?? {}) as FilterExpr, meta)
-        : ((query.filter ?? {}) as FilterExpr);
-
-    // Translate $groupBy: logical → physical
-    const groupBy = controls.$groupBy.map(
-      (field) => meta.leafByLogical.get(field)?.physicalName ?? field,
-    );
-
-    // Translate $select: strings → physical, AggregateExpr.$field → physical
-    let select: UniqueryControls["$select"] | undefined;
-    if (controls.$select) {
-      select = controls.$select.map((item) => {
-        if (typeof item === "string") {
-          return meta.leafByLogical.get(item)?.physicalName ?? item;
-        }
-        // AggregateExpr: translate $field (except '*'), keep $as
-        if (item.$field === "*") {
-          return item;
-        }
-        return {
-          ...item,
-          $field: meta.leafByLogical.get(item.$field)?.physicalName ?? item.$field,
-        } as AggregateExpr;
-      }) as UniqueryControls["$select"];
-    }
-
-    // Build alias set from $select AggregateExpr entries for $sort pass-through
-    const aliases = new Set<string>();
-    if (controls.$select) {
-      for (const item of controls.$select) {
-        if (typeof item !== "string") {
-          // uniqu 0.1.9 widened `$select` with `BucketExpr`; buckets are not executed yet.
-          aliases.add(resolveAlias(item as AggregateExpr));
-        }
-      }
-    }
-
-    // Translate $sort: alias keys pass through, others → physical
-    let sort: DbControls["$sort"];
-    if (controls.$sort) {
-      const translated: Record<string, unknown> = {};
-      for (const [key, dir] of Object.entries(controls.$sort)) {
-        if (aliases.has(key)) {
-          translated[key] = dir;
-        } else {
-          const physical = meta.leafByLogical.get(key)?.physicalName ?? key;
-          translated[physical] = dir;
-        }
-      }
-      sort = translated as DbControls["$sort"];
-    }
-
-    // Translate $having: same as filter translation (aliases pass through via ?? key fallback)
-    let having: FilterExpr | undefined;
-    if (controls.$having) {
-      having = meta.requiresMappings
-        ? this.translateFilterWithRename(controls.$having, meta)
-        : meta.toStorageFormatters
-          ? this.translateFilter(controls.$having, meta)
-          : controls.$having;
-    }
-
-    // Spread-then-override, like the sibling document mapper and this class's own
-    // `translateControls`: only the four keys that carry field PATHS need
-    // translating. An allowlist here silently dropped every other control — which
-    // is how `$search` came to be discarded on grouped queries.
-    return {
-      filter,
-      controls: {
-        ...controls,
-        $groupBy: groupBy,
-        $select: select ? new UniquSelect(select, meta.allPhysicalFields) : undefined,
-        $sort: sort,
-        $having: having,
-      },
-      insights: query.insights,
-    };
+  /** The flattened column of a logical path (`contact.email` → `contact__email`). */
+  protected physicalPath(logical: string, meta: TableMetadata): string {
+    return meta.leafByLogical.get(logical)?.physicalName ?? logical;
   }
 
   /**

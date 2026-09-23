@@ -1,5 +1,5 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { BaseDbAdapter, DbError } from "@atscript/db";
+import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
   AtscriptDbView,
@@ -21,7 +21,7 @@ import type {
   TSearchIndexInfo,
   TValueFormatterPair,
 } from "@atscript/db";
-import type { DbQuery, FilterExpr } from "@atscript/db";
+import type { BucketUnit, DbQuery, FilterExpr } from "@atscript/db";
 import {
   type TSqlFragment,
   EMPTY_AND,
@@ -60,6 +60,7 @@ import {
   type SqliteTxWaitOptions,
 } from "./tx-gate";
 import type { TSqliteDriver } from "./types";
+import { registerBucketFunction } from "./calendar-bucket";
 
 /**
  * SQLite adapter for {@link AtscriptDbTable}.
@@ -81,6 +82,15 @@ export class SqliteAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /**
+   * Every calendar-bucket unit when the driver could register the
+   * `atscript_bucket` UDF (at construction — see {@link registerBucketFunction}),
+   * none otherwise (`BUCKET_NOT_SUPPORTED`, a clean 400).
+   */
+  override calendarBucketUnits(): ReadonlySet<BucketUnit> {
+    return this._hasBucketFn ? ALL_BUCKET_UNITS : super.calendarBucketUnits();
+  }
+
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the SQLite connection has the sqlite-vec extension loaded. */
   private _supportsVector: boolean | undefined;
@@ -99,6 +109,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   /** Per-driver transaction gate (shared by every adapter over this driver). */
   private readonly _gate: SqliteTxGate;
   private readonly _txOptions: SqliteAdapterOptions;
+  /** Whether the driver has the calendar-bucket UDF — fixed at construction, when it is registered. */
+  private readonly _hasBucketFn: boolean;
 
   constructor(
     protected readonly driver: TSqliteDriver,
@@ -108,6 +120,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     this._gate = getSqliteTxGate(driver);
     this._txOptions = { ...options };
     this.driver.exec("PRAGMA foreign_keys = ON");
+    // Eager and once per driver: tables sharing a driver may be created and
+    // queried in any order, so the UDF (and the capability answer) must not
+    // depend on which adapter aggregates first.
+    this._hasBucketFn = registerBucketFunction(driver);
   }
 
   override onFieldScanned(

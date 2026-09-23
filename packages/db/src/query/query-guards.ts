@@ -1,9 +1,10 @@
-import type { AggregateExpr, AggregateQuery, FilterExpr } from "@uniqu/core";
-import { isPrimitive } from "@uniqu/core";
+import type { AggregateQuery, FilterExpr, ResolvedBucket } from "@uniqu/core";
+import { isAggregateExpr, isBucketExpr, isPrimitive } from "@uniqu/core";
 
 import { DbError } from "../db-error";
 import type { BaseDbAdapter } from "../base-adapter";
 import { resolveAlias } from "../agg";
+import { isBucketableField, jsonValueAncestor, resolveCalendarBuckets } from "./buckets";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 
@@ -19,6 +20,11 @@ import type { TDbFieldMeta } from "../types";
  * - `$geoWithin` with a malformed circle → `INVALID_QUERY`
  * - `$geoWithin` on an adapter without geo support → `GEO_NOT_SUPPORTED`
  * - `$exists` with a non-boolean operand → `INVALID_QUERY`
+ * - malformed `$select` computed entries / `$groupBy` entries, calendar
+ *   buckets outside grouped queries or with a bad unit / zone / alias →
+ *   `INVALID_QUERY` (the shared normalizer, `resolveCalendarBuckets`)
+ * - a calendar bucket over a non-timestamp field → `INVALID_QUERY`; a unit
+ *   the adapter's `calendarBucketUnits()` lacks → `BUCKET_NOT_SUPPORTED`
  * - every filter / `$sort` / `$select` / `$groupBy` / `$having` / aggregate
  *   path must resolve to physical storage on THIS adapter and pass the
  *   capability its position (for a filter entry: its predicate class, see
@@ -156,7 +162,15 @@ export function guardSort(meta: TableMetadata, sort: unknown): void {
 // ── Path guard: existence + physical capability ──────────────────────────────
 
 /** The query positions a field path can appear in. */
-export type TQueryPathOp = "filter" | "sort" | "select" | "groupBy" | "having" | "aggregate";
+export type TQueryPathOp =
+  | "filter"
+  | "sort"
+  | "select"
+  | "groupBy"
+  | "having"
+  | "aggregate"
+  /** The source field of a calendar bucket (`{ $bucket, $field }` in `$select`). Since 0.1.132. */
+  | "bucket";
 
 const OP_VERB: Record<TQueryPathOp, string> = {
   filter: "filter on",
@@ -165,6 +179,7 @@ const OP_VERB: Record<TQueryPathOp, string> = {
   groupBy: "group by",
   having: "filter ($having) on",
   aggregate: "aggregate over",
+  bucket: "bucket",
 };
 
 /** Query shape accepted by {@link guardPaths} / {@link collectQueryPaths} — the raw (pre-translation) uniqu controls. */
@@ -313,11 +328,17 @@ export interface TQueryPathRefs {
   filter: TFilterRef[];
   sort: string[];
   select: string[];
+  /** Grouped FIELD paths — calendar-bucket aliases are not listed (their sources are in {@link bucket}). */
   groupBy: string[];
   having: string[];
   /** Aggregate `$field`s (`*` excluded). Only populated in aggregate mode. */
   aggregate: string[];
-  /** `true` in aggregate mode: `$select` entries are aggregate expressions, aliases are exempt in `$sort` / `$having`. */
+  /** Calendar-bucket source `$field`s (since 0.1.132). Only populated in aggregate mode. */
+  bucket: string[];
+  /**
+   * `true` in aggregate mode: `$select` computed entries (aggregates, calendar
+   * buckets) are collected and their aliases are exempt in `$sort` / `$having`.
+   */
   aggregateMode: boolean;
   /**
    * First filter-node `$`-key that is not `$and` / `$or` / `$not`. uniqu's
@@ -361,10 +382,13 @@ function collectFilterKeys(
  * visited — they are validated against their target relation separately.
  *
  * Aggregate mode is `aggregate` when given, else the presence of `$groupBy`.
- * In aggregate mode `$select` entries are aggregate expressions whose
- * `$field` is collected and whose alias (`$as`, else `fn_field` — the core's
- * `resolveAlias`) is exempted from `$sort` / `$having`; outside it non-string
- * `$select` entries are ignored (the projection seal handles them).
+ * In aggregate mode `$select` computed entries are collected by kind — an
+ * aggregate's `$field` into `aggregate`, a calendar bucket's into `bucket` —
+ * and their aliases (`$as`, else uniqu's `resolveAlias`) are exempted from
+ * `$sort` / `$having`; a bucket alias is also dropped from `groupBy`, which
+ * lists grouped fields only.
+ *
+ * Entry shapes are not checked here — see `resolveCalendarBuckets`.
  */
 export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQueryPathRefs {
   const refs: TQueryPathRefs = {
@@ -374,6 +398,7 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
     groupBy: [],
     having: [],
     aggregate: [],
+    bucket: [],
     aggregateMode: false,
   };
   collectFilterKeys(
@@ -390,23 +415,31 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
       ? [rawGroupBy]
       : [];
   refs.aggregateMode = aggregate ?? groupBy.length > 0;
-  refs.groupBy = groupBy;
 
   const aliases = new Set<string>();
+  const bucketAliases = new Set<string>();
   const select = controls.$select;
   if (Array.isArray(select)) {
     for (const item of select) {
       if (typeof item === "string") {
         refs.select.push(item);
-      } else if (refs.aggregateMode && item && typeof item === "object" && "$field" in item) {
-        const expr = item as AggregateExpr;
-        aliases.add(resolveAlias(expr));
-        if (expr.$field !== "*") refs.aggregate.push(expr.$field);
+      } else if (!refs.aggregateMode) {
+        continue;
+      } else if (isAggregateExpr(item)) {
+        aliases.add(resolveAlias(item));
+        if (item.$field !== "*") refs.aggregate.push(item.$field);
+      } else if (isBucketExpr(item)) {
+        const alias = resolveAlias(item);
+        aliases.add(alias);
+        bucketAliases.add(alias);
+        refs.bucket.push(item.$field);
       }
     }
   } else if (select && typeof select === "object") {
     refs.select.push(...Object.keys(select as Record<string, unknown>));
   }
+  refs.groupBy =
+    bucketAliases.size > 0 ? groupBy.filter((name) => !bucketAliases.has(name)) : groupBy;
 
   for (const name of sortFieldNames(controls.$sort)) {
     if (!aliases.has(name)) refs.sort.push(name);
@@ -504,6 +537,8 @@ function pathSourceOf(meta: TableMetadata): TQueryPathSource {
  * - a leaf → physical capability (`canSortField` for `$sort`; for a filter
  *   entry {@link canFilterLeaf} of its `predicate` class; `canFilterField`
  *   for `$groupBy` / `$having` / aggregate `$field`s; `$select` always passes);
+ *   a calendar-bucket source must also be a timestamp field
+ *   (`isBucketableField`);
  * - a nested-object parent → only `$select`, and only when it expands to
  *   leaf columns (`selectExpansion`);
  * - everything else is rejected.
@@ -529,6 +564,25 @@ export function guardPath(
     case "leaf": {
       if (op === "select") return;
       const fd = meta.descriptorByPath.get(path)!;
+      if (op === "bucket") {
+        const jsonAncestor = jsonValueAncestor(path, meta.jsonValueParents);
+        if (jsonAncestor !== undefined) {
+          throw pathError(
+            path,
+            `Cannot bucket "${path}" — inside JSON-stored column "${jsonAncestor}"`,
+          );
+        }
+        if (!isBucketableField(fd)) {
+          throw pathError(path, notTimestampMessage(path));
+        }
+        if (!adapter.canFilterField(fd)) {
+          throw pathError(
+            path,
+            `Cannot bucket "${path}" — adapter cannot filter on this storage type`,
+          );
+        }
+        return;
+      }
       if (op === "sort") {
         if (!adapter.canSortField(fd)) {
           throw pathError(
@@ -572,9 +626,13 @@ export function guardPath(
  * {@link guardPath}). Adapters may therefore assume every path they receive
  * is physical.
  *
- * In aggregate mode (`aggregate = true`) `$select` entries are aggregate
- * expressions whose `$field` is checked, `$groupBy` fields are checked, and
- * aggregate aliases (`$as` or `fn_field`) are exempt in `$sort` / `$having`.
+ * Entry shapes are the caller's to normalize first (`resolveCalendarBuckets`
+ * — {@link guardQuery} / {@link guardAggregate} do).
+ *
+ * In aggregate mode (`aggregate = true`) `$select` computed entries have
+ * their `$field` checked (aggregates as `aggregate`, calendar buckets as
+ * `bucket`), `$groupBy` fields are checked, and computed aliases (`$as` or
+ * the default) are exempt in `$sort` / `$having`.
  *
  * Returns the collected refs so callers can run further structural rules
  * (see {@link checkHavingKeys}) without walking the query again.
@@ -596,12 +654,17 @@ export function guardPaths(
   for (const path of refs.sort) guardPath(meta, adapter, path, "sort");
   for (const path of refs.select) guardPath(meta, adapter, path, "select");
   for (const path of refs.aggregate) guardPath(meta, adapter, path, "aggregate");
+  for (const path of refs.bucket) guardPath(meta, adapter, path, "bucket");
   for (const path of refs.groupBy) guardPath(meta, adapter, path, "groupBy");
   for (const path of refs.having) guardPath(meta, adapter, path, "having");
   return refs;
 }
 
-/** Shared read-path guard: filter + $sort encryption checks, then the path guard. */
+/**
+ * Shared read-path guard: filter + $sort encryption checks, the `$select`
+ * normalizer (a calendar bucket is invalid outside a grouped query), then
+ * the path guard.
+ */
 export function guardQuery(
   meta: TableMetadata,
   adapter: BaseDbAdapter,
@@ -612,14 +675,15 @@ export function guardQuery(
   }
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);
+  resolveCalendarBuckets(query.controls, meta, false);
   guardPaths(meta, adapter, query);
 }
 
 /**
- * `$having` is a post-aggregation filter, so a key is either an aggregate
- * alias (`$as`, else `fn_field` — already exempt in {@link collectQueryPaths})
- * or a `$groupBy` field (exact logical-path match: `metadata.clicks` grouped
- * stays valid). Any other key — a real but non-grouped column included — is
+ * `$having` is a post-aggregation filter, so a key is either a computed
+ * alias (aggregate or calendar bucket — already exempt in
+ * {@link collectQueryPaths}) or a `$groupBy` field (exact logical-path
+ * match: `metadata.clicks` grouped stays valid). Any other key — a real but non-grouped column included — is
  * rejected here, once, for SDK and HTTP callers alike, instead of by the
  * engine (PostgreSQL / MySQL error, SQLite tolerance, Mongo `[]`). Returns
  * the first offending key as an error entry (`path` = the bare key, as the
@@ -645,15 +709,21 @@ export function checkHavingKeys(
 
 /**
  * Aggregate-path guard: $groupBy / $select / $having encryption refs + filter
- * + $sort, then the path guard, then the `$having` key rule
+ * + $sort, then the path guard, then the adapter's calendar-bucket units
+ * (`BUCKET_NOT_SUPPORTED`), then the `$having` key rule
  * ({@link checkHavingKeys} — after the path guard so an unknown key still
  * reads `Unknown field`).
+ *
+ * `buckets` are the query's resolved calendar buckets when the caller already
+ * ran `resolveCalendarBuckets` (resolved here otherwise).
  */
 export function guardAggregate(
   meta: TableMetadata,
   adapter: BaseDbAdapter,
   query: AggregateQuery,
+  resolved?: readonly ResolvedBucket[],
 ): void {
+  const buckets = resolved ?? resolveCalendarBuckets(query.controls, meta, true);
   guardFilter(meta, adapter, query.filter as FilterExpr | undefined);
   const controls = query.controls;
   if (meta.encryptedFields.size > 0) {
@@ -663,6 +733,7 @@ export function guardAggregate(
       }
     }
     if (controls.$select) {
+      // Every computed entry (aggregate or calendar bucket) names its source in `$field`.
       for (const item of controls.$select) {
         const field = typeof item === "string" ? item : item.$field;
         if (field !== "*" && isEncryptedRef(meta, field)) {
@@ -676,8 +747,34 @@ export function guardAggregate(
     guardSort(meta, controls.$sort);
   }
   const refs = guardPaths(meta, adapter, query as TGuardedQuery, true);
+  guardBucketUnits(adapter, buckets);
   const having = refs ? checkHavingKeys(refs) : undefined;
   if (having) {
     throw new DbError("INVALID_QUERY", [having]);
+  }
+}
+
+/** The core wording for a bucket over a field that is not `number.timestamp`. */
+function notTimestampMessage(path: string): string {
+  return `Cannot bucket "${path}" — not a timestamp field (declare it number.timestamp)`;
+}
+
+/**
+ * Rejects a calendar bucket whose unit this adapter cannot group by
+ * (`calendarBucketUnits()`; empty by default) with `BUCKET_NOT_SUPPORTED`,
+ * before anything is translated — third-party adapters get a clean 400,
+ * never an engine error or a silent fallback.
+ */
+function guardBucketUnits(adapter: BaseDbAdapter, buckets: readonly ResolvedBucket[]): void {
+  const units = adapter.calendarBucketUnits();
+  for (const b of buckets) {
+    if (!units.has(b.unit)) {
+      throw new DbError("BUCKET_NOT_SUPPORTED", [
+        {
+          path: "$select",
+          message: `Calendar bucket "${b.unit}" is not supported by this adapter`,
+        },
+      ]);
+    }
   }
 }

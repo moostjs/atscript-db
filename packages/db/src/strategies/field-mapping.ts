@@ -1,9 +1,19 @@
-import type { AggregateQuery, FilterExpr, Uniquery } from "@uniqu/core";
+import type {
+  AggregateControls,
+  AggregateQuery,
+  FilterExpr,
+  ResolvedBucket,
+  Uniquery,
+  UniqueryControls,
+} from "@uniqu/core";
+import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
 
+import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
+import type { TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
 import { isPlainObject } from "../shared/object";
-import type { DbQuery } from "../types";
+import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
 
 // ── Coercion helpers ────────────────────────────────────────────────────────
@@ -46,11 +56,118 @@ export abstract class FieldMappingStrategy {
 
   abstract translateQuery(query: Uniquery, meta: TableMetadata): DbQuery;
 
-  abstract translateAggregateQuery(query: AggregateQuery, meta: TableMetadata): DbQuery;
+  /**
+   * The physical path of a logical field path — a `__`-joined column
+   * (relational) or a document path with `@db.column` renames applied.
+   */
+  protected abstract physicalPath(logical: string, meta: TableMetadata): string;
+
+  /**
+   * Whether {@link physicalPath} can differ from the logical path for this
+   * table; `false` lets the path translations hand their input back as-is.
+   */
+  protected renamesPaths(_meta: TableMetadata): boolean {
+    return true;
+  }
+
+  /**
+   * Translates a grouped query to physical names: the filter and `$having`
+   * through {@link translateFilter}, and every field path in `$groupBy`,
+   * `$select` (plain and computed `$field`s) and `$sort` through
+   * {@link physicalPath}. Computed aliases pass through (a bucket alias never
+   * equals a field name).
+   *
+   * `buckets` are the query's calendar buckets as the core's normalizer
+   * resolved them (`resolveCalendarBuckets` — `AtscriptDbReadable.aggregate`
+   * runs it before the guards); they reach adapters with `field` made
+   * physical and the source descriptor as `fd`.
+   */
+  translateAggregateQuery(
+    query: AggregateQuery,
+    meta: TableMetadata,
+    buckets: readonly ResolvedBucket[],
+  ): DbQuery {
+    const controls = query.controls;
+    const aliases = this.computedAliasSet(controls.$select);
+    const physicalBuckets: TResolvedBucket[] = buckets.map((b) => ({
+      ...b,
+      field: this.physicalPath(b.field, meta),
+      fd: meta.descriptorByPath.get(b.field)!,
+    }));
+    const select = controls.$select && this.physicalSelect(controls.$select, meta);
+    return {
+      filter: this.translateFilter((query.filter ?? {}) as FilterExpr, meta),
+      controls: {
+        ...controls,
+        $with: undefined,
+        $groupBy: this.renamesPaths(meta)
+          ? controls.$groupBy.map((key) => (aliases.has(key) ? key : this.physicalPath(key, meta)))
+          : controls.$groupBy,
+        $select: select
+          ? new UniquSelect(select, meta.allPhysicalFields, physicalBuckets)
+          : undefined,
+        $sort: controls.$sort && this.physicalSort(controls.$sort, meta, aliases),
+        $having: controls.$having ? this.translateFilter(controls.$having, meta) : undefined,
+      },
+      insights: query.insights,
+    };
+  }
+
+  /** Output aliases of the computed `$select` entries (aggregates and calendar buckets). */
+  private computedAliasSet(select: AggregateControls["$select"]): Set<string> {
+    const aliases = new Set<string>();
+    for (const item of select ?? []) {
+      if (isAggregateExpr(item) || isBucketExpr(item)) aliases.add(resolveAlias(item));
+    }
+    return aliases;
+  }
+
+  /**
+   * `$select` with its field paths made physical: array-form names and
+   * computed `$field`s (`'*'` kept), or the keys of the object
+   * (inclusion / exclusion) form.
+   */
+  protected physicalSelect(
+    select: NonNullable<UniqueryControls["$select"]>,
+    meta: TableMetadata,
+  ): NonNullable<UniqueryControls["$select"]> {
+    if (!this.renamesPaths(meta)) return select;
+    if (Array.isArray(select)) {
+      return select.map((item: unknown) => {
+        if (typeof item === "string") return this.physicalPath(item, meta);
+        if (isAggregateExpr(item) || isBucketExpr(item)) {
+          return item.$field === "*"
+            ? item
+            : { ...item, $field: this.physicalPath(item.$field, meta) };
+        }
+        return item;
+      }) as NonNullable<UniqueryControls["$select"]>;
+    }
+    const translated: Record<string, 0 | 1> = {};
+    for (const [key, flag] of Object.entries(select as Record<string, 0 | 1>)) {
+      translated[this.physicalPath(key, meta)] = flag;
+    }
+    return translated as NonNullable<UniqueryControls["$select"]>;
+  }
+
+  /** `$sort` with physical keys; computed `aliases` (grouped queries) pass through. */
+  protected physicalSort(
+    sort: NonNullable<DbControls["$sort"]>,
+    meta: TableMetadata,
+    aliases?: ReadonlySet<string>,
+  ): DbControls["$sort"] {
+    if (!this.renamesPaths(meta)) return sort;
+    const translated: Record<string, 1 | -1> = {};
+    for (const [key, dir] of Object.entries(sort)) {
+      translated[aliases?.has(key) ? key : this.physicalPath(key, meta)] = dir as 1 | -1;
+    }
+    return translated;
+  }
 
   /**
    * Recursively walks a filter expression, applying `@db.column` key renames
-   * via `columnMap` and adapter-specific value formatting via `formatFilterValue`.
+   * (document paths — {@link TableMetadata.documentPath}) and adapter-specific
+   * value formatting via `formatFilterValue`.
    *
    * The relational mapper overrides this to use `leafByLogical` for deeper
    * key resolution (flattened nested paths).
@@ -72,8 +189,9 @@ export abstract class FieldMappingStrategy {
       } else if (key.startsWith("$")) {
         result[key] = value;
       } else {
-        const physical = meta.columnMap.get(key) ?? key;
-        result[physical] = this.formatFilterValue(physical, value, meta);
+        // Formatters are keyed by the field descriptor's physical name.
+        const formatKey = meta.columnMap.get(key) ?? key;
+        result[meta.documentPath(key)] = this.formatFilterValue(formatKey, value, meta);
       }
     }
     return result as FilterExpr;
@@ -315,34 +433,33 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
     return row;
   }
 
+  /**
+   * Every field-path position goes through `@db.column` renames
+   * ({@link TableMetadata.documentPath}): filter keys, `$select` fields
+   * (array, inclusion and exclusion forms) and `$sort` keys.
+   */
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
     const controls = query.controls;
+    const select = controls?.$select && this.physicalSelect(controls.$select, meta);
     return {
       filter: this.translateFilter(query.filter as FilterExpr, meta),
       controls: {
         ...controls,
         $with: undefined,
-        $select: controls?.$select
-          ? new UniquSelect(controls.$select, meta.allPhysicalFields)
-          : undefined,
+        $select: select ? new UniquSelect(select, meta.allPhysicalFields) : undefined,
+        $sort: controls?.$sort && this.physicalSort(controls.$sort, meta),
       },
       insights: query.insights,
     };
   }
 
-  translateAggregateQuery(query: AggregateQuery, meta: TableMetadata): DbQuery {
-    const controls = query.controls;
-    return {
-      filter: this.translateFilter((query.filter ?? {}) as FilterExpr, meta),
-      controls: {
-        ...controls,
-        $with: undefined,
-        $select: controls.$select
-          ? new UniquSelect(controls.$select as any, meta.allPhysicalFields)
-          : undefined,
-      },
-      insights: query.insights,
-    };
+  /** A document path with `@db.column` renames ({@link TableMetadata.documentPath}). */
+  protected physicalPath(logical: string, meta: TableMetadata): string {
+    return meta.documentPath(logical);
+  }
+
+  protected override renamesPaths(meta: TableMetadata): boolean {
+    return meta.columnMap.size > 0;
   }
 
   prepareForWrite(

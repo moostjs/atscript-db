@@ -3,6 +3,9 @@ import type { AggregateExpr } from "@atscript/db/agg";
 import { type DbQuery, UniquSelect } from "@atscript/db";
 import { buildAggregatePipeline, buildCountPipeline } from "../../agg";
 
+/** A plain `$groupBy` key as `$group._id` groups it: missing coalesced into the null group. */
+const nz = (path: string) => ({ $ifNull: [path, null] });
+
 /** Helper: build a DbQuery with aggregate controls. */
 function makeQuery(opts: {
   filter?: Record<string, unknown>;
@@ -38,8 +41,8 @@ describe("buildAggregatePipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.currency", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
+      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
     ]);
   });
 
@@ -62,7 +65,7 @@ describe("buildAggregatePipeline", () => {
       { $match: {} },
       {
         $group: {
-          _id: { status: "$status", region: "$region" },
+          _id: { k0: nz("$status"), k1: nz("$region") },
           total: { $sum: "$amount" },
           cnt: { $sum: 1 },
           avgAmt: { $avg: "$amount" },
@@ -73,8 +76,8 @@ describe("buildAggregatePipeline", () => {
       {
         $project: {
           _id: 0,
-          status: "$_id.status",
-          region: "$_id.region",
+          status: "$_id.k0",
+          region: "$_id.k1",
           total: 1,
           cnt: 1,
           avgAmt: 1,
@@ -176,8 +179,8 @@ describe("buildAggregatePipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { status: "$status", region: "$region" } } },
-      { $project: { _id: 0, status: "$_id.status", region: "$_id.region" } },
+      { $group: { _id: { k0: nz("$status"), k1: nz("$region") } } },
+      { $project: { _id: 0, status: "$_id.k0", region: "$_id.k1" } },
     ]);
   });
 
@@ -211,8 +214,14 @@ describe("buildAggregatePipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: { status: "active" } },
-      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" }, cnt: { $sum: 1 } } },
-      { $project: { _id: 0, currency: "$_id.currency", total: 1, cnt: 1 } },
+      {
+        $group: {
+          _id: { k0: nz("$currency") },
+          total: { $sum: "$amount" },
+          cnt: { $sum: 1 },
+        },
+      },
+      { $project: { _id: 0, currency: "$_id.k0", total: 1, cnt: 1 } },
       { $match: { total: { $gt: 100 } } },
       { $sort: { total: -1 } },
       { $limit: 10 },
@@ -237,7 +246,7 @@ describe("buildAggregatePipeline — dotted $groupBy path", () => {
       { $match: {} },
       {
         $group: {
-          _id: { k0: "$metadata.clicks" },
+          _id: { k0: nz("$metadata.clicks") },
           cnt: { $sum: { $cond: [{ $ne: ["$name", null] }, 1, 0] } },
         },
       },
@@ -245,7 +254,7 @@ describe("buildAggregatePipeline — dotted $groupBy path", () => {
     ]);
   });
 
-  it("mixes plain and dotted paths — plain keys keep their name, dotted ones are positional", () => {
+  it("mixes plain and dotted paths — every key positional in _id, projected back under its path", () => {
     const query = makeQuery({
       groupBy: ["category", "metadata.clicks"],
       select: ["category", "metadata.clicks", { $fn: "count", $field: "*", $as: "cnt" }],
@@ -256,8 +265,13 @@ describe("buildAggregatePipeline — dotted $groupBy path", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { category: "$category", k1: "$metadata.clicks" }, cnt: { $sum: 1 } } },
-      { $project: { _id: 0, category: "$_id.category", "metadata.clicks": "$_id.k1", cnt: 1 } },
+      {
+        $group: {
+          _id: { k0: nz("$category"), k1: nz("$metadata.clicks") },
+          cnt: { $sum: 1 },
+        },
+      },
+      { $project: { _id: 0, category: "$_id.k0", "metadata.clicks": "$_id.k1", cnt: 1 } },
       { $match: { $and: [{ cnt: { $gt: 1 } }, { "metadata.clicks": { $gte: 5 } }] } },
       { $sort: { "metadata.clicks": 1 } },
     ]);
@@ -273,7 +287,7 @@ describe("buildAggregatePipeline — dotted $groupBy path", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { k0: "$metadata.clicks" } } },
+      { $group: { _id: { k0: nz("$metadata.clicks") } } },
       { $project: { _id: 0, "metadata.clicks": "$_id.k0" } },
       { $match: { "metadata.clicks": { $gt: 5 } } },
       { $count: "count" },
@@ -292,7 +306,7 @@ describe("buildCountPipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: { status: "active" } },
-      { $group: { _id: { currency: "$currency" } } },
+      { $group: { _id: { k0: nz("$currency") } } },
       { $count: "count" },
     ]);
   });
@@ -306,7 +320,7 @@ describe("buildCountPipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { status: "$status" } } },
+      { $group: { _id: { k0: nz("$status") } } },
       { $count: "count" },
     ]);
   });
@@ -320,8 +334,8 @@ describe("buildCountPipeline", () => {
     const groupStage = pipeline.find((s: any) => s.$group)!.$group;
 
     expect(groupStage._id).toEqual({
-      status: "$status",
-      region: "$region",
+      k0: nz("$status"),
+      k1: nz("$region"),
     });
   });
 
@@ -339,8 +353,8 @@ describe("buildCountPipeline", () => {
     // and `$count` reports 0 groups. Order: $group → $project → $match(having) → $count.
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.currency", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
+      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
       { $match: { total: { $gt: 100 } } },
       { $count: "count" },
     ]);
@@ -355,8 +369,8 @@ describe("buildCountPipeline", () => {
     });
     expect(buildCountPipeline(query)).toEqual([
       { $match: {} },
-      { $group: { _id: { currency: "$currency" }, cnt: { $sum: 1 } } },
-      { $project: { _id: 0, currency: "$_id.currency", cnt: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, cnt: { $sum: 1 } } },
+      { $project: { _id: 0, currency: "$_id.k0", cnt: 1 } },
       { $match: { $and: [{ currency: "USD" }, { cnt: { $gte: 2 } }] } },
       { $count: "count" },
     ]);
@@ -412,8 +426,8 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
     expect(pipeline).toEqual([
       TEXT_STAGE,
       { $match: { status: "active" } },
-      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.currency", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
+      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
       { $sort: { total: -1 } },
       { $limit: 5 },
     ]);
@@ -437,8 +451,8 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
     expect(pipeline).toEqual([
       TEXT_STAGE,
       { $match: { status: "active" } },
-      { $group: { _id: { currency: "$currency" }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.currency", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
+      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
       { $match: { total: { $gt: 100 } } },
     ]);
   });
@@ -449,7 +463,7 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
     expect(pipeline).toEqual([
       TEXT_STAGE,
       { $match: { status: "active" } },
-      { $group: { _id: { currency: "$currency" } } },
+      { $group: { _id: { k0: nz("$currency") } } },
       { $count: "count" },
     ]);
   });

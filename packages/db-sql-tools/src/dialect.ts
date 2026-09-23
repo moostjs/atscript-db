@@ -1,3 +1,5 @@
+import type { TResolvedBucket } from "@atscript/db";
+
 export interface TSqlFragment {
   sql: string;
   params: unknown[];
@@ -29,6 +31,35 @@ export interface SqlDialect {
    * support omit this; the filter visitor then throws `GEO_NOT_SUPPORTED`.
    */
   geoWithin?(quotedCol: string, circle: TGeoCircle): TSqlFragment;
+  /**
+   * Calendar-bucket label expression over one column: TEXT `'YYYY-MM-DD'`
+   * (the local calendar date of the bucket's first day in `b.tz`), or NULL for
+   * a NULL source or one outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
+   * `quotedCol` is already quoted; `b.fd` identifies the storage kind.
+   *
+   * The expression must be PARAMETER-FREE — inline the zone with
+   * `sqlTimeZoneLiteral(b.tz)` and the unit / week start as literals (the
+   * shared builders assert them against their closed sets first) — because
+   * the builders render it in SELECT, GROUP BY and HAVING and PostgreSQL
+   * matches GROUP BY expressions structurally (and the bind-parameter order
+   * must not change). Dialects without calendar buckets omit this; the
+   * builders then throw `BUCKET_NOT_SUPPORTED`. Since 0.1.132.
+   */
+  calendarBucket?(quotedCol: string, b: TResolvedBucket): string;
+  /**
+   * HAVING references a calendar bucket by its quoted SELECT alias instead of
+   * re-rendering the bucket expression (the aggregate count query's inner
+   * SELECT lists `<bucket expr> AS alias`, so the alias exists there too).
+   *
+   * MySQL needs this: the bucket expression reads the raw source column, which
+   * is not itself in GROUP BY (only the expression is), so HAVING rejects it
+   * (`ER_BAD_FIELD_ERROR … in 'having clause'`), while MySQL does resolve
+   * SELECT aliases in HAVING. PostgreSQL is the opposite (no SELECT aliases in
+   * HAVING), so dialects that omit this keep the expression form. Aggregate
+   * aliases are unaffected — they always render as the inlined aggregate call.
+   * Since 0.1.132.
+   */
+  bucketAliasInHaving?: boolean;
   /** e.g. 'CREATE VIEW IF NOT EXISTS' or 'CREATE OR REPLACE VIEW' */
   createViewPrefix: string;
   /** Returns a parameter placeholder for the given 1-based index. When absent, '?' is used. */

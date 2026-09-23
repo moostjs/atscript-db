@@ -1,9 +1,28 @@
 import type { TDbReferentialAction } from "@atscript/db";
+import { DbError } from "@atscript/db";
+import { TIME_ZONE_NAME_RE } from "@uniqu/core";
 import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "@atscript/db";
 
 /** Formats a string value as a SQL literal with single-quote escaping. */
 export function sqlStringLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * A calendar bucket's time zone as an inlined SQL string literal (`'Europe/Berlin'`).
+ *
+ * The zone is already canonical (the core normalizer ran uniqu's
+ * `checkTimeZone`); this re-asserts uniqu's `TIME_ZONE_NAME_RE` charset —
+ * no quote, backslash or whitespace can reach the literal — as defense in
+ * depth for dialects that inline it (bucket expressions are parameter-free).
+ *
+ * @throws DbError `INVALID_QUERY` for a name outside the charset.
+ */
+export function sqlTimeZoneLiteral(tz: string): string {
+  if (!TIME_ZONE_NAME_RE.test(tz)) {
+    throw new DbError("INVALID_QUERY", [{ path: "$select", message: `Unknown time zone "${tz}"` }]);
+  }
+  return `'${tz}'`;
 }
 
 /** Converts a JS value to a SQL-bindable parameter. Objects/arrays -> JSON, booleans -> 0/1. */

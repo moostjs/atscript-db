@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
+  BucketUnit,
   FilterExpr as _FilterExpr,
   UniqueryControls as _UniqueryControls,
   UniqueryInsights,
@@ -92,6 +93,13 @@ export interface TFieldMeta {
    * is accepted (`sortable` does). Since 0.1.128.
    */
   indexed?: boolean;
+  /**
+   * Present (true) exactly when a calendar bucket over this field passes the
+   * gate: a physically filterable `number.timestamp` field (a dimension, when
+   * the table declares dimensions) on an adapter with calendar buckets
+   * (`bucketUnits`). Since 0.1.132.
+   */
+  bucketable?: true;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
@@ -133,6 +141,12 @@ export interface TMetaResponse {
    * the annotation, i.e. last-write-wins (default) behavior.
    */
   versionColumn?: string;
+  /**
+   * Calendar-bucket units the adapter can group by (`{ $bucket }` in an
+   * aggregate `$select`, URL `bucket(field,unit,…)`); omitted when it has
+   * none. Since 0.1.132.
+   */
+  bucketUnits?: BucketUnit[];
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────

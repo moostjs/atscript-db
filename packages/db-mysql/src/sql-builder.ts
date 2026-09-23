@@ -1,9 +1,10 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
-import type { DbControls } from "@atscript/db";
+import type { DbControls, TResolvedBucket } from "@atscript/db";
 import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
+  buildInsertMany as _buildInsertMany,
   buildSelect as _buildSelect,
   buildUpdate as _buildUpdate,
   buildDelete as _buildDelete,
@@ -12,11 +13,13 @@ import {
   buildAggregateCount as _buildAggregateCount,
   toSqlValue,
   sqlStringLiteral,
+  sqlTimeZoneLiteral,
   refActionToSql,
   defaultValueForType,
   defaultValueToSqlLiteral,
   parseRegexString,
 } from "@atscript/db-sql-tools";
+import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
 // Re-export shared utilities for consumers that import from this package
 export { sqlStringLiteral, refActionToSql, defaultValueForType, defaultValueToSqlLiteral };
@@ -320,8 +323,93 @@ export const mysqlDialect: SqlDialect = {
     const dist = mysqlGeoDistanceExpr(quotedCol, circle.center);
     return { sql: `${dist.sql} <= ?`, params: [...dist.params, circle.radius] };
   },
+  calendarBucket: mysqlCalendarBucket,
+  // Why MySQL needs it: see `SqlDialect.bucketAliasInHaving`.
+  bucketAliasInHaving: true,
   createViewPrefix: "CREATE OR REPLACE VIEW",
 };
+
+// ── Calendar buckets ────────────────────────────────────────────────────────
+
+/**
+ * Whether a field is stored as a native MySQL `TIMESTAMP`: a `number` with
+ * `@db.default.now`. The adapter writes such values as UTC
+ * `'YYYY-MM-DD HH:MM:SS'` strings and reads them back as epoch ms; every other
+ * numeric timestamp is a DOUBLE / BIGINT epoch-ms column.
+ */
+export function isMysqlTimestampColumn(fd: TDbFieldMeta): boolean {
+  return (
+    fd.designType === "number" && fd.defaultValue?.kind === "fn" && fd.defaultValue.fn === "now"
+  );
+}
+
+/** `'1970-01-01 00:00:00'` as a DATETIME: the base for epoch arithmetic free of the session zone. */
+const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
+
+/**
+ * Calendar-bucket label: TEXT `'YYYY-MM-DD'` — the local date of the
+ * bucket's first day in `b.tz` — or NULL for a NULL source or one outside
+ * `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
+ *
+ * The source's UTC wall time `U` (a DATETIME) depends on storage:
+ * - DOUBLE / BIGINT epoch ms: `epoch + INTERVAL FLOOR(col / 1000) SECOND`
+ *   (never `FROM_UNIXTIME`, which converts to the session zone);
+ * - native `TIMESTAMP` ({@link isMysqlTimestampColumn}): `CAST(col AS DATETIME)`
+ *   — the session-zone rendering, which is exactly the UTC string the adapter
+ *   wrote and parses back on read, so the label agrees with the value reads
+ *   return whatever the server's session zone is (`UNIX_TIMESTAMP(col)` would
+ *   agree only under a UTC session zone).
+ *
+ * The local date is `DATE(CONVERT_TZ(U, '+00:00', '<tz>'))`, or `DATE(U)` for
+ * `UTC` (no time zone tables needed). Truncation is calendar arithmetic on
+ * that date. `CONVERT_TZ` returns NULL when the zone is unknown to the
+ * server and its input unchanged outside its range — `MysqlAdapter` probes
+ * each zone before running the query (`BUCKET_TZ_UNAVAILABLE`).
+ *
+ * Parameter-free (the zone is an inlined, charset-checked literal), so the
+ * SELECT and GROUP BY renderings are identical (`ONLY_FULL_GROUP_BY`).
+ */
+export function mysqlCalendarBucket(quotedCol: string, b: TResolvedBucket): string {
+  let utc: string;
+  let inRange: string;
+  if (isMysqlTimestampColumn(b.fd)) {
+    utc = `CAST(${quotedCol} AS DATETIME)`;
+    // TIMESTAMP storage ends in 2038, far below BUCKET_MAX_INSTANT.
+    inRange = `${utc} >= '1970-01-02 00:00:00'`;
+  } else {
+    utc = `(${MYSQL_EPOCH} + INTERVAL FLOOR(${quotedCol} / 1000) SECOND)`;
+    inRange = `${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT}`;
+  }
+  const local =
+    b.tz === "UTC"
+      ? `DATE(${utc})`
+      : `DATE(CONVERT_TZ(${utc}, '+00:00', ${sqlTimeZoneLiteral(b.tz)}))`;
+  let first: string;
+  switch (b.unit) {
+    case "day": {
+      first = local;
+      break;
+    }
+    case "week": {
+      // WEEKDAY: 0 = Monday, so WEEKDAY + 1 is the ISO weekday
+      first = `DATE_SUB(${local}, INTERVAL ((WEEKDAY(${local}) + 1 - ${b.weekStartIso} + 7) % 7) DAY)`;
+      break;
+    }
+    case "month": {
+      first = `DATE_SUB(${local}, INTERVAL DAYOFMONTH(${local}) - 1 DAY)`;
+      break;
+    }
+    case "quarter": {
+      first = `(MAKEDATE(YEAR(${local}), 1) + INTERVAL (QUARTER(${local}) - 1) QUARTER)`;
+      break;
+    }
+    default: {
+      // year
+      first = `MAKEDATE(YEAR(${local}), 1)`;
+    }
+  }
+  return `CASE WHEN ${inRange} THEN DATE_FORMAT(${first}, '%Y-%m-%d') END`;
+}
 
 // ── Geo helpers (native POINT SRID 4326) ────────────────────────────────────
 
@@ -385,6 +473,15 @@ export function mysqlGeoValueToPoint(value: unknown): [number, number] | undefin
  */
 export function buildInsert(table: string, data: Record<string, unknown>): TSqlFragment {
   return _buildInsert(mysqlDialect, table, data);
+}
+
+/** Multi-row INSERT over `columns` (a missing column → `DEFAULT`). */
+export function buildInsertMany(
+  table: string,
+  rows: readonly Record<string, unknown>[],
+  columns: readonly string[],
+): TSqlFragment {
+  return _buildInsertMany(mysqlDialect, table, rows, columns);
 }
 
 /**
@@ -552,7 +649,7 @@ export function mysqlTypeFromField(field: TDbFieldMeta): string {
         return unsigned ? "BIGINT UNSIGNED" : "BIGINT";
       }
       // @db.default.now fields are timestamps, not floats
-      if (field.defaultValue?.kind === "fn" && field.defaultValue.fn === "now") {
+      if (isMysqlTimestampColumn(field)) {
         return "TIMESTAMP";
       }
       // number.int has designType "number" but carries the "int" tag —

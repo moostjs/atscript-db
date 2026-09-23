@@ -58,6 +58,26 @@ describe("undefined write props on SQLite", () => {
     expect((await read(2)).cap).toBe(5);
   });
 
+  // PG / MySQL once took the column list from the first row only, dropping a
+  // column absent from row 1 for every row. SQLite inserts row by row (it has
+  // no `DEFAULT` keyword inside VALUES), so each row stores exactly what a
+  // single-row insert of it would: its own columns, DDL DEFAULT for the rest.
+  it("insertMany: rows of different shapes each keep their own columns", async () => {
+    await items.insertMany([
+      { id: 1, name: "a" },
+      { id: 2, name: "b", cap: 5, note: "second" },
+      { id: 3, name: "c", note: "third" },
+    ] as any[]);
+    await items.insertOne({ id: 4, name: "d", note: "third" } as any);
+    expect([(await read(1)).cap, (await read(1)).note ?? null]).toEqual([10000, null]);
+    expect([(await read(2)).cap, (await read(2)).note]).toEqual([5, "second"]);
+    const { id: _3, name: _c, createdAt: _t3, ...third } = await read(3);
+    const { id: _4, name: _d, createdAt: _t4, ...single } = await read(4);
+    expect(third).toEqual(single);
+    expect(third.cap).toBe(10000);
+    expect(third.note).toBe("third");
+  });
+
   it("patch: undefined leaves the previous value untouched; null clears it", async () => {
     await items.insertOne({ id: 1, name: "a", note: "keep me" } as any);
     await items.updateOne({ id: 1, name: "b", note: undefined } as any);

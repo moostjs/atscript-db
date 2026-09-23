@@ -81,20 +81,31 @@ describe("MemoryAdapter — schema sync + capability overrides", () => {
     expect((err as DbError).code).toBe("CONFLICT");
   });
 
-  // ── aggregate → typed DbError ──────────────────────────────────────────────
+  // ── aggregate over a synced table ─────────────────────────────────────────
 
-  // WHY: routing a `?$groupBy=` query to aggregate() must NOT surface as the
-  // inherited plain-Error 500 — it must be a typed DbError with a 4xx code
-  // (INVALID_QUERY → HTTP 400 in moost-db) so REST clients get a clean error.
-  it("aggregate() throws a typed DbError (INVALID_QUERY), not the base plain Error", async () => {
+  // WHY: `?$groupBy=` queries route to aggregate(); memory answers them with its
+  // own grouping engine (aggregate.spec.ts covers the semantics) rather than the
+  // base adapter's plain-Error 500.
+  it("aggregate() groups the stored rows", async () => {
     const db: DbSpace = createTestSpace();
-    const adapter = db.getAdapter(User);
+    await syncSchema(db, [User]);
+    const users = db.getTable(User);
+    await users.insertOne(user({ id: "a", age: 30 }));
+    await users.insertOne(user({ id: "b", age: 30 }));
+    await users.insertOne(user({ id: "c", age: 40 }));
 
-    const promise = adapter.aggregate({ filter: {}, controls: { $groupBy: ["age"] } as any });
-    await expect(promise).rejects.toBeInstanceOf(DbError);
-    await expect(promise).rejects.toHaveProperty("code", "INVALID_QUERY");
-    // Explicitly NOT the inherited base-adapter plain-Error message.
-    await expect(promise).rejects.not.toThrow("Aggregation not supported by this adapter");
+    const rows = await users.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["age"],
+        $select: ["age", { $fn: "count", $field: "*", $as: "n" }],
+        $sort: { age: 1 },
+      },
+    } as any);
+    expect(rows).toEqual([
+      { age: 30, n: 2 },
+      { age: 40, n: 1 },
+    ]);
   });
 
   // ── canFilterField parity with Mongo ───────────────────────────────────────

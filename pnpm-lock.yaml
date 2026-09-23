@@ -98,6 +98,9 @@ importers:
 
   packages/db-client:
     dependencies:
+      '@uniqu/core':
+        specifier: 'catalog:'
+        version: 0.1.9
       '@uniqu/url':
         specifier: 'catalog:'
         version: 0.1.9
@@ -111,9 +114,6 @@ importers:
       '@atscript/typescript':
         specifier: 'catalog:'
         version: 0.1.92(@atscript/core@0.1.92)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.23)(wooks@0.7.23)
-      '@uniqu/core':
-        specifier: 'catalog:'
-        version: 0.1.9
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.92(@atscript/core@0.1.92)(@atscript/typescript@0.1.92(@atscript/core@0.1.92)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.23)(wooks@0.7.23))
@@ -130,6 +130,9 @@ importers:
       '@atscript/typescript':
         specifier: 'catalog:'
         version: 0.1.92(@atscript/core@0.1.92)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.23)(wooks@0.7.23)
+      '@uniqu/core':
+        specifier: 'catalog:'
+        version: 0.1.9
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.92(@atscript/core@0.1.92)(@atscript/typescript@0.1.92(@atscript/core@0.1.92)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.23)(wooks@0.7.23))
@@ -146,6 +149,9 @@ importers:
       '@atscript/typescript':
         specifier: 'catalog:'
         version: 0.1.92(@atscript/core@0.1.92)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.23)(wooks@0.7.23)
+      '@uniqu/core':
+        specifier: 'catalog:'
+        version: 0.1.9
       mongodb:
         specifier: ^6.17.0
         version: 6.21.0
