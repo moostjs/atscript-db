@@ -166,6 +166,9 @@ export {
   canFilterLeaf,
   narrowerFilterOps,
   acceptedOperatorsHint,
+  bucketSourceVerdict,
+  ADAPTER_FILTER_REASON,
+  ENCRYPTED_REASON,
 } from "./query/query-guards";
 export type {
   TQueryPathOp,
@@ -175,6 +178,8 @@ export type {
   TFilterRef,
   TQueryPathKind,
   TQueryPathSource,
+  TBucketSourceVerdict,
+  TBucketSourceTable,
 } from "./query/query-guards";
 export { findAncestorInSet } from "./table/table-metadata";
 

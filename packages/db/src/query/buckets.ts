@@ -45,10 +45,12 @@ export interface TBucketFieldSource {
  *   moost-db's HTTP gate — so both layers answer with the same wording.
  *   Everything downstream (`collectQueryPaths`, the field mappers,
  *   `UniquSelect`, adapters) assumes normalized input and does not re-check.
- * - **Schema** (timestamp-typed source, JSON ancestor, encryption, physical
- *   filterability) is the path guard's (`guardPath` op `bucket`), mirrored by
- *   moost-db's capability index; dimensions are the aggregate rules'.
- * - **Adapter capability** (`calendarBucketUnits()`) is `guardAggregate`'s
+ * - **The source field** (encryption, JSON ancestor, timestamp type,
+ *   physical filterability, strict-mode dimension, an adapter with calendar
+ *   buckets) is `bucketSourceVerdict` — ONE function, called by the path
+ *   guard (`guardPath` op `bucket`) and by moost-db's capability index, so
+ *   `/meta.fields[P].bucketable` and the core cannot disagree.
+ * - **The unit** (`calendarBucketUnits()` lacks it) is `guardAggregate`'s
  *   (`BUCKET_NOT_SUPPORTED`); SQL builders only re-assert the inlined
  *   literals (defense in depth).
  *
@@ -73,11 +75,14 @@ export function resolveCalendarBuckets(
 }
 
 /**
- * Whether a field can be the source of a calendar bucket: a `number` /
- * `integer` leaf carrying the `timestamp` tag (`number.timestamp`,
- * `.created`, `.updated`) that is not `@db.encrypted`. The type is the
- * declaration — no annotation opts a field in. Physical filterability is the
- * caller's (the core path guard and moost-db's capability index both add it).
+ * Whether a field's TYPE allows it to be the source of a calendar bucket: a
+ * `number` / `integer` leaf carrying the `timestamp` tag
+ * (`number.timestamp`, `.created`, `.updated`) that is not
+ * `@db.encrypted`. The type is the declaration — no annotation opts a field
+ * in.
+ *
+ * @deprecated since 0.1.133 — the type rule alone; use `bucketSourceVerdict`,
+ * the full bucket-source rule the core and moost-db apply.
  */
 export function isBucketableField(fd: TDbFieldMeta): boolean {
   if (fd.encrypted) return false;

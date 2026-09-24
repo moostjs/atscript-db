@@ -23,8 +23,10 @@ import type { TDbFieldMeta } from "../types";
  * - malformed `$select` computed entries / `$groupBy` entries, calendar
  *   buckets outside grouped queries or with a bad unit / zone / alias →
  *   `INVALID_QUERY` (the shared normalizer, `resolveCalendarBuckets`)
- * - a calendar bucket over a non-timestamp field → `INVALID_QUERY`; a unit
- *   the adapter's `calendarBucketUnits()` lacks → `BUCKET_NOT_SUPPORTED`
+ * - a calendar bucket over a field that is not a bucket source
+ *   (`bucketSourceVerdict`) → `INVALID_QUERY`, or `BUCKET_NOT_SUPPORTED`
+ *   when the adapter has no calendar buckets at all; a unit the adapter's
+ *   `calendarBucketUnits()` lacks → `BUCKET_NOT_SUPPORTED`
  * - every filter / `$sort` / `$select` / `$groupBy` / `$having` / aggregate
  *   path must resolve to physical storage on THIS adapter and pass the
  *   capability its position (for a filter entry: its predicate class, see
@@ -193,8 +195,12 @@ export interface TGuardedQuery {
   };
 }
 
-function pathError(path: string, message: string): DbError {
-  return new DbError("INVALID_QUERY", [{ path, message }]);
+function pathError(
+  path: string,
+  message: string,
+  code: "INVALID_QUERY" | "BUCKET_NOT_SUPPORTED" = "INVALID_QUERY",
+): DbError {
+  return new DbError(code, [{ path, message }]);
 }
 
 /**
@@ -253,6 +259,18 @@ export interface TFilterRef {
   path: string;
   predicate: TFilterPredicate;
 }
+
+/**
+ * The reason clause for a leaf the adapter cannot filter (value comparison).
+ * @internal Shared wording for moost-db's capability index — not consumer API.
+ */
+export const ADAPTER_FILTER_REASON = "adapter cannot filter on this storage type";
+
+/**
+ * The reason clause for an `@db.encrypted` leaf in a comparing / ordering position.
+ * @internal Shared wording for moost-db's capability index — not consumer API.
+ */
+export const ENCRYPTED_REASON = "field is @db.encrypted (ciphertext cannot be compared or ordered)";
 
 /** The adapter-shaped capability {@link canFilterLeaf} consults (a `BaseDbAdapter` or a readable). */
 type TFilterCapabilitySource = Pick<BaseDbAdapter, "canFilterField" | "isGeoSearchable">;
@@ -314,6 +332,100 @@ export function narrowerFilterOps(fd: TDbFieldMeta, adapter: TFilterCapabilitySo
 /** The rejection suffix naming {@link narrowerFilterOps} — `""` when there are none. */
 export function acceptedOperatorsHint(ops: readonly string[]): string {
   return ops.length > 0 ? ` (accepted operators: ${ops.join(", ")})` : "";
+}
+
+// ── Calendar-bucket source ───────────────────────────────────────────────────
+
+/**
+ * The table side of a {@link bucketSourceVerdict}: `TableMetadata` itself,
+ * or moost-db's capability index assembling the same names from a readable.
+ */
+export interface TBucketSourceTable {
+  /** Paths of the `isJsonValueField` descriptors — see `jsonValueAncestor`. */
+  jsonValueParents: ReadonlySet<string>;
+  /** Declared dimensions / measures — see {@link isStrictTable}. */
+  dimensions: readonly string[];
+  measures: readonly string[];
+}
+
+/**
+ * {@link bucketSourceVerdict}'s answer. `reason` is the shared clause (no
+ * trailing period) both layers put after the dash: the core's
+ * `Cannot bucket "P" — <reason>`, moost-db's
+ * `Bucketing field "P" is not permitted — <reason>.`
+ */
+export type TBucketSourceVerdict =
+  | { ok: true }
+  | {
+      ok: false;
+      code:
+        | "encrypted"
+        | "jsonDescendant"
+        | "notTimestamp"
+        | "notFilterable"
+        | "notDimension"
+        | "noBuckets";
+      reason: string;
+    };
+
+/**
+ * Strict mode: a table declaring dimensions or measures groups only by
+ * dimensions (a calendar bucket's source included) and aggregates only
+ * measures.
+ */
+export function isStrictTable(table: Pick<TBucketSourceTable, "dimensions" | "measures">): boolean {
+  return table.dimensions.length > 0 || table.measures.length > 0;
+}
+
+function rejectSource(
+  code: Extract<TBucketSourceVerdict, { ok: false }>["code"],
+  reason: string,
+): TBucketSourceVerdict {
+  return { ok: false, code, reason };
+}
+
+/**
+ * Whether the stored leaf `fd` may be the source of a calendar bucket
+ * (since 0.1.133) — every schema and adapter rule, once, for the core path
+ * guard ({@link guardPath} op `bucket`) and moost-db's capability index
+ * (`/meta.fields[P].bucketable` and the HTTP gate) alike. First failing rule
+ * wins, in this order:
+ *
+ * 1. `encrypted` — `@db.encrypted` (ciphertext has no calendar);
+ * 2. `jsonDescendant` — inside a JSON value (`jsonValueAncestor`):
+ *    relational adapters cannot address it and nested-object adapters must
+ *    not diverge from them;
+ * 3. `notTimestamp` — not a `number.timestamp` leaf;
+ * 4. `notFilterable` — the adapter cannot filter (so cannot group) the storage;
+ * 5. `notDimension` — a strict table ({@link isStrictTable}) and the field
+ *    is not a dimension;
+ * 6. `noBuckets` — the adapter reports no `calendarBucketUnits()`.
+ *
+ * Whether the adapter supports the requested UNIT is a per-query rule, not
+ * a field's (the core's `BUCKET_NOT_SUPPORTED`). Caller-specific policy
+ * layers on top: moost-db rejects `@db.writeOnly` sources before asking.
+ */
+export function bucketSourceVerdict(
+  fd: TDbFieldMeta,
+  table: TBucketSourceTable,
+  adapter: Pick<BaseDbAdapter, "canFilterField" | "calendarBucketUnits">,
+): TBucketSourceVerdict {
+  if (fd.encrypted) return rejectSource("encrypted", ENCRYPTED_REASON);
+  const jsonAncestor = jsonValueAncestor(fd.path, table.jsonValueParents);
+  if (jsonAncestor !== undefined) {
+    return rejectSource("jsonDescendant", `inside JSON-stored column "${jsonAncestor}"`);
+  }
+  if (!isBucketableField(fd)) {
+    return rejectSource("notTimestamp", "not a timestamp field (declare it number.timestamp)");
+  }
+  if (!adapter.canFilterField(fd)) return rejectSource("notFilterable", ADAPTER_FILTER_REASON);
+  if (isStrictTable(table) && !table.dimensions.includes(fd.path)) {
+    return rejectSource("notDimension", "not a dimension");
+  }
+  if (adapter.calendarBucketUnits().size === 0) {
+    return rejectSource("noBuckets", "adapter has no calendar buckets");
+  }
+  return { ok: true };
 }
 
 // ── Structural path collection ───────────────────────────────────────────────
@@ -537,8 +649,8 @@ function pathSourceOf(meta: TableMetadata): TQueryPathSource {
  * - a leaf → physical capability (`canSortField` for `$sort`; for a filter
  *   entry {@link canFilterLeaf} of its `predicate` class; `canFilterField`
  *   for `$groupBy` / `$having` / aggregate `$field`s; `$select` always passes);
- *   a calendar-bucket source must also be a timestamp field
- *   (`isBucketableField`);
+ *   a calendar-bucket source must pass `bucketSourceVerdict` (the rules
+ *   moost-db's capability index applies too);
  * - a nested-object parent → only `$select`, and only when it expands to
  *   leaf columns (`selectExpansion`);
  * - everything else is rejected.
@@ -565,20 +677,13 @@ export function guardPath(
       if (op === "select") return;
       const fd = meta.descriptorByPath.get(path)!;
       if (op === "bucket") {
-        const jsonAncestor = jsonValueAncestor(path, meta.jsonValueParents);
-        if (jsonAncestor !== undefined) {
+        const verdict = bucketSourceVerdict(fd, meta, adapter);
+        if (!verdict.ok) {
+          // An adapter without calendar buckets keeps its capability code.
           throw pathError(
             path,
-            `Cannot bucket "${path}" — inside JSON-stored column "${jsonAncestor}"`,
-          );
-        }
-        if (!isBucketableField(fd)) {
-          throw pathError(path, notTimestampMessage(path));
-        }
-        if (!adapter.canFilterField(fd)) {
-          throw pathError(
-            path,
-            `Cannot bucket "${path}" — adapter cannot filter on this storage type`,
+            `Cannot bucket "${path}" — ${verdict.reason}`,
+            verdict.code === "noBuckets" ? "BUCKET_NOT_SUPPORTED" : "INVALID_QUERY",
           );
         }
         return;
@@ -595,10 +700,7 @@ export function guardPath(
       if (!canFilterLeaf(fd, predicate, adapter)) {
         // Name the narrower predicates that WOULD pass (a JSON column's `$exists`).
         const hint = op === "filter" ? acceptedOperatorsHint(narrowerFilterOps(fd, adapter)) : "";
-        throw pathError(
-          path,
-          `Cannot ${verb} "${path}" — adapter cannot filter on this storage type${hint}`,
-        );
+        throw pathError(path, `Cannot ${verb} "${path}" — ${ADAPTER_FILTER_REASON}${hint}`);
       }
       return;
     }
@@ -754,14 +856,10 @@ export function guardAggregate(
   }
 }
 
-/** The core wording for a bucket over a field that is not `number.timestamp`. */
-function notTimestampMessage(path: string): string {
-  return `Cannot bucket "${path}" — not a timestamp field (declare it number.timestamp)`;
-}
-
 /**
  * Rejects a calendar bucket whose unit this adapter cannot group by
- * (`calendarBucketUnits()`; empty by default) with `BUCKET_NOT_SUPPORTED`,
+ * (`calendarBucketUnits()`; an adapter with none was already answered per
+ * source by `bucketSourceVerdict`) with `BUCKET_NOT_SUPPORTED`,
  * before anything is translated — third-party adapters get a clean 400,
  * never an engine error or a silent fallback.
  */

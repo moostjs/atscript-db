@@ -45,7 +45,7 @@ import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
 import type { TRelationLoaderHost } from "../rel/relation-loader";
 import { findFKForRelation, findRemoteFK } from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
-import { assertGeoPoint, guardAggregate, guardQuery } from "../query/query-guards";
+import { assertGeoPoint, guardAggregate, guardQuery, isStrictTable } from "../query/query-guards";
 import { resolveCalendarBuckets } from "../query/buckets";
 
 /**
@@ -715,10 +715,11 @@ export class AtscriptDbReadable<
    *   `resolveCalendarBuckets`: shapes, unit, zone, alias, grouping)
    * - Plain fields in $select are a subset of $groupBy
    * - When dimensions/measures are defined (strict mode): $groupBy fields
-   *   must be dimensions (a calendar bucket's source field included),
-   *   aggregate $field values must be measures (or '*')
-   * - the path guard (a bucket source must be a timestamp field) and the
-   *   adapter's calendar-bucket units (`BUCKET_NOT_SUPPORTED`)
+   *   must be dimensions, aggregate $field values must be measures (or '*')
+   * - the path guard (a bucket source must pass `bucketSourceVerdict` —
+   *   timestamp type, no JSON ancestor, a dimension in strict mode, an
+   *   adapter with calendar buckets) and the adapter's calendar-bucket units
+   *   (`BUCKET_NOT_SUPPORTED`)
    *
    * Translates field names, delegates to adapter.aggregate(),
    * then reverse-maps and applies fromStorage formatters on results.
@@ -748,14 +749,15 @@ export class AtscriptDbReadable<
 
     // Strict mode: validate dimensions/measures if any are defined
     const { dimensions, measures } = this._meta;
-    if (dimensions.length > 0 || measures.length > 0) {
+    if (isStrictTable(this._meta)) {
       const dimSet = new Set(dimensions);
       const measSet = new Set(measures);
 
-      // A bucket alias groups by its source field — that is the dimension.
-      const bucketSource = new Map(buckets.map((b) => [b.alias, b.field]));
-      for (const field of $groupBy.map((key) => bucketSource.get(key) ?? key)) {
-        if (!dimSet.has(field)) {
+      // A bucket alias groups by its source field, whose dimension rule is the
+      // bucket source verdict's (the path guard, shared with moost-db's gate).
+      const bucketAliases = new Set(buckets.map((b) => b.alias));
+      for (const field of $groupBy) {
+        if (!dimSet.has(field) && !bucketAliases.has(field)) {
           throw new DbError("INVALID_QUERY", [
             { path: "$groupBy", message: `Field "${field}" is not a dimension` },
           ]);

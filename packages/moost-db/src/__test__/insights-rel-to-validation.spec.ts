@@ -112,17 +112,17 @@ describe("AsDbReadableController.hasField — delegates to readable.isValidField
     expect(table.findMany).not.toHaveBeenCalled();
   });
 
-  // Deliberate change (0.1.128, efficiency): a listed leaf is a real field by
-  // construction, so the gate answers from the capability index without an
-  // existence lookup — `isValidFieldPath` is consulted only for paths that are
-  // not listed leaves (nav descendants, JSON / encrypted descendants, unknowns).
-  it("accepts listed top-level fields without consulting isValidFieldPath", async () => {
+  // Since 0.1.133 every gated path consults `hasField` (→ `isValidFieldPath`),
+  // listed leaves included — it is the visibility hook subclasses narrow, so a
+  // capability-index shortcut would let a hidden field be filtered or sorted.
+  it("consults isValidFieldPath for listed top-level fields too", async () => {
     const table = makeMockTable({
       flatMap: { id: {}, title: {} },
     });
     const controller = new AsDbController(makeMockApp(), table);
     const result = await controller.query("?$select=id,title");
     expect(result).not.toBeInstanceOf(HttpError);
-    expect(table.isValidFieldPath).not.toHaveBeenCalled();
+    expect(table.isValidFieldPath).toHaveBeenCalledWith("id");
+    expect(table.isValidFieldPath).toHaveBeenCalledWith("title");
   });
 });

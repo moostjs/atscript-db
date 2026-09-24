@@ -2,6 +2,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbReadable,
   BucketUnit,
+  TBucketSourceTable,
   TDbFieldMeta,
   TFilterPredicate,
   TQueryPathOp,
@@ -9,12 +10,13 @@ import type {
 } from "@atscript/db";
 import {
   acceptedOperatorsHint,
+  ADAPTER_FILTER_REASON,
+  bucketSourceVerdict,
   canFilterLeaf,
   classifyQueryPath,
+  ENCRYPTED_REASON,
   findAncestorInSet,
-  isBucketableField,
   isJsonValueField,
-  jsonValueAncestor,
   narrowerFilterOps,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
@@ -34,9 +36,9 @@ import { BUCKET_UNITS } from "@uniqu/core";
  * `filterable` is the value-comparison verdict, `filterOps` the narrower
  * predicates that still pass where it is `false`.
  *
- * A calendar-bucket source (`bucketable`) needs the physical capability, a
- * `number.timestamp` type, dimension status on a strict (dimension / measure
- * declaring) table, and an adapter with calendar-bucket units.
+ * A calendar-bucket source (`bucketable`) is the core's `bucketSourceVerdict`
+ * (the same function the core path guard runs) under the HTTP-only
+ * `@db.writeOnly` veto.
  */
 export interface TFieldCapability {
   /** A value-comparison filter on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
@@ -54,8 +56,8 @@ export interface TFieldCapability {
   /** Present when `sortable` is `false` — the reason clause appended to the HTTP 400 message. */
   sortReason?: string;
   /**
-   * A calendar bucket over this path passes the gate (physical ∧ timestamp ∧
-   * (¬strict ∨ dimension) ∧ adapter has calendar buckets). Since 0.1.132.
+   * A calendar bucket over this path passes the gate (¬writeOnly ∧ the core's
+   * `bucketSourceVerdict`). Since 0.1.132.
    */
   bucketable: boolean;
   /** Present when `bucketable` is `false` — the reason clause appended to the HTTP 400 message. */
@@ -95,16 +97,12 @@ interface TEntry {
   physicalReason?: string;
 }
 
-const ADAPTER_FILTER = "adapter cannot filter on this storage type";
-const REASON_ADAPTER_FILTER = `${ADAPTER_FILTER}.`;
+const REASON_ADAPTER_FILTER = `${ADAPTER_FILTER_REASON}.`;
 const REASON_ADAPTER_SORT = "adapter cannot sort on this storage type.";
 const REASON_WRITE_ONLY = "field is @db.writeOnly.";
-const REASON_ENCRYPTED = "field is @db.encrypted (ciphertext cannot be compared or ordered).";
+const REASON_ENCRYPTED = `${ENCRYPTED_REASON}.`;
 const REASON_ANNOTATION_FILTER = "add @db.column.filterable to enable.";
 const REASON_ANNOTATION_SORT = "add @db.column.sortable to enable.";
-const REASON_NOT_TIMESTAMP = "not a timestamp field (declare it number.timestamp).";
-const REASON_NOT_DIMENSION = "not a dimension.";
-const REASON_NO_BUCKETS = "adapter has no calendar buckets.";
 
 /** Sentence subject per op ("Filtering on field …"). */
 const OP_SUBJECT: Record<TQueryPathOp, string> = {
@@ -183,14 +181,8 @@ export class FieldCapabilityIndex implements TQueryPathSource {
   private readonly _entries = new Map<string, TEntry>();
   /** Nested-object parents (never listed, always selectable) → their listed leaves. */
   private readonly _objectParents = new Map<string, string[]>();
-  /**
-   * Declared dimensions when the table is strict (declares dimensions or
-   * measures), else `undefined` — the core rule: a grouping source, a
-   * bucketed field included, must then be a dimension.
-   */
-  private readonly _dimensions: ReadonlySet<string> | undefined;
-  /** Paths of every JSON-value descriptor (`isJsonValueField`) — see `jsonValueAncestor`. */
-  private readonly _jsonValueParents: ReadonlySet<string>;
+  /** What `bucketSourceVerdict` reads of the table (JSON-value parents, dimensions, measures). */
+  private readonly _bucketTable: TBucketSourceTable;
 
   /** Listed leaves — the {@link TQueryPathSource} view for `classifyQueryPath`. */
   get leaves(): ReadonlyMap<string, unknown> {
@@ -210,10 +202,6 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     this.signature = FieldCapabilityIndex.adapterSignature(source);
     const units = source.calendarBucketUnits();
     this.bucketUnits = BUCKET_UNITS.filter((unit) => units.has(unit));
-    this._dimensions =
-      source.dimensions.length > 0 || source.measures.length > 0
-        ? new Set(source.dimensions)
-        : undefined;
     const physicalNames = new Set<string>();
     const jsonValueParents = new Set<string>();
     for (const fd of source.fieldDescriptors) {
@@ -221,7 +209,11 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       if (isJsonValueField(fd)) jsonValueParents.add(fd.path);
     }
     this.physicalNames = physicalNames;
-    this._jsonValueParents = jsonValueParents;
+    this._bucketTable = {
+      jsonValueParents,
+      dimensions: source.dimensions,
+      measures: source.measures,
+    };
 
     const nav = new Set<string>(source.navFields);
     if (nav.size === 0) {
@@ -315,7 +307,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         ? narrowerFilterOps(fd, source)
         : [];
     if (filterOps.length > 0) {
-      filterBy.compare = `${ADAPTER_FILTER}${acceptedOperatorsHint(filterOps)}.`;
+      filterBy.compare = `${ADAPTER_FILTER_REASON}${acceptedOperatorsHint(filterOps)}.`;
     }
     const physicalReason = verdict("compare", false);
 
@@ -326,19 +318,11 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     if (!sortReason && this.sortableManual && !annotated(fd, "db.column.sortable")) {
       sortReason = REASON_ANNOTATION_SORT;
     }
-    // Bucket source: the physical capability `$groupBy` needs, then no JSON
-    // ancestor (parity with relational adapters), the type, the strict-mode
-    // dimension rule and the adapter's units.
-    let bucketReason = physicalReason;
-    const jsonAncestor = jsonValueAncestor(fd.path, this._jsonValueParents);
-    if (!bucketReason && jsonAncestor !== undefined) {
-      bucketReason = `inside JSON-stored column "${jsonAncestor}".`;
-    }
-    if (!bucketReason && !isBucketableField(fd)) bucketReason = REASON_NOT_TIMESTAMP;
-    if (!bucketReason && this._dimensions && !this._dimensions.has(fd.path)) {
-      bucketReason = REASON_NOT_DIMENSION;
-    }
-    if (!bucketReason && this.bucketUnits.length === 0) bucketReason = REASON_NO_BUCKETS;
+    // Bucket source: the HTTP-only writeOnly veto (a bucket label would leak
+    // the sealed value), then the core's verdict — the same rules, order and
+    // reason the core path guard answers with.
+    const bucket = isWriteOnly ? undefined : bucketSourceVerdict(fd, this._bucketTable, source);
+    const bucketReason = !bucket ? REASON_WRITE_ONLY : bucket.ok ? undefined : `${bucket.reason}.`;
 
     const cap: TFieldCapability = {
       filterable: filterBy.compare === undefined,
@@ -374,16 +358,23 @@ export class FieldCapabilityIndex implements TQueryPathSource {
 
   /**
    * Gate check for one path in one position. Returns `undefined` when the
-   * path is accepted. Order: navigation paths first (a nav path "exists" on
-   * the target table but is never a column here), then a listed leaf's
-   * capability (no existence lookup needed — every listed leaf is a real
-   * field), then `exists` (the readable's `isValidFieldPath`) and, for paths
-   * that exist but are not leaves, the storage classification.
+   * path is accepted.
    *
-   * Existence deliberately runs BEFORE the JSON / encrypted classification:
-   * an untyped descendant of a JSON column (`address.nope`) is reported as
-   * `Unknown field`, not as "inside JSON-stored column" — clients pin that
-   * wording, so do not "align" it with the core backstop's text.
+   * `exists` runs FIRST, for every path (since 0.1.133): it is the
+   * controller's `hasField`, the visibility hook subclasses narrow per
+   * request (e.g. a projection-scoped viewer). A path it rejects answers
+   * `Unknown field "x"` exactly like a nonexistent one — never a capability
+   * or navigation hint, which would reveal the field and let a filter or
+   * sort on it act as a value oracle. Before 0.1.133 listed leaves and
+   * navigation paths skipped it.
+   *
+   * Then: navigation paths (a nav path exists on the target table but is
+   * never a column here), a listed leaf's capability, and for other paths
+   * the storage classification. Existence also runs BEFORE the JSON /
+   * encrypted classification: an untyped descendant of a JSON column
+   * (`address.nope`) is reported as `Unknown field`, not as "inside
+   * JSON-stored column" — clients pin that wording, so do not "align" it
+   * with the core backstop's text.
    *
    * `predicate` is a filter entry's class (`collectQueryPaths` records it per
    * occurrence); it only matters for `op === "filter"` on a listed leaf.
@@ -394,6 +385,9 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     exists: (path: string) => boolean,
     predicate: TFilterPredicate = "compare",
   ): TCapabilityVerdict | undefined {
+    if (!exists(path)) {
+      return { path, message: `Unknown field "${path}"` };
+    }
     const { kind, parent } = classifyQueryPath(this, path);
     if (kind === "nav") {
       if (parent === undefined) {
@@ -445,9 +439,6 @@ export class FieldCapabilityIndex implements TQueryPathSource {
                 message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.physicalReason}`,
               };
       }
-    }
-    if (!exists(path)) {
-      return { path, message: `Unknown field "${path}"` };
     }
     switch (kind) {
       case "objectParent": {

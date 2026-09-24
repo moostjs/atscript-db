@@ -68,6 +68,40 @@ async function rejected(result: Promise<unknown>): Promise<HttpError> {
   return res as HttpError;
 }
 
+/**
+ * The core's answer to the same bucket as the gate's: both accept, or both
+ * reject with the same reason clause (`bucketSourceVerdict`). Returns whether a
+ * reason was compared — HTTP policy (the writeOnly seal) answers before the
+ * verdict, and the core reports encryption as `ENC_FIELD_AGG`.
+ */
+async function expectCoreAgrees(table: any, path: string, gate: unknown): Promise<boolean> {
+  let core: DbError | undefined;
+  try {
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $select: [
+          { $bucket: "day", $field: path, $as: "d" },
+          { $fn: "count", $field: "*", $as: "n" },
+        ],
+        $groupBy: ["d"],
+      },
+    });
+  } catch (error) {
+    core = error as DbError;
+  }
+  if (!(gate instanceof HttpError)) {
+    expect(core, path).toBeUndefined();
+    return false;
+  }
+  const reason = /^Bucketing field ".+" is not permitted — (.+)\.$/.exec(
+    errorsOf(gate)?.[0]?.message ?? "",
+  );
+  if (!reason || core?.code === "ENC_FIELD_AGG") return false;
+  expect(core?.errors, path).toEqual([{ path, message: `Cannot bucket "${path}" — ${reason[1]}` }]);
+  return true;
+}
+
 beforeAll(async () => {
   await prepareFixtures();
   ({ BucketTicket, BucketLoose } = await import("./fixtures/bucket-tickets.as"));
@@ -78,19 +112,25 @@ describe("/meta ⇔ gate parity for calendar buckets", () => {
     ["strict, relational", () => bind(BucketTicket)],
     ["loose, relational", () => bind(BucketLoose)],
     ["loose, nested-object", () => bind(BucketLoose, () => new NestedBucketAdapter())],
-  ])("%s: bucketable ⇔ a bucket over the field is accepted", async (_name, make) => {
-    const { controller, adapter } = make();
-    const meta = await controller.meta();
-    expect(meta.bucketUnits).toEqual(["day", "week", "month", "quarter", "year"]);
-    for (const [path, f] of Object.entries(meta.fields)) {
-      const res = await controller.query(bucketUrl(path));
-      const accepted = !(res instanceof HttpError);
-      expect(accepted, `bucket parity for "${path}"`).toBe(f.bucketable === true);
-      // Non-bucketable fields carry no key at all (absent, not false).
-      if (!accepted) expect("bucketable" in f, path).toBe(false);
-    }
-    expect(adapter.calls.some((c) => c.method === "aggregate")).toBe(true);
-  });
+  ])(
+    "%s: bucketable ⇔ the gate accepts ⇔ the core accepts, for the same reason",
+    async (_name, make) => {
+      const { controller, adapter, table } = make();
+      const meta = await controller.meta();
+      expect(meta.bucketUnits).toEqual(["day", "week", "month", "quarter", "year"]);
+      let compared = 0;
+      for (const [path, f] of Object.entries(meta.fields)) {
+        const res = await controller.query(bucketUrl(path));
+        const accepted = !(res instanceof HttpError);
+        expect(accepted, `bucket parity for "${path}"`).toBe(f.bucketable === true);
+        // Non-bucketable fields carry no key at all (absent, not false).
+        if (!accepted) expect("bucketable" in f, path).toBe(false);
+        if (await expectCoreAgrees(table, path, res)) compared++;
+      }
+      expect(compared).toBeGreaterThan(0);
+      expect(adapter.calls.some((c) => c.method === "aggregate")).toBe(true);
+    },
+  );
 
   it("strict table: exactly the timestamp dimensions are bucketable", async () => {
     const { controller } = bind(BucketTicket);
@@ -109,7 +149,7 @@ describe("/meta ⇔ gate parity for calendar buckets", () => {
   });
 
   it("an adapter without calendar buckets advertises nothing and the gate says why", async () => {
-    const { controller } = bind(BucketTicket, () => {
+    const { controller, table } = bind(BucketTicket, () => {
       const a = new BucketAdapter();
       a.units = new Set();
       return a;
@@ -118,6 +158,7 @@ describe("/meta ⇔ gate parity for calendar buckets", () => {
     expect("bucketUnits" in meta).toBe(false);
     expect(Object.values(meta.fields).some((f) => "bucketable" in f)).toBe(false);
     const res = await rejected(controller.query(bucketUrl("openedAt")));
+    expect(await expectCoreAgrees(table, "openedAt", res)).toBe(true);
     expect(errorsOf(res)).toEqual([
       {
         path: "openedAt",

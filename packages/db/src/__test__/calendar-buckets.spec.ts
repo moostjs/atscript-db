@@ -5,7 +5,7 @@ import type { BucketUnit } from "@uniqu/core";
 import { BUCKET_UNITS } from "@uniqu/core";
 
 import { DbError } from "../db-error";
-import { collectQueryPaths } from "../query/query-guards";
+import { bucketSourceVerdict, collectQueryPaths } from "../query/query-guards";
 import { resolveCalendarBuckets, type TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
 import { DocumentFieldMapper } from "../strategies/field-mapping";
@@ -79,6 +79,11 @@ function sentQuery(adapter: MockAdapter): DbQuery {
 }
 
 const n = { $fn: "count", $field: "*", $as: "n" };
+/** A grouped query bucketing `field` by day as `d`. */
+const bucketOn = (field: string) => ({
+  filter: {},
+  controls: { $select: [{ $bucket: "day", $field: field, $as: "d" }, n], $groupBy: ["d"] },
+});
 
 beforeAll(async () => {
   await prepareFixtures();
@@ -242,14 +247,6 @@ describe("aggregate() — calendar-bucket validation (every metadata-free rule, 
 });
 
 describe("aggregate() — the bucket source (path guard, strict mode, capability)", () => {
-  const bucketOn = (field: string, extra: Record<string, unknown> = {}) => ({
-    filter: {},
-    controls: {
-      $select: [{ $bucket: "day", $field: field, $as: "d", ...extra }, n],
-      $groupBy: ["d"],
-    },
-  });
-
   it("only a number.timestamp leaf can be bucketed", async () => {
     const { table } = sql();
     const points = await rejection(table.aggregate(bucketOn("points") as any));
@@ -288,7 +285,18 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
   it("strict mode: the bucket's source must be a dimension; a bucket is never 'not a measure'", async () => {
     const { table, adapter } = sql("BucketStrict");
     const err = await rejection(table.aggregate(bucketOn("reviewedAt") as any));
+    expect(err.code).toBe("INVALID_QUERY");
     expect(err.errors).toEqual([
+      { path: "reviewedAt", message: 'Cannot bucket "reviewedAt" — not a dimension' },
+    ]);
+    // Plain `$groupBy` fields keep the aggregate rule's wording.
+    const plain = await rejection(
+      table.aggregate({
+        filter: {},
+        controls: { $select: ["reviewedAt"], $groupBy: ["reviewedAt"] },
+      } as any),
+    );
+    expect(plain.errors).toEqual([
       { path: "$groupBy", message: 'Field "reviewedAt" is not a dimension' },
     ]);
     await table.aggregate({
@@ -310,7 +318,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
     const err = await rejection(plain.table.aggregate(bucketOn("openedAt") as any));
     expect(err.code).toBe("BUCKET_NOT_SUPPORTED");
     expect(err.errors).toEqual([
-      { path: "$select", message: 'Calendar bucket "day" is not supported by this adapter' },
+      { path: "openedAt", message: 'Cannot bucket "openedAt" — adapter has no calendar buckets' },
     ]);
     expect(plain.adapter.calls.some((c) => c.method === "aggregate")).toBe(false);
 
@@ -324,6 +332,114 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
       } as any),
     );
     expect(week.code).toBe("BUCKET_NOT_SUPPORTED");
+    expect(week.errors).toEqual([
+      { path: "$select", message: 'Calendar bucket "week" is not supported by this adapter' },
+    ]);
+  });
+});
+
+function verdictOf(
+  bound: { table: AtscriptDbTable; adapter: MockAdapter },
+  path: string,
+  adapter: Parameters<typeof bucketSourceVerdict>[2] = bound.adapter,
+) {
+  const meta = bound.table.getMetadata();
+  const fd = meta.descriptorByPath.get(path);
+  expect(fd, path).toBeDefined();
+  return bucketSourceVerdict(fd!, meta, adapter);
+}
+
+describe("bucketSourceVerdict — the one bucket-source rule set", () => {
+  it("accepts stored timestamp leaves (plain, renamed, flattened / nested)", () => {
+    for (const path of ["openedAt", "closedAt", "createdAt", "renamedAt", "stats.firstSeenAt"]) {
+      expect(verdictOf(sql(), path), path).toEqual({ ok: true });
+      expect(verdictOf(nested(), path), path).toEqual({ ok: true });
+    }
+  });
+
+  it("names each rejection with a code and the shared reason clause, first failing rule wins", () => {
+    const cases: Array<[string, ReturnType<typeof bucketSourceVerdict>]> = [
+      [
+        "secretAt",
+        {
+          ok: false,
+          code: "encrypted",
+          reason: "field is @db.encrypted (ciphertext cannot be compared or ordered)",
+        },
+      ],
+      [
+        "points",
+        {
+          ok: false,
+          code: "notTimestamp",
+          reason: "not a timestamp field (declare it number.timestamp)",
+        },
+      ],
+    ];
+    for (const [path, expected] of cases) {
+      expect(verdictOf(sql(), path), path).toEqual(expected);
+    }
+    // A JSON column is judged by its type before the adapter's storage veto.
+    expect(verdictOf(sql(), "meta")).toMatchObject({ ok: false, code: "notTimestamp" });
+    // Nested-object adapters keep JSON descendants as leaves — still no source.
+    expect(verdictOf(nested(), "meta.seenAt")).toEqual({
+      ok: false,
+      code: "jsonDescendant",
+      reason: 'inside JSON-stored column "meta"',
+    });
+  });
+
+  it("notFilterable, notDimension and noBuckets", () => {
+    const events = sql();
+    const blind = { canFilterField: () => false, calendarBucketUnits: () => ALL_UNITS };
+    expect(verdictOf(events, "openedAt", blind)).toEqual({
+      ok: false,
+      code: "notFilterable",
+      reason: "adapter cannot filter on this storage type",
+    });
+    const strict = sql("BucketStrict");
+    expect(verdictOf(strict, "reviewedAt")).toEqual({
+      ok: false,
+      code: "notDimension",
+      reason: "not a dimension",
+    });
+    expect(verdictOf(strict, "openedAt")).toEqual({ ok: true });
+    const none = { canFilterField: () => true, calendarBucketUnits: () => new Set<BucketUnit>() };
+    expect(verdictOf(events, "openedAt", none)).toEqual({
+      ok: false,
+      code: "noBuckets",
+      reason: "adapter has no calendar buckets",
+    });
+  });
+
+  it("is exactly what aggregate() enforces for every leaf (parity)", async () => {
+    for (const bound of [
+      sql(),
+      nested(),
+      sql("BucketStrict"),
+      bind(() => new MockAdapter(), "BucketEvent"),
+    ]) {
+      const meta = bound.table.getMetadata();
+      for (const [path, fd] of meta.descriptorByPath) {
+        if (meta.navFields.has(path)) continue;
+        const verdict = bucketSourceVerdict(fd, meta, bound.adapter);
+        let error: DbError | undefined;
+        try {
+          await bound.table.aggregate(bucketOn(path) as any);
+        } catch (e) {
+          error = e as DbError;
+        }
+        if (verdict.ok) {
+          expect(error, path).toBeUndefined();
+        } else if (verdict.code === "encrypted") {
+          expect(error?.code, path).toBe("ENC_FIELD_AGG");
+        } else {
+          expect(error?.errors, path).toEqual([
+            { path, message: `Cannot bucket "${path}" — ${verdict.reason}` },
+          ]);
+        }
+      }
+    }
   });
 });
 

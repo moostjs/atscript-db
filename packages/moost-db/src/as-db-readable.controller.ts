@@ -111,7 +111,7 @@ export class AsDbReadableController<
   protected override metaCacheKey(): unknown {
     return this.capabilities;
   }
-  /** Bound once: the field-existence check the gate hands to `capabilities.check`. */
+  /** Bound once: the visibility check ({@link hasField}) the gate hands to `capabilities.check`. */
   private readonly _exists = (path: string): boolean => this.hasField(path);
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
@@ -184,6 +184,20 @@ export class AsDbReadableController<
     return out;
   }
 
+  /**
+   * THE field-visibility hook: every gated path consults it before any
+   * capability check (since 0.1.133) — filter keys (inside `$and` / `$or` /
+   * `$not`, existence predicates included), `$sort`, `$select`,
+   * `$groupBy`, `$having` keys, aggregate and calendar-bucket `$field`s,
+   * `$with` relation names and sub-query paths, and the `$search` fallback
+   * fields. A path it rejects is answered exactly like a nonexistent one
+   * (`Unknown field "x"` / `Unknown relation "x"`), so override it to hide
+   * fields per request (read scopes). The default accepts every real path
+   * (`isValidFieldPath`). `/meta` does NOT consult it — prune hidden fields
+   * there with `applyMetaOverlay`. Native text search and vector search
+   * (`$vector` names an index) run inside the engine over its indexes, out of
+   * this hook's reach — keep hidden fields out of those indexes.
+   */
   protected hasField(path: string): boolean {
     // Guarded for the partial-mock readables in *.spec.ts that omit
     // isValidFieldPath. Real AtscriptDbReadable instances always have it.
@@ -308,11 +322,18 @@ export class AsDbReadableController<
     if (withRelations?.length) {
       const relations = this.readable.relations;
       for (const rel of withRelations) {
-        if (!rel.name.includes(".") && !relations.has(rel.name)) {
+        // A relation hidden by `hasField` is answered like a missing one.
+        const dot = rel.name.indexOf(".");
+        const known =
+          dot === -1
+            ? relations.has(rel.name) && this.hasField(rel.name)
+            : this.hasField(rel.name.slice(0, dot));
+        if (!known) {
+          const visible = [...relations.keys()].filter((name) => this.hasField(name));
           return badRequest(
             "$with",
             `Unknown relation "${rel.name}"`,
-            `Unknown relation "${rel.name}" in $with. Available relations: ${[...relations.keys()].join(", ") || "(none)"}`,
+            `Unknown relation "${rel.name}" in $with. Available relations: ${visible.join(", ") || "(none)"}`,
           );
         }
       }
@@ -667,13 +688,15 @@ export class AsDbReadableController<
     select: unknown,
   ): string | undefined {
     if (this._writeOnlySet.size === 0) return undefined;
+    // A field hidden by `hasField` falls through to the gate's `Unknown field`.
+    const sealed = (f: string) => this._writeOnlySet.has(f) && this.hasField(f);
     for (const f of groupBy) {
-      if (this._writeOnlySet.has(f)) return f;
+      if (sealed(f)) return f;
     }
     if (Array.isArray(select)) {
       for (const item of select as unknown[]) {
         const field = typeof item === "string" ? item : (item as { $field?: string }).$field;
-        if (field && this._writeOnlySet.has(field)) return field;
+        if (field && sealed(field)) return field;
       }
     }
     return undefined;
@@ -691,10 +714,14 @@ export class AsDbReadableController<
   ): FilterExpr | undefined {
     const term = controls.$search as string | undefined;
     if (!term || controls.$vector !== undefined) return filter;
-    if (this.readable.isSearchable() || this._searchFallbackFields.length === 0) return filter;
+    if (this.readable.isSearchable()) return filter;
+    // Only fields visible to this request — a hidden field would turn the
+    // term into a substring oracle over its values.
+    const fields = this._searchFallbackFields.filter((f) => this.hasField(f));
+    if (fields.length === 0) return filter;
     const rx = `/${term.replace(/[.*+?^${}()|[\]\\/]/g, String.raw`\$&`)}/i`;
     const fragment = {
-      $or: this._searchFallbackFields.map((f) => ({ [f]: { $regex: rx } })),
+      $or: fields.map((f) => ({ [f]: { $regex: rx } })),
     } as FilterExpr;
     return filter && Object.keys(filter).length > 0
       ? ({ $and: [filter, fragment] } as FilterExpr)

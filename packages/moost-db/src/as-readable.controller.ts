@@ -39,7 +39,9 @@ import { applyTerminalRefs } from "./meta/terminal-ref";
  *
  * Subclass responsibilities:
  * - Pass the bound interface + logical name + (optional) kind tag through super().
- * - Implement {@link hasField} so insights validation can reject unknown keys.
+ * - Implement {@link hasField} — the field-visibility hook every validated
+ *   path consults; a path it rejects gets the same `Unknown field` 400 as a
+ *   nonexistent one, so overriding it hides fields per request.
  * - Register the `/query`, `/pages`, `/one(/:id)` routes with the concrete
  *   handlers that match the data source's contract (DB readables route into
  *   aggregate/vector/search; value-help controllers just filter/sort/paginate).
@@ -92,7 +94,11 @@ export abstract class AsReadableController<
     }
   }
 
-  /** Subclass contract: return `true` if `path` addresses a valid field on the bound source. */
+  /**
+   * Subclass contract: return `true` if `path` addresses a field that exists
+   * AND is visible to the current request — see the DB controller's override
+   * for the full list of positions that consult it.
+   */
   protected abstract hasField(path: string): boolean;
 
   /** Sets @db.http.path on the type metadata from the controller's computed prefix. */
