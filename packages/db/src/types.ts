@@ -772,8 +772,13 @@ export interface TTouchManyOptions {
   require?: "all" | "any";
 }
 
-/** Options of `insertOne/Many`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate`. */
-export interface TWriteOptions<Row = Record<string, unknown>> {
+/**
+ * Options of `insertOne/Many`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate`.
+ * `isFieldVisible` (since 0.1.134, see {@link TIdResolveOptions}) applies to the
+ * top-level rows only — a payload without its primary key identifies through
+ * a unique index; nested-relation writes ignore it.
+ */
+export interface TWriteOptions<Row = Record<string, unknown>> extends TIdResolveOptions {
   /** Nested-relation write recursion limit (default 3). */
   maxDepth?: number;
   /**
@@ -787,14 +792,26 @@ export interface TWriteOptions<Row = Record<string, unknown>> {
   guard?: TDbWriteGuard<Row>;
 }
 
-/** Options of `deleteOne`. */
-export interface TDeleteOptions<Row = Record<string, unknown>> {
+/** Options of `deleteOne`. `isFieldVisible` since 0.1.134 — see {@link TIdResolveOptions}. */
+export interface TDeleteOptions<Row = Record<string, unknown>> extends TIdResolveOptions {
   /**
    * Validated-stage guard (since 0.1.128): invoked inside the table's
    * transaction after the id resolved to a filter and before cascade /
    * delete. A throw rolls the transaction back and propagates unchanged.
    */
   guard?: TDbRemoveGuard<Row>;
+}
+
+/** Options of `resolveIdFilter` / `identificationsVisibleTo` (since 0.1.134). */
+export interface TIdResolveOptions {
+  /**
+   * Field-visibility predicate (e.g. a per-request read scope). A unique-index
+   * identification with a field that fails it is ignored — the id resolves
+   * exactly as if that index did not exist, so a hidden unique key can never
+   * answer "a row with this value exists". Primary-key, `preferredId` and
+   * `@meta.id` fields always count as visible.
+   */
+  isFieldVisible?: (path: string) => boolean;
 }
 
 // ── Nullable typing (Group C: read-side generics; since 0.1.128) ─────────────

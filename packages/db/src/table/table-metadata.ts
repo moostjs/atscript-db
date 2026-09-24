@@ -177,6 +177,7 @@ export class TableMetadata {
 
   private _built = false;
   private _identifications?: readonly TIdentification[];
+  private _alwaysAddressable?: ReadonlySet<string>;
 
   // Intermediate build-time maps (not exposed after build)
   private _collateMap = new Map<string, TDbCollation>();
@@ -304,6 +305,11 @@ export class TableMetadata {
     // from logical → physical, so the captured field lists stay logical.
     this._buildIdentifications();
     this._resolvePreferredId(type);
+    this._alwaysAddressable = new Set([
+      ...this.primaryKeys,
+      ...this.preferredId,
+      ...this.originalMetaIdFields,
+    ]);
     this._finalizeIndexes();
 
     // Release intermediate build-time maps
@@ -1175,6 +1181,15 @@ export class TableMetadata {
   /** Legitimate row-identifier shapes — primary key first, then each unique index. */
   public getIdentifications(): readonly TIdentification[] {
     return this._identifications ?? [];
+  }
+
+  /**
+   * Fields that always count as visible for row identification (since
+   * 0.1.134): primary key, `preferredId` and `@meta.id` fields — see
+   * `AtscriptDbReadable.identificationsVisibleTo`.
+   */
+  public getAlwaysAddressable(): ReadonlySet<string> {
+    return this._alwaysAddressable ?? new Set();
   }
 
   private _resolvePreferredId(type: TAtscriptAnnotatedType<TAtscriptTypeObject>): void {

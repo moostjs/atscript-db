@@ -144,6 +144,7 @@ export type {
   TDbRemoveGuard,
   TWriteOptions,
   TDeleteOptions,
+  TIdResolveOptions,
   TTouchManyOptions,
 } from "./types";
 export type { TGenericLogger } from "./logger";

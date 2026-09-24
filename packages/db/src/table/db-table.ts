@@ -58,6 +58,7 @@ import type {
   TDbWriteGuardContext,
   TDeleteOptions,
   TFkLookupResolver,
+  TIdResolveOptions,
   TTableResolver,
   TWriteOptions,
   TTouchManyOptions,
@@ -559,7 +560,7 @@ export class AtscriptDbTable<
           if (versionColumn !== undefined) {
             assertNoVersionWrites(data, versionColumn);
           }
-          const filter = this._extractRecordFilter(data);
+          const filter = this._extractRecordFilter(data, opts);
           const prepared = this._fieldMapper.prepareForWrite(data, this._meta, this.adapter);
           const result = await this.adapter.replaceOne(
             this._fieldMapper.translateFilter(filter, this._meta),
@@ -704,7 +705,7 @@ export class AtscriptDbTable<
           for (const navField of this._meta.navFields) {
             delete data[navField];
           }
-          const filter = this._extractRecordFilter(data);
+          const filter = this._extractRecordFilter(data, opts);
 
           // Strip filter keys from data — they identify the record, not in the SET clause
           for (const key of Object.keys(filter)) {
@@ -916,7 +917,7 @@ export class AtscriptDbTable<
    */
   public async deleteOne(id: IdType, opts?: TDeleteOptions<DataType>): Promise<TDbDeleteResult> {
     this._ensureBuilt();
-    const filter = this._resolveIdFilter(id);
+    const filter = this._resolveIdFilter(id, opts);
     if (!filter) {
       return { deletedCount: 0 };
     }
@@ -1204,9 +1205,14 @@ export class AtscriptDbTable<
    * 2. Single-field unique index — first `@db.index.unique` field found.
    * 3. Compound unique index — first compound unique index whose fields are all present.
    *
-   * Throws when no identifying fields can be found.
+   * Throws when no identifying fields can be found. With `isFieldVisible`
+   * (since 0.1.134), a unique index over a hidden field is skipped, as if it
+   * did not exist — see {@link identificationsVisibleTo}.
    */
-  protected _extractRecordFilter(payload: Record<string, unknown>): FilterExpr {
+  protected _extractRecordFilter(
+    payload: Record<string, unknown>,
+    opts?: TIdResolveOptions,
+  ): FilterExpr {
     const pkFields = this.primaryKeys;
 
     // 1. Try primary key
@@ -1227,32 +1233,30 @@ export class AtscriptDbTable<
       }
     }
 
-    // 2. Try single-field unique index
+    const identifications = this.identificationsVisibleTo(opts?.isFieldVisible);
+
+    // 2. Try single-field unique index (in `uniqueProps` order)
+    const singleFields = new Set<string>();
+    for (const ident of identifications) {
+      if (ident.source !== "primaryKey" && ident.fields.length === 1) {
+        singleFields.add(ident.fields[0]!);
+      }
+    }
     for (const prop of this.uniqueProps) {
-      if (payload[prop] !== undefined) {
+      if (singleFields.has(prop) && payload[prop] !== undefined) {
         return { [prop]: this._prepareFilterValue(prop, payload[prop]) };
       }
     }
 
     // 3. Try compound unique indexes
-    for (const index of this._meta.indexes.values()) {
-      if (index.type !== "unique" || index.fields.length < 2) {
+    for (const ident of identifications) {
+      if (ident.source === "primaryKey" || ident.fields.length < 2) {
         continue;
       }
-      let allPresent = true;
-      for (const indexField of index.fields) {
-        if (payload[indexField.name] === undefined) {
-          allPresent = false;
-          break;
-        }
-      }
-      if (allPresent) {
+      if (ident.fields.every((field) => payload[field] !== undefined)) {
         const filter: FilterExpr = {};
-        for (const indexField of index.fields) {
-          filter[indexField.name] = this._prepareFilterValue(
-            indexField.name,
-            payload[indexField.name],
-          );
+        for (const field of ident.fields) {
+          filter[field] = this._prepareFilterValue(field, payload[field]);
         }
         return filter;
       }

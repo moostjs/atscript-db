@@ -263,4 +263,15 @@ describe("MemoryAdapter stored mode (driven through AtscriptDbTable)", () => {
     const res = await users.insertOne(user({ id: "u1", name: "Ada" }));
     expect(res.insertedId).toBe("u1");
   });
+  // WHY: excluding an object parent must drop its whole subtree, and a leaf
+  // exclusion must keep the parent's other children (0.1.134 regression pin).
+  it("an exclusion $select of an object parent drops the whole subtree", async () => {
+    await users.insertOne(user({ id: "u1", profile: { city: "X", age: 3 } }));
+    const pick = async (sel: unknown) =>
+      ((await users.findMany({ filter: {}, controls: { $select: sel } } as never)) as any[])[0];
+    expect(await pick({ profile: 0 })).not.toHaveProperty("profile");
+    expect(await pick({ profile: 0, name: 0 })).not.toHaveProperty("name");
+    expect((await pick({ "profile.city": 0 })).profile).toEqual({ age: 3 });
+    expect((await pick(["profile"])).profile).toEqual({ city: "X", age: 3 });
+  });
 });

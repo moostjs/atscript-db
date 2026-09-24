@@ -4,6 +4,7 @@ import type {
   FilterExpr,
   TCrudPermissions,
   TFieldMeta,
+  TIdResolveOptions,
   TMetaResponse,
   TQueryPathOp,
   UniqueryControls,
@@ -22,6 +23,7 @@ import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
+import type { IdValidationSource } from "./actions/id-validation";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions } from "./actions/list-augmenter";
 import { AsReadableController } from "./as-readable.controller";
@@ -113,6 +115,15 @@ export class AsDbReadableController<
   }
   /** Bound once: the visibility check ({@link hasField}) the gate hands to `capabilities.check`. */
   private readonly _exists = (path: string): boolean => this.hasField(path);
+  /**
+   * Id-resolution options (since 0.1.134): `{ isFieldVisible: hasField }`
+   * when a subclass overrides {@link hasField}, else `undefined` (the default
+   * accepts every real path, so resolution stays unfiltered). A unique index
+   * over a hidden field is never an identification.
+   */
+  protected readonly _idOpts: TIdResolveOptions | undefined;
+  /** Narrowed id sources, one stable object per distinct visible-identification set. */
+  private readonly _idSources = new Map<string, IdValidationSource>();
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
@@ -150,6 +161,30 @@ export class AsDbReadableController<
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
+    this._idOpts =
+      this.hasField === AsDbReadableController.prototype.hasField
+        ? undefined
+        : { isFieldVisible: this._exists };
+  }
+
+  /**
+   * The identifications this request may address rows through (since
+   * 0.1.134): the readable's own, minus unique indexes over fields
+   * {@link hasField} hides. Used by `/one?…`, `DELETE /?…` and action `ids`.
+   * Stable per distinct outcome, so per-source caches keyed on it hit.
+   */
+  get idSource(): IdValidationSource {
+    const opts = this._idOpts;
+    if (!opts) return this.readable;
+    const visible = this.readable.identificationsVisibleTo(opts.isFieldVisible);
+    if (visible.length === this.readable.identifications.length) return this.readable;
+    const key = visible.map((ident) => ident.source).join("\x1f");
+    let source = this._idSources.get(key);
+    if (!source) {
+      source = { identifications: visible, fieldDescriptors: this.readable.fieldDescriptors };
+      this._idSources.set(key, source);
+    }
+    return source;
   }
 
   private _collectInvertibleFields(): string[] {
@@ -192,7 +227,11 @@ export class AsDbReadableController<
    * `$with` relation names and sub-query paths, and the `$search` fallback
    * fields. A path it rejects is answered exactly like a nonexistent one
    * (`Unknown field "x"` / `Unknown relation "x"`), so override it to hide
-   * fields per request (read scopes). The default accepts every real path
+   * fields per request (read scopes). Since 0.1.134 it also governs row
+   * identification — a unique index over a hidden field is not an
+   * identification for `/one/:id`, `/one?…`, `DELETE`, a PK-less `PATCH` or
+   * an action id (primary key and `preferredId` always are) — and the
+   * nested-object 400 hint lists visible leaves only. The default accepts every real path
    * (`isValidFieldPath`). `/meta` does NOT consult it — prune hidden fields
    * there with `applyMetaOverlay`. Native text search and vector search
    * (`$vector` names an index) run inside the engine over its indexes, out of
@@ -450,11 +489,27 @@ export class AsDbReadableController<
     }
 
     const widened: Record<string, 1> = {};
-    for (const path of this._invertibleFields) {
-      if (!excluded.has(path)) widened[path] = 1;
-    }
+    for (const path of this._invertExclusion(excluded)) widened[path] = 1;
     for (const field of this._preferredIdSet) widened[field] = 1;
     return widened as UniqueryControls["$select"];
+  }
+
+  /**
+   * The logical paths an exclusion keeps. A path goes when it, an ancestor
+   * or a descendant is excluded: excluding an object parent excludes its
+   * whole subtree, and a kept parent would carry an excluded child back
+   * (its other leaves stay listed on their own). Before 0.1.134 only the
+   * exact paths were dropped, so `$select=-a` still returned `a`'s leaves.
+   */
+  private _invertExclusion(excluded: ReadonlySet<string>): string[] {
+    return this._invertibleFields.filter((path) => {
+      if (excluded.has(path) || findAncestorInSet(path, excluded) !== undefined) return false;
+      const prefix = `${path}.`;
+      for (const key of excluded) {
+        if (key.startsWith(prefix)) return false;
+      }
+      return true;
+    });
   }
 
   /**
@@ -559,8 +614,7 @@ export class AsDbReadableController<
     }
     if (included.length > 0 && excluded.length === 0) return included;
     if (excluded.length > 0 && included.length === 0) {
-      const excludedSet = new Set(excluded);
-      return this._invertibleFields.filter((path) => !excludedSet.has(path));
+      return this._invertExclusion(new Set(excluded));
     }
     throw new HttpError(
       500,
@@ -815,9 +869,14 @@ export class AsDbReadableController<
     return result;
   }
 
-  /** Pick the first identification (PK or unique index) whose fields are all present in the query. */
+  /**
+   * Pick the first identification (PK or unique index) whose fields are all
+   * present in the query. A unique index over a field {@link hasField} hides
+   * is not a candidate (since 0.1.134) — `?hidden=x` answers exactly like
+   * `?nope=x`, so it cannot probe whether a row with that value exists.
+   */
   protected extractIdShape(query: Record<string, string>): Record<string, unknown> | HttpError {
-    for (const id of this.readable.identifications) {
+    for (const id of this.idSource.identifications) {
       const idObj: Record<string, unknown> = {};
       let allPresent = true;
       for (const field of id.fields) {
@@ -1246,7 +1305,9 @@ export class AsDbReadableController<
     const initialSelect = prep?.widenedSelect ?? select;
     const controls = { ...parsedControls, $select: initialSelect };
 
-    const idFilter = this.readable.resolveIdFilter(id);
+    // A hidden unique key is not an identification (since 0.1.134): the id
+    // resolves as if that index did not exist.
+    const idFilter = this.readable.resolveIdFilter(id, this._idOpts);
     let row: DataType | null = null;
     if (idFilter) {
       const overlay = await this.transformOne({} as FilterExpr);

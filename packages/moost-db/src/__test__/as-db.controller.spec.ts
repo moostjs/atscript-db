@@ -502,7 +502,7 @@ describe("AsDbController", () => {
   describe("getOne", () => {
     it("should resolve the id filter and call findOne with it", async () => {
       const result = await controller.getOne("123", "/one/123?");
-      expect(table.resolveIdFilter).toHaveBeenCalledWith("123");
+      expect(table.resolveIdFilter).toHaveBeenCalledWith("123", undefined);
       expect(table.findOne).toHaveBeenCalledWith(
         expect.objectContaining({ filter: { id: "123" } }),
       );
@@ -549,7 +549,10 @@ describe("AsDbController", () => {
         { taskId: "5", tagId: "1" },
         "/one?taskId=5&tagId=1",
       );
-      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ taskId: "5", tagId: "1" });
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith(
+        { taskId: "5", tagId: "1" },
+        undefined,
+      );
       expect(ctx.table.findOne).toHaveBeenCalledWith(
         expect.objectContaining({ filter: { taskId: "5", tagId: "1" } }),
       );
@@ -578,7 +581,10 @@ describe("AsDbController", () => {
         { email: "alice", tenantId: "T1" },
         "/one?email=alice&tenantId=T1",
       );
-      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ email: "alice", tenantId: "T1" });
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith(
+        { email: "alice", tenantId: "T1" },
+        undefined,
+      );
       expect(ctx.table.findOne).toHaveBeenCalledWith(
         expect.objectContaining({ filter: { email: "alice", tenantId: "T1" } }),
       );
@@ -618,7 +624,7 @@ describe("AsDbController", () => {
         { username: "alice" },
         "/one?username=alice",
       );
-      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ username: "alice" });
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ username: "alice" }, undefined);
       expect(ctx.table.findOne).toHaveBeenCalledWith(
         expect.objectContaining({ filter: { username: "alice" } }),
       );
@@ -671,7 +677,7 @@ describe("AsDbController", () => {
         { sku: "SKU-00006" },
         "/one?sku=SKU-00006",
       );
-      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ sku: "SKU-00006" });
+      expect(ctx.table.resolveIdFilter).toHaveBeenCalledWith({ sku: "SKU-00006" }, undefined);
       expect(ctx.table.findOne).toHaveBeenCalledWith(
         expect.objectContaining({ filter: { sku: "SKU-00006" } }),
       );

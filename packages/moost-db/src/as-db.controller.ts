@@ -81,6 +81,17 @@ export class AsDbController<
     table?: AtscriptDbTable<T>,
   ) {
     super(app, table);
+    const proto = AsDbController.prototype as AsDbController;
+    this._writeArgs = this._hookArgs<TWriteOptions<any>>(
+      this.guardWrite !== proto.guardWrite
+        ? (ctx: TDbWriteGuardContext<DataType>) => this.guardWrite(ctx)
+        : undefined,
+    );
+    this._removeArgs = this._hookArgs<TDeleteOptions<any>>(
+      this.guardRemove !== proto.guardRemove
+        ? (ctx: TDbRemoveGuardContext<DataType>) => this.guardRemove(ctx)
+        : undefined,
+    );
   }
 
   protected override buildCrud(): TCrudPermissions {
@@ -165,24 +176,23 @@ export class AsDbController<
   // same type by default but independent generics, so the options are typed
   // loosely here and narrowed at the guard signature.
 
-  /**
-   * The table write call's trailing options: `[{ guard }]` only when
-   * `guardWrite` is overridden, else nothing (the table is called exactly as
-   * an unmodified controller always called it).
-   */
-  private _writeArgs(): [] | [TWriteOptions<any>] {
-    if (this.guardWrite === (AsDbController.prototype as AsDbController).guardWrite) {
-      return [];
-    }
-    return [{ guard: (ctx: TDbWriteGuardContext<DataType>) => this.guardWrite(ctx) }];
-  }
+  /** The table write call's trailing options — see {@link _hookArgs}. */
+  private readonly _writeArgs: [] | [TWriteOptions<any>];
+  /** `deleteOne`'s trailing options — see {@link _hookArgs}. */
+  private readonly _removeArgs: [] | [TDeleteOptions<any>];
 
-  /** `deleteOne`'s trailing options: `[{ guard }]` only when `guardRemove` is overridden. */
-  private _removeArgs(): [] | [TDeleteOptions<any>] {
-    if (this.guardRemove === (AsDbController.prototype as AsDbController).guardRemove) {
-      return [];
-    }
-    return [{ guard: (ctx: TDbRemoveGuardContext<DataType>) => this.guardRemove(ctx) }];
+  /**
+   * A table call's trailing options, built once: `guard` only when the guard
+   * hook is overridden, `isFieldVisible` only when `hasField` is (an id or a
+   * PK-less payload never resolves through a hidden unique key) — else
+   * nothing, so an unmodified controller calls the table exactly as before.
+   */
+  private _hookArgs<O extends TWriteOptions<any> | TDeleteOptions<any>>(
+    guard: O["guard"] | undefined,
+  ): [] | [O] {
+    const opts = { ...this._idOpts } as O;
+    if (guard) opts.guard = guard;
+    return Object.keys(opts).length > 0 ? [opts] : [];
   }
 
   /** Resolves a hook result: `undefined` aborts with `abortMessage`, an `Error` is thrown, anything else passes. */
@@ -259,7 +269,7 @@ export class AsDbController<
 
   /** Deletes by id (guard forwarded when overridden) and maps "nothing deleted" to 404. */
   private async _deleteOrThrow(id: unknown): Promise<unknown> {
-    const result = await this.table.deleteOne(id as never, ...this._removeArgs());
+    const result = await this.table.deleteOne(id as never, ...this._removeArgs);
     if (result.deletedCount < 1) {
       throw new HttpError(404);
     }
@@ -276,10 +286,10 @@ export class AsDbController<
     assertWriteShape(payload);
     if (Array.isArray(payload)) {
       const rows = await this._writeBody("insertMany", payload, true);
-      return this.table.insertMany(rows as never, ...this._writeArgs());
+      return this.table.insertMany(rows as never, ...this._writeArgs);
     }
     const row = await this._writeBody("insert", payload, false);
-    return this.table.insertOne(row as never, ...this._writeArgs());
+    return this.table.insertOne(row as never, ...this._writeArgs);
   }
 
   /**
@@ -301,14 +311,14 @@ export class AsDbController<
         Record<string, unknown>
       >;
       this._resolveBulkCas(rows, versionColumn);
-      return this.table.bulkReplace(rows as never, ...this._writeArgs());
+      return this.table.bulkReplace(rows as never, ...this._writeArgs);
     }
 
     const row = (await this._writeBody("replace", payload, false)) as Record<string, unknown>;
     const hadCas = this._resolveCas(row, versionColumn);
     const result = (await this.table.replaceOne(
       row as never,
-      ...this._writeArgs(),
+      ...this._writeArgs,
     )) as TDbUpdateResult;
     if (hadCas && result.matchedCount === 0) {
       throw await this._disambiguateMismatch(row, versionColumn!);
@@ -333,14 +343,14 @@ export class AsDbController<
         Record<string, unknown>
       >;
       this._resolveBulkCas(rows, versionColumn);
-      return this.table.bulkUpdate(rows as never, ...this._writeArgs());
+      return this.table.bulkUpdate(rows as never, ...this._writeArgs);
     }
 
     const row = (await this._writeBody("update", payload, false)) as Record<string, unknown>;
     const hadCas = this._resolveCas(row, versionColumn);
     const result = (await this.table.updateOne(
       row as never,
-      ...this._writeArgs(),
+      ...this._writeArgs,
     )) as TDbUpdateResult;
     if (hadCas && result.matchedCount === 0) {
       throw await this._disambiguateMismatch(row, versionColumn!);
@@ -355,7 +365,7 @@ export class AsDbController<
    * but the supplied version is stale (§6.3). Callers throw the result.
    */
   protected async _disambiguateMismatch(data: unknown, versionColumn: string): Promise<HttpError> {
-    const filter = this.table.resolveIdFilter(data);
+    const filter = this.table.resolveIdFilter(data, this._idOpts);
     const row = filter
       ? ((await this.table.findOne({ filter, controls: {} } as any)) as Record<
           string,

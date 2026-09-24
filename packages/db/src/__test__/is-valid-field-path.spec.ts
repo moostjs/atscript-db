@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
 import { DbSpace } from "../table/db-space";
+import { AtscriptDbTable } from "../table/db-table";
 import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let NoDepthSource: any;
@@ -127,5 +128,36 @@ describe("AtscriptDbReadable.isValidFieldPath", () => {
     // Eventually fails (no such leaf), but the test exists to prove we don't
     // blow the stack on the back-and-forth nav traversal.
     expect(post.isValidFieldPath("author.posts.author.posts.bogus")).toBe(false);
+  });
+});
+
+describe("AtscriptDbReadable.relatedTable (since 0.1.134)", () => {
+  beforeAll(async () => {
+    await prepareFixtures();
+    ({ NoDepthSource } = await import("./fixtures/rel-no-depth-source.as"));
+    ({ NoDepthMiddle } = await import("./fixtures/rel-no-depth-middle.as"));
+    ({ NoDepthTarget } = await import("./fixtures/rel-no-depth-target.as"));
+  });
+
+  it("returns the space's table for a navigation relation", () => {
+    const db = new DbSpace(() => new MockAdapter());
+    const target = db.getTable(NoDepthTarget);
+    db.getTable(NoDepthMiddle);
+    const src = db.getTable(NoDepthSource);
+    expect(src.relatedTable("target")).toBe(target);
+    expect(src.relatedTable("target")?.primaryKeys).toEqual(["id"]);
+  });
+
+  it("returns undefined for a non-relation, a dotted path or an unknown name", () => {
+    const db = new DbSpace(() => new MockAdapter());
+    const src = db.getTable(NoDepthSource);
+    expect(src.relatedTable("title")).toBeUndefined();
+    expect(src.relatedTable("middle.target")).toBeUndefined();
+    expect(src.relatedTable("nope")).toBeUndefined();
+  });
+
+  it("returns undefined without a table resolver", () => {
+    const src = new AtscriptDbTable(NoDepthSource, new MockAdapter());
+    expect(src.relatedTable("target")).toBeUndefined();
   });
 });

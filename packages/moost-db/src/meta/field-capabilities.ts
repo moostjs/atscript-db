@@ -126,6 +126,11 @@ const OP_VERB: Record<TQueryPathOp, string> = {
   bucket: "bucket",
 };
 
+/** The one "nonexistent path" verdict — hidden paths answer with it byte for byte. */
+function unknownField(path: string): TCapabilityVerdict {
+  return { path, message: `Unknown field "${path}"` };
+}
+
 function leafHint(leaves: readonly string[]): string {
   if (leaves.length === 0) return "no leaf fields";
   const shown = leaves.slice(0, 5).join(", ");
@@ -386,7 +391,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     predicate: TFilterPredicate = "compare",
   ): TCapabilityVerdict | undefined {
     if (!exists(path)) {
-      return { path, message: `Unknown field "${path}"` };
+      return unknownField(path);
     }
     const { kind, parent } = classifyQueryPath(this, path);
     if (kind === "nav") {
@@ -443,7 +448,14 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     switch (kind) {
       case "objectParent": {
         if (op === "select") return undefined;
-        const leaves = this._objectParents.get(path)!;
+        // The hint names visible leaves only — a hidden sibling must not leak
+        // through it (since 0.1.134). A parent whose every leaf is hidden
+        // answers like a nonexistent path.
+        const all = this._objectParents.get(path)!;
+        const leaves = all.filter(exists);
+        if (leaves.length === 0 && all.length > 0) {
+          return unknownField(path);
+        }
         return {
           path,
           message: `"${path}" is a nested object — filter or sort on one of its leaves (${leafHint(leaves)})`,
@@ -464,7 +476,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
             }
           : { path, message: `Cannot ${OP_VERB[op]} encrypted field "${path}"` };
       default:
-        return { path, message: `Unknown field "${path}"` };
+        return unknownField(path);
     }
   }
 }

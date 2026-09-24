@@ -35,6 +35,7 @@ import type {
   TDbRelation,
   TIdDescriptor,
   TIdentification,
+  TIdResolveOptions,
   TSearchIndexInfo,
   TTableResolver,
   TWriteTableResolver,
@@ -434,6 +435,22 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * The {@link identifications} an id may resolve through when fields are
+   * hidden per request (since 0.1.134): a unique index with a field that
+   * fails `isFieldVisible` is dropped, as if it did not exist. Primary-key,
+   * `preferredId` and `@meta.id` fields always count as visible. Without a
+   * predicate, every identification.
+   */
+  public identificationsVisibleTo(
+    isFieldVisible?: TIdResolveOptions["isFieldVisible"],
+  ): readonly TIdentification[] {
+    const all = this.identifications;
+    if (!isFieldVisible) return all;
+    const always = this._meta.getAlwaysAddressable();
+    return all.filter((ident) => ident.fields.every((f) => always.has(f) || isFieldVisible(f)));
+  }
+
+  /**
    * Physical column name of the single `@meta.id` field, or `null` when the
    * schema has zero or multiple `@meta.id` fields. Used by adapters to return
    * the user's logical ID instead of the DB-generated one on insert.
@@ -574,6 +591,27 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * The target table of the navigation relation `navField` (since 0.1.134),
+   * resolved through the table resolver this readable was built with (the
+   * `DbSpace`'s). `undefined` when `navField` is not a relation of this table
+   * or no resolver is available (a table constructed without a `DbSpace`).
+   * Top-level relation names only — no dotted paths.
+   *
+   * ```typescript
+   * const users = posts.relatedTable('author')
+   * users?.primaryKeys // ['id']
+   * ```
+   */
+  public relatedTable(navField: string): ReturnType<TTableResolver> {
+    this._ensureBuilt();
+    const targetType = this._meta.relations.get(navField)?.targetType();
+    if (!targetType || !this._tableResolver) {
+      return undefined;
+    }
+    return this._tableResolver(targetType);
+  }
+
+  /**
    * Resolves whether `path` references a real field — directly via `flatMap`
    * or transitively through a nav relation by recursing into the target
    * table. Defense-in-depth for query-path validation: `flattenAnnotatedType`
@@ -593,18 +631,7 @@ export class AtscriptDbReadable<
     }
     const head = path.slice(0, dotIdx);
     const tail = path.slice(dotIdx + 1);
-    if (!this.navFields.has(head)) {
-      return false;
-    }
-    const relation = this._meta.relations.get(head);
-    if (!relation) {
-      return false;
-    }
-    const targetType = relation.targetType();
-    if (!targetType || !this._tableResolver) {
-      return false;
-    }
-    const targetTable = this._tableResolver(targetType);
+    const targetTable = this.relatedTable(head);
     if (!targetTable || typeof targetTable.isValidFieldPath !== "function") {
       return false;
     }
@@ -1181,9 +1208,11 @@ export class AtscriptDbReadable<
    * same identification resolution as {@link findById}. Public so callers can
    * AND-combine the id-filter with a row-level read overlay before issuing
    * `findOne` (avoiding the existence leak that `findById` would cause).
+   * `opts.isFieldVisible` (since 0.1.134) drops unique indexes over hidden
+   * fields — see {@link identificationsVisibleTo}.
    */
-  public resolveIdFilter(id: unknown): FilterExpr | null {
-    return this._resolveIdFilter(id);
+  public resolveIdFilter(id: unknown, opts?: TIdResolveOptions): FilterExpr | null {
+    return this._resolveIdFilter(id, opts);
   }
 
   /**
@@ -1192,9 +1221,10 @@ export class AtscriptDbReadable<
    * When `preferredId` differs from the PK, scalar ids resolve only against
    * the preferred field (deterministic addressing). Otherwise scalars try PK
    * + every single-field unique index; objects try PK + compound unique
-   * indexes.
+   * indexes. With `opts.isFieldVisible`, only the identifications
+   * {@link identificationsVisibleTo} keeps are tried.
    */
-  protected _resolveIdFilter(id: unknown): FilterExpr | null {
+  protected _resolveIdFilter(id: unknown, opts?: TIdResolveOptions): FilterExpr | null {
     const pkFields = this.primaryKeys;
     const preferredFields = this.preferredId;
     const isExplicitPreferred =
@@ -1214,9 +1244,10 @@ export class AtscriptDbReadable<
 
     const orFilters: FilterExpr[] = [];
     const idObj = isScalar ? null : (id as Record<string, unknown>);
+    const identifications = this.identificationsVisibleTo(opts?.isFieldVisible);
 
     // Single-field identifications (PK + every single-field unique index).
-    for (const ident of this.identifications) {
+    for (const ident of identifications) {
       if (ident.fields.length !== 1) continue;
       const filter = tryScalarOrField(ident.fields[0]!);
       if (filter) orFilters.push(filter);
@@ -1226,7 +1257,7 @@ export class AtscriptDbReadable<
     // compound unique indexes are fallback — only attempted when nothing
     // else has matched, so a single-field match wins over a compound one.
     if (idObj) {
-      for (const ident of this.identifications) {
+      for (const ident of identifications) {
         if (ident.fields.length < 2) continue;
         if (ident.source !== "primaryKey" && orFilters.length > 0) break;
         const filter = this._tryCompoundFilter(ident.fields, idObj);

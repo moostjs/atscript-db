@@ -14,11 +14,20 @@ import {
 
 export const boundTableKey = key<unknown>("atscript_db_action_bound_table");
 
+/** What the actions module reads off a controller (duck-typed — see `controller-registry`). */
+interface TActionController {
+  readable?: unknown;
+  table?: unknown;
+  /** `AsDbReadableController.idSource`: identifications narrowed by `hasField` (since 0.1.134). */
+  idSource?: IdValidationSource;
+}
+
+function controllerOf(ctx: EventContext): TActionController | null | undefined {
+  return useControllerContext(ctx).getController() as TActionController | null | undefined;
+}
+
 export function controllerTable(ctx: EventContext): unknown {
-  const ctrl = useControllerContext(ctx).getController() as
-    | { readable?: unknown; table?: unknown }
-    | null
-    | undefined;
+  const ctrl = controllerOf(ctx);
   return ctrl?.readable ?? ctrl?.table ?? null;
 }
 
@@ -49,16 +58,28 @@ export function noTableError(ctx: EventContext): HttpError {
   });
 }
 
+/**
+ * Validates the body's `ids` against the action table's identifications. For
+ * the controller's own table that is its `idSource` (since 0.1.134): a unique
+ * index over a field `hasField` hides neither addresses a row nor appears in
+ * the "must exactly match one of" message. An `opts.table` binding has no
+ * visibility hook.
+ */
 async function resolveValidatedId(
   ctx: EventContext,
   validate: (body: unknown, src: IdValidationSource) => unknown,
 ): Promise<unknown> {
-  const table = getActionTable(ctx);
-  if (!isIdValidationSource(table)) {
+  const fromSlot = ctx.has(boundTableKey) ? ctx.get(boundTableKey) : undefined;
+  let source = fromSlot;
+  if (!source) {
+    const ctrl = controllerOf(ctx);
+    source = ctrl?.idSource ?? ctrl?.readable ?? ctrl?.table ?? null;
+  }
+  if (!isIdValidationSource(source)) {
     throw noTableError(ctx);
   }
   const env = await ctx.get(dbActionBodySlot);
-  validate(env.ids, table);
+  validate(env.ids, source);
   return env.ids;
 }
 
