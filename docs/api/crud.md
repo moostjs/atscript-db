@@ -358,7 +358,7 @@ Database operations throw `DbError` with a `code` property indicating the error 
 | `VERSION_COLUMN_WRITE`  | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
 | `CAS_EXHAUSTED`         | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
 | `CAS_MISMATCH`          | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
-| `BUCKET_NOT_SUPPORTED`  | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit. HTTP 400. Since 0.1.132                                                                                       |
+| `BUCKET_NOT_SUPPORTED`  | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit, or has no calendar buckets at all. HTTP 400. Since 0.1.132                                                    |
 | `BUCKET_TZ_UNAVAILABLE` | The database cannot convert to the calendar bucket's time zone (e.g. MySQL time zone tables not loaded). HTTP 501. Since 0.1.132                                                                       |
 
 Handle errors by checking the code:

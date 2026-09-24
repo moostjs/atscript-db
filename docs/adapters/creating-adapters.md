@@ -476,7 +476,7 @@ Return one row per group, with physical names for grouped fields and each comput
 calendarBucketUnits(): ReadonlySet<BucketUnit> // 'day' | 'week' | 'month' | 'quarter' | 'year'
 ```
 
-The [calendar-bucket](/api/calendar-buckets) units your adapter can group by (since 0.1.132). Return `ALL_BUCKET_UNITS` (exported from `@atscript/db`) when you implement all five. The default is an empty set: the core then rejects bucket queries with `BUCKET_NOT_SUPPORTED` before calling `aggregate()`, and moost-db's `/meta` advertises no `bucketUnits` and no `bucketable` field. moost-db re-reads this method (and `isGeoSearchable()`) when building its capability index, so the answer may change after construction or schema sync.
+The [calendar-bucket](/api/calendar-buckets) units your adapter can group by (since 0.1.132). Return `ALL_BUCKET_UNITS` (exported from `@atscript/db`) when you implement all five. The default is an empty set: the core then rejects every bucket source with `BUCKET_NOT_SUPPORTED` ([errors](/api/calendar-buckets#errors)) before calling `aggregate()`, and moost-db's `/meta` advertises no `bucketUnits` and no `bucketable` field. moost-db re-reads this method (and `isGeoSearchable()`) when building its capability index, so the answer may change after construction or schema sync.
 
 Returning a unit commits `aggregate()` to handle it:
 
@@ -492,7 +492,16 @@ For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlD
 
 `groupKeySql(dialect, controls, key)` renders a `$groupBy` key — the bucket expression for a bucket alias, the quoted column otherwise.
 
-`@atscript/db` also exports the rules the core and moost-db apply, for custom gates and tooling: `resolveCalendarBuckets(controls, fields, aggregate?)` validates and normalizes the bucket entries of a query (throws `INVALID_QUERY`), `isBucketableField(fd)` tells whether a field is a `number.timestamp` leaf that is not encrypted, `isJsonValueField(fd)` whether a descriptor holds a JSON value (JSON storage, or a `json` / `array` design type), and `jsonValueAncestor(path, jsonValueParents)` returns the outermost such ancestor (from a set of their paths) that disqualifies a nested path.
+`@atscript/db` also exports the rules the core and moost-db apply, for custom gates and tooling:
+
+- `resolveCalendarBuckets(controls, fields, aggregate?)` validates and normalizes the bucket entries of a query (throws `INVALID_QUERY`).
+- `bucketSourceVerdict(fd, table, adapter)` (since 0.1.133) decides whether a field can be a bucket source. It applies every rule from [which fields can be bucketed](/api/calendar-buckets#which-fields-can-be-bucketed) except the HTTP-only `@db.writeOnly` veto, which your gate adds itself. The core guard and moost-db's `/meta` and gate all call it. It returns `{ ok: true }` or `{ ok: false, code, reason }`:
+  - `code` is one of `"encrypted"`, `"jsonDescendant"`, `"notTimestamp"`, `"notFilterable"`, `"notDimension"` or `"noBuckets"` — the first rule the field fails.
+  - `reason` is the clause the built-in [messages](/api/calendar-buckets#errors) print after the dash, without a trailing period.
+  - `table` is the table's `TableMetadata` (`table.getMetadata()`), or any `TBucketSourceTable` with `jsonValueParents`, `dimensions` and `measures`.
+  - `adapter` is the adapter, or a readable proxying it (anything with `canFilterField` and `calendarBucketUnits`).
+- `isBucketableField(fd)` is deprecated since 0.1.133 — use `bucketSourceVerdict`.
+- `isJsonValueField(fd)` tells whether a descriptor holds a JSON value (JSON storage, or a `json` / `array` design type), and `jsonValueAncestor(path, jsonValueParents)` returns the outermost such ancestor (from a set of their paths) that disqualifies a nested path.
 
 For multi-row inserts, `buildInsertMany(dialect, table, rows, columns?)` in `@atscript/db-sql-tools` renders one `INSERT … VALUES (…), (…)` over the union of the rows' columns (`insertManyColumns(rows)`), with `DEFAULT` for a column a row lacks — so a heterogeneous batch stores what the same rows inserted one by one would (since 0.1.132; pass `columns` to keep one column list across your own batches).
 

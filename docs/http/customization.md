@@ -19,6 +19,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `transformFilter(filter)`              | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
 | `transformOne(filter)`                 | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
 | `transformProjection(projection)`      | Both           | Before every read                | Restrict visible fields                                           |
+| `hasField(path)`                       | Both           | Every field a request references | Hide fields per request — answered as `Unknown field`             |
 | `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
 | `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
@@ -122,6 +123,26 @@ protected validateInsights(insights: Map<string, unknown>): string | undefined {
 ```
 
 This catches every reference to a restricted field — whether in a filter (`salary>=100000`), a projection (`$select=ssn`), or a sort order (`$sort=salary`).
+
+### hasField {#hasfield}
+
+The field-visibility hook. Return `false` for a path the current request must not see, and the server answers exactly as for a field that does not exist — `Unknown field "x"` (or `Unknown relation "x"` in `$with`) — so the reply reveals nothing about the hidden field.
+
+```typescript
+protected hasField(path: string): boolean {
+  const hidden = useHiddenFields() // e.g. from the caller's read scopes
+  return super.hasField(path) && !hidden.has(path.split('.')[0])
+}
+```
+
+Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way.
+
+It only rejects references. Pair it with:
+
+- [`transformProjection`](#transformprojection) to strip the hidden values from rows (a request without `$select` returns every column);
+- [`applyMetaOverlay`](./permissions) to prune `/meta`, which is cached and does not consult `hasField`.
+
+Native text search and vector search (`$vector` names an index) run inside the database over their indexes, out of this hook's reach — keep hidden fields out of those indexes.
 
 ### computeEmbedding {#computeembedding}
 

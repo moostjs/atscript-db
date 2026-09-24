@@ -73,7 +73,7 @@ The output key is `$as` when given, otherwise `{fn}_{field}` — `sum_amount`, a
 
 When a table marks fields with [`@db.column.dimension` or `@db.column.measure`](/adapters/annotations#aggregation), grouped queries become strict:
 
-- every `$groupBy` entry must be a dimension — for a calendar bucket, its source field — else `Field "x" is not a dimension`;
+- every `$groupBy` field must be a dimension, else `Field "x" is not a dimension` (path `$groupBy`). A [calendar bucket](./calendar-buckets#which-fields-can-be-bucketed)'s source field must be one too; that rule is reported on the field itself ([errors](./calendar-buckets#errors));
 - every aggregate `$field` except `'*'` must be a measure, else `Aggregate field "x" is not a measure`.
 
 A table without either annotation accepts any groupable field. Fields tagged with a currency or unit reference must also be grouped by that reference — see [Quantity dimensions](/views/aggregations#runtime-aggregation-quantity-dimensions).

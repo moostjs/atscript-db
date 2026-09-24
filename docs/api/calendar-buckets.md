@@ -98,7 +98,11 @@ The source must be a field declared as a timestamp: `number.timestamp`, `number.
 
 - be a stored leaf — not inside a `@db.json` column or an array, on any adapter;
 - not be `@db.encrypted` (`ENC_FIELD_AGG`) or, over HTTP, `@db.writeOnly`;
-- be a dimension, when the table declares `@db.column.dimension` / `@db.column.measure` ([strict mode](./aggregation#dimensions-and-measures-strict-mode)).
+- be filterable by the adapter (every bundled adapter can filter a timestamp column);
+- be a dimension, when the table declares `@db.column.dimension` / `@db.column.measure` ([strict mode](./aggregation#dimensions-and-measures-strict-mode));
+- belong to a table whose adapter supports calendar buckets at all.
+
+The programmatic API, the HTTP gate and `/meta` apply these rules through one function, so they always agree and report the same reason — the first rule a field fails, in the order listed (encryption first, then JSON, type, filterability, dimension, adapter). Custom gates can call it too: [`bucketSourceVerdict`](/adapters/creating-adapters#calendar-buckets).
 
 A dotted source (`stats.firstSeenAt`) needs an explicit `$as`. An alias must look like an identifier (`^[A-Za-z_][A-Za-z0-9_]*$`), be unique in `$select`, and not equal a field name of the table.
 
@@ -160,10 +164,15 @@ Don't filter on the label with `$having` to restrict the period — `$having` ru
 | Bucket outside a grouped query, missing from `$groupBy`, duplicate alias, alias equal to a field name, dotted source without `$as` | `INVALID_QUERY`         | 400  |
 | Source is not a timestamp field, sits inside a JSON column, or is not a dimension in strict mode                                   | `INVALID_QUERY`         | 400  |
 | Source is `@db.encrypted`                                                                                                          | `ENC_FIELD_AGG`         | 400  |
+| The adapter supports no calendar buckets at all                                                                                    | `BUCKET_NOT_SUPPORTED`  | 400  |
 | The adapter does not support the unit                                                                                              | `BUCKET_NOT_SUPPORTED`  | 400  |
 | The database cannot resolve the zone (MySQL time zone tables not loaded, or a zone newer than the server's tz data)                | `BUCKET_TZ_UNAVAILABLE` | 501  |
 
-Programmatic calls throw `DbError` with these codes. Over HTTP the query rules report `path: "$select"` or `"$groupBy"`, and the field rules report the field — for example `Bucketing field "points" is not permitted — not a timestamp field (declare it number.timestamp).` The other endings are `— not a dimension.` and `— adapter has no calendar buckets.`
+Programmatic calls throw `DbError` with these codes. The query rules and an unsupported unit report `path: "$select"` or `"$groupBy"` — for example `Calendar bucket "week" is not supported by this adapter`.
+
+The field rules ([which fields can be bucketed](#which-fields-can-be-bucketed)) report the field as `path` and give the same reason in both layers: programmatically `Cannot bucket "points" — not a timestamp field (declare it number.timestamp)`, over HTTP `Bucketing field "points" is not permitted — not a timestamp field (declare it number.timestamp).` The other reasons are `inside JSON-stored column "meta"`, `adapter cannot filter on this storage type`, `not a dimension` and `adapter has no calendar buckets` (the last one with `BUCKET_NOT_SUPPORTED`). Over HTTP an encrypted source gives the reason `field is @db.encrypted (ciphertext cannot be compared or ordered)`, and a `@db.writeOnly` source is refused before any of these with `Field "x" is @db.writeOnly and cannot be aggregated`.
+
+Changed in 0.1.133: programmatically, a strict-mode bucket source that is not a dimension used to throw `Field "x" is not a dimension` on path `$groupBy`, and an adapter without calendar buckets threw `Calendar bucket "day" is not supported by this adapter` on path `$select`. Over HTTP, a column that is neither a timestamp nor filterable by the adapter (a JSON or array column on SQL) used to report `adapter cannot filter on this storage type`; it now reports `not a timestamp field`.
 
 `BUCKET_TZ_UNAVAILABLE` is a server configuration problem, not a bad request: the zone name was valid, but the database could not convert to it. No adapter falls back to UTC or returns `null` labels silently.
 
