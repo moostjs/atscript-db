@@ -103,6 +103,7 @@ Array or scalar root → HTTP 400 `ValidatorError` (envelope is strict; this is 
 
 - the **primary key** (`primaryKeys`), or
 - any declared `@db.index.unique` group (single-field or compound).
+- …minus unique groups over a field the controller's `hasField` hides (since 0.1.134): such a group is not an identification and is not listed in the 400 message. PK / `preferredId` always count. Not applied to an `opts.table`-bound action table.
 
 The validator is **strict** — unknown fields are rejected with HTTP 400. Precedence: PK first, then unique-index groups in declaration order. The same `@DbActionIDs()` array MAY mix shapes per-element (one element by PK, another by `email`, etc.).
 

@@ -98,6 +98,8 @@ protected transformProjection(projection?: UniqueryControls['$select']) {
 
 When `projection` is `undefined` (no `$select` from the client), the hook supplies a default exclusion list. When the client does send `$select`, you can merge or override as needed. This hook may also return a `Promise` for async decisions (e.g. per-user field visibility).
 
+`projection` arrives in the wire shape: an inclusion is an **array** (`$select=a,b` → `['a', 'b']`), an exclusion an **object** (`$select=-a` → `{ a: 0 }`). When you intersect it with a role's allowed fields, normalize the array first (`{ a: 1, b: 1 }`). A helper that expects the object form reads an array as an exclusion keyed `"0"`, `"1"`, …, and the result is no longer narrowed to what the client asked for.
+
 ### validateInsights {#validateinsights}
 
 Runs after the URL query string is parsed. The `insights` map contains every field referenced in the query — whether in a filter, projection, or sort order. Return a string to reject with HTTP `400`, or `undefined` to allow.
@@ -136,6 +138,18 @@ protected hasField(path: string): boolean {
 ```
 
 Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way.
+
+Since 0.1.134 it also governs **row identification**: a unique index over a hidden field is not an identification, so it cannot be used to probe whether a row with a given value exists. It behaves as if the index did not exist:
+
+| Request                                             | With the unique key hidden                                                                   |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET /one/<value>`                                  | Not tried as a key → `404`, same as a value that matches nothing                             |
+| `GET /one?<key>=<value>`                            | `400 Query params do not match any primary key or unique index`, same as `?nope=x`           |
+| `DELETE /<value>`, `DELETE /?<key>=<value>`         | Same as `/one` — nothing is deleted                                                          |
+| `PATCH /` without the PK, keyed by the hidden field | The payload identifies no row (`Missing primary key field …`)                                |
+| Action `ids` (`@DbActionID` / `@DbActionIDs`)       | Rejected like an unknown shape; the "must exactly match one of" list names visible keys only |
+
+The primary key and `preferredId` are always addressable — they are returned in every row anyway. Also since 0.1.134, the `"a" is a nested object — filter or sort on one of its leaves (…)` hint lists only visible leaves. When every leaf is hidden, the parent answers `Unknown field "a"`.
 
 It only rejects references. Pair it with:
 

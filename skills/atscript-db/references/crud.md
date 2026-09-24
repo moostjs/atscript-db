@@ -112,6 +112,8 @@ await users.deleteMany({ status: "archived" }); // FilterExpr
 
 `deleteOne` triggers referential actions (cascade/setNull/restrict) via the integrity strategy.
 
+Per-request hidden unique keys (since 0.1.134): `deleteOne(id, { isFieldVisible })`, `updateOne/bulkUpdate/replaceOne/bulkReplace(rows, { isFieldVisible })`, `resolveIdFilter(id, { isFieldVisible })`, `identificationsVisibleTo(isFieldVisible)` — a unique index over a field failing the predicate is ignored as if it did not exist (no existence oracle). PK / `preferredId` / `@meta.id` always count as visible. Writes apply it only to the top-level PK-less unique-index fallback, never to nested relation writes. moost-db passes it from `hasField` automatically.
+
 ## Reads
 
 ```ts

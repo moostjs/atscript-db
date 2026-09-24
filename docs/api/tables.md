@@ -180,6 +180,21 @@ await posts.findById({ id: 42 }); // PK still works
 
 With an explicit preferred identifier, scalar ids are routed **only** to the preferred field (deterministic) — they no longer fall back to other single-field unique indexes. Pass the argument-less form when the table has a single unique index group; the name is required only when there are multiple.
 
+### Hiding a unique key per request
+
+When a caller must not see a unique-indexed field (a per-request read scope), don't let that field address rows either — `findById`-style lookups would answer "a row with this value exists". Pass the visibility predicate and the id resolves as if that unique index did not exist (since 0.1.134):
+
+```typescript
+const visible = (path: string) => path !== "email";
+
+table.identificationsVisibleTo(visible); // PK + visible unique indexes only
+table.resolveIdFilter("a@x.test", { isFieldVisible: visible }); // null — email is not an id
+await table.deleteOne("a@x.test", { isFieldVisible: visible }); // { deletedCount: 0 }
+await table.updateOne({ email: "a@x.test", name: "X" }, { isFieldVisible: visible }); // throws: missing PK
+```
+
+Primary-key, `preferredId` and `@meta.id` fields always count as visible. `updateOne` / `replaceOne` apply the predicate only when the payload lacks its primary key (the unique-index fallback). The moost-db controllers pass it automatically from [`hasField`](/http/customization#hasfield).
+
 ::: warning Same-interface constraint
 The `@db.index.unique` group MUST be declared on a property of **this** interface, not inherited. `asc` walks the local property list only; if the only matching unique index lives on an `extends`-parent you get `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.` Declare both annotations on the same interface (the one carrying `@db.table`), or keep the PK as the preferred id for action addressing.
 :::

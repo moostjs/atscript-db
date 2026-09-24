@@ -369,6 +369,17 @@ const projects = await projectTable.findMany({
 
 This loads all projects, each with its `owner` record, and each project's `tasks` loaded with their `assignee` and `tags`. The loader runs relations in parallel within each `$with` level. The execution strategy is adapter-specific: SQL adapters issue a separate batched query per relation (no JOINs); MongoDB executes a `$lookup` aggregation pipeline per relation. See [Loading Relations § How It Works Internally](./loading#how-it-works-internally) for the full picture.
 
+### Resolving a Related Table
+
+`relatedTable(navField)` (since 0.1.134) returns the table a navigation property points to, taken from the same `DbSpace` — handy for reading its `primaryKeys` / `preferredId` or validating a path on it:
+
+```typescript
+const users = tasks.relatedTable("assignee");
+users?.primaryKeys; // ['id']
+```
+
+It answers `undefined` when the name is not a navigation property of this table (plain fields and dotted paths included) or the table was built without a `DbSpace`.
+
 ## Next Steps
 
 - [Loading Relations](./loading) — `$with` controls, nested loading, per-relation controls

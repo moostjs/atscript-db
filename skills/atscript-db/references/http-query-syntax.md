@@ -173,7 +173,7 @@ HTTP/1.1 400 Bad Request
 
 ## Read-response baseline (preferred-id fields always present)
 
-The server unions the table's `preferredId` field set into `$select` on every row-returning read endpoint, regardless of the URL `$select` value. So `?$select=name` on a `slug`-keyed table still returns rows containing both `slug` AND `name`. Pure exclusion maps (`?$select={id:0}`) are rewritten to inclusion before the readable call so preferred-id fields cannot be excluded; mixed inclusion/exclusion maps (`?$select={name:1,id:0}`) are rejected before read. Aggregate (`$groupBy`) and count (`$count`) responses are NOT widened. See [moost-db.md § Read-response baseline](moost-db.md#read-response-baseline).
+The server unions the table's `preferredId` field set into `$select` on every row-returning read endpoint, regardless of the URL `$select` value. So `?$select=name` on a `slug`-keyed table still returns rows containing both `slug` AND `name`. Pure exclusion maps (`?$select={id:0}`) are rewritten to inclusion before the readable call so preferred-id fields cannot be excluded (since 0.1.134 the rewrite drops an excluded object parent's whole subtree, and never keeps a parent whole when one of its leaves is excluded — before, `-address` still returned `address.*`); mixed inclusion/exclusion maps (`?$select={name:1,id:0}`) are rejected before read. Aggregate (`$groupBy`) and count (`$count`) responses are NOT widened. See [moost-db.md § Read-response baseline](moost-db.md#read-response-baseline).
 
 ## Encoding
 

@@ -126,6 +126,8 @@ The `ids` field is **always an object** (single) or **array of objects** (multi)
 - the **primary key** (`primaryKeys`), or
 - any declared `@db.index.unique` group (single-field or compound).
 
+A unique group over a field the controller's [`hasField`](./customization#hasfield) hides is not an identification (since 0.1.134). It is rejected like an unknown shape, and the error does not list it.
+
 The validator is **strict** — unknown fields are rejected with HTTP 400. Precedence: PK first, then unique-index groups in declaration order. The same `@DbActionIDs()` array MAY mix shapes per-element (one element by PK, another by `email`, etc.).
 
 ```json
