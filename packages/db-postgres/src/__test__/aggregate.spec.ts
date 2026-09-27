@@ -41,6 +41,29 @@ describe("PostgresAdapter aggregate", () => {
     expect(call.params).toEqual([]);
   });
 
+  // countDistinct (since 0.1.136): COUNT(DISTINCT col); HAVING inlines the
+  // expression, ORDER BY keeps the alias. A strict table may count a dimension.
+  it("renders countDistinct as COUNT(DISTINCT col) in SELECT, HAVING and ORDER BY", async () => {
+    const driver = createMockDriver({ allResult: [{ status: "active", currencies: 2 }] });
+    const table = new AtscriptDbTable(AggOrders, new PostgresAdapter(driver));
+
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["status"],
+        $select: ["status", { $fn: "countDistinct", $field: "currency", $as: "currencies" }] as any,
+        $having: { currencies: { $gt: 1 } } as any,
+        $sort: { currencies: -1 },
+      },
+    });
+
+    const call = driver.calls[0];
+    expect(call.sql).toBe(
+      'SELECT "status", COUNT(DISTINCT "currency") AS "currencies" FROM "orders" WHERE 1=1 GROUP BY "status" HAVING COUNT(DISTINCT "currency") > $1 ORDER BY "currencies" DESC',
+    );
+    expect(call.params).toEqual([1]);
+  });
+
   // PostgreSQL rejects `HAVING "total" > $1` — a SELECT alias is not visible
   // in HAVING (`column "total" does not exist`). The builder renders the
   // aggregate expression instead, which every dialect accepts.

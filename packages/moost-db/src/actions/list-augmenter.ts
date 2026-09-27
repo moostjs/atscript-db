@@ -62,6 +62,11 @@ function computeStripFields(
   return strip;
 }
 
+/**
+ * Sets `$actions` on every row and strips the columns fetched only for an
+ * action's `requiredFields` — IN PLACE; returns the same array, typed as
+ * augmented.
+ */
 export function augmentRowsWithActions<
   TRow extends Record<string, unknown> = Record<string, unknown>,
 >(args: AugmentArgs<TRow>): AugmentedRow<TRow>[] {

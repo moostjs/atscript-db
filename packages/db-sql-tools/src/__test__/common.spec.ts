@@ -166,8 +166,12 @@ describe("queryNodeToSql", () => {
     expect(queryNodeToSql(node, resolveFieldRef)).toBe("NOT ([t].[active] = 0)");
   });
 
-  it("uses default = for unknown operators", () => {
+  // Since 0.1.136 an operator the renderer doesn't know fails loudly instead
+  // of silently rendering `=`.
+  it("throws on unknown operators", () => {
     const node = { left: { table: "t", field: "x" }, op: "$unknown", right: 42 };
-    expect(queryNodeToSql(node, resolveFieldRef)).toBe("[t].[x] = 42");
+    expect(() => queryNodeToSql(node, resolveFieldRef)).toThrow(
+      'Operator "$unknown" is not supported in view predicates',
+    );
   });
 });

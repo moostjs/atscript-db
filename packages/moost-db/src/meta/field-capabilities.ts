@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type {
+  AggregateFn,
   AtscriptDbReadable,
   BucketUnit,
   TBucketSourceTable,
@@ -11,6 +12,7 @@ import type {
 import {
   acceptedOperatorsHint,
   ADAPTER_FILTER_REASON,
+  ALL_AGGREGATE_FNS,
   bucketSourceVerdict,
   canFilterLeaf,
   classifyQueryPath,
@@ -83,6 +85,7 @@ export type TCapabilityReadable = Pick<
   | "canSortField"
   | "isGeoSearchable"
   | "calendarBucketUnits"
+  | "aggregateFns"
   | "dimensions"
   | "measures"
 >;
@@ -168,19 +171,23 @@ export class FieldCapabilityIndex implements TQueryPathSource {
   readonly physicalNames: ReadonlySet<string>;
   /** Calendar-bucket units the adapter groups by, in `BUCKET_UNITS` order (`/meta.bucketUnits`). */
   readonly bucketUnits: readonly BucketUnit[];
+  /** Aggregate functions the adapter renders, in canonical `ALL_AGGREGATE_FNS` order (`/meta.aggregateFns`). */
+  readonly aggregateFns: readonly AggregateFn[];
   /** The adapter-level capabilities this index was built against — see {@link adapterSignature}. */
   readonly signature: string;
 
   /**
    * The adapter-level capabilities that can change after construction (geo
-   * support, calendar-bucket units): an index whose {@link signature}
-   * differs from this is stale. Any new adapter-level input the index reads
-   * must be added here.
+   * support, calendar-bucket units, aggregate functions): an index whose
+   * {@link signature} differs from this is stale. Any new adapter-level input
+   * the index reads must be added here.
    */
   static adapterSignature(
-    source: Pick<TCapabilityReadable, "isGeoSearchable" | "calendarBucketUnits">,
+    source: Pick<TCapabilityReadable, "isGeoSearchable" | "calendarBucketUnits" | "aggregateFns">,
   ): string {
-    return `${source.isGeoSearchable()}|${[...source.calendarBucketUnits()].join(",")}`;
+    return `${source.isGeoSearchable()}|${[...source.calendarBucketUnits()].join(",")}|${[
+      ...source.aggregateFns(),
+    ].join(",")}`;
   }
 
   private readonly _entries = new Map<string, TEntry>();
@@ -207,6 +214,8 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     this.signature = FieldCapabilityIndex.adapterSignature(source);
     const units = source.calendarBucketUnits();
     this.bucketUnits = BUCKET_UNITS.filter((unit) => units.has(unit));
+    const fns = source.aggregateFns();
+    this.aggregateFns = [...ALL_AGGREGATE_FNS].filter((fn) => fns.has(fn));
     const physicalNames = new Set<string>();
     const jsonValueParents = new Set<string>();
     for (const fd of source.fieldDescriptors) {

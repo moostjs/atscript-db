@@ -21,3 +21,16 @@ export interface AggEvent {
         views: number
     }
 }
+
+// A measure renamed with @db.column — the default aggregate alias must stay
+// logical (`sum_amount`, not `sum_amount_cents`).
+@db.table 'agg_payments'
+export interface AggPayment {
+    @meta.id
+    id: number
+
+    region: string
+
+    @db.column 'amount_cents'
+    amount?: number
+}

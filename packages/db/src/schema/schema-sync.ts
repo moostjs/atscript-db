@@ -6,6 +6,7 @@ import type { BaseDbAdapter } from "../base-adapter";
 import type { DbSpace } from "../table/db-space";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
+import type { TDbAggregateFn } from "../query/aggregate-fns";
 import type {
   TColumnDiff,
   TDbFieldMeta,
@@ -1078,14 +1079,25 @@ export class SchemaSync {
       }
     }
 
-    // A physical table sits where a managed view is declared
     for (const view of d.views) {
+      // A physical table sits where a managed view is declared
       if (d.viewObjectKinds.get(view.tableName) === "table") {
         addRefusal(
           refusals,
           view.tableName,
           `A physical table "${view.tableName}" exists where managed view "${view.tableName}" is declared — drop or rename it`,
         );
+      }
+      // An aggregate the adapter does not render (`aggregateFns()`)
+      const fns = view.dbAdapter.aggregateFns();
+      for (const col of view.getViewColumnMappings()) {
+        if (col.aggFn && !fns.has(col.aggFn as TDbAggregateFn)) {
+          addRefusal(
+            refusals,
+            view.tableName,
+            `View "${view.tableName}" field "${col.viewPath}": aggregate "${col.aggFn}" is not supported by this adapter (aggregateFns())`,
+          );
+        }
       }
     }
 

@@ -27,6 +27,9 @@ export type DbErrorCode =
   | "BUCKET_NOT_SUPPORTED"
   /** The engine cannot resolve the bucket's time zone — a store-configuration condition (moost-db: 501). */
   | "BUCKET_TZ_UNAVAILABLE"
+  // ── Aggregate functions ($select `{ $fn, $field }`) ──
+  /** A known aggregate function the adapter's `aggregateFns()` lacks (moost-db: 400). @since 0.1.136 */
+  | "AGG_FN_NOT_SUPPORTED"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
   | "TX_WAIT_TIMEOUT";
 

@@ -1,4 +1,4 @@
-import type { Collection, CreateIndexesOptions, Db, Document } from "mongodb";
+import type { Collection, CreateIndexesOptions, Db } from "mongodb";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   isAtscriptDbView,
@@ -9,13 +9,9 @@ import {
   type TDbFieldMeta,
   type TDbObjectKind,
   type TExistingTableOption,
-  type TViewColumnMapping,
-  type AtscriptQueryNode,
-  type AtscriptQueryFieldRef,
 } from "@atscript/db";
 import {
   INDEX_PREFIX,
-  JOINED_PREFIX,
   isPlainIndex,
   type TMongoIndex,
   type TPlainIndex,
@@ -23,6 +19,7 @@ import {
   type TSearchFieldMapping,
 } from "./mongo-types";
 import { hasAncestorIn, isArrayPath, joinPath } from "./path-utils";
+import { buildViewPipeline } from "./mongo-view-pipeline";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -174,7 +171,7 @@ export async function getObjectKindImpl(
   return type === "view" ? "view" : "table";
 }
 
-/** Creates a MongoDB view from the AtscriptDbView's view plan. */
+/** Creates a MongoDB view from the AtscriptDbView's view plan (pipeline: {@link buildViewPipeline}). */
 async function ensureView(host: TMongoSchemaSyncHost, view: AtscriptDbView): Promise<void> {
   const exists = await host.collectionExists();
   if (exists) {
@@ -182,233 +179,13 @@ async function ensureView(host: TMongoSchemaSyncHost, view: AtscriptDbView): Pro
   }
 
   const plan = view.viewPlan;
-  const columns = view.getViewColumnMappings();
-  const pipeline: Document[] = [];
-
-  // $lookup + $unwind for each join
-  for (const join of plan.joins) {
-    const { localField, foreignField } = resolveJoinFields(
-      join.condition,
-      plan.entryTable,
-      join.targetTable,
-    );
-    pipeline.push({
-      $lookup: {
-        from: join.targetTable,
-        localField,
-        foreignField,
-        as: `${JOINED_PREFIX}${join.targetTable}`,
-      },
-    });
-    // LEFT JOIN semantics: unwind with preserveNullAndEmptyArrays
-    pipeline.push({
-      $unwind: {
-        path: `$__joined_${join.targetTable}`,
-        preserveNullAndEmptyArrays: true,
-      },
-    });
-  }
-
-  // $match for view filter
-  if (plan.filter) {
-    const matchExpr = queryNodeToMatch(plan.filter, plan.entryTable);
-    pipeline.push({ $match: matchExpr });
-  }
-
-  // Check if any column has aggregate functions
-  const hasAggregates = columns.some((c) => c.aggFn);
-
-  /** Resolves a column to its MongoDB source field path. */
-  const colSourceField = (col: TViewColumnMapping) =>
-    col.sourceTable === plan.entryTable
-      ? `$${col.sourceColumn}`
-      : `$${JOINED_PREFIX}${col.sourceTable}.${col.sourceColumn}`;
-
-  if (hasAggregates) {
-    // $group stage — dimension columns into _id, aggregates as accumulators
-    const group: Record<string, unknown> = { _id: {} };
-    const project: Record<string, unknown> = { _id: 0 };
-
-    for (const col of columns) {
-      if (col.aggFn) {
-        if (col.aggFn === "count" && col.aggField === "*") {
-          group[col.viewColumn] = { $sum: 1 };
-        } else {
-          group[col.viewColumn] = { [`$${col.aggFn}`]: colSourceField(col) };
-        }
-        project[col.viewColumn] = `$${col.viewColumn}`;
-      } else {
-        // Dimension column — add to _id
-        (group._id as Record<string, unknown>)[col.viewColumn] = colSourceField(col);
-        project[col.viewColumn] = `$_id.${col.viewColumn}`;
-      }
-    }
-
-    pipeline.push({ $group: group });
-
-    // HAVING → $match (post-group filter)
-    // After $group, aggregate fields are top-level and dimension fields are under _id
-    if (plan.having) {
-      const havingMatch = queryNodeToHaving(plan.having, columns);
-      pipeline.push({ $match: havingMatch });
-    }
-
-    pipeline.push({ $project: project });
-  } else {
-    // Non-aggregate view — flat $project
-    const project: Record<string, unknown> = { _id: 0 };
-    for (const col of columns) {
-      project[col.viewColumn] = colSourceField(col);
-    }
-    pipeline.push({ $project: project });
-  }
+  const pipeline = buildViewPipeline(view);
 
   host._log("createView", host._table.tableName, plan.entryTable, pipeline);
   await host.db.createCollection(host._table.tableName, {
     viewOn: plan.entryTable,
     pipeline,
   });
-}
-
-// ── View helpers (pure) ──────────────────────────────────────────────────────
-
-/** Extracts localField/foreignField from a join condition. */
-function resolveJoinFields(
-  condition: AtscriptQueryNode,
-  entryTable: string,
-  joinTable: string,
-): { localField: string; foreignField: string } {
-  // Walk through $and if present (single-condition $and wrapper)
-  const comp =
-    "$and" in condition ? (condition as { $and: AtscriptQueryNode[] }).$and[0] : condition;
-  const c = comp as { left: AtscriptQueryFieldRef; op: string; right: AtscriptQueryFieldRef };
-
-  const leftTable = c.left.type
-    ? (c.left.type()?.metadata?.get("db.table") as string) || ""
-    : entryTable;
-  // Determine which side is the entry table (local) and which is the join table (foreign)
-  if (leftTable === joinTable) {
-    return { localField: (c.right as AtscriptQueryFieldRef).field, foreignField: c.left.field };
-  }
-  return { localField: c.left.field, foreignField: (c.right as AtscriptQueryFieldRef).field };
-}
-
-/** Translates an AtscriptQueryNode to a MongoDB $match expression. */
-function queryNodeToMatch(node: AtscriptQueryNode, entryTable: string): Document {
-  if ("$and" in node) {
-    const items = (node as { $and: AtscriptQueryNode[] }).$and;
-    const result: Document[] = [];
-    for (const item of items) {
-      result.push(queryNodeToMatch(item, entryTable));
-    }
-    return { $and: result };
-  }
-  if ("$or" in node) {
-    const items = (node as { $or: AtscriptQueryNode[] }).$or;
-    const result: Document[] = [];
-    for (const item of items) {
-      result.push(queryNodeToMatch(item, entryTable));
-    }
-    return { $or: result };
-  }
-  if ("$not" in node) {
-    return { $not: queryNodeToMatch((node as { $not: AtscriptQueryNode }).$not, entryTable) };
-  }
-
-  const comp = node as { left: AtscriptQueryFieldRef; op: string; right?: unknown };
-  const fieldPath = resolveViewFieldPath(comp.left, entryTable);
-
-  // Field-to-field comparison
-  if (comp.right && typeof comp.right === "object" && "field" in (comp.right as object)) {
-    const rightPath = resolveViewFieldPath(comp.right as AtscriptQueryFieldRef, entryTable);
-    return { $expr: { [comp.op]: [`$${fieldPath}`, `$${rightPath}`] } };
-  }
-
-  // Value comparison
-  if (comp.op === "$eq") {
-    return { [fieldPath]: comp.right };
-  }
-  if (comp.op === "$ne") {
-    return { [fieldPath]: { $ne: comp.right } };
-  }
-  return { [fieldPath]: { [comp.op]: comp.right } };
-}
-
-/** Resolves a field ref to a MongoDB dot path for view pipeline expressions. */
-function resolveViewFieldPath(ref: AtscriptQueryFieldRef, entryTable: string): string {
-  if (!ref.type) {
-    return ref.field;
-  }
-  const table = (ref.type()?.metadata?.get("db.table") as string) || "";
-  if (table === entryTable) {
-    return ref.field;
-  }
-  return `${JOINED_PREFIX}${table}.${ref.field}`;
-}
-
-/**
- * Translates an AtscriptQueryNode to a MongoDB $match for use after $group (HAVING).
- * After $group, aggregate fields are top-level and dimension fields are under _id.
- */
-function queryNodeToHaving(node: AtscriptQueryNode, columns: TViewColumnMapping[]): Document {
-  const colMap = new Map(columns.map((c) => [c.viewColumn, c]));
-
-  const resolveHavingField = (ref: AtscriptQueryFieldRef): string => {
-    if (!ref.type) {
-      const col = colMap.get(ref.field);
-      // Aggregate fields are top-level after $group, dimension fields are under _id
-      if (col?.aggFn) {
-        return ref.field;
-      }
-      if (col) {
-        return `_id.${ref.field}`;
-      }
-    }
-    return ref.field;
-  };
-
-  return queryNodeToHavingInner(node, resolveHavingField);
-}
-
-function queryNodeToHavingInner(
-  node: AtscriptQueryNode,
-  resolveField: (ref: AtscriptQueryFieldRef) => string,
-): Document {
-  if ("$and" in node) {
-    return {
-      $and: (node as { $and: AtscriptQueryNode[] }).$and.map((n) =>
-        queryNodeToHavingInner(n, resolveField),
-      ),
-    };
-  }
-  if ("$or" in node) {
-    return {
-      $or: (node as { $or: AtscriptQueryNode[] }).$or.map((n) =>
-        queryNodeToHavingInner(n, resolveField),
-      ),
-    };
-  }
-  if ("$not" in node) {
-    return {
-      $not: queryNodeToHavingInner((node as { $not: AtscriptQueryNode }).$not, resolveField),
-    };
-  }
-
-  const comp = node as { left: AtscriptQueryFieldRef; op: string; right?: unknown };
-  const fieldPath = resolveField(comp.left);
-
-  if (comp.right && typeof comp.right === "object" && "field" in (comp.right as object)) {
-    const rightPath = resolveField(comp.right as AtscriptQueryFieldRef);
-    return { $expr: { [comp.op]: [`$${fieldPath}`, `$${rightPath}`] } };
-  }
-
-  if (comp.op === "$eq") {
-    return { [fieldPath]: comp.right };
-  }
-  if (comp.op === "$ne") {
-    return { [fieldPath]: { $ne: comp.right } };
-  }
-  return { [fieldPath]: { [comp.op]: comp.right } };
 }
 
 // ── Drop / rename / recreate ─────────────────────────────────────────────────

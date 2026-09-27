@@ -8,6 +8,7 @@ import {
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TGenericLogger } from "../logger";
 import { isJsonValueField } from "../query/buckets";
+import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import type {
   TDbCollation,
@@ -48,8 +49,46 @@ export function findAncestorInSet(path: string, set: ReadonlySet<string>): strin
   return undefined;
 }
 
+/**
+ * Logical field path → its physical path in document storage (nested
+ * objects kept inline). `@db.column` renames (`columnMap`) apply to the
+ * annotated key, and a document renames the TOP-LEVEL key only — nested keys
+ * are stored as-is — so a dotted path under a renamed top-level object
+ * renames its first segment: `profile.bio` under `@db.column 'prof'` →
+ * `prof.bio`.
+ */
+export function documentPath(columnMap: ReadonlyMap<string, string>, path: string): string {
+  const direct = columnMap.get(path);
+  if (direct !== undefined) return direct;
+  const dot = path.indexOf(".");
+  if (dot === -1) return path;
+  const top = columnMap.get(path.slice(0, dot));
+  return top === undefined ? path : top + path.slice(dot);
+}
+
+/** The `__`-separated parent prefix of a dotted path (`a.b.c` → `a__b__`), `""` for a top-level path. */
+export function flattenedPrefix(path: string): string {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot >= 0 ? `${path.slice(0, lastDot).replace(/\./g, "__")}__` : "";
+}
+
+/**
+ * Relational column of a column-stored path: a top-level field is its
+ * `@db.column` (`override`) or its name; a leaf of a `flattened` object is
+ * its parent segments joined with `__` plus its `@db.column` or own segment
+ * (`address.zip` with `@db.column 'zip_code'` → `address__zip_code`).
+ */
+export function relationalColumnName(
+  path: string,
+  override: string | undefined,
+  flattened: boolean,
+): string {
+  if (override) return flattened ? flattenedPrefix(path) + override : override;
+  return flattened ? path.replace(/\./g, "__") : path;
+}
+
 /** Returns true if `metadata` indicates a navigation relation field. */
-function isNavRelation(metadata: TMetadataMap<AtscriptMetadata>): boolean {
+export function isNavRelation(metadata: TMetadataMap<AtscriptMetadata>): boolean {
   return metadata.has("db.rel.to") || metadata.has("db.rel.from") || metadata.has("db.rel.via");
 }
 
@@ -199,12 +238,7 @@ export class TableMetadata {
    * first segment: `profile.bio` under `@db.column 'prof'` → `prof.bio`.
    */
   documentPath(path: string): string {
-    const direct = this.columnMap.get(path);
-    if (direct !== undefined) return direct;
-    const dot = path.indexOf(".");
-    if (dot === -1) return path;
-    const top = this.columnMap.get(path.slice(0, dot));
-    return top === undefined ? path : top + path.slice(dot);
+    return documentPath(this.columnMap, path);
   }
 
   // ── Build pipeline ───────────────────────────────────────────────────────
@@ -458,8 +492,7 @@ export class TableMetadata {
       const raw = metadata.get("db.rel.FK");
       const alias = (raw === true ? undefined : raw) as string | undefined;
       if (fieldType.ref) {
-        const refTarget = fieldType.ref.type();
-        const targetTable = (refTarget?.metadata?.get("db.table") as string) || refTarget?.id || "";
+        const targetTable = tableNameOf(fieldType.ref.type());
         const targetField = fieldType.ref.field;
         const key = alias || `__auto_${fieldName}`;
         const existing = this.foreignKeys.get(key);
@@ -766,14 +799,7 @@ export class TableMetadata {
       }
 
       const isFlattened = findAncestorInSet(path, this.flattenedParents) !== undefined;
-      const columnOverride = this.columnMap.get(path);
-      let physicalName: string;
-      if (columnOverride) {
-        // For flattened fields, prepend parent prefix: 'address.zip' with override 'zip_code' → 'address__zip_code'
-        physicalName = isFlattened ? this._flattenedPrefix(path) + columnOverride : columnOverride;
-      } else {
-        physicalName = isFlattened ? path.replace(/\./g, "__") : path;
-      }
+      const physicalName = relationalColumnName(path, this.columnMap.get(path), isFlattened);
 
       this.pathToPhysical.set(path, physicalName);
       this.physicalToPath.set(physicalName, path);
@@ -807,12 +833,6 @@ export class TableMetadata {
       this.columnMap.size > 0 && this.flattenedParents.size === 0 && this.jsonFields.size === 0;
     this.requiresMappings =
       this.flattenedParents.size > 0 || this.jsonFields.size > 0 || this.onlyColumnRenames;
-  }
-
-  /** Returns the `__`-separated parent prefix for a dot-separated path, or empty string for top-level paths. */
-  private _flattenedPrefix(path: string): string {
-    const lastDot = path.lastIndexOf(".");
-    return lastDot >= 0 ? `${path.slice(0, lastDot).replace(/\./g, "__")}__` : "";
   }
 
   // ── Query-guard helpers ──────────────────────────────────────────────────
@@ -962,7 +982,7 @@ export class TableMetadata {
       const fromLocal = this._columnFromMap.get(path);
       let renamedFrom: string | undefined;
       if (fromLocal) {
-        renamedFrom = isFlattened ? this._flattenedPrefix(path) + fromLocal : fromLocal;
+        renamedFrom = isFlattened ? flattenedPrefix(path) + fromLocal : fromLocal;
       }
 
       const currencyCode = type.metadata.get("db.amount.currency") as string | undefined;

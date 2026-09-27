@@ -1,4 +1,4 @@
-import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+import { isAnnotatedType, type TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { TDbActionInfo, TDbActionLevel } from "@atscript/db";
 import type { Moost, TConsoleBase } from "moost";
 
@@ -36,7 +36,8 @@ const rowLevelActionsCache = new WeakMap<Function, TDbActionEnvelope[]>();
 /**
  * Per-controller registry of form names → compiled `.as` classes, populated
  * during {@link discoverActions} when a method param carries
- * `atscript_db_action_input_form`. Backs `GET /meta/form/:name`.
+ * `atscript_db_action_input_form` or a class-level entry passes a type as
+ * `inputForm`. Backs `GET /meta/form/:name`.
  *
  * Same name + same type ref across multiple actions is fine (forms can be
  * reused). Same name + *different* type refs is an ambiguity — discovery
@@ -296,7 +297,7 @@ function collectClassActions(
       );
       continue;
     }
-    const built = buildClassEntry(name, entry, logger);
+    const built = buildClassEntry(ctor, name, entry, logger);
     if (built) {
       seen.add(name);
       out.push({ info: built, raw: entry });
@@ -305,6 +306,7 @@ function collectClassActions(
 }
 
 function buildClassEntry(
+  ctor: Function,
   name: string,
   entry: TDbActionsEntry,
   logger: TConsoleBase,
@@ -361,6 +363,8 @@ function buildClassEntry(
     );
     return null;
   }
+  const form = resolveClassInputForm(name, entry, processor, logger);
+  if (form === null) return null;
   const info: TDbActionInfo = {
     name,
     label: entry.label,
@@ -368,6 +372,13 @@ function buildClassEntry(
     processor,
     value,
   };
+  if (form) {
+    if (form.type && !registerFormType(ctor, { type: form.type, name: form.name }, name, logger)) {
+      return null;
+    }
+    info.inputForm = form.name;
+    if (form.url !== undefined) info.formUrl = form.url;
+  }
   // Class-level dict entries forward `disabled.toString()` EXACTLY as for
   // method-decorator actions. The server does NOT register a gate interceptor
   // here — class-level entries point at endpoints (possibly in other
@@ -376,6 +387,38 @@ function buildClassEntry(
   // `@DbAction(name, { disabled })` on the actual handler).
   emitInfo(info, entry);
   return info;
+}
+
+/**
+ * Resolves a class-level entry's `inputForm`. Returns `undefined` when the
+ * entry declares none, `null` when it must be dropped (already warned — the
+ * runtime check for JS callers and `processor: "navigate"`), else the form to
+ * emit: `type` when this controller serves it (`/meta/form/:name`), `url`
+ * when it lives elsewhere.
+ */
+function resolveClassInputForm(
+  name: string,
+  entry: TDbActionsEntry,
+  processor: TDbActionInfo["processor"],
+  logger: TConsoleBase,
+): { name: string; type?: TAtscriptAnnotatedType; url?: string } | null | undefined {
+  const inputForm = (entry as { inputForm?: unknown }).inputForm;
+  if (inputForm === undefined) return undefined;
+  const drop = (reason: string): null => {
+    logger.warn(`${WARN_PREFIX} class-level action "${name}" — ${reason} — dropping`);
+    return null;
+  };
+  if (processor === "navigate") {
+    return drop('processor "navigate" cannot take an `inputForm`');
+  }
+  const { name: formName, url } = (inputForm ?? {}) as { name?: unknown; url?: unknown };
+  if (typeof formName === "string" && formName !== "") {
+    if (isAnnotatedType(inputForm)) return { name: formName, type: inputForm };
+    if (typeof url === "string" && url !== "") return { name: formName, url };
+  }
+  return drop(
+    "`inputForm` must be a compiled .as interface or `{ name, url }` (non-empty strings)",
+  );
 }
 
 // ── Default-per-level resolution ──────────────────────────────────────────

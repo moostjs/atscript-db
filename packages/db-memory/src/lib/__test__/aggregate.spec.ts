@@ -9,6 +9,7 @@ import { createTestSpace, prepareFixtures } from "./test-utils";
 
 // Populated after fixtures compile.
 let AggEvent: any;
+let AggPayment: any;
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -83,6 +84,7 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
     await prepareFixtures();
     const fixtures = await import("./fixtures/agg.as");
     AggEvent = fixtures.AggEvent;
+    AggPayment = fixtures.AggPayment;
   });
 
   beforeEach(async () => {
@@ -95,6 +97,31 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
     table.aggregate({ filter, controls } as any);
 
   // ── accumulators ─────────────────────────────────────────────────────────
+
+  // WHY: a default alias is named after the LOGICAL field even when the
+  // field is stored under a @db.column name; $having / $sort use that alias.
+  it("names a default alias after the logical field over a @db.column rename", async () => {
+    const payments = space.getTable(AggPayment) as AtscriptDbTable;
+    await payments.insertMany([
+      { id: 1, region: "eu", amount: 10 },
+      { id: 2, region: "eu", amount: 20 },
+      { id: 3, region: "us", amount: 5 },
+      { id: 4, region: "ap", amount: 40 },
+    ] as any);
+    const rows = await payments.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["region"],
+        $select: ["region", { $fn: "sum", $field: "amount" }],
+        $having: { sum_amount: { $gt: 10 } },
+        $sort: { sum_amount: -1 },
+      },
+    } as any);
+    expect(rows).toEqual([
+      { region: "ap", sum_amount: 40 },
+      { region: "eu", sum_amount: 30 },
+    ]);
+  });
 
   // WHY: SQL semantics — count(*) counts rows, count(f) non-null values,
   // sum/avg/min/max skip missing values.
@@ -147,6 +174,26 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
       { region: "eu", count_star: 3, sum_amount: 37 },
       { region: "us", count_star: 2, sum_amount: 5 },
     ]);
+  });
+
+  // WHY: countDistinct counts distinct NON-NULL values (SQL COUNT(DISTINCT)),
+  // null and missing skipped; $having / $sort see the number. Since 0.1.136.
+  it("countDistinct counts distinct non-null values; $having / $sort / $count use it", async () => {
+    expect(new MemoryAdapter().aggregateFns().has("countDistinct")).toBe(true);
+    const select = ["region", { $fn: "countDistinct", $field: "status", $as: "statuses" }];
+    expect(await agg({ $groupBy: ["region"], $select: select, $sort: { statuses: -1 } })).toEqual([
+      { region: "eu", statuses: 2 },
+      { region: "us", statuses: 1 },
+    ]);
+    const having = { $groupBy: ["region"], $select: select, $having: { statuses: { $gt: 1 } } };
+    expect(await agg(having)).toEqual([{ region: "eu", statuses: 2 }]);
+    expect(await agg({ ...having, $count: true })).toEqual([{ count: 1 }]);
+    expect(
+      await agg({
+        $groupBy: [],
+        $select: [{ $fn: "countDistinct", $field: "stats.source", $as: "sources" }],
+      }),
+    ).toEqual([{ sources: 2 }]);
   });
 
   it("rejects an unknown aggregate function with INVALID_QUERY", async () => {
@@ -532,6 +579,37 @@ describe("aggregateRows (pure engine)", () => {
       ),
     );
     expect(out).toEqual([{ lo: "apple", hi: "zucchini" }]);
+  });
+
+  // WHY: distinctness follows group identity — type-tagged, Dates by instant,
+  // JSON values structurally; null / undefined are never counted.
+  it("countDistinct uses the group identity and skips null / missing", () => {
+    const rows = [
+      { v: 1 },
+      { v: "1" },
+      { v: 1 },
+      { v: new Date(5) },
+      { v: new Date(5) },
+      { v: { a: 1, b: 2 } },
+      { v: { b: 2, a: 1 } },
+      { v: null },
+      {},
+      // Strings and booleans are their own identity — none collides with a
+      // tokenized number / Date / JSON value
+      { v: "n1" },
+      { v: true },
+      { v: true },
+      { v: "true" },
+      { v: "b1" },
+    ];
+    const out = aggregateRows(
+      rows,
+      controls([{ $fn: "countDistinct", $field: "v", $as: "d" }], []),
+    );
+    expect(out).toEqual([{ d: 8 }]);
+    expect(
+      aggregateRows([], controls([{ $fn: "countDistinct", $field: "v", $as: "d" }], [])),
+    ).toEqual([{ d: 0 }]);
   });
 
   it("rejects an unknown $fn even over no rows", () => {

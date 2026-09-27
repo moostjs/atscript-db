@@ -155,3 +155,188 @@ describe("[mongo] administrative adapter (no registered readable)", () => {
     await expect(admin.hasRows()).rejects.toThrow(/no registered readable/);
   });
 });
+
+// ── View pipelines (since 0.1.136) ────────────────────────────────────────
+
+describe("[mongo] view pipeline — $lookup forms, join kinds, physical paths", () => {
+  let fx: Record<string, any>;
+
+  beforeAll(async () => {
+    fx = await import("./fixtures/views.as");
+  });
+
+  async function pipelineOf(type: unknown): Promise<any[]> {
+    const view = createTestSpace().getView(type as never) as AtscriptDbView;
+    const { host, createCollection, raw } = fakeHost({ exists: false });
+    (raw._table as any).tableName = view.tableName;
+    await ensureTableImpl(host, view);
+    return (createCollection.mock.calls[0] as [string, { pipeline: any[] }])[1].pipeline;
+  }
+
+  it("uses the simple $lookup for = on a required target field; left keeps unmatched", async () => {
+    const pipeline = await pipelineOf(fx.MvOrdersLeft);
+    expect(pipeline.slice(0, 3)).toEqual([
+      {
+        $lookup: {
+          from: "mv_customers",
+          localField: "customerId",
+          foreignField: "id",
+          as: "__joined_mv_customers",
+        },
+      },
+      { $unwind: { path: "$__joined_mv_customers", preserveNullAndEmptyArrays: true } },
+      { $match: { status: { $ne: "void" } } },
+    ]);
+    // Physical (@db.column) and nested document paths; a column whose source
+    // may be missing (here: the left-joined table) projects null for it, a
+    // required entry column stays a plain path (index pushdown)
+    expect(pipeline[3].$project).toEqual({
+      _id: 0,
+      id: "$id",
+      customerName: { $ifNull: ["$__joined_mv_customers.full_name", null] },
+      city: { $ifNull: ["$__joined_mv_customers.profile.city", null] },
+    });
+  });
+
+  it("an inner join unwinds without preserving unmatched documents", async () => {
+    const pipeline = await pipelineOf(fx.MvOrdersInner);
+    expect(pipeline[1]).toEqual({
+      $unwind: { path: "$__joined_mv_customers", preserveNullAndEmptyArrays: false },
+    });
+    // Required sources through an inner join stay plain paths — a `$match` /
+    // `$sort` on the view pushes down (no `$ifNull` wrapper)
+    expect(pipeline[2].$project.customerName).toBe("$__joined_mv_customers.full_name");
+  });
+
+  it("uses the pipeline form when the target field is optional (null never matches)", async () => {
+    const [lookup] = await pipelineOf(fx.MvCustomerByCode);
+    expect(lookup).toEqual({
+      $lookup: {
+        from: "mv_regions",
+        let: { v0: "$code" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $gt: ["$code", null] },
+                  { $gt: ["$$v0", null] },
+                  { $eq: ["$code", "$$v0"] },
+                ],
+              },
+            },
+          },
+        ],
+        as: "__joined_mv_regions",
+      },
+    });
+  });
+
+  it("uses the pipeline form for a compound / non-equality condition", async () => {
+    const [lookup] = await pipelineOf(fx.MvCustomerEligible);
+    expect(lookup.$lookup.let).toEqual({ v0: "$regionId", v1: "$score" });
+    expect(lookup.$lookup.pipeline[0].$match.$expr.$and).toHaveLength(2);
+    expect(lookup.$lookup.localField).toBeUndefined();
+  });
+
+  it("a chained join reads its local field from the earlier join", async () => {
+    const pipeline = await pipelineOf(fx.MvCustomerGeo);
+    expect(pipeline[2]).toEqual({
+      $lookup: {
+        from: "mv_countries",
+        localField: "__joined_mv_regions.countryId",
+        foreignField: "id",
+        as: "__joined_mv_countries",
+      },
+    });
+    expect(pipeline[3]).toEqual({
+      $unwind: { path: "$__joined_mv_countries", preserveNullAndEmptyArrays: true },
+    });
+  });
+
+  it("translates the view filter with the query semantics (exists, not exists, field refs, /re/flags)", async () => {
+    const [match] = await pipelineOf(fx.MvFilterOps);
+    expect(match).toEqual({
+      $match: {
+        $and: [
+          { code: { $ne: null } },
+          { regionId: null },
+          { $expr: { $gt: ["$score", "$regionId"] } },
+          { full_name: { $regex: "^a", $options: "i" } },
+        ],
+      },
+    });
+  });
+
+  it("aggregates: COUNT(field) counts non-null values, in-list join condition", async () => {
+    const pipeline = await pipelineOf(fx.MvCustomerOrders);
+    expect(pipeline[0].$lookup.pipeline[0].$match.$expr.$and[1]).toEqual({
+      $in: ["$status", ["paid", "shipped"]],
+    });
+    const group = pipeline.find((s) => s.$group).$group;
+    expect(group).toEqual({
+      _id: { city: "$profile.city" },
+      orders: { $sum: { $cond: [{ $gt: ["$__joined_mv_orders.id", null] }, 1, 0] } },
+      total: { $sum: "$__joined_mv_orders.amount" },
+      customers: { $sum: 1 },
+    });
+    expect(pipeline.find((s) => s.$match && s.$match.customers)).toEqual({
+      $match: { customers: { $gt: 0 } },
+    });
+  });
+});
+
+const notNull = (x: unknown) => ({ $gt: [x, null] });
+const setSize = (f: string) => ({ $size: `$${f}` });
+const nonNull = (x: unknown) => ({ $ifNull: [x, "$$REMOVE"] });
+
+describe("[mongo] view pipeline — countDistinct + conditional aggregates (since 0.1.136)", () => {
+  let fx: Record<string, any>;
+
+  beforeAll(async () => {
+    fx = await import("./fixtures/agg-distinct.as");
+  });
+
+  async function pipelineOf(type: unknown): Promise<any[]> {
+    const view = createTestSpace().getView(type as never) as AtscriptDbView;
+    const { host, createCollection, raw } = fakeHost({ exists: false });
+    (raw._table as any).tableName = view.tableName;
+    await ensureTableImpl(host, view);
+    return (createCollection.mock.calls[0] as [string, { pipeline: any[] }])[1].pipeline;
+  }
+
+  const paid = { $eq: ["$status", "paid"] };
+
+  it("wraps conditional sources in $cond and sizes countDistinct sets right after $group", async () => {
+    const pipeline = await pipelineOf(fx.AdCityStats);
+    const groupAt = pipeline.findIndex((s) => s.$group);
+    expect(pipeline[groupAt].$group).toEqual({
+      _id: { city: "$city" },
+      orders: { $sum: 1 },
+      paidOrders: { $sum: { $cond: [paid, 1, 0] } },
+      paidWithAmount: { $sum: { $cond: [{ $and: [paid, notNull("$amount_cents")] }, 1, 0] } },
+      paidTotal: { $sum: { $cond: [paid, "$amount_cents", null] } },
+      paidAvg: { $avg: { $cond: [paid, "$amount_cents", null] } },
+      paidMin: { $min: { $cond: [paid, "$amount_cents", null] } },
+      buyers: { $addToSet: nonNull("$customerId") },
+      paidBuyers: { $addToSet: nonNull({ $cond: [paid, "$customerId", null] }) },
+      vipOrders: { $sum: { $cond: [{ $eq: ["$__joined_ad_customers.vip", true] }, 1, 0] } },
+    });
+    expect(pipeline[groupAt + 1]).toEqual({
+      $addFields: { buyers: setSize("buyers"), paidBuyers: setSize("paidBuyers") },
+    });
+  });
+
+  it("the HAVING $match runs after the set → size stage", async () => {
+    const pipeline = await pipelineOf(fx.AdBusyCities);
+    expect(pipeline.slice(-4).map((s) => Object.keys(s)[0])).toEqual([
+      "$group",
+      "$addFields",
+      "$match",
+      "$project",
+    ]);
+    expect(pipeline.at(-2)).toEqual({
+      $match: { $and: [{ buyers: { $gt: 1 } }, { paidOrders: { $gt: 0 } }] },
+    });
+  });
+});

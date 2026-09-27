@@ -4,7 +4,7 @@ import { isAggregateExpr, isBucketExpr, isPrimitive } from "@uniqu/core";
 import { DbError } from "../db-error";
 import type { BaseDbAdapter } from "../base-adapter";
 import { resolveAlias } from "../agg";
-import { isBucketableField, jsonValueAncestor, resolveCalendarBuckets } from "./buckets";
+import { isBucketableField, jsonValueAncestor, normalizeComputedSelect } from "./buckets";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 
@@ -22,7 +22,7 @@ import type { TDbFieldMeta } from "../types";
  * - `$exists` with a non-boolean operand → `INVALID_QUERY`
  * - malformed `$select` computed entries / `$groupBy` entries, calendar
  *   buckets outside grouped queries or with a bad unit / zone / alias →
- *   `INVALID_QUERY` (the shared normalizer, `resolveCalendarBuckets`)
+ *   `INVALID_QUERY` (the shared normalizer, `normalizeComputedSelect`)
  * - a calendar bucket over a field that is not a bucket source
  *   (`bucketSourceVerdict`) → `INVALID_QUERY`, or `BUCKET_NOT_SUPPORTED`
  *   when the adapter has no calendar buckets at all; a unit the adapter's
@@ -500,7 +500,7 @@ function collectFilterKeys(
  * `$sort` / `$having`; a bucket alias is also dropped from `groupBy`, which
  * lists grouped fields only.
  *
- * Entry shapes are not checked here — see `resolveCalendarBuckets`.
+ * Entry shapes are not checked here — see `normalizeComputedSelect`.
  */
 export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQueryPathRefs {
   const refs: TQueryPathRefs = {
@@ -728,7 +728,7 @@ export function guardPath(
  * {@link guardPath}). Adapters may therefore assume every path they receive
  * is physical.
  *
- * Entry shapes are the caller's to normalize first (`resolveCalendarBuckets`
+ * Entry shapes are the caller's to normalize first (`normalizeComputedSelect`
  * — {@link guardQuery} / {@link guardAggregate} do).
  *
  * In aggregate mode (`aggregate = true`) `$select` computed entries have
@@ -777,7 +777,7 @@ export function guardQuery(
   }
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);
-  resolveCalendarBuckets(query.controls, meta, false);
+  normalizeComputedSelect(query.controls, meta, false);
   guardPaths(meta, adapter, query);
 }
 
@@ -811,13 +811,14 @@ export function checkHavingKeys(
 
 /**
  * Aggregate-path guard: $groupBy / $select / $having encryption refs + filter
- * + $sort, then the path guard, then the adapter's calendar-bucket units
+ * + $sort, then the path guard, then the adapter's aggregate functions
+ * (`AGG_FN_NOT_SUPPORTED`) and calendar-bucket units
  * (`BUCKET_NOT_SUPPORTED`), then the `$having` key rule
  * ({@link checkHavingKeys} — after the path guard so an unknown key still
  * reads `Unknown field`).
  *
  * `buckets` are the query's resolved calendar buckets when the caller already
- * ran `resolveCalendarBuckets` (resolved here otherwise).
+ * ran `normalizeComputedSelect` (resolved here otherwise).
  */
 export function guardAggregate(
   meta: TableMetadata,
@@ -825,7 +826,7 @@ export function guardAggregate(
   query: AggregateQuery,
   resolved?: readonly ResolvedBucket[],
 ): void {
-  const buckets = resolved ?? resolveCalendarBuckets(query.controls, meta, true);
+  const buckets = resolved ?? normalizeComputedSelect(query.controls, meta, true);
   guardFilter(meta, adapter, query.filter as FilterExpr | undefined);
   const controls = query.controls;
   if (meta.encryptedFields.size > 0) {
@@ -849,10 +850,32 @@ export function guardAggregate(
     guardSort(meta, controls.$sort);
   }
   const refs = guardPaths(meta, adapter, query as TGuardedQuery, true);
+  guardAggregateFns(adapter, controls.$select);
   guardBucketUnits(adapter, buckets);
   const having = refs ? checkHavingKeys(refs) : undefined;
   if (having) {
     throw new DbError("INVALID_QUERY", [having]);
+  }
+}
+
+/**
+ * Rejects an aggregate whose (known — the normalizer checked the name)
+ * function this adapter does not render (`aggregateFns()`) with
+ * `AGG_FN_NOT_SUPPORTED`, before anything is translated — an adapter written
+ * before a function existed never receives it.
+ */
+function guardAggregateFns(adapter: BaseDbAdapter, select: AggregateQuery["controls"]["$select"]) {
+  if (!select) return;
+  const fns = adapter.aggregateFns();
+  for (const item of select) {
+    if (isAggregateExpr(item) && !fns.has(item.$fn)) {
+      throw new DbError("AGG_FN_NOT_SUPPORTED", [
+        {
+          path: "$select",
+          message: `Aggregate function "${item.$fn}" is not supported by this adapter`,
+        },
+      ]);
+    }
   }
 }
 

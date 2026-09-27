@@ -78,7 +78,7 @@ export abstract class FieldMappingStrategy {
    * equals a field name).
    *
    * `buckets` are the query's calendar buckets as the core's normalizer
-   * resolved them (`resolveCalendarBuckets` — `AtscriptDbReadable.aggregate`
+   * resolved them (`normalizeComputedSelect` — `AtscriptDbReadable.aggregate`
    * runs it before the guards); they reach adapters with `field` made
    * physical and the source descriptor as `fd`.
    */
@@ -125,7 +125,10 @@ export abstract class FieldMappingStrategy {
   /**
    * `$select` with its field paths made physical: array-form names and
    * computed `$field`s (`'*'` kept), or the keys of the object
-   * (inclusion / exclusion) form.
+   * (inclusion / exclusion) form. An aggregate's output alias is fixed
+   * (`$as`) from its LOGICAL field first, so a default alias never leaks a
+   * physical name (`sum(amount)` over `@db.column 'amount_cents'` stays
+   * `sum_amount`); a bucket's alias is already resolved.
    */
   protected physicalSelect(
     select: NonNullable<UniqueryControls["$select"]>,
@@ -136,9 +139,12 @@ export abstract class FieldMappingStrategy {
       return select.map((item: unknown) => {
         if (typeof item === "string") return this.physicalPath(item, meta);
         if (isAggregateExpr(item) || isBucketExpr(item)) {
-          return item.$field === "*"
-            ? item
-            : { ...item, $field: this.physicalPath(item.$field, meta) };
+          if (item.$field === "*") return item;
+          const physical = this.physicalPath(item.$field, meta);
+          if (physical === item.$field) return item;
+          return isAggregateExpr(item)
+            ? { ...item, $as: resolveAlias(item), $field: physical }
+            : { ...item, $field: physical };
         }
         return item;
       }) as NonNullable<UniqueryControls["$select"]>;

@@ -5,6 +5,8 @@ import { UniquSelect } from "../query/uniqu-select";
 import { AtscriptDbTable } from "../table/db-table";
 import { DbError } from "../db-error";
 import { assertAggregateFn, resolveAlias } from "../agg";
+import { ALL_AGGREGATE_FNS } from "../query/aggregate-fns";
+import { normalizeComputedSelect, resolveCalendarBuckets } from "../query/buckets";
 
 import { MockAdapter, NestedMockAdapter, prepareFixtures } from "./test-utils";
 
@@ -333,11 +335,11 @@ describe("aggregate function allow-list", () => {
     table = new AtscriptDbTable(PlainEvents, adapter);
   });
 
-  it("assertAggregateFn passes sum/count/avg/min/max and throws INVALID_QUERY otherwise", () => {
-    for (const fn of ["sum", "count", "avg", "min", "max"]) {
+  it("assertAggregateFn passes sum/count/avg/min/max/countDistinct and throws INVALID_QUERY otherwise", () => {
+    for (const fn of ["sum", "count", "avg", "min", "max", "countDistinct"]) {
       expect(() => assertAggregateFn(fn)).not.toThrow();
     }
-    for (const fn of ["sleep", "SUM", "countDistinct", "toString", "constructor", 1]) {
+    for (const fn of ["sleep", "SUM", "countdistinct", "toString", "constructor", 1]) {
       expect(() => assertAggregateFn(fn)).toThrow(DbError);
     }
   });
@@ -349,7 +351,8 @@ describe("aggregate function allow-list", () => {
       errors: [
         {
           path: "$select",
-          message: 'Unknown aggregate function "sleep" — use sum, count, avg, min or max',
+          message:
+            'Unknown aggregate function "sleep" — use sum, count, avg, min, max or countDistinct',
         },
       ],
     };
@@ -379,6 +382,111 @@ describe("aggregate function allow-list", () => {
       ],
     });
     expect(adapter.calls).toEqual([]);
+  });
+});
+
+// ── countDistinct + the aggregateFns() capability (since 0.1.136) ────────────
+
+/** An adapter that renders countDistinct too (like every built-in adapter). */
+class DistinctMockAdapter extends MockAdapter {
+  override aggregateFns() {
+    return ALL_AGGREGATE_FNS;
+  }
+}
+
+const distinct = (field: string) => ({ $fn: "countDistinct", $field: field, $as: "n" });
+
+describe("countDistinct and aggregateFns()", () => {
+  it("the base adapter advertises sum/count/avg/min/max; ALL_AGGREGATE_FNS adds countDistinct", () => {
+    expect([...new MockAdapter().aggregateFns()]).toEqual(["sum", "count", "avg", "min", "max"]);
+    expect([...ALL_AGGREGATE_FNS]).toEqual(["sum", "count", "avg", "min", "max", "countDistinct"]);
+  });
+
+  it("AGG_FN_NOT_SUPPORTED when the adapter lacks countDistinct — before the adapter runs", async () => {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(PlainEvents, adapter);
+    for (const controls of [
+      { $groupBy: ["category"], $select: ["category", distinct("label")] },
+      { $groupBy: ["category"], $select: [distinct("label")], $count: true },
+    ]) {
+      await expect(
+        table.aggregate({ filter: {}, controls } as unknown as AggregateQuery),
+      ).rejects.toMatchObject({
+        code: "AGG_FN_NOT_SUPPORTED",
+        errors: [
+          {
+            path: "$select",
+            message: 'Aggregate function "countDistinct" is not supported by this adapter',
+          },
+        ],
+      });
+    }
+    expect(adapter.calls).toEqual([]);
+  });
+
+  it("an adapter with countDistinct receives it (physical field, alias kept)", async () => {
+    const adapter = new DistinctMockAdapter();
+    adapter.aggregateResult = [{ status: "a", n: 2 }];
+    const table = new AtscriptDbTable(AggOrders, adapter);
+    const rows = await table.aggregate({
+      filter: {},
+      controls: { $groupBy: ["status"], $select: ["status", distinct("region")] },
+    } as unknown as AggregateQuery);
+    expect(rows).toEqual([{ status: "a", n: 2 }]);
+    const call = adapter.calls.find((c) => c.method === "aggregate")!;
+    expect(call.args[0].controls.$select.aggregates).toEqual([
+      { $fn: "countDistinct", $field: "region_code", $as: "n" },
+    ]);
+  });
+
+  it("strict mode: a countDistinct field may be a dimension or a measure, nothing else", async () => {
+    const table = new AtscriptDbTable(AggOrders, new DistinctMockAdapter());
+    const run = (field: string) =>
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: ["status"], $select: ["status", distinct(field)] },
+      } as unknown as AggregateQuery);
+    await expect(run("region")).resolves.toBeDefined();
+    await expect(run("amount")).resolves.toBeDefined();
+    await expect(run("name")).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [
+        { path: "$select", message: 'Aggregate field "name" is not a dimension or measure' },
+      ],
+    });
+    // Other functions still need a measure
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: ["status"], $select: [{ $fn: "sum", $field: "region" }] },
+      } as unknown as AggregateQuery),
+    ).rejects.toMatchObject({
+      errors: [{ path: "$select", message: 'Aggregate field "region" is not a measure' }],
+    });
+  });
+
+  it("countDistinct(*) is rejected (only count accepts *)", async () => {
+    const adapter = new DistinctMockAdapter();
+    const table = new AtscriptDbTable(PlainEvents, adapter);
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: [], $select: [distinct("*")] },
+      } as unknown as AggregateQuery),
+    ).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [
+        {
+          path: "$select",
+          message: 'Aggregate "countDistinct" needs a field — only count accepts *',
+        },
+      ],
+    });
+    expect(adapter.calls).toEqual([]);
+  });
+
+  it("resolveCalendarBuckets is a deprecated alias of normalizeComputedSelect", () => {
+    expect(resolveCalendarBuckets).toBe(normalizeComputedSelect);
   });
 });
 

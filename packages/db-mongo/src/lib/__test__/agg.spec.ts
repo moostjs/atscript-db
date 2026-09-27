@@ -88,7 +88,7 @@ describe("buildAggregatePipeline", () => {
     ]);
   });
 
-  it("count(field) maps to $cond null-check", () => {
+  it("count(field) maps to $cond null-check — a missing field is not counted either", () => {
     const query = makeQuery({
       groupBy: ["status"],
       select: ["status", { $fn: "count", $field: "email", $as: "emailCount" }],
@@ -97,8 +97,30 @@ describe("buildAggregatePipeline", () => {
     const groupStage = pipeline.find((s: any) => s.$group)!.$group;
 
     expect(groupStage.emailCount).toEqual({
-      $sum: { $cond: [{ $ne: ["$email", null] }, 1, 0] },
+      $sum: { $cond: [{ $gt: ["$email", null] }, 1, 0] },
     });
+  });
+
+  it("countDistinct accumulates a set of the non-null values and projects its size before $having / $sort", () => {
+    const pipeline = buildAggregatePipeline(
+      makeQuery({
+        groupBy: ["status"],
+        select: ["status", { $fn: "countDistinct", $field: "customer", $as: "buyers" }],
+        having: { buyers: { $gt: 1 } },
+        sort: { buyers: -1 },
+      }),
+    );
+    expect(pipeline.slice(1)).toEqual([
+      {
+        $group: {
+          _id: { k0: nz("$status") },
+          buyers: { $addToSet: { $ifNull: ["$customer", "$$REMOVE"] } },
+        },
+      },
+      { $project: { _id: 0, status: "$_id.k0", buyers: { $size: "$buyers" } } },
+      { $match: { buyers: { $gt: 1 } } },
+      { $sort: { buyers: -1 } },
+    ]);
   });
 
   it("applies $match filter", () => {
@@ -256,7 +278,7 @@ describe("buildAggregatePipeline — dotted $groupBy path", () => {
       {
         $group: {
           _id: { k0: nz("$metadata.clicks") },
-          cnt: { $sum: { $cond: [{ $ne: ["$name", null] }, 1, 0] } },
+          cnt: { $sum: { $cond: [{ $gt: ["$name", null] }, 1, 0] } },
         },
       },
       { $project: { _id: 0, "metadata.clicks": "$_id.k0", cnt: 1 } },

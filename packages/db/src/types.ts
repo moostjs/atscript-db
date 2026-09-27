@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
+  AggregateFn,
   BucketUnit,
   FilterExpr as _FilterExpr,
   UniqueryControls as _UniqueryControls,
@@ -147,6 +148,14 @@ export interface TMetaResponse {
    * none. Since 0.1.132.
    */
   bucketUnits?: BucketUnit[];
+  /**
+   * Aggregate functions the adapter renders (`{ $fn }` in an aggregate
+   * `$select`, URL `sum(field)` / `countDistinct(field)` …) — see
+   * `BaseDbAdapter.aggregateFns()`.
+   *
+   * @since 0.1.136
+   */
+  aggregateFns?: AggregateFn[];
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────
@@ -221,12 +230,24 @@ export interface TDbActionInfo {
   disabled?: string;
   /**
    * Name of the `.as` interface the action's `@InputForm()` parameter expects
-   * (the compiled class's `.name`). Present only when the handler declares an
-   * `@InputForm(FormType)` parameter. Clients fetch the serialized schema via
-   * `GET /meta/form/:name` on the same controller and render a form to
-   * collect the `input` field of the action's request envelope.
+   * (the compiled class's `.name`). Present for an `@InputForm(FormType)`
+   * parameter or a class-level `inputForm` entry. Clients fetch the
+   * serialized schema via `GET /meta/form/:name` on the same controller and
+   * render a form to collect the `input` field of the action's request
+   * envelope. A class-level entry may name a form served elsewhere — then
+   * {@link formUrl} is present and clients fetch it instead of `meta/form/:name`.
    */
   inputForm?: string;
+  /**
+   * Server-absolute path of the serialized form schema —
+   * same convention as `value` for `'backend'` actions: clients prefix
+   * their base URL. Present only together with {@link inputForm}, when the
+   * form is served by another endpoint than this controller's
+   * `meta/form/:name`; clients fetch it instead of the relative route.
+   *
+   * @since 0.1.136
+   */
+  formUrl?: string;
 }
 
 // ── CRUD Result Types ───────────────────────────────────────────────────────

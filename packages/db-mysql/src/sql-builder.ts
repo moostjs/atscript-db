@@ -1,6 +1,11 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls, TResolvedBucket } from "@atscript/db";
-import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
+import type {
+  AtscriptQueryFieldRef,
+  TViewColumnMapping,
+  TViewJsonType,
+  TViewPlan,
+} from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
@@ -18,6 +23,7 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   parseRegexString,
+  jsonDollarPath,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -326,8 +332,41 @@ export const mysqlDialect: SqlDialect = {
   calendarBucket: mysqlCalendarBucket,
   // Why MySQL needs it: see `SqlDialect.bucketAliasInHaving`.
   bucketAliasInHaving: true,
+  jsonExtract: mysqlJsonExtract,
   createViewPrefix: "CREATE OR REPLACE VIEW",
 };
+
+// ── JSON leaf extraction (views) ────────────────────────────────────────────
+
+/** `JSON_TYPE()` names of JSON numbers (MariaDB reports only INTEGER / DOUBLE). */
+const MYSQL_JSON_NUMBER_TYPES = "'INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL'";
+
+/**
+ * Typed read of a JSON leaf (`SqlDialect.jsonExtract`), MySQL and MariaDB:
+ * `JSON_TYPE()` guards the declared type, so a missing path, JSON `null` or
+ * another JSON type yields NULL (no coercion). Numbers convert with `+ 0`
+ * (a double) and booleans come back as 1/0 (the comparison's own result) —
+ * the view's boolean formatter converts them. Avoids `CAST(… AS DOUBLE)` (MySQL 8.0.17+) and
+ * `CAST(… AS JSON)` (not in MariaDB).
+ */
+function mysqlJsonExtract(quotedCol: string, path: readonly string[], type: TViewJsonType): string {
+  const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+  const t = `JSON_TYPE(${e})`;
+  switch (type) {
+    case "string": {
+      return `CASE ${t} WHEN 'STRING' THEN JSON_UNQUOTE(${e}) END`;
+    }
+    case "number": {
+      return `CASE WHEN ${t} IN (${MYSQL_JSON_NUMBER_TYPES}) THEN ${e} + 0 END`;
+    }
+    case "boolean": {
+      return `CASE ${t} WHEN 'BOOLEAN' THEN JSON_UNQUOTE(${e}) = 'true' END`;
+    }
+    default: {
+      return type satisfies never;
+    }
+  }
+}
 
 // ── Calendar buckets ────────────────────────────────────────────────────────
 

@@ -1,3 +1,4 @@
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbTable,
   FlatOf,
@@ -89,7 +90,7 @@ export type GateOpts<TRow, R extends readonly FlatKey<TRow>[]> = unknown extends
 // ── Method-decorator opts (`@DbAction`) ────────────────────────────────────
 
 interface BaseActionOpts extends Partial<
-  Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled">
+  Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "formUrl">
 > {
   /**
    * Bound table reference. REQUIRED on non-`AsDbReadableController` classes
@@ -126,6 +127,22 @@ interface DbActionsEntryCommonBase {
   promptText?: string | [string, string];
   /** Mirrors {@link TDbActionInfo.shortcut} — single-character UI hint. */
   shortcut?: string;
+  /**
+   * Input form the UI collects before invoking the action:
+   *
+   * - a compiled `.as` interface — registered on THIS controller and served
+   *   by its own `GET /meta/form/:name`; the wire carries `inputForm: Type.name`.
+   * - `{ name, url }` — a form served elsewhere: `name` goes on the wire as
+   *   `inputForm`, `url` (server-absolute path of the serialized schema, e.g.
+   *   `"/api/shipping/meta/form/ShipForm"`) as {@link TDbActionInfo.formUrl}.
+   *
+   * Not allowed with `processor: 'navigate'`. Class-level entries only
+   * describe the action — validating `input` is the target handler's job
+   * (e.g. its own `@InputForm(Type)` param).
+   *
+   * @since 0.1.136
+   */
+  inputForm?: TAtscriptAnnotatedType | { name: string; url: string };
 }
 
 type DbActionsEntryWithGate<TRow, R extends readonly FlatKey<TRow>[]> = DbActionsEntryCommonBase &
@@ -140,7 +157,11 @@ type DbActionsEntryWithGate<TRow, R extends readonly FlatKey<TRow>[]> = DbAction
  *   with the dict key.
  */
 export type TDbActionsEntry<TRow = unknown, R extends readonly FlatKey<TRow>[] = []> =
-  | (DbActionsEntryWithGate<TRow, R> & { processor: "navigate"; value: string })
+  | (DbActionsEntryWithGate<TRow, R> & {
+      processor: "navigate";
+      value: string;
+      inputForm?: never;
+    })
   | (DbActionsEntryWithGate<TRow, R> & { processor: "custom"; value?: never })
   | (DbActionsEntryWithGate<TRow, R> & { processor: "backend"; value: string });
 

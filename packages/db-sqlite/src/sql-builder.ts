@@ -1,6 +1,11 @@
 import type { TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls } from "@atscript/db";
-import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
+import type {
+  AtscriptQueryFieldRef,
+  TViewColumnMapping,
+  TViewJsonType,
+  TViewPlan,
+} from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 
 import { sqliteCalendarBucket } from "./calendar-bucket";
@@ -18,6 +23,7 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   parseRegexString,
+  jsonDollarPath,
 } from "@atscript/db-sql-tools";
 
 // Re-export shared utilities for consumers that import from this package
@@ -165,8 +171,41 @@ export const sqliteDialect: SqlDialect = {
   // units when its driver cannot register it, so the core rejects bucket
   // queries before this renders.
   calendarBucket: sqliteCalendarBucket,
+  jsonExtract: sqliteJsonExtract,
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
+
+// ── JSON leaf extraction (views) ────────────────────────────────────────────
+
+/**
+ * Typed read of a JSON leaf (`SqlDialect.jsonExtract`): `json_type()` guards
+ * the declared type, so a missing path, JSON `null` or another JSON type
+ * yields NULL (no coercion). Booleans come back as 1/0 — the view's boolean
+ * formatter converts them.
+ */
+function sqliteJsonExtract(
+  quotedCol: string,
+  path: readonly string[],
+  type: TViewJsonType,
+): string {
+  const p = jsonDollarPath(path);
+  const t = `json_type(${quotedCol}, ${p})`;
+  const v = `json_extract(${quotedCol}, ${p})`;
+  switch (type) {
+    case "string": {
+      return `CASE ${t} WHEN 'text' THEN ${v} END`;
+    }
+    case "number": {
+      return `CASE ${t} WHEN 'integer' THEN ${v} WHEN 'real' THEN ${v} END`;
+    }
+    case "boolean": {
+      return `CASE ${t} WHEN 'true' THEN 1 WHEN 'false' THEN 0 END`;
+    }
+    default: {
+      return type satisfies never;
+    }
+  }
+}
 
 // ── Geo helpers (haversine over JSON-stored tuples) ─────────────────────────
 

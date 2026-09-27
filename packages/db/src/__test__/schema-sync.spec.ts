@@ -3097,6 +3097,20 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
     expect(ok.entries.find((e) => e.name === "pf_orphans")!.dependsOn).toEqual([]);
   });
 
+  it("refuses a view with an aggregate the adapter does not render (aggregateFns())", async () => {
+    const vg = await import("./fixtures/view-agg.as");
+    const sync = new SchemaSync(createSpace());
+    const result = await sync.run([vg.VgOrder, vg.VgRegion, vg.VgStats], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.status).toBe("refused");
+    expect(result.entries.find((e) => e.name === "vg_stats")!.errors).toEqual([
+      'View "vg_stats" field "buyers": aggregate "countDistinct" is not supported by this adapter (aggregateFns())',
+      'View "vg_stats" field "bigBuyers": aggregate "countDistinct" is not supported by this adapter (aggregateFns())',
+    ]);
+  });
+
   it("refuses when a physical table sits where a managed view is declared (and vice versa)", async () => {
     const space = createSpace();
     const sync = new SchemaSync(space);

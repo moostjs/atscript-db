@@ -224,6 +224,7 @@ describe("schema-hash", () => {
 
 import { beforeAll } from "vite-plus/test";
 import { DbSpace } from "../index";
+import type { AtscriptDbView, TViewColumnMapping, TViewPlan } from "../index";
 import { MockAdapter, prepareFixtures } from "./test-utils";
 import {
   computeViewSnapshot,
@@ -278,7 +279,7 @@ describe("computeViewSnapshot — joins, filter, having", () => {
     expect(computeTableHash(a)).not.toBe(computeTableHash(b));
   });
 
-  it("serializes a join-less view exactly as before (joinTables: [])", () => {
+  it("serializes a join-less view with the documented key order", () => {
     const snap = snapshotOf(fx.VhPlain);
     expect(snap.joinTables).toEqual([]);
     expect(snap.filterHash).toBeUndefined();
@@ -288,11 +289,43 @@ describe("computeViewSnapshot — joins, filter, having", () => {
       "viewType",
       "entryTable",
       "joinTables",
-      "materialized",
+      "columns",
       "fields",
+    ]);
+    expect(snap.columns).toEqual([
+      { column: "id", sourceTable: "vh_tasks", sourceColumn: "id" },
+      { column: "title", sourceTable: "vh_tasks", sourceColumn: "title" },
     ]);
     // Ignored fields are excluded from the snapshot as they are from the DDL
     expect(snap.fields.some((f) => f.physicalName === "computed")).toBe(false);
+    expect(snap.columns!.some((c) => c.column === "computed")).toBe(false);
+  });
+
+  it("orders keys filterHash, havingHash, materialized before fields", () => {
+    expect(Object.keys(snapshotOf(fx.VhHavingA))).toEqual([
+      "tableName",
+      "viewType",
+      "entryTable",
+      "joinTables",
+      "columns",
+      "havingHash",
+      "fields",
+    ]);
+  });
+
+  // 0.1.136 recreates every managed view once: the snapshot now carries the
+  // physical column sources, so the stored 0.1.134/0.1.135 hash never matches.
+  it("differs from the 0.1.134 snapshot (one-time view recreation)", () => {
+    const golden0134 =
+      '{"tableName":"vh_plain","viewType":"V","entryTable":"vh_tasks","joinTables":[],"fields":[' +
+      '{"physicalName":"id","designType":"number","optional":false,"isPrimaryKey":false,"storage":"column"},' +
+      '{"physicalName":"title","designType":"string","optional":false,"isPrimaryKey":false,"storage":"column"}]}';
+    const snap = snapshotOf(fx.VhPlain);
+    expect(JSON.stringify(snap)).not.toBe(golden0134);
+    expect(computeTableHash(snap)).not.toBe("043f96bc");
+    // The 0.1.134 part is still there — only the column sources were added
+    const { columns: _columns, ...rest } = snap;
+    expect(JSON.stringify(rest)).toBe(golden0134);
   });
 
   it("is byte-identical across two constructions of the same view", () => {
@@ -336,5 +369,153 @@ describe("canonicalizeQueryNode", () => {
     const json = JSON.stringify(canonicalizeQueryNode(node, resolve as any));
     expect(json).not.toContain("[fn]");
     expect(JSON.parse(json)).toEqual(canonicalizeQueryNode(node, resolve as any));
+  });
+});
+
+function realView(type: any) {
+  return new DbSpace(() => new MockAdapter()).getView(type);
+}
+
+/** The real view with its mappings / plan swapped — everything else unchanged. */
+function variant(
+  type: any,
+  patch: {
+    mappings?: (m: TViewColumnMapping[]) => TViewColumnMapping[];
+    plan?: (p: TViewPlan) => TViewPlan;
+  },
+) {
+  const real = realView(type);
+  return {
+    isView: true,
+    isExternal: false,
+    tableName: real.tableName,
+    fieldDescriptors: real.fieldDescriptors,
+    viewPlan: patch.plan ? patch.plan(real.viewPlan) : real.viewPlan,
+    resolveFieldRef: (ref: any, qi?: any) => real.resolveFieldRef(ref, qi),
+    getViewColumnMappings: () =>
+      patch.mappings ? patch.mappings(real.getViewColumnMappings()) : real.getViewColumnMappings(),
+  } as unknown as AtscriptDbView;
+}
+
+const hashOf = (v: AtscriptDbView) => computeTableHash(computeViewSnapshot(v));
+const edit = (field: string, change: Partial<TViewColumnMapping>) => (m: TViewColumnMapping[]) =>
+  m.map((c) => (c.viewPath === field ? { ...c, ...change } : c));
+
+describe("computeViewSnapshot — column sources and join kind (since 0.1.136)", () => {
+  let fx: Record<string, any>;
+  let vs: Record<string, any>;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    fx = await import("./fixtures/view-hash.as");
+    vs = await import("./fixtures/view-source.as");
+  });
+
+  it("records physical sources (flattened, renamed, JSON leaf)", () => {
+    const snap = computeViewSnapshot(realView(vs.VsUserView));
+    const byColumn = new Map(snap.columns!.map((c) => [c.column, c]));
+    expect(byColumn.get("zip")).toEqual({
+      column: "zip",
+      sourceTable: "vs_users",
+      sourceColumn: "address__zip_code",
+    });
+    expect(byColumn.get("mode")).toEqual({
+      column: "mode",
+      sourceTable: "vs_users",
+      sourceColumn: "settings",
+      jsonPath: '["inner","mode"]',
+      jsonType: "string",
+    });
+    // Sorted by column
+    const names = snap.columns!.map((c) => c.column);
+    expect(names).toEqual(names.toSorted());
+  });
+
+  it("changes the hash when a source column changes", () => {
+    const base = hashOf(variant(fx.VhJoinA, {}));
+    expect(
+      hashOf(variant(fx.VhJoinA, { mappings: edit("title", { sourceColumn: "name" }) })),
+    ).not.toBe(base);
+  });
+
+  it("changes the hash when the aggregate function or field changes", () => {
+    const base = hashOf(variant(fx.VhHavingA, {}));
+    expect(hashOf(variant(fx.VhHavingA, { mappings: edit("total", { aggFn: "avg" }) }))).not.toBe(
+      base,
+    );
+    expect(
+      hashOf(variant(fx.VhHavingA, { mappings: edit("total", { aggField: "other" }) })),
+    ).not.toBe(base);
+  });
+
+  it("changes the hash when a JSON path or type changes", () => {
+    const base = hashOf(variant(vs.VsUserView, {}));
+    expect(
+      hashOf(
+        variant(vs.VsUserView, {
+          mappings: edit("theme", { json: { path: ["x"], type: "string" } }),
+        }),
+      ),
+    ).not.toBe(base);
+    expect(
+      hashOf(
+        variant(vs.VsUserView, {
+          mappings: edit("theme", { json: { path: ["theme"], type: "number" } }),
+        }),
+      ),
+    ).not.toBe(base);
+  });
+
+  it("changes the hash when an aggregate predicate is added or changed", () => {
+    const base = hashOf(variant(fx.VhHavingA, {}));
+    const paid = { left: { field: "status" }, op: "$eq", right: "paid" } as any;
+    const open = { left: { field: "status" }, op: "$eq", right: "open" } as any;
+    const a = hashOf(variant(fx.VhHavingA, { mappings: edit("total", { aggFilter: paid }) }));
+    const b = hashOf(variant(fx.VhHavingA, { mappings: edit("total", { aggFilter: open }) }));
+    expect(a).not.toBe(base);
+    expect(a).not.toBe(b);
+    const snap = computeViewSnapshot(
+      variant(fx.VhHavingA, { mappings: edit("total", { aggFilter: paid }) }),
+    );
+    expect(snap.columns!.find((c) => c.column === "total")!.aggFilter).toBe(
+      JSON.stringify({ l: "vh_tasks.status", op: "$eq", r: "paid" }),
+    );
+  });
+
+  it("does not change when view fields are reordered", () => {
+    expect(hashOf(variant(fx.VhJoinA, { mappings: (m) => m.toReversed() }))).toBe(
+      hashOf(variant(fx.VhJoinA, {})),
+    );
+  });
+
+  it("emits the join kind only for left joins, and a kind change changes the hash", () => {
+    const inner = computeViewSnapshot(variant(fx.VhJoinA, {}));
+    expect(inner.joinTables![0]).not.toHaveProperty("kind");
+    const leftView = variant(fx.VhJoinA, {
+      plan: (p) => ({ ...p, joins: p.joins.map((j) => ({ ...j, kind: "left" as const })) }),
+    });
+    const left = computeViewSnapshot(leftView);
+    expect(left.joinTables![0].kind).toBe("left");
+    expect(computeTableHash(left)).not.toBe(computeTableHash(inner));
+  });
+
+  it("qualifies predicates with physical columns", () => {
+    const snap = computeViewSnapshot(realView(vs.VsChain));
+    expect(snap.joinTables).toEqual([
+      {
+        targetTable: "vs_regions",
+        condition: JSON.stringify({ l: "vs_regions.id", op: "$eq", r: { f: "vs_users.regionId" } }),
+        kind: "left",
+      },
+      {
+        targetTable: "vs_countries",
+        condition: JSON.stringify({
+          l: "vs_countries.id",
+          op: "$eq",
+          r: { f: "vs_regions.countryId" },
+        }),
+      },
+    ]);
+    expect(computeViewSnapshot(realView(vs.VsUserView)).filterHash).toBeDefined();
   });
 });

@@ -15,7 +15,7 @@ import type { TResolvedBucket } from "./buckets";
  * An array `$select` holds plain field names and computed entries —
  * aggregates (`{ $fn, $field }`, {@link aggregates}) and calendar buckets
  * (`{ $bucket, $field }`, {@link buckets}). Entries arrive normalized
- * (`resolveCalendarBuckets` rejects any other shape before translation).
+ * (`normalizeComputedSelect` rejects any other shape before translation).
  */
 export class UniquSelect {
   private static readonly UNRESOLVED = Symbol("unresolved");

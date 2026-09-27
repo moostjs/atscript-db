@@ -7,10 +7,13 @@ import type {
   SemanticQueryFieldRefNode,
   SemanticRefNode,
   SemanticStructureNode,
+  TAnnotationTokens,
   Token,
   TMessages,
 } from "@atscript/core";
 import { isInterface, isQueryComparison, isQueryLogical, isRef, isStructure } from "@atscript/core";
+
+import { getAnnotationAlias } from "./annotation-utils";
 
 /**
  * Validate a ref annotation argument against the document's type registry.
@@ -155,6 +158,27 @@ const viewAnnotationNames = [
   "db.view.materialized",
 ];
 
+/** The `@db.view.joins` annotations of a view interface, in declaration order. */
+export function viewJoins(owner: SemanticNode): TAnnotationTokens[] {
+  return owner.annotations?.filter((a) => a.name === "db.view.joins") ?? [];
+}
+
+/** The target type names of `@db.view.joins` annotations. */
+export function joinTargets(joins: readonly TAnnotationTokens[]): string[] {
+  return joins.map((a) => a.args[0]?.text).filter((t): t is string => !!t);
+}
+
+/**
+ * The type names a view predicate (`@db.view.filter`, a conditional
+ * `@db.agg.*`) may reference: the `@db.view.for` entry table, then every
+ * `@db.view.joins` target.
+ */
+export function viewScopeTypes(owner: SemanticNode): string[] {
+  const entry = getAnnotationAlias(owner, "db.view.for");
+  const targets = joinTargets(viewJoins(owner));
+  return entry ? [entry, ...targets] : targets;
+}
+
 /**
  * Check if a node has any @db.view.* annotation.
  */
@@ -169,12 +193,14 @@ export function hasAnyViewAnnotation(node: SemanticNode): boolean {
  * @param allowedTypes - Type names allowed as qualified refs
  * @param unqualifiedTarget - Type name for resolving unqualified refs, or null to disallow them
  * @param doc - The document for type lookups
+ * @param scopeHint - Replaces the default "expected 'A' or 'B'" tail of the out-of-scope message
  */
 export function validateQueryScope(
   queryToken: Token,
   allowedTypes: string[],
   unqualifiedTarget: string | null,
   doc: AtscriptDoc,
+  scopeHint?: string,
 ): TMessages {
   const errors: TMessages = [];
   const queryNode = queryToken.queryNode;
@@ -188,7 +214,7 @@ export function validateQueryScope(
       const typeName = ref.typeRef.text;
       if (!allowedTypes.includes(typeName)) {
         errors.push({
-          message: `Query references '${typeName}' which is not in scope — expected ${allowedTypes.map((t) => `'${t}'`).join(" or ")}`,
+          message: `Query references '${typeName}' which is not in scope — ${scopeHint ?? `expected ${allowedTypes.map((t) => `'${t}'`).join(" or ")}`}`,
           severity: 1,
           range: ref.typeRef.range,
         });

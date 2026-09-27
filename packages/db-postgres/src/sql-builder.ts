@@ -1,6 +1,11 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
 import type { DbControls, TResolvedBucket } from "@atscript/db";
-import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
+import type {
+  AtscriptQueryFieldRef,
+  TViewColumnMapping,
+  TViewJsonType,
+  TViewPlan,
+} from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
@@ -18,6 +23,7 @@ import {
   defaultValueToSqlLiteral as _defaultValueToSqlLiteral,
   finalizeParams,
   parseRegexString,
+  quotedJsonPathSegments,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -141,11 +147,35 @@ export const pgDialect: SqlDialect = {
     };
   },
   calendarBucket: pgCalendarBucket,
+  jsonExtract: pgJsonExtract,
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {
     return `$${index}`;
   },
 };
+
+// ── JSON leaf extraction (views) ────────────────────────────────────────────
+
+/** Cast applied to the `#>>` text per leaf type — `jsonb_typeof()` names equal the type names. */
+const PG_JSON_LEAF_CAST: Readonly<Record<TViewJsonType, string>> = {
+  string: "",
+  number: "::double precision",
+  boolean: "::boolean",
+};
+
+/**
+ * Typed read of a JSON leaf (`SqlDialect.jsonExtract`): `jsonb_typeof()`
+ * guards the declared type, so a missing path, JSON `null` or another JSON
+ * type yields NULL (no coercion). Numbers are `double precision`, booleans
+ * native. The column is cast `::jsonb`, so JSON and JSONB storage both work.
+ */
+function pgJsonExtract(quotedCol: string, path: readonly string[], type: TViewJsonType): string {
+  const p = sqlStringLiteral(`{${quotedJsonPathSegments(path).join(",")}}`);
+  const j = `(${quotedCol})::jsonb`;
+  const cast = PG_JSON_LEAF_CAST[type];
+  const text = cast ? `(${j} #>> ${p})${cast}` : `${j} #>> ${p}`;
+  return `CASE jsonb_typeof(${j} #> ${p}) WHEN '${type}' THEN ${text} END`;
+}
 
 // ── Calendar buckets ────────────────────────────────────────────────────────
 

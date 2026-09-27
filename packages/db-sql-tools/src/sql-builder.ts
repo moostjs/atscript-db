@@ -1,11 +1,8 @@
 import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
-import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewPlan } from "@atscript/db";
 import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
-import { queryNodeToSql } from "./common";
-import { aggFnName } from "./agg";
 
 /**
  * Builds an INSERT statement.
@@ -297,89 +294,4 @@ export function buildProjection(dialect: SqlDialect, select?: UniquSelect): stri
   return sql || "*";
 }
 
-/** Builds the SQL expression for a single aggregate column. */
-function buildAggColExpr(dialect: SqlDialect, c: TViewColumnMapping): string {
-  const fn = aggFnName(c.aggFn, c.viewColumn);
-  const arg =
-    c.aggField === "*"
-      ? "*"
-      : `${dialect.quoteIdentifier(c.sourceTable)}.${dialect.quoteIdentifier(c.sourceColumn)}`;
-  return `${fn}(${arg})`;
-}
-
-/**
- * Builds a CREATE VIEW statement from a view plan and column mappings.
- */
-export function buildCreateView(
-  dialect: SqlDialect,
-  viewName: string,
-  plan: TViewPlan,
-  columns: TViewColumnMapping[],
-  resolveFieldRef: (ref: AtscriptQueryFieldRef) => string,
-): string {
-  // SELECT columns — wrap aggregate columns with their function
-  const selectCols = columns
-    .map((c) => {
-      if (c.aggFn) {
-        return `${buildAggColExpr(dialect, c)} AS ${dialect.quoteIdentifier(c.viewColumn)}`;
-      }
-      return `${dialect.quoteIdentifier(c.sourceTable)}.${dialect.quoteIdentifier(c.sourceColumn)} AS ${dialect.quoteIdentifier(c.viewColumn)}`;
-    })
-    .join(", ");
-
-  // FROM entry table
-  let sql = `${dialect.createViewPrefix} ${dialect.quoteTable(viewName)} AS SELECT ${selectCols} FROM ${dialect.quoteIdentifier(plan.entryTable)}`;
-
-  // JOINs
-  for (const join of plan.joins) {
-    const onClause = queryNodeToSql(join.condition, resolveFieldRef);
-    sql += ` JOIN ${dialect.quoteIdentifier(join.targetTable)} ON ${onClause}`;
-  }
-
-  // WHERE filter
-  if (plan.filter) {
-    const whereClause = queryNodeToSql(plan.filter, resolveFieldRef);
-    sql += ` WHERE ${whereClause}`;
-  }
-
-  // GROUP BY + HAVING — only when aggregates are present
-  const hasAggregates = columns.some((c) => c.aggFn);
-  if (hasAggregates) {
-    const dimensionCols = columns.filter((c) => !c.aggFn);
-    if (dimensionCols.length > 0) {
-      const groupByCols = dimensionCols
-        .map(
-          (c) =>
-            `${dialect.quoteIdentifier(c.sourceTable)}.${dialect.quoteIdentifier(c.sourceColumn)}`,
-        )
-        .join(", ");
-      sql += ` GROUP BY ${groupByCols}`;
-    }
-
-    // HAVING — post-aggregation filter
-    if (plan.having) {
-      const columnMap = new Map<string, TViewColumnMapping>();
-      for (const c of columns) {
-        columnMap.set(c.viewColumn, c);
-      }
-
-      const havingResolver = (ref: AtscriptQueryFieldRef): string => {
-        if (!ref.type) {
-          const col = columnMap.get(ref.field);
-          if (col?.aggFn) {
-            return buildAggColExpr(dialect, col);
-          }
-          if (col) {
-            return `${dialect.quoteIdentifier(col.sourceTable)}.${dialect.quoteIdentifier(col.sourceColumn)}`;
-          }
-        }
-        return resolveFieldRef(ref);
-      };
-
-      const havingClause = queryNodeToSql(plan.having, havingResolver);
-      sql += ` HAVING ${havingClause}`;
-    }
-  }
-
-  return sql;
-}
+export { buildCreateView } from "./view-builder";

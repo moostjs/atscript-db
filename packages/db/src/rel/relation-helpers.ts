@@ -1,3 +1,5 @@
+import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+
 import type { TDbForeignKey, TDbRelation } from "../types";
 
 /**
@@ -40,9 +42,18 @@ export function findRemoteFK(
 }
 
 /**
+ * Table name of an annotated type — its `@db.table`, else its type id (`""`
+ * when neither is set). The rule relations, foreign keys and view plans use
+ * to name a referenced table.
+ * @since 0.1.136
+ */
+export function tableNameOf(type: TAtscriptAnnotatedType | undefined): string {
+  return (type?.metadata?.get("db.table") as string) || type?.id || "";
+}
+
+/**
  * Resolves the target table name from a relation's target type metadata.
  */
 export function resolveRelationTargetTable(relation: TDbRelation): string {
-  const targetType = relation.targetType();
-  return (targetType?.metadata?.get("db.table") as string) || targetType?.id || "";
+  return tableNameOf(relation.targetType());
 }

@@ -139,6 +139,29 @@ describe("MysqlAdapter aggregate", () => {
     expect(call.sql).toContain("ORDER BY `total` DESC");
   });
 
+  // countDistinct (since 0.1.136): COUNT(DISTINCT col); HAVING inlines the
+  // expression, ORDER BY keeps the alias. A strict table may count a dimension.
+  it("renders countDistinct as COUNT(DISTINCT col) in SELECT, HAVING and ORDER BY", async () => {
+    const driver = createMockDriver({ allResult: [{ status: "active", currencies: 2 }] });
+    const table = new AtscriptDbTable(AggOrders, new MysqlAdapter(driver));
+
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $groupBy: ["status"],
+        $select: ["status", { $fn: "countDistinct", $field: "currency", $as: "currencies" }] as any,
+        $having: { currencies: { $gt: 1 } } as any,
+        $sort: { currencies: -1 },
+      },
+    });
+
+    const call = driver.calls[0];
+    expect(call.sql).toBe(
+      "SELECT `status`, COUNT(DISTINCT `currency`) AS `currencies` FROM `orders` WHERE 1=1 GROUP BY `status` HAVING COUNT(DISTINCT `currency`) > ? ORDER BY `currencies` DESC",
+    );
+    expect(call.params).toEqual([1]);
+  });
+
   it("$having on an aggregate alias renders the aggregate expression, not the alias", async () => {
     const driver = createMockDriver({ allResult: [{ status: "active", total: 450 }] });
     const adapter = new MysqlAdapter(driver);

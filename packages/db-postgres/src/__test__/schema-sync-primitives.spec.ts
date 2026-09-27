@@ -569,3 +569,27 @@ describe("pgObjectName", () => {
     expect(name).toBe(`${"t".repeat(29)}_${"c".repeat(29)}_key`);
   });
 });
+
+describe("PostgresAdapter — view DDL with left / chained joins (since 0.1.136)", () => {
+  it("renders LEFT JOIN in declaration order and physical source columns", async () => {
+    const vj = await import("./fixtures/view-joins.as");
+    const driver = createMockDriver();
+    const view = new DbSpace(() => new PostgresAdapter(driver)).getView(
+      vj.VjOrderList,
+    ) as AtscriptDbView;
+    const adapter = new PostgresAdapter(driver);
+    adapter.registerReadable(view as any);
+    await adapter.ensureTable();
+    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    expect(ddl).toHaveLength(1);
+    expect(ddl[0]).toContain(
+      'LEFT JOIN "vj_customers" ON "vj_customers"."id" = "vj_orders"."customerId"',
+    );
+    expect(ddl[0]).toContain(
+      'LEFT JOIN "vj_regions" ON "vj_regions"."id" = "vj_customers"."regionId"',
+    );
+    expect(ddl[0]).toContain('"vj_customers"."full_name" AS "customerName"');
+    expect(ddl[0]).toContain('"vj_customers"."address__zip_code" AS "zip"');
+    expect(ddl[0].indexOf("vj_customers")).toBeLessThan(ddl[0].lastIndexOf("vj_regions"));
+  });
+});

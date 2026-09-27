@@ -64,6 +64,7 @@ function makeMockTable(overrides: Record<string, any> = {}) {
     isVectorSearchable: vi.fn().mockReturnValue(false),
     isGeoSearchable: vi.fn().mockReturnValue(false),
     calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
+    aggregateFns: vi.fn().mockReturnValue(new Set()),
     dimensions: [],
     measures: [],
     canFilterField: vi.fn().mockReturnValue(true),
@@ -243,7 +244,7 @@ describe("AsDbReadableController — unknown aggregate functions", () => {
     const body = (result as HttpError).body as any;
     expect(body.statusCode).toBe(400);
     expect(body.message).toMatch(
-      /^Unknown aggregate function "(pg_)?sleep" — use sum, count, avg, min or max$/,
+      /^Unknown aggregate function "(pg_)?sleep" — use sum, count, avg, min, max or countDistinct$/,
     );
     expect(body.errors).toEqual([expect.objectContaining({ path: "$select" })]);
     for (const method of ["aggregate", "findMany", "findManyWithCount", "count"]) {

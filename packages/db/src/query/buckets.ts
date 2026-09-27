@@ -31,14 +31,15 @@ export interface TBucketFieldSource {
 }
 
 /**
- * The one normalizer of `$select` computed entries (since 0.1.132) — uniqu's
+ * The one normalizer of `$select` computed entries — uniqu's
  * `resolveBuckets` (entry shapes, unit, time zone canonicalization, week
  * start, alias syntax and uniqueness, "grouped queries only", "must also
  * appear in $groupBy", string `$groupBy` entries) with the table's names as
  * the collision set: a bucket alias may not equal a logical path, a physical
  * column or a navigation field, so a label is never reverse-mapped as a
  * column. Aggregate entries are checked against `SUPPORTED_AGGREGATE_FNS`
- * (and `'*'` is `count`'s only).
+ * (and `'*'` is `count`'s only); whether the adapter renders a function is
+ * `guardAggregate`'s (`aggregateFns()` → `AGG_FN_NOT_SUPPORTED`).
  *
  * Which layer validates what:
  * - **Shapes** (this normalizer) run FIRST at every entry point — the core's
@@ -60,7 +61,7 @@ export interface TBucketFieldSource {
  *
  * @throws DbError `INVALID_QUERY` carrying every issue (`path` `$select` / `$groupBy`).
  */
-export function resolveCalendarBuckets(
+export function normalizeComputedSelect(
   controls: { $select?: unknown; $groupBy?: unknown } | undefined,
   fields: TBucketFieldSource,
   aggregate?: boolean,
@@ -76,6 +77,12 @@ export function resolveCalendarBuckets(
   }
   return res.buckets;
 }
+
+/**
+ * @deprecated since 0.1.136 — renamed {@link normalizeComputedSelect} (it
+ * normalizes every computed `$select` entry, aggregates included).
+ */
+export const resolveCalendarBuckets = normalizeComputedSelect;
 
 /**
  * Whether a field's TYPE allows it to be the source of a calendar bucket: a

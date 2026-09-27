@@ -1,5 +1,11 @@
 import type { TAtscriptAnnotatedType, TMetadataMap } from "@atscript/typescript/utils";
-import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError, bucketTimeZoneUnavailable } from "@atscript/db";
+import {
+  ALL_AGGREGATE_FNS,
+  ALL_BUCKET_UNITS,
+  BaseDbAdapter,
+  DbError,
+  bucketTimeZoneUnavailable,
+} from "@atscript/db";
 import type {
   AtscriptDbView,
   TDbDeleteResult,
@@ -21,7 +27,7 @@ import type {
   TValueFormatterPair,
   TFieldOps,
 } from "@atscript/db";
-import type { BucketUnit, DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import type { AggregateFn, BucketUnit, DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
@@ -255,6 +261,11 @@ export class MysqlAdapter extends BaseDbAdapter {
    */
   override calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return ALL_BUCKET_UNITS;
+  }
+
+  /** Every aggregate function, `countDistinct` included. */
+  override aggregateFns(): ReadonlySet<AggregateFn> {
+    return ALL_AGGREGATE_FNS;
   }
 
   // ── Annotation hooks ──────────────────────────────────────────────────────

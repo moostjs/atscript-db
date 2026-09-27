@@ -4,10 +4,14 @@ import { assertAggregateFn, resolveAlias, type TDbAggregateFn } from "@atscript/
 
 import { sqlTimeZoneLiteral } from "./common";
 import type { SqlDialect, TSqlFragment } from "./dialect";
-import { EMPTY_AND, finalizeParams } from "./dialect";
+import { EMPTY_AND, finalizeParams, havingGroupRef } from "./dialect";
 import { createFilterVisitor } from "./filter-builder";
 
-export const AGG_FN_SQL: Readonly<Record<TDbAggregateFn, string>> = {
+/**
+ * SQL function name of each single-name aggregate. `countDistinct` is not a
+ * name but a form (`COUNT(DISTINCT x)`) — see {@link renderAggCall}.
+ */
+export const AGG_FN_SQL: Readonly<Record<Exclude<TDbAggregateFn, "countDistinct">, string>> = {
   sum: "SUM",
   avg: "AVG",
   count: "COUNT",
@@ -15,17 +19,21 @@ export const AGG_FN_SQL: Readonly<Record<TDbAggregateFn, string>> = {
   max: "MAX",
 };
 
-/** The SQL function for an aggregate name; throws `INVALID_QUERY` on an unsupported one. */
-export function aggFnName(fn: unknown, path?: string): string {
+/**
+ * Renders one aggregate call over an already-rendered argument (`*`, a quoted
+ * column, a `CASE` expression): `SUM(x)`, `COUNT(DISTINCT x)`, …
+ * Re-asserts the name first (`INVALID_QUERY` on an unknown one), so nothing
+ * unchecked reaches SQL.
+ */
+export function renderAggCall(fn: unknown, arg: string, path?: string): string {
   assertAggregateFn(fn, path);
-  return AGG_FN_SQL[fn];
+  return fn === "countDistinct" ? `COUNT(DISTINCT ${arg})` : `${AGG_FN_SQL[fn]}(${arg})`;
 }
 
-/** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)`. */
+/** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)` / `COUNT(DISTINCT "region")`. */
 function aggFnSql(dialect: SqlDialect, expr: AggregateExpr): string {
-  const fn = aggFnName(expr.$fn);
   const field = expr.$field === "*" ? "*" : dialect.quoteIdentifier(expr.$field);
-  return `${fn}(${field})`;
+  return renderAggCall(expr.$fn, field);
 }
 
 function buildAggExpr(dialect: SqlDialect, expr: AggregateExpr): string {
@@ -95,7 +103,7 @@ export function groupKeySql(dialect: SqlDialect, controls: DbControls, key: stri
  * not allow a SELECT alias in HAVING (MySQL and SQLite tolerate it, so the
  * expression form keeps all three identical). A calendar-bucket alias renders
  * its bucket expression ({@link groupKeySql}), or its quoted alias when the
- * dialect sets `SqlDialect.bucketAliasInHaving` (why: see there). Other keys
+ * dialect sets `SqlDialect.bucketAliasInHaving` (`havingGroupRef`). Other keys
  * (grouped columns) render as plain columns.
  */
 function havingClause(dialect: SqlDialect, controls: DbControls): TSqlFragment | undefined {
@@ -109,10 +117,10 @@ function havingClause(dialect: SqlDialect, controls: DbControls): TSqlFragment |
     columnRef: (field) => {
       const aggExpr = exprByAlias.get(field);
       if (aggExpr) return aggExpr;
-      if (dialect.bucketAliasInHaving && controls.$select?.bucketByAlias(field)) {
-        return dialect.quoteIdentifier(field);
-      }
-      return groupKeySql(dialect, controls, field);
+      const bucket = controls.$select?.bucketByAlias(field);
+      return bucket
+        ? havingGroupRef(dialect, bucketSql(dialect, bucket), field)
+        : dialect.quoteIdentifier(field);
     },
   });
   const fragment = walkFilter(having, visitor);

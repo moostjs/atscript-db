@@ -1,5 +1,11 @@
 import type { Collection, Document } from "mongodb";
-import type { TDbRelation, TDbForeignKey, TTableResolver, WithRelation } from "@atscript/db";
+import {
+  tableNameOf,
+  type TDbRelation,
+  type TDbForeignKey,
+  type TTableResolver,
+  type WithRelation,
+} from "@atscript/db";
 import { buildMongoFilter } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
 
@@ -258,7 +264,7 @@ function buildFromLookup(
     return undefined;
   }
 
-  const targetTableName = resolveRelTargetTableName(relation);
+  const targetTableName = tableNameOf(relation.targetType());
   const innerPipeline = buildLookupInnerPipeline(withRel, remoteFK.fields);
   const { letVars, exprMatch } = buildLookupJoin(remoteFK.targetFields, remoteFK.fields, "pk_");
 
@@ -301,9 +307,8 @@ function buildViaLookup(
     return undefined;
   }
 
-  const junctionTableName =
-    (junctionType.metadata?.get("db.table") as string) || junctionType.id || "";
-  const targetTableName = resolveRelTargetTableName(relation);
+  const junctionTableName = tableNameOf(junctionType);
+  const targetTableName = tableNameOf(relation.targetType());
 
   const fkToThis = findRemoteFK(junctionMeta, host._table.tableName);
   if (!fkToThis) {
@@ -495,7 +500,7 @@ function findFKForRelation(
   relation: TDbRelation,
   foreignKeys: ReadonlyMap<string, TDbForeignKey>,
 ): { localFields: string[]; targetFields: string[]; targetTable: string } | undefined {
-  const targetTableName = resolveRelTargetTableName(relation);
+  const targetTableName = tableNameOf(relation.targetType());
   for (const fk of foreignKeys.values()) {
     if (relation.alias) {
       if (fk.alias === relation.alias) {
@@ -527,10 +532,4 @@ function findRemoteFK(
     }
   }
   return undefined;
-}
-
-/** Resolves the target table/collection name from a relation's target type. */
-function resolveRelTargetTableName(relation: TDbRelation): string {
-  const targetType = relation.targetType();
-  return (targetType?.metadata?.get("db.table") as string) || targetType?.id || "";
 }

@@ -16,7 +16,7 @@ import {
   checkHavingKeys,
   collectQueryPaths,
   findAncestorInSet,
-  resolveCalendarBuckets,
+  normalizeComputedSelect,
   unsupportedOperatorMessage,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
@@ -47,12 +47,43 @@ import {
   QUERY_CONTROLS,
 } from "./permissions/crud-controls";
 
+/** Read endpoint a {@link AsDbReadableController.decorateRows} call serves. */
+export type TDbDecorateEndpoint = "query" | "pages" | "geo" | "one";
+
+/**
+ * Context passed to {@link AsDbReadableController.decorateRows}.
+ *
+ * @since 0.1.136
+ */
+export interface TDbDecorateContext {
+  /** Endpoint that produced the rows. `/one` and `/one/:id` both report `"one"`. */
+  endpoint: TDbDecorateEndpoint;
+  /**
+   * The effective `$select` the endpoint read with — after
+   * `transformProjection`, the `@db.writeOnly` seal and preferred-id
+   * widening (`undefined` = no projection). Columns added only to feed an
+   * action's `requiredFields` are stripped again before the hook runs.
+   */
+  projection: UniqueryControls["$select"] | undefined;
+  /** The request's parsed controls (`$select`, `$with`, `$actions`, …). Read-only by convention. */
+  controls: Record<string, unknown>;
+}
+
+/** What `$actions` augmentation of a read needs, prepared before the read runs. */
+interface TAugmentationPrep {
+  envelopes: readonly TDbActionEnvelope[];
+  resolvedProjection: string[] | null;
+  widenedSelect: string[] | null;
+}
+
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
  * (tables or views). Provides query, pages, getOne, and meta endpoints.
  *
  * For write operations (insert, replace, update, delete), use {@link AsDbController}.
- * For views, use {@link AsDbViewController}.
+ * Views bind to this same class — `@ViewController(view)` (an alias of
+ * `@ReadableController`) or a constructor-passed view; there is no separate
+ * view controller.
  */
 @Inherit()
 export class AsDbReadableController<
@@ -126,6 +157,8 @@ export class AsDbReadableController<
   private readonly _idSources = new Map<string, IdValidationSource>();
   private readonly _preferredIdSet: ReadonlySet<string>;
   private readonly _overlayIsNoOp: boolean;
+  /** `true` when a subclass implements {@link decorateRows} (the override switches the hook on). */
+  private readonly _decorates: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
   /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
@@ -161,6 +194,7 @@ export class AsDbReadableController<
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
+    this._decorates = typeof this.decorateRows === "function";
     this._idOpts =
       this.hasField === AsDbReadableController.prototype.hasField
         ? undefined
@@ -297,7 +331,7 @@ export class AsDbReadableController<
 
   /**
    * The core's shared normalizer of `$select` computed entries
-   * (`resolveCalendarBuckets`) as a 400 with the core's wording and `path`
+   * (`normalizeComputedSelect`) as a 400 with the core's wording and `path`
    * (`$select` / `$groupBy`): entry shapes, calendar-bucket unit / zone /
    * week start / alias, "grouped queries only", "must also appear in
    * $groupBy", alias collisions with this table's fields. Runs once per
@@ -309,7 +343,7 @@ export class AsDbReadableController<
   protected checkComputedSelect(controls: object | undefined): HttpError | undefined {
     const capabilities = this.capabilities;
     try {
-      resolveCalendarBuckets(controls, {
+      normalizeComputedSelect(controls, {
         flatMap: this.readable.flatMap,
         physicalNames: capabilities.physicalNames,
         navFields: capabilities.navFields,
@@ -664,11 +698,7 @@ export class AsDbReadableController<
   private async _prepareAugmentation(
     controls: Record<string, unknown>,
     select: UniqueryControls["$select"] | undefined,
-  ): Promise<{
-    envelopes: readonly TDbActionEnvelope[];
-    resolvedProjection: string[] | null;
-    widenedSelect: string[] | null;
-  } | null> {
+  ): Promise<TAugmentationPrep | null> {
     if (!controls.$actions) return null;
     const envelopes = await this._resolveAugmentEnvelopes();
     if (envelopes === null) return null;
@@ -832,13 +862,66 @@ export class AsDbReadableController<
   }
 
   /**
-   * Shared `query` / `pages` pipeline: prepare actions augmentation + read
+   * Post-read row decoration hook. Not implemented by
+   * default — defining it in a subclass switches it on. Runs once per
+   * response on `/query`, `/pages`, `/geo` and `/one` (`/one/:id` and the
+   * composite form), after `$actions` augmentation, with the final top-level
+   * rows. Mutate the rows in place; the return value is ignored. May be async.
+   *
+   * Not called for `$count`, `$groupBy` aggregates, nested `$with` rows
+   * (reach them through the parent row), a `/one` 404, or value-help
+   * controllers.
+   *
+   * Convention (not enforced): name decoration keys with a `$` prefix, like
+   * `$actions` and `$distance`, so they can never collide with a field name.
+   * Do not overwrite `$actions`. Columns the
+   * hook needs but the client did not select must be added in
+   * {@link transformProjection} — they are then part of the response.
+   *
+   * ```ts
+   * protected async decorateRows(rows: Record<string, unknown>[], ctx: TDbDecorateContext) {
+   *   const unread = await countUnread(rows.map((r) => r.id))
+   *   for (const row of rows) row.$unread = unread.get(row.id) ?? 0
+   * }
+   * ```
+   *
+   * @since 0.1.136
+   */
+  protected decorateRows?(
+    rows: Record<string, unknown>[],
+    ctx: TDbDecorateContext,
+  ): void | Promise<void>;
+
+  /**
+   * Finishes a read's top-level rows in place: `$actions` augmentation (when
+   * the request asked for it — `prep`), then {@link decorateRows} when a
+   * subclass implements it. Returns the hook's result — `undefined`, with no
+   * promise or microtask, when there is no hook or it is synchronous.
+   */
+  private _finishRows(
+    rows: Record<string, unknown>[],
+    prep: TAugmentationPrep | null,
+    ctx: TDbDecorateContext,
+  ): void | Promise<void> {
+    if (prep) {
+      augmentRowsWithActions({
+        envelopes: prep.envelopes,
+        rows,
+        resolvedProjection: prep.resolvedProjection,
+      });
+    }
+    return this._decorates ? this.decorateRows!(rows, ctx) : undefined;
+  }
+
+  /**
+   * Shared `query` / `pages` / `geo` pipeline: prepare actions augmentation + read
    * strategy in parallel, pre-widen $select for `requiredFields`, run
    * `exec`, and augment `result.data` with `$actions` when the request set
-   * `$actions=true`. Caller dispatches the strategy to its read-method
-   * family (count vs no-count).
+   * `$actions=true`, then run {@link decorateRows}. Caller dispatches the
+   * strategy to its read-method family (count vs no-count).
    */
   private async _runReadWithActions<R extends { data: unknown[] }>(
+    endpoint: Exclude<TDbDecorateEndpoint, "one">,
     queryObj: Uniquery<any, any>,
     controls: Record<string, unknown>,
     select: UniqueryControls["$select"] | undefined,
@@ -860,12 +943,12 @@ export class AsDbReadableController<
       : queryObj;
 
     const result = await exec(initialQuery, strategy);
-    if (!prep) return result;
-    result.data = augmentRowsWithActions({
-      envelopes: prep.envelopes,
-      rows: result.data as Record<string, unknown>[],
-      resolvedProjection: prep.resolvedProjection,
-    }) as R["data"];
+    const pending = this._finishRows(result.data as Record<string, unknown>[], prep, {
+      endpoint,
+      projection: select,
+      controls,
+    });
+    if (pending) await pending;
     return result;
   }
 
@@ -982,6 +1065,7 @@ export class AsDbReadableController<
     } as Uniquery<any, any>;
 
     const wrapped = await this._runReadWithActions(
+      "query",
       queryObj,
       controls as Record<string, unknown>,
       select,
@@ -1063,6 +1147,7 @@ export class AsDbReadableController<
     };
 
     const result = await this._runReadWithActions(
+      "pages",
       query as Uniquery<any, any>,
       controls,
       select,
@@ -1178,6 +1263,7 @@ export class AsDbReadableController<
 
     if (paginated) {
       const result = await this._runReadWithActions(
+        "geo",
         queryObj,
         controls,
         select,
@@ -1199,6 +1285,7 @@ export class AsDbReadableController<
     }
 
     const wrapped = await this._runReadWithActions(
+      "geo",
       queryObj,
       controls,
       select,
@@ -1318,13 +1405,13 @@ export class AsDbReadableController<
 
     const item = await this.returnOne(Promise.resolve(row));
     if (item instanceof HttpError) return item;
-    if (!prep) return item;
-    const [augmented] = augmentRowsWithActions({
-      envelopes: prep.envelopes,
-      rows: [item as unknown as Record<string, unknown>],
-      resolvedProjection: prep.resolvedProjection,
+    const pending = this._finishRows([item as unknown as Record<string, unknown>], prep, {
+      endpoint: "one",
+      projection: select,
+      controls: parsedControls as Record<string, unknown>,
     });
-    return augmented as DataType;
+    if (pending) await pending;
+    return item;
   }
 
   /**
@@ -1407,6 +1494,8 @@ export class AsDbReadableController<
       versionColumn: this.readable.versionColumn,
       // Calendar-bucket units (`bucket(field,unit,…)` in an aggregate `$select`); omitted when none.
       ...(capabilities.bucketUnits.length > 0 && { bucketUnits: [...capabilities.bucketUnits] }),
+      // Aggregate functions the adapter renders.
+      aggregateFns: [...capabilities.aggregateFns],
     };
   }
 

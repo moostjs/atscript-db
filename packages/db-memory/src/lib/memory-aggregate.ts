@@ -18,7 +18,8 @@ type TRow = Record<string, unknown>;
  * - null and missing form ONE group; a calendar-bucket key is the
  *   `@uniqu/core` kernel label (the SQLite UDF runs the same kernel);
  * - `sum` / `avg` over no numeric value are `null`; `min` / `max` order with
- *   the `$sort` comparator; any other `$fn` is `INVALID_QUERY`;
+ *   the `$sort` comparator; `countDistinct` counts distinct non-null values
+ *   by group identity (below); any other `$fn` is `INVALID_QUERY`;
  * - group identity is type-tagged: `1` and `"1"` never share a group (a
  *   number and a bigint of one value do), `Date`s group by instant, JSON
  *   values by a key-order-independent serialization;
@@ -238,6 +239,25 @@ function accumulatorFactory(expr: AggregateExpr): () => TAccumulator {
             }
           },
           result: () => (n === 0 ? null : avg ? sum / n : sum),
+        };
+      };
+    }
+    case "countDistinct": {
+      // Distinct non-null values, by group identity: a string or boolean is
+      // its own identity; numbers / bigints / `Date`s / JSON values are
+      // tokenized (a number and a bigint of one value, one instant, one JSON
+      // value count once) in a set of their own, so no token meets a string.
+      return () => {
+        const plain = new Set<unknown>();
+        const tokens = new Set<string>();
+        return {
+          add: (row) => {
+            const v = read(row);
+            if (v == null) return;
+            if (typeof v === "string" || typeof v === "boolean") plain.add(v);
+            else tokens.add(identityToken(v));
+          },
+          result: () => plain.size + tokens.size,
         };
       };
     }

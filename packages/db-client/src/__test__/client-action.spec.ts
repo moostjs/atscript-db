@@ -418,6 +418,19 @@ describe("Client.action — unknown action", () => {
   });
 });
 
+/** Table-level backend action with a `User` input form, optionally served at `formUrl`. */
+function formAction(name: string, formUrl?: string): TDbActionInfo {
+  return {
+    name,
+    label: name,
+    level: "table",
+    processor: "backend",
+    value: `/api/x/${name}`,
+    inputForm: "User",
+    ...(formUrl ? { formUrl } : {}),
+  };
+}
+
 describe("Client.getActionForm — form-schema lookup", () => {
   function fetchWithForm(actions: TDbActionInfo[], formSchema: unknown) {
     return vi.fn().mockImplementation((url: string) => {
@@ -522,5 +535,62 @@ describe("Client.getActionForm — form-schema lookup", () => {
       String(call[0]).includes("/meta/form/"),
     );
     expect(formCalls).toHaveLength(1);
+  });
+
+  // since 0.1.136 — class-level entries may point at a form served elsewhere.
+  it("fetches baseUrl + formUrl when the action carries formUrl", async () => {
+    const formSchema = serializeAnnotatedType(UserType, {});
+    const fetchFn = fetchWithForm(
+      [
+        {
+          name: "ship",
+          label: "Ship",
+          level: "row",
+          processor: "backend",
+          value: "/api/shipping/actions/ship",
+          inputForm: "ShipForm",
+          formUrl: "/api/shipping/meta/form/ShipForm",
+        },
+      ],
+      formSchema,
+    );
+    const c = new Client("/api/orders", { fetch: fetchFn, baseUrl: "https://example.test" });
+    const form = await c.getActionForm("ship");
+    expect(form).toBeTruthy();
+    const formCalls = fetchFn.mock.calls.filter((call: unknown[]) =>
+      String(call[0]).includes("/meta/form/"),
+    );
+    expect(formCalls.map((call: unknown[]) => call[0])).toEqual([
+      "https://example.test/api/shipping/meta/form/ShipForm",
+    ]);
+  });
+
+  it("caches by resolved URL — same form name at different URLs fetches both", async () => {
+    const formSchema = serializeAnnotatedType(UserType, {});
+    const fetchFn = fetchWithForm(
+      [
+        formAction("local"),
+        formAction("remoteA", "/api/a/meta/form/User"),
+        formAction("remoteA2", "/api/a/meta/form/User"),
+        formAction("remoteB", "/api/b/meta/form/User"),
+      ],
+      formSchema,
+    );
+    const c = new Client("/api/orders", { fetch: fetchFn });
+    const local = await c.getActionForm("local");
+    const a = await c.getActionForm("remoteA");
+    const a2 = await c.getActionForm("remoteA2");
+    const b = await c.getActionForm("remoteB");
+    expect(a2).toBe(a);
+    expect(b).not.toBe(a);
+    expect(local).not.toBe(a);
+    const formUrls = fetchFn.mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((url: string) => url.includes("/meta/form/"));
+    expect(formUrls).toEqual([
+      "/api/orders/meta/form/User",
+      "/api/a/meta/form/User",
+      "/api/b/meta/form/User",
+    ]);
   });
 });

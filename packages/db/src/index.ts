@@ -55,13 +55,15 @@ export { isPlainObject, isEmptyObject } from "./shared/object";
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView } from "./table/db-view";
-export type { TViewColumnMapping } from "./table/db-view";
+export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 export { BaseDbAdapter, ALL_BUCKET_UNITS } from "./base-adapter";
+export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
-export { translateQueryTree } from "./query/query-tree";
+export { translateQueryTree, isFieldRef } from "./query/query-tree";
+export { tableNameOf } from "./rel/relation-helpers";
 export type {
   TViewPlan,
   TViewJoin,
@@ -186,6 +188,7 @@ export { findAncestorInSet } from "./table/table-metadata";
 
 // ── Calendar buckets (since 0.1.132) ─────────────────────────────────────────
 export {
+  normalizeComputedSelect,
   resolveCalendarBuckets,
   isBucketableField,
   isJsonValueField,

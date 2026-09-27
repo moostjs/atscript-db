@@ -32,14 +32,18 @@ export function validateExclusiveWith(
   return errors;
 }
 
+/** Primitive base type (`string`, `number`, `decimal`, …) of a resolved definition, if it is a primitive. */
+export function primitiveBaseType(def: SemanticNode | undefined): string | undefined {
+  if (!def || !isPrimitive(def)) return undefined;
+  const ct = def.config.type;
+  return typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
+}
+
 /** Resolves a field/prop's primitive base type, or `undefined` if it isn't a ref-to-primitive. */
 function getPrimitiveBaseType(node: SemanticNode, doc: AtscriptDoc): string | undefined {
   const def = node.getDefinition();
   if (!def || !isRef(def)) return undefined;
-  const unwound = doc.unwindType(def.id!, def.chain);
-  if (!unwound || !isPrimitive(unwound.def)) return undefined;
-  const ct = unwound.def.config.type;
-  return typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
+  return primitiveBaseType(doc.unwindType(def.id!, def.chain)?.def);
 }
 
 /** Asserts `args[0]` names a sibling property whose primitive base type is `string`. */

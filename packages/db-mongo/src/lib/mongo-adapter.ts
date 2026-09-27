@@ -5,6 +5,7 @@ import type {
   Validator,
 } from "@atscript/typescript/utils";
 import {
+  ALL_AGGREGATE_FNS,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
@@ -41,7 +42,7 @@ import type {
   MongoClient,
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
-import type { BucketUnit } from "@uniqu/core";
+import type { AggregateFn, BucketUnit } from "@uniqu/core";
 import { dedupeProjection } from "./projection-dedupe";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
@@ -371,6 +372,11 @@ export class MongoAdapter extends BaseDbAdapter {
   /** All five units, over MongoDB's bundled time zone database (see `agg.ts` `bucketExpression`). */
   override calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return ALL_BUCKET_UNITS;
+  }
+
+  /** Every aggregate function, `countDistinct` included. */
+  override aggregateFns(): ReadonlySet<AggregateFn> {
+    return ALL_AGGREGATE_FNS;
   }
 
   override getValidatorPlugins(): ReturnType<BaseDbAdapter["getValidatorPlugins"]> {

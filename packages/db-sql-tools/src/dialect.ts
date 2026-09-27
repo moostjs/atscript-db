@@ -1,4 +1,4 @@
-import type { TResolvedBucket } from "@atscript/db";
+import type { TResolvedBucket, TViewJsonType } from "@atscript/db";
 
 export interface TSqlFragment {
   sql: string;
@@ -47,9 +47,10 @@ export interface SqlDialect {
    */
   calendarBucket?(quotedCol: string, b: TResolvedBucket): string;
   /**
-   * HAVING references a calendar bucket by its quoted SELECT alias instead of
-   * re-rendering the bucket expression (the aggregate count query's inner
-   * SELECT lists `<bucket expr> AS alias`, so the alias exists there too).
+   * HAVING references a calendar bucket — and a view's JSON-extracted
+   * dimension ({@link jsonExtract}) — by its quoted SELECT alias instead of
+   * re-rendering the expression (the aggregate count query's inner SELECT
+   * lists `<bucket expr> AS alias`, so the alias exists there too).
    *
    * MySQL needs this: the bucket expression reads the raw source column, which
    * is not itself in GROUP BY (only the expression is), so HAVING rejects it
@@ -60,6 +61,27 @@ export interface SqlDialect {
    * Since 0.1.132.
    */
   bucketAliasInHaving?: boolean;
+  /**
+   * Typed extraction of one primitive leaf inside a JSON column — how a view
+   * field that references a descendant of a `@db.json` column reads it.
+   *
+   * Semantics (identical on every dialect): the result is the declared
+   * primitive, or NULL when the path is missing, the value is JSON `null`, or
+   * the value has another JSON type — never a coercion (the JSON string
+   * `"5"` is NULL for a `number` leaf). Numbers come back as doubles (integers
+   * beyond 2^53 lose precision); booleans as the dialect's boolean
+   * representation (0/1 where booleans are integers).
+   *
+   * `quotedCol` is already quoted (`"table"."column"`); `path` holds the
+   * segments below it. The expression must be PARAMETER-FREE — it renders in
+   * CREATE VIEW DDL, repeated in SELECT, GROUP BY, HAVING and aggregate
+   * arguments. Quote every segment via {@link quotedJsonPathSegments}.
+   * Dialects without JSON extraction omit this; view sync then fails with
+   * `JSON extraction is not supported by this adapter`.
+   *
+   * @since 0.1.136
+   */
+  jsonExtract?(quotedCol: string, path: readonly string[], type: TViewJsonType): string;
   /** e.g. 'CREATE VIEW IF NOT EXISTS' or 'CREATE OR REPLACE VIEW' */
   createViewPrefix: string;
   /** Returns a parameter placeholder for the given 1-based index. When absent, '?' is used. */
@@ -77,6 +99,45 @@ export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSq
   let idx = 0;
   const sql = fragment.sql.replace(/\?/g, () => dialect.paramPlaceholder!(++idx));
   return { sql, params: fragment.params };
+}
+
+/**
+ * How HAVING references a grouped NON-column expression (a calendar bucket, a
+ * view's JSON-extracted dimension): its quoted SELECT `alias` on dialects that
+ * set {@link SqlDialect.bucketAliasInHaving}, else the expression itself.
+ */
+export function havingGroupRef(dialect: SqlDialect, expr: string, alias: string): string {
+  return dialect.bucketAliasInHaving ? dialect.quoteIdentifier(alias) : expr;
+}
+
+/**
+ * Each JSON path segment wrapped in double quotes (`"a"`), for the dialects'
+ * {@link SqlDialect.jsonExtract} path literals (`'$."a"."b"'`, `'{"a","b"}'`).
+ *
+ * A segment containing `"`, `\` or a control character has no quoting that
+ * reads the same on every dialect (SQLite's quoted path labels have no escape
+ * syntax), so it is rejected rather than escaped.
+ *
+ * @since 0.1.136
+ * @throws for an empty path or a segment that is empty or holds such a character.
+ */
+export function quotedJsonPathSegments(path: readonly string[]): string[] {
+  if (path.length === 0) {
+    throw new Error("JSON extraction needs a path below the JSON column");
+  }
+  return path.map((seg) => {
+    let ok = seg.length > 0;
+    for (let i = 0; ok && i < seg.length; i++) {
+      const code = seg.charCodeAt(i);
+      ok = code >= 0x20 && code !== 0x22 && code !== 0x5c;
+    }
+    if (!ok) {
+      throw new Error(
+        `JSON path segment ${JSON.stringify(seg)} can't be extracted — segments must be non-empty and free of '"', '\\' and control characters`,
+      );
+    }
+    return `"${seg}"`;
+  });
 }
 
 export const EMPTY_AND: TSqlFragment = { sql: "1=1", params: [] };

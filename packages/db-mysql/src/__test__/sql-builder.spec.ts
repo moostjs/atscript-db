@@ -6,6 +6,7 @@ import {
   buildUpdate,
   buildDelete,
   buildCreateTable,
+  buildCreateView,
   mysqlTypeFromField,
   mysqlDialect,
   esc,
@@ -738,5 +739,65 @@ describe("defaultValueForType", () => {
 
   it("should return empty string for string", () => {
     expect(defaultValueForType("string")).toBe("''");
+  });
+});
+
+// ── JSON leaf extraction in views (since 0.1.136) ───────────────────────────
+
+const extract = (col: string, path: string[], type: "string" | "number" | "boolean") =>
+  mysqlDialect.jsonExtract!(col, path, type);
+const e = (path: string) => `JSON_EXTRACT(\`t\`.\`data\`, '${path}')`;
+
+describe("mysqlDialect.jsonExtract", () => {
+  it("guards each declared type with JSON_TYPE, no coercion or CAST", () => {
+    expect(extract("`t`.`data`", ["a", "b"], "string")).toBe(
+      `CASE JSON_TYPE(${e('$."a"."b"')}) WHEN 'STRING' THEN JSON_UNQUOTE(${e('$."a"."b"')}) END`,
+    );
+    expect(extract("`t`.`data`", ["n"], "number")).toBe(
+      `CASE WHEN JSON_TYPE(${e('$."n"')}) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') THEN ${e('$."n"')} + 0 END`,
+    );
+    expect(extract("`t`.`data`", ["f"], "boolean")).toBe(
+      `CASE JSON_TYPE(${e('$."f"')}) WHEN 'BOOLEAN' THEN JSON_UNQUOTE(${e('$."f"')}) = 'true' END`,
+    );
+    for (const type of ["string", "number", "boolean"] as const) {
+      expect(extract("`t`.`data`", ["x"], type)).not.toContain("CAST");
+    }
+  });
+
+  it("renders the extraction in view SELECT / GROUP BY and a HAVING dimension by alias", () => {
+    const tagSql = extract("`items`.`data`", ["tag"], "string");
+    const scoreSql = extract("`items`.`data`", ["score"], "number");
+    const sql = buildCreateView(
+      "v",
+      {
+        entryType: () => ({}) as never,
+        entryTable: "items",
+        joins: [],
+        having: { left: { field: "tag" }, op: "$ne", right: "x" },
+        materialized: false,
+      },
+      [
+        {
+          viewColumn: "tag",
+          viewPath: "tag",
+          sourceTable: "items",
+          sourceColumn: "data",
+          json: { path: ["tag"], type: "string" },
+        },
+        {
+          viewColumn: "total",
+          viewPath: "total",
+          sourceTable: "items",
+          sourceColumn: "data",
+          json: { path: ["score"], type: "number" },
+          aggFn: "sum",
+          aggField: "data.score",
+        },
+      ],
+      (ref) => `\`items\`.\`${ref.field}\``,
+    );
+    expect(sql).toBe(
+      `CREATE OR REPLACE VIEW \`v\` AS SELECT ${tagSql} AS \`tag\`, SUM(${scoreSql}) AS \`total\` FROM \`items\` GROUP BY ${tagSql} HAVING \`tag\` != 'x'`,
+    );
   });
 });

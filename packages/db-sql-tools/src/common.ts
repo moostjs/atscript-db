@@ -1,11 +1,25 @@
 import type { TDbReferentialAction } from "@atscript/db";
-import { DbError } from "@atscript/db";
+import { DbError, isFieldRef } from "@atscript/db";
 import { TIME_ZONE_NAME_RE } from "@uniqu/core";
 import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "@atscript/db";
+
+import { EMPTY_AND, EMPTY_OR, quotedJsonPathSegments } from "./dialect";
 
 /** Formats a string value as a SQL literal with single-quote escaping. */
 export function sqlStringLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * The SQL string literal of a `$`-rooted JSON path with every segment quoted
+ * (`'$."a"."b"'`) — the path argument of SQLite's and MySQL's `json_extract` /
+ * `json_type`.
+ *
+ * @since 0.1.136
+ * @throws as {@link quotedJsonPathSegments}.
+ */
+export function jsonDollarPath(path: readonly string[]): string {
+  return sqlStringLiteral(`$.${quotedJsonPathSegments(path).join(".")}`);
 }
 
 /**
@@ -117,8 +131,35 @@ export const queryOpToSql: Record<string, string> = {
   $lte: "<=",
 };
 
+/** An inlined SQL literal for a view-predicate value (DDL — no parameters). */
+function predicateLiteral(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "NULL";
+  }
+  if (typeof value === "string") {
+    return sqlStringLiteral(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`Non-finite number ${value} in a view predicate`);
+    }
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  throw new Error(`Unsupported literal ${JSON.stringify(value)} in a view predicate`);
+}
+
 /**
  * Renders an AtscriptQueryNode tree to raw SQL (no parameters -- for DDL use only).
+ *
+ * Operators: `=`/`!=`/`<`/`<=`/`>`/`>=` (a `null` operand becomes `IS [NOT] NULL`),
+ * `in` / `not in` (inlined literals; an empty `in` is `0=1`, an empty
+ * `not in` `1=1`), `exists` → `IS NOT NULL`, `not exists` → `IS NULL`.
+ *
+ * @throws for `matches` (`$regex`) and any other operator — a view predicate
+ *   that cannot be rendered fails at sync instead of rendering wrong SQL.
  */
 export function queryNodeToSql(
   node: AtscriptQueryNode,
@@ -126,10 +167,16 @@ export function queryNodeToSql(
 ): string {
   if ("$and" in node) {
     const children = (node as { $and: AtscriptQueryNode[] }).$and;
+    if (children.length === 0) {
+      return EMPTY_AND.sql;
+    }
     return children.map((n) => queryNodeToSql(n, resolveFieldRef)).join(" AND ");
   }
   if ("$or" in node) {
     const children = (node as { $or: AtscriptQueryNode[] }).$or;
+    if (children.length === 0) {
+      return EMPTY_OR.sql;
+    }
     return `(${children.map((n) => queryNodeToSql(n, resolveFieldRef)).join(" OR ")})`;
   }
   if ("$not" in node) {
@@ -139,19 +186,39 @@ export function queryNodeToSql(
   // Comparison
   const comp = node as { left: AtscriptQueryFieldRef; op: string; right?: unknown };
   const leftSql = resolveFieldRef(comp.left);
-  const sqlOp = queryOpToSql[comp.op] || "=";
+
+  switch (comp.op) {
+    case "$exists": {
+      return comp.right === false ? `${leftSql} IS NULL` : `${leftSql} IS NOT NULL`;
+    }
+    case "$in":
+    case "$nin": {
+      const values = Array.isArray(comp.right) ? comp.right : [comp.right];
+      if (values.length === 0) {
+        return comp.op === "$in" ? EMPTY_OR.sql : EMPTY_AND.sql;
+      }
+      const list = values.map((v) => predicateLiteral(v)).join(", ");
+      return `${leftSql} ${comp.op === "$in" ? "IN" : "NOT IN"} (${list})`;
+    }
+    case "$regex": {
+      throw new Error("matches is not supported in view predicates");
+    }
+    default:
+  }
+
+  const sqlOp = queryOpToSql[comp.op];
+  if (!sqlOp) {
+    throw new Error(`Operator "${comp.op}" is not supported in view predicates`);
+  }
 
   // Field-to-field comparison
-  if (comp.right && typeof comp.right === "object" && "field" in (comp.right as object)) {
-    return `${leftSql} ${sqlOp} ${resolveFieldRef(comp.right as AtscriptQueryFieldRef)}`;
+  if (isFieldRef(comp.right)) {
+    return `${leftSql} ${sqlOp} ${resolveFieldRef(comp.right)}`;
   }
 
   // Value comparison
   if (comp.right === null || comp.right === undefined) {
     return comp.op === "$ne" ? `${leftSql} IS NOT NULL` : `${leftSql} IS NULL`;
   }
-  if (typeof comp.right === "string") {
-    return `${leftSql} ${sqlOp} '${comp.right.replace(/'/g, "''")}'`;
-  }
-  return `${leftSql} ${sqlOp} ${comp.right as number}`;
+  return `${leftSql} ${sqlOp} ${predicateLiteral(comp.right)}`;
 }

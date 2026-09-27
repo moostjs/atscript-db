@@ -10,7 +10,13 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
 } from "../sql-builder";
-import { buildInsert, buildSelect, buildUpdate, buildDelete } from "../sql-builder";
+import {
+  buildInsert,
+  buildSelect,
+  buildUpdate,
+  buildDelete,
+  buildCreateView,
+} from "../sql-builder";
 import type { TDbFieldMeta } from "@atscript/db";
 import { finalizeParams } from "@atscript/db-sql-tools";
 
@@ -386,5 +392,66 @@ describe("buildCreateTable", () => {
     expect(sql).not.toContain("ENGINE");
     expect(sql).not.toContain("CHARSET");
     expect(sql).not.toContain("utf8mb4");
+  });
+});
+
+// ── JSON leaf extraction in views (since 0.1.136) ───────────────────────────
+
+const extract = (col: string, path: string[], type: "string" | "number" | "boolean") =>
+  pgDialect.jsonExtract!(col, path, type);
+
+describe("pgDialect.jsonExtract", () => {
+  it("guards each declared type with jsonb_typeof, no coercion", () => {
+    expect(extract(`"t"."data"`, ["a", "b"], "string")).toBe(
+      `CASE jsonb_typeof(("t"."data")::jsonb #> '{"a","b"}') WHEN 'string' THEN ("t"."data")::jsonb #>> '{"a","b"}' END`,
+    );
+    expect(extract(`"t"."data"`, ["n"], "number")).toBe(
+      `CASE jsonb_typeof(("t"."data")::jsonb #> '{"n"}') WHEN 'number' THEN (("t"."data")::jsonb #>> '{"n"}')::double precision END`,
+    );
+    expect(extract(`"t"."data"`, ["f"], "boolean")).toBe(
+      `CASE jsonb_typeof(("t"."data")::jsonb #> '{"f"}') WHEN 'boolean' THEN (("t"."data")::jsonb #>> '{"f"}')::boolean END`,
+    );
+  });
+
+  it("quotes every path segment and escapes single quotes", () => {
+    expect(extract(`"t"."d"`, ["1", "a,b", "it's"], "string")).toContain(
+      `#> '{"1","a,b","it''s"}'`,
+    );
+  });
+
+  it("renders the extraction in view SELECT, GROUP BY, HAVING and aggregates", () => {
+    const tag = {
+      viewColumn: "tag",
+      viewPath: "tag",
+      sourceTable: "items",
+      sourceColumn: "data",
+      json: { path: ["tag"], type: "string" as const },
+    };
+    const total = {
+      viewColumn: "total",
+      viewPath: "total",
+      sourceTable: "items",
+      sourceColumn: "data",
+      json: { path: ["score"], type: "number" as const },
+      aggFn: "sum",
+      aggField: "data.score",
+    };
+    const tagSql = extract(`"items"."data"`, ["tag"], "string");
+    const scoreSql = extract(`"items"."data"`, ["score"], "number");
+    const sql = buildCreateView(
+      "v",
+      {
+        entryType: () => ({}) as never,
+        entryTable: "items",
+        joins: [],
+        having: { left: { field: "tag" }, op: "$ne", right: "x" },
+        materialized: false,
+      },
+      [tag, total],
+      (ref) => `"items"."${ref.field}"`,
+    );
+    expect(sql).toBe(
+      `CREATE OR REPLACE VIEW "v" AS SELECT ${tagSql} AS "tag", SUM(${scoreSql}) AS "total" FROM "items" GROUP BY ${tagSql} HAVING ${tagSql} != 'x'`,
+    );
   });
 });

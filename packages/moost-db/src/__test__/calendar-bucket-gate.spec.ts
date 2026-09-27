@@ -7,10 +7,9 @@ import { BUCKET_UNITS } from "@uniqu/core";
 import { HttpError } from "@moostjs/event-http";
 
 import { AsDbController } from "../as-db.controller";
-import { validationErrorTransform } from "../validation-interceptor";
 // The core test adapter has no package entry — the one relative import that stays.
 import { MockAdapter } from "../../../db/src/__test__/test-utils";
-import { createMockApp as makeApp, errorsOf, prepareFixtures } from "./test-utils";
+import { createMockApp as makeApp, errorsOf, httpReplyFor, prepareFixtures } from "./test-utils";
 
 /**
  * Calendar buckets over HTTP (since 0.1.132): the gate runs the core's shared
@@ -299,19 +298,12 @@ describe("capability index follows the adapter (sync-safe)", () => {
 
 describe("DbError → HTTP status", () => {
   it("BUCKET_TZ_UNAVAILABLE is 501, BUCKET_NOT_SUPPORTED is 400", () => {
-    const transform = validationErrorTransform() as unknown as {
-      error: (error: unknown, reply: (r: unknown) => void) => void;
-    };
     for (const [code, status] of [
       ["BUCKET_TZ_UNAVAILABLE", 501],
       ["BUCKET_NOT_SUPPORTED", 400],
     ] as const) {
-      let replied: unknown;
-      transform.error(new DbError(code, [{ path: "$select", message: "m" }]), (r) => {
-        replied = r;
-      });
-      expect(replied).toBeInstanceOf(HttpError);
-      expect((replied as HttpError).body.statusCode, code).toBe(status);
+      const replied = httpReplyFor(new DbError(code, [{ path: "$select", message: "m" }]));
+      expect(replied.body.statusCode, code).toBe(status);
     }
   });
 });

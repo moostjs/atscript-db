@@ -6,9 +6,10 @@ import type {
   TValidatorPlugin,
 } from "@atscript/typescript/utils";
 
-import { BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
+import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
 
 import { DbError } from "./db-error";
+import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
 import { createFailureCollector } from "./shared/failure-collector";
 
 import type {
@@ -341,6 +342,21 @@ export abstract class BaseDbAdapter {
    */
   calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return EMPTY_BUCKET_UNITS;
+  }
+
+  /**
+   * Aggregate functions (`{ $fn, $field }` in an aggregate `$select`) this
+   * adapter renders. The default is `sum`, `count`, `avg`, `min` and `max`;
+   * an adapter that also implements `countDistinct` (distinct non-null
+   * values) returns `ALL_AGGREGATE_FNS`. The core rejects a known function
+   * missing from this set with `AGG_FN_NOT_SUPPORTED` before dispatch, so
+   * `aggregate()` only ever receives functions listed here; moost-db's
+   * `/meta` advertises the set as `aggregateFns`.
+   *
+   * @since 0.1.136
+   */
+  aggregateFns(): ReadonlySet<AggregateFn> {
+    return BASE_AGGREGATE_FNS;
   }
 
   /**

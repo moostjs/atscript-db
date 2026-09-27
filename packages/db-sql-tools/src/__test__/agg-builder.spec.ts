@@ -188,6 +188,35 @@ describe("buildAggregateSelect", () => {
     expect(result.sql).toContain("SUM([amount]) AS [sum_amount]");
   });
 
+  it("renders countDistinct as COUNT(DISTINCT col); HAVING inlines it, ORDER BY keeps the alias", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["status"],
+      $select: makeSelect(["status", { $fn: "countDistinct", $field: "customer", $as: "buyers" }]),
+      $having: { buyers: { $gt: 2 } } as any,
+      $sort: { buyers: -1 },
+    });
+    expect(result.sql).toBe(
+      "SELECT [status], COUNT(DISTINCT [customer]) AS [buyers] FROM [orders] WHERE 1=1 GROUP BY [status] HAVING COUNT(DISTINCT [customer]) > ? ORDER BY [buyers] DESC",
+    );
+    expect(result.params).toEqual([2]);
+    const count = buildAggregateCount(mockDialect, "orders", emptyWhere, {
+      $groupBy: ["status"],
+      $select: makeSelect([{ $fn: "countDistinct", $field: "customer", $as: "buyers" }]),
+      $having: { buyers: { $gt: 2 } } as any,
+    });
+    expect(count.sql).toContain("HAVING COUNT(DISTINCT [customer]) > ?");
+  });
+
+  it("the default countDistinct alias is countDistinct_<field>", () => {
+    const result = buildAggregateSelect(mockDialect, "orders", emptyWhere, {
+      $groupBy: [],
+      $select: makeSelect([{ $fn: "countDistinct", $field: "customer" }]),
+    });
+    expect(result.sql).toBe(
+      "SELECT COUNT(DISTINCT [customer]) AS [countDistinct_customer] FROM [orders] WHERE 1=1",
+    );
+  });
+
   it.each(["sleep", "constructor"])(
     "throws INVALID_QUERY on an unknown $fn %s instead of rendering it (select and $having)",
     (fn) => {

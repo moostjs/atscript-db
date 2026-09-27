@@ -95,7 +95,7 @@ export type { TForeignKeyDiff } from "./schema/fk-diff";
 // ── Since 0.1.128 ────────────────────────────────────────────────────────────
 export type { TSyncEntryInit } from "./schema/schema-sync";
 export { canonicalizeQueryNode } from "./schema/schema-hash";
-export type { TViewJoinSnapshot } from "./schema/schema-hash";
+export type { TViewJoinSnapshot, TViewColumnSnapshot } from "./schema/schema-hash";
 export { topoOrder } from "./schema/dependency-order";
 export type { TDependencyEdge } from "./schema/dependency-order";
 export type {

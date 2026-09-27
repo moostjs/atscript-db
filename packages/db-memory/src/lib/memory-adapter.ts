@@ -1,4 +1,4 @@
-import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError, DbSpace } from "@atscript/db";
+import { ALL_AGGREGATE_FNS, ALL_BUCKET_UNITS, BaseDbAdapter, DbError, DbSpace } from "@atscript/db";
 import type {
   DbQuery,
   DbControls,
@@ -17,7 +17,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { buildMemoryPredicate, getPath, valuesEqual } from "./memory-filter";
 import { paginate, projectRow, setPath, sortRows } from "./memory-engine";
 import { aggregateRows } from "./memory-aggregate";
-import type { BucketUnit, UniquSelect } from "@atscript/db";
+import type { AggregateFn, BucketUnit, UniquSelect } from "@atscript/db";
 
 /**
  * Provider (read-through) backing closure. Recomputes and returns the table's
@@ -779,6 +779,11 @@ export class MemoryAdapter extends BaseDbAdapter {
    */
   override calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return ALL_BUCKET_UNITS;
+  }
+
+  /** Every aggregate function, `countDistinct` included. */
+  override aggregateFns(): ReadonlySet<AggregateFn> {
+    return ALL_AGGREGATE_FNS;
   }
 
   // ── Batch operations ──────────────────────────────────────────────────────

@@ -56,8 +56,27 @@ export interface TViewJoinSnapshot {
   targetTable: string;
   /** Canonical JSON of the join condition (see {@link canonicalizeQueryNode}). */
   condition: string;
-  /** Reserved for optional joins; absent today so it does not perturb the hash. */
+  /** Emitted only for `"left"` — an inner join (the default) carries no key. @since 0.1.136 */
   kind?: "inner" | "left";
+}
+
+/**
+ * One column of a managed view as stored in its snapshot — the PHYSICAL
+ * source it reads, so a source rename (`@db.column`, flattening, a moved
+ * JSON leaf) or an aggregate change recreates the view.
+ * @since 0.1.136
+ */
+export interface TViewColumnSnapshot {
+  column: string;
+  sourceTable: string;
+  sourceColumn: string;
+  /** JSON array of the path segments inside a JSON source column. */
+  jsonPath?: string;
+  jsonType?: string;
+  aggFn?: string;
+  aggField?: string;
+  /** Canonical JSON of a conditional aggregate's predicate. */
+  aggFilter?: string;
 }
 
 export interface TViewSnapshot {
@@ -69,6 +88,8 @@ export interface TViewSnapshot {
    * join-less view (`[]`) serializes byte-identically to older snapshots.
    */
   joinTables?: TViewJoinSnapshot[];
+  /** @since 0.1.136 — view columns and their physical sources, sorted by `column`. */
+  columns?: TViewColumnSnapshot[];
   filterHash?: string;
   /** @since 0.1.128 — hash of the canonical `@db.view.having` predicate. */
   havingHash?: string;
@@ -176,29 +197,58 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
   }
 
   const plan = view.viewPlan;
-  // Same table rule as the SQL renderers (`@db.table` of the referenced type,
-  // entry table for an unqualified ref) — unquoted, as `"<table>.<field>"`.
+  // Same table + physical-column rule as the SQL renderers (`@db.table` of
+  // the referenced type, entry table for an unqualified ref) — unquoted, as
+  // `"<table>.<column>"`.
   const qualify = (ref: AtscriptQueryFieldRef): string => view.resolveFieldRef(ref, (n) => n);
-  const result: TViewSnapshot = {
+  const canonical = (node: AtscriptQueryNode): string =>
+    JSON.stringify(canonicalizeQueryNode(node, qualify));
+
+  const columns = view
+    .getViewColumnMappings()
+    .map((m) => {
+      const col: TViewColumnSnapshot = {
+        column: m.viewColumn,
+        sourceTable: m.sourceTable,
+        sourceColumn: m.sourceColumn,
+      };
+      if (m.json) {
+        col.jsonPath = JSON.stringify(m.json.path);
+        col.jsonType = m.json.type;
+      }
+      if (m.aggFn) col.aggFn = m.aggFn;
+      if (m.aggField) col.aggField = m.aggField;
+      if (m.aggFilter) col.aggFilter = canonical(m.aggFilter);
+      return col;
+    })
+    .toSorted((a, b) => (a.column < b.column ? -1 : a.column > b.column ? 1 : 0));
+
+  // Key order is part of the hash: tableName, viewType, entryTable,
+  // joinTables, columns, filterHash, havingHash, materialized, fields.
+  const result: Omit<TViewSnapshot, "fields"> = {
     tableName: view.tableName,
     viewType: plan.materialized ? "M" : "V",
     entryTable: plan.entryTable,
-    joinTables: plan.joins.map((j) => ({
-      targetTable: j.targetTable,
-      condition: JSON.stringify(canonicalizeQueryNode(j.condition, qualify)),
-    })),
-    materialized: plan.materialized || undefined,
-    fields,
+    joinTables: plan.joins.map((j) => {
+      const join: TViewJoinSnapshot = {
+        targetTable: j.targetTable,
+        condition: canonical(j.condition),
+      };
+      if (j.kind === "left") join.kind = "left";
+      return join;
+    }),
+    columns,
   };
-
   if (plan.filter) {
-    result.filterHash = fnv1a(JSON.stringify(canonicalizeQueryNode(plan.filter, qualify)));
+    result.filterHash = fnv1a(canonical(plan.filter));
   }
   if (plan.having) {
-    result.havingHash = fnv1a(JSON.stringify(canonicalizeQueryNode(plan.having, qualify)));
+    result.havingHash = fnv1a(canonical(plan.having));
   }
-
-  return result;
+  if (plan.materialized) {
+    result.materialized = true;
+  }
+  return { ...result, fields };
 }
 
 // ── Query-node canonicalization ───────────────────────────────────────────

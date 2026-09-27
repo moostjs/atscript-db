@@ -7,38 +7,16 @@
  */
 
 import type { DbQuery, TResolvedBucket } from "@atscript/db";
-import {
-  type AggregateExpr,
-  type BucketUnit,
-  assertAggregateFn,
-  resolveAlias,
-  type TDbAggregateFn,
-} from "@atscript/db/agg";
+import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/agg";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
+import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
 import { buildMongoFilter } from "./lib/mongo-filter";
+import { orNull } from "./lib/mongo-view-expr";
 
-/** `$group` accumulator per value aggregate (`count` is built below). */
-const ACCUMULATORS: Record<Exclude<TDbAggregateFn, "count">, string> = {
-  sum: "$sum",
-  avg: "$avg",
-  min: "$min",
-  max: "$max",
-};
-
-/**
- * Maps an AggregateExpr to a MongoDB $group accumulator expression.
- */
+/** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
 function toAccumulator(expr: AggregateExpr): Document {
-  assertAggregateFn(expr.$fn);
-  if (expr.$fn !== "count") {
-    return { [ACCUMULATORS[expr.$fn]]: `$${expr.$field}` };
-  }
-  if (expr.$field === "*") {
-    return { $sum: 1 };
-  }
-  // COUNT(field) — count non-null values
-  return { $sum: { $cond: [{ $ne: [`$${expr.$field}`, null] }, 1, 0] } };
+  return buildAccumulator(expr.$fn, expr.$field === "*" ? "*" : `$${expr.$field}`);
 }
 
 // ── Calendar buckets ─────────────────────────────────────────────────────────
@@ -164,7 +142,7 @@ function buildPrefix(
   for (const [index, key] of groupBy.entries()) {
     const idKey = `k${index}`;
     const bucket = controls.$select?.bucketByAlias(key);
-    groupId[idKey] = bucket ? bucketExpression(bucket) : { $ifNull: [`$${key}`, null] };
+    groupId[idKey] = bucket ? bucketExpression(bucket) : orNull(`$${key}`);
     groupKeys.push([key, idKey]);
   }
 
@@ -206,7 +184,9 @@ function buildGroupedStages(
   for (const expr of controls.$select?.aggregates ?? []) {
     const alias = resolveAlias(expr);
     groupStage[alias] = toAccumulator(expr);
-    project[alias] = 1;
+    // countDistinct accumulates a set — `$project` turns it into its size, so
+    // `$having` and `$sort` (which run after it) compare a number.
+    project[alias] = expr.$fn === "countDistinct" ? distinctCountExpr(`$${alias}`) : 1;
   }
   pipeline.push({ $group: groupStage });
   pipeline.push({ $project: project });

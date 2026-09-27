@@ -1,9 +1,11 @@
 import path from "path";
 
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { prepareFixtures as prepare } from "@atscript/typescript/test-utils";
 import dbPlugin from "@atscript/db/plugin";
-import type { HttpError } from "@moostjs/event-http";
+import { HttpError } from "@moostjs/event-http";
+
+import { validationErrorTransform } from "../validation-interceptor";
 
 /** Compiles the `.as` fixtures of this package (js + dts, written only when changed). */
 export async function prepareFixtures(): Promise<void> {
@@ -15,6 +17,30 @@ export async function prepareFixtures(): Promise<void> {
 export function errorsOf(e: unknown): Array<{ path: string; message: string }> {
   return ((e as HttpError).body as unknown as { errors: Array<{ path: string; message: string }> })
     .errors;
+}
+
+/** The `HttpError` reply {@link validationErrorTransform} gives for a thrown error. */
+export function httpReplyFor(error: unknown): HttpError {
+  const transform = validationErrorTransform() as unknown as {
+    error: (error: unknown, reply: (r: unknown) => void) => void;
+  };
+  let replied: unknown;
+  transform.error(error, (r) => {
+    replied = r;
+  });
+  expect(replied).toBeInstanceOf(HttpError);
+  return replied as HttpError;
+}
+
+/** Awaits `run` — expected to throw — and replays the error as {@link httpReplyFor}. */
+export async function transformed(run: Promise<unknown>): Promise<HttpError> {
+  let error: unknown;
+  try {
+    await run;
+  } catch (e) {
+    error = e;
+  }
+  return httpReplyFor(error);
 }
 
 /** Minimal Moost app mock: only `getLogger` is consulted by the controllers. */
@@ -115,6 +141,7 @@ export function createMockReadable(
     isVectorSearchable: vi.fn().mockReturnValue(false),
     isGeoSearchable: vi.fn().mockReturnValue(false),
     calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
+    aggregateFns: vi.fn().mockReturnValue(new Set()),
     dimensions: [] as string[],
     measures: [] as string[],
     canFilterField: vi.fn().mockReturnValue(true),

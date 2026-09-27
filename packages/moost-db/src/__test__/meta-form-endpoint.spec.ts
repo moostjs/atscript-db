@@ -4,6 +4,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { AsReadableController } from "../as-readable.controller";
 import { discoverActions } from "../actions/discover";
+import { DbRowActions } from "../actions/db-actions.decorator";
 import { fakeOverview, idMate, inputFormMate, makeApp } from "./actions-test-utils";
 import { prepareFixtures } from "./test-utils";
 
@@ -114,5 +115,46 @@ describe("AsReadableController.metaForm", () => {
     const a = await ctrl.metaForm("CommentForm");
     const b = await ctrl.metaForm("CommentForm");
     expect(a).toBe(b);
+  });
+
+  // since 0.1.136
+  it("serves a form declared as a type on a class-level entry", async () => {
+    @DbRowActions({
+      ship: {
+        label: "Ship",
+        processor: "backend",
+        value: "/api/shipping/ship",
+        inputForm: CommentForm,
+      },
+    })
+    class ClassLevelCtrl extends AsReadableController {
+      protected hasField(): boolean {
+        return true;
+      }
+    }
+    const ctx = makeApp();
+    const ctrl = new ClassLevelCtrl(makeBoundType(), "test", ctx.app);
+    const schema = await ctrl.metaForm("CommentForm");
+    expect(schema).toBeDefined();
+    expect(typeof schema).toBe("object");
+  });
+
+  it("does not register { name, url } forms (served elsewhere)", async () => {
+    @DbRowActions({
+      ship: {
+        label: "Ship",
+        processor: "backend",
+        value: "/api/shipping/ship",
+        inputForm: { name: "ShipForm", url: "/api/shipping/meta/form/ShipForm" },
+      },
+    })
+    class RemoteFormCtrl extends AsReadableController {
+      protected hasField(): boolean {
+        return true;
+      }
+    }
+    const ctx = makeApp();
+    const ctrl = new RemoteFormCtrl(makeBoundType(), "test", ctx.app);
+    await expect(ctrl.metaForm("ShipForm")).rejects.toBeInstanceOf(HttpError);
   });
 });

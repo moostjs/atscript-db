@@ -13,6 +13,7 @@ import {
 } from "@atscript/typescript/utils";
 
 import type {
+  AggregateFn,
   AggregateQuery,
   BucketUnit,
   FilterExpr,
@@ -47,7 +48,7 @@ import type { TRelationLoaderHost } from "../rel/relation-loader";
 import { findFKForRelation, findRemoteFK } from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
 import { assertGeoPoint, guardAggregate, guardQuery, isStrictTable } from "../query/query-guards";
-import { resolveCalendarBuckets } from "../query/buckets";
+import { normalizeComputedSelect } from "../query/buckets";
 
 /**
  * Extracts nav prop names from a query's `$with` array.
@@ -739,13 +740,15 @@ export class AtscriptDbReadable<
    *
    * Validates:
    * - `$select` computed entries and calendar buckets (the shared normalizer,
-   *   `resolveCalendarBuckets`: shapes, unit, zone, alias, grouping)
+   *   `normalizeComputedSelect`: shapes, unit, zone, alias, grouping)
    * - Plain fields in $select are a subset of $groupBy
    * - When dimensions/measures are defined (strict mode): $groupBy fields
-   *   must be dimensions, aggregate $field values must be measures (or '*')
+   *   must be dimensions, aggregate $field values must be measures (or '*';
+   *   a `countDistinct` field may also be a dimension)
    * - the path guard (a bucket source must pass `bucketSourceVerdict` —
    *   timestamp type, no JSON ancestor, a dimension in strict mode, an
-   *   adapter with calendar buckets) and the adapter's calendar-bucket units
+   *   adapter with calendar buckets), the adapter's aggregate functions
+   *   (`AGG_FN_NOT_SUPPORTED`) and calendar-bucket units
    *   (`BUCKET_NOT_SUPPORTED`)
    *
    * Translates field names, delegates to adapter.aggregate(),
@@ -757,7 +760,7 @@ export class AtscriptDbReadable<
 
     // Computed-entry shapes + calendar buckets, before any rule reads `$select`
     // (the rules below then meet only strings, aggregates and valid buckets).
-    const buckets = resolveCalendarBuckets(query.controls, this._meta, true);
+    const buckets = normalizeComputedSelect(query.controls, this._meta, true);
 
     // Validate: plain fields in $select must be in $groupBy
     if ($select) {
@@ -793,11 +796,21 @@ export class AtscriptDbReadable<
 
       if ($select) {
         for (const item of $select) {
-          if (isAggregateExpr(item) && item.$field !== "*" && !measSet.has(item.$field)) {
+          if (!isAggregateExpr(item) || item.$field === "*" || measSet.has(item.$field)) continue;
+          // Counting distinct values is a question about a dimension as much
+          // as a measure ("how many regions sold"), so either may be counted.
+          if (item.$fn === "countDistinct") {
+            if (dimSet.has(item.$field)) continue;
             throw new DbError("INVALID_QUERY", [
-              { path: "$select", message: `Aggregate field "${item.$field}" is not a measure` },
+              {
+                path: "$select",
+                message: `Aggregate field "${item.$field}" is not a dimension or measure`,
+              },
             ]);
           }
+          throw new DbError("INVALID_QUERY", [
+            { path: "$select", message: `Aggregate field "${item.$field}" is not a measure` },
+          ]);
         }
       }
     }
@@ -870,6 +883,11 @@ export class AtscriptDbReadable<
   /** Calendar-bucket units the adapter can group by (proxies adapter capability; empty = none). */
   public calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return this.adapter.calendarBucketUnits();
+  }
+
+  /** Aggregate functions the adapter renders (proxies adapter capability). @since 0.1.136 */
+  public aggregateFns(): ReadonlySet<AggregateFn> {
+    return this.adapter.aggregateFns();
   }
 
   /** Whether the adapter can sort by a given field (proxies adapter capability). */

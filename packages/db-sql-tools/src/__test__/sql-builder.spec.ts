@@ -12,6 +12,7 @@ import {
   fillReplacePayload,
   replaceColumnsFor,
 } from "../sql-builder";
+import { viewAggExpr } from "../view-builder";
 import type { SqlDialect, TSqlFragment } from "../dialect";
 import type {
   UniquSelect,
@@ -297,8 +298,13 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "user_id", sourceTable: "users", sourceColumn: "id" },
-      { viewColumn: "user_name", sourceTable: "users", sourceColumn: "name" },
+      { viewColumn: "user_id", viewPath: "user_id", sourceTable: "users", sourceColumn: "id" },
+      {
+        viewColumn: "user_name",
+        viewPath: "user_name",
+        sourceTable: "users",
+        sourceColumn: "name",
+      },
     ];
 
     const result = buildCreateView(mockDialect, "user_view", plan, columns, resolveFieldRef);
@@ -320,13 +326,19 @@ describe("buildCreateView", () => {
             op: "$eq",
             right: { table: "users", field: "id" } as any as AtscriptQueryFieldRef,
           },
+          kind: "inner",
         },
       ],
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "order_id", sourceTable: "orders", sourceColumn: "id" },
-      { viewColumn: "user_name", sourceTable: "users", sourceColumn: "name" },
+      { viewColumn: "order_id", viewPath: "order_id", sourceTable: "orders", sourceColumn: "id" },
+      {
+        viewColumn: "user_name",
+        viewPath: "user_name",
+        sourceTable: "users",
+        sourceColumn: "name",
+      },
     ];
 
     const result = buildCreateView(mockDialect, "order_view", plan, columns, resolveFieldRef);
@@ -346,7 +358,7 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "id", sourceTable: "users", sourceColumn: "id" },
+      { viewColumn: "id", viewPath: "id", sourceTable: "users", sourceColumn: "id" },
     ];
 
     const result = buildCreateView(mockDialect, "active_users", plan, columns, resolveFieldRef);
@@ -362,7 +374,7 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "id", sourceTable: "users", sourceColumn: "id" },
+      { viewColumn: "id", viewPath: "id", sourceTable: "users", sourceColumn: "id" },
     ];
 
     const result = buildCreateView(customDialect, "v", plan, columns, resolveFieldRef);
@@ -377,9 +389,15 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "category", sourceTable: "orders", sourceColumn: "category" },
+      {
+        viewColumn: "category",
+        viewPath: "category",
+        sourceTable: "orders",
+        sourceColumn: "category",
+      },
       {
         viewColumn: "totalRevenue",
+        viewPath: "totalRevenue",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sum",
@@ -387,6 +405,7 @@ describe("buildCreateView", () => {
       },
       {
         viewColumn: "orderCount",
+        viewPath: "orderCount",
         sourceTable: "orders",
         sourceColumn: "*",
         aggFn: "count",
@@ -394,6 +413,7 @@ describe("buildCreateView", () => {
       },
       {
         viewColumn: "avgAmount",
+        viewPath: "avgAmount",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "avg",
@@ -418,6 +438,7 @@ describe("buildCreateView", () => {
     const columns: TViewColumnMapping[] = [
       {
         viewColumn: "x",
+        viewPath: "x",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sleep",
@@ -440,10 +461,16 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "category", sourceTable: "orders", sourceColumn: "category" },
-      { viewColumn: "region", sourceTable: "orders", sourceColumn: "region" },
+      {
+        viewColumn: "category",
+        viewPath: "category",
+        sourceTable: "orders",
+        sourceColumn: "category",
+      },
+      { viewColumn: "region", viewPath: "region", sourceTable: "orders", sourceColumn: "region" },
       {
         viewColumn: "total",
+        viewPath: "total",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sum",
@@ -465,6 +492,7 @@ describe("buildCreateView", () => {
     const columns: TViewColumnMapping[] = [
       {
         viewColumn: "total",
+        viewPath: "total",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sum",
@@ -472,6 +500,7 @@ describe("buildCreateView", () => {
       },
       {
         viewColumn: "cnt",
+        viewPath: "cnt",
         sourceTable: "orders",
         sourceColumn: "*",
         aggFn: "count",
@@ -496,9 +525,15 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "category", sourceTable: "orders", sourceColumn: "category" },
+      {
+        viewColumn: "category",
+        viewPath: "category",
+        sourceTable: "orders",
+        sourceColumn: "category",
+      },
       {
         viewColumn: "totalRevenue",
+        viewPath: "totalRevenue",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sum",
@@ -523,9 +558,15 @@ describe("buildCreateView", () => {
       materialized: false,
     };
     const columns: TViewColumnMapping[] = [
-      { viewColumn: "category", sourceTable: "orders", sourceColumn: "category" },
+      {
+        viewColumn: "category",
+        viewPath: "category",
+        sourceTable: "orders",
+        sourceColumn: "category",
+      },
       {
         viewColumn: "totalRevenue",
+        viewPath: "totalRevenue",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "sum",
@@ -533,6 +574,7 @@ describe("buildCreateView", () => {
       },
       {
         viewColumn: "orderCount",
+        viewPath: "orderCount",
         sourceTable: "orders",
         sourceColumn: "*",
         aggFn: "count",
@@ -540,6 +582,7 @@ describe("buildCreateView", () => {
       },
       {
         viewColumn: "avgAmount",
+        viewPath: "avgAmount",
         sourceTable: "orders",
         sourceColumn: "amount",
         aggFn: "avg",
@@ -550,6 +593,237 @@ describe("buildCreateView", () => {
     const result = buildCreateView(mockDialect, "order_stats", plan, columns, resolveFieldRef);
     expect(result).toBe(
       "CREATE VIEW [order_stats] AS SELECT [orders].[category] AS [category], SUM([orders].[amount]) AS [totalRevenue], COUNT(*) AS [orderCount], AVG([orders].[amount]) AS [avgAmount] FROM [orders] GROUP BY [orders].[category] HAVING SUM([orders].[amount]) > 100",
+    );
+  });
+
+  // ── Join kinds, chains, predicates, physical names (since 0.1.136) ──────
+
+  const ref = (table: string, field: string) => ({ table, field }) as any as AtscriptQueryFieldRef;
+  const plainPlan = (over: Partial<TViewPlan> = {}): TViewPlan => ({
+    entryType: stubType,
+    entryTable: "orders",
+    joins: [],
+    materialized: false,
+    ...over,
+  });
+  const idCol: TViewColumnMapping[] = [
+    { viewColumn: "id", viewPath: "id", sourceTable: "orders", sourceColumn: "id" },
+  ];
+
+  it("renders LEFT JOIN for kind 'left' and chains joins in declaration order", () => {
+    const plan = plainPlan({
+      joins: [
+        {
+          targetType: stubType,
+          targetTable: "customers",
+          condition: {
+            left: ref("customers", "id"),
+            op: "$eq",
+            right: ref("orders", "customer_id"),
+          },
+          kind: "left",
+        },
+        {
+          targetType: stubType,
+          targetTable: "regions",
+          condition: {
+            $and: [
+              { left: ref("regions", "id"), op: "$eq", right: ref("customers", "region_id") },
+              { left: ref("regions", "active"), op: "$eq", right: true },
+            ],
+          },
+          kind: "inner",
+        },
+      ],
+    });
+    const result = buildCreateView(mockDialect, "v", plan, idCol, resolveFieldRef);
+    expect(result).toBe(
+      "CREATE VIEW [v] AS SELECT [orders].[id] AS [id] FROM [orders]" +
+        " LEFT JOIN [customers] ON [customers].[id] = [orders].[customer_id]" +
+        " JOIN [regions] ON [regions].[id] = [customers].[region_id] AND [regions].[active] = true",
+    );
+  });
+
+  it("renders in / not in / exists / not exists in view predicates", () => {
+    const filter = {
+      $and: [
+        { left: ref("orders", "status"), op: "$in", right: ["paid", "it's"] },
+        { left: ref("orders", "code"), op: "$nin", right: [1, 2] },
+        { left: ref("orders", "note"), op: "$exists", right: true },
+        { left: ref("orders", "deleted"), op: "$exists", right: false },
+      ],
+    };
+    const result = buildCreateView(mockDialect, "v", plainPlan({ filter }), idCol, resolveFieldRef);
+    expect(result).toContain(
+      "WHERE [orders].[status] IN ('paid', 'it''s') AND [orders].[code] NOT IN (1, 2)" +
+        " AND [orders].[note] IS NOT NULL AND [orders].[deleted] IS NULL",
+    );
+  });
+
+  it("renders an empty in as false and an empty not in as true", () => {
+    const filter = {
+      $or: [
+        { left: ref("orders", "a"), op: "$in", right: [] },
+        { left: ref("orders", "b"), op: "$nin", right: [] },
+      ],
+    };
+    const result = buildCreateView(mockDialect, "v", plainPlan({ filter }), idCol, resolveFieldRef);
+    expect(result).toContain("WHERE (0=1 OR 1=1)");
+  });
+
+  it("rejects matches in a view predicate", () => {
+    const filter = { left: ref("orders", "name"), op: "$regex", right: "^a" };
+    expect(() =>
+      buildCreateView(mockDialect, "v", plainPlan({ filter }), idCol, resolveFieldRef),
+    ).toThrow("matches is not supported in view predicates");
+  });
+
+  it("uses the physical source and view names in SELECT, GROUP BY and HAVING", () => {
+    const columns: TViewColumnMapping[] = [
+      {
+        viewColumn: "city_name",
+        viewPath: "city",
+        sourceTable: "orders",
+        sourceColumn: "address__city",
+      },
+      {
+        viewColumn: "total",
+        viewPath: "total",
+        sourceTable: "orders",
+        sourceColumn: "amount_cents",
+        aggFn: "sum",
+        aggField: "amount",
+      },
+    ];
+    const having = {
+      $and: [
+        { left: { field: "total" }, op: "$gt", right: 10 },
+        { left: { field: "city" }, op: "$ne", right: "x" },
+      ],
+    };
+    const result = buildCreateView(
+      mockDialect,
+      "v",
+      plainPlan({ having }),
+      columns,
+      resolveFieldRef,
+    );
+    expect(result).toBe(
+      "CREATE VIEW [v] AS SELECT [orders].[address__city] AS [city_name]," +
+        " SUM([orders].[amount_cents]) AS [total] FROM [orders]" +
+        " GROUP BY [orders].[address__city]" +
+        " HAVING SUM([orders].[amount_cents]) > 10 AND [orders].[address__city] != 'x'",
+    );
+  });
+
+  it("viewAggExpr renders the aggregate over the mapping's source", () => {
+    const col: TViewColumnMapping = {
+      viewColumn: "total",
+      viewPath: "total",
+      sourceTable: "o",
+      sourceColumn: "a",
+      aggFn: "max",
+      aggField: "amount",
+    };
+    const agg = (c: TViewColumnMapping) => viewAggExpr(mockDialect, c, resolveFieldRef);
+    expect(agg(col)).toBe("MAX([o].[a])");
+    expect(agg({ ...col, aggFn: "count", aggField: "*" })).toBe("COUNT(*)");
+    expect(agg({ ...col, aggFn: "countDistinct" })).toBe("COUNT(DISTINCT [o].[a])");
+    expect(() => agg({ ...col, aggFn: "sleep" })).toThrow('Unknown aggregate function "sleep"');
+  });
+
+  // ── Conditional aggregates (since 0.1.136) ──────────────────────────────
+
+  it("viewAggExpr wraps a conditional aggregate's source in CASE WHEN", () => {
+    const col = (aggFn: string, aggField = "amount"): TViewColumnMapping => ({
+      viewColumn: "x",
+      viewPath: "x",
+      sourceTable: "o",
+      sourceColumn: aggField === "*" ? "*" : "a",
+      aggFn,
+      aggField,
+    });
+    const paid = {
+      left: { table: "o", field: "paid" } as any as AtscriptQueryFieldRef,
+      op: "$eq",
+      right: 1,
+    };
+    const agg = (c: TViewColumnMapping) =>
+      viewAggExpr(mockDialect, { ...c, aggFilter: paid }, resolveFieldRef);
+    expect(agg(col("sum"))).toBe("COALESCE(SUM(CASE WHEN [o].[paid] = 1 THEN [o].[a] END), 0)");
+    expect(agg(col("avg"))).toBe("AVG(CASE WHEN [o].[paid] = 1 THEN [o].[a] END)");
+    expect(agg(col("min"))).toBe("MIN(CASE WHEN [o].[paid] = 1 THEN [o].[a] END)");
+    expect(agg(col("max"))).toBe("MAX(CASE WHEN [o].[paid] = 1 THEN [o].[a] END)");
+    expect(agg(col("count"))).toBe("COUNT(CASE WHEN [o].[paid] = 1 THEN [o].[a] END)");
+    expect(agg(col("count", "*"))).toBe("COUNT(CASE WHEN [o].[paid] = 1 THEN 1 END)");
+    expect(agg(col("countDistinct"))).toBe(
+      "COUNT(DISTINCT CASE WHEN [o].[paid] = 1 THEN [o].[a] END)",
+    );
+  });
+
+  it("renders conditional aggregates in SELECT and re-renders them for HAVING on their alias", () => {
+    const paid = { left: ref("orders", "status"), op: "$in", right: ["paid", "shipped"] };
+    const columns: TViewColumnMapping[] = [
+      { viewColumn: "city", viewPath: "city", sourceTable: "orders", sourceColumn: "city" },
+      {
+        viewColumn: "paidTotal",
+        viewPath: "paidTotal",
+        sourceTable: "orders",
+        sourceColumn: "amount",
+        aggFn: "sum",
+        aggField: "amount",
+        aggFilter: paid,
+      },
+      {
+        viewColumn: "paidOrders",
+        viewPath: "paidOrders",
+        sourceTable: "orders",
+        sourceColumn: "*",
+        aggFn: "count",
+        aggField: "*",
+        aggFilter: paid,
+      },
+      {
+        viewColumn: "bigBuyers",
+        viewPath: "bigBuyers",
+        sourceTable: "orders",
+        sourceColumn: "customer_id",
+        aggFn: "countDistinct",
+        aggField: "customerId",
+        aggFilter: { left: ref("orders", "amount"), op: "$gte", right: 100 },
+      },
+    ];
+    const having = { left: { field: "paidOrders" }, op: "$gt", right: 0 };
+    const result = buildCreateView(
+      mockDialect,
+      "v",
+      plainPlan({ having }),
+      columns,
+      resolveFieldRef,
+    );
+    const paidSql = "[orders].[status] IN ('paid', 'shipped')";
+    expect(result).toBe(
+      "CREATE VIEW [v] AS SELECT [orders].[city] AS [city]," +
+        ` COALESCE(SUM(CASE WHEN ${paidSql} THEN [orders].[amount] END), 0) AS [paidTotal],` +
+        ` COUNT(CASE WHEN ${paidSql} THEN 1 END) AS [paidOrders],` +
+        " COUNT(DISTINCT CASE WHEN [orders].[amount] >= 100 THEN [orders].[customer_id] END) AS [bigBuyers]" +
+        " FROM [orders] GROUP BY [orders].[city]" +
+        ` HAVING COUNT(CASE WHEN ${paidSql} THEN 1 END) > 0`,
+    );
+  });
+
+  it("rejects a JSON-leaf column until the dialect supports extraction", () => {
+    const columns: TViewColumnMapping[] = [
+      {
+        viewColumn: "theme",
+        viewPath: "theme",
+        sourceTable: "orders",
+        sourceColumn: "settings",
+        json: { path: ["theme"], type: "string" },
+      },
+    ];
+    expect(() => buildCreateView(mockDialect, "v", plainPlan(), columns, resolveFieldRef)).toThrow(
+      'View column "theme": JSON extraction is not supported by this adapter',
     );
   });
 });

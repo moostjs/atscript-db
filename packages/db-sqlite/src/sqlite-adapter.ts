@@ -1,5 +1,5 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { ALL_BUCKET_UNITS, BaseDbAdapter, DbError } from "@atscript/db";
+import { ALL_AGGREGATE_FNS, ALL_BUCKET_UNITS, BaseDbAdapter, DbError } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
   AtscriptDbView,
@@ -21,7 +21,7 @@ import type {
   TSearchIndexInfo,
   TValueFormatterPair,
 } from "@atscript/db";
-import type { BucketUnit, DbQuery, FilterExpr } from "@atscript/db";
+import type { AggregateFn, BucketUnit, DbQuery, FilterExpr } from "@atscript/db";
 import {
   type TSqlFragment,
   EMPTY_AND,
@@ -89,6 +89,11 @@ export class SqliteAdapter extends BaseDbAdapter {
    */
   override calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return this._hasBucketFn ? ALL_BUCKET_UNITS : super.calendarBucketUnits();
+  }
+
+  /** Every aggregate function, `countDistinct` included. */
+  override aggregateFns(): ReadonlySet<AggregateFn> {
+    return ALL_AGGREGATE_FNS;
   }
 
   // ── Vector search state ─────────────────────────────────────────────────

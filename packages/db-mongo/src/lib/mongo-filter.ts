@@ -69,16 +69,41 @@ const mongoVisitor: FilterVisitor<Filter<any>> = {
   },
 };
 
+/** A `{ $field: path }` comparison operand (a field-to-field comparison). */
+function isFieldOperand(value: unknown): value is { $field: string } {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { $field?: unknown }).$field === "string"
+  );
+}
+
+/** {@link mongoVisitor} plus field-to-field comparisons (`{ $field }` operands → `$expr`). */
+const fieldOperandVisitor: FilterVisitor<Filter<any>> = {
+  ...mongoVisitor,
+  comparison(field, op, value) {
+    return isFieldOperand(value)
+      ? { $expr: { [op]: [`$${field}`, `$${value.$field}`] } }
+      : mongoVisitor.comparison(field, op, value);
+  },
+};
+
 /**
  * Translates a generic {@link FilterExpr} into a MongoDB-compatible
  * {@link Filter} document.
  *
  * MongoDB's query language is nearly identical to the `FilterExpr` structure,
  * so this is largely a structural pass-through via the `walkFilter` visitor.
+ * `fieldOperands` (view predicates only — `translateQueryTree` output) turns
+ * `{ $field: path }` operands into field-to-field `$expr` comparisons; a
+ * request filter never gets that reading.
  */
-export function buildMongoFilter(filter: FilterExpr): Filter<any> {
+export function buildMongoFilter(
+  filter: FilterExpr,
+  { fieldOperands = false }: { fieldOperands?: boolean } = {},
+): Filter<any> {
   if (!filter || Object.keys(filter).length === 0) {
     return EMPTY;
   }
-  return walkFilter(filter, mongoVisitor) ?? EMPTY;
+  return walkFilter(filter, fieldOperands ? fieldOperandVisitor : mongoVisitor) ?? EMPTY;
 }

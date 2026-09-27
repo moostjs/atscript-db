@@ -46,6 +46,7 @@ function makeMockTable(rows: Record<string, unknown>[]): ReturnType<typeof Objec
     isVectorSearchable: vi.fn().mockReturnValue(false),
     isGeoSearchable: vi.fn().mockReturnValue(false),
     calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
+    aggregateFns: vi.fn().mockReturnValue(new Set()),
     dimensions: [],
     measures: [],
     canFilterField: vi.fn().mockReturnValue(true),

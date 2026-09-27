@@ -49,6 +49,7 @@ type Own<T> = OwnOf<T>;
 type Nav<T> = NavOf<T>;
 type Id<T> = IdOf<T>;
 type Response<T, Q> = ClientResponse<T, Q>;
+type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 /**
  * HTTP client for moost-db REST endpoints.
@@ -80,7 +81,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
   private readonly _lenientWrites?: boolean;
   private _metaPromise?: Promise<MetaResponse>;
   private _validatorPromise?: Promise<ClientValidator>;
-  /** Cached deserialized form schemas keyed by form name. */
+  /** Cached deserialized form schemas keyed by resolved URL. */
   private _formCache = new Map<string, Promise<TAtscriptAnnotatedType>>();
 
   constructor(path: string, opts?: ClientOptions) {
@@ -379,29 +380,31 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * returned annotated type to a form-renderer (e.g. `@atscript/ui` form
    * components) and then submit the collected payload through
    * {@link action}'s `input` argument.
+   *
+   * The schema comes from this controller's `meta/form/:name`, or — when the
+   * action carries `formUrl` — from `baseUrl + formUrl`.
+   * Cached per resolved URL.
    */
   async getActionForm(actionName: string): Promise<TAtscriptAnnotatedType | null> {
     const meta = await this.meta();
     const action = meta.actions.find((a) => a.name === actionName);
     if (!action?.inputForm) return null;
-    return this._loadActionForm(action.inputForm);
+    const url = action.formUrl
+      ? `${this._baseUrl}${action.formUrl}`
+      : this._endpointUrl(`meta/form/${encodeURIComponent(action.inputForm)}`);
+    return this._loadActionForm(url);
   }
 
-  private _loadActionForm(formName: string): Promise<TAtscriptAnnotatedType> {
-    let p = this._formCache.get(formName);
+  private _loadActionForm(url: string): Promise<TAtscriptAnnotatedType> {
+    let p = this._formCache.get(url);
     if (!p) {
-      p = (
-        this._request(
-          "GET",
-          `meta/form/${encodeURIComponent(formName)}`,
-        ) as Promise<TSerializedAnnotatedType>
-      )
+      p = (this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>)
         .then((schema) => deserializeAnnotatedType(schema))
         .catch((err) => {
-          this._formCache.delete(formName);
+          this._formCache.delete(url);
           throw err;
         });
-      this._formCache.set(formName, p);
+      this._formCache.set(url, p);
     }
     return p;
   }
@@ -506,10 +509,8 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     );
   }
 
-  private async _postAction(action: TDbActionInfo, body: unknown): Promise<unknown> {
-    const url = `${this._baseUrl}${action.value}`;
-    const init = await this._buildInit("POST", body);
-    return this._send(url, init, true);
+  private _postAction(action: TDbActionInfo, body: unknown): Promise<unknown> {
+    return this._requestUrl("POST", `${this._baseUrl}${action.value}`, body, true);
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -544,28 +545,30 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     return this._headers;
   }
 
-  private async _request(
-    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
-    endpoint: string,
-    body?: unknown,
-  ): Promise<unknown> {
-    const sep = endpoint && !endpoint.startsWith("?") ? "/" : "";
-    const url = `${this._baseUrl}${this._path}${sep}${endpoint}`;
-    const init = await this._buildInit(method, body);
-    return this._send(url, init, false);
+  private _request(method: THttpMethod, endpoint: string, body?: unknown): Promise<unknown> {
+    return this._requestUrl(method, this._endpointUrl(endpoint), body);
   }
 
-  private async _buildInit(
-    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+  /** `baseUrl + path` joined with an endpoint relative to this controller (`""`, `meta`, `?q`…). */
+  private _endpointUrl(endpoint: string): string {
+    const sep = endpoint && !endpoint.startsWith("?") ? "/" : "";
+    return `${this._baseUrl}${this._path}${sep}${endpoint}`;
+  }
+
+  /** Sends one request to an absolute URL with the client's headers and a JSON body. */
+  private async _requestUrl(
+    method: THttpMethod,
+    url: string,
     body?: unknown,
-  ): Promise<RequestInit> {
+    allowEmpty = false,
+  ): Promise<unknown> {
     const headers: Record<string, string> = { ...(await this._resolveHeaders()) };
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return init;
+    return this._send(url, init, allowEmpty);
   }
 
   private async _send(url: string, init: RequestInit, allowEmpty: boolean): Promise<unknown> {

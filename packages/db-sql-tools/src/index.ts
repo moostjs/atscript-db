@@ -1,5 +1,5 @@
 export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
-export { EMPTY_AND, EMPTY_OR, finalizeParams } from "./dialect";
+export { EMPTY_AND, EMPTY_OR, finalizeParams, quotedJsonPathSegments } from "./dialect";
 export { createFilterVisitor, buildWhere, type TFilterVisitorOptions } from "./filter-builder";
 export type { TGeoWindow } from "./geo";
 export {
@@ -26,6 +26,7 @@ export {
 } from "./sql-builder";
 export {
   sqlStringLiteral,
+  jsonDollarPath,
   sqlTimeZoneLiteral,
   toSqlValue,
   refActionToSql,
