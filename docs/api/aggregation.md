@@ -82,14 +82,15 @@ A table without either annotation accepts any groupable field. Fields tagged wit
 
 Grouped queries are checked before any SQL or pipeline is built. Failures throw `DbError("INVALID_QUERY")` (HTTP 400 through moost-db):
 
-| Mistake                                                                    | Message                                                                         |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| A plain `$select` field missing from `$groupBy`                            | `Plain field "x" in $select must also appear in $groupBy`                       |
-| A `$having` key that is neither an alias nor a grouped field               | `$having key "x" must be an aggregate alias or a $groupBy field`                |
-| A `$select` entry that is not a string, aggregate or bucket                | `Unsupported $select entry at index i`                                          |
-| An aggregate `$fn` other than `sum`, `count`, `avg`, `min`, `max`          | `Unsupported aggregate function "x" — use sum, count, avg, min, max`            |
-| A `$groupBy` entry that is not a string                                    | `Unsupported $groupBy entry at index i — expected a field name or bucket alias` |
-| A path that does not resolve to stored data (JSON descendant on SQL, etc.) | see [path validation](/api/queries#nested-field-filters)                        |
+| Mistake                                                                                                                                     | Message                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| A plain `$select` field missing from `$groupBy`                                                                                             | `Plain field "x" in $select must also appear in $groupBy`                       |
+| A `$having` key that is neither an alias nor a grouped field                                                                                | `$having key "x" must be an aggregate alias or a $groupBy field`                |
+| A `$select` entry that is not a string, aggregate or bucket                                                                                 | `Unsupported $select entry at index i`                                          |
+| An aggregate `$fn` other than `sum`, `count`, `avg`, `min`, `max` (since 0.1.135; ≤ 0.1.134 the SQL adapters passed unknown names into SQL) | `Unknown aggregate function "x" — use sum, count, avg, min or max`              |
+| `*` on any aggregate other than `count`, e.g. `sum(*)` (since 0.1.135)                                                                      | `Aggregate "sum" needs a field — only count accepts *`                          |
+| A `$groupBy` entry that is not a string                                                                                                     | `Unsupported $groupBy entry at index i — expected a field name or bucket alias` |
+| A path that does not resolve to stored data (JSON descendant on SQL, etc.)                                                                  | see [path validation](/api/queries#nested-field-filters)                        |
 
 An `@db.encrypted` field in `$groupBy` or an aggregate fails with `ENC_FIELD_AGG`. Calendar buckets add their own rules — see [Calendar Buckets — Errors](./calendar-buckets#errors).
 
