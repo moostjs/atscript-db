@@ -1,6 +1,5 @@
-import { DbError } from "@atscript/db";
 import type { DbControls, FilterExpr } from "@atscript/db";
-import { type AggregateExpr, resolveAlias } from "@atscript/db/agg";
+import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/db/agg";
 import { bucketer } from "@uniqu/core";
 
 import { buildMemoryPredicate, pathReader } from "./memory-filter";
@@ -207,6 +206,7 @@ function numericValue(value: unknown): number | undefined {
  * there are no rows.
  */
 function accumulatorFactory(expr: AggregateExpr): () => TAccumulator {
+  assertAggregateFn(expr.$fn);
   const field = expr.$field;
   const read = pathReader(field);
   switch (expr.$fn) {
@@ -257,11 +257,6 @@ function accumulatorFactory(expr: AggregateExpr): () => TAccumulator {
       };
     }
     default:
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$select",
-          message: `Unsupported aggregate function "${String(expr.$fn)}" — use count, sum, avg, min or max`,
-        },
-      ]);
+      return expr.$fn satisfies never;
   }
 }

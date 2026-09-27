@@ -408,6 +408,30 @@ describe("buildCreateView", () => {
     expect(result).toContain("[orders].[category] AS [category]");
   });
 
+  it("throws INVALID_QUERY on an unknown aggregate function instead of rendering it", () => {
+    const plan: TViewPlan = {
+      entryType: stubType,
+      entryTable: "orders",
+      joins: [],
+      materialized: false,
+    };
+    const columns: TViewColumnMapping[] = [
+      {
+        viewColumn: "x",
+        sourceTable: "orders",
+        sourceColumn: "amount",
+        aggFn: "sleep",
+        aggField: "amount",
+      },
+    ];
+    expect(() => buildCreateView(mockDialect, "v", plan, columns, resolveFieldRef)).toThrow(
+      expect.objectContaining({
+        code: "INVALID_QUERY",
+        errors: [expect.objectContaining({ path: "x" })],
+      }),
+    );
+  });
+
   it("generates GROUP BY for dimension columns when aggregates present", () => {
     const plan: TViewPlan = {
       entryType: stubType,

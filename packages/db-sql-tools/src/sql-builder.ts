@@ -5,7 +5,7 @@ import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
 import { queryNodeToSql } from "./common";
-import { AGG_FN_SQL } from "./agg";
+import { aggFnName } from "./agg";
 
 /**
  * Builds an INSERT statement.
@@ -299,7 +299,7 @@ export function buildProjection(dialect: SqlDialect, select?: UniquSelect): stri
 
 /** Builds the SQL expression for a single aggregate column. */
 function buildAggColExpr(dialect: SqlDialect, c: TViewColumnMapping): string {
-  const fn = AGG_FN_SQL[c.aggFn!] ?? c.aggFn!.toUpperCase();
+  const fn = aggFnName(c.aggFn, c.viewColumn);
   const arg =
     c.aggField === "*"
       ? "*"

@@ -87,6 +87,7 @@ Grouped queries are checked before any SQL or pipeline is built. Failures throw 
 | A plain `$select` field missing from `$groupBy`                            | `Plain field "x" in $select must also appear in $groupBy`                       |
 | A `$having` key that is neither an alias nor a grouped field               | `$having key "x" must be an aggregate alias or a $groupBy field`                |
 | A `$select` entry that is not a string, aggregate or bucket                | `Unsupported $select entry at index i`                                          |
+| An aggregate `$fn` other than `sum`, `count`, `avg`, `min`, `max`          | `Unsupported aggregate function "x" — use sum, count, avg, min, max`            |
 | A `$groupBy` entry that is not a string                                    | `Unsupported $groupBy entry at index i — expected a field name or bucket alias` |
 | A path that does not resolve to stored data (JSON descendant on SQL, etc.) | see [path validation](/api/queries#nested-field-filters)                        |
 

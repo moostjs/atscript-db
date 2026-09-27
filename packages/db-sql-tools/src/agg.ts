@@ -1,13 +1,13 @@
 import { type AggregateExpr, BUCKET_UNITS, WEEK_STARTS, walkFilter } from "@uniqu/core";
 import { DbError, type DbControls, type TResolvedBucket } from "@atscript/db";
-import { resolveAlias } from "@atscript/db/agg";
+import { assertAggregateFn, resolveAlias, type TDbAggregateFn } from "@atscript/db/agg";
 
 import { sqlTimeZoneLiteral } from "./common";
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { EMPTY_AND, finalizeParams } from "./dialect";
 import { createFilterVisitor } from "./filter-builder";
 
-export const AGG_FN_SQL: Record<string, string> = {
+export const AGG_FN_SQL: Readonly<Record<TDbAggregateFn, string>> = {
   sum: "SUM",
   avg: "AVG",
   count: "COUNT",
@@ -15,9 +15,15 @@ export const AGG_FN_SQL: Record<string, string> = {
   max: "MAX",
 };
 
+/** The SQL function for an aggregate name; throws `INVALID_QUERY` on an unsupported one. */
+export function aggFnName(fn: unknown, path?: string): string {
+  assertAggregateFn(fn, path);
+  return AGG_FN_SQL[fn];
+}
+
 /** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)`. */
 function aggFnSql(dialect: SqlDialect, expr: AggregateExpr): string {
-  const fn = AGG_FN_SQL[expr.$fn] ?? expr.$fn.toUpperCase();
+  const fn = aggFnName(expr.$fn);
   const field = expr.$field === "*" ? "*" : dialect.quoteIdentifier(expr.$field);
   return `${fn}(${field})`;
 }

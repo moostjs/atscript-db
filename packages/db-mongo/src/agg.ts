@@ -7,13 +7,19 @@
  */
 
 import type { DbQuery, TResolvedBucket } from "@atscript/db";
-import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/agg";
+import {
+  type AggregateExpr,
+  type BucketUnit,
+  assertAggregateFn,
+  resolveAlias,
+  type TDbAggregateFn,
+} from "@atscript/db/agg";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildMongoFilter } from "./lib/mongo-filter";
 
-/** Simple accumulators that map directly to `{ $<fn>: '$field' }`. */
-const SIMPLE_ACCUMULATORS: Record<string, string> = {
+/** `$group` accumulator per value aggregate (`count` is built below). */
+const ACCUMULATORS: Record<Exclude<TDbAggregateFn, "count">, string> = {
   sum: "$sum",
   avg: "$avg",
   min: "$min",
@@ -24,18 +30,15 @@ const SIMPLE_ACCUMULATORS: Record<string, string> = {
  * Maps an AggregateExpr to a MongoDB $group accumulator expression.
  */
 function toAccumulator(expr: AggregateExpr): Document {
-  const simple = SIMPLE_ACCUMULATORS[expr.$fn];
-  if (simple) {
-    return { [simple]: `$${expr.$field}` };
+  assertAggregateFn(expr.$fn);
+  if (expr.$fn !== "count") {
+    return { [ACCUMULATORS[expr.$fn]]: `$${expr.$field}` };
   }
-  if (expr.$fn === "count") {
-    if (expr.$field === "*") {
-      return { $sum: 1 };
-    }
-    // COUNT(field) — count non-null values
-    return { $sum: { $cond: [{ $ne: [`$${expr.$field}`, null] }, 1, 0] } };
+  if (expr.$field === "*") {
+    return { $sum: 1 };
   }
-  throw new Error(`Unsupported aggregate function: ${expr.$fn}`);
+  // COUNT(field) — count non-null values
+  return { $sum: { $cond: [{ $ne: [`$${expr.$field}`, null] }, 1, 0] } };
 }
 
 // ── Calendar buckets ─────────────────────────────────────────────────────────

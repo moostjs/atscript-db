@@ -27,6 +27,8 @@ export type {
  */
 export { resolveAlias, isAggregateExpr, isBucketExpr } from "@uniqu/core";
 export type { TResolvedBucket } from "./query/buckets";
+export { assertAggregateFn } from "./query/aggregate-fns";
+export type { TDbAggregateFn } from "./query/aggregate-fns";
 
 /** The text-search request a grouped query carries, once normalised. */
 interface TAggregateSearch {

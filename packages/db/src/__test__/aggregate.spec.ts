@@ -4,7 +4,7 @@ import type { AggregateExpr, AggregateQuery } from "@uniqu/core";
 import { UniquSelect } from "../query/uniqu-select";
 import { AtscriptDbTable } from "../table/db-table";
 import { DbError } from "../db-error";
-import { resolveAlias } from "../agg";
+import { assertAggregateFn, resolveAlias } from "../agg";
 
 import { MockAdapter, NestedMockAdapter, prepareFixtures } from "./test-utils";
 
@@ -321,6 +321,64 @@ describe("aggregate() loose mode (no annotations)", () => {
     };
     const result = await table.aggregate(query);
     expect(result).toBeDefined();
+  });
+});
+
+describe("aggregate function allow-list", () => {
+  let adapter: MockAdapter;
+  let table: AtscriptDbTable<any>;
+
+  beforeEach(() => {
+    adapter = new MockAdapter();
+    table = new AtscriptDbTable(PlainEvents, adapter);
+  });
+
+  it("assertAggregateFn passes sum/count/avg/min/max and throws INVALID_QUERY otherwise", () => {
+    for (const fn of ["sum", "count", "avg", "min", "max"]) {
+      expect(() => assertAggregateFn(fn)).not.toThrow();
+    }
+    for (const fn of ["sleep", "SUM", "countDistinct", "toString", "constructor", 1]) {
+      expect(() => assertAggregateFn(fn)).toThrow(DbError);
+    }
+  });
+
+  it("an unknown $fn is rejected before the adapter (rows, $count, ungrouped, read paths)", async () => {
+    const select = [{ $fn: "sleep", $field: "value" }];
+    const rejection = {
+      code: "INVALID_QUERY",
+      errors: [
+        {
+          path: "$select",
+          message: 'Unknown aggregate function "sleep" — use sum, count, avg, min or max',
+        },
+      ],
+    };
+    for (const controls of [
+      { $groupBy: ["category"], $select: ["category", ...select] },
+      { $groupBy: ["category"], $select: select, $count: true },
+      { $groupBy: [], $select: select },
+    ]) {
+      await expect(
+        table.aggregate({ filter: {}, controls } as unknown as AggregateQuery),
+      ).rejects.toMatchObject(rejection);
+    }
+    const query = { filter: {}, controls: { $select: select } } as any;
+    await expect(table.findMany(query)).rejects.toMatchObject(rejection);
+    await expect(table.count(query)).rejects.toMatchObject(rejection);
+    expect(adapter.calls).toEqual([]);
+  });
+
+  it("'*' is count's only — sum(*) is rejected before the adapter", async () => {
+    const controls = { $groupBy: [], $select: [{ $fn: "sum", $field: "*" }] };
+    await expect(
+      table.aggregate({ filter: {}, controls } as unknown as AggregateQuery),
+    ).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [
+        { path: "$select", message: 'Aggregate "sum" needs a field — only count accepts *' },
+      ],
+    });
+    expect(adapter.calls).toEqual([]);
   });
 });
 

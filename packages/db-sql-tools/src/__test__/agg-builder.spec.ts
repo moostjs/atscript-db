@@ -187,6 +187,27 @@ describe("buildAggregateSelect", () => {
     });
     expect(result.sql).toContain("SUM([amount]) AS [sum_amount]");
   });
+
+  it.each(["sleep", "constructor"])(
+    "throws INVALID_QUERY on an unknown $fn %s instead of rendering it (select and $having)",
+    (fn) => {
+      const controls = {
+        $groupBy: ["status"],
+        $select: makeSelect(["status", { $fn: fn, $field: "amount", $as: "x" }]),
+      };
+      const expected = {
+        code: "INVALID_QUERY",
+        errors: [expect.objectContaining({ path: "$select" })],
+      };
+      expect(() => buildAggregateSelect(mockDialect, "orders", emptyWhere, controls)).toThrow(
+        expect.objectContaining(expected),
+      );
+      const having = { ...controls, $having: { x: { $gt: 1 } } as any };
+      expect(() => buildAggregateCount(mockDialect, "orders", emptyWhere, having)).toThrow(
+        expect.objectContaining(expected),
+      );
+    },
+  );
 });
 
 describe("buildAggregateCount", () => {

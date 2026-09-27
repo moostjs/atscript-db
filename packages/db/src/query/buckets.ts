@@ -1,6 +1,7 @@
 import { resolveBuckets, type ResolvedBucket } from "@uniqu/core";
 
 import { DbError } from "../db-error";
+import { SUPPORTED_AGGREGATE_FNS } from "./aggregate-fns";
 import type { TDbFieldMeta } from "../types";
 
 /**
@@ -36,7 +37,8 @@ export interface TBucketFieldSource {
  * appear in $groupBy", string `$groupBy` entries) with the table's names as
  * the collision set: a bucket alias may not equal a logical path, a physical
  * column or a navigation field, so a label is never reverse-mapped as a
- * column.
+ * column. Aggregate entries are checked against `SUPPORTED_AGGREGATE_FNS`
+ * (and `'*'` is `count`'s only).
  *
  * Which layer validates what:
  * - **Shapes** (this normalizer) run FIRST at every entry point — the core's
@@ -65,6 +67,7 @@ export function resolveCalendarBuckets(
 ): ResolvedBucket[] {
   const res = resolveBuckets(controls, {
     aggregate,
+    fns: SUPPORTED_AGGREGATE_FNS,
     isField: (name) =>
       fields.flatMap.has(name) || fields.navFields.has(name) || fields.physicalNames.has(name),
   });

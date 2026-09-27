@@ -224,3 +224,30 @@ describe("AsDbReadableController.query — aggregate path runs subclass validate
     expect(table.aggregate).toHaveBeenCalled();
   });
 });
+
+describe("AsDbReadableController — unknown aggregate functions", () => {
+  it.each([
+    "/query?$groupBy=status&$select=status,sleep(amount)",
+    "/query?$groupBy=status&$select=pg_sleep(amount):x&$count=true",
+    "/query?$select=sleep(amount)",
+    "/pages?$select=pg_sleep(amount)",
+  ])("%s → 400 before the table is reached", async (url) => {
+    const table = makeMockTable();
+    const controller = new AsDbController(makeMockApp(), table);
+
+    const result = url.startsWith("/pages")
+      ? await controller.pages(url)
+      : await controller.query(url);
+
+    expect(result).toBeInstanceOf(HttpError);
+    const body = (result as HttpError).body as any;
+    expect(body.statusCode).toBe(400);
+    expect(body.message).toMatch(
+      /^Unknown aggregate function "(pg_)?sleep" — use sum, count, avg, min or max$/,
+    );
+    expect(body.errors).toEqual([expect.objectContaining({ path: "$select" })]);
+    for (const method of ["aggregate", "findMany", "findManyWithCount", "count"]) {
+      expect(table[method]).not.toHaveBeenCalled();
+    }
+  });
+});

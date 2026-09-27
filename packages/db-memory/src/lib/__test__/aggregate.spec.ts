@@ -152,7 +152,7 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
   it("rejects an unknown aggregate function with INVALID_QUERY", async () => {
     await expectInvalidQuery(
       agg({ $groupBy: ["region"], $select: ["region", { $fn: "median", $field: "amount" }] }),
-      'Unsupported aggregate function "median"',
+      'Unknown aggregate function "median"',
     );
   });
 

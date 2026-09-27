@@ -197,6 +197,15 @@ describe("buildAggregatePipeline", () => {
     expect(projectStage).toHaveProperty("sum_amount", 1);
   });
 
+  it("throws INVALID_QUERY on an unknown $fn instead of emitting an accumulator", () => {
+    for (const $fn of ["push", "constructor"]) {
+      const query = makeQuery({ groupBy: ["currency"], select: [{ $fn, $field: "amount" }] });
+      expect(() => buildAggregatePipeline(query)).toThrow(
+        expect.objectContaining({ code: "INVALID_QUERY" }),
+      );
+    }
+  });
+
   it("full pipeline with filter + group + having + sort + pagination", () => {
     const query = makeQuery({
       filter: { status: "active" },
