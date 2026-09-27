@@ -22,6 +22,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `hasField(path)`                       | Both           | Every field a request references | Hide fields per request — answered as `Unknown field`             |
 | `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
+| `decorateRows(rows, ctx)`              | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
 | `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
 | `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
 | `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
@@ -181,6 +182,47 @@ export class ArticlesController extends AsDbController<typeof Article> {
 The `fieldName` parameter identifies which vector field was specified in `$vector`, allowing different embedding models per field if needed.
 
 See [Vector Search in URLs](./advanced#vector-search) for how this hook integrates with the URL parameters.
+
+### decorateRows {#decoraterows}
+
+Since 0.1.136. A post-read hook for data that is not a column: unread counters, a signed download URL, a flag computed from another service. It is not implemented by default — defining it in your subclass switches it on. It receives the final rows of one response and mutates them in place. It may be async, and one call covers the whole page, so batch your lookups:
+
+```typescript
+import type { TDbDecorateContext } from "@atscript/moost-db";
+
+@TableController(ticketsTable)
+export class TicketsController extends AsDbController<typeof Ticket> {
+  protected async decorateRows(rows: Record<string, unknown>[], ctx: TDbDecorateContext) {
+    const unread = await countUnread(rows.map((r) => r.id)); // one query per response
+    for (const row of rows) row.$unread = unread.get(row.id) ?? 0;
+  }
+}
+```
+
+`ctx` carries:
+
+| Field        | Value                                                                                                                     |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint`   | `"query"`, `"pages"`, `"geo"` or `"one"` (`/one/:id` and the composite `/one?…` both report `"one"`)                      |
+| `projection` | The effective `$select` of the read, after `transformProjection` and the `@db.writeOnly` seal (`undefined` = all columns) |
+| `controls`   | The request's parsed controls (`$select`, `$with`, `$actions`, …) — treat as read-only                                    |
+
+When it runs:
+
+- Once per response on `/query`, `/pages`, `/geo` and `/one`, including `$search` and `$vector` reads.
+- After [`$actions`](./actions#actions-augmentation) augmentation, so rows already carry `$actions`.
+- Not for `$count`, `$groupBy` aggregates, a `/one` 404, or [value-help controllers](./actions#value-help-controllers-are-excluded).
+- Nested `$with` rows are not passed on their own — reach them through the parent row.
+
+**DO**
+
+- Name the keys you add with a `$` prefix, like `$actions` and `$distance`. Such a key can never collide with a field. The prefix is a convention; nothing enforces it.
+- Add any column the hook reads but the client might not select in [`transformProjection`](#transformprojection). That column is then part of the response.
+
+**DON'T**
+
+- Overwrite or remove `$actions`.
+- Rely on columns that only an action's `requiredFields` pulled in — they are stripped again before the hook runs.
 
 ## Write Hooks
 

@@ -447,7 +447,7 @@ The decorator also stamps two pieces of param metadata: `atscript_db_action_inpu
 ### Constraints
 
 - **One `@InputForm` per action.** For multiple structured inputs, compose them into a single `.as` interface (object with sub-objects, or an array field for repeated items).
-- **No class-level support.** `@DbActions` / `@DbRowActions` / `@DbRowsActions` cannot bind a form — class-level entries point at endpoints that may live in other controllers, so the form binding can't be derived. If the target endpoint needs a form, declare it with `@DbAction(name, ...) + @InputForm(...)` on the actual handler.
+- **Class-level entries declare a form, they don't validate it.** `@DbActions` / `@DbRowActions` / `@DbRowsActions` entries take `inputForm` — see [Input forms on class-level entries](#class-level-input-form). Validation still happens only in the handler that owns the route, through its own `@InputForm(...)` parameter.
 - **Body shape stays the envelope.** With or without `@InputForm`, the body is still `{ ids?, input? }`. Mixing `@InputForm` with `@Body()` on the same method is allowed but unusual: `@Body()` would receive the full envelope while `@InputForm` resolves to `body.input`.
 
 ### Composable
@@ -512,6 +512,44 @@ For `'navigate'` and `'backend'`, `undefined`, `null`, and `''` are all treated 
 ::: tip Class-level `'backend'` is the escape hatch
 Use `processor: 'backend'` at the class level to point an action at a shared or legacy path. The dev-supplied path **must** be served by a `@Post`-bound handler somewhere — typically a method using `@DbActionID()` / `@DbActionIDs()` so the identifier-shaped JSON body is parsed and validated. The meta builder does not validate that the path resolves; that's your contract.
 :::
+
+### Input forms on class-level entries {#class-level-input-form}
+
+Since 0.1.136. A class-level entry can tell the UI which form to collect before the action runs. This is the case when a listing controller shows a `'backend'` action whose handler lives on another controller. Pass the form in one of two ways:
+
+```typescript
+import { ShipForm } from "./forms.as";
+
+@TableController(ordersTable)
+@DbRowActions({
+  // 1. The compiled .as type — served by THIS controller's /meta/form/ShipForm
+  ship: {
+    label: "Ship",
+    processor: "backend",
+    value: "/api/shipping/actions/ship",
+    inputForm: ShipForm,
+  },
+  // 2. The form's name + the path where another controller serves its schema
+  refund: {
+    label: "Refund",
+    processor: "backend",
+    value: "/api/payments/actions/refund",
+    inputForm: { name: "RefundForm", url: "/api/payments/meta/form/RefundForm" },
+  },
+})
+export class OrdersController extends AsDbController<typeof Order> {}
+```
+
+| `inputForm`         | `/meta` entry                     | Schema served by                         |
+| ------------------- | --------------------------------- | ---------------------------------------- |
+| compiled `.as` type | `inputForm: Type.name`            | this controller's `GET /meta/form/:name` |
+| `{ name, url }`     | `inputForm: name`, `formUrl: url` | whatever serves `url`                    |
+
+Any other shape is a type error. JavaScript callers that pass one anyway, or set `inputForm` on a `processor: 'navigate'` entry, get the entry dropped with a warning.
+
+`url` is a server-absolute path, the same convention as `value` for `'backend'` actions: clients prefix their base URL. [`getActionForm()`](./client#get-action-form) in `@atscript/db-client` handles both shapes.
+
+The entry only describes the form. The handler behind `value` must still validate `input`, normally with its own `@InputForm(ShipForm)` parameter. A type registered here shares this controller's form-name registry with method-level `@InputForm` parameters, and a name clash with a different type drops the entry.
 
 ### When to use class- vs. method-level
 
@@ -910,7 +948,8 @@ interface TDbActionInfo {
   promptText?: string | [string, string]; // [singular, plural]
   shortcut?: string; // single character; UI binds the modifier
   disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
-  inputForm?: string; // FormType.name when @InputForm declared; client fetches GET /meta/form/<name>
+  inputForm?: string; // form name (@InputForm param or class-level inputForm); client fetches GET /meta/form/<name>
+  formUrl?: string; // class-level inputForm { name, url }; client fetches baseUrl + formUrl instead
 }
 ```
 
@@ -989,6 +1028,8 @@ The meta builder enforces several rules. Every violation emits a console warning
 | Mixing row + rows cardinality (`@DbActionID*` / `@DbActionRow*`) on the same method | warn + drop                      |
 | Duplicate action name within the same controller                                    | warn + drop second declaration   |
 | Two actions sharing the same `@InputForm` form name with **different** type refs    | warn + drop second declaration   |
+| Class-level `inputForm` that is neither a compiled type nor `{ name, url }` (JS)    | warn + drop                      |
+| Class-level `inputForm` on a `'navigate'` entry                                     | warn + drop                      |
 
 The single greppable prefix `[moost-db actions]` makes it easy to detect issues in CI logs.
 

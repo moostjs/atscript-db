@@ -120,7 +120,7 @@ Unique indexes (recorded from the model at sync time) and primary keys are enfor
 
 ### Grouped queries
 
-[Grouped queries](/api/aggregation) — `$groupBy`, `count` / `sum` / `avg` / `min` / `max`, [calendar buckets](/api/calendar-buckets), `$having`, `$sort`, `$skip` / `$limit` and `$count` — work since 0.1.132, in stored and provider mode (before, `$groupBy` threw `INVALID_QUERY`). Groups are computed in process over one snapshot of the rows with the SQL semantics described in [Aggregate functions](/api/aggregation#aggregate-functions): `null` and missing values form one group, and `sum` / `avg` over no values are `null`. Calendar-bucket labels use the Node.js runtime's time zone data.
+[Grouped queries](/api/aggregation) — `$groupBy`, `count` / `countDistinct` / `sum` / `avg` / `min` / `max`, [calendar buckets](/api/calendar-buckets), `$having`, `$sort`, `$skip` / `$limit` and `$count` — work since 0.1.132, in stored and provider mode (before, `$groupBy` threw `INVALID_QUERY`). Groups are computed in process over one snapshot of the rows with the SQL semantics described in [Aggregate functions](/api/aggregation#aggregate-functions): `null` and missing values form one group, and `sum` / `avg` over no values are `null`. Calendar-bucket labels use the Node.js runtime's time zone data.
 
 There is no index-backed grouping: every grouped query scans the matching rows, which suits the small sets this adapter targets.
 

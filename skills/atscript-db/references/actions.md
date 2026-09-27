@@ -288,6 +288,33 @@ export class UsersController extends AsDbController<typeof User> {}
 
 For `'navigate'` actions, `$1` is substituted with the row's `preferredId` field values — see § Processor.
 
+#### Class-level input form (since 0.1.136)
+
+Entries accept `inputForm?: TAtscriptAnnotatedType | { name: string; url: string }` so a listing controller can advertise a form for an action whose handler lives elsewhere:
+
+| `inputForm`         | Result                                                                                        |
+| ------------------- | --------------------------------------------------------------------------------------------- |
+| compiled `.as` type | registered on THIS controller → served by its `/meta/form/:name`; wire `inputForm: Type.name` |
+| `{ name, url }`     | wire `inputForm: name` + `formUrl: url`; clients fetch `baseUrl + formUrl`                    |
+
+Any other shape is a type error (and `inputForm` is `never` on `processor: "navigate"`); JS callers that pass one anyway get warn + drop.
+
+```ts
+@DbRowActions({
+  ship: { label: "Ship", processor: "backend", value: "/api/shipping/actions/ship", inputForm: ShipForm },
+  refund: {
+    label: "Refund",
+    processor: "backend",
+    value: "/api/payments/actions/refund",
+    inputForm: { name: "RefundForm", url: "/api/payments/meta/form/RefundForm" },
+  },
+})
+```
+
+- The entry only DESCRIBES the form — the target handler must still validate `input` (its own `@InputForm(Type)` param).
+- A type here shares the controller's form-name registry with method-level `@InputForm`: same name + different type → warn + drop.
+- `url` is a server-absolute path (same convention as `'backend'` `value`). `formUrl` is wire-only — not accepted on `@DbAction` method opts.
+
 ## Server-side gate
 
 `disabled` predicate — Moost interceptor at `AFTER_GUARD` priority (auth → gate → handler). Server is authoritative. Wire ships `fn.toString()` for UI mirror.
@@ -388,7 +415,7 @@ Stamps two param mate keys:
 
 Form name on the wire is `FormType.name` (compiled `.as` classes have stable names). Reusing the same `FormType` across multiple actions on the same controller is allowed; clashing names with different type refs → discovery warns and drops the second action.
 
-Co-occurrence rules: orthogonal to level — `@InputForm` alone keeps the action `'table'`-level. Combines freely with `@DbActionID*` / `@DbActionRow*`. NOT supported on class-level dict actions (no params to decorate).
+Co-occurrence rules: orthogonal to level — `@InputForm` alone keeps the action `'table'`-level. Combines freely with `@DbActionID*` / `@DbActionRow*`. Class-level dict entries have no params to decorate — they declare a form via `inputForm` instead (§ Class-level input form) without validating it.
 
 ### Example — `@InputForm` on a row action
 
@@ -479,7 +506,8 @@ interface TDbActionInfo {
   promptText?: string | [string, string]; // [singular, plural]; UI substitutes $1 (preferred-id values), $N (count)
   shortcut?: string; // single char; UI binds modifier
   disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
-  inputForm?: string; // FormType.name when @InputForm declared; client fetches GET /meta/form/<name>
+  inputForm?: string; // form name (@InputForm param or class-level inputForm); client fetches GET /meta/form/<name>
+  formUrl?: string; // class-level inputForm { name, url }; client fetches baseUrl + formUrl instead
 }
 ```
 
@@ -506,6 +534,7 @@ interface TDbActionInfo {
 - **`disabled` set without (non-empty) `requiredFields` → drop the action.** Field-deps must be declared explicitly.
 - Duplicate action name within a controller — second declaration dropped.
 - Two actions with the same `@InputForm` form name but different type refs on the same controller — second declaration dropped.
+- Class-level `inputForm` that is neither a compiled type nor `{ name, url }` (JS callers), or on a `'navigate'` entry.
 
 Value-help controllers (`AsValueHelpController` / `AsJsonValueHelpController`) silently emit `actions: []`; decorators on them are ignored.
 
@@ -569,7 +598,8 @@ await users.action<{ message: string }>("block", { id: "abc" }); // typed return
 // Discovery — fetch the deserialized form schema for an action's @InputForm
 const form = await users.getActionForm("approve"); // TAtscriptAnnotatedType | null
 // → null when action has no inputForm or the action name is unknown.
-// → cached per form name on the client instance.
+// → fetched from baseUrl + formUrl when the action carries formUrl;
+// → cached per resolved URL on the client instance.
 ```
 
 - POST always (hardcoded for `'backend'`). Body is the `{ ids?, input? }` envelope; table-level + no form ⇒ no body sent.

@@ -589,12 +589,35 @@ const results = await cursor.toArray();
 
 `mongoIndexKey(type, logicalName)` and `INDEX_PREFIX` are the same helpers schema sync uses, so the resolved name always matches what was provisioned — if the prefix scheme ever changes, your interop code tracks it automatically.
 
+## Views
+
+Managed [views](../views/) become native MongoDB views (`createCollection` with `viewOn` + an aggregation pipeline). Each join becomes a `$lookup` + `$unwind`; field paths are the physical document paths (a `@db.column` renames the top-level key), joined documents live under `__joined_<table>`.
+
+| Join condition                                                                                                                               | `$lookup` form                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| a single `=` between a field of the joined table and a field of the entry or an earlier join, where the joined table's field is **required** | `localField` / `foreignField` (index-friendly) |
+| anything else — optional join field, `and` / `or`, `<` / `>=` / `!=`, `in`, …                                                                | `let` + `pipeline: [{ $match: { $expr } }]`    |
+
+Null semantics follow SQL:
+
+- A null or missing join key never matches (the simple form is only used where the joined field can't be null or missing). `<`, `<=`, `>`, `>=`, `!=`, `not in` and field-to-field `=` are false when an operand is null or missing.
+- **Divergence:** `not (…)` over a comparison with a null operand is **true** on MongoDB and UNKNOWN (row excluded) on SQL.
+- An inner join (the default) drops unmatched documents; a `'left'` join keeps them and its fields read back as `null`.
+- A view field whose source may be missing — a left-joined table, an optional field, a leaf inside a `@db.json` field — is projected as `{ $ifNull: [source, null] }`, so it reads back as `null`. Every other field stays a plain path, so a filter or sort on the view can still use the source collection's indexes.
+- `matches` is not supported in join conditions (`$regexMatch` needs MongoDB 4.2); it still works in `@db.view.filter`, which is a regular `$match`.
+- `@db.view.filter` and `@db.view.having` use [query](../api/queries) semantics: `!=` also matches documents where the field is null or missing, `exists` means "holds a value" (a stored `null` counts as absent), `not exists` its negation, and `matches` accepts `/pattern/flags`.
+- Aggregates: `$sum` over a group with no values is `0` (SQL: `NULL`).
+
+::: tip Indexes
+The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the join field required and the condition a single `=` when the joined collection is large.
+:::
+
 ## Limitations
 
 - **FK constraints emulated** — referential integrity is enforced in the generic layer, not by MongoDB itself
 - **Atlas Search requires Atlas** — not available on self-hosted MongoDB
 - **Vector search requires Atlas M10+** — minimum tier for vector search indexes
-- **No SQL views** — MongoDB does not have SQL-style views; use aggregation pipelines instead
+- **No materialized views** — `@db.view.materialized` creates a plain (on-demand) view; see [Views](#views)
 - **Transactions require replica set** — standalone MongoDB instances cannot use transactions
 - **Embeddings are external** — pass pre-computed vectors to `vectorSearch()`, the adapter does not generate them
 - **Atlas Search indexes build asynchronously** — they may take a few seconds to become available after creation

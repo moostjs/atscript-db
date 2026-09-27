@@ -428,6 +428,7 @@ const meta = await users.meta();
 | `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly`, `filterOps` when only narrower operators such as `$exists` pass, and `bucketable` on fields that accept a calendar bucket — both since 0.1.132). Since 0.1.128 exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted — so `name` above is sortable (not index-backed, hence no `indexed`). See [Query Gate](../adapters/annotations#query-gate) |
 | `type`             | Full serialized Atscript type definition. Fields declared through a reference chain carry the terminal `ref` (and inherit `db.rel.FK`) since 0.1.128 — value-help resolves to the dictionary                                                                                                                                                                                                                                                                                                 |
 | `bucketUnits`      | Calendar-bucket units the adapter supports; absent when none. Since 0.1.132 — see [Calendar Buckets](/api/calendar-buckets#discovering-support-through-meta)                                                                                                                                                                                                                                                                                                                                 |
+| `aggregateFns`     | Aggregate functions the adapter renders in grouped queries — see [GET /meta](./crud#get-meta)                                                                                                                                                                                                                                                                                                                                                                                                |
 | `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                                                                                                                                                                                         |
 | `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                                                                                                                                                                                    |
 
@@ -495,7 +496,9 @@ if (action?.inputForm) {
 }
 ```
 
-Returns `null` when the action has no `inputForm`, or the action name isn't on `/meta`. Cached per form name on the client instance — repeated calls for the same form make only one HTTP request. Failed fetches are evicted from the cache so retries can re-fetch.
+When the action also carries `formUrl` (a [class-level form served by another controller](./actions#class-level-input-form)), the schema is fetched from `baseUrl + formUrl` instead.
+
+Returns `null` when the action has no `inputForm`, or the action name isn't on `/meta`. Cached per resolved URL on the client instance — repeated calls for the same form make only one HTTP request. Failed fetches are evicted from the cache so retries can re-fetch.
 
 ### Client-side validation
 
@@ -788,18 +791,18 @@ import type { ClientValidationError } from "@atscript/db-client";
 
 ## Method ↔ Endpoint Reference
 
-| Method            | HTTP   | Endpoint                    | Returns                                                 |
-| ----------------- | ------ | --------------------------- | ------------------------------------------------------- |
-| `query()`         | GET    | `/query`                    | `DataOf<T>[]`                                           |
-| `count()`         | GET    | `/query` (`$count`)         | `number`                                                |
-| `aggregate()`     | GET    | `/query` (`$groupBy`)       | `AggregateResult[]`                                     |
-| `pages()`         | GET    | `/pages`                    | `PageResult<DataOf<T>>`                                 |
-| `one()`           | GET    | `/one/:id` or `/one?k=v`    | `DataOf<T> \| null`                                     |
-| `insert()`        | POST   | `/`                         | `TDbInsertResult` or `TDbInsertManyResult`              |
-| `update()`        | PATCH  | `/`                         | `TDbUpdateResult`                                       |
-| `replace()`       | PUT    | `/`                         | `TDbUpdateResult`                                       |
-| `remove()`        | DELETE | `/:id` or `/?k=v`           | `TDbDeleteResult`                                       |
-| `meta()`          | GET    | `/meta`                     | `MetaResponse`                                          |
-| `getActionForm()` | GET    | `/meta/form/:name`          | `TAtscriptAnnotatedType \| null`                        |
-| `getValidator()`  | —      | _client-side; uses `/meta`_ | `ClientValidator` (lazy, cached)                        |
-| `action()`        | POST   | _resolved from `/meta`_     | `unknown` (server response, or `void` for `'navigate'`) |
+| Method            | HTTP   | Endpoint                        | Returns                                                 |
+| ----------------- | ------ | ------------------------------- | ------------------------------------------------------- |
+| `query()`         | GET    | `/query`                        | `DataOf<T>[]`                                           |
+| `count()`         | GET    | `/query` (`$count`)             | `number`                                                |
+| `aggregate()`     | GET    | `/query` (`$groupBy`)           | `AggregateResult[]`                                     |
+| `pages()`         | GET    | `/pages`                        | `PageResult<DataOf<T>>`                                 |
+| `one()`           | GET    | `/one/:id` or `/one?k=v`        | `DataOf<T> \| null`                                     |
+| `insert()`        | POST   | `/`                             | `TDbInsertResult` or `TDbInsertManyResult`              |
+| `update()`        | PATCH  | `/`                             | `TDbUpdateResult`                                       |
+| `replace()`       | PUT    | `/`                             | `TDbUpdateResult`                                       |
+| `remove()`        | DELETE | `/:id` or `/?k=v`               | `TDbDeleteResult`                                       |
+| `meta()`          | GET    | `/meta`                         | `MetaResponse`                                          |
+| `getActionForm()` | GET    | `/meta/form/:name` or `formUrl` | `TAtscriptAnnotatedType \| null`                        |
+| `getValidator()`  | —      | _client-side; uses `/meta`_     | `ClientValidator` (lazy, cached)                        |
+| `action()`        | POST   | _resolved from `/meta`_         | `unknown` (server response, or `void` for `'navigate'`) |

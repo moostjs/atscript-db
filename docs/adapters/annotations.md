@@ -309,15 +309,15 @@ For `@db.rel.onDelete` and `@db.rel.onUpdate`:
 
 ## Views
 
-| Annotation              | Applies To | Arguments                          | Description                                                              |
-| ----------------------- | ---------- | ---------------------------------- | ------------------------------------------------------------------------ |
-| `@db.view`              | Interface  | `name?` (string)                   | Mark as database [view](../views/) (defaults to interface name)          |
-| `@db.view.for`          | Interface  | `entry` (ref)                      | Entry/primary table for a managed view                                   |
-| `@db.view.joins`        | Interface  | `target` (ref), `condition` (expr) | Explicit join clause (repeatable)                                        |
-| `@db.view.filter`       | Interface  | `condition` (expr)                 | View WHERE clause                                                        |
-| `@db.view.having`       | Interface  | `condition` (expr)                 | Post-aggregation HAVING clause                                           |
-| `@db.view.materialized` | Interface  | —                                  | Mark the view as materialized                                            |
-| `@db.view.renamed`      | Interface  | `oldName` (string)                 | Previous view name for [schema sync](../sync/what-gets-synced) migration |
+| Annotation              | Applies To | Arguments                                                           | Description                                                                     |
+| ----------------------- | ---------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `@db.view`              | Interface  | `name?` (string)                                                    | Mark as database [view](../views/) (defaults to interface name)                 |
+| `@db.view.for`          | Interface  | `entry` (ref)                                                       | Entry/primary table for a managed view                                          |
+| `@db.view.joins`        | Interface  | `target` (ref), `condition` (expr), `kind?` (`'inner'` \| `'left'`) | Explicit join (repeatable, applied in order; [kinds & chains](../views/#joins)) |
+| `@db.view.filter`       | Interface  | `condition` (expr)                                                  | View WHERE clause                                                               |
+| `@db.view.having`       | Interface  | `condition` (expr)                                                  | Post-aggregation HAVING clause                                                  |
+| `@db.view.materialized` | Interface  | —                                                                   | Mark the view as materialized                                                   |
+| `@db.view.renamed`      | Interface  | `oldName` (string)                                                  | Previous view name for [schema sync](../sync/what-gets-synced) migration        |
 
 ```atscript
 @db.view
@@ -333,22 +333,24 @@ interface ActiveTaskView {
 
 ## Aggregation
 
-| Annotation      | Applies To | Arguments         | Description                                                                 |
-| --------------- | ---------- | ----------------- | --------------------------------------------------------------------------- |
-| `@db.agg.sum`   | Field      | `field` (string)  | SUM of a source column (numeric/decimal only)                               |
-| `@db.agg.avg`   | Field      | `field` (string)  | AVG of a source column (numeric/decimal only)                               |
-| `@db.agg.count` | Field      | `field?` (string) | COUNT — omit argument for `COUNT(*)`, provide field name for non-null count |
-| `@db.agg.min`   | Field      | `field` (string)  | MIN of a source column                                                      |
-| `@db.agg.max`   | Field      | `field` (string)  | MAX of a source column                                                      |
+| Annotation              | Applies To | Arguments                               | Description                                                                                    |
+| ----------------------- | ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `@db.agg.sum`           | Field      | `field` (string), `condition?` (query)  | SUM of a source column (numeric/decimal only)                                                  |
+| `@db.agg.avg`           | Field      | `field` (string), `condition?` (query)  | AVG of a source column (numeric/decimal only)                                                  |
+| `@db.agg.count`         | Field      | `field?` (string), `condition?` (query) | COUNT — omit the field (or pass `'*'`) for `COUNT(*)`, provide a field name for non-null count |
+| `@db.agg.countDistinct` | Field      | `field` (string), `condition?` (query)  | `COUNT(DISTINCT field)` — distinct non-null values                                             |
+| `@db.agg.min`           | Field      | `field` (string), `condition?` (query)  | MIN of a source column                                                                         |
+| `@db.agg.max`           | Field      | `field` (string), `condition?` (query)  | MAX of a source column                                                                         |
 
-Use aggregation annotations on [view](../views/aggregations) fields together with `@db.column.dimension` on grouping fields.
+The optional `condition` makes the aggregate [conditional](../views/aggregations#conditional-aggregates): it reads only the rows the query matches, e.g. ``@db.agg.sum 'amount', `status = 'paid'` ``.
+
+Use aggregation annotations on [view](../views/aggregations) fields. The view's plain (non-aggregated) fields become its `GROUP BY` columns automatically — they need no `@db.column.dimension`, which only makes runtime [`$groupBy` queries](../api/aggregation#dimensions-and-measures-strict-mode) strict.
 
 ```atscript
 @db.view
 @db.view.for Order
 @db.view.having `totalRevenue > 100`
 interface CategoryStats {
-  @db.column.dimension
   category: Order.category
 
   @db.agg.sum 'amount'

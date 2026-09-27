@@ -318,7 +318,7 @@ curl "http://localhost:3000/orders/query?\$groupBy=status&\$select=status,sum(am
 
 ### Aggregate Functions
 
-The standard SQL aggregate functions are available: `count(*)`, `sum(field)`, `avg(field)`, `min(field)`, `max(field)`. Any other function name is rejected with 400 (since 0.1.135). See [Grouped Queries — Aggregate functions](/api/aggregation#aggregate-functions) for their null handling.
+The standard SQL aggregate functions are available: `count(*)`, `count(field)`, `sum(field)`, `avg(field)`, `min(field)`, `max(field)`, and `countDistinct(field)` (distinct non-null values; [`/meta.aggregateFns`](./crud#get-meta) lists what the adapter supports). Any other function name is rejected with 400 (since 0.1.135), and so is `countDistinct(*)`. See [Grouped Queries — Aggregate functions](/api/aggregation#aggregate-functions) for their null handling.
 
 ### Calendar Buckets
 

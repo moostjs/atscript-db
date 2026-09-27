@@ -131,6 +131,8 @@ export interface Event {
 | `@db.search.vector`                         | `vector(N)`                       | pgvector extension; falls back to `JSONB`                                               |
 | `db.geoPoint`                               | `geography(Point,4326)`           | PostGIS extension; falls back to `JSONB`. See [Geo Search](/search/geo-search)          |
 
+To filter, sort or group by a leaf inside a `@db.json` column, expose it as a [typed view field](/views/#reading-json-leaves).
+
 ### Unsigned Integer Promotion
 
 PostgreSQL has no unsigned integer types. Unsigned types are promoted to the next-larger signed type to preserve the full value range:

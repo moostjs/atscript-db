@@ -185,6 +185,7 @@ const guideSidebar = [
       { text: "Overview", link: "/guide/" },
       { text: "Quick Start", link: "/guide/quick-start" },
       { text: "Setup", link: "/guide/setup" },
+      { text: "Upgrading", link: "/guide/upgrading" },
     ],
   },
 ];

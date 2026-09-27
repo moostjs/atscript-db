@@ -105,25 +105,38 @@ Renaming the column via `@db.column 'v'` is not recommended at this time — see
 
 ## Views
 
-| Annotation              | Target    | Args                           | Effect                                              |
-| ----------------------- | --------- | ------------------------------ | --------------------------------------------------- |
-| `@db.view`              | Interface | `name?: string`                | Mark as view (mutually exclusive with `@db.table`). |
-| `@db.view.for`          | Interface | `entry: ref`                   | Primary (entry) table for a managed view.           |
-| `@db.view.joins`        | Interface | `target: ref, condition: expr` | Repeatable JOIN clauses.                            |
-| `@db.view.filter`       | Interface | `expr`                         | WHERE clause.                                       |
-| `@db.view.having`       | Interface | `expr`                         | HAVING clause (post-aggregation).                   |
-| `@db.view.materialized` | Interface | —                              | Materialize the view at DB level.                   |
-| `@db.view.renamed`      | Interface | `oldName: string`              | Rename during sync.                                 |
+| Annotation              | Target    | Args                                                     | Effect                                                                                     |
+| ----------------------- | --------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@db.view`              | Interface | `name?: string`                                          | Mark as view (mutually exclusive with `@db.table`).                                        |
+| `@db.view.for`          | Interface | `entry: ref`                                             | Primary (entry) table for a managed view.                                                  |
+| `@db.view.joins`        | Interface | `target: ref, condition: expr, kind?: 'inner' \| 'left'` | Repeatable joins, applied in order; default inner. See `tables-and-views.md § Join rules`. |
+| `@db.view.filter`       | Interface | `expr`                                                   | WHERE clause.                                                                              |
+| `@db.view.having`       | Interface | `expr`                                                   | HAVING clause (post-aggregation).                                                          |
+| `@db.view.materialized` | Interface | —                                                        | Materialize the view at DB level.                                                          |
+| `@db.view.renamed`      | Interface | `oldName: string`                                        | Rename during sync.                                                                        |
 
 ## Aggregation (view fields only)
 
-| Annotation      | Args             | Effect                       |
-| --------------- | ---------------- | ---------------------------- |
-| `@db.agg.sum`   | `field: string`  | SUM (numeric/decimal).       |
-| `@db.agg.avg`   | `field: string`  | AVG.                         |
-| `@db.agg.count` | `field?: string` | COUNT — omit for `COUNT(*)`. |
-| `@db.agg.min`   | `field: string`  | MIN.                         |
-| `@db.agg.max`   | `field: string`  | MAX.                         |
+| Annotation              | Args                                  | Effect                                              |
+| ----------------------- | ------------------------------------- | --------------------------------------------------- |
+| `@db.agg.sum`           | `field: string`, `condition?: query`  | SUM (numeric/decimal).                              |
+| `@db.agg.avg`           | `field: string`, `condition?: query`  | AVG (numeric/decimal).                              |
+| `@db.agg.count`         | `field?: string`, `condition?: query` | COUNT — omit (or `'*'`) for `COUNT(*)`.             |
+| `@db.agg.countDistinct` | `field: string`, `condition?: query`  | `COUNT(DISTINCT field)` — distinct non-null values. |
+| `@db.agg.min`           | `field: string`, `condition?: query`  | MIN.                                                |
+| `@db.agg.max`           | `field: string`, `condition?: query`  | MAX.                                                |
+
+Conditional aggregates (2nd arg, 0.1.136) — `FN(CASE WHEN cond THEN field END)` on SQL, `$cond` on Mongo:
+
+| #   | Rule                                                                                                                                                                                                          |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Conditional `COUNT(*)` = ``@db.agg.count '*', `status = 'paid'` ``. `'*'` on any other fn = compile error.                                                                                                    |
+| 2   | No matching row in the group → `sum` = 0 (COALESCE, same on Mongo), `count` / `countDistinct` = 0, `avg` / `min` / `max` = NULL → their field MUST be optional (`paidAvg?: number`, compile error otherwise). |
+| 3   | Condition scope = entry table + every join (like `@db.view.filter`); unqualified fields = entry table. Grammar = view predicates (no `matches`, no JSON paths).                                               |
+| 4   | `@db.view.having` may filter on a conditional / countDistinct alias.                                                                                                                                          |
+| 5   | countDistinct: field required; result field `number`; distinctness follows collation (MySQL `*_ci`: `'A'` = `'a'`; PG / SQLite / Mongo case-sensitive). Mongo uses `$addToSet` (in-memory set per group).     |
+| 6   | Unconditional SUM over only-null values: NULL on SQL, 0 on Mongo (unchanged). Want 0 everywhere → conditional sum.                                                                                            |
+| 7   | Compiled metadata `db.agg.*` = `{ field?, condition? }`; older models carry a string / `true` — runtime reads all shapes, tooling reading the metadata must too.                                              |
 
 ## Quantity tagging (currency / unit)
 

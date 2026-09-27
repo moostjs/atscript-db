@@ -241,10 +241,10 @@ Every `$select` entry is validated before the read (since 0.1.128, on `/query`, 
 
 With [`$groupBy`](./advanced#groupby), `$select` also takes computed entries, each with an optional `:alias`:
 
-| Entry                                 | Meaning                                                                                            |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `fn(field)` / `count(*)`              | Aggregate — `count`, `sum`, `avg`, `min`, `max`. Default key `fn_field`; `count(*)` → `count_star` |
-| `bucket(field,unit[,tz][,weekStart])` | [Calendar bucket](/api/calendar-buckets) (since 0.1.132). Default key `unit_field`                 |
+| Entry                                 | Meaning                                                                                                                                                                                                                    |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fn(field)` / `count(*)`              | Aggregate — `count`, `sum`, `avg`, `min`, `max`, `countDistinct` (`countDistinct(*)` is a 400). Default key `fn_field`; `count(*)` → `count_star`. [`/meta.aggregateFns`](./crud#get-meta) lists what the adapter supports |
+| `bucket(field,unit[,tz][,weekStart])` | [Calendar bucket](/api/calendar-buckets) (since 0.1.132). Default key `unit_field`                                                                                                                                         |
 
 ```bash
 curl "http://localhost:3000/tickets/query?\$select=status,bucket(openedAt,month,'Europe/Berlin'):month,count(*):n&\$groupBy=status,month&\$having=month>='2026-01-01'"

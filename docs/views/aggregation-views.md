@@ -116,6 +116,42 @@ The `HAVING` clause references **view field aliases** (`totalRevenue`), not sour
 You can combine `@db.view.filter` and `@db.view.having` — the filter narrows rows before grouping, and the having clause filters the aggregated results.
 :::
 
+## Conditional Aggregates and Distinct Counts
+
+An aggregate can read only some rows of its group, and `@db.agg.countDistinct` counts distinct values. Together they put several breakdowns into one view:
+
+```atscript
+@db.view 'category_funnel'
+@db.view.for Order
+export interface CategoryFunnel {
+    category: Order.category
+
+    @db.agg.count
+    orders: number
+
+    @db.agg.count '*', `status = 'completed'`
+    completedOrders: number
+
+    @db.agg.sum "amount", `status = 'completed'`
+    completedRevenue: number        // 0 when a category has no completed order
+
+    @db.agg.countDistinct "customerId"
+    customers: number
+}
+```
+
+```sql
+SELECT category,
+       COUNT(*) AS orders,
+       COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completedOrders,
+       COALESCE(SUM(CASE WHEN status = 'completed' THEN amount END), 0) AS completedRevenue,
+       COUNT(DISTINCT customerId) AS customers
+FROM orders
+GROUP BY category
+```
+
+A `@db.view.filter` would drop the other rows for every column. A condition applies to its own column only. For the rules (NULL results, optional fields, what a condition may reference), see [Conditional Aggregates](./aggregations#conditional-aggregates).
+
 ## Multi-Table Aggregation Views
 
 Use `@db.view.joins` to aggregate across joined tables:

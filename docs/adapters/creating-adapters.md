@@ -470,6 +470,28 @@ Override to support [grouped queries](/api/aggregation); the default throws. The
 
 Return one row per group, with physical names for grouped fields and each computed entry under its output key — `resolveAlias(expr)` from `@atscript/db/agg` (`$as`, else `{fn}_{field}`; `count(*)` → `count_star` since 0.1.132, `count_*` before). The table reverse-maps the rows. Match the portable semantics: `null` and missing values form one group, `count(field)` counts non-null values, `sum` / `avg` ignore nulls. `$count: true` returns `[{ count: N }]`, the number of groups that survive `$having`. SQL adapters get all of this from `buildAggregateSelect` / `buildAggregateCount` in `@atscript/db-sql-tools`. Before rendering a `$fn`, re-assert it with `assertAggregateFn(fn)` from `@atscript/db/agg` (since 0.1.135).
 
+### Aggregate functions {#aggregate-functions}
+
+```typescript
+aggregateFns(): ReadonlySet<AggregateFn> // 'sum' | 'count' | 'avg' | 'min' | 'max' | 'countDistinct'
+```
+
+The aggregate functions your `aggregate()` renders (since 0.1.136). The default is `sum`, `count`, `avg`, `min` and `max`. The core rejects any other known function [with `AGG_FN_NOT_SUPPORTED`](/api/aggregation#validation-and-errors) before it calls `aggregate()`, so an adapter written before a function existed never receives it. moost-db's [`/meta`](/http/crud#get-meta) advertises the set as `aggregateFns`. The same set gates managed views: schema sync refuses a view whose `@db.agg.*` field uses a function missing from it. Conditional aggregates (the `@db.agg.*` second argument) are not a separate capability — an adapter that renders views renders them.
+
+To support `countDistinct` too, return `ALL_AGGREGATE_FNS` (exported from `@atscript/db`) and follow its semantics: count the **distinct non-null** values of `$field` in each group. `null` and missing values are never counted, a group of only nulls counts `0`, and `'*'` never reaches you (the core rejects `countDistinct(*)`). Distinctness may follow the engine's collation. The value must be a number by the time `$having` and `$sort` see it. For example, MongoDB collects a set with `$addToSet` and turns it into its non-null size before `$having`. SQL adapters built on `buildAggregateSelect` / `buildAggregateCount` render `COUNT(DISTINCT col)` already, in `SELECT` and `HAVING`, and only need to return the set.
+
+```typescript
+import { ALL_AGGREGATE_FNS, BaseDbAdapter, type AggregateFn } from "@atscript/db";
+
+class MyAdapter extends BaseDbAdapter {
+  override aggregateFns(): ReadonlySet<AggregateFn> {
+    return ALL_AGGREGATE_FNS;
+  }
+}
+```
+
+`assertAggregateFn` accepts every known function, `countDistinct` included; its type `TDbAggregateFn` is uniqu's full `AggregateFn`. `AGG_FN_SQL` from `@atscript/db-sql-tools` maps only the single-name functions — `countDistinct` renders as `COUNT(DISTINCT x)`.
+
 ### Calendar buckets {#calendar-buckets}
 
 ```typescript
@@ -489,12 +511,13 @@ For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlD
 
 - **`calendarBucket?(quotedCol: string, b: TResolvedBucket): string`** — the label expression over one column. It must be **parameter-free**: the builders render it in `SELECT`, `GROUP BY` and `HAVING`, and PostgreSQL matches `GROUP BY` expressions structurally. Inline the zone with `sqlTimeZoneLiteral(b.tz)`, which re-checks the name's charset before quoting it. Without this hook the builders throw `BUCKET_NOT_SUPPORTED`.
 - **`bucketAliasInHaving?: boolean`** — render a bucket in `HAVING` by its `SELECT` alias instead of repeating the expression. MySQL needs it (it rejects the raw column there but resolves aliases); PostgreSQL needs the default expression form.
+- **`jsonExtract?(quotedCol: string, path: readonly string[], type: "string" | "number" | "boolean"): string`** — the typed read of one primitive leaf inside a JSON column, used by [view fields that read a JSON leaf](/views/#reading-json-leaves) (since 0.1.136). It must be **parameter-free**, because it runs in `CREATE VIEW`. Return the declared type, or `NULL` when the path is missing, the value is JSON `null`, or the value has another JSON type. Never coerce: the JSON string `"5"` is `NULL` for a `number` leaf. Build the path literal from `quotedJsonPathSegments(path)` (exported from `@atscript/db-sql-tools`), which quotes each segment and rejects segments that can't be quoted portably. Without this hook, syncing a view with a JSON-leaf field fails with `JSON extraction is not supported by this adapter`.
 
 `groupKeySql(dialect, controls, key)` renders a `$groupBy` key — the bucket expression for a bucket alias, the quoted column otherwise.
 
 `@atscript/db` also exports the rules the core and moost-db apply, for custom gates and tooling:
 
-- `resolveCalendarBuckets(controls, fields, aggregate?)` validates and normalizes the bucket entries of a query (throws `INVALID_QUERY`).
+- `normalizeComputedSelect(controls, fields, aggregate?)` validates and normalizes the computed `$select` entries of a query — aggregate names and the `'*'` rule, calendar buckets — and returns the buckets (throws `INVALID_QUERY`). `resolveCalendarBuckets` is a deprecated alias.
 - `bucketSourceVerdict(fd, table, adapter)` (since 0.1.133) decides whether a field can be a bucket source. It applies every rule from [which fields can be bucketed](/api/calendar-buckets#which-fields-can-be-bucketed) except the HTTP-only `@db.writeOnly` veto, which your gate adds itself. The core guard and moost-db's `/meta` and gate all call it. It returns `{ ok: true }` or `{ ok: false, code, reason }`:
   - `code` is one of `"encrypted"`, `"jsonDescendant"`, `"notTimestamp"`, `"notFilterable"`, `"notDimension"` or `"noBuckets"` — the first rule the field fails.
   - `reason` is the clause the built-in [messages](/api/calendar-buckets#errors) print after the dash, without a trailing period.

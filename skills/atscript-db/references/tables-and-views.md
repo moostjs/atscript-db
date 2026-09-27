@@ -67,13 +67,14 @@ Metadata is built lazily on first access — safe to reference from peer tables.
 
 ## AtscriptDbView — extra surface
 
-| Member                         | Purpose                                                                                                                                                                                                                                                          |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isView: true`                 | Differentiator from tables. Adapters branch on THIS (or `isAtscriptDbView(readable)`, exported from `@atscript/db`, 0.1.128) — never `instanceof AtscriptDbView` (two copies of the core in a bundle ⇒ false ⇒ an empty table is created under the view's name). |
-| `viewPlan`                     | Computed plan (entry table + joins + filter + groupBy).                                                                                                                                                                                                          |
-| `isExternal`                   | True when neither `@db.view.for` nor joins are present — assumed pre-existing in DB.                                                                                                                                                                             |
-| `getViewColumnMappings()`      | View column → source table/column; `@db.ignore` fields are excluded (0.1.128) so they never reach `CREATE VIEW`.                                                                                                                                                 |
-| `findOne/Many/count/aggregate` | Read-only ops; writes throw.                                                                                                                                                                                                                                     |
+| Member                         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isView: true`                 | Differentiator from tables. Adapters branch on THIS (or `isAtscriptDbView(readable)`, exported from `@atscript/db`, 0.1.128) — never `instanceof AtscriptDbView` (two copies of the core in a bundle ⇒ false ⇒ an empty table is created under the view's name).                                                                                                                                                                    |
+| `viewPlan`                     | Computed plan (entry table + joins + filter + groupBy).                                                                                                                                                                                                                                                                                                                                                                             |
+| `isExternal`                   | True when neither `@db.view.for` nor joins are present — assumed pre-existing in DB.                                                                                                                                                                                                                                                                                                                                                |
+| `getViewColumnMappings()`      | View column → source table/column; `@db.ignore` fields are excluded (0.1.128) so they never reach `CREATE VIEW`. Names are PHYSICAL on both sides (`viewColumn` = the view's own column, `sourceColumn` = flattened `__` / `@db.column` / document path; `viewPath` = logical view path, required; `json` set for a JSON leaf; `nullable` when the source may be missing — left join, optional, JSON leaf). Computed once per view. |
+| `resolveRefSource(ref)`        | A view query ref (join condition, filter, conditional aggregate) → `{ table, source }`: the PHYSICAL column / document path on this view's adapter (+ `jsonPath` inside a JSON column), same layout rules as `TableMetadata`. The only public view-source resolver — use it in custom adapters instead of re-deriving names.                                                                                                        |
+| `findOne/Many/count/aggregate` | Read-only ops; writes throw.                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### View kinds
 
@@ -95,9 +96,36 @@ interface ActiveTask {
 }
 ```
 
-View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `tasks.id`); over HTTP, `/meta` resolves a chained ref to its terminal field (a view's `assigneeId: Task.assigneeId` → `User.id` with `db.rel.FK` inherited, since 0.1.128) so value-help works on view fields — see `relations.md § Meta FK ref shape`. `@db.ignore`d view fields have no column: excluded from `CREATE VIEW`, from the definition hash and from queries (400); JSON-source paths are not queryable (400).
+View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `tasks.id`); over HTTP, `/meta` resolves a chained ref to its terminal field (a view's `assigneeId: Task.assigneeId` → `User.id` with `db.rel.FK` inherited, since 0.1.128) so value-help works on view fields — see `relations.md § Meta FK ref shape`. `@db.ignore`d view fields have no column: excluded from `CREATE VIEW`, from the definition hash and from queries (400); JSON-source paths are not queryable (400) — except a primitive leaf exposed as its own view field (`theme?: User.settings.theme`; see § JSON leaf fields).
 
-Sync detail (0.1.128): a view's definition = entry table + joins WITH their ON conditions + filter + having + materialized flag + fields; a physical table already sitting under a managed view's name is a pre-flight refusal, not a silent skip. See `schema-sync.md § View sync`.
+### Join rules (0.1.136)
+
+| #   | Rule                                                                                                                                                                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Joins are INNER by default on every adapter; 3rd arg `'left'` keeps unmatched entry rows: ``@db.view.joins User, `User.id = Task.assigneeId`, 'left'``.                                                                                         |
+| 2   | A field read from a left-joined table MUST be optional (`assigneeName?: User.name`) — compile error otherwise. `@db.agg.count` / `countDistinct` fields exempt; `sum`/`avg`/`min`/`max` not.                                                    |
+| 3   | Joins apply in declaration order; a join condition may reference the entry table + joins declared BEFORE it (chains `Order → Customer → Region`). Forward refs = compile error.                                                                 |
+| 4   | One join per table; joining the entry table or the same table twice = compile error (no aliases / self-joins).                                                                                                                                  |
+| 5   | `@db.view.filter` on a left-joined table's field drops unmatched rows (acts inner) — put match restrictions into the join condition.                                                                                                            |
+| 6   | View predicates support `= != < <= > >= in, not in, exists, not exists, and/or/not`. `matches` fails sync on SQL (and in Mongo join conditions). JSON paths in conditions fail sync.                                                            |
+| 7   | Object view field over a flattened source → one view column per leaf; over a `@db.json` source → needs `@db.json` on the view field (sync error otherwise). A chain into a JSON field must end at a string/number/boolean leaf (compile error). |
+| 8   | A view field / join / filter ref to a SOURCE field with `@db.ignore` or to a nav relation fails sync (`… has no column — "x" is @db.ignore or a navigation relation`).                                                                          |
+
+### JSON leaf fields (0.1.136)
+
+`theme?: User.settings.theme` where `settings` is `@db.json` → a typed view column; filter / sort / `$groupBy` it like any column.
+
+| #   | Rule                                                                                                                                                                                                       |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Leaf must be `string` / `number` / `boolean` (compile error otherwise). Declare the view field optional — it is `null` for a missing key, SQL `NULL` column, JSON `null`, or a value of ANOTHER JSON type. |
+| 2   | No coercion: `"14"` is not a number, `1` is not `true`. Numbers are doubles (ints > 2^53 lose precision).                                                                                                  |
+| 3   | Usable as SELECT column, GROUP BY dimension, `@db.agg.*` source (`@db.agg.sum "settings.score"`), `@db.view.having` operand. NOT in join ON / `@db.view.filter` (sync error).                              |
+| 4   | Computed per row — no index; filters/sorts on it scan the source. Need speed → promote the leaf to a real column.                                                                                          |
+| 5   | MongoDB: reads the document path with NO type guard (off-type values written outside atscript-db pass through). SQL adapters guard with `json_type` / `JSON_TYPE` / `jsonb_typeof`.                        |
+| 6   | A path segment containing `"`, `\` or a control char fails sync (`JSON path segment … can't be extracted`).                                                                                                |
+| 7   | Custom SQL adapters: implement `SqlDialect.jsonExtract` → `creating-adapters.md § SQL helpers`.                                                                                                            |
+
+Sync detail: a view's definition = entry table + joins WITH their ON conditions and kind + each column's physical source + aggregate + filter + having + materialized flag + fields; a physical table already sitting under a managed view's name is a pre-flight refusal, not a silent skip. See `schema-sync.md § View sync`.
 
 ## Aggregate views
 
@@ -115,6 +143,8 @@ interface CategoryStats {
     orderCount: number
 }
 ```
+
+Functions: `sum`, `avg`, `count`, `min`, `max`, `countDistinct`. Any of them takes a 2nd query arg → conditional aggregate (``@db.agg.sum "amount", `status = 'paid'` ``; `COUNT(*)` spelled ``@db.agg.count '*', `…` ``). Rules (NULL results, optional fields, scope) → [annotations.md § Aggregation](annotations.md#aggregation-view-fields).
 
 ## Lifecycle
 

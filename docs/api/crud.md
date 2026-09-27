@@ -360,6 +360,7 @@ Database operations throw `DbError` with a `code` property indicating the error 
 | `CAS_MISMATCH`          | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
 | `BUCKET_NOT_SUPPORTED`  | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit, or has no calendar buckets at all. HTTP 400. Since 0.1.132                                                    |
 | `BUCKET_TZ_UNAVAILABLE` | The database cannot convert to the calendar bucket's time zone (e.g. MySQL time zone tables not loaded). HTTP 501. Since 0.1.132                                                                       |
+| `AGG_FN_NOT_SUPPORTED`  | A [grouped query](/api/aggregation#aggregate-functions) uses an aggregate function the adapter does not render (e.g. `countDistinct` on a custom adapter). HTTP 400                                    |
 
 Handle errors by checking the code:
 

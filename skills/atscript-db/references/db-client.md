@@ -150,7 +150,7 @@ The TypeScript signature catches the `id`-shape cases at compile time when `Clie
 
 ### Form-schema discovery — `getActionForm(name)`
 
-Lazily fetches `GET <controller>/meta/form/<inputForm>` and returns the deserialized `TAtscriptAnnotatedType`. Returns `null` when the action has no `inputForm` declared, or the action name isn't on `/meta`. Cached per form name on the client instance; failed fetches are evicted.
+Lazily fetches `GET <controller>/meta/form/<inputForm>` — or `baseUrl + formUrl` when the action carries `formUrl` (class-level forms served by another controller) — and returns the deserialized `TAtscriptAnnotatedType`. Returns `null` when the action has no `inputForm` declared, or the action name isn't on `/meta`. Cached per resolved URL on the client instance; failed fetches are evicted.
 
 ```ts
 const meta = await users.meta();

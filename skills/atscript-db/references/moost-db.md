@@ -198,6 +198,10 @@ export class UsersController extends AsDbController<typeof User> {
   protected computeEmbedding(text: string) {
     return myEmbed.embed(text);
   } // enables $vector
+  protected async decorateRows(rows: Record<string, unknown>[], ctx: TDbDecorateContext) {
+    const unread = await countUnread(rows.map((r) => r.id)); // one batch per response
+    for (const row of rows) row.$unread = unread.get(row.id) ?? 0;
+  } // optional; defining it switches it on
 }
 ```
 
@@ -214,6 +218,7 @@ export class UsersController extends AsDbController<typeof User> {
 - `version` + differing `$cas` → 400 at `$cas` (`Ambiguous version: "version" and "$cas.version" differ`, `[i].$cas` in bulk); a malformed `$cas` beside `version` reports `separateCas`'s own message (shared `reconcileCas` from `@atscript/db`).
 - Built-in write failures are THROWN `HttpError`s (wire-identical; a throw also rolls back a wrapper `withTransaction` around `super.update()`; on a throw the router may fall through to a later matching route).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
+- `decorateRows(rows, ctx)` (since 0.1.136; `TDbDecorateContext` exported from `@atscript/moost-db`): post-read hook with no base impl — defining it switches it on. Mutate `rows` in place (return ignored; may be async). Runs ONCE per response with the top-level rows on `/query`, `/pages`, `/geo`, `/one` (`/one/:id` + `/one?…`), AFTER `$actions` augmentation. `ctx = { endpoint: "query" | "pages" | "geo" | "one", projection, controls }` — `projection` = effective `$select` after `transformProjection` + write-only seal (`undefined` = all columns). NOT called for `$count`, `$groupBy`, a `/one` 404, value-help controllers; nested `$with` rows are never passed on their own. Rules: prefix added keys with `$` (convention, not enforced); never overwrite `$actions`; columns pulled in only by an action's `requiredFields` are already stripped — widen via `transformProjection` if the hook needs a column (it then ships in the response).
 
 ## Optimistic concurrency over HTTP
 
@@ -317,17 +322,17 @@ Write endpoints run the server validator for the matching mode (`insert` / `patc
 
 Status-code mapping (`validation-interceptor.ts`):
 
-| Source                                                                                                                                                     | HTTP                                                                                                              |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `ValidatorError`                                                                                                                                           | 400                                                                                                               |
-| `DbError` code `CONFLICT`                                                                                                                                  | 409                                                                                                               |
-| `DbError` code `TX_WAIT_TIMEOUT` (SQLite gate waiter timed out — `transactionWaitTimeoutMs`)                                                               | 503                                                                                                               |
-| `DbError` code `BUCKET_TZ_UNAVAILABLE` (engine can't resolve a calendar bucket's zone — MySQL tz tables, stale tzdata; since 0.1.132)                      | 501                                                                                                               |
-| `DbError` code `CAS_MISMATCH` (`table.touchMany` stale/missing key — only via a custom route, since 0.1.129)                                               | 409                                                                                                               |
-| Write body not an object / array of objects (shape gate, since 0.1.128)                                                                                    | 400 with `errors[{ path: "" \| "[i]", message: "Expected an object" }]`                                           |
-| `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`, `VERSION_COLUMN_WRITE`, `BUCKET_NOT_SUPPORTED`) | 400                                                                                                               |
-| CAS version mismatch on PATCH/PUT (`@db.column.version` table)                                                                                             | 409 with `kind: "version_mismatch"` — see [§ Optimistic concurrency over HTTP](#optimistic-concurrency-over-http) |
-| `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                                                                   | 409                                                                                                               |
+| Source                                                                                                                                                                             | HTTP                                                                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ValidatorError`                                                                                                                                                                   | 400                                                                                                               |
+| `DbError` code `CONFLICT`                                                                                                                                                          | 409                                                                                                               |
+| `DbError` code `TX_WAIT_TIMEOUT` (SQLite gate waiter timed out — `transactionWaitTimeoutMs`)                                                                                       | 503                                                                                                               |
+| `DbError` code `BUCKET_TZ_UNAVAILABLE` (engine can't resolve a calendar bucket's zone — MySQL tz tables, stale tzdata; since 0.1.132)                                              | 501                                                                                                               |
+| `DbError` code `CAS_MISMATCH` (`table.touchMany` stale/missing key — only via a custom route, since 0.1.129)                                                                       | 409                                                                                                               |
+| Write body not an object / array of objects (shape gate, since 0.1.128)                                                                                                            | 400 with `errors[{ path: "" \| "[i]", message: "Expected an object" }]`                                           |
+| `DbError` any other code (`FK_VIOLATION`, `NOT_FOUND`, `CASCADE_CYCLE`, `INVALID_QUERY`, `DEPTH_EXCEEDED`, `VERSION_COLUMN_WRITE`, `BUCKET_NOT_SUPPORTED`, `AGG_FN_NOT_SUPPORTED`) | 400                                                                                                               |
+| CAS version mismatch on PATCH/PUT (`@db.column.version` table)                                                                                                                     | 409 with `kind: "version_mismatch"` — see [§ Optimistic concurrency over HTTP](#optimistic-concurrency-over-http) |
+| `ActionDisabledError` (server-side action gate rejection — see [actions.md](actions.md))                                                                                           | 409                                                                                                               |
 
 ## Value-help controllers
 
@@ -387,6 +392,7 @@ interface TMetaResponse {
   preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
   versionColumn?: string; // logical field name of the `@db.column.version` field; omitted when none. See versioning.md.
   bucketUnits?: BucketUnit[]; // calendar-bucket units; omitted when none (since 0.1.132). See calendar-buckets.md.
+  aggregateFns?: AggregateFn[]; // the adapter's aggregateFns(), canonical order; always sent by moost-db. See aggregation.md.
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<
     string,

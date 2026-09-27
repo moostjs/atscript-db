@@ -142,6 +142,18 @@ await users.withTransaction(async () => {
 
 Requires a replica set. The adapter uses `session.withTransaction()` internally and propagates the session via `AsyncLocalStorage` to nested tables in the same space.
 
+## Managed views
+
+Native views (`createCollection` + `viewOn` + pipeline); joined docs under `__joined_<table>`; physical document paths (`@db.column` renames the top-level key).
+
+| #   | Behavior                                                                                                                                                                                                                                                                                                                                             |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Simple `$lookup` (`localField`/`foreignField`, index-friendly) ONLY for a single `=` between a joined field and an entry / earlier-join field where the joined field is REQUIRED. Everything else → `let` + `pipeline: [{ $match: { $expr } }]` (no index before MongoDB 5.0) — keep join keys required for large collections.                       |
+| 2   | SQL null semantics in join conditions: null/missing keys never match; `< <= > >= !=`, `not in`, field `=` field are false on a null operand. Divergence: `not (…)` over a null comparison is TRUE here, UNKNOWN on SQL.                                                                                                                              |
+| 3   | Inner (default) → `$unwind` without `preserveNullAndEmptyArrays`; `'left'` → preserved, left-joined fields project as `null`. Only a source that may be missing (left join, optional field, leaf inside `@db.json`; mapping `nullable`) is wrapped in `$ifNull: [src, null]` — required sources stay plain paths so view `$match`/`$sort` push down. |
+| 4   | `matches` rejected in join conditions (`$regexMatch` = 4.2); still allowed in `@db.view.filter`. Filter / having go through the shared query translation (`translateQueryTree` → `buildMongoFilter`): `!=` also matches null/missing, `exists` = holds a value (`not exists` = null/missing), `matches` takes `/re/flags`, field-to-field → `$expr`. |
+| 5   | `@db.agg.count "field"` counts non-null, non-missing values; `$sum` over no values = `0` (SQL `NULL`). `@db.view.materialized` = plain view.                                                                                                                                                                                                         |
+
 ## Known limits
 
 - **`$exists` is not native key presence (since 0.1.132).** It means "holds a value" like SQL: `{ f: { $exists: true } }` → `{ f: { $ne: null } }`, `false` → `{ f: null }`, so a stored `null` counts as ABSENT. Filters that relied on null-valued keys matching `$exists: true` change results; key presence needs `adapter.collection`. → [queries.md § `$exists`](queries.md)

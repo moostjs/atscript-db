@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-`table.aggregate()` groups rows and computes counts, sums, averages, minimums and maximums at query time — the ad-hoc counterpart of [aggregation views](/views/aggregation-views), whose shape is fixed in the schema.
+`table.aggregate()` groups rows and computes counts, distinct counts, sums, averages, minimums and maximums at query time — the ad-hoc counterpart of [aggregation views](/views/aggregation-views), whose shape is fixed in the schema.
 
 ```typescript
 const revenue = await orders.aggregate({
@@ -46,16 +46,30 @@ The same query over HTTP is `GET /orders/query?status=paid&$groupBy=region&$sele
 
 An aggregate entry is `{ $fn, $field, $as? }`. The semantics are the SQL ones on every adapter:
 
-| `$fn`   | `$field`      | Result                                                                                    |
-| ------- | ------------- | ----------------------------------------------------------------------------------------- |
-| `count` | `'*'`         | Number of rows in the group                                                               |
-| `count` | a field       | Number of rows where the field holds a value                                              |
-| `sum`   | numeric field | Sum of the non-null values; `null` when there are none (MongoDB returns `0` in that case) |
-| `avg`   | numeric field | Average of the non-null values; `null` when there are none                                |
-| `min`   | any field     | Smallest non-null value                                                                   |
-| `max`   | any field     | Largest non-null value                                                                    |
+| `$fn`           | `$field`      | Result                                                                                    |
+| --------------- | ------------- | ----------------------------------------------------------------------------------------- |
+| `count`         | `'*'`         | Number of rows in the group                                                               |
+| `count`         | a field       | Number of rows where the field holds a value                                              |
+| `sum`           | numeric field | Sum of the non-null values; `null` when there are none (MongoDB returns `0` in that case) |
+| `avg`           | numeric field | Average of the non-null values; `null` when there are none                                |
+| `min`           | any field     | Smallest non-null value                                                                   |
+| `max`           | any field     | Largest non-null value                                                                    |
+| `countDistinct` | any field     | Number of distinct non-null values (since 0.1.136). `'*'` is rejected                     |
 
-The output key is `$as` when given, otherwise `{fn}_{field}` — `sum_amount`, and `count_star` for `count(*)`. The HTTP parser uses the same rule, so `$select=count(*)` returns a `count_star` key too.
+`countDistinct` follows the column's collation: MySQL's default `*_ci` collations count `'A'` and `'a'` once, while PostgreSQL, SQLite and MongoDB count them twice. Every built-in adapter supports it; a [custom adapter](/adapters/creating-adapters#aggregate-functions) may not (see [errors](#validation-and-errors)).
+
+```typescript
+const reach = await orders.aggregate({
+  filter: {},
+  controls: {
+    $groupBy: ["region"],
+    $select: ["region", { $fn: "countDistinct", $field: "customerId", $as: "buyers" }],
+    $having: { buyers: { $gte: 10 } },
+  },
+});
+```
+
+The output key is `$as` when given, otherwise `{fn}_{field}` — `sum_amount`, and `count_star` for `count(*)`. The HTTP parser uses the same rule, so `$select=count(*)` returns a `count_star` key too. The `{field}` part is always the logical field name, also when the field is stored under a `@db.column` name.
 
 ::: info `resolveAlias` and `count(*)` — 0.1.132
 `resolveAlias` from `@atscript/db/agg` now returns `count_star` for `{ $fn: "count", $field: "*" }`. Up to 0.1.131 it returned `count_*`, which did not match the key the URL parser and the adapters produce.
@@ -74,7 +88,7 @@ The output key is `$as` when given, otherwise `{fn}_{field}` — `sum_amount`, a
 When a table marks fields with [`@db.column.dimension` or `@db.column.measure`](/adapters/annotations#aggregation), grouped queries become strict:
 
 - every `$groupBy` field must be a dimension, else `Field "x" is not a dimension` (path `$groupBy`). A [calendar bucket](./calendar-buckets#which-fields-can-be-bucketed)'s source field must be one too; that rule is reported on the field itself ([errors](./calendar-buckets#errors));
-- every aggregate `$field` except `'*'` must be a measure, else `Aggregate field "x" is not a measure`.
+- every aggregate `$field` except `'*'` must be a measure, else `Aggregate field "x" is not a measure`. A `countDistinct` field may be a dimension or a measure ("how many regions sold"), else `Aggregate field "x" is not a dimension or measure`.
 
 A table without either annotation accepts any groupable field. Fields tagged with a currency or unit reference must also be grouped by that reference — see [Quantity dimensions](/views/aggregations#runtime-aggregation-quantity-dimensions).
 
@@ -82,17 +96,17 @@ A table without either annotation accepts any groupable field. Fields tagged wit
 
 Grouped queries are checked before any SQL or pipeline is built. Failures throw `DbError("INVALID_QUERY")` (HTTP 400 through moost-db):
 
-| Mistake                                                                                                                                     | Message                                                                         |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| A plain `$select` field missing from `$groupBy`                                                                                             | `Plain field "x" in $select must also appear in $groupBy`                       |
-| A `$having` key that is neither an alias nor a grouped field                                                                                | `$having key "x" must be an aggregate alias or a $groupBy field`                |
-| A `$select` entry that is not a string, aggregate or bucket                                                                                 | `Unsupported $select entry at index i`                                          |
-| An aggregate `$fn` other than `sum`, `count`, `avg`, `min`, `max` (since 0.1.135; ≤ 0.1.134 the SQL adapters passed unknown names into SQL) | `Unknown aggregate function "x" — use sum, count, avg, min or max`              |
-| `*` on any aggregate other than `count`, e.g. `sum(*)` (since 0.1.135)                                                                      | `Aggregate "sum" needs a field — only count accepts *`                          |
-| A `$groupBy` entry that is not a string                                                                                                     | `Unsupported $groupBy entry at index i — expected a field name or bucket alias` |
-| A path that does not resolve to stored data (JSON descendant on SQL, etc.)                                                                  | see [path validation](/api/queries#nested-field-filters)                        |
+| Mistake                                                                            | Message                                                                           |
+| ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| A plain `$select` field missing from `$groupBy`                                    | `Plain field "x" in $select must also appear in $groupBy`                         |
+| A `$having` key that is neither an alias nor a grouped field                       | `$having key "x" must be an aggregate alias or a $groupBy field`                  |
+| A `$select` entry that is not a string, aggregate or bucket                        | `Unsupported $select entry at index i`                                            |
+| An aggregate `$fn` other than `sum`, `count`, `avg`, `min`, `max`, `countDistinct` | `Unknown aggregate function "x" — use sum, count, avg, min, max or countDistinct` |
+| `*` on any aggregate other than `count`, e.g. `sum(*)` or `countDistinct(*)`       | `Aggregate "sum" needs a field — only count accepts *`                            |
+| A `$groupBy` entry that is not a string                                            | `Unsupported $groupBy entry at index i — expected a field name or bucket alias`   |
+| A path that does not resolve to stored data (JSON descendant on SQL, etc.)         | see [path validation](/api/queries#nested-field-filters)                          |
 
-An `@db.encrypted` field in `$groupBy` or an aggregate fails with `ENC_FIELD_AGG`. Calendar buckets add their own rules — see [Calendar Buckets — Errors](./calendar-buckets#errors).
+A known function the adapter does not render (`aggregateFns()`) fails with `DbError("AGG_FN_NOT_SUPPORTED")` — also HTTP 400 — and message `Aggregate function "countDistinct" is not supported by this adapter`. [`/meta.aggregateFns`](/http/crud#get-meta) lists the functions an adapter supports. An `@db.encrypted` field in `$groupBy` or an aggregate fails with `ENC_FIELD_AGG`. Calendar buckets add their own rules — see [Calendar Buckets — Errors](./calendar-buckets#errors).
 
 ::: warning Malformed entries are rejected since 0.1.132
 Up to 0.1.131 an unrecognized `$select` entry (for example `{ $fn: "sum" }` without `$field`) or a non-string `$groupBy` entry was silently dropped, so the query ran without it.

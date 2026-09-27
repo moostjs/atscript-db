@@ -150,6 +150,8 @@ export interface User {
 | `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                            |
 | `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                 |
 
+To filter, sort or group by a leaf inside a `@db.json` column, expose it as a [typed view field](/views/#reading-json-leaves).
+
 ### Unsigned Integers
 
 MySQL supports unsigned integer types natively. Use `@db.mysql.unsigned` or unsigned primitive tags to produce the appropriate column type:

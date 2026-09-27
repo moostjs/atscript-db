@@ -280,7 +280,7 @@ Schema sync manages views according to their type (see [View Types](/views/view-
 - **Materialized views** — same lifecycle as managed views, but created with the materialized flag where supported.
 - **External views** — validated only (existence + column check). Never created, modified, or dropped by sync. A failed check reports an `'error'` entry but is advisory — it does not block hash persistence or wedge re-runs.
 
-A view's **definition** is its entry table, its joins **including their `ON` conditions**, its `@db.view.filter`, its `@db.view.having`, the materialized flag and its field set (since 0.1.128 — earlier releases only hashed the join _targets_, so a change to a join condition or a filter retargeted to another table with the same field name went unnoticed). `@db.ignore` fields are excluded from the definition and from the generated `SELECT`.
+A view's **definition** is its entry table, its joins **including their `ON` conditions and kind**, every view column **with the physical source column it reads** and its aggregate (so renaming or flattening a source column recreates the view; reordering view fields does not), its `@db.view.filter`, its `@db.view.having`, the materialized flag and its field set. `@db.ignore` fields are excluded from the definition and from the generated `SELECT`.
 
 ::: warning Upgrading to 0.1.128
 Managed views that have joins, a filter or a having clause hash differently after the upgrade and are recreated **once** on the first sync (plain views without any of those are untouched). Three consequences to plan for:
@@ -289,6 +289,10 @@ Managed views that have joins, a filter or a having clause hash differently afte
 - **PostgreSQL** — sync never drops with `CASCADE`, so a _user-created_ view that depends on a managed view makes the recreate fail with an `error` entry (and the hash is withheld) until that dependent view is dropped or the managed view is excluded from the inventory.
 - **MongoDB** — `@db.view.materialized` views are plain views on MongoDB, so the recreate is metadata-only.
   :::
+
+::: warning Upgrading to 0.1.136
+**Every** managed view hashes differently after the upgrade and is recreated **once** on the first sync — `plan()` / `--dry-run` shows each one as an alter on that first run. Plan for the same consequences as in the 0.1.128 upgrade above (PostgreSQL `GRANT`s, user-created dependent views, metadata-only on MongoDB), plus: PostgreSQL materialized views are **re-materialized** (a full scan of their sources). The recreate is also when MongoDB inner joins start dropping unmatched documents and invalid view predicates start failing the sync — see [Upgrading → 0.1.136](/guide/upgrading#v0-1-136).
+:::
 
 Views whose definition changed (or that are being renamed), **and views removed from the schema**, are dropped
 **before** table changes apply; changed ones are recreated after. This matters when a sync
