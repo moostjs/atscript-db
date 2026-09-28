@@ -55,6 +55,11 @@ function createSyncMockDriver(opts?: {
         async all<T>(sql: string, params?: unknown[]) {
           connCalls.push({ method: "all", sql, params });
           calls.push({ method: "all", sql, params });
+          for (const [key, val] of allResults) {
+            if (sql.includes(key)) {
+              return val as T[];
+            }
+          }
           return [] as T[];
         },
         async get<T>(sql: string, params?: unknown[]) {

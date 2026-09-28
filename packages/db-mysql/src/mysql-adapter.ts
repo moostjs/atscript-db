@@ -234,6 +234,33 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._txConnection() ?? this.driver;
   }
 
+  /**
+   * Runs `fn` on one connection (the transaction's, or a dedicated one) with
+   * `STRICT_ALL_TABLES` added to the session `sql_mode`, restoring the
+   * previous mode after. Schema sync's converting statements (`MODIFY
+   * COLUMN`, the recreate copy) then fail on a value that does not convert
+   * instead of coercing or truncating it — a non-strict server (RDS defaults
+   * to `NO_ENGINE_SUBSTITUTION`) would turn `'abc'` into `0` silently.
+   */
+  private async _withStrictSession<T>(fn: (conn: TMysqlConnection) => Promise<T>): Promise<T> {
+    const tx = this._txConnection();
+    const conn = tx ?? (await this.driver.getConnection());
+    try {
+      await conn.exec(
+        "SET @atscript_sql_mode = @@SESSION.sql_mode, SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')",
+      );
+      try {
+        return await fn(conn);
+      } finally {
+        await conn.exec("SET SESSION sql_mode = @atscript_sql_mode");
+      }
+    } finally {
+      if (!tx) {
+        conn.release();
+      }
+    }
+  }
+
   // ── Capability flags ──────────────────────────────────────────────────────
 
   /** MySQL InnoDB enforces FK constraints natively. */
@@ -866,7 +893,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
     const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ${clauses.join(", ")}`;
     this._log(ddl);
-    await this._exec().exec(ddl);
+    await this._withStrictSession((conn) => conn.exec(ddl));
   }
 
   private async _ensureView(): Promise<void> {
@@ -886,11 +913,19 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async getExistingColumnsForTable(tableName: string): Promise<TExistingColumn[]> {
+    return this._readColumns(this._exec(), tableName);
+  }
+
+  /** Live columns of `tableName`, read through `exec` (a held connection, or the pool). */
+  private async _readColumns(
+    exec: Pick<TMysqlDriver, "all">,
+    tableName: string,
+  ): Promise<TExistingColumn[]> {
     // `COLUMN_KEY = 'PRI'` also flags the first NOT NULL UNIQUE index of a
     // table WITHOUT a primary key (documented SHOW COLUMNS behaviour) — the
     // PRIMARY constraint (KEY_COLUMN_USAGE) is the only trustworthy source,
     // joined in so introspection is one round trip per table.
-    const rows = await this._exec().all<{
+    const rows = await exec.all<{
       COLUMN_NAME: string;
       COLUMN_TYPE: string;
       IS_NULLABLE: string;
@@ -923,181 +958,177 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
-    const tableName = this.resolveTableName();
-    const added: string[] = [];
-    const renamed: string[] = [];
+    // One strict-mode connection: a MODIFY or backfill whose values do not
+    // convert fails instead of being coerced (see `_withStrictSession`).
+    return this._withStrictSession(async (conn) => {
+      const tableName = this.resolveTableName();
+      const added: string[] = [];
+      const renamed: string[] = [];
 
-    // Renames first
-    for (const { field, oldName } of diff.renamed ?? []) {
-      const ddl = `ALTER TABLE ${quoteTableName(tableName)} RENAME COLUMN ${qi(oldName)} TO ${qi(field.physicalName)}`;
-      this._log(ddl);
-      await this._exec().exec(ddl);
-      renamed.push(field.physicalName);
-    }
+      // Renames first
+      for (const { field, oldName } of diff.renamed ?? []) {
+        const ddl = `ALTER TABLE ${quoteTableName(tableName)} RENAME COLUMN ${qi(oldName)} TO ${qi(field.physicalName)}`;
+        this._log(ddl);
+        await conn.exec(ddl);
+        renamed.push(field.physicalName);
+      }
 
-    const quotedTable = quoteTableName(tableName);
+      const quotedTable = quoteTableName(tableName);
 
-    // Adds — a required column without a model default gets an invented type
-    // default so existing rows are filled, then loses it again immediately:
-    // the live column must end in the canonical "no default" state or the
-    // next diff would try to remove a default the adapter itself invented.
-    // An increment column is added WITHOUT AUTO_INCREMENT (it would need a key
-    // in the same statement) — the primary-key rebuild declares it.
-    for (const field of diff.added) {
-      const { def, inventedDefault } = buildColumnDefinition(field, this._columnCtx("add"));
-      const ddl = `ALTER TABLE ${quotedTable} ADD COLUMN ${def}`;
-      this._log(ddl);
-      await this._exec().exec(ddl);
-      if (inventedDefault) {
-        const drop = `ALTER TABLE ${quotedTable} ALTER COLUMN ${qi(field.physicalName)} DROP DEFAULT`;
-        this._log(drop);
-        await this._exec().exec(drop);
+      // Adds — a required column without a model default gets an invented type
+      // default so existing rows are filled, then loses it again immediately:
+      // the live column must end in the canonical "no default" state or the
+      // next diff would try to remove a default the adapter itself invented.
+      // An increment column is added WITHOUT AUTO_INCREMENT (it would need a key
+      // in the same statement) — the primary-key rebuild declares it.
+      for (const field of diff.added) {
+        const { def, inventedDefault } = buildColumnDefinition(field, this._columnCtx("add"));
+        const ddl = `ALTER TABLE ${quotedTable} ADD COLUMN ${def}`;
+        this._log(ddl);
+        await conn.exec(ddl);
+        if (inventedDefault) {
+          const drop = `ALTER TABLE ${quotedTable} ALTER COLUMN ${qi(field.physicalName)} DROP DEFAULT`;
+          this._log(drop);
+          await conn.exec(drop);
+        }
+        added.push(field.physicalName);
       }
-      added.push(field.physicalName);
-    }
 
-    // Modifications — type, nullability and default changes on one column
-    // collapse into ONE `MODIFY COLUMN <full definition>` (the definition
-    // carries DEFAULT / COLLATE / ON UPDATE / AUTO_INCREMENT, so nothing is
-    // silently reset by a partial MODIFY). Columns entering a pending primary
-    // key are left to `rebuildPrimaryKey`, which re-declares them in the swap
-    // statement (their AUTO_INCREMENT needs the key in the same statement).
-    const enteringKey = new Set(diff.primaryKeyChanged?.to ?? []);
-    const modified = new Map<string, TDbFieldMeta>();
-    for (const { field } of diff.typeChanged ?? []) {
-      if (enteringKey.has(field.physicalName)) {
-        continue;
-      }
-      const sqlType = this.typeMapper(field);
-      if (field.isGeoPoint && !field.encrypted && sqlType.startsWith("POINT")) {
-        // v1 JSON '[lng, lat]' → native POINT SRID 4326. MODIFY can't convert
-        // JSON to geometry — go through a temp column, preserving NULLs.
-        await this._migrateJsonColumnToPoint(tableName, field);
-        continue;
-      }
-      modified.set(field.physicalName, field);
-    }
-    for (const { field } of diff.nullableChanged ?? []) {
-      if (enteringKey.has(field.physicalName)) {
-        continue;
-      }
-      if (!field.optional) {
-        // NULLs would make the NOT NULL MODIFY fail under strict sql_mode —
-        // backfill with the model default (or a type default) first.
+      // Modifications — type, nullability and default changes on one column
+      // collapse into ONE `MODIFY COLUMN <full definition>` (the definition
+      // carries DEFAULT / COLLATE / ON UPDATE / AUTO_INCREMENT, so nothing is
+      // silently reset by a partial MODIFY). Columns entering a pending primary
+      // key are left to `rebuildPrimaryKey`, which re-declares them in the swap
+      // statement (their AUTO_INCREMENT needs the key in the same statement).
+      const enteringKey = new Set(diff.primaryKeyChanged?.to ?? []);
+      const modified = new Map<string, TDbFieldMeta>();
+      for (const { field } of diff.typeChanged ?? []) {
+        if (enteringKey.has(field.physicalName)) {
+          continue;
+        }
         const sqlType = this.typeMapper(field);
-        const fallback =
-          field.defaultValue?.kind === "value"
-            ? mysqlDefaultLiteral(sqlType, field.designType, field.defaultValue.value)
-            : mysqlTypeDefault(sqlType, field);
-        const backfill = `UPDATE ${quotedTable} SET ${qi(field.physicalName)} = ${fallback} WHERE ${qi(field.physicalName)} IS NULL`;
-        this._log(backfill);
-        await this._exec().exec(backfill);
-      }
-      modified.set(field.physicalName, field);
-    }
-    for (const { field } of diff.defaultChanged ?? []) {
-      if (!enteringKey.has(field.physicalName)) {
+        if (field.isGeoPoint && !field.encrypted && sqlType.startsWith("POINT")) {
+          // v1 JSON '[lng, lat]' → native POINT SRID 4326. MODIFY can't convert
+          // JSON to geometry — go through a temp column, preserving NULLs.
+          await this._migrateJsonColumnToPoint(conn, tableName, field);
+          continue;
+        }
         modified.set(field.physicalName, field);
       }
-    }
-    for (const field of modified.values()) {
-      const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
-      this._log(ddl);
-      await this._exec().exec(ddl);
-    }
+      for (const { field } of diff.nullableChanged ?? []) {
+        if (enteringKey.has(field.physicalName)) {
+          continue;
+        }
+        if (!field.optional) {
+          // NULLs would make the NOT NULL MODIFY fail under strict sql_mode —
+          // backfill with the model default (or a type default) first.
+          const sqlType = this.typeMapper(field);
+          const fallback =
+            field.defaultValue?.kind === "value"
+              ? mysqlDefaultLiteral(sqlType, field.designType, field.defaultValue.value)
+              : mysqlTypeDefault(sqlType, field);
+          const backfill = `UPDATE ${quotedTable} SET ${qi(field.physicalName)} = ${fallback} WHERE ${qi(field.physicalName)} IS NULL`;
+          this._log(backfill);
+          await conn.exec(backfill);
+        }
+        modified.set(field.physicalName, field);
+      }
+      for (const { field } of diff.defaultChanged ?? []) {
+        if (!enteringKey.has(field.physicalName)) {
+          modified.set(field.physicalName, field);
+        }
+      }
+      for (const field of modified.values()) {
+        const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
+        this._log(ddl);
+        await conn.exec(ddl);
+      }
 
-    return { added, renamed };
+      return { added, renamed };
+    });
   }
 
   async recreateTable(): Promise<void> {
     const tableName = this.resolveTableName();
     const tempName = `${this._table.tableName}__tmp_${Date.now()}`;
 
-    // `SET FOREIGN_KEY_CHECKS` is session-scoped: every statement of the
-    // recreate must run on the SAME dedicated connection (the pool would hand
-    // the DROP to a connection where checks are still on).
-    const tx = this._txConnection();
-    const conn = tx ?? (await this.driver.getConnection());
-    const dedicated = tx === undefined;
-    await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
-    // MySQL DDL auto-commits, so nothing rolls the temp table back: a failure
-    // before the original is dropped drops it here. After that the temp table
-    // holds the only copy of the rows and is left in place.
-    let originalDropped = false;
-    try {
-      // 1. Create new table with temp name
-      const createSql = buildCreateTable(
-        tempName,
-        this._table.fieldDescriptors,
-        this._table.foreignKeys,
-        this._tableOptions(),
-      );
-      this._log(createSql);
-      await conn.exec(createSql);
-
-      // 2. Get columns that exist in both old and new
-      const oldCols = (await this.getExistingColumns()).map((c) => c.name);
-      const newCols = this._table.fieldDescriptors
-        .filter((f) => !f.ignored)
-        .map((f) => f.physicalName);
-      const oldColSet = new Set(oldCols);
-      const commonCols = newCols.filter((c) => oldColSet.has(c));
-
-      if (commonCols.length > 0) {
-        // 3. Copy data
-        const fieldsByName = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
-        const colNames = commonCols.map((c) => qi(c)).join(", ");
-        const selectExprs = commonCols
-          .map((c) => {
-            const field = fieldsByName.get(c);
-            if (field && !field.optional && !field.isPrimaryKey) {
-              const fallback =
-                field.defaultValue?.kind === "value"
-                  ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
-                  : defaultValueForType(field.designType);
-              return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
-            }
-            return qi(c);
-          })
-          .join(", ");
-        const copySql = `INSERT INTO ${qi(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
-        this._log(copySql);
-        await conn.exec(copySql);
-      }
-
-      // 4. Drop old, rename new. Not an atomic `RENAME TABLE t TO old, tmp TO t`:
-      //    InnoDB would re-point other tables' foreign keys at the renamed original.
-      await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
-      originalDropped = true;
-      await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
-    } catch (error) {
-      if (originalDropped) {
-        throw new Error(
-          `Recreate of "${tableName}" failed after the original table was dropped; its rows are in "${tempName}"`,
-          { cause: error },
+    // `SET FOREIGN_KEY_CHECKS` and `sql_mode` are session-scoped: every
+    // statement of the recreate runs on the SAME connection (the pool would
+    // hand the DROP to a connection where checks are still on), in strict mode
+    // so a copied value that does not convert fails the copy.
+    return this._withStrictSession(async (conn) => {
+      await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
+      // MySQL DDL auto-commits, so nothing rolls the temp table back: a failure
+      // before the original is dropped drops it here. After that the temp table
+      // holds the only copy of the rows and is left in place.
+      let originalDropped = false;
+      try {
+        // 1. Create new table with temp name
+        const createSql = buildCreateTable(
+          tempName,
+          this._table.fieldDescriptors,
+          this._table.foreignKeys,
+          this._tableOptions(),
         );
+        this._log(createSql);
+        await conn.exec(createSql);
+
+        // 2. Get columns that exist in both old and new
+        // Read on the held connection: a second pool checkout could wait forever
+        // on a one-connection pool.
+        const oldCols = (await this._readColumns(conn, this._table.tableName)).map((c) => c.name);
+        const newCols = this._table.fieldDescriptors
+          .filter((f) => !f.ignored)
+          .map((f) => f.physicalName);
+        const oldColSet = new Set(oldCols);
+        const commonCols = newCols.filter((c) => oldColSet.has(c));
+
+        if (commonCols.length > 0) {
+          // 3. Copy data
+          const fieldsByName = new Map(
+            this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+          );
+          const colNames = commonCols.map((c) => qi(c)).join(", ");
+          const selectExprs = commonCols
+            .map((c) => {
+              const field = fieldsByName.get(c);
+              if (field && !field.optional && !field.isPrimaryKey) {
+                const fallback =
+                  field.defaultValue?.kind === "value"
+                    ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
+                    : defaultValueForType(field.designType);
+                return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
+              }
+              return qi(c);
+            })
+            .join(", ");
+          const copySql = `INSERT INTO ${qi(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
+          this._log(copySql);
+          await conn.exec(copySql);
+        }
+
+        // 4. Drop old, rename new. Not an atomic `RENAME TABLE t TO old, tmp TO t`:
+        //    InnoDB would re-point other tables' foreign keys at the renamed original.
+        await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
+        originalDropped = true;
+        await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
+      } catch (error) {
+        if (originalDropped) {
+          throw new Error(
+            `Recreate of "${tableName}" failed after the original table was dropped; its rows are in "${tempName}"`,
+            { cause: error },
+          );
+        }
+        await conn.exec(`DROP TABLE IF EXISTS ${qi(tempName)}`).catch(() => undefined);
+        throw error;
+      } finally {
+        await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
       }
-      await conn.exec(`DROP TABLE IF EXISTS ${qi(tempName)}`).catch(() => undefined);
-      throw error;
-    } finally {
-      await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
-      if (dedicated) {
-        conn.release();
-      }
-    }
+    });
   }
 
   async dropTable(): Promise<void> {
-    const ddl = `DROP TABLE IF EXISTS ${quoteTableName(this.resolveTableName())}`;
-    this._log(ddl);
-    const conn = await this.driver.getConnection();
-    await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
-    try {
-      await conn.exec(ddl);
-    } finally {
-      await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
-      conn.release();
-    }
+    return this.dropTableByName(this.resolveTableName());
   }
 
   async dropColumns(columns: string[]): Promise<void> {
@@ -1677,7 +1708,11 @@ export class MysqlAdapter extends BaseDbAdapter {
    * Migrates a v1 JSON `[lng, lat]` column to native `POINT SRID 4326` via a
    * temp column (MySQL has no JSON→geometry cast for MODIFY COLUMN).
    */
-  private async _migrateJsonColumnToPoint(tableName: string, field: TDbFieldMeta): Promise<void> {
+  private async _migrateJsonColumnToPoint(
+    conn: TMysqlConnection,
+    tableName: string,
+    field: TDbFieldMeta,
+  ): Promise<void> {
     const col = qi(field.physicalName);
     const tmp = qi(`${field.physicalName}__geo_mig`);
     const quotedTable = quoteTableName(tableName);
@@ -1694,7 +1729,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     ];
     for (const ddl of steps) {
       this._log(ddl);
-      await this._exec().exec(ddl);
+      await conn.exec(ddl);
     }
   }
 }

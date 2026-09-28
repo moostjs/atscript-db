@@ -20,6 +20,19 @@ function diff(partial: Partial<TColumnDiff>): TColumnDiff {
 }
 
 let fx: Record<string, any>;
+
+// Schema sync's converting statements run in a strict-mode session (since
+// 0.1.140); these two bracket them on the same connection.
+const STRICT_ON =
+  "SET @atscript_sql_mode = @@SESSION.sql_mode, SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')";
+const STRICT_OFF = "SET SESSION sql_mode = @atscript_sql_mode";
+
+/** Every `exec` statement, without the strict-mode session brackets. */
+function execSql(driver: { calls: CapturedCall[] }): string[] {
+  return driver.calls
+    .filter((c) => c.method === "exec" && c.sql !== STRICT_ON && c.sql !== STRICT_OFF)
+    .map((c) => c.sql);
+}
 let CycleA: any;
 
 function pick(table: any, path: string): TDbFieldMeta {
@@ -259,8 +272,8 @@ describe("MysqlAdapter — sync primitives", () => {
     await adapter.recreateTable();
     const ddl = driver.calls.filter((c) => c.method === "exec");
     expect(ddl.map((c) => c.via)).toEqual(ddl.map(() => "conn"));
-    expect(ddl[0].sql).toBe("SET FOREIGN_KEY_CHECKS = 0");
-    expect(ddl.at(-1)!.sql).toBe("SET FOREIGN_KEY_CHECKS = 1");
+    expect(ddl.map((c) => c.sql).slice(0, 2)).toEqual([STRICT_ON, "SET FOREIGN_KEY_CHECKS = 0"]);
+    expect(ddl.map((c) => c.sql).slice(-2)).toEqual(["SET FOREIGN_KEY_CHECKS = 1", STRICT_OFF]);
     expect(ddl.some((c) => c.sql.startsWith("DROP TABLE IF EXISTS `pf_tokens`"))).toBe(true);
     expect(ddl.some((c) => c.sql.startsWith("RENAME TABLE"))).toBe(true);
     expect(driver.releaseCount()).toBe(1);
@@ -285,7 +298,7 @@ describe("MysqlAdapter — sync primitives", () => {
       const adapter = new MysqlAdapter(driver);
       new AtscriptDbTable(fx.PfTokenV1, adapter);
       await expect(adapter.recreateTable()).rejects.toThrow("boom");
-      const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+      const ddl = execSql(driver);
       const tempName = /`(pf_tokens__tmp_\d+)`/.exec(ddl.join("\n"))![1];
       expect(ddl).toContain(`DROP TABLE IF EXISTS \`${tempName}\``);
       expect(ddl.some((sql) => sql.startsWith("DROP TABLE IF EXISTS `pf_tokens`"))).toBe(false);
@@ -300,7 +313,7 @@ describe("MysqlAdapter — sync primitives", () => {
       await expect(adapter.recreateTable()).rejects.toThrow(
         /Recreate of "pf_tokens" failed after the original table was dropped; its rows are in "pf_tokens__tmp_\d+"/,
       );
-      const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+      const ddl = execSql(driver);
       expect(ddl.filter((sql) => sql.includes("__tmp_") && sql.startsWith("DROP"))).toEqual([]);
     });
   });
@@ -342,7 +355,7 @@ describe("MysqlAdapter — views", () => {
     const adapter = new MysqlAdapter(driver);
     adapter.registerReadable(duck as any);
     await adapter.ensureTable();
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toHaveLength(1);
     expect(ddl[0]).toMatch(/^CREATE (OR REPLACE )?VIEW/);
     expect(ddl[0]).not.toContain("CREATE TABLE");
@@ -358,7 +371,7 @@ describe("MysqlAdapter.syncColumns — one definition renderer", () => {
     const driver = createDriver();
     const adapter = new MysqlAdapter(driver);
     const table = new AtscriptDbTable(fx.PfStamped, adapter);
-    const ddl = () => driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = () => execSql(driver);
     return { driver, adapter, table, ddl };
   }
 
@@ -540,7 +553,7 @@ describe("MysqlAdapter.syncIndexes — key-length prefixes", () => {
     });
     const adapter = new MysqlAdapter(driver);
     await new AtscriptDbTable(IpPreset, adapter).syncIndexes();
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toEqual([
       "DROP INDEX `atscript__unique__ip_title` ON `ip_presets`",
       "CREATE UNIQUE INDEX `atscript__unique__ip_title` ON `ip_presets` (`title`(768) ASC)",
@@ -565,7 +578,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     await adapter.syncColumns(
       diff({ added: [pick(table, "id")], primaryKeyChanged: { from: ["code"], to: ["id"] } }),
     );
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toEqual(["ALTER TABLE `pf_tokens` ADD COLUMN `id` BIGINT NOT NULL"]);
     expect(ddl.join("\n")).not.toContain("AUTO_INCREMENT");
     expect(ddl.join("\n")).not.toContain("INDEX");
@@ -588,7 +601,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
         primaryKeyChanged: { from: ["code"], to: ["id"] },
       }),
     );
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toEqual(["ALTER TABLE `pf_tokens` MODIFY COLUMN `label` TEXT NOT NULL"]);
   });
 
@@ -599,7 +612,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     await adapter.syncColumns(
       diff({ typeChanged: [{ field: pick(table, "id"), existingType: "DOUBLE" }] }),
     );
-    expect(driver.calls.filter((c) => c.method === "exec").map((c) => c.sql)).toEqual([
+    expect(execSql(driver)).toEqual([
       "ALTER TABLE `pf_tokens` MODIFY COLUMN `id` BIGINT AUTO_INCREMENT NOT NULL",
     ]);
   });
@@ -616,7 +629,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     });
     await safeAdapter.syncColumns(change);
     await safeAdapter.syncIndexes();
-    const safeDdl = safeDriver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const safeDdl = execSql(safeDriver);
     expect(safeDdl.filter((d) => d.startsWith("ALTER TABLE"))).toEqual([
       "ALTER TABLE `pf_tokens` ADD COLUMN `id` BIGINT NOT NULL",
     ]);
@@ -630,7 +643,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     new AtscriptDbTable(fx.PfTokenV1, adapter);
     await adapter.syncColumns(diff({ primaryKeyChanged: { from: ["code"], to: ["id"] } }));
     await adapter.rebuildPrimaryKey({ from: ["code"], to: ["id"] });
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toEqual([
       "ALTER TABLE `pf_tokens` MODIFY COLUMN `id` BIGINT AUTO_INCREMENT NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`id`)",
     ]);
@@ -655,7 +668,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     });
     await adapter.syncColumns(change);
     await adapter.rebuildPrimaryKey(change.primaryKeyChanged!);
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toEqual([
       "ALTER TABLE `pf_tokens` ADD COLUMN `seq` BIGINT NOT NULL",
       "ALTER TABLE `pf_tokens` MODIFY COLUMN `id` DOUBLE NOT NULL",
@@ -776,7 +789,7 @@ describe("MysqlAdapter — view DDL with left / chained joins (since 0.1.136)", 
     const adapter = new MysqlAdapter(driver);
     adapter.registerReadable(view as any);
     await adapter.ensureTable();
-    const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    const ddl = execSql(driver);
     expect(ddl).toHaveLength(1);
     expect(ddl[0]).toContain(
       "LEFT JOIN `vj_customers` ON `vj_customers`.`id` = `vj_orders`.`customerId`",
@@ -787,5 +800,62 @@ describe("MysqlAdapter — view DDL with left / chained joins (since 0.1.136)", 
     expect(ddl[0]).toContain("`vj_customers`.`full_name` AS `customerName`");
     expect(ddl[0]).toContain("`vj_customers`.`address__zip_code` AS `zip`");
     expect(ddl[0].indexOf("vj_customers")).toBeLessThan(ddl[0].lastIndexOf("vj_regions"));
+  });
+});
+
+describe("MysqlAdapter — strict sql_mode for converting statements (since 0.1.140)", () => {
+  /** A PfStamped adapter and its `status` field (a type change → one MODIFY). */
+  function strictSetup(opts?: Parameters<typeof createDriver>[0]) {
+    const driver = createDriver(opts);
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(fx.PfStamped, adapter);
+    const field = table.fieldDescriptors.find((d: TDbFieldMeta) => d.path === "status")!;
+    return { driver, adapter, field };
+  }
+
+  it("syncColumns runs its MODIFYs on one connection between the strict brackets, then releases it", async () => {
+    const { driver, adapter, field } = strictSetup();
+    await adapter.syncColumns(diff({ typeChanged: [{ field } as never] }));
+    const execs = driver.calls.filter((c) => c.method === "exec");
+    expect(execs.map((c) => c.via)).toEqual(execs.map(() => "conn"));
+    expect(execs[0].sql).toBe(STRICT_ON);
+    expect(execs.at(-1)!.sql).toBe(STRICT_OFF);
+    expect(execs.some((c) => c.sql.includes("MODIFY COLUMN `status`"))).toBe(true);
+    expect(driver.releaseCount()).toBe(1);
+  });
+
+  it("restores the session mode and releases the connection when a statement fails", async () => {
+    const { driver, adapter, field } = strictSetup({
+      execError: (sql) => (sql.includes("MODIFY COLUMN") ? new Error("Data truncated") : undefined),
+    });
+    await expect(adapter.syncColumns(diff({ typeChanged: [{ field } as never] }))).rejects.toThrow(
+      "Data truncated",
+    );
+    expect(driver.calls.filter((c) => c.method === "exec").at(-1)!.sql).toBe(STRICT_OFF);
+    expect(driver.releaseCount()).toBe(1);
+  });
+
+  it("inside a transaction uses the transaction's connection and leaves it open", async () => {
+    const { driver, adapter, field } = strictSetup();
+    await adapter.withTransaction(async () => {
+      await adapter.syncColumns(diff({ typeChanged: [{ field } as never] }));
+      expect(driver.releaseCount()).toBe(0);
+    });
+    const sql = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    expect(sql[0]).toBe("START TRANSACTION");
+    expect(sql[1]).toBe(STRICT_ON);
+    expect(sql.slice(-2)).toEqual([STRICT_OFF, "COMMIT"]);
+    expect(driver.releaseCount()).toBe(1);
+  });
+
+  it("rebuildPrimaryKey runs its ALTER between the strict brackets", async () => {
+    const driver = createDriver();
+    const adapter = new MysqlAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await adapter.rebuildPrimaryKey({ from: ["id"], to: ["code"] });
+    const sql = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+    expect(sql[0]).toBe(STRICT_ON);
+    expect(sql[1]).toMatch(/^ALTER TABLE `pf_tokens` .*ADD PRIMARY KEY \(`code`\)$/);
+    expect(sql[2]).toBe(STRICT_OFF);
   });
 });

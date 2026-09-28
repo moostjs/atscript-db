@@ -116,6 +116,9 @@ describe("[mysql] geo support", () => {
     expect(sqls.some((s) => s.includes("DROP COLUMN `geo`"))).toBe(true);
     expect(sqls.some((s) => s.includes("RENAME COLUMN `geo__geo_mig` TO `geo`"))).toBe(true);
     expect(sqls.some((s) => s.includes("MODIFY COLUMN `geo` POINT SRID 4326 NOT NULL"))).toBe(true);
+    // Every step runs on the strict-mode connection, never a second pool one (since 0.1.140)
+    const steps = driver.calls.filter((c) => c.method === "exec");
+    expect(steps.map((c) => c.via)).toEqual(steps.map(() => "conn"));
   });
 
   // ── Write/read path ───────────────────────────────────────────────────────
