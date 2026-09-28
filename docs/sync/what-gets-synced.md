@@ -270,7 +270,7 @@ MySQL tracks engine, charset, and collation as table options. Non-destructive ch
 
 ### MongoDB
 
-MongoDB tracks capped collection parameters (size, max documents). Since these cannot be modified in place, changes require recreation. With `@db.sync.method 'recreate'`, **data is preserved**: it is copied server-side to a temporary collection via `$out`, the original is dropped and recreated with the new options, then data is copied back via `$merge`. With `@db.sync.method 'drop'`, data is lost (the collection is dropped and recreated empty).
+MongoDB tracks capped collection parameters (size, max documents). Since these cannot be modified in place, changes require recreation. With `@db.sync.method 'recreate'`, **data is preserved**: a temporary collection is created with the new options, the documents are copied into it server-side via `$merge`, and it replaces the original in one atomic rename (since 0.1.139 — a failed step leaves the original untouched). With `@db.sync.method 'drop'`, data is lost (the collection is dropped and recreated empty).
 
 ## Views
 

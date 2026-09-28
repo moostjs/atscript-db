@@ -6,6 +6,16 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.139 {#v0-1-139}
+
+### MongoDB
+
+- **`@db.sync.method 'recreate'` never puts the documents at risk.** The new collection is built under a temporary name, filled server-side, and swapped in with one atomic rename; a failed step drops the temporary collection and leaves the original untouched. Before, the original was dropped first, and a failure left the documents only in a `<name>__tmp_<ts>` collection, with no error naming it — see [MongoDB → Capped Collections](/adapters/mongodb#capped-collections).
+
+### PostgreSQL
+
+- **Sync fix: foreign keys of two tables that share a constraint name are no longer mixed up.** Constraint names are unique per table, not per schema. Sync read foreign keys by name within the schema, so two tables with a same-named foreign key had their columns merged: the FK diff saw columns from the other table, and a `@db.sync.method 'recreate'` of the referenced table failed or restored a wrong constraint. Constraints are now read per table from `pg_catalog`. Names that sync generates (`<table>_<cols>_fkey`) only collided after truncation to 63 characters; hand-named constraints could collide freely.
+
 ## 0.1.138 {#v0-1-138}
 
 ### Memory

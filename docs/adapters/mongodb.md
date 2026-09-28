@@ -536,7 +536,7 @@ export interface LogEntry {
 }
 ```
 
-The first argument is the maximum size in bytes (10 MB above), and the optional second argument is the maximum number of documents (10,000 above). Changing cap size requires collection recreation. Use `@db.sync.method 'recreate'` to preserve data — sync copies the collection server-side into a temporary collection (`<name>__tmp_<timestamp>`) via `$out`, drops the original, recreates it with the new options, then merges the temp data back via `$merge` and drops the temp collection. Use `@db.sync.method 'drop'` if data loss is acceptable (the collection is dropped and recreated empty).
+The first argument is the maximum size in bytes (10 MB above), and the optional second argument is the maximum number of documents (10,000 above). Changing cap size requires collection recreation. Use `@db.sync.method 'recreate'` to preserve data — sync creates a temporary collection (`<name>__tmp_<timestamp>`) with the new options, copies the documents into it server-side via `$merge`, then swaps it in with one atomic `renameCollection` (`dropTarget`). Since 0.1.139 the original is untouched until that swap: a failed step drops the temporary collection and the original keeps its documents and options. Before, the original was dropped first, and a failure could leave the documents only in the temporary collection. Use `@db.sync.method 'drop'` if data loss is acceptable (the collection is dropped and recreated empty).
 
 ::: warning
 Capped collections do not support document deletion or updates that increase document size. They are append-only by design.

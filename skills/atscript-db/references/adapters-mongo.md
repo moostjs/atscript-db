@@ -83,9 +83,9 @@ Removed (use generic core annotations instead):
 
 Capped collections:
 
-| Annotation         | Args                         | Effect                                                                                                    |
-| ------------------ | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `@db.mongo.capped` | `size: number, max?: number` | Creates a capped collection at `ensureTable()`. `size` = bytes. Resize requires `@db.sync.method 'drop'`. |
+| Annotation         | Args                         | Effect                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mongo.capped` | `size: number, max?: number` | Creates a capped collection at `ensureTable()`. `size` = bytes. Resize = destructive option change → `@db.sync.method 'recreate'` (keeps docs) or `'drop'`. Recreate (0.1.139): temp collection with new options ← `$merge` → atomic `renameCollection(dropTarget)`; failure = original untouched, temp dropped (≤ 0.1.138 dropped the original first). |
 
 ## Primitives
 
