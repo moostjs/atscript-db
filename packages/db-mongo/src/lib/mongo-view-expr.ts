@@ -55,6 +55,16 @@ function guarded(operands: unknown[], cond: Document): Document {
 }
 
 /**
+ * Field-to-field comparison `x <op> y` (`$eq` … `$lte`): both operands must
+ * be non-null (SQL `NULL = NULL` is UNKNOWN) — view predicates and
+ * `buildMongoFilter`'s field operands.
+ * @since 0.1.137
+ */
+export function fieldCompareExpr(op: string, x: unknown, y: unknown): Document {
+  return guarded([x, y], { [op]: [x, y] });
+}
+
+/**
  * Translates a view predicate (join condition, conditional-aggregate filter)
  * to an aggregation expression for `$match: { $expr }` / `$cond`, matching
  * SQL's three-valued logic wherever a NULL operand makes SQL's comparison
@@ -114,10 +124,8 @@ export function queryNodeToExpr(node: AtscriptQueryNode, pathOf: TViewExprPathOf
     throw new Error(`Operator "${comp.op}" is not supported in view predicates`);
   }
 
-  // Field-to-field: both operands must be non-null (SQL NULL = NULL is UNKNOWN)
   if (isFieldRef(comp.right)) {
-    const y = pathOf(comp.right);
-    return guarded([x, y], { [op]: [x, y] });
+    return fieldCompareExpr(op, x, pathOf(comp.right));
   }
 
   if (comp.right === null || comp.right === undefined) {

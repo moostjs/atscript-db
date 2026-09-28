@@ -2,6 +2,8 @@ import type { FilterExpr, FilterVisitor } from "@atscript/db";
 import { walkFilter } from "@atscript/db";
 import type { Document, Filter } from "mongodb";
 
+import { fieldCompareExpr } from "./mongo-view-expr";
+
 const EMPTY: Filter<any> = {};
 
 function parseRegexString(value: unknown): { pattern: string; flags: string } {
@@ -78,12 +80,15 @@ function isFieldOperand(value: unknown): value is { $field: string } {
   );
 }
 
-/** {@link mongoVisitor} plus field-to-field comparisons (`{ $field }` operands → `$expr`). */
+/**
+ * {@link mongoVisitor} plus field-to-field comparisons (`{ $field }` operands →
+ * `$expr`), null-guarded like SQL ({@link fieldCompareExpr}).
+ */
 const fieldOperandVisitor: FilterVisitor<Filter<any>> = {
   ...mongoVisitor,
   comparison(field, op, value) {
     return isFieldOperand(value)
-      ? { $expr: { [op]: [`$${field}`, `$${value.$field}`] } }
+      ? { $expr: fieldCompareExpr(op, `$${field}`, `$${value.$field}`) }
       : mongoVisitor.comparison(field, op, value);
   },
 };

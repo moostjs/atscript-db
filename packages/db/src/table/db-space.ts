@@ -99,7 +99,7 @@ export class DbSpace {
   getTable<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbTable<T> {
     let readable = this._readables.get(type) as AtscriptDbTable<T> | undefined;
     if (!readable) {
-      const adapter = this.adapterFactory();
+      const adapter = this._createAdapter();
       readable = new AtscriptDbTable<T>(
         type,
         adapter as any,
@@ -126,7 +126,7 @@ export class DbSpace {
   getView<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbView<T> {
     let readable = this._readables.get(type) as AtscriptDbView<T> | undefined;
     if (!readable) {
-      const adapter = this.adapterFactory();
+      const adapter = this._createAdapter();
       readable = new AtscriptDbView<T>(
         type,
         adapter as any,
@@ -150,22 +150,18 @@ export class DbSpace {
 
   /**
    * Drops a table by name. Used by schema sync to remove tables no longer in the schema.
+   * See `BaseDbAdapter.dropTableByName` for an adapter that does not support it.
    */
   async dropTableByName(tableName: string): Promise<void> {
-    const adapter = this._getAdminAdapter();
-    if (adapter.dropTableByName) {
-      await adapter.dropTableByName(tableName);
-    }
+    await this._getAdminAdapter().dropTableByName(tableName);
   }
 
   /**
    * Drops a view by name. Used by schema sync to remove views no longer in the schema.
+   * See `BaseDbAdapter.dropViewByName` for an adapter that does not support it.
    */
   async dropViewByName(viewName: string): Promise<void> {
-    const adapter = this._getAdminAdapter();
-    if (adapter.dropViewByName) {
-      await adapter.dropViewByName(viewName);
-    }
+    await this._getAdminAdapter().dropViewByName(viewName);
   }
 
   /**
@@ -197,7 +193,17 @@ export class DbSpace {
    * schema for those from the driver/connection, not from a bound table.
    */
   private _getAdminAdapter(): BaseDbAdapter {
-    return (this._adminAdapter ??= this.adapterFactory());
+    return (this._adminAdapter ??= this._createAdapter());
+  }
+
+  /**
+   * A factory-fresh adapter that knows its space (see `BaseDbAdapter.registerSpace`).
+   * Optional call: an adapter built against an older `@atscript/db` copy lacks it.
+   */
+  private _createAdapter(): BaseDbAdapter {
+    const adapter = this.adapterFactory();
+    (adapter as Partial<Pick<BaseDbAdapter, "registerSpace">>).registerSpace?.(this);
+    return adapter;
   }
 
   /**

@@ -326,10 +326,28 @@ function fkRow(
 /** A constraint row of the recreated table as `_renameTempConstraints` reads it. */
 type TConRow = { conname: string; contype: string; columns: string[] | null };
 
+/** A live column row as the column introspection query returns it. */
+function colRow(name: string, dataType: string, maxLength: number | null = null) {
+  return {
+    column_name: name,
+    data_type: dataType,
+    udt_name: dataType,
+    character_maximum_length: maxLength,
+    numeric_precision: null,
+    numeric_scale: null,
+    is_nullable: "NO",
+    column_default: null,
+    is_identity: "NO",
+    formatted_type: dataType,
+  };
+}
+
 /** A driver that answers the capture, column and constraint queries of a recreate. */
 function recreateDriver(opts: {
   table: string;
   inbound: ReturnType<typeof fkRow>[];
+  /** The old table's live columns (default: id / code / label of `pf_tokens`). */
+  columns?: ReturnType<typeof colRow>[];
   /** Constraints on the table after the RENAME, given the temp name PostgreSQL named them for. */
   constraints?: (tmp: string) => TConRow[];
   /** Relation names present in the schema (the `pg_class` check before a PK/UNIQUE rename). */
@@ -343,7 +361,12 @@ function recreateDriver(opts: {
         return opts.inbound;
       }
       if (sql.includes("information_schema.columns")) {
-        return [{ column_name: "id" }, { column_name: "code" }, { column_name: "label" }];
+        return (
+          opts.columns ?? [colRow("id", "bigint"), colRow("code", "text"), colRow("label", "text")]
+        );
+      }
+      if (sql.includes("constraint_type = 'PRIMARY KEY'")) {
+        return [{ column_name: "id" }];
       }
       if (sql.includes("pg_constraint")) {
         return (
@@ -542,6 +565,91 @@ describe("PostgresAdapter — recreateTable", () => {
     expect(sql.some((s) => s.includes("ADD CONSTRAINT"))).toBe(false);
     // Nothing ran on the pool after the rollback (no sequence reset)
     expect(driver.calls.filter((c) => c.method === "run")).toEqual([]);
+  });
+
+  // Since 0.1.137: the copy used `COALESCE("col", <fallback of the NEW type>)`,
+  // which PostgreSQL types by the OLD column — number → string failed with
+  // `invalid input syntax for type double precision: ""`.
+  describe("copy step with changed column types", () => {
+    let RtItem: any;
+    beforeAll(async () => {
+      RtItem = (await import("./fixtures/recreate-types.as")).RtItem;
+    });
+    const columns = [
+      colRow("id", "double precision"),
+      colRow("priority", "double precision"),
+      colRow("score", "text"),
+      colRow("code", "text"),
+      colRow("label", "text"),
+      colRow("flag", "boolean"),
+    ];
+
+    it("converts a changed column to its new type before the COALESCE; unchanged columns copy as-is", async () => {
+      const { driver, execs } = recreateDriver({ table: "rt_items", inbound: [], columns });
+      const adapter = new PostgresAdapter(driver);
+      new AtscriptDbTable(RtItem, adapter);
+      await adapter.recreateTable();
+
+      const copy = execs().find((s) => s.startsWith("INSERT INTO"))!;
+      expect(copy).toMatch(
+        /^INSERT INTO "rt_items__tmp_\d+" \("id", "priority", "score", "code", "label", "flag"\) SELECT /,
+      );
+      expect(copy.slice(copy.indexOf(" SELECT ") + 8)).toBe(
+        [
+          '"id"',
+          // number → string: text, then the string fallback
+          `COALESCE("priority"::text, '') AS "priority"`,
+          // string → number, optional: parsed through text, no fallback
+          '"score"::text::DOUBLE PRECISION AS "score"',
+          // TEXT → VARCHAR(3): stops at text — the INSERT rejects an over-long value
+          `COALESCE("code"::text, '') AS "code"`,
+          `COALESCE("label", '') AS "label"`,
+          '"flag"',
+        ].join(", ") + ' FROM "rt_items"',
+      );
+      // The old columns were read on the recreate's own connection, inside the transaction
+      const tx = execs();
+      expect(tx.indexOf("BEGIN")).toBe(0);
+      expect(tx.at(-1)).toBe("COMMIT");
+    });
+
+    it("a value that does not convert fails the copy: rolled back before the DROP, error rethrown", async () => {
+      const bad = new Error('invalid input syntax for type double precision: "n/a"');
+      const { driver, execs } = recreateDriver({
+        table: "rt_items",
+        inbound: [fkRow("rt_logs_item_fkey", "rt_logs", "itemId", "id")],
+        columns,
+        execError: (sql) => (sql.startsWith("INSERT INTO") ? bad : undefined),
+      });
+      const adapter = new PostgresAdapter(driver);
+      new AtscriptDbTable(RtItem, adapter);
+      await expect(adapter.recreateTable()).rejects.toBe(bad);
+
+      const sql = execs();
+      expect(sql.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(s))).toEqual(["BEGIN", "ROLLBACK"]);
+      expect(sql.some((s) => s.startsWith("DROP TABLE"))).toBe(false);
+      expect(sql.some((s) => s.includes("ADD CONSTRAINT"))).toBe(false);
+    });
+
+    it("an in-place type change uses the same conversion (ALTER COLUMN … TYPE … USING)", async () => {
+      const driver = createMockDriver();
+      const adapter = new PostgresAdapter(driver);
+      const table = new AtscriptDbTable(RtItem, adapter);
+      await adapter.syncColumns(
+        diff({
+          typeChanged: ["priority", "score", "code"].map((p) => ({
+            field: pick(table, p),
+            existingType: "TEXT",
+          })),
+        }),
+      );
+      expect(driver.calls.filter((c) => c.method === "exec").map((c) => c.sql)).toEqual([
+        'ALTER TABLE "rt_items" ALTER COLUMN "priority" TYPE TEXT USING "priority"::text',
+        'ALTER TABLE "rt_items" ALTER COLUMN "score" TYPE DOUBLE PRECISION USING "score"::text::DOUBLE PRECISION',
+        // Stops at text: an explicit ::VARCHAR(3) would truncate silently
+        'ALTER TABLE "rt_items" ALTER COLUMN "code" TYPE VARCHAR(3) USING "code"::text',
+      ]);
+    });
   });
 
   it("an error without detail is rethrown as-is", async () => {

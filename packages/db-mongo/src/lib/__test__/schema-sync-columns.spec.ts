@@ -68,9 +68,11 @@ describe("[mongo] syncColumnsImpl — array-of-objects sub-fields", () => {
 
     await syncColumnsImpl(adapter as any, makeDiff([withDefault]));
     expect(mockCol.updateMany).toHaveBeenCalledOnce();
-    const [filter, update] = mockCol.updateMany.mock.calls[0]!;
+    const [filter, update, options] = mockCol.updateMany.mock.calls[0]!;
     expect(filter).toEqual({});
-    expect(update).toEqual({ $set: { "withoutKey.$[].attribute": "n/a" } });
+    // The innermost array is narrowed to elements missing the field (since 0.1.137)
+    expect(update).toEqual({ $set: { "withoutKey.$[backfill].attribute": "n/a" } });
+    expect(options).toEqual({ arrayFilters: [{ "backfill.attribute": { $exists: false } }] });
   });
 
   it("leaves non-array paths flat", async () => {
@@ -84,6 +86,49 @@ describe("[mongo] syncColumnsImpl — array-of-objects sub-fields", () => {
     await syncColumnsImpl(adapter as any, makeDiff([withDefault]));
     const [, update] = mockCol.updateMany.mock.calls[0]!;
     expect(update).toEqual({ $set: { primitive: [] } });
+  });
+});
+
+describe("[mongo] syncColumnsImpl — backfill fills only where the field is missing (since 0.1.137)", () => {
+  // A snapshot can report a field as added although its documents already hold
+  // it — e.g. a nested leaf whose `@db.column` no longer renames it on
+  // documents (`zip_code` → `address.zip`). A stored value is never overwritten.
+  it("filters a non-array path on $exists: false", async () => {
+    const withDefault: TDbFieldMeta = {
+      ...pickField(table, "primitive"),
+      path: "address.zip",
+      physicalName: "address.zip",
+      designType: "string",
+      optional: false,
+      defaultValue: { kind: "value", value: "n/a" },
+    };
+
+    await syncColumnsImpl(adapter as any, makeDiff([withDefault]));
+    const [filter, update] = mockCol.updateMany.mock.calls[0]!;
+    expect(filter).toEqual({ "address.zip": { $exists: false } });
+    expect(update).toEqual({ $set: { "address.zip": "n/a" } });
+  });
+
+  it("runs renames first, then one guarded backfill per defaulted field", async () => {
+    const proto = pickField(table, "primitive");
+    const a: TDbFieldMeta = {
+      ...proto,
+      path: "a",
+      physicalName: "a",
+      designType: "number",
+      optional: false,
+      defaultValue: { kind: "value", value: "1" },
+    };
+    const b: TDbFieldMeta = { ...a, path: "b", physicalName: "b" };
+    const diff = { ...makeDiff([a, b]), renamed: [{ field: proto, oldName: "old_primitive" }] };
+
+    const result = await syncColumnsImpl(adapter as any, diff);
+    expect(result).toEqual({ added: ["a", "b"], renamed: ["primitive"] });
+    expect(mockCol.updateMany.mock.calls.map((c) => c.slice(0, 2))).toEqual([
+      [{}, { $rename: { old_primitive: "primitive" } }],
+      [{ a: { $exists: false } }, { $set: { a: 1 } }],
+      [{ b: { $exists: false } }, { $set: { b: 1 } }],
+    ]);
   });
 });
 
@@ -161,7 +206,7 @@ describe("[mongo] syncColumnsImpl — @db.default literal coercion", () => {
 
     await syncColumnsImpl(adapter as any, makeDiff([withDefault]));
     const [, update] = mockCol.updateMany.mock.calls[0]!;
-    expect(update).toEqual({ $set: { "uniqueObjects.$[].score": 0 } });
+    expect(update).toEqual({ $set: { "uniqueObjects.$[backfill].score": 0 } });
   });
 });
 

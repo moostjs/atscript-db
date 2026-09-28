@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll } from "vite-plus/test";
 import { DocumentFieldMapper } from "../strategies/field-mapping";
 import { DbSpace } from "../table/db-space";
 import type { AtscriptDbTable } from "../table/db-table";
+import { resolveViewSource } from "../table/view-source";
 import type { DbQuery } from "../types";
 import { NestedMockAdapter, prepareFixtures } from "./test-utils";
 
@@ -58,13 +59,14 @@ describe("DocumentFieldMapper.translateQuery — @db.column renames", () => {
   it("maps object-form $select keys (exclusion) and inverts over physical names", () => {
     const { table } = nested();
     const meta = table.getMetadata();
-    expect(meta.allPhysicalFields).toEqual(["id", "title", "opened_on", "prof", "prof.bio"]);
+    const stored = ["prof", "prof.bio", "address", "address.city", "address.zip", "cnt"];
+    expect(meta.allPhysicalFields).toEqual(["id", "title", "opened_on", ...stored]);
     const q = new DocumentFieldMapper().translateQuery(
       { filter: {}, controls: { $select: { renamedAt: 0 } } },
       meta,
     );
     expect(q.controls.$select!.asProjection).toEqual({ opened_on: 0 });
-    expect(q.controls.$select!.asArray).toEqual(["id", "title", "prof", "prof.bio"]);
+    expect(q.controls.$select!.asArray).toEqual(["id", "title", ...stored]);
   });
 
   it("maps $sort keys ascending and descending, preserving key order", () => {
@@ -153,5 +155,112 @@ describe("AtscriptDbTable over a document adapter — renamed fields end to end"
     expect(q.controls.$groupBy).toEqual(["prof.bio"]);
     expect(q.controls.$select!.asArray).toEqual(["prof.bio"]);
     expect(q.controls.$sort).toEqual({ "prof.bio": 1, n: -1 });
+  });
+});
+
+describe("a nested-leaf @db.column on a document adapter renames nothing (since 0.1.137)", () => {
+  it("metadata: no columnMap entry, descriptor / index / documentPath on the stored path", () => {
+    const { table } = nested();
+    const meta = table.getMetadata();
+    expect(meta.columnMap.has("address.zip")).toBe(false);
+    expect([...meta.columnMap]).toEqual([
+      ["renamedAt", "opened_on"],
+      ["profile", "prof"],
+      ["visits", "cnt"],
+    ]);
+    expect(meta.documentPath("address.zip")).toBe("address.zip");
+    const fd = meta.descriptorByPath.get("address.zip")!;
+    expect(fd.physicalName).toBe("address.zip");
+    // `@db.column.renamed` on a nested leaf is no rename either — sync sees no change
+    expect(fd.renamedFrom).toBeUndefined();
+    expect(table.indexes.get("atscript__plain__zip_idx")!.fields.map((f) => f.name)).toEqual([
+      "address.zip",
+    ]);
+  });
+
+  it("view sources: the stored path on documents, the flattened rename on relational", () => {
+    // One layout index serves both families — only the document read ignores the leaf rename
+    expect(resolveViewSource(DocRename, "address.zip", true).column).toBe("address.zip");
+    expect(resolveViewSource(DocRename, "address.zip", false).column).toBe("address__zip_code");
+    expect(resolveViewSource(DocRename, "profile.bio", true).column).toBe("prof.bio");
+  });
+
+  it("filter, $select, $sort address the stored path", () => {
+    const { table } = nested();
+    const q = new DocumentFieldMapper().translateQuery(
+      {
+        filter: { "address.zip": "75001", $or: [{ "address.zip": { $in: ["1", "2"] } }] },
+        controls: { $select: ["address.zip", "address"], $sort: { "address.zip": -1 } },
+      },
+      table.getMetadata(),
+    );
+    expect(q.filter).toEqual({
+      "address.zip": "75001",
+      $or: [{ "address.zip": { $in: ["1", "2"] } }],
+    });
+    expect(q.controls.$select!.asArray).toEqual(["address.zip", "address"]);
+    expect(q.controls.$sort).toEqual({ "address.zip": -1 });
+  });
+
+  it("the grouped path groups, selects and aggregates on the stored path", async () => {
+    const { table, adapter } = nested();
+    await table.aggregate({
+      filter: { "address.zip": { $exists: true } },
+      controls: {
+        $select: ["address.zip", { $fn: "count", $field: "address.zip", $as: "n" }],
+        $groupBy: ["address.zip"],
+        $sort: { "address.zip": 1 },
+      },
+    } as any);
+    const q = sent(adapter, "aggregate");
+    expect(q.filter).toEqual({ "address.zip": { $exists: true } });
+    expect(q.controls.$groupBy).toEqual(["address.zip"]);
+    expect(q.controls.$select!.asArray).toEqual(["address.zip"]);
+    expect(q.controls.$select!.aggregates).toEqual([
+      { $fn: "count", $field: "address.zip", $as: "n" },
+    ]);
+    expect(q.controls.$sort).toEqual({ "address.zip": 1 });
+  });
+
+  it("writes and reads keep the nested leaf where it is stored", async () => {
+    const { table, adapter } = nested();
+    await table.insertOne({ id: 1, title: "a", address: { city: "Paris", zip: "75001" } });
+    expect(adapter.calls.find((c) => c.method === "insertMany")!.args[0]).toEqual([
+      { id: 1, title: "a", address: { city: "Paris", zip: "75001" } },
+    ]);
+    // A top-level `zip_code` key is not the nested leaf — it is not reverse-mapped
+    adapter.store.set("doc_renames", [
+      { id: 2, title: "b", address: { zip: "1" }, zip_code: "other" },
+    ]);
+    const rows = await table.findMany({ filter: {}, controls: {} });
+    expect(rows[0]).toEqual({ id: 2, title: "b", address: { zip: "1" }, zip_code: "other" });
+  });
+});
+
+describe("fields under a renamed top-level object (since 0.1.137)", () => {
+  it("descriptor physicalName and index field use the document path", () => {
+    const { table } = nested();
+    const meta = table.getMetadata();
+    expect(meta.descriptorByPath.get("profile.bio")!.physicalName).toBe("prof.bio");
+    expect(meta.physicalPath("profile.bio")).toBe("prof.bio");
+    expect(table.indexes.get("atscript__plain__bio_idx")!.fields.map((f) => f.name)).toEqual([
+      "prof.bio",
+    ]);
+  });
+});
+
+describe("document patch keys follow documentPath (since 0.1.137)", () => {
+  it("a decomposed merge patch under a renamed object renames the first segment", async () => {
+    const { table, adapter } = nested();
+    await table.updateMany({ id: 1 }, { profile: { bio: "x" }, address: { zip: "2" } } as any);
+    const [, data] = adapter.calls.find((c) => c.method === "updateMany")!.args;
+    expect(data).toEqual({ "prof.bio": "x", address: { zip: "2" } });
+  });
+
+  it("$inc / $mul field ops target the physical key", async () => {
+    const { table, adapter } = nested();
+    await table.updateMany({ id: 1 }, { visits: { $inc: 2 } } as any);
+    const [, , ops] = adapter.calls.find((c) => c.method === "updateMany")!.args;
+    expect(ops.inc).toEqual({ cnt: 2 });
   });
 });

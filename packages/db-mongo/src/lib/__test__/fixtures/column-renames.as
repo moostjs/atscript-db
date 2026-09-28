@@ -15,7 +15,11 @@ export interface ColumnRename {
 
     @db.column 'prof'
     profile?: {
+        @db.index.plain 'bio_idx'
         bio?: string
         rank?: number
     }
+
+    @db.column 'cnt'
+    visits?: number
 }

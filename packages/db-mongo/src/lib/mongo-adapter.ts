@@ -379,6 +379,14 @@ export class MongoAdapter extends BaseDbAdapter {
     return ALL_AGGREGATE_FNS;
   }
 
+  /**
+   * See BaseDbAdapter.viewRenderRevision. 2 = 0.1.137 (null-guarded field filters, nested document paths).
+   * BUMP whenever `buildViewPipeline` output changes for an unchanged view definition.
+   */
+  override viewRenderRevision(): string {
+    return "2";
+  }
+
   override getValidatorPlugins(): ReturnType<BaseDbAdapter["getValidatorPlugins"]> {
     return [validateMongoIdPlugin];
   }
@@ -552,15 +560,6 @@ export class MongoAdapter extends BaseDbAdapter {
       this._addMongoIndexField("unique", "__pk", field);
       this._pendingUniqueFields.push(field);
     }
-    // @db.default.increment → track for auto-increment on insert (with optional start value)
-    if (metadata.has("db.default.increment")) {
-      const physicalName = metadata.get("db.column") ?? field;
-      const startValue = metadata.get("db.default.increment");
-      this._incrementFields.set(
-        physicalName,
-        typeof startValue === "number" ? startValue : undefined,
-      );
-    }
     // @db.index.fulltext is registered ONLY by core (`_addIndexField("fulltext", …)`),
     // which `syncIndexesImpl` converts to the single `atscript__fulltext__<name>`
     // text index. Re-scanning it here into `_mongoIndexes` as a separate
@@ -692,13 +691,18 @@ export class MongoAdapter extends BaseDbAdapter {
       }
     }
 
-    // Build map of fields with non-binary collation for query-time collation injection
     for (const fd of this._table.fieldDescriptors) {
+      // Non-binary collations for query-time collation injection — keyed by
+      // the logical path too: request insights name logical fields.
       if (fd.collate && fd.collate !== "binary") {
-        if (!this._collateFields) {
-          this._collateFields = new Map();
-        }
+        this._collateFields ??= new Map();
+        this._collateFields.set(fd.path, fd.collate);
         this._collateFields.set(fd.physicalName, fd.collate);
+      }
+      // @db.default.increment → auto-increment on insert (optional start value)
+      const def = fd.defaultValue;
+      if (def?.kind === "fn" && def.fn === "increment") {
+        this._incrementFields.set(fd.physicalName, def.start);
       }
     }
   }
@@ -1130,10 +1134,10 @@ export class MongoAdapter extends BaseDbAdapter {
   async dropTable(): Promise<void> {
     return dropTableImpl(this as any as TMongoSchemaSyncHost);
   }
-  async dropViewByName(viewName: string): Promise<void> {
+  override async dropViewByName(viewName: string): Promise<void> {
     return dropViewByNameImpl(this as any as TMongoSchemaSyncHost, viewName);
   }
-  async dropTableByName(tableName: string): Promise<void> {
+  override async dropTableByName(tableName: string): Promise<void> {
     return dropTableByNameImpl(this as any as TMongoSchemaSyncHost, tableName);
   }
   override getDesiredTableOptions(): TExistingTableOption[] {

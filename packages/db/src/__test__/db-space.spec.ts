@@ -227,12 +227,36 @@ describe("DbSpace", () => {
     expect((users.dbAdapter as MockAdapter).calls).toEqual([]);
   });
 
-  it("admin primitives resolve to no-ops / undefined on adapters that lack them", async () => {
+  // Since 0.1.137 a drop the adapter has no primitive for throws — before, it
+  // resolved as a no-op and schema sync reported the object dropped.
+  it("admin primitives on adapters that lack them: FK probe 'cannot tell', drops throw", async () => {
     const space = new DbSpace(() => new MockAdapter());
     expect(await space.getReferencingForeignKeys("users")).toBeUndefined();
-    await expect(space.dropTableByName("x")).resolves.toBeUndefined();
-    await expect(space.dropViewByName("v")).resolves.toBeUndefined();
-    await expect(space.dropTablesByName(["a", "b"])).resolves.toBeUndefined();
+    await expect(space.dropTableByName("x")).rejects.toThrow(
+      'Cannot drop table "x": dropTableByName is not supported by this adapter',
+    );
+    await expect(space.dropViewByName("v")).rejects.toThrow(
+      'Cannot drop view "v": dropViewByName is not supported by this adapter',
+    );
+    // The base group drop loops dropTableByName, so it fails on the first name
+    await expect(space.dropTablesByName(["a", "b"])).rejects.toThrow(
+      'Cannot drop table "a": dropTableByName is not supported by this adapter',
+    );
+  });
+
+  it("registers itself on every adapter its factory builds, the admin adapter included", async () => {
+    const registered: Array<[AdminMockAdapter, DbSpace]> = [];
+    class SpaceAwareAdapter extends AdminMockAdapter {
+      override registerSpace(space: DbSpace): void {
+        registered.push([this, space]);
+      }
+    }
+    const space = new DbSpace(() => new SpaceAwareAdapter());
+    const users = space.getTable(UsersTable);
+    await space.dropTableByName("gone");
+    expect(registered).toHaveLength(2);
+    expect(registered.every(([, s]) => s === space)).toBe(true);
+    expect(registered[0]![0]).toBe(users.dbAdapter);
   });
 
   it("base hasRows(tableName) on an unbound adapter answers 'cannot tell'; table-scoped ops throw a clear error", async () => {

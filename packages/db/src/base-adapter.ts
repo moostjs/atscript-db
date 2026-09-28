@@ -42,6 +42,7 @@ import type {
 import type { TFieldOps } from "./ops";
 import type { WithRelation } from "@uniqu/core";
 import type { AtscriptDbReadable } from "./table/db-readable";
+import type { DbSpace } from "./table/db-space";
 import type { TableMetadata } from "./table/table-metadata";
 import type { TGenericLogger } from "./logger";
 import { NoopLogger } from "./logger";
@@ -146,6 +147,16 @@ export abstract class BaseDbAdapter {
       this.logger = logger;
     }
   }
+
+  /**
+   * Called by {@link DbSpace} right after its factory builds this adapter —
+   * the administrative one included — before {@link registerReadable}. No-op
+   * by default: override it to share state across a space's adapters when the
+   * adapter has no driver to share it through (the memory adapter keeps one
+   * store per space).
+   * @since 0.1.137
+   */
+  registerSpace(_space: DbSpace): void {}
 
   /**
    * Enables or disables verbose (debug-level) logging for this adapter.
@@ -357,6 +368,20 @@ export abstract class BaseDbAdapter {
    */
   aggregateFns(): ReadonlySet<AggregateFn> {
     return BASE_AGGREGATE_FNS;
+  }
+
+  /**
+   * Revision of how this adapter renders a managed view (its SQL / pipeline)
+   * from an unchanged view definition. Stored in each managed view's sync
+   * snapshot when defined, so bumping it recreates every managed view of the
+   * adapter once on the next sync — return a new value whenever a rendering
+   * fix changes what an existing view returns. `undefined` (the default)
+   * leaves the snapshot, and its hash, as before. External views ignore it.
+   *
+   * @since 0.1.137
+   */
+  viewRenderRevision(): string | undefined {
+    return undefined;
   }
 
   /**
@@ -1026,17 +1051,29 @@ export abstract class BaseDbAdapter {
 
   /**
    * Drops a table by name (without needing a registered readable).
-   * Used by schema sync to remove tables no longer in the schema.
-   * Optional — only relational adapters implement this.
+   * Used by schema sync to remove tables no longer in the schema. A missing
+   * table is not an error (`DROP TABLE IF EXISTS`). The default throws —
+   * schema sync then reports the removed table as an `error` entry and keeps
+   * it tracked. Since 0.1.137; before, the method was optional and a drop the
+   * adapter lacked was skipped silently while sync reported it done.
    */
-  dropTableByName?(tableName: string): Promise<void>;
+  async dropTableByName(tableName: string): Promise<void> {
+    throw new Error(
+      `Cannot drop table "${tableName}": dropTableByName is not supported by this adapter`,
+    );
+  }
 
   /**
    * Drops a view by name (without needing a registered readable).
-   * Used by schema sync to remove views no longer in the schema.
-   * Optional — only relational adapters implement this.
+   * Used by schema sync to remove views no longer in the schema, and to drop
+   * a managed view before recreating it. A missing view is not an error. The
+   * default throws, with the same history as {@link dropTableByName}.
    */
-  dropViewByName?(viewName: string): Promise<void>;
+  async dropViewByName(viewName: string): Promise<void> {
+    throw new Error(
+      `Cannot drop view "${viewName}": dropViewByName is not supported by this adapter`,
+    );
+  }
 
   /**
    * Drops several tables that reference each other (a foreign-key cycle) as
@@ -1049,7 +1086,7 @@ export abstract class BaseDbAdapter {
    */
   async dropTablesByName(tableNames: string[]): Promise<void> {
     for (const name of tableNames) {
-      await this.dropTableByName?.(name);
+      await this.dropTableByName(name);
     }
   }
 

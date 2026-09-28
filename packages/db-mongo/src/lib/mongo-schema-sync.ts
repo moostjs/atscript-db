@@ -44,6 +44,7 @@ export interface TMongoSchemaSyncHost {
     >;
     readonly flatMap: ReadonlyMap<string, TAtscriptAnnotatedType>;
     readonly isExternal?: boolean;
+    getMetadata(): { documentPath(path: string): string };
   };
   readonly _mongoIndexes: ReadonlyMap<string, TMongoIndex>;
   readonly _cappedOptions?: { size: number; max?: number };
@@ -262,57 +263,74 @@ export async function syncColumnsImpl(
 ): Promise<TSyncColumnResult> {
   const renamed: string[] = [];
   const added: string[] = [];
-  const update: Record<string, Record<string, unknown>> = {};
 
   // Renames — use $rename operator. $rename does not support array-positional
   // operators; fields crossing an array boundary need a separate aggregation-
   // pipeline update. Fall back to a flat $rename for non-array paths and skip
   // (with a log) anything that would cross an array — Mongo would reject it.
-  if (diff.renamed.length > 0) {
-    const renameSpec: Record<string, string> = {};
-    for (const r of diff.renamed) {
-      if (pathCrossesArray(host, r.field.path)) {
-        host._log(
-          "syncColumns: skipping $rename for array-element field",
-          r.oldName,
-          "→",
-          r.field.physicalName,
-          "(Mongo $rename cannot traverse arrays)",
-        );
-        continue;
-      }
-      renameSpec[r.oldName] = r.field.physicalName;
-      renamed.push(r.field.physicalName);
+  const renameSpec: Record<string, string> = {};
+  for (const r of diff.renamed) {
+    if (pathCrossesArray(host, r.field.path)) {
+      host._log(
+        "syncColumns: skipping $rename for array-element field",
+        r.oldName,
+        "→",
+        r.field.physicalName,
+        "(Mongo $rename cannot traverse arrays)",
+      );
+      continue;
     }
-    if (Object.keys(renameSpec).length > 0) {
-      update.$rename = renameSpec;
-    }
+    renameSpec[r.oldName] = r.field.physicalName;
+    renamed.push(r.field.physicalName);
+  }
+  if (renamed.length > 0) {
+    await host.collection.updateMany({}, { $rename: renameSpec }, host._getSessionOpts());
   }
 
-  // Adds — use $set with default values. Optional fields with no @db.default.*
-  // get no backfill (the field stays absent on existing docs, which is exactly
-  // what "optional" means in Mongo). For fields crossing an array boundary,
-  // rewrite the path to use $[] so the $set walks every existing element and
-  // is a no-op on empty arrays (Mongo would otherwise reject with code 28).
-  if (diff.added.length > 0) {
-    const setSpec: Record<string, unknown> = {};
-    for (const field of diff.added) {
-      const defaultVal = resolveSyncDefault(field);
-      if (defaultVal !== undefined) {
-        setSpec[arraySafePath(host, field.physicalName, field.path)] = defaultVal;
-      }
-      added.push(field.physicalName);
+  // Adds — see defaultBackfill.
+  for (const field of diff.added) {
+    const value = resolveSyncDefault(field);
+    if (value !== undefined) {
+      await defaultBackfill(host, field.path, value);
     }
-    if (Object.keys(setSpec).length > 0) {
-      update.$set = setSpec;
-    }
-  }
-
-  if (Object.keys(update).length > 0) {
-    await host.collection.updateMany({}, update, host._getSessionOpts());
+    added.push(field.physicalName);
   }
 
   return { added, renamed };
+}
+
+/**
+ * Backfills an added field's `@db.default` literal where the field is
+ * missing — a stored value is never overwritten. Optional fields without a
+ * default get no backfill (absent = "optional" in Mongo). A path crossing an
+ * array narrows the innermost `$[]` to an `arrayFilters` element missing the
+ * sub-path; outer arrays keep `$[]`, so empty arrays are a no-op (a bare
+ * dotted path into an empty array is rejected with code 28).
+ */
+async function defaultBackfill(
+  host: TMongoSchemaSyncHost,
+  logicalPath: string,
+  value: unknown,
+): Promise<void> {
+  const segments = positionalSegments(host, logicalPath);
+  const inner = segments.lastIndexOf("$[]");
+  const opts = host._getSessionOpts();
+  if (inner === -1) {
+    const path = segments.join(".");
+    await host.collection.updateMany(
+      { [path]: { $exists: false } },
+      { $set: { [path]: value } },
+      opts,
+    );
+    return;
+  }
+  segments[inner] = "$[backfill]";
+  const rest = segments.slice(inner + 1).join(".");
+  await host.collection.updateMany(
+    {},
+    { $set: { [segments.join(".")]: value } },
+    { ...opts, arrayFilters: [{ [`backfill.${rest}`]: { $exists: false } }] },
+  );
 }
 
 export async function dropColumnsImpl(
@@ -334,45 +352,37 @@ export async function dropColumnsImpl(
   const unsetSpec: Record<string, ""> = {};
   for (const col of minimal) {
     // The dropped leaf is gone from flatMap, but its array ancestors usually
-    // remain (we're dropping a sub-field, not the parent array). Passing the
-    // column name as both args lets arraySafePath probe those ancestors and
-    // emit $[] where needed.
-    unsetSpec[arraySafePath(host, col, col)] = "";
+    // remain (we're dropping a sub-field, not the parent array). The stored
+    // path is probed as-is and never renamed — an old logical path under a
+    // renamed parent must unset nothing, not the live renamed data.
+    unsetSpec[positionalSegments(host, col, col).join(".")] = "";
   }
   await host.collection.updateMany({}, { $unset: unsetSpec }, host._getSessionOpts());
 }
 
 /**
- * Rewrites a dotted physical path to use Mongo's all-positional $[] operator
- * at every segment that's typed as an array in the table's flatMap. Returns
- * the input unchanged when no segment crosses an array boundary.
- *
- * `logicalPath` drives the array-boundary walk (flatMap is keyed by logical
- * path); the leaf of `physicalPath` is preserved so any `@db.column` rename
- * on the leaf still applies.
+ * The segments of a field's physical document path with `$[]` after every
+ * segment whose logical prefix is an array in the flatMap — Mongo's
+ * all-positional operator walks every element. `physicalPath` defaults to
+ * the logical path's document path (same segment count).
  */
-function arraySafePath(
+function positionalSegments(
   host: TMongoSchemaSyncHost,
-  physicalPath: string,
   logicalPath: string,
-): string {
-  const logicalSegments = logicalPath.split(".");
-  if (logicalSegments.length < 2) {
-    return physicalPath;
-  }
-  const physicalSegments = physicalPath.split(".");
-  const physicalLeaf = physicalSegments[physicalSegments.length - 1]!;
+  physicalPath = host._table.getMetadata().documentPath(logicalPath),
+): string[] {
+  const logical = logicalPath.split(".");
+  const physical = physicalPath.split(".");
   const out: string[] = [];
   let prefix = "";
-  for (let i = 0; i < logicalSegments.length; i++) {
-    const isLeaf = i === logicalSegments.length - 1;
-    out.push(isLeaf ? physicalLeaf : logicalSegments[i]!);
-    prefix = joinPath(prefix, logicalSegments[i]!);
-    if (!isLeaf && isArrayPath(host._table.flatMap, prefix)) {
+  for (let i = 0; i < logical.length; i++) {
+    out.push(physical[i]!);
+    prefix = joinPath(prefix, logical[i]!);
+    if (i < logical.length - 1 && isArrayPath(host._table.flatMap, prefix)) {
       out.push("$[]");
     }
   }
-  return out.join(".");
+  return out;
 }
 
 /** Returns true if any non-leaf segment of the path is typed as an array. */

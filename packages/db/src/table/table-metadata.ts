@@ -50,18 +50,25 @@ export function findAncestorInSet(path: string, set: ReadonlySet<string>): strin
 }
 
 /**
+ * Whether a `@db.column` / `@db.column.renamed` on `path` applies: always on
+ * relational storage; on document storage (`nestedObjects`) for top-level
+ * fields only — nested keys are stored as-is. Column maps are built with it.
+ */
+export function columnOverrideApplies(path: string, nestedObjects: boolean): boolean {
+  return !nestedObjects || !path.includes(".");
+}
+
+/**
  * Logical field path → its physical path in document storage (nested
- * objects kept inline). `@db.column` renames (`columnMap`) apply to the
- * annotated key, and a document renames the TOP-LEVEL key only — nested keys
- * are stored as-is — so a dotted path under a renamed top-level object
- * renames its first segment: `profile.bio` under `@db.column 'prof'` →
- * `prof.bio`.
+ * objects kept inline). A document renames the TOP-LEVEL key only — nested
+ * keys are stored as-is, so a `@db.column` on a nested leaf renames nothing
+ * (`address.zip` stays `address.zip`; see {@link columnOverrideApplies}) —
+ * and a dotted path under a renamed top-level object renames its first
+ * segment: `profile.bio` under `@db.column 'prof'` → `prof.bio`.
  */
 export function documentPath(columnMap: ReadonlyMap<string, string>, path: string): string {
-  const direct = columnMap.get(path);
-  if (direct !== undefined) return direct;
   const dot = path.indexOf(".");
-  if (dot === -1) return path;
+  if (dot === -1) return columnMap.get(path) ?? path;
   const top = columnMap.get(path.slice(0, dot));
   return top === undefined ? path : top + path.slice(dot);
 }
@@ -148,6 +155,7 @@ export class TableMetadata {
   ignoredFields = new Set<string>();
   uniqueProps = new Set<string>();
   defaults = new Map<string, TDbDefaultValue>();
+  /** Logical path → `@db.column` override (top-level keys only on document storage). */
   columnMap = new Map<string, string>();
   dimensions: string[] = [];
   measures: string[] = [];
@@ -230,15 +238,20 @@ export class TableMetadata {
     return this._built;
   }
 
-  /**
-   * Logical field path → its physical path in document storage (nested
-   * objects kept inline). `@db.column` renames apply to the annotated key,
-   * and a document renames the TOP-LEVEL key only — nested keys are stored
-   * as-is — so a dotted path under a renamed top-level object renames its
-   * first segment: `profile.bio` under `@db.column 'prof'` → `prof.bio`.
-   */
+  /** {@link documentPath} over this table's `columnMap`. */
   documentPath(path: string): string {
     return documentPath(this.columnMap, path);
+  }
+
+  /**
+   * Physical name of a logical path: the document path on nested-object
+   * adapters, else the relational column (`pathToPhysical`, then the
+   * `@db.column` override).
+   */
+  physicalPath(logical: string): string {
+    return this.nestedObjects
+      ? this.documentPath(logical)
+      : (this.pathToPhysical.get(logical) ?? this.columnMap.get(logical) ?? logical);
   }
 
   // ── Build pipeline ───────────────────────────────────────────────────────
@@ -435,15 +448,16 @@ export class TableMetadata {
       this.originalMetaIdFields.push(fieldName);
     }
 
-    // @db.column → column mapping
+    // @db.column → column mapping (a nested one is ignored on document storage)
+    const renamable = columnOverrideApplies(fieldName, this.nestedObjects);
     const column = metadata.get("db.column") as string | undefined;
-    if (column) {
+    if (column && renamable) {
       this.columnMap.set(fieldName, column);
     }
 
     // @db.column.renamed → rename mapping (intermediate, consumed by _buildFieldDescriptors)
     const columnFrom = metadata.get("db.column.renamed") as string | undefined;
-    if (columnFrom) {
+    if (columnFrom && renamable) {
       this._columnFromMap.set(fieldName, columnFrom);
     }
 
@@ -974,9 +988,7 @@ export class TableMetadata {
         storage = "column";
       }
 
-      const physicalName = skipFlattening
-        ? (this.columnMap.get(path) ?? path)
-        : (this.pathToPhysical.get(path) ?? this.columnMap.get(path) ?? path);
+      const physicalName = this.physicalPath(path);
 
       // Compute renamedFrom (old physical name from @db.column.renamed)
       const fromLocal = this._columnFromMap.get(path);
@@ -1153,8 +1165,7 @@ export class TableMetadata {
           const tags = (ftype.type as { tags?: ReadonlySet<string> }).tags;
           field.designType = tags?.has("objectId") ? "objectId" : resolveDesignType(ftype);
         }
-        field.name =
-          this.pathToPhysical.get(field.name) ?? this.columnMap.get(field.name) ?? field.name;
+        field.name = this.physicalPath(field.name);
       }
     }
   }

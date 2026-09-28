@@ -94,6 +94,11 @@ export interface TViewSnapshot {
   /** @since 0.1.128 — hash of the canonical `@db.view.having` predicate. */
   havingHash?: string;
   materialized?: boolean;
+  /**
+   * @since 0.1.137 — the adapter's `viewRenderRevision()`, present only when
+   * the adapter defines one (managed views only).
+   */
+  renderRevision?: string;
   fields: TFieldSnapshot[];
 }
 
@@ -224,7 +229,9 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
     .toSorted((a, b) => (a.column < b.column ? -1 : a.column > b.column ? 1 : 0));
 
   // Key order is part of the hash: tableName, viewType, entryTable,
-  // joinTables, columns, filterHash, havingHash, materialized, fields.
+  // joinTables, columns, filterHash, havingHash, materialized,
+  // renderRevision, fields. Optional keys are omitted when unset, so an
+  // adapter without a render revision hashes exactly as before 0.1.137.
   const result: Omit<TViewSnapshot, "fields"> = {
     tableName: view.tableName,
     viewType: plan.materialized ? "M" : "V",
@@ -247,6 +254,10 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
   }
   if (plan.materialized) {
     result.materialized = true;
+  }
+  const renderRevision = view.dbAdapter.viewRenderRevision();
+  if (renderRevision !== undefined) {
+    result.renderRevision = renderRevision;
   }
   return { ...result, fields };
 }

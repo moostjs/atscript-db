@@ -1109,7 +1109,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
   }
 
-  async dropTableByName(tableName: string): Promise<void> {
+  override async dropTableByName(tableName: string): Promise<void> {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
     const conn = await this.driver.getConnection();
@@ -1122,7 +1122,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
   }
 
-  async dropViewByName(viewName: string): Promise<void> {
+  override async dropViewByName(viewName: string): Promise<void> {
     const ddl = `DROP VIEW IF EXISTS ${quoteTableName(viewName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);

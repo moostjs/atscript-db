@@ -389,6 +389,7 @@ function variant(
     isView: true,
     isExternal: false,
     tableName: real.tableName,
+    dbAdapter: real.dbAdapter,
     fieldDescriptors: real.fieldDescriptors,
     viewPlan: patch.plan ? patch.plan(real.viewPlan) : real.viewPlan,
     resolveFieldRef: (ref: any, qi?: any) => real.resolveFieldRef(ref, qi),
@@ -517,5 +518,43 @@ describe("computeViewSnapshot — column sources and join kind (since 0.1.136)",
       },
     ]);
     expect(computeViewSnapshot(realView(vs.VsUserView)).filterHash).toBeDefined();
+  });
+});
+
+/** An adapter declaring a view render revision. */
+class RevisedAdapter extends MockAdapter {
+  override viewRenderRevision(): string {
+    return "7";
+  }
+}
+
+describe("computeViewSnapshot — adapter render revision (since 0.1.137)", () => {
+  let tt: Record<string, any>;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    tt = await import("./fixtures/test-table.as");
+  });
+
+  it("stores a defined revision on managed views, before `fields`, and changes the hash", () => {
+    const plain = computeViewSnapshot(realView(tt.ActiveUsersView));
+    expect(plain).not.toHaveProperty("renderRevision");
+    const revised = computeViewSnapshot(
+      new DbSpace(() => new RevisedAdapter()).getView(tt.ActiveUsersView),
+    );
+    expect(revised.renderRevision).toBe("7");
+    const keys = Object.keys(revised);
+    expect(keys.slice(-2)).toEqual(["renderRevision", "fields"]);
+    const { renderRevision: _, ...withoutRevision } = revised;
+    expect(withoutRevision).toEqual(plain);
+    expect(computeTableHash(revised)).not.toBe(computeTableHash(plain));
+  });
+
+  it("never stores it on an external view (sync neither creates nor recreates it)", () => {
+    const snap = computeViewSnapshot(
+      new DbSpace(() => new RevisedAdapter()).getView(tt.LegacyReportView),
+    );
+    expect(snap.viewType).toBe("E");
+    expect(snap).not.toHaveProperty("renderRevision");
   });
 });

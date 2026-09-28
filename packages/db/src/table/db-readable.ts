@@ -501,7 +501,7 @@ export class AtscriptDbReadable<
     return this._syncMethod;
   }
 
-  /** Logical → physical column name mapping from `@db.column`. */
+  /** Logical → physical column name mapping from `@db.column` (top-level only on document storage). */
   public get columnMap(): ReadonlyMap<string, string> {
     this._ensureBuilt();
     return this._meta.columnMap;

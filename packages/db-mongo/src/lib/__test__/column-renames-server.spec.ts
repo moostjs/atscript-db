@@ -139,3 +139,38 @@ describe("@db.column renames on findMany / findManyWithCount (MongoDB)", () => {
     expect(row).not.toHaveProperty("opened_on");
   });
 });
+
+describe("@db.column renames on patch field ops (MongoDB, since 0.1.137)", () => {
+  it("$inc / $mul update the renamed key, not a stray logical one", async () => {
+    await table.insertOne({ id: 4, title: "d", visits: 1 } as never);
+    try {
+      await table.updateOne({ id: 4, visits: { $inc: 2 } } as never);
+      await table.updateMany({ id: 4 }, { visits: { $mul: 5 } } as never);
+      const doc = await raw.findOne({ id: 4 });
+      expect(doc).toMatchObject({ cnt: 15 });
+      expect(doc).not.toHaveProperty("visits");
+      expect(await table.findOne({ filter: { id: 4 }, controls: {} })).toMatchObject({
+        visits: 15,
+      });
+    } finally {
+      await raw.deleteOne({ id: 4 });
+    }
+  });
+});
+
+describe("fields under a renamed top-level object (MongoDB, since 0.1.137)", () => {
+  it("physicalName, the synced index and a filter all use prof.bio", async () => {
+    const fd = table.fieldDescriptors.find((f) => f.path === "profile.bio")!;
+    expect(fd.physicalName).toBe("prof.bio");
+    await table.syncIndexes();
+    const index = (await raw.listIndexes().toArray()).find((i) => i.name.endsWith("bio_idx"));
+    expect(index?.key).toEqual({ "prof.bio": 1 });
+    const rows = await table.findMany({ filter: { "profile.bio": "y" }, controls: {} });
+    expect(ids(rows)).toEqual([1]);
+  });
+
+  it("dropping the old snapshot path profile.bio (upgrade diff) leaves prof.bio intact", async () => {
+    await (table.dbAdapter as MongoAdapter).dropColumns(["profile.bio"]);
+    expect(await raw.findOne({ id: 1 })).toMatchObject({ prof: { bio: "y", rank: 1 } });
+  });
+});

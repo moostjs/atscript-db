@@ -66,7 +66,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     $self: new AnnotationSpec({
       description:
         "Overrides the physical column name in the database. " +
-        "For nested (flattened) fields, the parent prefix is still prepended automatically." +
+        "For nested (flattened) fields, the parent prefix is still prepended automatically. " +
+        "Document storage (MongoDB) renames top-level fields only — a nested field keeps its name there." +
         "\n\n**Example:**\n" +
         "```atscript\n" +
         '@db.column "first_name"\n' +
@@ -92,7 +93,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     renamed: new AnnotationSpec({
       description:
         "Specifies the previous local field name for column rename migration. " +
-        "The sync engine generates ALTER TABLE RENAME COLUMN instead of drop+add." +
+        "The sync engine generates ALTER TABLE RENAME COLUMN instead of drop+add " +
+        "(on document storage, top-level fields only)." +
         "\n\n**Example:**\n" +
         "```atscript\n" +
         '@db.column.renamed "zip"\n' +

@@ -1,7 +1,15 @@
-import { ALL_AGGREGATE_FNS, ALL_BUCKET_UNITS, BaseDbAdapter, DbError, DbSpace } from "@atscript/db";
+import {
+  ALL_AGGREGATE_FNS,
+  ALL_BUCKET_UNITS,
+  BaseDbAdapter,
+  DbError,
+  DbSpace,
+  isAtscriptDbView,
+} from "@atscript/db";
 import type {
   DbQuery,
   DbControls,
+  TDbObjectKind,
   FilterExpr,
   TFieldOps,
   TDbFieldMeta,
@@ -41,12 +49,38 @@ interface RecordedUniqueIndex {
 }
 
 /**
+ * One table (or view) of an in-memory database. Its presence in the
+ * {@link MemoryDatabase} is what `tableExists()` reports; dropping it deletes
+ * the entry, so a table added back starts empty with fresh counters.
+ */
+interface MemoryTableState {
+  kind: Exclude<TDbObjectKind, "materialized">;
+  /** Stored rows keyed by `pkKey`, in nested physical shape. */
+  rows: Map<string, Record<string, unknown>>;
+  /** Unique indexes recorded by `syncIndexes`, enforced on insert. */
+  uniqueIndexes: RecordedUniqueIndex[];
+  /** Per-field `@db.default.increment` counters (physical name → last value). */
+  incrementCounters: Map<string, number>;
+}
+
+/** Table/view name → state: one in-memory database. */
+type MemoryDatabase = Map<string, MemoryTableState>;
+
+/**
+ * One database per {@link DbSpace}, shared by every adapter the space builds —
+ * the administrative adapter schema sync drops tables through included. A
+ * space is the lifetime of an in-memory database: a fresh space starts empty.
+ */
+const databases = new WeakMap<DbSpace, MemoryDatabase>();
+
+/**
  * In-memory {@link BaseDbAdapter} implementation.
  *
  * Runs in one of two modes:
- * - STORED mode (default): storage is a plain `Map` living on the adapter
- *   instance — adapter instances are 1:1 with a readable (table/view), so the
- *   Map is this table's whole store. Documents are kept in their nested PHYSICAL
+ * - STORED mode (default): rows live in a `Map` of the space's in-memory
+ *   database, keyed by table name (see {@link databases}), so every adapter of
+ *   the space that serves a name sees the same table, and the administrative
+ *   adapter can drop it by name. Documents are kept in their nested PHYSICAL
  *   shape (no flattening), which is why {@link supportsNestedObjects} is `true`.
  *   Full CRUD surface: inserts, reads, update / replace / delete with
  *   optimistic-concurrency CAS.
@@ -58,13 +92,10 @@ interface RecordedUniqueIndex {
  */
 export class MemoryAdapter extends BaseDbAdapter {
   /**
-   * The table's store, keyed by {@link pkKey}. Values are the stored rows in
-   * nested physical shape. An instance field — no `ensureTable` DDL needed.
+   * The in-memory database: the space's (see {@link databases}), resolved once
+   * in {@link registerSpace}; an adapter used without a space keeps this own one.
    */
-  private rows = new Map<string, Record<string, unknown>>();
-
-  /** Unique indexes recorded by {@link syncIndexes}. Enforced on insert. */
-  private uniqueIndexes: RecordedUniqueIndex[] = [];
+  private _db: MemoryDatabase = new Map();
 
   /** Memoized physical PK field names — stable for the adapter's lifetime. */
   private _pkFieldsCache?: string[];
@@ -75,15 +106,6 @@ export class MemoryAdapter extends BaseDbAdapter {
    * {@link _incrementFields}).
    */
   private _incrementFieldsCache?: Map<string, number | undefined>;
-
-  /**
-   * Running per-field auto-increment counters (PHYSICAL name → last value
-   * handed out). Lives on the adapter INSTANCE, so it resets whenever a new
-   * DbSpace/adapter is built — correct for an in-memory store (parity with
-   * SQLite `:memory:`, whose sequence also restarts with a fresh DB). Never
-   * persisted.
-   */
-  private _incrementCounters = new Map<string, number>();
 
   /**
    * Provider (read-through) backing closure. When set, this adapter is
@@ -160,6 +182,46 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   // ── Storage helpers ────────────────────────────────────────────────────────
 
+  /** Joins the space's in-memory database (see {@link databases}), creating it on first use. */
+  override registerSpace(space: DbSpace): void {
+    let db = databases.get(space);
+    if (!db) {
+      db = new Map();
+      databases.set(space, db);
+    }
+    this._db = db;
+  }
+
+  /**
+   * This table's state, or `undefined` while it does not exist (never synced,
+   * or dropped) — or when no readable is registered.
+   */
+  private _peekState(): MemoryTableState | undefined {
+    const table = this._table as typeof this._table | undefined;
+    return table && this._db.get(table.tableName);
+  }
+
+  /**
+   * This table's state, created on first use — by `ensureTable`, or by a write
+   * to a table that was never synced (implicit create, like a MongoDB
+   * collection). Reads never create it.
+   */
+  private _state(): MemoryTableState {
+    const db = this._db;
+    const name = this._table.tableName;
+    let state = db.get(name);
+    if (!state) {
+      state = {
+        kind: this._table.isView ? "view" : "table",
+        rows: new Map(),
+        uniqueIndexes: [],
+        incrementCounters: new Map(),
+      };
+      db.set(name, state);
+    }
+    return state;
+  }
+
   /**
    * Physical names of the primary-key field(s). Single `@meta.id` resolves via
    * {@link AtscriptDbReadable.metaIdPhysical}; a composite key maps each logical
@@ -218,7 +280,9 @@ export class MemoryAdapter extends BaseDbAdapter {
    * are computed so an increment PRIMARY KEY produces a real `insertedId` and
    * stores under a real key. The memory analogue of the Mongo adapter's
    * insert-time increment (Mongo uses an atomic `__atscript_counters`
-   * collection; an in-memory store just keeps the counter on the instance):
+   * collection; an in-memory store keeps the counter in the table's state, so
+   * it restarts with a fresh space or when the table is dropped — parity with
+   * SQLite `:memory:`; never persisted):
    *
    * - No value for the field → assign the next counter value. First use starts
    *   at `start ?? 1` (`max(counter, (start ?? 1) - 1) + 1`); thereafter it is
@@ -228,7 +292,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * - Explicit value present → keep it, but advance the counter to
    *   `max(counter, value)` so a later auto value can never collide with it.
    */
-  private _applyIncrements(row: Record<string, unknown>): void {
+  private _applyIncrements(counters: Map<string, number>, row: Record<string, unknown>): void {
     const fields = this._incrementFields();
     if (fields.size === 0) {
       return;
@@ -238,15 +302,15 @@ export class MemoryAdapter extends BaseDbAdapter {
       // counter write below keeps it >= floor, so `base >= floor` is invariant —
       // the next auto value is simply `base + 1` (no `Math.max(base, floor)`).
       const floor = (start ?? 1) - 1;
-      const base = this._incrementCounters.get(physical) ?? floor;
+      const base = counters.get(physical) ?? floor;
       const current = row[physical];
       if (current === undefined || current === null) {
         const next = base + 1;
         row[physical] = next;
-        this._incrementCounters.set(physical, next);
+        counters.set(physical, next);
       } else if (typeof current === "number") {
         // Explicit id: don't overwrite, but never let a future auto value reuse it.
-        this._incrementCounters.set(physical, Math.max(base, current));
+        counters.set(physical, Math.max(base, current));
       }
     }
   }
@@ -335,7 +399,8 @@ export class MemoryAdapter extends BaseDbAdapter {
   /**
    * Snapshot seam for reads. Returns the current rows.
    *
-   * - Stored mode reads the instance Map directly (insertion order preserved).
+   * - Stored mode reads the table's Map directly (insertion order preserved);
+   *   a table that does not exist reads as empty.
    * - Provider (read-through) mode calls {@link _provider} to recompute a fresh
    *   snapshot per read.
    *
@@ -354,7 +419,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     if (this._provider) {
       return this._provider();
     }
-    return [...this.rows.values()];
+    return [...(this._peekState()?.rows.values() ?? [])];
   }
 
   // ── CRUD ────────────────────────────────────────────────────────────────
@@ -367,7 +432,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * the store. Called once per item by both `insertOne` and `insertMany`, so
    * increment values advance sequentially across a batch.
    */
-  private _insertRow(data: Record<string, unknown>): unknown {
+  private _insertRow(state: MemoryTableState, data: Record<string, unknown>): unknown {
     const row = structuredClone(data);
 
     // Memory has no DDL DEFAULT; fill version=0 at insert when missing so OCC
@@ -380,15 +445,15 @@ export class MemoryAdapter extends BaseDbAdapter {
     // Memory has no DB sequence; the adapter generates @db.default.increment
     // values here — BEFORE pkKey, so an increment PK yields a real inserted id
     // (parity with SQL autoincrement / the Mongo counter-collection).
-    this._applyIncrements(row);
+    this._applyIncrements(state.incrementCounters, row);
 
     const key = this.pkKey(row);
-    if (this.rows.has(key)) {
+    if (state.rows.has(key)) {
       throw this._pkConflict();
     }
 
-    this._enforceUniqueIndexes(row);
-    this.rows.set(key, row);
+    this._enforceUniqueIndexes(state, row);
+    state.rows.set(key, row);
     // Single-`@meta.id` tables resolve their scalar id from `row[metaIdPhysical]`
     // and keep an `undefined` fallback (unchanged). A composite (or single
     // non-meta) PK has no single meta id, so supply a DEFINED fallback built from
@@ -407,8 +472,12 @@ export class MemoryAdapter extends BaseDbAdapter {
    * `excludeKey` (when given) skips the row stored under that {@link pkKey} — so
    * a row updating its own unique value does not false-conflict with itself.
    */
-  private _enforceUniqueIndexes(row: Record<string, unknown>, excludeKey?: string): void {
-    for (const index of this.uniqueIndexes) {
+  private _enforceUniqueIndexes(
+    state: MemoryTableState,
+    row: Record<string, unknown>,
+    excludeKey?: string,
+  ): void {
+    for (const index of state.uniqueIndexes) {
       const tuple: unknown[] = [];
       let skip = false;
       for (const field of index.fields) {
@@ -422,7 +491,7 @@ export class MemoryAdapter extends BaseDbAdapter {
       if (skip) {
         continue;
       }
-      for (const [existingKey, existing] of this.rows) {
+      for (const [existingKey, existing] of state.rows) {
         if (excludeKey !== undefined && existingKey === excludeKey) {
           continue;
         }
@@ -447,7 +516,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
     this._assertWritable();
-    return { insertedId: this._insertRow(data) };
+    return { insertedId: this._insertRow(this._state(), data) };
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
@@ -456,7 +525,8 @@ export class MemoryAdapter extends BaseDbAdapter {
     // items are already stored. The table layer routes `insertOne` through
     // `insertMany([one])` and the sync lock relies on a duplicate-PK insert
     // throwing, so a single-element collision MUST throw — which it does.
-    const insertedIds = data.map((item) => this._insertRow(item));
+    const state = this._state();
+    const insertedIds = data.map((item) => this._insertRow(state, item));
     return { insertedCount: data.length, insertedIds };
   }
 
@@ -464,7 +534,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   /**
    * Selects the stored rows a write should touch, as `{ key, row }` pairs so
-   * callers can mutate in place and re-key. Stored mode scans the instance Map
+   * callers can mutate in place and re-key. Stored mode scans the table's Map
    * directly (writes are authoritative against the store, unlike reads which go
    * through the {@link _loadRows} snapshot seam).
    *
@@ -475,9 +545,11 @@ export class MemoryAdapter extends BaseDbAdapter {
    * that has no version column is a misconfiguration and throws (mirrors the
    * Mongo adapter's `_buildCasFilter`).
    *
-   * When `many` is `false` at most the first match is returned.
+   * When `many` is `false` at most the first match is returned. A table that
+   * does not exist (`state` undefined) matches nothing and is not created.
    */
   private _selectForWrite(
+    state: MemoryTableState | undefined,
     filter: FilterExpr,
     expectedVersion: number | undefined,
     many: boolean,
@@ -488,7 +560,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     }
     const match = buildMemoryPredicate(filter);
     const matched: Array<{ key: string; row: Record<string, unknown> }> = [];
-    for (const [key, row] of this.rows) {
+    for (const [key, row] of state?.rows ?? []) {
       if (!match(row)) {
         continue;
       }
@@ -568,15 +640,19 @@ export class MemoryAdapter extends BaseDbAdapter {
    * NEW key (some other row already owns it) throws `CONFLICT`. Throws BEFORE
    * touching the Map so a failed re-key leaves the store unchanged.
    */
-  private _commitRow(oldKey: string, next: Record<string, unknown>): void {
+  private _commitRow(
+    rows: Map<string, Record<string, unknown>>,
+    oldKey: string,
+    next: Record<string, unknown>,
+  ): void {
     const newKey = this.pkKey(next);
-    if (newKey !== oldKey && this.rows.has(newKey)) {
+    if (newKey !== oldKey && rows.has(newKey)) {
       throw this._pkConflict();
     }
     if (newKey !== oldKey) {
-      this.rows.delete(oldKey);
+      rows.delete(oldKey);
     }
-    this.rows.set(newKey, next);
+    rows.set(newKey, next);
   }
 
   /**
@@ -588,6 +664,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * pass, so a conflict leaves the store untouched.
    */
   private _commitUpdate(
+    state: MemoryTableState,
     oldKey: string,
     row: Record<string, unknown>,
     data: Record<string, unknown>,
@@ -596,8 +673,8 @@ export class MemoryAdapter extends BaseDbAdapter {
     const next = structuredClone(row);
     this._applyUpdate(next, data, ops);
     this._bumpVersion(next, row);
-    this._enforceUniqueIndexes(next, oldKey);
-    this._commitRow(oldKey, next);
+    this._enforceUniqueIndexes(state, next, oldKey);
+    this._commitRow(state.rows, oldKey, next);
   }
 
   async replaceOne(
@@ -606,8 +683,9 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const matched = this._selectForWrite(filter, expectedVersion, false);
-    if (matched.length === 0) {
+    const state = this._peekState();
+    const matched = this._selectForWrite(state, filter, expectedVersion, false);
+    if (!state || matched.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
     const { key, row } = matched[0]!;
@@ -618,8 +696,8 @@ export class MemoryAdapter extends BaseDbAdapter {
     const next = structuredClone(data);
     this._bumpVersion(next, row);
 
-    this._enforceUniqueIndexes(next, key);
-    this._commitRow(key, next);
+    this._enforceUniqueIndexes(state, next, key);
+    this._commitRow(state.rows, key, next);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -630,22 +708,24 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const matched = this._selectForWrite(filter, expectedVersion, false);
-    if (matched.length === 0) {
+    const state = this._peekState();
+    const matched = this._selectForWrite(state, filter, expectedVersion, false);
+    if (!state || matched.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
     const { key, row } = matched[0]!;
-    this._commitUpdate(key, row, data, ops);
+    this._commitUpdate(state, key, row, data, ops);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
-    const matched = this._selectForWrite(filter, undefined, false);
-    if (matched.length === 0) {
+    const state = this._peekState();
+    const matched = this._selectForWrite(state, filter, undefined, false);
+    if (!state || matched.length === 0) {
       return { deletedCount: 0 };
     }
-    this.rows.delete(matched[0]!.key);
+    state.rows.delete(matched[0]!.key);
     return { deletedCount: 1 };
   }
 
@@ -798,9 +878,13 @@ export class MemoryAdapter extends BaseDbAdapter {
     // never passed. Each matched row still auto-bumps its own version. Applied
     // sequentially and NON-atomically (a mid-loop unique/PK conflict leaves the
     // earlier rows already updated), matching `insertMany`'s v1 contract.
-    const matched = this._selectForWrite(filter, undefined, true);
+    const state = this._peekState();
+    if (!state) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
+    const matched = this._selectForWrite(state, filter, undefined, true);
     for (const { key, row } of matched) {
-      this._commitUpdate(key, row, data, ops);
+      this._commitUpdate(state, key, row, data, ops);
     }
     return { matchedCount: matched.length, modifiedCount: matched.length };
   }
@@ -811,18 +895,26 @@ export class MemoryAdapter extends BaseDbAdapter {
     // + version bump on every match (via `_applyUpdate`), NOT a full-document
     // replace like `replaceOne`. Fields absent from `data` are RETAINED on each
     // matched row. Sequential + non-atomic, sibling of `updateMany`, no CAS.
-    const matched = this._selectForWrite(filter, undefined, true);
+    const state = this._peekState();
+    if (!state) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
+    const matched = this._selectForWrite(state, filter, undefined, true);
     for (const { key, row } of matched) {
-      this._commitUpdate(key, row, data);
+      this._commitUpdate(state, key, row, data);
     }
     return { matchedCount: matched.length, modifiedCount: matched.length };
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
-    const matched = this._selectForWrite(filter, undefined, true);
+    const state = this._peekState();
+    if (!state) {
+      return { deletedCount: 0 };
+    }
+    const matched = this._selectForWrite(state, filter, undefined, true);
     for (const { key } of matched) {
-      this.rows.delete(key);
+      state.rows.delete(key);
     }
     return { deletedCount: matched.length };
   }
@@ -835,24 +927,65 @@ export class MemoryAdapter extends BaseDbAdapter {
    * in-memory scan needs no plain/fulltext/geo index to answer queries.
    */
   async syncIndexes(): Promise<void> {
-    this.uniqueIndexes = [];
+    const uniqueIndexes: RecordedUniqueIndex[] = [];
     for (const index of this._table.indexes.values()) {
       if (index.type !== "unique") {
         continue;
       }
-      this.uniqueIndexes.push({
+      uniqueIndexes.push({
         name: index.name,
         fields: index.fields.map((f) => f.name),
         optionalFields: new Set(index.fields.filter((f) => f.optional).map((f) => f.name)),
       });
     }
+    this._state().uniqueIndexes = uniqueIndexes;
+  }
+
+  /** Creates the table's (empty) state when it does not exist. Idempotent. */
+  async ensureTable(): Promise<void> {
+    this._state();
   }
 
   /**
-   * No-op: the store is the instance-level {@link rows} Map, which already
-   * exists. Safe to call repeatedly.
+   * Whether the table exists in the space's in-memory database — created by
+   * {@link ensureTable} (or a first write) and not dropped since. Schema sync
+   * reports a table that does not exist as `create`. An external view always
+   * exists: nothing in memory creates one, its rows come from a provider.
+   * @since 0.1.137
    */
-  async ensureTable(): Promise<void> {}
+  async tableExists(): Promise<boolean> {
+    if (isAtscriptDbView(this._table) && this._table.isExternal) {
+      return true;
+    }
+    return this._peekState() !== undefined;
+  }
+
+  /**
+   * Drops a table by name: its rows, unique indexes and increment counters go,
+   * so the table added back starts empty. A missing table is not an error;
+   * a view under that name is (`dropViewByName` drops views).
+   * @since 0.1.137
+   */
+  async dropTableByName(tableName: string): Promise<void> {
+    this._dropByName(tableName, "table");
+  }
+
+  /**
+   * Drops a view by name — its (empty) state; a view holds no rows here.
+   * A missing view is not an error; a table under that name is.
+   * @since 0.1.137
+   */
+  async dropViewByName(viewName: string): Promise<void> {
+    this._dropByName(viewName, "view");
+  }
+
+  private _dropByName(name: string, kind: MemoryTableState["kind"]): void {
+    const state = this._db.get(name);
+    if (state && state.kind !== kind) {
+      throw new Error(`Cannot drop ${kind} "${name}": it is a ${state.kind}`);
+    }
+    this._db.delete(name);
+  }
 }
 
 /**

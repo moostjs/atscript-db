@@ -7,6 +7,7 @@ import { flattenAnnotatedType } from "@atscript/typescript/utils";
 
 import { resolveDesignType } from "./db-readable";
 import {
+  columnOverrideApplies,
   documentPath,
   findAncestorInSet,
   isNavRelation,
@@ -45,8 +46,10 @@ export interface TViewSource {
 /** Per-type layout index, built once per annotated type (`TableMetadata`'s build rules). */
 interface TSourceIndex {
   flatMap: Map<string, TAtscriptAnnotatedType>;
-  /** `@db.column` overrides by logical path. */
+  /** `@db.column` overrides by logical path (relational layout). */
   columnMap: Map<string, string>;
+  /** The overrides a document applies — top-level only ({@link columnOverrideApplies}). */
+  documentColumnMap: Map<string, string>;
   /** Paths without storage: `@db.ignore` fields and navigation relations. */
   unstored: Set<string>;
   /**
@@ -68,6 +71,7 @@ function sourceIndex(type: TAtscriptAnnotatedType): TSourceIndex {
   idx = {
     flatMap: new Map(),
     columnMap: new Map(),
+    documentColumnMap: new Map(),
     unstored: new Set(),
     jsonRoots: new Set(),
     encrypted: new Set(),
@@ -92,7 +96,10 @@ function sourceIndex(type: TAtscriptAnnotatedType): TSourceIndex {
     for (const [path, fieldType, metadata] of collected) {
       if (!path || findAncestorInSet(path, navFields) !== undefined) continue;
       const column = metadata.get("db.column") as string | undefined;
-      if (column) idx.columnMap.set(path, column);
+      if (column) {
+        idx.columnMap.set(path, column);
+        if (columnOverrideApplies(path, true)) idx.documentColumnMap.set(path, column);
+      }
       if (metadata.has("db.ignore") || navFields.has(path)) idx.unstored.add(path);
       if (metadata.has("db.encrypted")) {
         storage.push([path, false]);
@@ -163,7 +170,7 @@ export function resolveViewSource(
   const designType = resolveDesignType(node);
 
   if (nestedObjects) {
-    return { column: documentPath(idx.columnMap, logicalPath), designType, optional };
+    return { column: documentPath(idx.documentColumnMap, logicalPath), designType, optional };
   }
 
   const encrypted = findAncestorInSet(logicalPath, idx.encrypted);

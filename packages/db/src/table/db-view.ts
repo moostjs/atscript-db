@@ -298,7 +298,7 @@ export class AtscriptDbView<
     const meta = this.getMetadata();
     const nested = this._nested;
     const viewName = (path: string): string | undefined =>
-      nested ? meta.documentPath(path) : meta.pathToPhysical.get(path);
+      nested ? meta.physicalPath(path) : meta.pathToPhysical.get(path);
     const fail = (field: string, message: string): never => {
       throw new Error(`View "${this.tableName}" field "${field}": ${message}`);
     };

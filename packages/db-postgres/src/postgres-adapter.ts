@@ -5,6 +5,7 @@ import {
   BaseDbAdapter,
   DbError,
   bucketTimeZoneUnavailable,
+  isColumnTypeChanged,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -881,8 +882,16 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   async getExistingColumnsForTable(tableName: string): Promise<TExistingColumn[]> {
+    return this._readColumns(this._exec(), tableName);
+  }
+
+  /** Live columns of `tableName`, read through `exec` (the recreate's own connection, or the pool). */
+  private async _readColumns(
+    exec: Pick<TPgDriver, "all">,
+    tableName: string,
+  ): Promise<TExistingColumn[]> {
     const schema = this._schema;
-    const rows = await this._exec().all<{
+    const rows = await exec.all<{
       column_name: string;
       data_type: string;
       udt_name: string;
@@ -905,7 +914,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     );
 
     // Query primary key columns
-    const pkRows = await this._exec().all<{ column_name: string }>(
+    const pkRows = await exec.all<{ column_name: string }>(
       `SELECT kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
@@ -995,17 +1004,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     for (const { field } of diff.typeChanged ?? []) {
       const sqlType = this.typeMapper(field);
       const col = qi(field.physicalName);
-      let ddl: string;
-      if (field.isGeoPoint && sqlType.startsWith("geography")) {
-        // v1 JSONB '[lng, lat]' → native geography(Point,4326). The generic
-        // ::text double-cast can't parse a JSON tuple as WKT — build the
-        // point explicitly, preserving NULLs.
-        ddl =
-          `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} ` +
-          `USING CASE WHEN ${col} IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((${col}->>0)::float8, (${col}->>1)::float8), 4326)::geography END`;
-      } else {
-        ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${col}::text::${sqlType}`;
-      }
+      const ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${convertColumnExpr(col, field, sqlType)}`;
       this._log(ddl);
       await this._exec().exec(ddl);
     }
@@ -1178,34 +1177,37 @@ export class PostgresAdapter extends BaseDbAdapter {
       this._log(createSql);
       await conn.exec(createSql);
 
-      // 2. Get columns that exist in both old and new (query via conn, not pool)
-      const oldColRows = await conn.all<{ column_name: string }>(
-        `SELECT column_name FROM information_schema.columns
-         WHERE table_name = $1 AND table_schema = COALESCE($2, 'public')
-         ORDER BY ordinal_position`,
-        [this._table.tableName, schema],
+      // 2. Get columns that exist in both old and new, with their live types
+      //    (query via conn, not pool)
+      const oldTypes = new Map(
+        (await this._readColumns(conn, this._table.tableName)).map((c) => [c.name, c.type]),
       );
-      const newCols = this._table.fieldDescriptors
-        .filter((f) => !f.ignored)
-        .map((f) => f.physicalName);
-      const oldColSet = new Set(oldColRows.map((c) => c.column_name));
-      const commonCols = newCols.filter((c) => oldColSet.has(c));
+      const commonFields = this._table.fieldDescriptors.filter(
+        (f) => !f.ignored && oldTypes.has(f.physicalName),
+      );
 
-      if (commonCols.length > 0) {
-        // 3. Copy data
-        const fieldsByName = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
-        const colNames = commonCols.map((c) => qi(c)).join(", ");
-        const selectExprs = commonCols
-          .map((c) => {
-            const field = fieldsByName.get(c);
-            if (field && !field.optional && !field.isPrimaryKey) {
+      if (commonFields.length > 0) {
+        // 3. Copy data. A column whose type changed is converted to its new
+        //    type first, as an in-place ALTER COLUMN TYPE would: PostgreSQL
+        //    types a COALESCE by its first argument, so the old column would
+        //    make it parse the new type's fallback (`''` for a string) as the
+        //    OLD type. A value that does not convert fails the INSERT and the
+        //    transaction rolls back.
+        const colNames = commonFields.map((f) => qi(f.physicalName)).join(", ");
+        const selectExprs = commonFields
+          .map((field) => {
+            const c = qi(field.physicalName);
+            const sqlType = this.typeMapper(field);
+            const changed = isColumnTypeChanged(oldTypes.get(field.physicalName)!, sqlType);
+            const value = changed ? convertColumnExpr(c, field, sqlType) : c;
+            if (!field.optional && !field.isPrimaryKey) {
               const fallback =
                 field.defaultValue?.kind === "value"
                   ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
                   : defaultValueForType(field.designType);
-              return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
+              return `COALESCE(${value}, ${fallback}) AS ${c}`;
             }
-            return qi(c);
+            return changed ? `${value} AS ${c}` : c;
           })
           .join(", ");
         const copySql = `INSERT INTO ${quoteTableName(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
@@ -1415,13 +1417,13 @@ export class PostgresAdapter extends BaseDbAdapter {
     }
   }
 
-  async dropTableByName(tableName: string): Promise<void> {
+  override async dropTableByName(tableName: string): Promise<void> {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
   }
 
-  async dropViewByName(viewName: string): Promise<void> {
+  override async dropViewByName(viewName: string): Promise<void> {
     const ddl = `DROP VIEW IF EXISTS ${quoteTableName(viewName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
@@ -1978,6 +1980,31 @@ export class PostgresAdapter extends BaseDbAdapter {
       $skip: ctx.controls.$skip as number | undefined,
     });
   }
+}
+
+/** A text / character type: the value is converted by the assignment into the column. */
+const CHARACTER_TYPE = /^\s*(?:text|varchar|character varying|char|character|bpchar)\b/i;
+
+/**
+ * The expression converting column `col` (quoted) to `sqlType`, the field's
+ * new type — one rule for `ALTER COLUMN … TYPE … USING` and the recreate copy.
+ * The value goes through text, so one that does not parse as the new type
+ * fails the statement instead of being coerced. A TEXT / VARCHAR(n) / CHAR(n)
+ * target stops at `::text`: an explicit cast to VARCHAR(n) / CHAR(n) would
+ * truncate an over-long value, the assignment into the column rejects it
+ * (since 0.1.137).
+ */
+function convertColumnExpr(col: string, field: TDbFieldMeta, sqlType: string): string {
+  if (field.isGeoPoint && sqlType.startsWith("geography")) {
+    // v1 JSONB '[lng, lat]' → native geography(Point,4326). The generic
+    // ::text double-cast can't parse a JSON tuple as WKT — build the
+    // point explicitly, preserving NULLs.
+    return `CASE WHEN ${col} IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((${col}->>0)::float8, (${col}->>1)::float8), 4326)::geography END`;
+  }
+  if (CHARACTER_TYPE.test(sqlType)) {
+    return `${col}::text`;
+  }
+  return `${col}::text::${sqlType}`;
 }
 
 /**

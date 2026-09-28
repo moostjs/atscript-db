@@ -261,11 +261,45 @@ describe("[mongo] view pipeline — $lookup forms, join kinds, physical paths", 
         $and: [
           { code: { $ne: null } },
           { regionId: null },
-          { $expr: { $gt: ["$score", "$regionId"] } },
+          {
+            $expr: {
+              $and: [
+                { $gt: ["$score", null] },
+                { $gt: ["$regionId", null] },
+                { $gt: ["$score", "$regionId"] },
+              ],
+            },
+          },
           { full_name: { $regex: "^a", $options: "i" } },
         ],
       },
     });
+  });
+
+  it("reads a nested leaf's @db.column-annotated path where it is stored (since 0.1.137)", async () => {
+    const zips = await pipelineOf(fx.MvStoreZips);
+    expect(zips).toEqual([
+      {
+        $match: {
+          $and: [
+            { "address.zip": { $ne: null } },
+            {
+              $expr: {
+                $and: [{ $gt: ["$qty", null] }, { $gt: ["$cap", null] }, { $gt: ["$qty", "$cap"] }],
+              },
+            },
+          ],
+        },
+      },
+      { $project: { _id: 0, id: "$id", zip: { $ifNull: ["$address.zip", null] } } },
+    ]);
+    const stats = await pipelineOf(fx.MvZipStats);
+    const group = stats.find((s) => s.$group).$group;
+    expect(group).toEqual({
+      _id: { city: "$address.city" },
+      zips: { $addToSet: { $ifNull: ["$address.zip", "$$REMOVE"] } },
+    });
+    expect(JSON.stringify(stats)).not.toContain("zip_code");
   });
 
   it("aggregates: COUNT(field) counts non-null values, in-list join condition", async () => {

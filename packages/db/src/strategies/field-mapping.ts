@@ -10,6 +10,7 @@ import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
 
 import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
+import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
 import { isPlainObject } from "../shared/object";
@@ -196,8 +197,8 @@ export abstract class FieldMappingStrategy {
         result[key] = value;
       } else {
         // Formatters are keyed by the field descriptor's physical name.
-        const formatKey = meta.columnMap.get(key) ?? key;
-        result[meta.documentPath(key)] = this.formatFilterValue(formatKey, value, meta);
+        const physical = this.physicalPath(key, meta);
+        result[physical] = this.formatFilterValue(physical, value, meta);
       }
     }
     return result as FilterExpr;
@@ -215,6 +216,17 @@ export abstract class FieldMappingStrategy {
     update: Record<string, unknown>,
     meta: TableMetadata,
   ): Record<string, unknown>;
+
+  /** `$inc` / `$mul` field-op keys to physical names ({@link physicalPath}). */
+  translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
+    if (!this.renamesPaths(meta)) return ops;
+    const physical = (rec: Record<string, number>) => {
+      const out: Record<string, number> = {};
+      for (const key in rec) out[this.physicalPath(key, meta)] = rec[key]!;
+      return out;
+    };
+    return { inc: ops.inc && physical(ops.inc), mul: ops.mul && physical(ops.mul) };
+  }
 
   // ── Shared implementations ──────────────────────────────────────────────
 
@@ -486,14 +498,15 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
     return this.formatWriteValues(data, meta);
   }
 
+  /** Patch keys (top-level or decomposed dotted) to document paths. */
   translatePatchKeys(
     update: Record<string, unknown>,
     meta: TableMetadata,
   ): Record<string, unknown> {
-    if (meta.columnMap.size > 0) {
+    if (this.renamesPaths(meta)) {
       const result: Record<string, unknown> = {};
       for (const key of Object.keys(update)) {
-        result[meta.columnMap.get(key) ?? key] = update[key];
+        result[this.physicalPath(key, meta)] = update[key];
       }
       return this.formatWriteValues(result, meta);
     }

@@ -40,6 +40,9 @@ beforeAll(async () => {
       fx.MvCustomerEligible,
       fx.MvCustomerGeo,
       fx.MvCustomerOrders,
+      fx.MvStore,
+      fx.MvStoreZips,
+      fx.MvZipStats,
     ],
     { force: true },
   );
@@ -63,6 +66,12 @@ beforeAll(async () => {
     { id: 103, amount: 3, status: "paid" },
     { id: 104, customerId: 99, amount: 1, status: "paid" },
     { id: 105, customerId: 1, amount: 2, status: "void" },
+  ] as never);
+  await space.getTable(fx.MvStore).insertMany([
+    { id: 1, address: { city: "Paris", zip: "75001" }, qty: 7, cap: 5 },
+    { id: 2, address: { city: "Paris", zip: "75002" }, qty: 3, cap: 5 },
+    { id: 3, address: { city: "Lyon", zip: "69001" }, qty: 7 },
+    { id: 4, address: { city: "Lyon" }, qty: 9, cap: 1 },
   ] as never);
 }, 60_000);
 
@@ -121,6 +130,55 @@ describe("MongoDB views — join kinds", () => {
       // $sum over no values is 0 on MongoDB (SQL: NULL)
       { city: "Nowhere", orders: 0, total: 0, customers: 1 },
       { city: "Paris", orders: 1, total: 10, customers: 2 },
+    ]);
+  });
+});
+
+// Since 0.1.137: a `@db.column` on a nested leaf renames nothing on documents
+// (the leaf is written, filtered, sorted, grouped and read by views at
+// `address.zip`), and a field-to-field view filter comparison excludes a
+// null / missing operand like SQL.
+describe("MongoDB — nested-leaf @db.column and field-to-field view filters", () => {
+  it("stores the nested leaf at its logical path", async () => {
+    const doc = await db.collection("mv_stores").findOne({ id: 1 });
+    expect(doc).toMatchObject({ address: { city: "Paris", zip: "75001" } });
+    expect(doc).not.toHaveProperty("zip_code");
+  });
+
+  it("table filter / $sort / $groupBy address the stored path", async () => {
+    const table = space.getTable(fx.MvStore);
+    const byZip = await table.findMany({
+      filter: { "address.zip": "75001" },
+      controls: {},
+    } as never);
+    expect(byZip.map((r: any) => r.id)).toEqual([1]);
+    const sorted = await table.findMany({
+      filter: {},
+      controls: { $sort: { "address.zip": -1 } },
+    } as never);
+    expect(sorted.map((r: any) => r.id)).toEqual([2, 1, 3, 4]);
+    const groups = await table.aggregate({
+      filter: { "address.city": "Paris" },
+      controls: {
+        $select: ["address.zip", { $fn: "count", $field: "*", $as: "n" }],
+        $groupBy: ["address.zip"],
+        $sort: { "address.zip": 1 },
+      },
+    } as never);
+    expect(groups).toEqual([
+      { address: { zip: "75001" }, n: 1 },
+      { address: { zip: "75002" }, n: 1 },
+    ]);
+  });
+
+  it("a view reads the nested leaf; `qty > cap` drops a missing cap", async () => {
+    expect(await rows(fx.MvStoreZips)).toEqual([{ id: 1, zip: "75001" }]);
+  });
+
+  it("countDistinct over the nested leaf", async () => {
+    expect(await rows(fx.MvZipStats, { city: 1 })).toEqual([
+      { city: "Lyon", zips: 1 },
+      { city: "Paris", zips: 2 },
     ]);
   });
 });

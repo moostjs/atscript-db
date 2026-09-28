@@ -3,6 +3,17 @@ import { serializeDefaultValue } from "./schema-hash";
 import { fkKey } from "./fk-diff";
 
 /**
+ * Whether a live column's type differs from the type the adapter's
+ * `typeMapper` gives the field — the one rule schema sync diffs column types
+ * by (case-insensitive). Exported for adapters that must agree with it (the
+ * PostgreSQL recreate converts exactly the columns this reports changed).
+ * @since 0.1.137
+ */
+export function isColumnTypeChanged(existingType: string, expectedType: string): boolean {
+  return existingType.toUpperCase() !== expectedType.toUpperCase();
+}
+
+/**
  * Computes the difference between desired schema fields and existing database columns.
  *
  * @param desired - Field descriptors from the Atscript type (after flattening).
@@ -44,8 +55,7 @@ export function computeColumnDiff(
       } else {
         // Check type change (requires typeMapper)
         if (typeMapper) {
-          const expectedType = typeMapper(field);
-          if (expectedType.toUpperCase() !== existingCol.type.toUpperCase()) {
+          if (isColumnTypeChanged(existingCol.type, typeMapper(field))) {
             typeChanged.push({ field, existingType: existingCol.type });
           }
         }

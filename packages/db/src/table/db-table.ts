@@ -13,8 +13,7 @@ import type { FilterExpr } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import { CasMismatchError, DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
-import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
-import type { TableMetadata } from "./table-metadata";
+import { separateCas, separateFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
 import { AtscriptDbReadable } from "./db-readable";
@@ -211,26 +210,6 @@ class RemoveGuardContext<Row> implements TDbRemoveGuardContext<Row> {
     } as never) as Promise<Row | null>;
     return this._pending;
   }
-}
-
-/** Translates a single ops record from logical to physical column names. */
-function _translateOpsRecord(
-  rec: Record<string, number>,
-  meta: TableMetadata,
-): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const key in rec) {
-    out[meta.leafByLogical.get(key)?.physicalName ?? key] = rec[key]!;
-  }
-  return out;
-}
-
-/** Translates ops keys from logical field names to physical column names. */
-function _translateOpsKeys(ops: TFieldOps, meta: TableMetadata): TFieldOps {
-  return {
-    inc: ops.inc ? _translateOpsRecord(ops.inc, meta) : undefined,
-    mul: ops.mul ? _translateOpsRecord(ops.mul, meta) : undefined,
-  };
 }
 
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
@@ -738,7 +717,9 @@ export class AtscriptDbTable<
           if (this.adapter.supportsNativePatch()) {
             // Native patch path: separate top-level ops; patcher handles nested ops internally
             const ops = separateFieldOps(data);
-            const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
+            const translatedOps = ops
+              ? this._fieldMapper.translateOpsKeys(ops, this._meta)
+              : undefined;
             const translatedData = this._fieldMapper.translatePatchKeys(data, this._meta);
             result = await this.adapter.nativePatch(
               translatedFilter,
@@ -751,7 +732,9 @@ export class AtscriptDbTable<
             // A single separateFieldOps pass after flattening catches both top-level and nested ops.
             const update = decomposePatch(data, this as AtscriptDbTable);
             const ops = separateFieldOps(update);
-            const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
+            const translatedOps = ops
+              ? this._fieldMapper.translateOpsKeys(ops, this._meta)
+              : undefined;
             const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
 
             // Resolve array ops via read-modify-write if any __$ keys present
@@ -987,7 +970,7 @@ export class AtscriptDbTable<
     // separateFieldOps catches nested ops like { account: { failedLoginAttempts: { $inc: 1 } } }.
     const update = decomposePatch(dataCopy, this as AtscriptDbTable);
     const ops = separateFieldOps(update);
-    const translatedOps = ops ? _translateOpsKeys(ops, this._meta) : undefined;
+    const translatedOps = ops ? this._fieldMapper.translateOpsKeys(ops, this._meta) : undefined;
     const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
     const translatedFilter = this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
     // Empty patch: nothing to SET (an empty SET list is a SQL syntax error) and

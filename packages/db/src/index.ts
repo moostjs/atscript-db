@@ -57,6 +57,7 @@ export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView } from "./table/db-view";
 export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 export { BaseDbAdapter, ALL_BUCKET_UNITS } from "./base-adapter";
+export { isColumnTypeChanged } from "./schema/column-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";

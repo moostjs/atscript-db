@@ -814,7 +814,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     });
   }
 
-  async dropTableByName(tableName: string): Promise<void> {
+  override async dropTableByName(tableName: string): Promise<void> {
     return this._stmt(() => {
       this._dropAllFtsTables(tableName);
       this._dropAllVecTables(tableName);
@@ -824,7 +824,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     });
   }
 
-  async dropViewByName(viewName: string): Promise<void> {
+  override async dropViewByName(viewName: string): Promise<void> {
     return this._stmt(() => {
       const ddl = `DROP VIEW IF EXISTS "${esc(viewName)}"`;
       this._log(ddl);

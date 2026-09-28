@@ -3325,6 +3325,31 @@ describe("SchemaSync — dependency order", () => {
     expect(JSON.parse(controlValueOf("synced_tables")!).map((e: any) => e.name)).toEqual(["tags"]);
   });
 
+  // Since 0.1.137: before, DbSpace skipped the drop silently and the entry said "drop".
+  it("a removed table the adapter cannot drop is an error entry, not a drop; it stays tracked", async () => {
+    const space = createSpace();
+    const sync = new SchemaSync(space);
+    await sync.run([Rel.Tag], { force: true, onError: "silent" });
+    const admin = space as unknown as {
+      _adminAdapter?: MockAdapter;
+      adapterFactory: () => MockAdapter;
+    };
+    const incapable = admin.adapterFactory();
+    // Back to the base default: an adapter that does not support dropping by name
+    incapable.dropTableByName = (name: string) =>
+      BaseDbAdapter.prototype.dropTableByName.call(incapable, name);
+    admin._adminAdapter = incapable;
+
+    const result = await sync.run([], { force: true, onError: "silent" });
+    const entry = result.entries.find((e) => e.name === "tags")!;
+    expect(entry.status).toBe("error");
+    expect(entry.errors[0]).toBe(
+      'Drop of "tags" failed: Cannot drop table "tags": dropTableByName is not supported by this adapter',
+    );
+    expect(sharedTables.has("tags")).toBe(true);
+    expect(JSON.parse(controlValueOf("synced_tables")!).map((e: any) => e.name)).toEqual(["tags"]);
+  });
+
   it("drops a removed view before table ops", async () => {
     const space = createSpace();
     const sync = new SchemaSync(space);

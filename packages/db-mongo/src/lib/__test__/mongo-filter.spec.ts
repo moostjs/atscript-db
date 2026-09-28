@@ -78,3 +78,42 @@ describe("buildMongoFilter — $exists follows the null model (SQL IS [NOT] NULL
     });
   });
 });
+
+/** `qty <op> cap` with both operands guarded non-null. */
+const guard = (op: string) => ({
+  $expr: {
+    $and: [{ $gt: ["$qty", null] }, { $gt: ["$cap", null] }, { [op]: ["$qty", "$cap"] }],
+  },
+});
+
+describe("buildMongoFilter — field operands (view predicates, since 0.1.137)", () => {
+  it("AND-guards every comparison so a null / missing operand never matches", () => {
+    for (const op of ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"]) {
+      expect(
+        buildMongoFilter({ qty: { [op]: { $field: "cap" } } } as any, { fieldOperands: true }),
+        op,
+      ).toEqual(guard(op));
+    }
+  });
+
+  it("leaves literal comparisons and request filters as they were", () => {
+    expect(
+      buildMongoFilter({ qty: { $gt: 1 }, cap: { $ne: { $field: "qty" } } } as any, {
+        fieldOperands: true,
+      }),
+    ).toEqual({
+      $and: [
+        { qty: { $gt: 1 } },
+        {
+          $expr: {
+            $and: [{ $gt: ["$cap", null] }, { $gt: ["$qty", null] }, { $ne: ["$cap", "$qty"] }],
+          },
+        },
+      ],
+    });
+    // Without `fieldOperands` a `{ $field }` value is data, not a path
+    expect(buildMongoFilter({ qty: { $eq: { $field: "cap" } } } as any)).toEqual({
+      qty: { $field: "cap" },
+    });
+  });
+});

@@ -182,7 +182,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     const physicalToLogical = new Map<string, string>();
     const physicalFields: string[] = [];
     for (const logical of neededLogical) {
-      const physical = meta.pathToPhysical.get(logical) ?? meta.columnMap.get(logical) ?? logical;
+      const physical = meta.physicalPath(logical);
       physicalFields.push(physical);
       physicalToLogical.set(physical, logical);
     }

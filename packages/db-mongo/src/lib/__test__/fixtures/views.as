@@ -119,3 +119,39 @@ export interface MvCustomerOrders {
 export interface MvFilterOps {
     id: MvCustomer.id
 }
+
+// A `@db.column` on a nested leaf renames nothing on documents — the view
+// reads `address.zip` where it is stored (since 0.1.137). A field-to-field
+// filter comparison is null-guarded like SQL (since 0.1.137).
+@db.table 'mv_stores'
+export interface MvStore {
+    @meta.id
+    id: number
+
+    address: {
+        city: string
+
+        @db.column 'zip_code'
+        zip?: string
+    }
+
+    qty: number
+    cap?: number
+}
+
+@db.view 'mv_store_zips'
+@db.view.for MvStore
+@db.view.filter `MvStore.address.zip exists and MvStore.qty > MvStore.cap`
+export interface MvStoreZips {
+    id: MvStore.id
+    zip?: MvStore.address.zip
+}
+
+@db.view 'mv_zip_stats'
+@db.view.for MvStore
+export interface MvZipStats {
+    city: MvStore.address.city
+
+    @db.agg.countDistinct "address.zip"
+    zips: number
+}

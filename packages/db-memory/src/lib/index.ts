@@ -21,7 +21,8 @@ export { sortRows, projectRow } from "./memory-engine";
 /**
  * Creates a {@link DbSpace} backed by an in-memory {@link MemoryAdapter}.
  *
- * Tables default to STORED mode (an instance-level `Map`). To make one table
+ * Tables default to STORED mode (a `Map` per table in the space's in-memory
+ * database, shared by every adapter of the space). To make one table
  * read-only and read-through from a runtime closure, call `setMemoryProvider`
  * (re-exported from {@link ./memory-adapter}) on the space AFTER the table's
  * adapter has been built.
