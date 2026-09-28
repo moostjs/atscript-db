@@ -134,6 +134,8 @@ Reach for `@db.column` when you need a custom physical name — typically to map
 
 For nested objects that are flattened, the parent prefix is prepended automatically. If you rename a parent field, all its flattened children reflect the new prefix.
 
+Document storage (MongoDB) renames **top-level** fields only: a `@db.column` on a nested field is ignored there, and the field keeps its logical path — see [MongoDB → Renamed Fields](/adapters/mongodb#renamed-fields).
+
 ## Excluding Fields
 
 Use `@db.ignore` to keep a field in the type but exclude it from the database:

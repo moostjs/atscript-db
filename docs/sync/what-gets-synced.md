@@ -69,7 +69,7 @@ Column-level changes are detected by `computeColumnDiff()`, which compares the d
 
 ### Add
 
-New fields in a type generate `ALTER TABLE ADD COLUMN` statements. Added columns are nullable by default unless a default value is specified via `@db.default.*`:
+New fields in a type generate `ALTER TABLE ADD COLUMN` statements. Added columns are nullable by default unless a default value is specified via `@db.default.*`. On MongoDB there is no column to add: a literal `@db.default` is written into existing documents that don't hold the field yet — since 0.1.137 a document that already holds a value keeps it (before, every document was overwritten):
 
 ```atscript
 @db.table 'users'
@@ -294,6 +294,10 @@ Managed views that have joins, a filter or a having clause hash differently afte
 **Every** managed view hashes differently after the upgrade and is recreated **once** on the first sync — `plan()` / `--dry-run` shows each one as an alter on that first run. Plan for the same consequences as in the 0.1.128 upgrade above (PostgreSQL `GRANT`s, user-created dependent views, metadata-only on MongoDB), plus: PostgreSQL materialized views are **re-materialized** (a full scan of their sources). The recreate is also when MongoDB inner joins start dropping unmatched documents and invalid view predicates start failing the sync — see [Upgrading → 0.1.136](/guide/upgrading#v0-1-136).
 :::
 
+::: warning Upgrading to 0.1.137
+Every managed **MongoDB** view is recreated **once** on the first sync (metadata-only; via [`viewRenderRevision()`](/adapters/creating-adapters#view-render-revision)); SQL view hashes are unchanged — see [Upgrading → 0.1.137](/guide/upgrading#v0-1-137).
+:::
+
 Views whose definition changed (or that are being renamed), **and views removed from the schema**, are dropped
 **before** table changes apply; changed ones are recreated after. This matters when a sync
 both drops a column and updates a view that referenced it: without the early
@@ -422,7 +426,7 @@ The table is dropped and recreated from scratch.
 All data in the table is permanently destroyed. Use `'drop'` only for ephemeral data like sessions, caches, or temporary tables where data loss is acceptable.
 :::
 
-### `'recreate'` — Copy and Swap
+### `'recreate'` — Copy and Swap {#recreate-copy-and-swap}
 
 ```atscript
 @db.table 'users'
@@ -439,6 +443,14 @@ export interface User {
 Sync copies the data into a new table with the updated schema and swaps it
 in. Data is preserved wherever the old and new types are compatible;
 incompatible columns may lose data during the copy.
+
+On PostgreSQL (since 0.1.137) a column whose type changed is converted to
+its new type the way an in-place type change converts it — see
+[PostgreSQL → Column Type Changes](/adapters/postgresql#column-type-changes).
+A value that does not convert fails the recreate inside its transaction:
+the table keeps its rows, old types and constraints, and its entry is an
+`error`. Before 0.1.137 a type change on a required column always failed
+the copy (`invalid input syntax for type double precision: ""`).
 
 On PostgreSQL (since 0.1.129) the swap keeps the constraint names stable —
 the recreated table's own `<table>_pkey` / `<table>_<col>_fkey` names and

@@ -233,9 +233,27 @@ Dotted paths into `@db.json` objects and arrays of objects (`prefs.theme`, `item
 `$exists` means "the field holds a value" on every adapter, so a document storing `note: null` no longer matches `{ note: { $exists: true } }` — the adapter sends `{ note: { $ne: null } }` / `{ note: null }` instead of native `$exists`. Filters that counted a `null`-valued key as present now return different rows. See [Existence](/api/queries#existence).
 :::
 
-## Renamed Fields (`@db.column`)
+## Renamed Fields (`@db.column`) {#renamed-fields}
 
 A field renamed with `@db.column 'physical_name'` is addressed by its logical name everywhere. Since 0.1.132 that includes `$select` and `$sort` on `findMany` / `findOne` / `findManyWithCount` and their search, vector and geo variants, filters on dotted paths under a renamed object, and grouped queries (`$groupBy`, aggregate fields, `$sort`, `$having`). Up to 0.1.131 a renamed field was dropped from `$select`ed rows, silently ignored in `$sort`, and mapped to the wrong key in grouped queries.
+
+MongoDB renames **top-level** keys only:
+
+```atscript
+@db.column 'prof'
+profile: {
+    bio: string        // stored at prof.bio — the renamed parent renames the first segment
+}
+
+address: {
+    @db.column 'zip_code'
+    zip: string        // stored at address.zip — a nested @db.column is ignored here
+}
+```
+
+- A field under a renamed object is addressed at its stored path everywhere — filters, sorts, patches, `$inc` / `$mul` and indexes (`@db.index.*` on `profile.bio` indexes `prof.bio`).
+- A `@db.column` (and `@db.column.renamed`) on a nested field has no effect on MongoDB: the field is written, filtered, sorted, grouped, indexed and read by views at its logical path (`address.zip`). SQL adapters still flatten it to `address__zip_code`, so one model can serve both.
+- Changing or removing a nested `@db.column` is not a schema change on MongoDB — sync reports nothing. Upgrading from 0.1.136: see [Upgrading → 0.1.137](/guide/upgrading#v0-1-137).
 
 ## Grouped Queries and Calendar Buckets {#calendar-buckets}
 
@@ -591,7 +609,7 @@ const results = await cursor.toArray();
 
 ## Views
 
-Managed [views](../views/) become native MongoDB views (`createCollection` with `viewOn` + an aggregation pipeline). Each join becomes a `$lookup` + `$unwind`; field paths are the physical document paths (a `@db.column` renames the top-level key), joined documents live under `__joined_<table>`.
+Managed [views](../views/) become native MongoDB views (`createCollection` with `viewOn` + an aggregation pipeline). Each join becomes a `$lookup` + `$unwind`; field paths are the physical document paths (a `@db.column` renames a top-level key only — see [Renamed Fields](#renamed-fields)), joined documents live under `__joined_<table>`.
 
 | Join condition                                                                                                                               | `$lookup` form                                 |
 | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
@@ -606,6 +624,7 @@ Null semantics follow SQL:
 - A view field whose source may be missing — a left-joined table, an optional field, a leaf inside a `@db.json` field — is projected as `{ $ifNull: [source, null] }`, so it reads back as `null`. Every other field stays a plain path, so a filter or sort on the view can still use the source collection's indexes.
 - `matches` is not supported in join conditions (`$regexMatch` needs MongoDB 4.2); it still works in `@db.view.filter`, which is a regular `$match`.
 - `@db.view.filter` and `@db.view.having` use [query](../api/queries) semantics: `!=` also matches documents where the field is null or missing, `exists` means "holds a value" (a stored `null` counts as absent), `not exists` its negation, and `matches` accepts `/pattern/flags`.
+- A field-to-field comparison in `@db.view.filter` / `@db.view.having` (`` `Item.qty > Item.cap` ``, any of `=`, `!=`, `<`, `<=`, `>`, `>=`) is false when either field is null or missing, as on SQL and in join conditions (since 0.1.137; before, a missing field compared below every value, so `7 > missing` matched).
 - Aggregates: `$sum` over a group with no values is `0` (SQL: `NULL`).
 
 ::: tip Indexes

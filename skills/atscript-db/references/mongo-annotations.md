@@ -83,7 +83,7 @@ For vector fields, use the core `db.vector` primitive (registered by `dbPlugin()
 
 ## Divergence from SQL annotations
 
-- `@db.column` is a no-op semantically — MongoDB stores keys verbatim. Still costs the perf price of key remapping.
+- `@db.column` renames TOP-LEVEL document keys only (still costs the key-remapping perf price); on a nested field it — and `@db.column.renamed` — is ignored (since 0.1.137), the field stays at its logical path. See [adapters-mongo.md](./adapters-mongo.md) § Known limits.
 - `@db.rel.onDelete` / `@db.rel.onUpdate` have no native enforcement; the generic layer emulates cascades (see [relations.md](relations.md)).
 - `@db.index.fulltext` maps to a legacy `text` index; for Atlas Search prefer `@db.mongo.search.static` + `@db.mongo.search.text`.
 - Native FK constraints are not supported (`supportsNativeForeignKeys(): false`) → FK validation + cascades run in the application integrity strategy.

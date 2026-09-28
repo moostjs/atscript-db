@@ -26,6 +26,10 @@ The table handles query translation, field flattening, relation orchestration, v
 
 When an `AtscriptDbTable` is created with your adapter, it registers itself via `registerReadable()`. From that point, you can access all computed table metadata through `this._table`.
 
+#### `registerSpace(space)` — since 0.1.137 {#register-space}
+
+A `DbSpace` calls it on every adapter its factory builds — the administrative adapter it drops tables through included — before `registerReadable()`. The default does nothing. Override it to share state across a space's adapters when there is no driver to share it through: the memory adapter keeps one store per space, keyed by the `space` object.
+
 ## Getting Started
 
 Extend `BaseDbAdapter` and implement the abstract methods:
@@ -346,7 +350,7 @@ Drop the adapter's own table. Used by `@db.sync.method "drop"` for tables with e
 
 #### `dropTableByName(name)`
 
-Drop a table by name, without needing a registered readable. Used by schema sync to remove tables that are no longer present in the schema.
+Drop a table by name, without needing a registered readable. Used by schema sync to remove tables that are no longer present in the schema. A missing table is not an error. The base class throws `… is not supported by this adapter` (since 0.1.137 — see [Upgrading](/guide/upgrading#v0-1-137)); schema sync then reports every removed table as an `error` entry and keeps it tracked.
 
 #### `dropTablesByName(names)` — since 0.1.128
 
@@ -368,7 +372,24 @@ Create or update a database view. Called when the adapter's readable is a view �
 
 #### `dropViewByName(name)`
 
-Drop a view by name. Used by schema sync to remove views that are no longer present in the schema.
+Drop a view by name. Used by schema sync to remove views that are no longer present in the schema, and to drop a managed view before recreating it. A missing view is not an error. The base class throws, like `dropTableByName()`, and sync reports the view as an `error` entry.
+
+#### `viewRenderRevision()` — since 0.1.137 {#view-render-revision}
+
+```typescript
+viewRenderRevision(): string | undefined
+```
+
+Schema sync recreates a managed view only when its definition changes, so a fix to how your adapter renders views would never reach views created before it. Return a revision string and bump it in the release that changes what an existing view returns: the revision is part of every managed view's sync snapshot, so each managed view of your adapter is recreated once (`plan()` reports it as `alter`) on the first sync after the upgrade. External views are never affected. The default `undefined` adds nothing to the snapshot — view hashes stay as they were. The MongoDB adapter returns `"2"` since 0.1.137.
+
+```typescript
+class MyAdapter extends BaseDbAdapter {
+  // Bump when ensureView() renders an unchanged view differently
+  override viewRenderRevision(): string {
+    return "2";
+  }
+}
+```
 
 ### Foreign Keys
 

@@ -31,6 +31,8 @@ There is no driver to install and no plugin to register. `@atscript/core`, `@ats
 
 Both modes start from `createAdapter()`, which builds a `DbSpace` backed by a fresh `MemoryAdapter` per table, then run [schema sync](/sync/) to record indexes and provision the in-memory control table.
 
+The space is the database: its tables are keyed by table name and shared by every adapter the space builds, and a new space starts empty. Since 0.1.137 — before, each compiled type had its own store, even when two types named the same table.
+
 Stored (read-write) — the drop-in in-memory space for tests and trivial tables:
 
 ```typescript
@@ -108,7 +110,7 @@ Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale
 
 ### Field Operations & Defaults
 
-`$inc`, `$dec`, and `$mul` field operators are applied over dot-paths. `@db.default.increment` (a per-instance counter that resets with each fresh space, like SQLite `:memory:`), `@db.default.now`, and static defaults are all honored at insert time.
+`$inc`, `$dec`, and `$mul` field operators are applied over dot-paths. `@db.default.increment` (a per-table counter that restarts with each fresh space, like SQLite `:memory:`, and when the table is dropped), `@db.default.now`, and static defaults are all honored at insert time.
 
 ### Unique & Primary-Key Enforcement
 
@@ -132,7 +134,11 @@ There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cas
 
 ### Schema Sync
 
-Schema sync works end to end: it provisions an in-memory `__atscript_control` table, takes the distributed lock, and records unique indexes for insert-time enforcement. `ensureTable()` is a no-op because the store is just an instance `Map`. See [Schema Sync](/sync/).
+Schema sync provisions an in-memory `__atscript_control` table, takes the distributed lock, creates and drops tables, and records unique indexes for insert-time enforcement. See [Schema Sync](/sync/).
+
+- **Create** — a table that does not exist yet is reported `create`. A write to a table that was never synced creates it too.
+- **Drop** (since 0.1.137) — a model removed from the schema has its table dropped: rows, unique indexes and increment counter. Added back, it is reported `create` and starts empty. Removed views are dropped the same way. Before 0.1.137, sync reported the drop but the rows stayed, and a model added back was reported `in-sync` with its old rows.
+- **Columns** — sync does not diff or migrate columns. See [Limitations](#limitations).
 
 ## Comparison semantics
 
@@ -156,6 +162,7 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 - **Provider tables are read-only** — writes throw, and there is no cross-request pagination stability (page 1 and page 2 are separate requests over separate snapshots).
 - **Relations `$with`** — resolved by core's app-level batch loading (`supportsNativeRelations()` is `false`), not natively.
 - **No FTS / vector / geo / `$search`** — unsupported. No DB views.
+- **Table-level schema sync only** — sync creates and drops tables but does not diff columns: after a field is renamed, removed or changes type, stored rows keep their old shape and `plan()` reports the table `in-sync`. `@db.sync.method` has no effect. `@db.table.renamed` is not applied: the table is created empty under its new name, and the old rows are not moved.
 - **In-process only** — nothing is persisted or shared across processes. **Not a production datastore.**
 
 ## Utilities
