@@ -452,6 +452,10 @@ the table keeps its rows, old types and constraints, and its entry is an
 `error`. Before 0.1.137 a type change on a required column always failed
 the copy (`invalid input syntax for type double precision: ""`).
 
+On MySQL (since 0.1.140) the copy runs in strict `sql_mode` whatever the
+server's setting, so a value that does not convert fails the copy instead of
+being coerced — see [MySQL → Conversions are strict](/adapters/mysql#strict-conversions).
+
 On SQLite (since 0.1.138) the recreate runs in one transaction: a failed
 step rolls it back and the table keeps its rows. On MySQL, whose DDL is not
 transactional, a copy that fails drops the `<table>__tmp_<ts>` table and

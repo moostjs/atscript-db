@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.140 {#v0-1-140}
+
+### MySQL
+
+- **Schema sync no longer converts data silently on a server that is not strict.** Its converting statements (`MODIFY COLUMN`, the `NOT NULL` backfill, the primary-key rebuild, the `@db.sync.method 'recreate'` copy) now run with `STRICT_ALL_TABLES` added to the session `sql_mode`. On a server that is not strict — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — a string → number change used to turn `'abc'` into `0`, and lowering `@expect.maxLength` truncated stored text, while the sync reported success. Both now fail the sync as an `error` entry and leave the data as it was. Clean or migrate values that do not convert before changing a column's type. Strict servers see no change. See [MySQL → Conversions are strict](/adapters/mysql#strict-conversions).
+
 ## 0.1.139 {#v0-1-139}
 
 ### MongoDB

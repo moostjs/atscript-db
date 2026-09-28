@@ -278,6 +278,15 @@ ALTER TABLE `users` MODIFY COLUMN `age` INT UNSIGNED NOT NULL
 
 This means most schema changes do not require full table recreation. You only need `@db.sync.method 'recreate'` for rare structural changes that MySQL cannot handle in-place (e.g., reordering primary key columns).
 
+### Conversions are strict (since 0.1.140) {#strict-conversions}
+
+Schema sync runs the statements that convert stored values — `MODIFY COLUMN`, the `NULL` backfill before `NOT NULL`, the primary-key rebuild and the `@db.sync.method 'recreate'` copy — with `STRICT_ALL_TABLES` added to the session `sql_mode`, and restores the session's previous mode afterwards. A value that does not convert fails the sync as an `error` entry and the table keeps its data:
+
+- changing `code: string` to `code: number` fails on a stored `'abc'`;
+- lowering `@expect.maxLength` below a stored value fails with `Data too long`.
+
+Before 0.1.140 this depended on the server. A server whose `sql_mode` is not strict — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — coerced `'abc'` to `0` and truncated text, and the sync reported success. Clean or migrate such values before changing the type. Your application's own connections keep the server's `sql_mode`.
+
 ### Column definitions (since 0.1.128)
 
 `CREATE TABLE`, `ADD COLUMN` and `MODIFY COLUMN` all render a column through one definition builder, so a `MODIFY` never silently resets an attribute it did not mention:
