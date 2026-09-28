@@ -154,11 +154,12 @@ Callers building regex from user input should pass it through `escapeRegex(liter
 
 `@db.sync.method 'recreate'` is overridden in `sqlite-adapter.ts`. Flow (one block per table):
 
-1. Drop FTS5 + vec0 shadow tables (`syncIndexes()` recreates them).
-2. `PRAGMA foreign_keys = OFF`; `PRAGMA legacy_alter_table = ON`.
-3. Create temp with new schema: `<table>__tmp_<ts>`.
-4. `INSERT INTO <tmp> (commonCols) SELECT … FROM <table>` — copies the intersection of old × new physical names. Non-optional, non-PK columns use `COALESCE(col, <default>)` (from `@db.default.value` or type default).
-5. Rename old to `<table>__old_<ts>`, rename temp to `<table>`, `DROP TABLE <old>`.
-6. Restore pragmas.
+1. `PRAGMA foreign_keys = OFF`; `PRAGMA legacy_alter_table = ON` — outside the transaction (the FK pragma is a no-op inside one).
+2. `withTransaction` (0.1.138; joins a caller's tx) around steps 3–6 → any failure rolls back everything: rows, FTS/vec, no `<table>__tmp_<ts>` left (≤ 0.1.137: temp table left behind, search indexes gone).
+3. Drop FTS5 + vec0 shadow tables (`syncIndexes()` recreates them).
+4. Create temp with new schema: `<table>__tmp_<ts>`.
+5. `INSERT INTO <tmp> (commonCols) SELECT … FROM <table>` — copies the intersection of old × new physical names. Non-optional, non-PK columns use `COALESCE(col, <default>)` (from `@db.default.value` or type default).
+6. `DROP TABLE <table>`, rename temp to `<table>` (≤ 0.1.137: rename-old-away dance).
+7. Restore pragmas.
 
 Column rename (`@db.column.renamed`) is handled in `syncColumns`, not here — `recreateTable` only copies the intersection of physical names.

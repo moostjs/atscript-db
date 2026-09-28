@@ -310,7 +310,7 @@ Whether the table has at least one row (`SELECT EXISTS`/`LIMIT 1`, not a count).
 
 Live foreign keys that **reference** `tableName` from any table in the database, as `{ table, fields, targetFields }[]` — including tables whose models are no longer in the inventory. Schema sync uses it to drop removed tables children-first, to refuse dropping a table an unmanaged table still references, and to refuse a primary-key change a live constraint depends on. Omit it on engines without physical foreign keys.
 
-#### `getObjectKind(name)` — since 0.1.128
+#### `getObjectKind(name)` — since 0.1.128 {#getobjectkind-name}
 
 `'table' | 'view' | 'materialized' | undefined` for the object stored under `name`. Schema sync refuses a run when a physical table sits where a managed view is declared (or a view where a table is declared), and uses it to check whether an FK target outside the inventory exists at all. Adapters without it skip the check.
 
@@ -322,7 +322,7 @@ Apply column-level changes from a computed diff. The diff object contains `added
 
 #### `recreateTable()`
 
-Full table recreation with data migration. Used when structural changes cannot be handled by `ALTER TABLE` (e.g., column drops in SQLite, or when `@db.sync.method "recreate"` is specified). Typical pattern: create a temporary table with the new schema, copy data (only columns that exist in both old and new), drop the old table, rename the temp table to the original name.
+Full table recreation with data migration. Used when structural changes cannot be handled by `ALTER TABLE` (e.g., column drops in SQLite, or when `@db.sync.method "recreate"` is specified). Typical pattern: create a temporary table with the new schema, copy data (only columns that exist in both old and new), drop the old table, rename the temp table to the original name. Run it in a transaction where the engine's DDL is transactional. Where DDL auto-commits (MySQL), drop the temp table when a step fails before the original is gone; after that the temp table holds the only copy of the rows, so keep it and name it in the error.
 
 #### `renameTable(oldName)`
 

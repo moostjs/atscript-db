@@ -6,6 +6,21 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.138 {#v0-1-138}
+
+### Memory
+
+- **Sync now runs the pre-flight name checks.** The memory adapter implements [`getObjectKind`](/adapters/creating-adapters#getobjectkind-name), so a sync that declares a managed view where a table sits (or a table where a view sits) is refused, as on SQL and MongoDB. Before, the clash went unnoticed.
+- **A foreign key to a table that is not in the space is refused.** A `@db.rel.FK` whose target is neither in the sync inventory nor already in the space's in-memory database fails pre-flight (`FK <table>.<cols> references "<target>" which is neither in the sync inventory nor present in the database`). Before, the check was skipped. Sync the target table in the same run, or sync it first in the same `DbSpace` — see [Memory → Schema Sync](/adapters/memory#schema-sync).
+
+### MySQL
+
+- **A failed `@db.sync.method 'recreate'` no longer leaves a `<table>__tmp_<ts>` table behind.** When the copy fails, the temp table is dropped and the table keeps its rows. Before, every failed attempt left one; drop any you find from earlier runs. A failure after the original table was dropped keeps the temp table, because it holds the only copy of the rows, and the error names it (`… its rows are in "<table>__tmp_<ts>"`) — see [What gets synced → Copy and Swap](/sync/what-gets-synced#recreate-copy-and-swap).
+
+### SQLite
+
+- **`@db.sync.method 'recreate'` runs in one transaction.** A step that fails rolls the whole recreate back: the table keeps its rows and its full-text and vector indexes, and no `<table>__tmp_<ts>` table is left behind (before, one was, and the indexes were already gone).
+
 ## 0.1.137 {#v0-1-137}
 
 ### MongoDB

@@ -138,6 +138,7 @@ Schema sync provisions an in-memory `__atscript_control` table, takes the distri
 
 - **Create** — a table that does not exist yet is reported `create`. A write to a table that was never synced creates it too.
 - **Drop** (since 0.1.137) — a model removed from the schema has its table dropped: rows, unique indexes and increment counter. Added back, it is reported `create` and starts empty. Removed views are dropped the same way. Before 0.1.137, sync reported the drop but the rows stayed, and a model added back was reported `in-sync` with its old rows.
+- **Pre-flight** (since 0.1.138) — sync refuses a managed view declared where a table sits, a table declared where a view sits, and a foreign key whose target is neither in the inventory nor already in the space. Include FK targets in the same sync, or sync them first on the same `DbSpace` — a new space starts empty.
 - **Columns** — sync does not diff or migrate columns. See [Limitations](#limitations).
 
 ## Comparison semantics

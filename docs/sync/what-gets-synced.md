@@ -452,6 +452,13 @@ the table keeps its rows, old types and constraints, and its entry is an
 `error`. Before 0.1.137 a type change on a required column always failed
 the copy (`invalid input syntax for type double precision: ""`).
 
+On SQLite (since 0.1.138) the recreate runs in one transaction: a failed
+step rolls it back and the table keeps its rows. On MySQL, whose DDL is not
+transactional, a copy that fails drops the `<table>__tmp_<ts>` table and
+leaves the original with its rows; a failure after the original was dropped
+keeps the temp table, which holds the only copy of the rows, and the error
+names it. Rename it back to recover. Either way the entry is an `error`.
+
 On PostgreSQL (since 0.1.129) the swap keeps the constraint names stable —
 the recreated table's own `<table>_pkey` / `<table>_<col>_fkey` names and
 the inbound foreign keys of other tables, which are captured (whether they

@@ -235,10 +235,9 @@ SQLite does not support `ALTER COLUMN` for type changes. When schema sync detect
 
 1. Creates a new table with the updated schema
 2. Copies data from the old table (with `COALESCE` for new NOT NULL columns)
-3. Renames old table out of the way, renames new table into place
-4. Drops the old table
+3. Drops the old table and renames the new one into place
 
-Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
+Since 0.1.138 these steps run in one transaction: a step that fails rolls them all back, so the table keeps its rows and its full-text and vector indexes. Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
 
 ### In-Memory Databases
 
