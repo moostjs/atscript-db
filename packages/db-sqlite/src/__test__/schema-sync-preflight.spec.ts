@@ -318,4 +318,18 @@ describe("SQLite: schema-sync pre-flight, ordering and primitives", () => {
     expect(await admin.getObjectKind("pf_parents")).toBeUndefined();
     expect(driver.get<{ fk: number }>("PRAGMA foreign_keys")).toEqual({ foreign_keys: 1 });
   });
+
+  it("recreateTable drops its temp table when the copy fails and leaves the original intact", async () => {
+    // Duplicate ids: the rebuilt table's primary key rejects the copy
+    driver.exec(`CREATE TABLE "pf_tokens" ("id" INTEGER, "code" TEXT, "label" TEXT)`);
+    driver.exec(`INSERT INTO "pf_tokens" VALUES (1, 'a', 'A'), (1, 'b', 'B')`);
+    const adapter = spaceFor().getAdapter(fx.PfTokenV1);
+    await expect(adapter.recreateTable!()).rejects.toThrow(/UNIQUE|PRIMARY KEY/);
+    const leftovers = driver.all<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE name LIKE 'pf_tokens\\_\\_%' ESCAPE '\\'`,
+    );
+    expect(leftovers).toEqual([]);
+    expect(driver.get<{ n: number }>(`SELECT COUNT(*) AS n FROM "pf_tokens"`)).toEqual({ n: 2 });
+    expect(driver.get<{ fk: number }>("PRAGMA foreign_keys")).toEqual({ foreign_keys: 1 });
+  });
 });

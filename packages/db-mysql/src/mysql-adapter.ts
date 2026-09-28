@@ -1020,6 +1020,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     const conn = tx ?? (await this.driver.getConnection());
     const dedicated = tx === undefined;
     await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
+    // MySQL DDL auto-commits, so nothing rolls the temp table back: a failure
+    // before the original is dropped drops it here. After that the temp table
+    // holds the only copy of the rows and is left in place.
+    let originalDropped = false;
     try {
       // 1. Create new table with temp name
       const createSql = buildCreateTable(
@@ -1061,9 +1065,20 @@ export class MysqlAdapter extends BaseDbAdapter {
         await conn.exec(copySql);
       }
 
-      // 4. Drop old, rename new
+      // 4. Drop old, rename new. Not an atomic `RENAME TABLE t TO old, tmp TO t`:
+      //    InnoDB would re-point other tables' foreign keys at the renamed original.
       await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
+      originalDropped = true;
       await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
+    } catch (error) {
+      if (originalDropped) {
+        throw new Error(
+          `Recreate of "${tableName}" failed after the original table was dropped; its rows are in "${tempName}"`,
+          { cause: error },
+        );
+      }
+      await conn.exec(`DROP TABLE IF EXISTS ${qi(tempName)}`).catch(() => undefined);
+      throw error;
     } finally {
       await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
       if (dedicated) {

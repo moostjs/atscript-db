@@ -683,61 +683,64 @@ export class SqliteAdapter extends BaseDbAdapter {
       const tableName = this.resolveTableName();
       const tempName = `${tableName}__tmp_${Date.now()}`;
 
-      // Drop FTS / vec shadow tables before rebuild — syncIndexes() will recreate them
-      this._dropAllFtsTables(tableName);
-      this._dropAllVecTables(tableName);
-
-      // Disable FK checks during recreation — referenced tables may be mid-sync
+      // Disable FK checks during recreation — referenced tables may be mid-sync.
+      // Set outside the transaction: `PRAGMA foreign_keys` is a no-op inside one.
       this.driver.exec("PRAGMA foreign_keys = OFF");
       this.driver.exec("PRAGMA legacy_alter_table = ON");
       try {
-        // 1. Create new table with temp name
-        const createSql = buildCreateTable(
-          tempName,
-          this._table.fieldDescriptors,
-          this._table.foreignKeys,
-          { typeMapper: (field) => this.typeMapper(field) },
-        );
-        this._log(createSql);
-        this.driver.exec(createSql);
+        // One transaction: a failed step rolls every step back, so the table
+        // keeps its rows and search indexes and no temp table is left behind.
+        await this.withTransaction(async () => {
+          // Drop FTS / vec shadow tables before rebuild — syncIndexes() will recreate them
+          this._dropAllFtsTables(tableName);
+          this._dropAllVecTables(tableName);
 
-        // 2. Get columns that exist in both old and new
-        const oldCols = (await this.getExistingColumns()).map((c) => c.name);
-        const newCols = this._table.fieldDescriptors
-          .filter((f) => !f.ignored)
-          .map((f) => f.physicalName);
-        const oldColSet = new Set(oldCols);
-        const commonCols = newCols.filter((c) => oldColSet.has(c));
-
-        if (commonCols.length > 0) {
-          // 3. Copy data — use COALESCE for columns that became NOT NULL
-          const fieldsByName = new Map(
-            this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+          // 1. Create new table with temp name
+          const createSql = buildCreateTable(
+            tempName,
+            this._table.fieldDescriptors,
+            this._table.foreignKeys,
+            { typeMapper: (field) => this.typeMapper(field) },
           );
-          const colNames = commonCols.map((c) => `"${esc(c)}"`).join(", ");
-          const selectExprs = commonCols
-            .map((c) => {
-              const field = fieldsByName.get(c);
-              if (field && !field.optional && !field.isPrimaryKey) {
-                const fallback =
-                  field.defaultValue?.kind === "value"
-                    ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
-                    : defaultValueForType(field.designType);
-                return `COALESCE("${esc(c)}", ${fallback}) AS "${esc(c)}"`;
-              }
-              return `"${esc(c)}"`;
-            })
-            .join(", ");
-          const copySql = `INSERT INTO "${esc(tempName)}" (${colNames}) SELECT ${selectExprs} FROM "${esc(tableName)}"`;
-          this._log(copySql);
-          this.driver.exec(copySql);
-        }
+          this._log(createSql);
+          this.driver.exec(createSql);
 
-        // 4. Rename old table out of the way, rename new into place, drop old
-        const oldName = `${tableName}__old_${Date.now()}`;
-        this.driver.exec(`ALTER TABLE "${esc(tableName)}" RENAME TO "${esc(oldName)}"`);
-        this.driver.exec(`ALTER TABLE "${esc(tempName)}" RENAME TO "${esc(tableName)}"`);
-        this.driver.exec(`DROP TABLE IF EXISTS "${esc(oldName)}"`);
+          // 2. Get columns that exist in both old and new
+          const oldCols = (await this.getExistingColumns()).map((c) => c.name);
+          const newCols = this._table.fieldDescriptors
+            .filter((f) => !f.ignored)
+            .map((f) => f.physicalName);
+          const oldColSet = new Set(oldCols);
+          const commonCols = newCols.filter((c) => oldColSet.has(c));
+
+          if (commonCols.length > 0) {
+            // 3. Copy data — use COALESCE for columns that became NOT NULL
+            const fieldsByName = new Map(
+              this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+            );
+            const colNames = commonCols.map((c) => `"${esc(c)}"`).join(", ");
+            const selectExprs = commonCols
+              .map((c) => {
+                const field = fieldsByName.get(c);
+                if (field && !field.optional && !field.isPrimaryKey) {
+                  const fallback =
+                    field.defaultValue?.kind === "value"
+                      ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
+                      : defaultValueForType(field.designType);
+                  return `COALESCE("${esc(c)}", ${fallback}) AS "${esc(c)}"`;
+                }
+                return `"${esc(c)}"`;
+              })
+              .join(", ");
+            const copySql = `INSERT INTO "${esc(tempName)}" (${colNames}) SELECT ${selectExprs} FROM "${esc(tableName)}"`;
+            this._log(copySql);
+            this.driver.exec(copySql);
+          }
+
+          // 4. Drop old, rename new into place
+          this.driver.exec(`DROP TABLE IF EXISTS "${esc(tableName)}"`);
+          this.driver.exec(`ALTER TABLE "${esc(tempName)}" RENAME TO "${esc(tableName)}"`);
+        });
       } finally {
         this.driver.exec("PRAGMA legacy_alter_table = OFF");
         this.driver.exec("PRAGMA foreign_keys = ON");

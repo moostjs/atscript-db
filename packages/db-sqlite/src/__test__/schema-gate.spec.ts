@@ -98,7 +98,7 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
     inner.exec(`INSERT INTO "pf_children" ("parentId") VALUES (1)`);
     expect(inner.all(`SELECT * FROM "pf_children"`)).toHaveLength(1);
   });
-
+  // (b) the PRAGMA toggles are effective: issued with the gate held, outside the rebuild transaction
   // (b) the PRAGMA toggles are effective because the gate is held without BEGIN
   it("recreateTable toggles PRAGMA foreign_keys effectively while holding the gate (populated parent/child)", async () => {
     await parents.ensureTable();
@@ -114,7 +114,14 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
       { sql: "PRAGMA foreign_keys = OFF", foreignKeys: 0, gateHeld: true },
       { sql: "PRAGMA foreign_keys = ON", foreignKeys: 1, gateHeld: true },
     ]);
-    expect(txStatements(driver.execs)).toEqual([]); // no BEGIN — the gate alone serialises
+    // The rebuild is one transaction (since 0.1.138); the toggles sit outside it,
+    // where PRAGMA foreign_keys takes effect.
+    const execs = driver.execs;
+    expect(txStatements(execs)).toEqual(["BEGIN IMMEDIATE", "COMMIT"]);
+    expect(execs.indexOf("PRAGMA foreign_keys = OFF")).toBeLessThan(
+      execs.indexOf("BEGIN IMMEDIATE"),
+    );
+    expect(execs.indexOf("COMMIT")).toBeLessThan(execs.indexOf("PRAGMA foreign_keys = ON"));
     expect(driver.foreignKeys()).toBe(1);
     expect(gate().held).toBe(false);
 

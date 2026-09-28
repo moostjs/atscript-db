@@ -266,6 +266,45 @@ describe("MysqlAdapter — sync primitives", () => {
     expect(driver.releaseCount()).toBe(1);
   });
 
+  describe("recreateTable failure", () => {
+    const idColumn = {
+      COLUMN_NAME: "id",
+      COLUMN_TYPE: "bigint",
+      IS_NULLABLE: "NO",
+      COLUMN_DEFAULT: null,
+      IS_PK: 1,
+    };
+    const failingOn = (prefix: string) =>
+      createDriver({
+        all: [["INFORMATION_SCHEMA.COLUMNS", [idColumn]]],
+        execError: (sql) => (sql.startsWith(prefix) ? new Error("boom") : undefined),
+      });
+
+    it("drops the temp table when the copy fails (DDL auto-commits)", async () => {
+      const driver = failingOn("INSERT INTO");
+      const adapter = new MysqlAdapter(driver);
+      new AtscriptDbTable(fx.PfTokenV1, adapter);
+      await expect(adapter.recreateTable()).rejects.toThrow("boom");
+      const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+      const tempName = /`(pf_tokens__tmp_\d+)`/.exec(ddl.join("\n"))![1];
+      expect(ddl).toContain(`DROP TABLE IF EXISTS \`${tempName}\``);
+      expect(ddl.some((sql) => sql.startsWith("DROP TABLE IF EXISTS `pf_tokens`"))).toBe(false);
+      expect(ddl.at(-1)).toBe("SET FOREIGN_KEY_CHECKS = 1");
+      expect(driver.releaseCount()).toBe(1);
+    });
+
+    it("keeps the temp table and names it when the rename fails after the original was dropped", async () => {
+      const driver = failingOn("RENAME TABLE");
+      const adapter = new MysqlAdapter(driver);
+      new AtscriptDbTable(fx.PfTokenV1, adapter);
+      await expect(adapter.recreateTable()).rejects.toThrow(
+        /Recreate of "pf_tokens" failed after the original table was dropped; its rows are in "pf_tokens__tmp_\d+"/,
+      );
+      const ddl = driver.calls.filter((c) => c.method === "exec").map((c) => c.sql);
+      expect(ddl.filter((sql) => sql.includes("__tmp_") && sql.startsWith("DROP"))).toEqual([]);
+    });
+  });
+
   it("ensureTable omits inline FKs to deferred cycle members", async () => {
     const driver = createDriver();
     const space = new DbSpace(() => new MysqlAdapter(driver));

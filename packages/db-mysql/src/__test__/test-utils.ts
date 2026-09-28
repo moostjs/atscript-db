@@ -34,6 +34,8 @@ export interface TMockDriverOptions {
   all?: Array<[substring: string, rows: unknown[]]>;
   /** Canned `get` results by SQL substring — first match wins. */
   get?: Array<[substring: string, row: unknown]>;
+  /** Makes `exec` throw the returned error (after recording the call). */
+  execError?: (sql: string) => Error | undefined;
 }
 
 /**
@@ -71,6 +73,10 @@ export function createMockDriver(
     },
     async exec(sql: string): Promise<void> {
       calls.push({ via, method: "exec", sql });
+      const error = overrides?.execError?.(sql);
+      if (error) {
+        throw error;
+      }
     },
   });
 

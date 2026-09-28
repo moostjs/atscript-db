@@ -961,6 +961,16 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
+   * Kind of the object stored under `name` in the space's in-memory database,
+   * or `undefined` when nothing is. Lets schema sync refuse a table declared
+   * where a view exists (and the reverse) and an FK to a table that is missing.
+   * @since 0.1.138
+   */
+  async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
+    return this._db.get(name)?.kind;
+  }
+
+  /**
    * Drops a table by name: its rows, unique indexes and increment counters go,
    * so the table added back starts empty. A missing table is not an error;
    * a view under that name is (`dropViewByName` drops views).
