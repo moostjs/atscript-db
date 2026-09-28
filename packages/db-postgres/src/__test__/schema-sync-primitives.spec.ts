@@ -262,15 +262,18 @@ describe("PostgresAdapter — administrative adapter (no registered readable)", 
           column_default: null,
           is_identity: "NO",
           formatted_type: "integer",
+          is_pk: true,
         },
+        colRow("name", "text"),
       ],
     });
     const cols = await new PostgresAdapter(colDriver).getExistingColumnsForTable("parents");
-    expect(cols.map((c) => [c.name, c.notnull, c.pk])).toEqual([["id", true, true]]);
-    expect(colDriver.calls.map((c) => c.params)).toEqual([
-      ["parents", null],
-      ["parents", null],
+    // The primary-key flag comes from the same query (since 0.1.139)
+    expect(cols.map((c) => [c.name, c.notnull, c.pk])).toEqual([
+      ["id", true, true],
+      ["name", true, false],
     ]);
+    expect(colDriver.calls.map((c) => c.params)).toEqual([["parents", null]]);
   });
 
   it("drops by name without a readable: unqualified, no CASCADE, a cycle in one statement", async () => {
@@ -339,6 +342,7 @@ function colRow(name: string, dataType: string, maxLength: number | null = null)
     column_default: null,
     is_identity: "NO",
     formatted_type: dataType,
+    is_pk: name === "id",
   };
 }
 
@@ -357,16 +361,13 @@ function recreateDriver(opts: {
   let tmp = "";
   const driver = createMockDriver({
     allResult: (sql, params) => {
-      if (sql.includes("referential_constraints")) {
+      if (sql.includes("c.confdeltype")) {
         return opts.inbound;
       }
       if (sql.includes("information_schema.columns")) {
         return (
           opts.columns ?? [colRow("id", "bigint"), colRow("code", "text"), colRow("label", "text")]
         );
-      }
-      if (sql.includes("constraint_type = 'PRIMARY KEY'")) {
-        return [{ column_name: "id" }];
       }
       if (sql.includes("pg_constraint")) {
         return (
@@ -428,15 +429,35 @@ describe("PostgresAdapter — recreateTable", () => {
     );
     expect(sql.filter((s) => s.includes("ADD CONSTRAINT"))).toHaveLength(2);
     expect(sql.filter((s) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(s))).toEqual(["BEGIN", "COMMIT"]);
-    // The capture query includes FKs to UNIQUE targets, pairs the referenced
-    // column by its position in the referenced key, ordinal-ordered
-    const capture = driver.calls.find((c) => c.sql.includes("referential_constraints"))!;
-    expect(capture.sql).toContain("constraint_type IN ('PRIMARY KEY', 'UNIQUE')");
-    expect(capture.sql).toContain("kcur.ordinal_position = kcu.position_in_unique_constraint");
-    expect(capture.sql).toContain(
-      "ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position",
-    );
+    // The capture query reads pg_constraint: conkey / confkey pair the
+    // referenced column by position, ordinal-ordered per constraint
+    const capture = driver.calls.find((c) => c.sql.includes("c.confdeltype"))!;
+    expect(capture.sql).toContain("unnest(c.conkey, c.confkey) WITH ORDINALITY");
+    expect(capture.sql).toContain("ORDER BY n.nspname, cl.relname, c.conname, k.ord");
     expect(capture.params).toEqual([null, "pf_tokens"]);
+  });
+
+  it("keeps same-named inbound FKs of different tables apart (names are unique per table)", async () => {
+    const { driver, execs } = recreateDriver({
+      table: "pf_tokens",
+      inbound: [
+        fkRow("token_fk", "children", "pa", "id"),
+        fkRow("token_fk", "logs", "tokenId", "id", { del: "CASCADE" }),
+      ],
+    });
+    const adapter = new PostgresAdapter(driver);
+    new AtscriptDbTable(fx.PfTokenV1, adapter);
+    await adapter.recreateTable();
+
+    const sql = execs();
+    expect(sql).toContain('ALTER TABLE "public"."children" DROP CONSTRAINT IF EXISTS "token_fk"');
+    expect(sql).toContain('ALTER TABLE "public"."logs" DROP CONSTRAINT IF EXISTS "token_fk"');
+    expect(sql).toContain(
+      'ALTER TABLE "public"."children" ADD CONSTRAINT "token_fk" FOREIGN KEY ("pa") REFERENCES "pf_tokens" ("id")',
+    );
+    expect(sql).toContain(
+      'ALTER TABLE "public"."logs" ADD CONSTRAINT "token_fk" FOREIGN KEY ("tokenId") REFERENCES "pf_tokens" ("id") ON DELETE CASCADE',
+    );
   });
 
   it("a self-referencing FK is neither dropped nor restored; the temp CREATE omits it (syncForeignKeys re-adds it)", async () => {
@@ -500,7 +521,10 @@ describe("PostgresAdapter — recreateTable", () => {
     expect(sql.indexOf(renames[0])).toBeGreaterThan(renameTo);
     expect(sql.indexOf(renames[1])).toBeLessThan(sql.indexOf("COMMIT"));
     // The constraint query targets the renamed table; the PK/UNIQUE targets were checked in pg_class
-    const query = driver.calls.find((c) => c.method === "all" && c.sql.includes("pg_constraint"))!;
+    const query = driver.calls.find(
+      (c) =>
+        c.method === "all" && c.sql.includes("pg_constraint") && !c.sql.includes("c.confdeltype"),
+    )!;
     expect(query.params).toEqual(["pf_tokens", null]);
     const checks = driver.calls.filter((c) => c.method === "get" && c.sql.includes("pg_class"));
     expect(checks.map((c) => c.params![0])).toEqual(["pf_tokens_pkey", "pf_tokens_code_key"]);

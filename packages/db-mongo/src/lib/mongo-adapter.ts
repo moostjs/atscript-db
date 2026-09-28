@@ -515,7 +515,7 @@ export class MongoAdapter extends BaseDbAdapter {
     const type = _type as TAtscriptAnnotatedType;
     const typeMeta = type.metadata;
 
-    // @db.mongo.capped → store for ensureCollectionExists
+    // @db.mongo.capped → store for collectionCreateOptions
     const capped = typeMeta.get("db.mongo.capped") as { size: number; max?: number } | undefined;
     if (capped) {
       this._cappedOptions = { size: capped.size, max: capped.max };
@@ -862,18 +862,23 @@ export class MongoAdapter extends BaseDbAdapter {
     const exists = await this.collectionExists();
     if (!exists) {
       this._log("createCollection", this._table.tableName);
-      const opts: Record<string, unknown> = {
-        comment: "Created by Atscript Mongo Adapter",
-      };
-      if (this._cappedOptions) {
-        opts.capped = true;
-        opts.size = this._cappedOptions.size;
-        if (this._cappedOptions.max !== null && this._cappedOptions.max !== undefined) {
-          opts.max = this._cappedOptions.max;
-        }
-      }
-      await this.db.createCollection(this._table.tableName, opts);
+      await this.db.createCollection(this._table.tableName, this.collectionCreateOptions());
     }
+  }
+
+  /** `createCollection` options for this table (`@db.mongo.capped` size/max). */
+  collectionCreateOptions(): Record<string, unknown> {
+    const opts: Record<string, unknown> = {
+      comment: "Created by Atscript Mongo Adapter",
+    };
+    if (this._cappedOptions) {
+      opts.capped = true;
+      opts.size = this._cappedOptions.size;
+      if (this._cappedOptions.max !== null && this._cappedOptions.max !== undefined) {
+        opts.max = this._cappedOptions.max;
+      }
+    }
+    return opts;
   }
 
   /**

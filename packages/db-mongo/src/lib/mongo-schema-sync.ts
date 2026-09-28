@@ -47,12 +47,12 @@ export interface TMongoSchemaSyncHost {
     getMetadata(): { documentPath(path: string): string };
   };
   readonly _mongoIndexes: ReadonlyMap<string, TMongoIndex>;
-  readonly _cappedOptions?: { size: number; max?: number };
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
   resolveTableName(includeSchema?: boolean): string;
   collectionExists(): Promise<boolean>;
   ensureCollectionExists(): Promise<void>;
+  collectionCreateOptions(): Record<string, unknown>;
   clearCollectionCache(): void;
 }
 
@@ -226,25 +226,20 @@ export async function recreateTableImpl(host: TMongoSchemaSyncHost): Promise<voi
   host._log("recreateTable", tableName);
   const tempName = `${tableName}__tmp_${Date.now()}`;
 
-  // 1. Server-side copy to temp collection (data stays in MongoDB)
-  const source = host.db.collection(tableName);
-  const count = await source.countDocuments();
-  if (count > 0) {
-    await source.aggregate([{ $out: tempName }]).toArray();
-  }
-
-  // 2. Drop the original collection
-  await host.collection.drop();
-  host.clearCollectionCache();
-
-  // 3. Recreate with current options (e.g. new capped size/max)
-  await host.ensureCollectionExists();
-
-  // 4. Copy data back from temp into the recreated collection
-  if (count > 0) {
-    const temp = host.db.collection(tempName);
-    await temp.aggregate([{ $merge: { into: tableName } }]).toArray();
-    await temp.drop();
+  // Build the new collection under the temp name with the current options
+  // (e.g. new capped size/max), copy the documents into it server-side, then
+  // swap it in with one atomic rename. The original is untouched until the
+  // swap, so a failed step only drops the temp collection.
+  await host.db.createCollection(tempName, host.collectionCreateOptions());
+  try {
+    await host.db
+      .collection(tableName)
+      .aggregate([{ $merge: { into: tempName } }])
+      .toArray();
+    await host.db.renameCollection(tempName, tableName, { dropTarget: true });
+  } catch (error) {
+    await dropTableByNameImpl(host, tempName);
+    throw error;
   }
 }
 

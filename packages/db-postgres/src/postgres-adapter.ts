@@ -902,9 +902,14 @@ export class PostgresAdapter extends BaseDbAdapter {
       column_default: string | null;
       is_identity: string;
       formatted_type: string;
+      is_pk: boolean;
     }>(
       `SELECT c.column_name, c.data_type, c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable, c.column_default, c.is_identity,
-              format_type(a.atttypid, a.atttypmod) AS formatted_type
+              format_type(a.atttypid, a.atttypmod) AS formatted_type,
+              EXISTS (
+                SELECT 1 FROM pg_index i
+                WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)
+              ) AS is_pk
        FROM information_schema.columns c
        JOIN pg_attribute a ON a.attname = c.column_name
          AND a.attrelid = (SELECT oid FROM pg_class WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = COALESCE($2, 'public')))
@@ -912,18 +917,6 @@ export class PostgresAdapter extends BaseDbAdapter {
        ORDER BY c.ordinal_position`,
       [tableName, schema],
     );
-
-    // Query primary key columns
-    const pkRows = await exec.all<{ column_name: string }>(
-      `SELECT kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-       WHERE tc.table_name = $1 AND tc.table_schema = COALESCE($2, 'public')
-         AND tc.constraint_type = 'PRIMARY KEY'`,
-      [tableName, schema],
-    );
-    const pkSet = new Set(pkRows.map((r) => r.column_name));
 
     return rows.map((r) => ({
       name: r.column_name,
@@ -936,7 +929,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         r.formatted_type,
       ),
       notnull: r.is_nullable === "NO",
-      pk: pkSet.has(r.column_name),
+      pk: r.is_pk,
       dflt_value: normalizePgDefault(r.column_default, r.is_identity),
     }));
   }
@@ -1084,9 +1077,10 @@ export class PostgresAdapter extends BaseDbAdapter {
 
       // Save and drop FK constraints from OTHER tables that reference this
       // table — whether they reference its primary key or a UNIQUE
-      // constraint. Rows come ordinal-ordered and each referenced column is
-      // matched by its position in the referenced key, so a multi-column
-      // FK's pairs line up; each is restored below under its captured name.
+      // constraint. Read from `pg_constraint`: `conkey` / `confkey` are
+      // positionally aligned, so a multi-column FK's pairs line up, and a
+      // constraint is identified by its table — names are unique per table,
+      // not per schema. Each is restored below under its captured name.
       // The table's own self-referencing FKs are not captured: the old table
       // goes away with them and the executor's `syncForeignKeys` re-adds them
       // on the recreated table (its CREATE omits them, see below).
@@ -1099,31 +1093,30 @@ export class PostgresAdapter extends BaseDbAdapter {
         delete_rule: string;
         update_rule: string;
       }>(
-        `SELECT tc.constraint_name, tc.table_name, tc.table_schema,
-                kcu.column_name, kcur.column_name AS ref_column_name,
-                rc.delete_rule, rc.update_rule
-         FROM information_schema.referential_constraints rc
-         JOIN information_schema.table_constraints tc
-           ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.constraint_schema
-         JOIN information_schema.key_column_usage kcu
-           ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
-         JOIN information_schema.key_column_usage kcur
-           ON kcur.constraint_name = rc.unique_constraint_name AND kcur.table_schema = rc.unique_constraint_schema
-              AND kcur.ordinal_position = kcu.position_in_unique_constraint
-         WHERE rc.unique_constraint_schema = COALESCE($1, 'public')
-           AND rc.unique_constraint_name IN (
-             SELECT constraint_name FROM information_schema.table_constraints
-             WHERE table_name = $2 AND table_schema = COALESCE($1, 'public')
-               AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-           )
-         ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position`,
+        `SELECT c.conname AS constraint_name, cl.relname AS table_name, n.nspname AS table_schema,
+                a.attname AS column_name, ra.attname AS ref_column_name,
+                CASE c.confdeltype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT'
+                  WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS delete_rule,
+                CASE c.confupdtype WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT'
+                  WHEN 'r' THEN 'RESTRICT' ELSE 'NO ACTION' END AS update_rule
+         FROM pg_constraint c
+         JOIN pg_class cl ON cl.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = cl.relnamespace
+         JOIN pg_class rcl ON rcl.oid = c.confrelid
+         JOIN pg_namespace rn ON rn.oid = rcl.relnamespace
+         CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(attnum, refattnum, ord)
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+         JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = k.refattnum
+         WHERE c.contype = 'f' AND rcl.relname = $2 AND rn.nspname = COALESCE($1, 'public')
+         ORDER BY n.nspname, cl.relname, c.conname, k.ord`,
         [schema, this._table.tableName],
       );
 
-      // Group FK refs by constraint name for multi-column FKs
-      const fkByName = new Map<
+      // Group FK refs per constraint (table + name) for multi-column FKs
+      const inboundFks = new Map<
         string,
         {
+          name: string;
           schema: string;
           table: string;
           cols: string[];
@@ -1137,9 +1130,11 @@ export class PostgresAdapter extends BaseDbAdapter {
         if (fk.table_schema === ownSchema && fk.table_name === this._table.tableName) {
           continue;
         }
-        let entry = fkByName.get(fk.constraint_name);
+        const key = `${fk.table_schema}.${fk.table_name}.${fk.constraint_name}`;
+        let entry = inboundFks.get(key);
         if (!entry) {
           entry = {
+            name: fk.constraint_name,
             schema: fk.table_schema,
             table: fk.table_name,
             cols: [],
@@ -1147,15 +1142,15 @@ export class PostgresAdapter extends BaseDbAdapter {
             onDelete: fk.delete_rule,
             onUpdate: fk.update_rule,
           };
-          fkByName.set(fk.constraint_name, entry);
+          inboundFks.set(key, entry);
         }
         entry.cols.push(fk.column_name);
         entry.refCols.push(fk.ref_column_name);
       }
 
       // Drop FK constraints
-      for (const [name, fk] of fkByName) {
-        const ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} DROP CONSTRAINT IF EXISTS ${qi(name)}`;
+      for (const fk of inboundFks.values()) {
+        const ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} DROP CONSTRAINT IF EXISTS ${qi(fk.name)}`;
         this._log(ddl);
         await conn.exec(ddl);
       }
@@ -1236,10 +1231,10 @@ export class PostgresAdapter extends BaseDbAdapter {
 
       // 5. Restore FK constraints from other tables under their captured names
       const resolvedTable = this.resolveTableName();
-      for (const [name, fk] of fkByName) {
+      for (const fk of inboundFks.values()) {
         const localCols = fk.cols.map((c) => qi(c)).join(", ");
         const refCols = fk.refCols.map((c) => qi(c)).join(", ");
-        let ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} ADD CONSTRAINT ${qi(name)} FOREIGN KEY (${localCols}) REFERENCES ${quoteTableName(resolvedTable)} (${refCols})`;
+        let ddl = `ALTER TABLE ${qi(fk.schema)}.${qi(fk.table)} ADD CONSTRAINT ${qi(fk.name)} FOREIGN KEY (${localCols}) REFERENCES ${quoteTableName(resolvedTable)} (${refCols})`;
         if (fk.onDelete !== "NO ACTION") {
           ddl += ` ON DELETE ${fk.onDelete}`;
         }
@@ -1597,12 +1592,14 @@ export class PostgresAdapter extends BaseDbAdapter {
       constraint_name: string;
       column_name: string;
     }>(
-      `SELECT kcu.constraint_name, kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-       WHERE tc.table_name = $1 AND tc.table_schema = COALESCE($2, 'public')
-         AND tc.constraint_type = 'FOREIGN KEY'`,
+      `SELECT c.conname AS constraint_name, a.attname AS column_name
+       FROM pg_constraint c
+       JOIN pg_class cl ON cl.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = cl.relnamespace
+       CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+       WHERE c.contype = 'f' AND cl.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       ORDER BY c.conname, k.ord`,
       [this._table.tableName, this._schema],
     );
     const byName = new Map<string, string[]>();
