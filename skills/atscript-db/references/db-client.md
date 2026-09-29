@@ -144,7 +144,7 @@ The client refuses obviously-wrong shapes BEFORE the network round-trip:
 
 - `'row'` level + non-object (scalar, `null`, array) for `id` → `TypeError`.
 - `'rows'` level + non-array (single object included — no auto-wrap) for `id` → `TypeError`.
-- `input` is `unknown` — no client-side validation. Caller must match the action's `inputForm` schema; server-side validation depends on a Moost atscript validator pipe (see [actions.md § `@InputForm`](actions.md#inputformformtype--structured-user-input)).
+- `input` is `unknown` — no client-side validation. Caller must match the action's `inputForm` schema; server-side validation depends on a Moost atscript validator pipe (see [actions.md § `@InputForm`](actions.md#inputformformtype-validatoropts--structured-user-input)).
 
 The TypeScript signature catches the `id`-shape cases at compile time when `Client<typeof T>` is used. Untyped `Client<>` clients fall back to `Partial<Record<string, unknown>>` and get only the runtime guard.
 

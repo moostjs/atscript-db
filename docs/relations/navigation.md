@@ -380,6 +380,17 @@ users?.primaryKeys; // ['id']
 
 It answers `undefined` when the name is not a navigation property of this table (plain fields and dotted paths included) or the table was built without a `DbSpace`.
 
+### The Foreign Key Behind a TO Relation {#foreign-key-of}
+
+`foreignKeyOf(relationName)` (since 0.1.143) returns the `@db.rel.FK` entry a `@db.rel.to` relation follows — paired exactly as loading and nested writes pair them: by alias when the relation has one, else by target table:
+
+```typescript
+tasks.foreignKeyOf("assignee"); // { fields: ['assigneeId'], targetTable: 'users', targetFields: ['id'], … }
+tasks.foreignKeyOf("reviewer"); // the FK with alias 'reviewer'
+```
+
+It answers `undefined` for a `@db.rel.from` / `@db.rel.via` relation (their key lives on the other table), a name that is not a relation, or a TO relation without a matching FK.
+
 ## Next Steps
 
 - [Loading Relations](./loading) — `$with` controls, nested loading, per-relation controls

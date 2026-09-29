@@ -111,7 +111,7 @@ All other query parameters from `GET /query` (filters, `$sort`, `$select`, `$sea
 
 ### GET /one/:id {#get-one}
 
-Retrieves a single record by primary key (or any single-field unique index — the path resolver walks every legitimate identification). Returns `404` if not found.
+Retrieves a single record by primary key (or any single-field unique index — the path resolver walks every legitimate identification). Returns `404` if not found. Since 0.1.143 the id addresses exactly one row, [primary key first](/api/crud#id-resolution), among the rows the [`transformOne`](./customization#transformone) overlay admits: when `abc` is one in-scope row's key and another row's unique value, `/one/abc` reads the key row; when the key row is out of scope, it reads the in-scope unique-value row — the same answer as if the out-of-scope row did not exist.
 
 ```bash
 curl http://localhost:3000/todos/one/42
@@ -408,7 +408,7 @@ Clients on `409` typically:
 
 ### 404 Not Found — missing row
 
-A CAS-bearing write on a row that does **not** exist returns `404`, not `409`. The controller disambiguates by issuing a single `findOne(id)` after the adapter reports `matchedCount === 0`:
+A CAS-bearing write on a row that does **not** exist returns `404`, not `409`. The controller disambiguates by issuing a single `findOne(id)` after the adapter reports `matchedCount === 0` — resolving the row [primary key first](/api/crud#id-resolution) like the write itself (since 0.1.143), so `currentVersion` is never read from a different row that merely shares a unique value with the payload:
 
 - Row missing → `404 Not Found`.
 - Row present → `409 Conflict` with the body above.
@@ -469,13 +469,13 @@ The controller enforces the seal, not just hides the value:
 - `/meta` still serves the field's **type**, flagged `writeOnly: true`, so generated forms render a set-only input and client preflight validation accepts the field in write payloads.
 - Server-side code reading through `AtscriptDbTable` still sees the value — the seal is an HTTP-layer contract.
 
-Two boundaries to know: related models' write-only fields are **not** sealed through `$with` relation loads (seal them at their own controller), and permission overlays (e.g. `@aooth/arbac-moost`) can stamp `writeOnly` per-caller for fields the caller may write but not read.
+The seal reaches **joined rows** too (since 0.1.143): every `$with` entry, at any depth, has its target table's `@db.writeOnly` fields stripped from its `$select` (the default projection included), and a `$with` sub-filter or sub-sort on one — `$with=owner(password='x')`, `$with=owner($sort=password)` — is rejected with the same 400 as the top-level form, naming the full path (`owner.password`). This applies to every controller, not only permission-aware ones; before 0.1.143 joined rows carried their write-only values. Permission overlays (e.g. `@aooth/arbac-moost`) can additionally stamp `writeOnly` per-caller for fields the caller may write but not read.
 
 ## Deleting Records
 
 ### DELETE /:id {#delete}
 
-Removes a single record by primary key. Returns `404` if the record is not found.
+Removes a single record by primary key (or unique key — resolved [primary key first](/api/crud#id-resolution)). Returns `404` if the record is not found. Since 0.1.143, when the controller overrides `transformOne` / `transformFilter`, that overlay is the delete's row scope: `DELETE /:id` and `DELETE /?…` only ever delete a row inside it, and an out-of-scope row answers `404` exactly like a missing one.
 
 ```bash
 curl -X DELETE http://localhost:3000/todos/42

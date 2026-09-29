@@ -89,6 +89,27 @@ import { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "@atscript/moost-db
 
 `actions` is the URL-control name for [`$actions=true`](./actions#actions-augmentation) — when the caller asks the server to compute per-row action availability.
 
+## Handler methods per op {#crud-handlers}
+
+Since 0.1.143 the handler method(s) serving each op are exported, so a permission layer can authorize a `crud` entry exactly as its route is authorized (an op is allowed when any of its handlers is):
+
+```typescript
+import { DB_CRUD_HANDLERS, VALUE_HELP_CRUD_HANDLERS } from "@atscript/moost-db";
+```
+
+| Op        | `DB_CRUD_HANDLERS` (`AsDbReadableController` / `AsDbController`) | `VALUE_HELP_CRUD_HANDLERS`        |
+| --------- | ---------------------------------------------------------------- | --------------------------------- |
+| `query`   | `query`                                                          | `runQuery`                        |
+| `pages`   | `pages`                                                          | `runPages`                        |
+| `one`     | `getOne`, `getOneComposite`                                      | `runGetOne`, `runGetOneComposite` |
+| `geo`     | `geo`                                                            | —                                 |
+| `insert`  | `insert`                                                         | —                                 |
+| `update`  | `update`                                                         | —                                 |
+| `replace` | `replace`                                                        | —                                 |
+| `remove`  | `remove`, `removeComposite`                                      | —                                 |
+
+Both maps are frozen. A readable serves only the read ops.
+
 ## Read-only check
 
 `readOnly` was removed in favor of `crud`. Derive the boolean inline:

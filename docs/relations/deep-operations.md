@@ -125,6 +125,11 @@ relations), absent ones are cascade-deleted per their referential rules, and
 unrecognized entries are inserted. VIA junction entries are recomputed against
 the new target set.
 
+A child primary key that belongs to **another** record's child is rejected with
+`CONFLICT` before anything is written (since 0.1.143). A replace never re-parents
+or overwrites someone else's child. A replace that matches no row writes no
+related rows either. See [Nested write rules](./patches#nested-write-rules).
+
 ```typescript
 await taskTable.replaceOne({
   id: 1,
@@ -156,7 +161,7 @@ await taskTable.replaceOne({
 
 Partial updates support relations, but with important constraints:
 
-- **TO relations**: Send changed fields plus the PK — the parent record is partially updated
+- **TO relations**: Send changed fields — the record the stored FK references is partially updated (a payload that also changes that FK is rejected, see [TO Relation Patches](./patches#to-relation-patches))
 - **FROM and VIA relations**: You **must** use patch operators (`$insert`, `$remove`, `$update`, `$upsert`, `$replace`) — plain arrays are rejected with a `400` error
 - **Nested FROM inside TO**: Not supported — you cannot patch a TO parent's FROM children in a single call. This returns a `400` error.
 

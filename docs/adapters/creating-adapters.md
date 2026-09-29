@@ -629,11 +629,17 @@ Return available search indexes for this adapter as `TSearchIndexInfo[]`. Used b
 ```typescript
 getSearchIndexes(): TSearchIndexInfo[] {
   return [
-    { name: 'default', type: 'text', description: 'tsvector(title, body)' },
-    { name: 'embedding', type: 'vector', description: 'vector(1536), cosine' },
+    { name: 'default', type: 'text', description: 'tsvector(title, body)',
+      fields: ['title', 'body'], isDefault: true },
+    { name: 'embedding', type: 'vector', description: 'vector(1536), cosine',
+      fields: ['embedding'], isDefault: true },
   ]
 }
 ```
+
+Since 0.1.143 each entry also says which **logical** fields the index reads (`fields`) and whether it is the one of its type that answers a request naming no index (`isDefault`, at most one per type). HTTP layers gate indexes over hidden fields with them — an index whose fields you cannot tell (a dynamic document mapping) leaves `fields` out, which callers treat as "every field". Index definitions carry physical column names; the protected `this._indexLogicalPaths(index)` maps a `TDbIndex` back to logical paths.
+
+Word "index not found" errors with the exported builders — `searchIndexNotFoundMessage(name?)`, `vectorIndexNotFoundMessage(name?)`, `geoIndexNotFoundMessage(table, name?)` — so a request naming a hidden index reads exactly like one naming a nonexistent index.
 
 **Tag every vector entry `type: 'vector'`.** `isSearchable()` is derived from this list, so a vector index left untagged makes a vector-only table claim text search it cannot run — `$search` then reaches your adapter, which has no index to answer it with. `type` is optional only for back-compatibility: an entry that omits it is taken as text, because adapters written before the field existed only ever listed text indexes.
 

@@ -81,6 +81,8 @@ await tasks.findMany({
 
 Adapters with `supportsNativeRelations(): true` can implement JOIN/`$lookup`-based loading; the default is an application-level batch-loader that fires one query per relation, independent of result-set size.
 
+Projections (0.1.143): a relation's sub-`$select` accepts array, inclusion-map and exclusion-map forms on every adapter (≤ 0.1.142 Mongo `$lookup` 500'd on the map forms); join keys are never dropped. A parent `$select` that omits the join key (TO: the FK; FROM / VIA: the PK) still loads the relation — the key is read for the join and stripped from the rows (≤ 0.1.142: `project: null`).
+
 ### Per-relation filter
 
 `@db.rel.filter` hangs a permanent filter on a navigation:
@@ -110,6 +112,23 @@ await posts.insertOne({
 ```
 
 Server runs nested writes in the same transaction as the parent; on failure the whole operation rolls back.
+
+### Nested-write integrity (0.1.143)
+
+A nested write only touches rows related to the record being written. Every rule below is checked as a planning step BEFORE the call's first write (one read per relation for the whole batch) → a rejection never leaves a partial write, even without transactions (memory, standalone Mongo). Planned FROM children are then written through filters pinned to their parent (`{ pk, fk: parentPK }`) — a child re-parented between plan and write matches nothing → `CONFLICT`, rolled back (no in-phase re-checks).
+
+| Payload                                                                             | Rule                                                                                                                                                                                | Violation                                       |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| FROM `$update` / `$upsert` / `$replace` by child PK; `replaceOne` with a FROM array | Only THIS record's children. A PK under another parent (or an orphan) is never re-parented / overwritten; `$replace` never deletes or steals.                                       | `CONFLICT` (409), path = relation               |
+| FROM `$update` entry                                                                | Must carry the child PK.                                                                                                                                                            | `NOT_FOUND` (400), path `<rel>.$update[i].<pk>` |
+| VIA `$update` / `$upsert` with target PK                                            | Target must ALREADY be linked. **Breaking:** `$upsert` by PK no longer creates the link — link an existing target with `$insert`. `$upsert` without PK still inserts + links.       | `CONFLICT` (409), no link created               |
+| TO object on PATCH                                                                  | Patches the row the STORED FK references (read inside the tx). FK `null` → `FK_VIOLATION`.                                                                                          | —                                               |
+| TO object + a changed FK in the same payload                                        | Rejected — re-point first, patch in a second call. Sending the unchanged FK value is fine.                                                                                          | `INVALID_QUERY` (400), path = FK field          |
+| TO object whose own key names another row (`author: { id: 2 }`)                     | Rejected.                                                                                                                                                                           | `INVALID_QUERY` (400), path `<rel>.<pk>`        |
+| Any nested phase                                                                    | Runs only for rows the main write MATCHED — missing row or stale `$cas` → no TO / FROM / VIA writes. **Breaking:** TO patch on a missing row → `{ matchedCount: 0 }` (was a throw). | —                                               |
+
+- Unchanged by design: TO replace, VIA `$insert`, VIA plain-array replace by PK may reference (TO / VIA replace: overwrite) any row by key — authorizing that is the permission layer's job.
+- Nested re-entries get neither `guard`, `check` nor `isFieldVisible` ([crud.md](crud.md#post-write-check-check-01143)); only the table's own integrity rules. A permission layer that must authorize related tables rejects nested payloads up front.
 
 ## Meta FK ref shape
 

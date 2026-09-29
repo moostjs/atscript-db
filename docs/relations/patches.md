@@ -106,6 +106,10 @@ await tasks.updateOne({
 
 Items with a primary key are updated. Items without a primary key are inserted, with the FK automatically set to the parent's PK.
 
+::: warning Children of this record only (since 0.1.143)
+`$update`, `$upsert` and `$replace` only ever touch children of the record being patched. A child primary key that exists under a **different** parent, or under no parent, is rejected with `CONFLICT` (HTTP 409) and nothing is written. The child is never re-parented or overwritten. `$update` entries must carry the child's primary key; an entry without it is rejected with `NOT_FOUND` (HTTP 400). Moving a child to another parent is a write on the child's own table.
+:::
+
 ### `$replace` — Replace All Children
 
 Deletes all existing children and inserts the new set:
@@ -117,7 +121,7 @@ await tasks.updateOne({
 });
 ```
 
-This uses identity-preserving diff-sync — children with matching PKs are updated in place, not deleted and re-created. Only children whose PKs are absent from the new set are deleted.
+This uses identity-preserving diff-sync — children with matching PKs are updated in place, not deleted and re-created. Only children whose PKs are absent from the new set are deleted. A PK that belongs to another parent's child is rejected with `CONFLICT` before anything is deleted.
 
 ## VIA Relation Patches {#via}
 
@@ -166,7 +170,7 @@ Removes the **junction entry** only — the target record (`Tag`) is preserved. 
 await tasks.updateOne({ id: 1, tags: { $update: [{ id: 5, name: "renamed" }] } });
 ```
 
-Updates the target record. The junction entry is untouched.
+Updates the target record. The junction entry is untouched. Since 0.1.143 the target must be **linked to this record already**; an unlinked target is rejected with `CONFLICT` (HTTP 409), whether or not it exists. Entries must carry the target's primary key.
 
 ### `$upsert` — Insert or Update Targets
 
@@ -175,14 +179,14 @@ await tasks.updateOne({
   id: 1,
   tags: {
     $upsert: [
-      { id: 5, name: "renamed" }, // Has PK → update target + ensure junction exists
+      { id: 5, name: "renamed" }, // Has PK → update the (already linked) target
       { name: "brand-new" }, // No PK → insert target + create junction
     ],
   },
 });
 ```
 
-For items with a PK: the target record is updated, and a junction entry is created if one does not already exist. For items without a PK: a new target record is inserted and a junction entry is created.
+For items with a PK: the target record is updated. Since 0.1.143 it must already be linked to this record, otherwise the patch is rejected with `CONFLICT` and no link is created. Link an existing target with `$insert`. For items without a PK: a new target record is inserted and a junction entry is created.
 
 ### `$replace` — Replace All Links
 
@@ -204,7 +208,10 @@ await tasks.updateOne({
 // UPDATE projects SET title = 'Updated Title' WHERE id = 2
 ```
 
-If the FK value is not present in the patch payload, it is read from the database before the update. If the FK is `null`, the patch returns an error — you cannot patch a TO relation when the FK has no target.
+The nested object always patches the record the **stored** foreign key references. The FK is read inside the transaction. If it is `null`, the patch fails with `FK_VIOLATION`: a TO relation without a target cannot be patched. Since 0.1.143 two payloads are rejected with `INVALID_QUERY` (HTTP 400), and nothing is written:
+
+- a payload that changes the FK (`projectId: 3`) **and** carries a nested object for the same relation. Re-point first, then patch in a second call. Sending the unchanged FK value is fine.
+- a nested object whose own key (`project: { id: 3 }`) names a record other than the referenced one.
 
 ::: warning Nested FROM inside TO
 Patching a TO parent's FROM children in a single call is not supported. The nested relation data exceeds the allowed depth and returns a `400` error:
@@ -219,6 +226,17 @@ await tasks.updateOne({
 
 Update the parent and its children in separate calls instead.
 :::
+
+## Nested Write Rules {#nested-write-rules}
+
+These rules apply to every nested write, whether PATCH, PUT, or insert:
+
+- **Nested phases run only for rows the main write matched.** A patch or replace that matches nothing writes no related rows: a missing record, or a stale `$cas` version. This covers TO, FROM and VIA alike.
+- **A nested write only touches rows related to the record being written.** FROM operators only reach this record's children. VIA `$update` / `$upsert` only reach linked targets. A TO patch only reaches the currently referenced record. Violations are rejected (see the sections above) and roll the whole call back on transactional adapters.
+- **Nested re-entries get no guard, check or field-visibility predicate.** The `guard`, `check` and `isFieldVisible` [write options](/api/crud#write-guards) apply to the root call only. The related tables' rows are written with the table's own integrity rules. A permission layer that must authorize related tables should reject nested payloads up front.
+- **TO replace and VIA `$insert` / plain-array replace by PK are unchanged:** they may reference (and, for TO / VIA replace, overwrite) any row by its key. Authorizing that is the permission layer's job.
+
+Every rejection above is raised **before the first write** of the call: the FROM ownership, VIA link and TO foreign-key checks run as a planning step — one read per relation for the whole batch. A rejected nested operation therefore never leaves a partial write, even on adapters without transactions (memory, standalone MongoDB). The planned FROM children are then written through filters that also pin their parent (`{ pk, fk: parentPK }`): a child moved to another record between the plan and the write is never touched, and the call fails with `CONFLICT` (rolled back on transactional adapters).
 
 ## Plain Arrays Rejected on PATCH
 

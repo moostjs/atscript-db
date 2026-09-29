@@ -60,19 +60,19 @@ Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` +
 
 ## Decorators
 
-| Decorator                | Target | Effect                                                                                                                                            |
-| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@DbAction(name, opts?)` | method | Backend action. Pair with `@Post(...)`. Registers gate interceptor when `disabled` or `@DbActionRow*` present.                                    |
-| `@DbActionDefault()`     | method | Sugar for `opts.default = true`. Order-independent.                                                                                               |
-| `@DbActionID()`          | param  | Single identifier object from JSON body. Infers `level: 'row'`.                                                                                   |
-| `@DbActionIDs()`         | param  | Identifier-object array from body. Infers `level: 'rows'`.                                                                                        |
-| `@DbActionRow()`         | param  | Injects gate-loaded row (no double-fetch). Infers `level: 'row'`.                                                                                 |
-| `@DbActionRows()`        | param  | Injects gate-loaded rows (survivors only in `'skip'` mode). Infers `level: 'rows'`.                                                               |
-| `@InputForm(FormType?)`  | param  | Injects `body.input` **validated** against the form; form inferred from the param's type when arg omitted. Does NOT affect level. One per action. |
-| `@DbActions(dict)`       | class  | Generic dict; each entry must include `level`.                                                                                                    |
-| `@DbTableActions(dict)`  | class  | Sugar — pins `level: 'table'`.                                                                                                                    |
-| `@DbRowActions(dict)`    | class  | Sugar — pins `level: 'row'`.                                                                                                                      |
-| `@DbRowsActions(dict)`   | class  | Sugar — pins `level: 'rows'`.                                                                                                                     |
+| Decorator                | Target | Effect                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@DbAction(name, opts?)` | method | Backend action. Pair with `@Post(...)`. Registers an interceptor on every `'row'`/`'rows'` action (gate when `disabled`, else id/row loader + [row-scope check](#row-scoping-01143), 0.1.143); on an `AsReadableController` subclass also on `'table'` actions — each first runs [`prepareRequest`](#preparerequest-on-actions-01143). Throws on a value-help controller. |
+| `@DbActionDefault()`     | method | Sugar for `opts.default = true`. Order-independent.                                                                                                                                                                                                                                                                                                                       |
+| `@DbActionID()`          | param  | Single identifier object from JSON body. Infers `level: 'row'`.                                                                                                                                                                                                                                                                                                           |
+| `@DbActionIDs()`         | param  | Identifier-object array from body. Infers `level: 'rows'`.                                                                                                                                                                                                                                                                                                                |
+| `@DbActionRow()`         | param  | Injects gate-loaded row (no double-fetch). Infers `level: 'row'`.                                                                                                                                                                                                                                                                                                         |
+| `@DbActionRows()`        | param  | Injects gate-loaded rows (survivors only in `'skip'` mode). Infers `level: 'rows'`.                                                                                                                                                                                                                                                                                       |
+| `@InputForm(FormType?)`  | param  | Injects `body.input` **validated** against the form; form inferred from the param's type when arg omitted. Does NOT affect level. One per action.                                                                                                                                                                                                                         |
+| `@DbActions(dict)`       | class  | Generic dict; each entry must include `level`.                                                                                                                                                                                                                                                                                                                            |
+| `@DbTableActions(dict)`  | class  | Sugar — pins `level: 'table'`.                                                                                                                                                                                                                                                                                                                                            |
+| `@DbRowActions(dict)`    | class  | Sugar — pins `level: 'row'`.                                                                                                                                                                                                                                                                                                                                              |
+| `@DbRowsActions(dict)`   | class  | Sugar — pins `level: 'rows'`.                                                                                                                                                                                                                                                                                                                                             |
 
 ## Level inference (method decorators)
 
@@ -117,6 +117,8 @@ The validator is **strict** — unknown fields are rejected with HTTP 400. Prece
 ```
 
 Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `"abc"`. `Content-Type: application/json` only.
+
+Identifier VALUES must be scalars (0.1.143): `{ "id": { "$ne": null } }` → 400 whatever the field type. A `'rows'` `ids` array longer than `maxIds` (default 1000) → 400 `Too many identifiers: N (at most M per request)` before any row is loaded. Ids resolve PK-first ([crud.md § Id resolution](crud.md#id-resolution--one-row-primary-key-first-01143)).
 
 Field names are **logical** (the `.as` prop names) — never physical column names from `@db.column "..."`. The matcher always operates in logical-name space.
 
@@ -179,6 +181,7 @@ Every row-returning read endpoint (`GET /query`, `/pages`, `/one`, `/one/:id`, i
 | `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-paths the predicate reads. Server-internal — never on the wire. Type-narrows `disabled`'s row arg AND drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation read). Listing a relation field is a TS error.                                                           |
 | `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean \| string)[]`  | **Sync batch gate.** Row arg is narrowed to `requiredFields` only; reading another field is a TS error. One verdict per input row, parallel by index: truthy = disabled, non-empty string = disabled + reason (§ Disabled reasons). Length mismatch → HTTP 500. `Promise` not permitted. Without `requiredFields` → action dropped. |
 | `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level only. Default `'reject'`.                                                                                                                                                                                                                                                                                            |
+| `maxIds`         | `number`                                                            | `'rows'`-level only (0.1.143). Max identifiers per request, default `1000`; above → 400. Server-internal.                                                                                                                                                                                                                           |
 | `table`          | `AtscriptDbTable<TRow>`                                             | Required on plain controllers when `disabled`, `@DbActionID*`, or `@DbActionRow*` present. Ignored on `AsDbReadableController` subclasses.                                                                                                                                                                                          |
 
 `FlatKey<TRow> = keyof FlatOf<TRow> & string` (dot-paths over scalars; relations excluded). When `TRow = unknown` (no `<TRow>` generic), all string keys allowed; `disabled` row arg falls back to `any[]` and `requiredFields` is loosely `string[]` — runtime still drops `disabled` without `requiredFields`.
@@ -331,7 +334,7 @@ Verdicts MUST be parallel by index. Length mismatch → HTTP 500.
 
 Same predicate runs in three places: gate enforcement on POST, `$actions` augmentation on reads, and UI mirror via wire string.
 
-**Missing rows (`'rows'` level):** unresolved identifiers fail without invoking `disabled` against `undefined`. Surviving rows are batched into one call.
+**Missing rows (`'rows'` level):** unresolved identifiers (no match, or outside the [row overlay](#row-scoping-01143)) fail without invoking `disabled` against `undefined`; their `reasons` entry is `null`. Surviving rows are batched into one call.
 
 **Batch mode (`'rows'`):**
 
@@ -381,6 +384,28 @@ Server class: `@atscript/moost-db` (`extends HttpError`). Client class: `@atscri
 
 `@DbActions*` accept `disabled` (with required `requiredFields`) but DO NOT register a server interceptor — the dict's `value` may target another controller. The predicate runs in two places: (1) `$actions=true` augmentation against the controller's own read result; (2) UI mirror via wire `disabled` string. POSTs to the dict's `value` endpoint are NOT blocked here. For server enforcement on the actual handler, also declare `@DbAction(name, { requiredFields, disabled })` on it.
 
+## Row scoping (0.1.143)
+
+Action ids and rows obey the controller's row overlay — `transformOne({})` (defaults to `transformFilter`), the one `GET /one/:id` uses. Active only when the controller overrides `transformOne` or `transformFilter` AND the overlay is non-empty (otherwise no hook, no query). Applies with or without `disabled`:
+
+| Action                                                   | Id outside the overlay                                                                                                           |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `'row'` with a row load (`@DbActionRow()` or `disabled`) | Overlay ANDed into the load → 404 `Row not found for action identifier` (same as missing).                                       |
+| `'row'`, `@DbActionID()` only                            | The row is loaded (`id AND overlay`) before the handler, like `@DbActionRow()` → same 404.                                       |
+| `'rows'` (`@DbActionIDs()` / `@DbActionRows()`)          | Fails like a missing id: same position in `ids`, `null` reason; `onDisabledRows` applies (`'reject'` → 409, `'skip'` → dropped). |
+
+| #   | Rule                                                                                                                                                                                                                                                               |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Out-of-scope ≡ nonexistent: nothing in status, body, `ids` or `reasons` tells them apart; `disabled` never runs for an out-of-scope row; the handler never runs for one.                                                                                           |
+| 2   | Under an overlay an UNGATED `'rows'` action rejects unmatched ids (missing and out-of-scope) by default; `onDisabledRows: 'skip'` drops them. Without an overlay: unchanged (`undefined` gap in `@DbActionRows()`).                                                |
+| 3   | The check lives in the interceptor `@DbAction` registers — a `@DbActionID*` param on a route WITHOUT `@DbAction` is not checked.                                                                                                                                   |
+| 4   | Overlay = the controller's own table only; an `opts.table` binding on a plain controller has none.                                                                                                                                                                 |
+| 5   | A `requiredFields` entry the controller's `hasField` hides (or a `@db.column.derived` field whose source it hides) is never loaded — `disabled` and `@DbActionRow*` see `undefined` (also on `$actions=true` widening), so a hidden column never drives a verdict. |
+
+## prepareRequest on actions (0.1.143)
+
+Every `@DbAction` handler (`'row'` / `'rows'` / `'table'`, gated or not) runs the controller's `prepareRequest({ endpoint: "action", action: "<name>" })` ONCE, from the action interceptor (`AFTER_GUARD`: after auth guards) and BEFORE id validation (`hasField` / `idSource`), `@DbActionRow*` loads, the `disabled` gate and the row overlay (`transformOne({})`). A throw aborts with that error — even a malformed body answers the hook's error. Permission layers resolve policy there and need NO own action guard. No `prepareRequest` → no await. A plain (non-`AsReadableController`) controller's `'table'` actions get no interceptor.
+
 ## `@DbActionRow*` projection narrowing
 
 Handlers using `@DbActionRow()` / `@DbActionRows()` receive rows projected to:
@@ -389,7 +414,7 @@ Handlers using `@DbActionRow()` / `@DbActionRows()` receive rows projected to:
 identifier-shape fields ∪ preferredId ∪ requiredFields
 ```
 
-Other table columns are absent. `requiredFields` is the only knob — there is no auto-deps tracker.
+Other table columns are absent (and `requiredFields` hidden by `hasField`, 0.1.143). `requiredFields` is the only knob — there is no auto-deps tracker. Rows outside the row overlay are not loaded ([§ Row scoping](#row-scoping-01143)).
 
 ```ts
 @DbAction<Order, ["archived", "orderNumber"]>("archive", {
@@ -466,7 +491,7 @@ Wire body: `{ "ids": { "id": "abc" }, "input": { "note": "ok", "visibility": "pu
 
 ### `GET /meta/form/:name` — form schema discovery
 
-Per-controller route on every `AsReadableController` subclass. Returns the serialized `TSerializedAnnotatedType` of the named form (same annotation-allowlist policy as `/meta.type`). 404 when the name is unregistered.
+Per-controller route on every `AsReadableController` subclass. Returns the serialized `TSerializedAnnotatedType` of the named form (same annotation-allowlist policy as `/meta.type`). 404 when the name is unregistered — or when the controller's `authorizeForm(name, actionNames)` returns `false` (0.1.143, identical 404; see [moost-db.md § Hooks](moost-db.md#hooks-override-on-subclass)).
 
 ```bash
 GET /orders/meta/form/CommentForm
@@ -554,7 +579,7 @@ interface TDbActionInfo {
 - Two actions with the same `@InputForm` form name but different type refs on the same controller — second declaration dropped.
 - Class-level `inputForm` that is neither a compiled type nor `{ name, url }` (JS callers), or on a `'navigate'` entry.
 
-Value-help controllers (`AsValueHelpController` / `AsJsonValueHelpController`) silently emit `actions: []`; decorators on them are ignored.
+Value-help controllers (`AsValueHelpController` / `AsJsonValueHelpController`) always emit `actions: []`. `@DbAction` / `@DbActions*` on them is NOT a drop but a hard error (0.1.143; ≤ 0.1.142 silently ignored, route ran ungated) — see [moost-db.md § Value-help controllers](moost-db.md#value-help-controllers).
 
 ## Class-level `'backend'` row/rows caveat
 

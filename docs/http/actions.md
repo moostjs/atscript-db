@@ -142,6 +142,84 @@ Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `
 
 Field names are **logical** (the `.as` prop names) — never physical column names from `@db.column "..."`. The matcher always operates in logical-name space.
 
+Identifier values must be scalars (since 0.1.143). An object or array value, such as `{ "id": { "$ne": null } }`, is rejected with 400 whatever the field's type.
+
+A `'rows'` request carries at most `maxIds` identifiers (default 1000, since 0.1.143). See [Id-count cap](#id-cap).
+
+## Row scoping {#row-scoping}
+
+Since 0.1.143, action ids and rows obey the controller's row overlay. The overlay is the one `GET /one/:id` uses: `transformOne({})`, which defaults to [`transformFilter`](./customization#transformfilter). If the controller overrides `transformOne` or `transformFilter` and the overlay is not empty, every `'row'` and `'rows'` action checks its ids before the handler runs. This applies with or without `disabled`:
+
+| Action                                                       | Id outside the overlay                                                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'row'`: `@DbActionRow()` or a `disabled` gate               | The row load includes the overlay. The request gets the same 404 as a missing row: `"Row not found for action identifier"`.                  |
+| `'row'`: `@DbActionID()` only                                | The row is loaded (`id AND overlay`) before the handler, like `@DbActionRow()`. The request gets the same 404.                               |
+| `'rows'`: `@DbActionIDs()` / `@DbActionRows()`, gated or not | The id fails like a missing id: same position in `ids`, `null` reason. `onDisabledRows` then applies (`'reject'` → 409, `'skip'` → dropped). |
+
+An out-of-scope id gets exactly the answer a nonexistent id gets. Nothing in the status, body, `ids` or `reasons` tells them apart. A `disabled` reason is never computed for an out-of-scope row, so the reason cannot leak that row's state. The handler never runs for an out-of-scope id.
+
+```typescript
+@TableController(OrderTable)
+export class OrdersController extends AsDbController<typeof OrderTable> {
+  protected override transformFilter(filter: FilterExpr): FilterExpr {
+    return { $and: [filter, { ownerId: currentUserId() }] };
+  }
+
+  @Post("actions/cancel")
+  @DbAction("cancel", { label: "Cancel" })
+  async cancel(@DbActionID() id: { id: string }) {
+    // Reached only for the caller's own orders. Any other id → 404.
+  }
+}
+```
+
+Notes:
+
+- The check costs nothing when neither `transformOne` nor `transformFilter` is overridden. No hook runs and no query is added. Without an overlay, `'rows'` actions keep today's behavior: an unmatched id is an `undefined` gap in `@DbActionRows()` (gated actions still fail it).
+- Under an overlay, an ungated `'rows'` action rejects unmatched ids by default, missing and out-of-scope alike. Set `onDisabledRows: 'skip'` to drop them instead.
+- The checks run in an interceptor that `@DbAction` registers. A `@DbActionID*` param on a route without `@DbAction` is not checked. `@DbActionRow*` loads still include the overlay.
+- The overlay applies only to the controller's own table. An `opts.table` binding on a plain controller has no overlay.
+- A `requiredFields` entry that the controller's [`hasField`](./customization#hasfield) hides is never loaded, nor is a `@db.column.derived` field whose source it hides. The `disabled` predicate and `@DbActionRow*` see it as `undefined`, so a hidden column never drives a verdict.
+
+## prepareRequest on actions {#preparerequest-on-actions}
+
+Since 0.1.143, every `@DbAction` handler — `'row'`, `'rows'` and `'table'` level, gated or not — runs the controller's [`prepareRequest`](./customization#preparerequest) with `{ endpoint: "action", action: "<name>" }`. It runs once per request, after the guards and **before** anything reads the request's ids, loads its rows or builds its row overlay: id validation (which consults [`hasField`](./customization#hasfield)), `@DbActionRow*` loads, the `disabled` gate and the row scoping above all see the policy it resolved. A throw aborts the request with the thrown error, even when the body is malformed.
+
+```typescript
+@TableController(OrderTable)
+export class OrdersController extends AsDbController<typeof OrderTable> {
+  protected async prepareRequest(ctx: TDbRequestContext) {
+    // ctx.endpoint === "action", ctx.action === "cancel" for the route below
+    const scopes = await loadScopes(ctx.action ?? ctx.endpoint);
+    if (!scopes) throw new HttpError(403);
+    requestScopes.set(scopes); // read back by transformFilter / hasField
+  }
+
+  @Post("actions/cancel")
+  @DbAction("cancel", { label: "Cancel" })
+  async cancel(@DbActionID() id: { id: string }) {}
+}
+```
+
+A permission layer that resolves its policy in `prepareRequest` therefore needs no action guard of its own. Controllers that don't define `prepareRequest` pay nothing: the interceptor returns without awaiting. A plain controller (not an `AsReadableController` subclass) has no `prepareRequest`; its `'table'`-level actions get no interceptor at all.
+
+## Id-count cap {#id-cap}
+
+`@DbActionIDs()` / `@DbActionRows()` accept at most `maxIds` identifiers per request. The default is 1000 (since 0.1.143). A longer `ids` array is rejected with 400 before any row is loaded:
+
+```json
+{
+  "statusCode": 400,
+  "errors": [{ "path": "", "message": "Too many identifiers: 1500 (at most 1000 per request)" }]
+}
+```
+
+To raise or lower the cap for one action:
+
+```typescript
+@DbAction("purge", { label: "Purge", maxIds: 5000 })
+```
+
 ## Preferred row identifier {#preferred-id}
 
 The interface-level annotation `@db.table.preferredId.uniqueIndex(name?: string)` picks a unique-index group as the row's display/addressing identifier. When omitted, `preferredId` defaults to `primaryKeys`.
@@ -237,6 +315,7 @@ The decorator is generic over `TRow` (the bound table's row type) and `R` (the l
 | `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-notation paths the predicate references. Server-internal — never on the wire. Type-narrows `disabled`'s row argument and drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation). Listing a relation field is a TS error. See [`requiredFields`](#required-fields). |
 | `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean \| string)[]`  | Sync batch gate predicate. One verdict per input row, parallel by index: truthy = disabled, a string also gives the [reason](#disabled-reasons). Without `requiredFields` → action dropped at discovery. See [Server-side Gate](#server-side-gate).                                                                               |
 | `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level batch policy. Default `'reject'`. See [Batch mode](#rows-batch-mode).                                                                                                                                                                                                                                              |
+| `maxIds`         | `number`                                                            | `'rows'` level: the most identifiers one request may carry. Default `1000`. Above it → 400. Server-internal. Since 0.1.143. See [Id-count cap](#id-cap).                                                                                                                                                                          |
 | `table`          | `AtscriptDbTable<TRow>`                                             | Required when declaring `disabled` or any `@DbActionRow*` on a class that does **not** extend `AsDbReadableController`. Silently ignored on subclasses (the bound table wins). See [Bound-table requirement](#bound-table-requirement).                                                                                           |
 
 `FlatKey<TRow> = keyof FlatOf<TRow> & string` — dot-paths over scalars; relations excluded. When `TRow = unknown` (no `<TRow>` generic), all string keys are accepted at the type level and `disabled`'s row arg falls back to `any[]`. The runtime still drops `disabled` without `requiredFields`.
@@ -294,7 +373,7 @@ async lock(@DbActionIDs() ids: Array<{ id: string }>) {
 Validation is **strict** — unknown fields are rejected, no coercion. The identifier object's field set must EXACTLY match one legitimate identification on the table. See [Identifier shape](#identifier-shape) for precedence rules and the full contract.
 
 ::: warning `rows`-level `ids` is always an array
-A `'rows'` action MUST receive a JSON array under `ids`, even when the client invokes it on a single row. Send `{ "ids": [{"id":"a"}] }`, not `{ "ids": {"id":"a"} }`. The `@DbActionIDs()` resolver rejects non-array `ids` with HTTP 400. An empty array `[]` is accepted — `client.action(name, [])` posts `{ "ids": [] }`, and your handler runs with `ids === []`.
+A `'rows'` action MUST receive a JSON array under `ids`, even when the client invokes it on a single row. Send `{ "ids": [{"id":"a"}] }`, not `{ "ids": {"id":"a"} }`. The `@DbActionIDs()` resolver rejects non-array `ids` with HTTP 400. An empty array `[]` is accepted — `client.action(name, [])` posts `{ "ids": [] }`, and your handler runs with `ids === []`. An array longer than [`maxIds`](#id-cap) (default 1000) is rejected with 400.
 :::
 
 ::: danger `@DbActionID*` requires a bound table
@@ -672,7 +751,7 @@ async ship(@DbActionID() id: { id: string }, @DbActionRow() order: Order) {
 `@DbActionRow()` / `@DbActionRows()` are also recognized as level signals (see [Action Levels](#action-levels)) — `@DbActionRow()` infers `'row'`, `@DbActionRows()` infers `'rows'`. They are interchangeable with `@DbActionID*` for level inference; mixing row-cardinality and rows-cardinality decorators on the same method drops the action with a warning.
 
 ::: tip Row projection is narrowed
-The injected row(s) are projected to `identifier-shape ∪ preferredId ∪ requiredFields`. Other table columns are absent. To access fields the gate doesn't read, add them to `requiredFields` (or re-fetch with `findOne`). There is no auto-deps tracker — the field set is exactly what you declare.
+The injected row(s) are projected to `identifier-shape ∪ preferredId ∪ requiredFields`. Other table columns are absent. To access fields the gate doesn't read, add them to `requiredFields` (or re-fetch with `findOne`). There is no auto-deps tracker — the field set is exactly what you declare. Since 0.1.143, `requiredFields` that the controller's `hasField` hides are left out, and rows outside the controller's row overlay are not loaded. See [Row scoping](#row-scoping).
 :::
 
 In `'rows'` + `'skip'` mode, `@DbActionRows()` resolves to filtered survivors only — the original request rows are not retrievable post-filter.
@@ -686,7 +765,7 @@ For `@DbActionIDs()` / `@DbActionRows()` actions, `onDisabledRows` controls how 
 | `'reject'` (default) | every survivor row once | throws `ActionDisabledError` listing **all** failing IDs (+ their reasons) | n/a                |
 | `'skip'`             | every survivor row once | filters cached IDs + rows to passing-only; zero survivors → throw          | only the survivors |
 
-Identifiers whose row didn't resolve (no DB match) are treated as failing without invoking `disabled` against `undefined`. Surviving rows are passed in one batched `disabled` call.
+Identifiers whose row didn't resolve (no DB match, or outside the controller's [row overlay](#row-scoping)) are treated as failing without invoking `disabled` against `undefined`. Their `reasons` entry is `null`. Surviving rows are passed in one batched `disabled` call.
 
 ```typescript
 @Post("actions/archive")
@@ -756,6 +835,8 @@ export class AdminController {
 ```
 
 Without (non-empty) `requiredFields`, `disabled` is dropped at discovery with a `[moost-db actions]` warning.
+
+Since 0.1.143, a `requiredFields` entry that the controller's [`hasField`](./customization#hasfield) hides for the current request is never loaded, nor is a `@db.column.derived` field whose source it hides. The predicate sees it as `undefined`, and the `@DbActionRow*` row does not carry it.
 
 ### Closure-emission pitfall
 
@@ -918,7 +999,7 @@ async block(@DbActionID() id: { id: string }) {
 
 If the guard rejects the request, the handler body never runs and the auth-failure response is returned — exactly as for any other Moost handler.
 
-The internal gate interceptor (registered automatically when `disabled` or `@DbActionRow*` is present) runs at `AFTER_GUARD` priority — so auth guards run first, the gate runs after, then any custom `INTERCEPTOR`-priority interceptors, then the handler.
+The internal action interceptor (the `disabled` gate, the row scoping, and — since 0.1.143 — [`prepareRequest`](#preparerequest-on-actions), which it runs first) is at `AFTER_GUARD` priority — so auth guards run first, then `prepareRequest`, then the gate, then any custom `INTERCEPTOR`-priority interceptors, then the handler.
 
 ### Worked recipe — auth + gate + `requiredFields` {#auth-gate-recipe}
 
@@ -963,6 +1044,7 @@ export class OrdersController extends AsDbController<typeof Order> {
 What happens per request:
 
 1. `@Authenticate(adminGuard)` — Moost runs the auth guard. On failure: standard auth-failure response, handler never runs.
+   Then the controller's [`prepareRequest`](#preparerequest-on-actions) runs, when it defines one.
 2. `requiredFields` widens the projection used to load the row.
 3. The gate interceptor (`AFTER_GUARD`) loads the row, evaluates `disabled([row])`. On failure: HTTP 409 `ActionDisabledError`.
 4. `@DbActionRow()` injects the gate-loaded row into the handler — no second fetch.
@@ -1097,9 +1179,18 @@ The meta builder enforces several rules. Every violation emits a console warning
 
 The single greppable prefix `[moost-db actions]` makes it easy to detect issues in CI logs.
 
+One misconfiguration throws instead: an action on a value-help controller (since 0.1.143, see [below](#value-help-controllers-are-excluded)).
+
 ## Value-Help Controllers Are Excluded
 
-`AsValueHelpController` and `AsJsonValueHelpController` (used for FK pickers and dictionary surfaces) do **not** participate in action discovery. Action decorators applied to them are silently ignored — `actions` is always emitted as `[]` for shape uniformity. Adding actions to a value-help picker doesn't make sense; the contract is intentionally narrow.
+`AsValueHelpController` and `AsJsonValueHelpController` (used for FK pickers and dictionary surfaces) do **not** support actions. `/meta` always emits `actions: []` for shape uniformity.
+
+Since 0.1.143, an action on a value-help controller is a **hard error**:
+
+- `@DbAction` on a value-help method, or `@DbActions` / `@DbTableActions` / `@DbRowActions` / `@DbRowsActions` on a value-help class, throws when the decorator is applied.
+- An action inherited from a non-value-help base throws when the controller is constructed.
+
+Before 0.1.143 these decorators were silently ignored, and the `@Post` route still ran with no gate. Move the action to an `AsDbReadableController` / `AsDbController`.
 
 ## Inspecting Action Metadata — `getAtscriptDbMate()`
 

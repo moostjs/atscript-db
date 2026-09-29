@@ -21,7 +21,7 @@ Before this release, value help only fired for fields whose `.ref` resolved to a
 Three classes in `@atscript/moost-db`:
 
 - **`AsReadableController<T>`** — abstract base. Handles `@db.http.path` stamping, the shared `/meta` route, serialization options, Uniquery control validation, and the helper surface reused by every subclass.
-- **`AsValueHelpController<T>`** — abstract subclass for read-only value-help sources. Adds `/query`, `/pages`, `/one(/:id)`, `/one` routes. Subclasses implement `query(controls)` and `getOne(id)`.
+- **`AsValueHelpController<T>`** — abstract subclass for read-only value-help sources. Adds `/query`, `/pages`, `/one(/:id)`, `/one` routes. Subclasses implement `query(controls)` and `getOne(id)`. Value-help controllers do not support actions. Since 0.1.143, `@DbAction` / `@DbActions*` on one is a hard error (see [Actions](../http/actions#value-help-controllers-are-excluded)).
 - **`AsJsonValueHelpController<T>`** — concrete subclass backed by a static in-memory array. Handy for enum-style dictionaries that ship with the application and don't warrant a DB table.
 
 `AsDbReadableController` / `AsDbController` now extend `AsReadableController` too; DB-backed tables and views participate in the same contract. See the [CRUD docs](../http/crud) for the DB-side details.
@@ -103,12 +103,49 @@ export interface InviteForm {
 
 The picker resolves via `prop.ref.type().metadata.get('db.http.path')` (stamped by the controller at registration) → `/api/dicts/status`. It fetches `/api/dicts/status/meta` once, caches it app-wide, and uses the capability hints to drive its UI.
 
+## Per-request scoping {#scoping}
+
+Since 0.1.143, `AsValueHelpController` has the same three scoping seams as the DB controllers. The base routes apply them to every value-help source, so a permission layer needs no extra code per subclass. Each hook may be async.
+
+| Hook                          | Default             | Applied to                                                                                                                                                                                                        |
+| ----------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `transformFilter(filter)`     | identity            | `/query` and `/pages`: receives the request filter and returns the one `query()` runs. `/one` checks the found row against `transformFilter({})` in memory: a row outside it is a 404, the same as a missing row. |
+| `transformProjection(select)` | identity            | Receives the request `$select` (`undefined` when absent; `/one` always passes `undefined`). Returns the projection to apply: an inclusion list or `{ path: 1 }` map, or an exclusion `{ path: 0 }` map.           |
+| `hasField(path)`              | every declared prop | A path it rejects in the filter, `$sort` or `$select` gets the same `Unknown field "x"` 400 as a nonexistent one. A hidden field never matches `$search`.                                                         |
+
+`hasField` gates the request only. To also remove a hidden column from responses, return an exclusion from `transformProjection`:
+
+```ts
+@Controller("/api/dicts/accounts")
+export class AccountDictController extends AsJsonValueHelpController<typeof AccountDict> {
+  constructor(app: Moost) {
+    super(AccountDict, ACCOUNTS, app, "accounts");
+  }
+
+  protected override transformFilter(filter: FilterExpr): FilterExpr {
+    return { $and: [filter, { tenantId: currentTenant() }] };
+  }
+
+  protected override transformProjection(select?: ValueHelpSelect<Account>) {
+    return select ?? { internalCode: 0 };
+  }
+
+  protected override hasField(path: string): boolean {
+    return path !== "internalCode" && super.hasField(path);
+  }
+}
+```
+
+`prepareRequest` runs first on `/query`, `/pages` and `/one`, before any of these hooks. See [Customization](../http/customization).
+
+A custom `AsValueHelpController` subclass receives the filter and `$select` that already went through the hooks in `query(controls)`. It must apply both. `getOne(id)` returns the raw row; the base route applies the overlay and projection to it.
+
 ## JSON-source semantics
 
 The built-in `AsJsonValueHelpController.query` implementation iterates the constructor-provided array and applies Uniquery controls in this order, delegating filter, sort, and projection to the shared JS-native engine from the [Memory adapter](./memory) (`buildMemoryPredicate` / `sortRows` / `projectRow` — the same engine that backs in-memory tables):
 
 1. **Filter** — MongoDB-style comparison operators (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`, `$exists`) and logical combinators (`$and`, `$or`, `$not`, `$nor`), over **dot-path** access into nested objects. `$regex` honors inline flags (`/foo/i`). The [MongoDB-like null model](./memory#comparison-semantics) applies: `$eq: null` matches an explicit `null` **or** a missing field; `$ne: null` matches only a concrete present value. Any field can be filtered — no gate.
-2. **Search** — case-insensitive substring match, applied by the controller itself (the engine has no `$search`). Fields to match come from `@ui.dict.searchable`: field-level annotation narrows to those props; absent or interface-level defaults to every `string`-typed prop.
+2. **Search** — case-insensitive substring match, applied by the controller itself (the engine has no `$search`). Fields to match come from `@ui.dict.searchable`: field-level annotation narrows to those props; absent or interface-level defaults to every `string`-typed prop. A field [`hasField`](#scoping) hides is skipped.
 3. **Sort** — stable, multi-key. Accepts the flexible value-help grammar: a leading `-`, `"field:asc,-other"` strings, arrays, or the `{ [field]: 'asc' \| 'desc' }` form. Any field can be sorted — no gate.
 4. **Projection** — `$select` resolves nested dot-paths.
 5. **Pagination** — `$skip` + `$limit` applied after filter/search/sort. `/pages` returns the full total count.

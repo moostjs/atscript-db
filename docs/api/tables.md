@@ -117,6 +117,8 @@ The `decimal` type is stored as a string at runtime to preserve exact precision.
 
 Nested objects and arrays have special storage modes — see [Storage & Nested Objects](/api/storage) for details.
 
+`table.jsonParents` (since 0.1.143) lists the logical paths the adapter stores as **one** JSON column — `@db.json` fields and arrays on the SQL adapters. The engine cannot address a sub-path of such a column in a projection, filter or sort, so a permission layer treats it atomically (visible whole or not at all). Navigation fields are never listed; document adapters (MongoDB) list none, since they store nested values natively.
+
 ## Custom Column Names
 
 Override the physical column name with `@db.column`:

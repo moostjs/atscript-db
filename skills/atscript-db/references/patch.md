@@ -127,4 +127,4 @@ Array ops against scalar arrays in SQL columns emit an in-application diff-and-r
 - `ValidatorError` (from `@atscript/typescript`) — required field missing on replace, bad value shape.
 - `DbError('FK_VIOLATION')` — FK existence check failed on write.
 - `DbError('DEPTH_EXCEEDED')` (`DepthLimitExceededError`) — payload nests past `@db.depth.limit N`.
-- `DbError('CONFLICT')` — unique-index violation.
+- `DbError('CONFLICT')` — unique-index violation; a nested relation write naming a row outside the record's relation (0.1.143) → [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143).

@@ -111,7 +111,7 @@ const results = await docs.vectorSearch(queryVector, {
 });
 ```
 
-Results are ordered by similarity (most similar first).
+Results are ordered by similarity (most similar first). `controls.$select` projects the rows exactly like `findMany()` — inclusion and exclusion forms, on every adapter (the SQL adapters returned every column before 0.1.143, so `@db.writeOnly` fields leaked through `$vector` queries over HTTP).
 
 ### Vector Search with Count
 

@@ -24,7 +24,7 @@ await users.insertMany(rows, { maxDepth: 5 }); // override nested-write recursio
 - Payload types: `DbPatch<Row>` (insert/patch — all keys optional, optional columns accept `null`), `DbRow<Row>` (replace). Defaults pass before validation: static `@db.default 'x'` values on EVERY adapter (since 0.1.128 — also where the DDL carries the same `DEFAULT`; guards/validators see the full row), function defaults (`now`/`uuid`/`increment`) only when not in the adapter's `nativeDefaultFns()`. No public `applyDefaults` — observe / enrich the defaulted rows through a write guard.
 - Static defaults are typed per design type (string / string-literal union → raw string; boolean, number, JSON → `JSON.parse` of the literal).
 - Nested writes (insert / replace / patch into `@db.rel.from` arrays) are rejected unless `@db.depth.limit N` is set for the right depth; `@db.depth.limit 0` rejects any nesting with HTTP 400.
-- **`opts?: { maxDepth?: number; guard? }`** (`TWriteOptions`) on `insertOne/Many` / `updateOne` / `bulkUpdate` / `replaceOne` / `bulkReplace`: `maxDepth` caps recursive nested-write depth at this call (default `3`; `@db.depth.limit` is the server-side acceptance gate, `maxDepth` the in-call recursion budget). `guard(ctx)` (since 0.1.128) runs EXACTLY ONCE inside the table's own transaction after `undefined`-pruning + defaults + validation, before encryption / nested phases, never for nested re-entries: `ctx.action` (`insert|insertMany|replace|replaceMany|update|updateMany`), `ctx.rows` (validated plaintext rows, nav data attached; `$cas` removed on update — mutate in place, re-validated afterwards), `ctx.expectedVersions[i]`, `ctx.current(i)` (lazy memoised pre-image read inside the tx; `null` without an identifying key, never throws). A throw rolls back and propagates unchanged. `deleteOne(id, { guard })` (`TDeleteOptions`): `ctx.id`, `ctx.filter`, `ctx.current()`; an id that resolves to no filter → `{ deletedCount: 0 }`, guard not called. moost-db's `guardWrite` / `guardRemove` overrides are these guards.
+- **`opts?: { maxDepth?: number; guard?; check? }`** (`TWriteOptions`) on `insertOne/Many` / `updateOne` / `bulkUpdate` / `replaceOne` / `bulkReplace`: `maxDepth` caps recursive nested-write depth at this call (default `3`; `@db.depth.limit` is the server-side acceptance gate, `maxDepth` the in-call recursion budget). `guard(ctx)` (since 0.1.128) runs EXACTLY ONCE inside the table's own transaction after `undefined`-pruning + defaults + validation, before encryption / nested phases, never for nested re-entries: `ctx.action` (`insert|insertMany|replace|replaceMany|update|updateMany`), `ctx.rows` (validated plaintext rows, nav data attached; `$cas` removed on update — mutate in place, re-validated afterwards), `ctx.expectedVersions[i]`, `ctx.current(i)` (lazy memoised pre-image read inside the tx, identified exactly like the write — [primary key first](#id-resolution--one-row-primary-key-first-01143), 0.1.143; `null` without an identifying key, never throws), `ctx.currentAll()` (0.1.143: every pre-image in ONE `findMany`, parallel to `rows`, fills the same memo — reuses indexes `current(i)` read; a later `current(i)` reads nothing), `ctx.filterFor(i)` (0.1.143: the exact filter the write targets row i by — PK, else its unique key, ≤ 1 row — or `null` without a key; what `current(i)` reads by; memoised per index. USING without reads: `count({ $and: [{ $or: filters }, policy] }) === distinct filters`). A throw rolls back and propagates unchanged. `deleteOne(id, { guard, scope? })` (`TDeleteOptions`): `ctx.id`, `ctx.filter` (the exact filter the delete targets, PK first), `ctx.current()`; an id that resolves to no filter → `{ deletedCount: 0 }`, guard not called. `check(ctx)` (0.1.143) → [§ Post-write check](#post-write-check-check-01143). moost-db's `guardWrite` / `guardRemove` / `checkWrite` overrides are these hooks.
 - **`insertMany` rows may differ in shape** — each row is written like `insertOne`; a column a row omits gets its DEFAULT/NULL. ≤ 0.1.131 PostgreSQL + MySQL took the column list from row 1 and silently DROPPED every other column for the whole batch (SQLite/Mongo/memory unaffected) — re-check data from heterogeneous batches.
 
 ## Replaces (full-record)
@@ -60,6 +60,32 @@ await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion overrid
 - `undefined` value = key not sent (never in the SET list); `null` = SET NULL (optional columns; typed — since 0.1.128 filters on optional columns accept `null` too, see `queries.md § Null values`). Non-merge nested object: undefined optional leaf ≡ omitted (null-filled); merge block: untouched.
 - Empty patch (PK only, no `$cas`) → no statement, `{ matchedCount: 1|0, modifiedCount: 0 }`; PK + `$cas` → versioned touch (executes, bumps) — see `versioning.md`. `updateMany(filter, {})` → count only.
 - `touchMany(keys, { require })` (since 0.1.129, versioned tables): batch versioned touch — each key = primary key (composite ok, not a unique index) + version, no payload; `'all'` (default) pre-counts and throws `CasMismatchError` (`CAS_MISMATCH`, 409) on a stale/missing row, bumps in ≤ 500-key `$or` chunks inside one transaction; `'any'` bumps what matches. Not on the REST surface. See `versioning.md § Batch touch`.
+- Nested relation payloads (TO object, FROM/VIA operators) only ever touch rows related to the record being written, and run only for rows the main write matched — rules + error codes in [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143). A TO patch on a missing row returns `{ matchedCount: 0, modifiedCount: 0 }` (≤ 0.1.142 threw `source record not found`).
+
+## Post-write check (`check`, 0.1.143)
+
+Row-level WITH CHECK. The guard sees rows BEFORE the write; `check` sees what was WRITTEN, with the database's own filter semantics. Option on `insertOne/Many`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate` — not deletes, not `updateMany` / `replaceMany`.
+
+```ts
+import type { TDbWriteCheckContext } from "@atscript/db";
+
+const withCheck = async (ctx: TDbWriteCheckContext) => {
+  if (ctx.filters.length === 0) return;
+  const inScope = await ctx.count({
+    $and: [{ $or: [...ctx.filters] }, { tenant: currentTenant() }],
+  });
+  if (inScope !== ctx.filters.length) throw new Error("row outside your tenant"); // rolls back
+};
+await tasks.updateOne({ id: 1, tenant: "other" }, { check: withCheck }); // throws, nothing written
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                     |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Called ONCE per top-level call, inside the table's tx, AFTER the main write and every nested-relation phase. Never for nested re-entries.                                                                                                                                                                                                |
+| 2   | `ctx.action` = the guard's enum (`bulkReplace` → `replaceMany`, `bulkUpdate` → `updateMany`). `ctx.filters` = one exact PK filter per written row, de-duplicated: inserted rows by their resulting PK (auto-increment / generated ids included), updated / replaced rows by the targeted row's PK; rows that matched nothing are absent. |
+| 3   | `ctx.count(filter)` counts inside the same tx. A throw rolls back and propagates unchanged.                                                                                                                                                                                                                                              |
+| 4   | `ctx.transactional === false` (pass-through tx: memory adapter, standalone Mongo) → the write is already durable; the throw rolls nothing back. Validate BEFORE the write (guard) where a hard guarantee is needed.                                                                                                                      |
+| 5   | Nested re-entries on related tables get neither `guard`, `check` nor `isFieldVisible` — a permission layer rejects nested payloads up front.                                                                                                                                                                                             |
 
 ## Optimistic concurrency
 
@@ -114,6 +140,28 @@ await users.deleteMany({ status: "archived" }); // FilterExpr
 
 Per-request hidden unique keys (since 0.1.134): `deleteOne(id, { isFieldVisible })`, `updateOne/bulkUpdate/replaceOne/bulkReplace(rows, { isFieldVisible })`, `resolveIdFilter(id, { isFieldVisible })`, `identificationsVisibleTo(isFieldVisible)` — a unique index over a field failing the predicate is ignored as if it did not exist (no existence oracle). PK / `preferredId` / `@meta.id` always count as visible. Writes apply it only to the top-level PK-less unique-index fallback, never to nested relation writes. moost-db passes it from `hasField` automatically.
 
+## Id resolution — one row, primary key first (0.1.143)
+
+A scalar can fit several identifications (string PK next to a string unique `slug`: `"abc"` = one row's `id` AND another's `slug`). ≤ 0.1.142 writes `$or`-ed them → `deleteOne("abc")` could delete the slug namesake. Now every id addresses exactly ONE row.
+
+| API                                                                                                 | Resolves to                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveRowFilter(id, { scope?, isFieldVisible? })`                                                 | `Promise<FilterExpr \| null>` — PK tried first, then each unique index; the first that matches a row wins, returned as that row's exact PK filter. Object id with the complete PK → PK alone (no read). Nothing matches → the first identification (matches nothing). `null` = the id fits no identification. |
+| `findOneByRow(id, { scope?, controls?, isFieldVisible? })` (0.1.143)                                | `Promise<row \| null>` — the row `resolveRowFilter` addresses, read with `controls`, `null` when missing or outside `scope`. One step: identifications probed in order with the caller's controls (no resolve-then-read).                                                                                     |
+| `resolveIdFilter(id, { isFieldVisible? })`                                                          | Sync `$or` of every compatible identification — CAN match several rows. Never address a write or a single-row read with it.                                                                                                                                                                                   |
+| `recordFilter(payload, { isFieldVisible? })` (0.1.143, tables)                                      | The filter `updateOne` / `replaceOne` of `payload` target (PK when complete, else a unique index) — explain a write's outcome (e.g. a CAS 0-match) against exactly the row it addressed. Throws `NOT_FOUND` without identifying fields.                                                                       |
+| `findById`, `deleteOne` (pinned inside its tx), write guard `current(i)`, remove guard `ctx.filter` | `resolveRowFilter` semantics.                                                                                                                                                                                                                                                                                 |
+
+`scope` (`TRowResolveOptions`, a row overlay such as a tenant filter): only in-scope rows count while identifications are tried — an out-of-scope row never shadows an in-scope one. `resolveRowFilter` does NOT filter its result: AND the scope on before reading. `deleteOne(id, { scope })` also scopes the delete itself (out-of-scope row → `{ deletedCount: 0 }`, guard `current()` → `null`).
+
+```ts
+const scope = { tenant: currentTenant() };
+const row = await slugs.findOneByRow("abc", { scope, controls: { $select: ["id", "title"] } });
+await slugs.deleteOne("abc", { scope });
+```
+
+moost-db passes `transformOne({})` as this scope for `/one`, `DELETE` and action ids → [moost-db.md § Hooks](moost-db.md#hooks-override-on-subclass).
+
 ## Reads
 
 ```ts
@@ -157,13 +205,13 @@ try {
   await users.insertOne({ authorId: 999 });
 } catch (e) {
   if (e instanceof DbError) {
-    e.code; // 'CONFLICT' | 'FK_VIOLATION' | 'NOT_FOUND' | 'CASCADE_CYCLE' | 'INVALID_QUERY' | 'DEPTH_EXCEEDED'
+    e.code; // 'CONFLICT' | 'FK_VIOLATION' | 'NOT_FOUND' | 'CASCADE_CYCLE' | 'INVALID_QUERY' | 'DEPTH_EXCEEDED' | …
     e.errors; // Array<{ path: string; message: string }>
   }
 }
 ```
 
-Moost controllers (`moost-db`) map `CONFLICT → 409` and every other `DbError` code → 400. `ValidatorError → 400`. Body shape: `{ statusCode, message, errors }`.
+`CONFLICT` = unique violation OR (0.1.143) a nested write naming a related row outside the record's relation — see [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143). Moost controllers (`moost-db`) map `CONFLICT → 409` and every other `DbError` code → 400. `ValidatorError → 400`. Body shape: `{ statusCode, message, errors }`.
 
 ## Search
 
@@ -175,5 +223,7 @@ await users.vectorSearchWithCount(vector, q)            // { data, count }
 ```
 
 Guard with `users.isSearchable()` / `users.isVectorSearchable()` — adapters without override throw.
+
+`controls.$select` on `vectorSearch*` / `geoSearch*` projects exactly like `findMany` (inclusion + exclusion, nested paths) on every adapter; ≤ 0.1.142 the SQL adapters returned every column (incl. `@db.writeOnly`, also over HTTP `$vector` / `/geo`).
 
 `isSearchable()` answers for TEXT search only. `getSearchIndexes()` lists vector indexes alongside text ones (it feeds the index picker), but a vector index answers `vectorSearch()` and nothing else, so a table whose only search declaration is `@db.search.vector` reports `isSearchable() === false` and rejects `search()` / `searchWithCount()` / a grouped `$search` with `DbError("INVALID_QUERY", [{ path: "$search" }])`. (since 0.1.131). `vectorSearch()` never took this gate and is unaffected.

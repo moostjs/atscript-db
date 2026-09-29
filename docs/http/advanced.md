@@ -118,7 +118,7 @@ All [filter operators](./query-syntax) and control parameters work inside relati
 
 The controller validates relation names against your schema:
 
-- **Unknown relation** — returns `400` with a list of available relations
+- **Unknown relation** — returns `400` with a list of available relations. Since 0.1.143 this runs at every level: a nested `$with` (`$with=author($with=org)`) and each segment of a dotted name are checked against the relations of their own target table, and the list names that level's relations. A relation [`hasField`](./customization#hasfield) hides (checked at its full path, e.g. `author.org`) answers exactly like a nonexistent one. The check runs before the sub-query fields, so an unknown nested relation is never reported as `Unknown field "author.nope"`. A permission layer that rejects a relation itself should throw `unknownRelationError(name, visibleRelations)` from `@atscript/moost-db` — the single source of this wording.
 - **FK field used as relation** — `$with=projectId` returns `400` (use the navigation property name instead, e.g., `$with=project`)
 
 ::: tip FK fields auto-included

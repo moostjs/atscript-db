@@ -51,6 +51,7 @@ Key formats accepted: 32-byte `Buffer`, 64-char hex, base64, or raw 32-char stri
 | 10  | Tampered/corrupt envelope or unknown keyId → `ENC_DECRYPT_FAILED` (carries table/field/keyId, never plaintext). JSON-serialized plaintext → round-trips are type-exact (`"42"` ≠ `42`).                                                                                                                        |
 | 11  | Toggling `@db.encrypted` changes the schema hash → sync runs (SQL column-type migration; Mongo metadata-only). Key material is never persisted or hashed.                                                                                                                                                      |
 | 12  | Keys live app-side by design (threat model: DB dumps/backups/operators — NOT an attacker controlling the app). No-key-in-process needs → MongoDB CSFLE independently (own `MongoClient` `autoEncryption`); don't combine with `@db.encrypted` on the same field.                                               |
+| 13  | A VIEW column over an encrypted field is encrypted on the view (0.1.143): decrypted rows, `ENC_FIELD_*` on filter / sort, needs the view's `DbSpace` `encryption` config; aggregating it fails at first use → [tables-and-views.md § Read seals](./tables-and-views.md#read-seals-01143).                      |
 
 ## Key imports
 

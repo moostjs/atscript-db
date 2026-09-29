@@ -16,6 +16,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 
 | Hook                                   | Available On   | Called When                      | Purpose                                                           |
 | -------------------------------------- | -------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `prepareRequest(ctx)`                  | Both           | First, on every endpoint         | Resolve per-request policy asynchronously (since 0.1.143)         |
 | `transformFilter(filter)`              | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
 | `transformOne(filter)`                 | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
 | `transformProjection(projection)`      | Both           | Before every read                | Restrict visible fields                                           |
@@ -27,14 +28,51 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
 | `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
 | `guardRemove(ctx)`                     | AsDbController | Inside the table's tx, id known  | Validated-stage delete checks (since 0.1.128)                     |
+| `checkWrite(ctx)`                      | AsDbController | Inside the table's tx, after it  | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
 | `withTransaction(fn)`                  | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
 | `meta()`                               | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
 | `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
+| `authorizeForm(name, actionNames)`     | Both           | On `GET /meta/form/:name`        | Refuse a form per request — answered as an unknown form (0.1.143) |
 | `init()`                               | Both           | On controller construction       | One-time setup                                                    |
 
 ::: info Deprecated hook
 `checkGates(parsed)` still runs after the field capability gate but is deprecated since 0.1.128: the gate derived from `/meta.fields` already rejects every unlisted or non-sortable / non-filterable path before it. Override the read hooks above, or the table-level `guard` options, instead.
 :::
+
+## Request Preparation
+
+### prepareRequest {#preparerequest}
+
+Since 0.1.143. The entry point for a permission layer that must resolve the caller's policy **asynchronously** — load scopes from a session store, evaluate grants — before the synchronous hooks ([`hasField`](#hasfield), [`validateControls`](#validateinsights), the capability gate) consult it. Not implemented by default; defining it switches it on, and it is awaited only then.
+
+```typescript
+import { HttpError } from "@moostjs/event-http";
+import type { TDbRequestContext } from "@atscript/moost-db";
+
+@TableController(ordersTable)
+export class OrdersController extends AsDbController<typeof Order> {
+  protected async prepareRequest(ctx: TDbRequestContext) {
+    const scopes = await loadScopes(ctx.endpoint); // your policy source
+    if (!scopes) throw new HttpError(403);
+    requestScopes.set(scopes); // read back by hasField / transformFilter
+  }
+}
+```
+
+It runs exactly once per request, before anything else looks at the request:
+
+| Endpoint                                               | `ctx.endpoint`                          | When                                                                  | `ctx.controls`      |
+| ------------------------------------------------------ | --------------------------------------- | --------------------------------------------------------------------- | ------------------- |
+| `/query`, `/pages`, `/geo`, `/one/:id`, `/one?…`       | `query`, `pages`, `geo`, `one`          | Right after the URL is parsed, before validation and every other hook | The parsed controls |
+| `POST` / `PUT` / `PATCH` / `DELETE /:id`, `DELETE /?…` | `insert`, `replace`, `update`, `remove` | At handler start, before the shape gate, `onWrite` / `onRemove`       | —                   |
+| `/meta`, `/meta/form/:name`                            | `meta`, `metaForm`                      | First                                                                 | —                   |
+| Every `@DbAction` handler (row, rows and table level)  | `action` (`ctx.action` = the name)      | After the guards, before the action's ids are validated / rows loaded | —                   |
+
+Value-help controllers call it too (`query`, `pages`, `one`). [Actions](./actions#preparerequest-on-actions) run it before anything reads their ids, rows or row overlay, so a permission layer needs no separate action guard. Every built-in route enters through `parseRequest(endpoint, url?)`: with a URL it parses the query string, coerces boolean controls (`$actions=true`) and hands the parsed controls to `prepareRequest`; without one (writes, `meta`) it only runs the hook. Custom routes you add to a subclass should do the same — `const { parsed, controls } = await this.parseRequest("query", url)`, or `await this.parseRequest("insert")`.
+
+- **Do** throw to deny — an `HttpError` for a specific status; the request aborts with it.
+- **Do** mutate `ctx.controls` if you must rewrite a read — the rest of the pipeline validates what you leave.
+- **Don't** do per-row work here — it runs once per request; row-level policy belongs in [`transformFilter`](#transformfilter) / [`guardWrite`](#guardwrite) / [`checkWrite`](#checkwrite).
 
 ## Read Hooks
 
@@ -87,6 +125,10 @@ protected transformOne(filter: FilterExpr): FilterExpr {
 
 If you only need to scope BOTH `/query` and `/one` the same way (the common case), override `transformFilter` alone — `transformOne` will pick it up automatically.
 
+Since 0.1.143 the overlay also scopes id resolution and deletes: `/one/:id`, `/one?…`, `DELETE /:id` and `DELETE /?…` resolve the id [primary key first](/api/crud#id-resolution) among in-scope rows only (an out-of-scope row never shadows an in-scope one), and a `DELETE` never removes an out-of-scope row — it answers `404` like a missing one.
+
+Since 0.1.143, `transformOne({})` also scopes the ids and rows of `@DbAction` handlers. An id outside it gets the same answer as a missing one. See [Actions § Row scoping](./actions#row-scoping).
+
 ### transformProjection {#transformprojection}
 
 Intercepts the projection before every read. If the client sends `$select`, `projection` contains it; otherwise it is `undefined`. Use this to enforce field exclusions:
@@ -138,7 +180,7 @@ protected hasField(path: string): boolean {
 }
 ```
 
-Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way.
+Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. Since 0.1.143 nested `$with` relation names are checked too, at their full path (`hasField("author.org")` for `$with=author($with=org)`), with the same `Unknown relation` answer. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way.
 
 Since 0.1.134 it also governs **row identification**: a unique index over a hidden field is not an identification, so it cannot be used to probe whether a row with a given value exists. It behaves as if the index did not exist:
 
@@ -157,7 +199,18 @@ It only rejects references. Pair it with:
 - [`transformProjection`](#transformprojection) to strip the hidden values from rows (a request without `$select` returns every column);
 - [`applyMetaOverlay`](./permissions) to prune `/meta`, which is cached and does not consult `hasField`.
 
-Native text search and vector search (`$vector` names an index) run inside the database over their indexes, out of this hook's reach — keep hidden fields out of those indexes.
+Since 0.1.143 an overridden `hasField` also gates the database's **indexes**, which search inside the engine and would otherwise rank or match on a hidden column:
+
+| Request                                             | An index reading a hidden field is answered…                                                                                                            |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$search` + `$index=<name>` (native text search)    | like a nonexistent index: `400 Search index "<name>" not found`                                                                                         |
+| `$search` without `$index` (the default text index) | falls back to the [`@db.column.searchable`](./advanced#search-fallback) substring search over visible fields — or ignores the term when none is visible |
+| `$search` + `$vector[=<name>]`                      | like a nonexistent vector index: `400 Vector index "<name>" not found` (`No vector index available` without a name), before `computeEmbedding` runs     |
+| `GET /geo` (default geo index, or `$index=<name>`)  | like a missing geo index — the same 400 the core answers for an unknown one                                                                             |
+
+Unknown index names get the same answers on a controller that overrides `hasField`, so the reply reveals nothing. A **`@db.column.derived`** field follows its source: it is visible only while its source path is (a derived copy of `settings.apiKey` disappears with `settings`), and one whose source is hidden is sealed out of every read projection for that request, exactly like a `@db.writeOnly` field — in joined `$with` rows too (the source is checked as `rel.<source>`) — and is never loaded for an action's `requiredFields`.
+
+To prune `/meta` consistently (`searchIndexes`, `searchable`, `vectorSearchable`, `geoSearchable`), read the protected `indexFieldPaths()` from `applyMetaOverlay`: it lists every text / vector / geo index with the logical field paths it reads and which one is the default. Text and vector entries come from the adapter's `getSearchIndexes()` (`fields`, `isDefault`); an index whose coverage the adapter cannot tell (a dynamic document-search mapping) lists every field.
 
 ### computeEmbedding {#computeembedding}
 
@@ -229,9 +282,11 @@ When it runs:
 Every built-in write endpoint runs the same pipeline (since 0.1.128):
 
 ```
-shape gate (400)  →  onWrite / onRemove (untrusted body, outside any transaction)
+prepareRequest (when implemented)
+  →  shape gate (400)  →  onWrite / onRemove (untrusted body, outside any transaction)
   →  table op — the table's own transaction:
        validate → guardWrite / guardRemove (only when overridden) → re-validate → write
+       → nested-relation phases → checkWrite (only when overridden)
   →  404 / 409 disambiguation
 ```
 
@@ -408,6 +463,31 @@ Overriding a guard is the only switch: there is no separate flag, and a no-op ov
 - **A guard that writes the same row** (e.g. a [versioned touch](/api/versioning#versioned-touch) as a fence) bumps the version twice — once for the touch, once for the main write.
 - Guard rows are validated twice (once before the guard, once after it): that cost exists only when a guard is overridden.
 
+### checkWrite {#checkwrite}
+
+Since 0.1.143. A row-level **WITH CHECK**: verify the rows a write produced, with the database's own filter semantics. The override becomes the table's [`check` write option](/api/crud#write-check) — same switch as `guardWrite` — and runs once per insert / replace / update call (bulk forms included), inside the table's transaction, **after** the main write and every nested-relation phase. Deletes never call it.
+
+```typescript
+import type { TDbWriteCheckContext } from "@atscript/moost-db";
+
+protected override async checkWrite(ctx: TDbWriteCheckContext) {
+  // Every written row must still be in the caller's tenant.
+  const inScope = await ctx.count({ $and: [{ $or: [...ctx.filters] }, { tenant: currentTenant() }] });
+  if (inScope !== ctx.filters.length) throw new HttpError(403, "row leaves your scope");
+}
+```
+
+| `ctx` field     | Meaning                                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------------------- |
+| `action`        | The table method the check runs for (`insert`, `insertMany`, `replace`, `update`, …)                        |
+| `filters`       | One exact primary-key filter per written row (inserted rows by their resulting key, generated ids included) |
+| `count(filter)` | Counts matching rows inside the same transaction                                                            |
+| `transactional` | `false` when the adapter's transaction is a pass-through — the write is already durable                     |
+
+- **Do** throw to reject: the transaction rolls back and the error propagates unchanged.
+- **Don't** rely on the rollback when `ctx.transactional` is `false` (standalone MongoDB, the memory adapter): validate before the write in [`guardWrite`](#guardwrite) there.
+- Nested writes a deep payload performs on related tables do not re-run it.
+
 ### withTransaction {#withtransaction}
 
 `this.withTransaction(fn)` runs `fn` inside the bound table's adapter transaction — the same nesting rules as [`adapter.withTransaction`](/api/transactions). Use it for custom routes and actions that must be atomic across several table operations:
@@ -490,7 +570,17 @@ The argument is the cached envelope shared across all requests. Mutating it leak
 `applyMetaOverlay` controls what the UI **renders**. It does NOT stop a client from hitting the underlying route — for real per-principal route enforcement, use Moost auth guards (`@Authenticate`) and the [server-side action gate](./actions#server-side-gate). See [Permissions](./permissions) for the broader contract.
 :::
 
-May return a `Promise`. The hook is invoked even when other meta-derived endpoints (`/meta/form/:name`, `$actions=true` augmentation) consult the meta envelope.
+May return a `Promise`. The hook is invoked even when other meta-derived endpoints (`$actions=true` augmentation) consult the meta envelope — since 0.1.143 they read the cached envelope through `applyMetaOverlay` directly (`resolveMeta()`), not through an overridden `meta()`, and without re-running [`prepareRequest`](#preparerequest).
+
+### authorizeForm {#authorizeform}
+
+Since 0.1.143. `GET /meta/form/:name` serves the schema of an [action input form](./actions#input-form). Override `authorizeForm(name, actionNames)` to refuse it per request: return `false` (or a promise of it) and the response is the same `404 Unknown form "<name>"` an unknown form gets, so a refused form's existence does not leak. `actionNames` lists the discovered actions whose input form is `name` — allow the form when the caller may run at least one of them. Default: `true`.
+
+```typescript
+protected override authorizeForm(name: string, actionNames: readonly string[]) {
+  return actionNames.some((action) => this.mayRun(action));
+}
+```
 
 ## Initialization
 

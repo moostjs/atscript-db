@@ -188,6 +188,17 @@ const tasks = await taskTable.findMany({
 Primary key and foreign key fields used for joining are always included in the query, even if not listed in `$select`. They are needed internally to match related records to their parents. In the example above, `id` appears in the result even though only `name` was selected.
 :::
 
+The relation's `$select` takes every projection form — an array, an inclusion map (`{ name: 1 }`) or an exclusion map (`{ secret: 0 }`); an exclusion never drops a join key (since 0.1.143 on every adapter).
+
+The parent's own `$select` does not have to list the key a relation joins on either (since 0.1.143): the key — a TO relation's foreign key, the primary key a FROM / VIA relation is looked up by — is read for the join and removed from the returned rows again.
+
+```typescript
+const tasks = await taskTable.findMany({
+  controls: { $select: ["title"], $with: [{ name: "project" }] },
+});
+// tasks[0] → { title: '…', project: { id: 1, name: 'Website Redesign', … } } — no projectId
+```
+
 ## Filtering Loaded Relations
 
 Use `filter` on a `$with` entry to restrict which related records are returned:
@@ -308,7 +319,7 @@ curl "http://localhost:3000/tasks/query?\$with=project"
 curl "http://localhost:3000/tasks/query?\$with=project,assignee,tags"
 ```
 
-For nested loading and per-relation controls in URLs, see [CRUD Endpoints](/http/crud).
+For nested loading and per-relation controls in URLs, see [CRUD Endpoints](/http/crud). The controller rejects an unknown or hidden relation at any nesting level with `400 Unknown relation "<name>"` — see [Advanced Queries § Validation](/http/advanced#validation).
 
 ## Next Steps
 

@@ -250,6 +250,15 @@ View fields name **logical** paths — `Task.title`, `User.address.city` — and
 
 A view field annotated with `@db.ignore` has no column anywhere — it is excluded from the generated `SELECT` list, from the view's definition hash and from queries, exactly like an ignored table field. A view field, join condition or filter that reads a **source** field with `@db.ignore`, or a navigation relation, fails the sync: `… has no column — "x" is @db.ignore or a navigation relation`.
 
+### Write-only and encrypted source fields
+
+Since 0.1.143 a view column inherits the read seals of the source field it reads, so a view never exposes a value differently from its table:
+
+- **`@db.writeOnly`** — a view column over a write-only field, over a leaf of a write-only object, or aggregating one (`@db.agg.max "pin"`) is write-only on the view too. The HTTP view controller seals it out of every read and rejects filters / sorts on it, exactly as on the table (before 0.1.143 it was readable and filterable through the view).
+- **`@db.encrypted`** — a view column over an encrypted field reads the ciphertext column and is encrypted on the view: rows come back **decrypted** (the view needs the `DbSpace` `encryption` config, like the table), and filters / sorts on it are rejected with `ENC_FIELD_FILTER` / `ENC_FIELD_SORT`. An aggregate over an encrypted field fails at first use of the view (`ciphertext cannot be aggregated`) — the table refuses the same aggregate.
+
+The seals travel through [views over views](#views-over-views). No annotation is needed on the view field; `@db.writeOnly` stays an HTTP-layer contract (server code reading the view still sees the value).
+
 ## Reading JSON Leaves
 
 Since 0.1.136 a view field can reference a primitive leaf **inside** a `@db.json` column. The view extracts it into a typed column you can filter, sort and group like any other:

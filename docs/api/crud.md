@@ -81,6 +81,48 @@ const user = await users.findById(1);
 
 Add [`@db.table.preferredId.uniqueIndex`](/api/tables#preferred-identifier) to a table to make a non-PK unique index the canonical id (e.g., `slug`). Scalar ids then resolve **only** against that index — no PK fallback — which keeps URLs and external references deterministic.
 
+#### Which row an id addresses {#id-resolution}
+
+An id always addresses **exactly one row, primary key first** (since 0.1.143). A scalar can be type-compatible with several identifications — with a string primary key next to a string unique `slug`, `"abc"` may be one row's `id` and another row's `slug`:
+
+1. The identifications are tried in order — primary key first, then each unique index. The first one that matches a row wins, and that row is then addressed by its exact primary key.
+2. An object id that carries the complete primary key resolves by the primary key alone, like a write payload.
+3. When nothing matches, the id addresses no row (`findById` → `null`, `deleteOne` → `{ deletedCount: 0 }`).
+
+`findById`, `deleteOne` and the write guards' `current()` all follow this rule. `deleteOne` pins the row inside its transaction, so the guard, the cascade and the delete all see the same row.
+
+**Row scope.** Pass `{ scope: filter }` (a row-level overlay such as a tenant filter) to `resolveRowFilter` or `deleteOne` and only rows matching it count while the identifications are tried: an out-of-scope row can never shadow an in-scope one, so the answer is exactly what it would be if that row did not exist. `resolveRowFilter` still returns the first identification when nothing in scope matches — AND the scope onto its result before reading. `deleteOne` also applies the scope to the delete itself: an out-of-scope row is not deleted (`{ deletedCount: 0 }`, and the guard's `current()` is `null`).
+
+To READ the addressed row under a scope, use `findOneByRow` (since 0.1.143): it resolves the id the same way and returns the row itself — scope applied to the result, your `controls` applied to the read — in one step, without a separate resolve-then-read:
+
+```typescript
+const scope = { tenant: currentTenant() };
+const row = await slugs.findOneByRow("abc", { scope, controls: { $select: ["id", "title"] } });
+await slugs.deleteOne("abc", { scope });
+
+// The same, by hand:
+const filter = await slugs.resolveRowFilter("abc", { scope });
+const same = filter ? await slugs.findOne({ filter: { $and: [filter, scope] } }) : null;
+```
+
+Public helpers that turn an id (or a write payload) into a filter or a row:
+
+| Method                         | Returns                                                                                                                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveRowFilter(id, opts?)`  | `Promise<FilterExpr \| null>` — the one-row filter described above (since 0.1.143). Use it whenever an id must name a single row, e.g. before AND-ing it with a read scope. `null` when the id fits no identification. |
+| `findOneByRow(id, opts?)`      | `Promise<row \| null>` — the row that filter addresses, read with `opts.controls`; `null` when it is missing or outside `opts.scope` (since 0.1.143).                                                                  |
+| `resolveIdFilter(id, opts?)`   | `FilterExpr \| null` (sync) — the `$or` of every identification the id fits. It can match more than one row.                                                                                                           |
+| `recordFilter(payload, opts?)` | `FilterExpr` (sync, tables only) — the filter `updateOne` / `replaceOne` of that payload target: primary key when complete, else a unique index. Throws `NOT_FOUND` without identifying fields (since 0.1.143).        |
+
+All take `{ isFieldVisible }`: a unique index over a hidden field is skipped.
+
+```typescript
+// rows: { id: "zz-b", slug: "abc" }, { id: "abc", slug: "a-own" }
+await slugs.resolveRowFilter("abc"); // { id: "abc" }   — the primary-key row
+await slugs.resolveRowFilter("a-own"); // { id: "abc" } — unique-key fallback, pinned to its PK
+slugs.resolveIdFilter("abc"); // { $or: [{ id: "abc" }, { slug: "abc" }] }
+```
+
 ### Find One
 
 Return the first record matching a filter:
@@ -237,7 +279,7 @@ const result = await users.deleteOne(1);
 // result: { deletedCount: 1 }
 ```
 
-`deleteOne` accepts the same flexible ID format as `findById` — primary key, composite key object, or unique index value. An optional `{ guard }` runs inside the delete's transaction once the id has resolved to a filter — see [Write guards](#write-guards).
+`deleteOne` accepts the same flexible ID format as `findById` — primary key, composite key object, or unique index value — and deletes the one row that id addresses, [primary key first](#id-resolution). An optional `{ guard }` runs inside the delete's transaction once the id has resolved to a filter — see [Write guards](#write-guards).
 
 ### Delete Many
 
@@ -313,11 +355,59 @@ await orders.deleteOne(id, {
 });
 ```
 
-- `ctx.current(i)` never throws for a row without an identifying key (an auto-increment insert): it resolves to `null`.
+- `ctx.current(i)` reads the row exactly as the write identifies it — by its primary key, else by a unique index — so it is always the row the write targets. It never throws for a row without an identifying key (an auto-increment insert): it resolves to `null`.
+- `ctx.currentAll()` (since 0.1.143) reads every row's pre-image in **one** `findMany` and resolves to an array parallel to `ctx.rows` — each entry exactly what `current(i)` would give. It fills the same per-index memo: an index `current(i)` already read is reused, and a later `current(i)` reads nothing. Prefer it to a `current(i)` loop on batches.
+- `ctx.filterFor(i)` (since 0.1.143) is the exact filter the write identifies `rows[i]` by — its primary key, else the unique index it carries, each naming at most one row — or `null` when the row has no identifying key yet. It is the filter `current(i)` reads by, memoised per index on first use (change a row's identifying fields before asking, not after). It lets a guard check a whole batch in the database without reading it:
+
+  ```typescript
+  // Row-level USING: every row this update targets must be the caller's.
+  guard: async (ctx) => {
+    const filters = ctx.rows.map((_, i) => ctx.filterFor(i)).filter((f) => f !== null);
+    if (filters.length === 0) return;
+    const distinct = new Set(filters.map((f) => JSON.stringify(f))).size;
+    const owned = await orders.count({ filter: { $and: [{ $or: filters }, { ownerId: me }] } });
+    if (owned !== distinct) throw new Error("row outside your scope"); // missing rows count as misses
+  };
+  ```
+
+- A delete guard's `ctx.filter` is the exact filter the delete targets ([primary key first](#id-resolution)).
 - A throw rolls the table's transaction back — including anything the guard itself wrote through other tables that joined it — and the same error propagates to the caller.
 - The guard runs for the root call only, never for the nested re-entries a deep write performs on related tables.
 - An id that resolves to no filter makes `deleteOne` answer `{ deletedCount: 0 }` without calling the guard.
 - In `@atscript/moost-db`, overriding `guardWrite` / `guardRemove` on a controller passes that override as the guard — see [Customization — Write Hooks](/http/customization#write-hooks).
+
+## Post-write Check {#write-check}
+
+Since 0.1.143, `insertOne` / `insertMany`, `replaceOne` / `bulkReplace` and `updateOne` / `bulkUpdate` accept `{ check }`. A guard sees the rows **before** the write. A check sees what was **actually written**, through the database's own filter semantics. Use it for a row-level "WITH CHECK" policy: every written row must still match a filter.
+
+The table invokes the check **exactly once per call, inside its transaction, after the main write and every nested-relation phase**. It receives a `TDbWriteCheckContext`:
+
+| Field           | Meaning                                                                                                                                                                                                                                                                      |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`        | `'insert'` · `'insertMany'` · `'replace'` · `'replaceMany'` · `'update'` · `'updateMany'`                                                                                                                                                                                    |
+| `filters`       | One exact primary-key filter per written row, de-duplicated. Inserted rows appear by their resulting key, auto-increment and generated ids included. Updated / replaced rows appear by the key of the row the write targeted. Rows the write matched nothing for are absent. |
+| `transactional` | `true` when a throw rolls the write back. `false` on adapters whose transaction is a pass-through (the memory adapter, a standalone MongoDB): the write is already durable.                                                                                                  |
+| `count(filter)` | Counts matching rows inside the same transaction.                                                                                                                                                                                                                            |
+
+```typescript
+import type { TDbWriteCheckContext } from "@atscript/db";
+
+// Row-level WITH CHECK: every row this call wrote must belong to the caller's tenant.
+const withCheck = async (ctx: TDbWriteCheckContext) => {
+  if (ctx.filters.length === 0) return;
+  const inScope = await ctx.count({ $and: [{ $or: ctx.filters }, { tenant: currentTenant() }] });
+  if (inScope !== ctx.filters.length) {
+    throw new Error("row outside your tenant"); // rolls back, propagates unchanged
+  }
+};
+
+await tasks.updateOne({ id: 1, title: "Renamed" }, { check: withCheck }); // ok
+await tasks.updateOne({ id: 1, tenant: "other" }, { check: withCheck }); // throws, nothing written
+```
+
+- A throw rolls the table's transaction back and propagates unchanged — **only when `ctx.transactional` is `true`**. Without a real transaction, a caller that needs a hard guarantee must validate before the write: for inserts and replaces, the full rows; for updates, the patched fields.
+- Like the guard, the check runs for the root call only. The nested re-entries a deep write performs on related tables get neither `guard` nor `check` nor `isFieldVisible`. See [Nested write rules](/relations/patches#nested-write-rules).
+- In `@atscript/moost-db`, overriding `checkWrite` on a controller passes that override as the check.
 
 ## Validation
 
@@ -349,7 +439,7 @@ Database operations throw `DbError` with a `code` property indicating the error 
 
 | Code                    | Meaning                                                                                                                                                                                                |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CONFLICT`              | Unique constraint violation                                                                                                                                                                            |
+| `CONFLICT`              | Unique constraint violation; a nested write that names a related row outside the record's relation (since 0.1.143, see [Nested write rules](/relations/patches#nested-write-rules))                    |
 | `FK_VIOLATION`          | Foreign key constraint violated                                                                                                                                                                        |
 | `NOT_FOUND`             | Record not found                                                                                                                                                                                       |
 | `CASCADE_CYCLE`         | Circular cascade detected                                                                                                                                                                              |
