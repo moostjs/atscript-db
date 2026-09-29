@@ -13,3 +13,17 @@ export interface VersionedItemTable {
     @db.column.version
     version: number.int
 }
+
+@db.table 'versioned_renamed'
+export interface VersionedRenamedTable {
+    @meta.id
+    id: number
+
+    name: string
+
+    note?: string
+
+    @db.column 'row_version'
+    @db.column.version
+    version: number.int
+}

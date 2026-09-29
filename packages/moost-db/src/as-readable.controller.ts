@@ -158,9 +158,9 @@ export abstract class AsReadableController<
    * The shallow shape emits `{ field, type: { id, metadata } }` for every FK,
    * which carries the target's `db.http.path` so clients can resolve value-help
    * URLs and lazy-fetch target `/meta` when deeper structure is needed. Nav
-   * props (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) are not `.ref` nodes
-   * and always expand fully regardless of `refDepth` — the write-payload shape
-   * clients need is unaffected.
+   * props (`@db.rel.from` / `@db.rel.to` / `@db.rel.via`) carry only a plain
+   * `ref` (`field: ""`) and their bodies always expand fully regardless of
+   * `refDepth` — the write-payload shape clients need is unaffected.
    *
    * Annotation whitelist: keeps `meta.*`, `expect.*`, and `db.rel.*`; strips
    * other `db.*` (table, column, index, default, etc.). Override in subclass

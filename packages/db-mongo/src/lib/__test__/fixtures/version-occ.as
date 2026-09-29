@@ -20,3 +20,17 @@ export interface PlainWidgetTable {
 
     name: string
 }
+
+@db.table 'versioned_renamed'
+export interface VersionedRenamedTable {
+    @meta.id
+    id: number
+
+    name: string
+
+    counter: number
+
+    @db.column 'row_version'
+    @db.column.version
+    version: number.int
+}

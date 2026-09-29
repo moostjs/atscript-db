@@ -39,3 +39,16 @@ export interface VersionedUser {
   @db.column.version
   version: number
 }
+
+@db.table 'versioned_revisions'
+export interface VersionedRevision {
+  @meta.id
+  @db.default.increment
+  id: number
+
+  name: string
+
+  @db.column 'rev'
+  @db.column.version
+  revision: number
+}

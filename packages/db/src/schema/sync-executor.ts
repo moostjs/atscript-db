@@ -15,6 +15,7 @@ import type {
 import type { SyncStore } from "./sync-store";
 import {
   SyncEntry,
+  type TSyncDerivedChange,
   type TSyncEntryInit,
   type TSyncEntryStatus,
   type TSyncSkippedWork,
@@ -143,6 +144,7 @@ export function planTableInit(
     ...init,
     columnsToDrop: [],
     typeChanges: skipped.includes("recreate") ? init.typeChanges : [],
+    derivedChanges: skipped.includes("derived") ? init.derivedChanges : [],
     skipped: skipped.length > 0 ? skipped : undefined,
     recreated: false,
   };
@@ -188,6 +190,11 @@ export function typeChangeErrors(readable: AtscriptDbReadable, diff: TColumnDiff
       `Type change on ${readable.tableName}.${tc.field.physicalName} ` +
       `(${tc.existingType} → ${tc.field.designType}). ${advice}`,
   );
+}
+
+/** A derived-column rebuild on an adapter without `dropColumns` / `syncColumns`. */
+export function derivedRebuildUnsupported(name: string, columns: readonly string[]): string {
+  return `Derived column${columns.length === 1 ? "" : "s"} ${columns.map((c) => `"${c}"`).join(", ")} of "${name}" changed but the adapter cannot drop and re-add columns. Migrate manually and re-run.`;
 }
 
 /** `(a, b → c)` — the key change as the messages print it. */
@@ -262,7 +269,12 @@ export async function executeSyncTable(
       } else if (existing.length > 0) {
         const diff =
           facts.diff ??
-          computeColumnDiff(readable.fieldDescriptors, existing, adapter.typeMapper?.bind(adapter));
+          computeColumnDiff(
+            readable.columnDescriptors,
+            existing,
+            adapter.typeMapper?.bind(adapter),
+            { snapshot: storedSnapshot },
+          );
         // FK changes on adapters without syncForeignKeys (SQLite) require table recreation
         if (hasFkChanges && !adapter.syncForeignKeys && adapter.recreateTable) {
           await adapter.recreateTable();
@@ -303,9 +315,10 @@ export async function executeSyncTable(
         const diff =
           facts.diff ??
           computeColumnDiff(
-            readable.fieldDescriptors,
-            snapshotToExistingColumns(storedSnapshot),
+            readable.columnDescriptors,
+            snapshotToExistingColumns(storedSnapshot, readable),
             deps.resolveTypeMapper(adapter),
+            { snapshot: storedSnapshot },
           );
         await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
       }
@@ -440,6 +453,18 @@ export async function executeDeferredForeignKeys(
 export interface TViewSyncPlan {
   isRenamed: boolean;
   definitionChanged: boolean;
+  /**
+   * Managed views this view reads (directly) that the run drops and
+   * recreates — the view is recreated with them, its own definition
+   * unchanged. Set by `SchemaSync` after every view's plan is known.
+   * @since 0.1.141
+   */
+  upstreamRecreated?: string[];
+}
+
+/** Whether a plan drops and recreates the view (its own change, or an upstream's). */
+export function viewRecreated(plan: TViewSyncPlan): boolean {
+  return plan.definitionChanged || (plan.upstreamRecreated?.length ?? 0) > 0;
 }
 
 /** Determines whether a view's predecessor (on rename) or stale definition must be dropped. */
@@ -462,7 +487,7 @@ export async function dropOutdatedView(
 ): Promise<void> {
   if (plan.isRenamed) {
     await space.dropViewByName(view.renamedFrom!);
-  } else if (plan.definitionChanged) {
+  } else if (viewRecreated(plan)) {
     await space.dropViewByName(view.tableName);
   }
 }
@@ -473,7 +498,7 @@ export function viewPlanStatus(
   plan: TViewSyncPlan,
   trackedNames: Set<string>,
 ): TSyncEntryStatus {
-  if (plan.isRenamed || plan.definitionChanged) {
+  if (plan.isRenamed || viewRecreated(plan)) {
     return "alter";
   }
   return trackedNames.has(view.tableName) ? "in-sync" : "create";
@@ -493,6 +518,15 @@ export async function executeSyncView(
 }
 
 // ── Column diff application (shared by Path A and Path B) ────────────────
+
+/** The plan-shaped summary of a diff's derived-column rebuilds (`entry.derivedChanges`). */
+export function describeDerivedChanges(diff: TColumnDiff): TSyncDerivedChange[] {
+  return (diff.derivedChanged ?? []).map((dc) => ({
+    column: dc.field.physicalName,
+    reason: dc.reason,
+    derived: dc.field.derived !== undefined,
+  }));
+}
 
 /** The plan-shaped summary of a diff's type changes (`entry.typeChanges`). */
 export function describeTypeChanges(
@@ -576,6 +610,9 @@ export function safeModeSkips(facts: TTableFacts): TSyncSkippedWork[] {
     needsDdlForNullableDefaults(adapter)
   ) {
     out.push("nullable-defaults");
+  }
+  if ((diff?.derivedChanged?.length ?? 0) > 0) {
+    out.push("derived");
   }
   if (diff?.primaryKeyChanged) {
     out.push("pk-rebuild");
@@ -742,6 +779,46 @@ async function applyColumnDiff(
     init.columnsRenamed = syncResult.renamed;
     if (syncResult.added.length > 0 || (syncResult.renamed?.length ?? 0) > 0 || needsSyncColumns) {
       init.status = "alter";
+    }
+  }
+
+  // Derived columns whose live column no longer matches the model (kind /
+  // expression / type) — a generated column's expression cannot be altered
+  // in place: drop the column (its indexes first — engines refuse to drop an
+  // indexed column) and add it back; `syncIndexes` recreates the indexes. A
+  // recreated table already carries the new definition. Safe mode skips it
+  // (the column-drop policy) and leaves it pending.
+  const derivedChanged = diff.derivedChanged ?? [];
+  if (derivedChanged.length > 0 && !init.recreated && init.status !== "error") {
+    init.derivedChanges = describeDerivedChanges(diff);
+    const columns = derivedChanged.map((dc) => dc.field.physicalName);
+    if (safe) {
+      markSkipped(init, "derived");
+      init.status = "alter";
+      logger.warn?.(
+        `[schema-sync] Derived column change on "${name}" (${columns.join(", ")}) — rebuild skipped (safe mode)`,
+      );
+    } else if (adapter.dropColumns && adapter.syncColumns) {
+      if (adapter.dropIndexesForColumns) {
+        await adapter.dropIndexesForColumns(columns);
+      }
+      await adapter.dropColumns(columns);
+      await adapter.syncColumns({
+        added: derivedChanged.map((dc) => dc.field),
+        removed: [],
+        renamed: [],
+        typeChanged: [],
+        nullableChanged: [],
+        defaultChanged: [],
+        conflicts: [],
+      });
+      init.status = "alter";
+    } else {
+      // Defensive copy of the plan rule (`populatePlanFromDiff`)
+      const msg = derivedRebuildUnsupported(name, columns);
+      logger.error?.(`[schema-sync] ${msg}`);
+      init.errors = [...(init.errors ?? []), msg];
+      init.status = "error";
     }
   }
 

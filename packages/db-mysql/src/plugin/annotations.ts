@@ -17,6 +17,7 @@ export const annotations: TAnnotationsTree = {
       '**Default:** `"InnoDB"`\n\n' +
       '```atscript\n@db.mysql.engine "MyISAM"\nexport interface Logs { ... }\n```',
     nodeType: ["interface"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "engine",

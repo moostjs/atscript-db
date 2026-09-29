@@ -7,6 +7,16 @@ import type {
   TDbActionLevel,
 } from "@atscript/db";
 
+/**
+ * One entry of a `disabled` predicate's result. Truthy = the action is
+ * disabled for that row; falsy (`false`, `""`) = enabled. A non-empty string
+ * disables the action AND carries a human-readable reason — surfaced in the
+ * 409 `ActionDisabledError` message/body and in the row's `$disabledReasons`.
+ *
+ * @since 0.1.141 (`string`)
+ */
+export type TDbActionDisabledVerdict = boolean | string;
+
 /** `'rows'`-level batch policy — controls whether failing rows reject or are filtered out. */
 export type TOnDisabledRows = "reject" | "skip";
 
@@ -49,15 +59,17 @@ interface WithGate<TRow, R extends readonly FlatKey<TRow>[]> {
    */
   requiredFields: R;
   /**
-   * Sync batch gate predicate — returns a parallel `boolean[]` aligned with
-   * the input. `true` = disabled for the corresponding row. The `rows`
+   * Sync batch gate predicate — returns a parallel array aligned with the
+   * input. Per entry: truthy = disabled for the corresponding row; a
+   * non-empty string also gives the reason (see
+   * {@link TDbActionDisabledVerdict}). The `rows`
    * argument is type-narrowed to `Pick<FlatOf<TRow>, R[number]>[]`; reading
    * a field not listed in `requiredFields` is a compile error.
    *
    * Promise return is NOT permitted — the predicate is consumed in the
    * same tick by the gate and the augmenter.
    */
-  disabled?: (rows: DisabledRowsArg<TRow, R>) => boolean[];
+  disabled?: (rows: DisabledRowsArg<TRow, R>) => TDbActionDisabledVerdict[];
   /**
    * `'rows'`-level batch policy. Default `'reject'`.
    *
@@ -79,7 +91,7 @@ interface WithGate<TRow, R extends readonly FlatKey<TRow>[]> {
 interface LooseGate {
   requiredFields?: string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  disabled?: (rows: any[]) => boolean[];
+  disabled?: (rows: any[]) => TDbActionDisabledVerdict[];
   onDisabledRows?: TOnDisabledRows;
 }
 

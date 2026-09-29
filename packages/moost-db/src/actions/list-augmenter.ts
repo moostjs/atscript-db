@@ -1,9 +1,14 @@
 import type { TDbActionEnvelope } from "./discover";
-import { assertVerdictLength } from "./verdict";
+import type { TDbActionDisabledVerdict } from "./types";
+import { assertVerdictLength, verdictReason } from "./verdict";
 
-type DisabledFn = (rows: unknown[]) => boolean[];
+type DisabledFn = (rows: unknown[]) => TDbActionDisabledVerdict[];
 
-export type AugmentedRow<TRow extends Record<string, unknown>> = TRow & { $actions?: string[] };
+export type AugmentedRow<TRow extends Record<string, unknown>> = TRow & {
+  $actions?: string[];
+  /** Action name → reason, for actions disabled on this row WITH a reason. Absent when none. */
+  $disabledReasons?: Record<string, string>;
+};
 
 export interface AugmentArgs<TRow extends Record<string, unknown> = Record<string, unknown>> {
   envelopes: readonly TDbActionEnvelope[];
@@ -63,7 +68,8 @@ function computeStripFields(
 }
 
 /**
- * Sets `$actions` on every row and strips the columns fetched only for an
+ * Sets `$actions` on every row (plus `$disabledReasons` on rows where a
+ * predicate returned a reason string) and strips the columns fetched only for an
  * action's `requiredFields` — IN PLACE; returns the same array, typed as
  * augmented.
  */
@@ -77,7 +83,7 @@ export function augmentRowsWithActions<
     return rows as AugmentedRow<TRow>[];
   }
 
-  const verdicts: Array<boolean[] | undefined> = candidates.map((c) => {
+  const verdicts: Array<TDbActionDisabledVerdict[] | undefined> = candidates.map((c) => {
     if (!c.disabledFn) return undefined;
     const out = c.disabledFn(rows as unknown[]);
     assertVerdictLength(c.envelope.info.name, out, rows.length);
@@ -87,15 +93,19 @@ export function augmentRowsWithActions<
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const names: string[] = [];
+    let reasons: Record<string, string> | undefined;
     for (let j = 0; j < candidates.length; j++) {
-      const v = verdicts[j];
-      if (v === undefined) {
-        names.push(candidates[j].envelope.info.name);
+      const name = candidates[j].envelope.info.name;
+      const verdict = verdicts[j]?.[i];
+      if (!verdict) {
+        names.push(name);
         continue;
       }
-      if (!v[i]) names.push(candidates[j].envelope.info.name);
+      const reason = verdictReason(verdict);
+      if (reason !== undefined) (reasons ??= {})[name] = reason;
     }
     (row as Record<string, unknown>).$actions = names;
+    if (reasons) (row as Record<string, unknown>).$disabledReasons = reasons;
   }
 
   if (resolvedProjection !== null) {

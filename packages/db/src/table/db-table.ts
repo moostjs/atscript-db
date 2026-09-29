@@ -690,6 +690,8 @@ export class AtscriptDbTable<
           for (const key of Object.keys(filter)) {
             delete data[key];
           }
+          // Derived fields are computed, never SET (a row read back patches back as-is)
+          this._meta.stripDerived(data);
 
           // Reject direct writes to the version column (server-managed).
           if (versionColumn !== undefined) {
@@ -944,6 +946,7 @@ export class AtscriptDbTable<
       true,
     );
     const dataCopy = _cloneWritePayload(data);
+    this._meta.stripDerived(dataCopy);
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still

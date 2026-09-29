@@ -62,3 +62,17 @@ export interface Ticket {
 
     subject: string
 }
+
+@db.table 'renamed_versions'
+export interface RenamedVersion {
+    @meta.id
+    id: number
+
+    name: string
+
+    counter: number
+
+    @db.column 'row_version'
+    @db.column.version
+    version: number.int
+}

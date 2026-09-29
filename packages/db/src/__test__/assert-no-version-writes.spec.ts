@@ -46,9 +46,8 @@ describe("assertNoVersionWrites", () => {
     }
   });
 
-  // WHY: the version column name is configurable via @db.column rename;
-  // the assertion must respect the physical name passed in, not assume
-  // a literal "version".
+  // WHY: the version field can be named anything; the assertion must respect
+  // the (logical) name passed in, not assume a literal "version".
   it("honors a renamed version column", () => {
     expect(() => assertNoVersionWrites({ v: 1 }, "v")).toThrow(DbError);
     // The literal "version" key is fine when the column is named "v".

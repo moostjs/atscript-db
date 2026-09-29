@@ -3,6 +3,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { AtscriptDbTable } from "./db-table";
 import { AtscriptDbView } from "./db-view";
 import type { AtscriptDbReadable } from "./db-readable";
+import { aliasTargetOf } from "./view-source";
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbEncryption, type TDbEncryptionOptions } from "../encryption";
 import type { TGenericLogger } from "../logger";
@@ -21,6 +22,19 @@ export interface TDbSpaceOptions {
   logger?: TGenericLogger;
   /** Field-level encryption configuration for `@db.encrypted` fields. */
   encryption?: TDbEncryptionOptions;
+}
+
+/**
+ * A `@db.alias` type only names a join scope inside a view definition — it
+ * is never a table or view of its own (since 0.1.141).
+ */
+function assertNotAlias(type: TAtscriptAnnotatedType): void {
+  const target = aliasTargetOf(type);
+  if (target) {
+    throw new Error(
+      `"${type.id ?? ""}" is a @db.alias of "${target.id ?? ""}" — a join scope, not a table or view; register "${target.id ?? ""}" instead`,
+    );
+  }
 }
 
 interface TWeakMapOf<V> {
@@ -99,6 +113,7 @@ export class DbSpace {
   getTable<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbTable<T> {
     let readable = this._readables.get(type) as AtscriptDbTable<T> | undefined;
     if (!readable) {
+      assertNotAlias(type);
       const adapter = this._createAdapter();
       readable = new AtscriptDbTable<T>(
         type,
@@ -126,6 +141,7 @@ export class DbSpace {
   getView<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbView<T> {
     let readable = this._readables.get(type) as AtscriptDbView<T> | undefined;
     if (!readable) {
+      assertNotAlias(type);
       const adapter = this._createAdapter();
       readable = new AtscriptDbView<T>(
         type,

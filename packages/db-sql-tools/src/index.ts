@@ -21,6 +21,7 @@ export {
   buildDelete,
   buildProjection,
   buildCreateView,
+  derivedColumnExpr,
   fillReplacePayload,
   replaceColumnsFor,
 } from "./sql-builder";

@@ -7,12 +7,9 @@ import type {
   Token,
 } from "@atscript/core";
 import { NULL_WHEN_EMPTY_AGGREGATE_FNS, type TDbAggregateFn } from "../../query/aggregate-fns";
-import {
-  getAnnotationAlias,
-  getDbTableOwner,
-  validateFieldBaseType,
-} from "../../shared/annotation-utils";
-import { validateQueryScope, viewScopeTypes } from "../../shared/validation-utils";
+import { validateFieldBaseType } from "../../shared/annotation-utils";
+import { validateQueryScope } from "../../shared/validation-utils";
+import { aggConditionScope, fieldScopes } from "../lsp-scopes";
 
 /**
  * A conditional aggregate that is NULL when no row matches (so its field
@@ -32,6 +29,7 @@ const CONDITION_ARG: TAnnotationArgument = {
     "Row predicate of a conditional aggregate: only rows where it holds are aggregated " +
     "(SQL `FN(CASE WHEN … THEN field END)`). May reference the entry table and every join; " +
     "unqualified fields resolve to the entry table.",
+  fieldScope: fieldScopes.aggCondition,
 };
 
 /**
@@ -59,9 +57,9 @@ function validateAggArgs(
   const condition = args[1];
   if (!condition?.queryNode) return errors;
 
-  const owner = getDbTableOwner(token);
-  const entryTypeName = owner ? getAnnotationAlias(owner, "db.view.for") : undefined;
-  if (!owner || !entryTypeName) {
+  // The scope of the view's @db.view.filter — what the editor completes too (lsp-scopes)
+  const scope = aggConditionScope(token);
+  if (!scope) {
     errors.push({
       message: `A conditional ${annotation} requires @db.view.for on the view`,
       severity: 1,
@@ -69,7 +67,7 @@ function validateAggArgs(
     });
     return errors;
   }
-  errors.push(...validateQueryScope(condition, viewScopeTypes(owner), entryTypeName, doc));
+  errors.push(...validateQueryScope(condition, scope, doc));
 
   const prop = token.parentNode;
   if (conditionalIsNullable(name) && prop && !prop.has("optional")) {
@@ -111,7 +109,13 @@ function aggSpec(
     nodeType: ["prop"],
     passedWhenReferred: false,
     argument: [
-      { name: "field", type: "string", optional: field.optional, description: field.description },
+      {
+        name: "field",
+        type: "string",
+        optional: field.optional,
+        description: field.description,
+        fieldScope: fieldScopes.aggField,
+      },
       CONDITION_ARG,
     ],
     validate(token, args, doc) {

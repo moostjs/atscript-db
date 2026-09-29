@@ -1,6 +1,39 @@
-import type { TDbFieldMeta, TExistingColumn, TColumnDiff } from "../types";
-import { serializeDefaultValue } from "./schema-hash";
+import type { TDbFieldMeta, TDerivedChangeReason, TExistingColumn, TColumnDiff } from "../types";
+import { serializeDefaultValue, type TFieldSnapshot, type TTableSnapshot } from "./schema-hash";
 import { fkKey } from "./fk-diff";
+
+/**
+ * Why a derived column (desired, live, or both) must be dropped and re-added,
+ * or `undefined` when it is unchanged. Nullability and defaults are never
+ * compared for one: a generated column is nullable and has no DEFAULT.
+ */
+function derivedChangeReason(
+  field: TDbFieldMeta,
+  existingCol: TExistingColumn,
+  typeMapper: ((field: TDbFieldMeta) => string) | undefined,
+  snap: TFieldSnapshot | undefined,
+): TDerivedChangeReason | undefined {
+  if (!field.derived) {
+    return existingCol.generated ? "kind" : undefined;
+  }
+  if (!existingCol.generated) {
+    return "kind";
+  }
+  const stored = snap?.derived;
+  if (
+    stored &&
+    (stored.sourceColumn !== field.derived.sourceColumn ||
+      stored.type !== field.derived.type ||
+      stored.jsonPath.length !== field.derived.jsonPath.length ||
+      stored.jsonPath.some((seg, i) => seg !== field.derived!.jsonPath[i]))
+  ) {
+    return "expression";
+  }
+  if (typeMapper && isColumnTypeChanged(existingCol.type, typeMapper(field))) {
+    return "type";
+  }
+  return undefined;
+}
 
 /**
  * Whether a live column's type differs from the type the adapter's
@@ -16,19 +49,29 @@ export function isColumnTypeChanged(existingType: string, expectedType: string):
 /**
  * Computes the difference between desired schema fields and existing database columns.
  *
- * @param desired - Field descriptors from the Atscript type (after flattening).
+ * @param desired - Field descriptors from the Atscript type (after flattening) —
+ *                  the readable's `columnDescriptors`; ignored descriptors are skipped.
  * @param existing - Columns currently in the database (from introspection).
  * @param typeMapper - Optional function to map field metadata to DB-native type strings.
  *                     Receives the full field meta (design type, annotations, PK status, etc.)
  *                     so adapters can produce context-aware types (e.g., `VARCHAR(255)` from maxLength).
  *                     Required for type change detection.
+ * @param opts.snapshot - The table's stored snapshot (since 0.1.141) — the baseline a
+ *                        derived column's expression is compared with (the engine normalizes
+ *                        the expression it stores, so the live column cannot be). Without
+ *                        one, only a kind or type drift is seen.
  */
 export function computeColumnDiff(
   desired: readonly TDbFieldMeta[],
   existing: TExistingColumn[],
   typeMapper?: (field: TDbFieldMeta) => string,
+  opts?: { snapshot?: TTableSnapshot | null },
 ): TColumnDiff {
   const existingByName = new Map(existing.map((c) => [c.name, c]));
+  const snapshotByName = opts?.snapshot
+    ? new Map(opts.snapshot.fields.map((f) => [f.physicalName, f]))
+    : undefined;
+  const derivedChanged: NonNullable<TColumnDiff["derivedChanged"]> = [];
   const desiredByName = new Map<string, TDbFieldMeta>();
   const renamedOldNames = new Set<string>();
 
@@ -38,6 +81,22 @@ export function computeColumnDiff(
   const nullableChanged: TColumnDiff["nullableChanged"] = [];
   const defaultChanged: TColumnDiff["defaultChanged"] = [];
   const conflicts: TColumnDiff["conflicts"] = [];
+
+  /**
+   * A derived column (on either side) is compared as a whole — any drift is a
+   * drop + add, and nullability / defaults are not the model's to manage.
+   * `true` when the pair was a derived one (handled here).
+   */
+  const checkDerived = (field: TDbFieldMeta, col: TExistingColumn, snapKey: string): boolean => {
+    if (!field.derived && !col.generated) {
+      return false;
+    }
+    const reason = derivedChangeReason(field, col, typeMapper, snapshotByName?.get(snapKey));
+    if (reason) {
+      derivedChanged.push({ field, reason });
+    }
+    return true;
+  };
 
   for (const field of desired) {
     if (field.ignored) {
@@ -52,7 +111,7 @@ export function computeColumnDiff(
       if (field.renamedFrom && existingByName.has(field.renamedFrom)) {
         conflicts.push({ field, oldName: field.renamedFrom, conflictsWith: field.physicalName });
         renamedOldNames.add(field.renamedFrom);
-      } else {
+      } else if (!checkDerived(field, existingCol, field.physicalName)) {
         // Check type change (requires typeMapper)
         if (typeMapper) {
           if (isColumnTypeChanged(existingCol.type, typeMapper(field))) {
@@ -82,9 +141,12 @@ export function computeColumnDiff(
         }
       }
     } else if (field.renamedFrom && existingByName.has(field.renamedFrom)) {
-      // Column exists under old name → rename
+      // Column exists under old name → rename. A derived column that also
+      // changed its expression (or kind) is rebuilt after the rename, under
+      // its new name — the rename alone would keep the old expression.
       renamed.push({ field, oldName: field.renamedFrom });
       renamedOldNames.add(field.renamedFrom);
+      checkDerived(field, existingByName.get(field.renamedFrom)!, field.renamedFrom);
     } else {
       added.push(field);
     }
@@ -104,6 +166,9 @@ export function computeColumnDiff(
     defaultChanged,
     conflicts,
   };
+  if (derivedChanged.length > 0) {
+    diff.derivedChanged = derivedChanged;
+  }
 
   // Primary-key field set — only meaningful when the table exists. Compared
   // as sorted sets (consistent with the schema hash, which stores

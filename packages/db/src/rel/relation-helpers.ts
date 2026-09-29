@@ -42,13 +42,17 @@ export function findRemoteFK(
 }
 
 /**
- * Table name of an annotated type — its `@db.table`, else its type id (`""`
- * when neither is set). The rule relations, foreign keys and view plans use
- * to name a referenced table.
+ * Physical name of an annotated type — its `@db.table`, else its `@db.view`
+ * name (a view is a readable source too, since 0.1.141), else its type id
+ * (`""` when none is set). The rule relations, foreign keys and view plans
+ * use to name a referenced table or view.
  * @since 0.1.136
  */
 export function tableNameOf(type: TAtscriptAnnotatedType | undefined): string {
-  return (type?.metadata?.get("db.table") as string) || type?.id || "";
+  const table = type?.metadata?.get("db.table") as string | undefined;
+  if (table) return table;
+  const view = type?.metadata?.get("db.view") as string | true | undefined;
+  return (typeof view === "string" && view) || type?.id || "";
 }
 
 /**

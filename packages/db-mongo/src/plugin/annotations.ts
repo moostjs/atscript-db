@@ -70,6 +70,7 @@ export const annotations: TAnnotationsTree = {
       "}\n" +
       "```\n",
     nodeType: ["interface"],
+    passedWhenReferred: false,
     validate(token, args, doc) {
       const parent = token.parentNode;
       const struc = parent?.getDefinition();
@@ -139,6 +140,7 @@ export const annotations: TAnnotationsTree = {
       "}\n" +
       "```\n",
     nodeType: ["interface"],
+    passedWhenReferred: false,
     multiple: false,
     argument: [
       {
@@ -170,6 +172,7 @@ export const annotations: TAnnotationsTree = {
         "export interface MongoCollection {}\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       multiple: false,
       argument: [
         {
@@ -202,6 +205,7 @@ export const annotations: TAnnotationsTree = {
         "export interface MongoCollection {}\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       multiple: true,
       argument: [
         {

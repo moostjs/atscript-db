@@ -1,6 +1,7 @@
 import type { TAtscriptPlugin } from "@atscript/core";
 import { generateModelManifest, type TDbManifestOptions } from "./manifest";
 import { dbAggAnnotations } from "./annotations/agg";
+import { dbAliasAnnotations } from "./annotations/alias";
 import { dbAmountAnnotations } from "./annotations/amount";
 import { dbColumnAnnotations } from "./annotations/column";
 import { dbIndexAnnotations } from "./annotations/index-ann";
@@ -53,6 +54,7 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
           depth: dbTableAnnotations.depth,
           rel: dbRelAnnotations.rel,
           view: dbViewAnnotations.view,
+          alias: dbAliasAnnotations.alias,
           agg: dbAggAnnotations.agg,
           search: dbSearchAnnotations.search,
           amount: dbAmountAnnotations.amount,

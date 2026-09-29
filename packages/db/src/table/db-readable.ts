@@ -34,6 +34,7 @@ import type {
   TDbForeignKey,
   TDbIndex,
   TDbRelation,
+  TDerivedColumn,
   TIdDescriptor,
   TIdentification,
   TIdResolveOptions,
@@ -42,10 +43,14 @@ import type {
   TWriteTableResolver,
 } from "../types";
 import { TableMetadata } from "./table-metadata";
-import { type FieldMappingStrategy, DocumentFieldMapper } from "../strategies/field-mapping";
+import {
+  type FieldMappingStrategy,
+  type TReadControls,
+  DocumentFieldMapper,
+} from "../strategies/field-mapping";
 import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
 import type { TRelationLoaderHost } from "../rel/relation-loader";
-import { findFKForRelation, findRemoteFK } from "../rel/relation-helpers";
+import { findFKForRelation, findRemoteFK, tableNameOf } from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
 import { assertGeoPoint, guardAggregate, guardQuery, isStrictTable } from "../query/query-guards";
 import { normalizeComputedSelect } from "../query/buckets";
@@ -227,12 +232,7 @@ export class AtscriptDbReadable<
       throw new Error("Database type must be an object type");
     }
 
-    const adapterName = adapter.getAdapterTableName?.(_type);
-    const dbTable = _type.metadata.get("db.table") as string | undefined;
-    const dbViewName = _type.metadata.get("db.view") as string | undefined;
-    const fallbackName = _type.id || "";
-
-    this.tableName = adapterName || dbTable || dbViewName || fallbackName;
+    this.tableName = adapter.getAdapterTableName?.(_type) || tableNameOf(_type);
     if (!this.tableName) {
       throw new Error("@db.table or @db.view annotation expected");
     }
@@ -473,11 +473,26 @@ export class AtscriptDbReadable<
   }
 
   /**
-   * Physical column name of the field annotated with `@db.column.version`, or
-   * `undefined` when the table has no version column. Used by adapters and the
-   * REST integration to drive optimistic concurrency control (OCC).
+   * Logical field name of the field annotated with `@db.column.version`, or
+   * `undefined` when the table has no version column. This is the key used in
+   * `$cas: { <versionColumn>: N }`, in write payloads, in rows read back, and in
+   * `/meta`'s `versionColumn` — a `@db.column 'physical_name'` rename on the
+   * field changes only the storage column (see {@link versionColumnPhysical}).
    */
   public get versionColumn(): string | undefined {
+    this._ensureBuilt();
+    return this._meta.versionField;
+  }
+
+  /**
+   * Physical column name of the `@db.column.version` field (after any
+   * `@db.column` rename), or `undefined` when the table has no version column.
+   * Adapters use it for the auto-bump, the CAS predicate, and the insert-time
+   * `0` backfill — all of which operate on already-mapped physical rows.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   */
+  public get versionColumnPhysical(): string | undefined {
     this._ensureBuilt();
     const field = this._meta.versionField;
     if (field === undefined) return undefined;
@@ -517,6 +532,15 @@ export class AtscriptDbReadable<
   public get ignoredFields(): ReadonlySet<string> {
     this._ensureBuilt();
     return this._meta.ignoredFields;
+  }
+
+  /**
+   * `@db.column.derived` fields (logical name → what they read) — computed
+   * from a JSON leaf of the same row, never written. Since 0.1.141.
+   */
+  public get derivedFields(): ReadonlyMap<string, TDerivedColumn> {
+    this._ensureBuilt();
+    return this._meta.derivedFields;
   }
 
   /** Navigational fields (`@db.rel.to` / `@db.rel.from`) — not stored as columns. */
@@ -584,11 +608,45 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * Physical rows of one read → logical rows: the field mapper's per-read
+   * work (the derived read plan on document adapters) is done once for all
+   * of them. Every read path funnels through here.
+   */
+  private _fromRead(
+    rows: Record<string, unknown>[],
+    controls: TReadControls | undefined,
+  ): Record<string, unknown>[] {
+    return this._fieldMapper.reconstructRows(rows, this._meta, controls);
+  }
+
+  /**
    * Pre-computed field metadata for adapter use.
    */
   public get fieldDescriptors(): readonly TDbFieldMeta[] {
     this._ensureBuilt();
     return this._meta.fieldDescriptors;
+  }
+
+  /**
+   * The descriptors schema sync manages as columns: non-ignored, and on
+   * nested-object adapters without the `@db.column.derived` fields (they store
+   * nothing there). See `TableMetadata.columnDescriptors`.
+   * @since 0.1.141
+   */
+  public get columnDescriptors(): readonly TDbFieldMeta[] {
+    this._ensureBuilt();
+    return this._meta.columnDescriptors;
+  }
+
+  /**
+   * The columns that hold a value of their own (non-ignored, not derived) —
+   * what a table recreation copies and a full replace assigns. See
+   * `TableMetadata.storedDescriptors`.
+   * @since 0.1.141
+   */
+  public get storedDescriptors(): readonly TDbFieldMeta[] {
+    this._ensureBuilt();
+    return this._meta.storedDescriptors;
   }
 
   /**
@@ -672,7 +730,7 @@ export class AtscriptDbReadable<
     if (!result) {
       return null;
     }
-    const row = this._fieldMapper.reconstructFromRead(result, this._meta);
+    const [row] = this._fromRead([result], query.controls);
     await this._decryptRows([row]);
     if (withRelations?.length) {
       await this.loadRelations([row], withRelations);
@@ -693,7 +751,7 @@ export class AtscriptDbReadable<
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translatedQuery = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const results = await this.adapter.findMany(translatedQuery);
-    const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(results, query.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -722,7 +780,7 @@ export class AtscriptDbReadable<
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.findManyWithCount(translated);
-    const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(result.data, query.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -864,8 +922,10 @@ export class AtscriptDbReadable<
     // that collides with a physical column name is treated as that column (as
     // the formatter rule always did). A bucket alias never collides (the
     // normalizer rejects it), so no formatter ever touches a label. Rows an
-    // adapter already returns nested (MongoDB) pass through unchanged.
-    return results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    // adapter already returns nested (MongoDB) pass through unchanged. A
+    // grouped derived field on a document adapter is filled from its source
+    // path (the grouped dimension) and the source pruned (since 0.1.141).
+    return this._fromRead(results, query.controls);
   }
 
   // ── Search ──────────────────────────────────────────────────────────────
@@ -914,7 +974,7 @@ export class AtscriptDbReadable<
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const results = await this.adapter.search(text, translated, indexName);
-    const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(results, query.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -936,7 +996,7 @@ export class AtscriptDbReadable<
     const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
     const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
     const result = await this.adapter.searchWithCount(text, translated, indexName);
-    const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(result.data, query.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -978,7 +1038,7 @@ export class AtscriptDbReadable<
       | undefined;
     const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
     const results = await this.adapter.vectorSearch(vector, translated, indexName);
-    const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(results, query?.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -1010,7 +1070,7 @@ export class AtscriptDbReadable<
       | undefined;
     const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
     const result = await this.adapter.vectorSearchWithCount(vector, translated, indexName);
-    const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(result.data, query?.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -1068,7 +1128,7 @@ export class AtscriptDbReadable<
     );
     const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
     const results = await this.adapter.geoSearch(point, translated, indexName);
-    const rows = results.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(results, query?.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);
@@ -1098,7 +1158,7 @@ export class AtscriptDbReadable<
     );
     const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
     const result = await this.adapter.geoSearchWithCount(point, translated, indexName);
-    const rows = result.data.map((row) => this._fieldMapper.reconstructFromRead(row, this._meta));
+    const rows = this._fromRead(result.data, query?.controls);
     await this._decryptRows(rows);
     if (withRelations?.length) {
       await this.loadRelations(rows, withRelations);

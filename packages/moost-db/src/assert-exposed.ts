@@ -1,3 +1,4 @@
+import { aliasTargetOf } from "@atscript/db";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { Moost } from "moost";
 
@@ -68,6 +69,8 @@ export function assertExposed(
 
   const missing: TAtscriptAnnotatedType[] = [];
   for (const model of models) {
+    // A @db.alias type is a join scope, not a model a controller could serve
+    if (aliasTargetOf(model)) continue;
     const httpPath = model.metadata.get("db.http.path") as string | undefined;
     if (!auditAll && httpPath === undefined) continue;
     if (excluded.has(model) || exposed.has(model)) continue;

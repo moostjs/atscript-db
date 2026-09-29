@@ -494,7 +494,7 @@ export class MongoAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = this._buildCasFilter(filter, expectedVersion, "nativePatch");
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
     // aggregation expression alongside any user-supplied $inc / $mul ops.
     const effectiveOps =
@@ -502,11 +502,12 @@ export class MongoAdapter extends BaseDbAdapter {
     const patcher = new CollectionPatcher(this.getPatcherContext(), patch, effectiveOps);
     const { updateFilter, updateOptions } = patcher.preparePatch();
     this._log("updateOne (patch)", mongoFilter, updateFilter);
-    const result = await this.collection.updateOne(mongoFilter, updateFilter, {
-      ...updateOptions,
-      ...this._getSessionOpts(),
-    });
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    return this._wrapUpdate(() =>
+      this.collection.updateOne(mongoFilter, updateFilter, {
+        ...updateOptions,
+        ...this._getSessionOpts(),
+      }),
+    );
   }
 
   // ── Annotation scanning hooks ────────────────────────────────────────────
@@ -891,7 +892,7 @@ export class MongoAdapter extends BaseDbAdapter {
     expectedVersion: number | undefined,
     op: string,
   ): Record<string, unknown> {
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (expectedVersion !== undefined && versionColumn === undefined) {
       throw new Error(`${op}: expectedVersion requires versionColumn`);
     }
@@ -904,7 +905,9 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /**
    * Wraps an async operation to catch MongoDB duplicate key errors
-   * (code 11000) and rethrow as structured `DbError`.
+   * (code 11000) and rethrow as structured `DbError` — every write path
+   * (insert, replace, update, patch, their `*Many` variants) goes through it,
+   * so a unique-index violation is a `CONFLICT` whichever statement hit it.
    */
   private async _wrapDuplicateKeyError<R>(fn: () => Promise<R>): Promise<R> {
     try {
@@ -918,12 +921,20 @@ export class MongoAdapter extends BaseDbAdapter {
     }
   }
 
+  /** An update-shaped write under {@link _wrapDuplicateKeyError}, reduced to `TDbUpdateResult`. */
+  private async _wrapUpdate(
+    fn: () => Promise<{ matchedCount: number; modifiedCount: number }>,
+  ): Promise<TDbUpdateResult> {
+    const { matchedCount, modifiedCount } = await this._wrapDuplicateKeyError(fn);
+    return { matchedCount, modifiedCount };
+  }
+
   // ── CRUD implementation ──────────────────────────────────────────────────
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
     // §4.6 — Mongo has no DDL DEFAULT; the adapter fills in version=0 at insert
     // time when missing so OCC stays consistent with the SQL adapters.
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (versionColumn !== undefined && !(versionColumn in data)) {
       data[versionColumn] = 0;
     }
@@ -945,7 +956,7 @@ export class MongoAdapter extends BaseDbAdapter {
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
     // §4.6 — version default per item (parity with SQL DDL DEFAULT 0).
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (versionColumn !== undefined) {
       for (const item of data) {
         if (!(versionColumn in item)) {
@@ -1020,10 +1031,11 @@ export class MongoAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = this._buildCasFilter(filter, expectedVersion, "updateOne");
-    const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumn);
+    const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumnPhysical);
     this._log("updateOne", mongoFilter, updateDoc);
-    const result = await this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts());
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    return this._wrapUpdate(() =>
+      this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts()),
+    );
   }
 
   async replaceOne(
@@ -1032,9 +1044,8 @@ export class MongoAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = this._buildCasFilter(filter, expectedVersion, "replaceOne");
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     this._log("replaceOne", mongoFilter, data);
-    let result: { matchedCount: number; modifiedCount: number };
     if (versionColumn !== undefined) {
       // Mongo's plain replaceOne doesn't accept $inc, so use an aggregation
       // pipeline update via $replaceWith — the replacement document is rebuilt
@@ -1047,15 +1058,13 @@ export class MongoAdapter extends BaseDbAdapter {
           },
         },
       ];
-      result = await this._wrapDuplicateKeyError(() =>
+      return this._wrapUpdate(() =>
         this.collection.updateOne(mongoFilter, pipeline, this._getSessionOpts()),
       );
-    } else {
-      result = await this._wrapDuplicateKeyError(() =>
-        this.collection.replaceOne(mongoFilter, data, this._getSessionOpts()),
-      );
     }
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    return this._wrapUpdate(() =>
+      this.collection.replaceOne(mongoFilter, data, this._getSessionOpts()),
+    );
   }
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
@@ -1071,22 +1080,24 @@ export class MongoAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps.
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const mongoFilter = buildMongoFilter(filter);
     const updateDoc = buildMongoUpdateDoc(data, ops, versionColumn);
     this._log("updateMany", mongoFilter, updateDoc);
-    const result = await this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts());
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    return this._wrapUpdate(() =>
+      this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
+    );
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     // MongoDB has no native replaceMany; use updateMany with $set (+ auto-bump
     // version when this table is versioned — sibling of updateMany, no CAS).
     const mongoFilter = buildMongoFilter(filter);
-    const updateDoc = buildMongoUpdateDoc(data, undefined, this._table.versionColumn);
+    const updateDoc = buildMongoUpdateDoc(data, undefined, this._table.versionColumnPhysical);
     this._log("replaceMany", mongoFilter, updateDoc);
-    const result = await this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts());
-    return { matchedCount: result.matchedCount, modifiedCount: result.modifiedCount };
+    return this._wrapUpdate(() =>
+      this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
+    );
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {

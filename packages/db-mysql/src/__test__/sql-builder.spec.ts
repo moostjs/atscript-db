@@ -607,6 +607,7 @@ describe("buildCreateTable", () => {
         {
           fields: ["userId"],
           targetTable: "users",
+          scope: "users",
           targetFields: ["id"],
           onDelete: "cascade" as const,
           onUpdate: "restrict" as const,
@@ -638,6 +639,7 @@ describe("buildCreateTable", () => {
         {
           fields: ["ownerId"],
           targetTable: "users",
+          scope: "users",
           targetFields: ["id"],
         },
       ],

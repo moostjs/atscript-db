@@ -5,7 +5,12 @@ export { DbActionIDs } from "./db-action-ids.decorator";
 export { DbActionRow, DbActionRows } from "./db-action-row.decorator";
 export { DbActions, DbTableActions, DbRowActions, DbRowsActions } from "./db-actions.decorator";
 export { InputForm } from "./db-action-input-form.decorator";
-export type { DbActionOpts, TDbActionsEntry, TDbActionsEntryUnpinned } from "./types";
+export type {
+  DbActionOpts,
+  TDbActionDisabledVerdict,
+  TDbActionsEntry,
+  TDbActionsEntryUnpinned,
+} from "./types";
 export { discoverActions, getControllerFormType } from "./discover";
 export type { IdValidationSource } from "./id-validation";
 export { useDbActionId, useDbActionIds } from "./id-cache";

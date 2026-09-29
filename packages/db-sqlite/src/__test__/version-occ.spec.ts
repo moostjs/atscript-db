@@ -286,3 +286,119 @@ describe("OCC ($cas + auto-bump) end-to-end via SqliteAdapter + AtscriptDbTable"
     expect(sql).toMatch(/"version"\s+\S+\s+NOT NULL DEFAULT 0/);
   });
 });
+
+// ── Renamed version column (`@db.column 'row_version'` on logical `version`) ──
+// The table API speaks the logical field (`$cas: { version }`, rows carry
+// `version`); the adapter bumps / CASes / backfills the PHYSICAL column
+// (`versionColumnPhysical`). ≤ 0.1.140 mixed the two and broke OCC.
+
+describe("OCC on a @db.column-renamed version column via SqliteAdapter", () => {
+  let driver: BetterSqlite3Driver;
+  let renamed: AtscriptDbTable;
+  let VersionedRenamedTable: any;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    VersionedRenamedTable = (await import("./fixtures/version-occ.as")).VersionedRenamedTable;
+  });
+
+  beforeEach(async () => {
+    driver = new BetterSqlite3Driver(":memory:");
+    renamed = new AtscriptDbTable(VersionedRenamedTable, new SqliteAdapter(driver));
+    await renamed.ensureTable();
+    await renamed.insertOne({ id: 1, name: "Ada", counter: 0 } as any);
+  });
+
+  afterEach(() => {
+    driver.close();
+  });
+
+  const read = async () => (await renamed.findOne({ filter: { id: 1 }, controls: {} })) as any;
+  const stored = () => driver.get(`SELECT * FROM "versioned_renamed"`);
+
+  it("exposes logical versionColumn and physical versionColumnPhysical", () => {
+    expect(renamed.versionColumn).toBe("version");
+    expect(renamed.versionColumnPhysical).toBe("row_version");
+  });
+
+  it("DDL declares only the physical column, NOT NULL DEFAULT 0", () => {
+    const sql = buildCreateTable(renamed.tableName, renamed.fieldDescriptors, renamed.foreignKeys);
+    expect(sql).toMatch(/"row_version"\s+\S+\s+NOT NULL DEFAULT 0/);
+    expect(sql).not.toMatch(/"version"/);
+  });
+
+  it("stores the physical column and reads back the logical field", async () => {
+    expect(stored()).toMatchObject({ id: 1, row_version: 0 });
+    const row = await read();
+    expect(row.version).toBe(0);
+    expect(row).not.toHaveProperty("row_version");
+  });
+
+  it("auto-bumps the physical column on a plain update", async () => {
+    await renamed.updateOne({ id: 1, name: "B" } as any);
+    expect(stored()).toMatchObject({ name: "B", row_version: 1 });
+    expect((await read()).version).toBe(1);
+  });
+
+  it("fresh `$cas: { version }` applies and bumps; stale reports { 0, 0 }", async () => {
+    const fresh = await renamed.updateOne({ id: 1, name: "B", $cas: { version: 0 } } as any);
+    expect(fresh).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    const stale = await renamed.updateOne({ id: 1, name: "C", $cas: { version: 0 } } as any);
+    expect(stale).toEqual({ matchedCount: 0, modifiedCount: 0 });
+    expect(await read()).toMatchObject({ name: "B", version: 1 });
+  });
+
+  it("`$cas` keyed by the physical column is rejected", async () => {
+    await expect(
+      renamed.updateOne({ id: 1, name: "B", $cas: { row_version: 0 } } as any),
+    ).rejects.toThrow(DbError);
+  });
+
+  it("replaceOne CASes on the physical column", async () => {
+    const stale = await renamed.replaceOne({
+      id: 1,
+      name: "X",
+      counter: 9,
+      $cas: { version: 5 },
+    } as any);
+    expect(stale.matchedCount).toBe(0);
+    const fresh = await renamed.replaceOne({
+      id: 1,
+      name: "R",
+      counter: 9,
+      $cas: { version: 0 },
+    } as any);
+    expect(fresh.matchedCount).toBe(1);
+    expect(await read()).toMatchObject({ name: "R", counter: 9, version: 1 });
+  });
+
+  it("rejects a direct write to the logical version field", async () => {
+    await expect(renamed.updateOne({ id: 1, version: 5 } as any)).rejects.toThrow(DbError);
+    await expect(renamed.updateOne({ id: 1, version: { $inc: 1 } } as any)).rejects.toThrow(
+      DbError,
+    );
+    expect(stored()).toMatchObject({ row_version: 0 });
+  });
+
+  it("`$cas` + `$inc` on another column apply atomically", async () => {
+    await renamed.updateOne({ id: 1, counter: { $inc: 3 }, $cas: { version: 0 } } as any);
+    expect(await read()).toMatchObject({ counter: 3, version: 1 });
+  });
+
+  it("touch + bulk mixed + updateMany all bump the physical column", async () => {
+    await renamed.insertOne({ id: 2, name: "B", counter: 0 } as any);
+    const touch = await renamed.updateOne({ id: 1, $cas: { version: 0 } } as any);
+    expect(touch).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    const bulk = await renamed.bulkUpdate([
+      { id: 1, name: "A2", $cas: { version: 1 } },
+      { id: 2, name: "B2", $cas: { version: 9 } },
+    ] as any[]);
+    expect(bulk).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    await renamed.updateMany({ counter: 0 } as any, { name: "all" } as any);
+    const rows = driver.all(`SELECT id, row_version FROM "versioned_renamed" ORDER BY id`);
+    expect(rows).toEqual([
+      { id: 1, row_version: 3 },
+      { id: 2, row_version: 1 },
+    ]);
+  });
+});

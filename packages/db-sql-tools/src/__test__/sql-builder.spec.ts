@@ -321,6 +321,7 @@ describe("buildCreateView", () => {
         {
           targetType: stubType,
           targetTable: "users",
+          scope: "users",
           condition: {
             left: { table: "orders", field: "user_id" } as any as AtscriptQueryFieldRef,
             op: "$eq",
@@ -616,6 +617,7 @@ describe("buildCreateView", () => {
         {
           targetType: stubType,
           targetTable: "customers",
+          scope: "customers",
           condition: {
             left: ref("customers", "id"),
             op: "$eq",
@@ -626,6 +628,7 @@ describe("buildCreateView", () => {
         {
           targetType: stubType,
           targetTable: "regions",
+          scope: "regions",
           condition: {
             $and: [
               { left: ref("regions", "id"), op: "$eq", right: ref("customers", "region_id") },

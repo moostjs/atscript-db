@@ -24,7 +24,15 @@ export function isFieldRef(value: unknown): value is AtscriptQueryFieldRef {
 /** A single join in a view query plan. */
 export interface TViewJoin {
   targetType: () => TAtscriptAnnotatedType;
+  /** Physical table (or view) joined. */
   targetTable: string;
+  /**
+   * The name the join is addressed by in conditions, filters and column
+   * mappings: {@link targetTable} for a plain target, the alias's type name
+   * for a `@db.alias` target (`JOIN "employees" AS "Manager"`).
+   * @since 0.1.141
+   */
+  scope: string;
   condition: AtscriptQueryNode;
   /**
    * `inner` (default) drops entry rows without a match; `left` keeps them

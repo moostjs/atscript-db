@@ -2,6 +2,7 @@ export { AtscriptDbReadable, resolveDesignType } from "./table/db-readable";
 export { DEFAULT_DB_SPACE } from "./shared/consts";
 export { TableMetadata } from "./table/table-metadata";
 export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-mapping";
+export type { TReadControls } from "./strategies/field-mapping";
 export { RelationalFieldMapper } from "./strategies/relational-field-mapper";
 export { IntegrityStrategy, NativeIntegrity } from "./strategies/integrity";
 export { ApplicationIntegrity } from "./strategies/application-integrity";
@@ -50,7 +51,7 @@ export type {
 // ── Server-only ops (not in ./validator) ────────────────────────────────────
 export { getDbFieldOp, separateFieldOps, separateCas, reconcileCas } from "./ops";
 export type { TFieldOps } from "./ops";
-export { isPlainObject, isEmptyObject } from "./shared/object";
+export { isPlainObject, isEmptyObject, getPath, deletePath } from "./shared/object";
 
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
@@ -65,6 +66,9 @@ export { UniquSelect } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { translateQueryTree, isFieldRef } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
+// ── Since 0.1.141 ────────────────────────────────────────────────────────────
+export { aliasTargetOf } from "./table/view-source";
+export { isDbEntityType } from "./table/db-entity";
 export type {
   TViewPlan,
   TViewJoin,
@@ -90,6 +94,8 @@ export type {
   TIdDescriptor,
   TIdentification,
   TDbFieldMeta,
+  TDerivedColumn,
+  TDerivedChangeReason,
   TValueFormatterPair,
   TDbStorageType,
   TDbIndexType,

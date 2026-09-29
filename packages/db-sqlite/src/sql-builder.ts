@@ -22,12 +22,28 @@ import {
   refActionToSql,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  derivedColumnExpr,
   parseRegexString,
   jsonDollarPath,
 } from "@atscript/db-sql-tools";
 
 // Re-export shared utilities for consumers that import from this package
 export { sqlStringLiteral, defaultValueForType, defaultValueToSqlLiteral };
+
+/**
+ * The generated-column clause of a `@db.column.derived` field (since 0.1.141):
+ * `GENERATED ALWAYS AS (<json extraction>) VIRTUAL` — computed per read,
+ * never stored, nullable (a missing or off-type leaf is NULL), no DEFAULT;
+ * `COLLATE` may follow it. Shared by CREATE TABLE and ADD COLUMN.
+ */
+export function sqliteDerivedClause(field: TDbFieldMeta): string {
+  return ` GENERATED ALWAYS AS (${derivedColumnExpr(sqliteDialect, field)}) VIRTUAL${sqliteCollateClause(field)}`;
+}
+
+/** The `COLLATE` clause of a `@db.column.collate` field (SQLite's built-in names) — `""` without one. */
+export function sqliteCollateClause(field: TDbFieldMeta): string {
+  return field.collate ? ` COLLATE ${field.collate.toUpperCase()}` : "";
+}
 export { toSqlValue as toSqliteValue };
 
 // ── SQLite identifier quoting ────────────────────────────────────────────────
@@ -399,6 +415,10 @@ export function buildCreateTable(
         : sqliteTypeFromDesignType(field.designType));
 
     let def = `"${esc(field.physicalName)}" ${sqlType}`;
+    if (field.derived) {
+      colDefs.push(def + sqliteDerivedClause(field));
+      continue;
+    }
     if (field.isPrimaryKey && primaryKeys.length === 1) {
       def += " PRIMARY KEY";
       // Add AUTOINCREMENT for integer PKs with @db.default.increment
@@ -417,9 +437,7 @@ export function buildCreateTable(
     if (field.defaultValue?.kind === "value") {
       def += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
     }
-    if (field.collate) {
-      def += ` COLLATE ${field.collate.toUpperCase()}`;
-    }
+    def += sqliteCollateClause(field);
     colDefs.push(def);
   }
 

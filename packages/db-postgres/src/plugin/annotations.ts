@@ -31,6 +31,7 @@ export const annotations: TAnnotationsTree = {
       '**Default:** `"public"`\n\n' +
       '```atscript\n@db.pg.schema "analytics"\nexport interface Events { ... }\n```',
     nodeType: ["interface"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       name: "schema",

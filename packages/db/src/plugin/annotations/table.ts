@@ -21,6 +21,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         "export interface User { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "name",
@@ -53,6 +54,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         "export interface User { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "oldName",
         type: "string",
@@ -87,6 +89,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
           "}\n" +
           "```\n",
         nodeType: ["interface"],
+        passedWhenReferred: false,
         multiple: false,
         argument: {
           optional: true,
@@ -163,6 +166,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
       "export interface User { ... }\n" +
       "```\n",
     nodeType: ["interface"],
+    passedWhenReferred: false,
     argument: {
       name: "name",
       type: "string",
@@ -186,6 +190,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
       "export interface FeedRun { ... }\n" +
       "```\n",
     nodeType: ["interface"],
+    passedWhenReferred: false,
     argument: {
       name: "name",
       type: "string",
@@ -206,6 +211,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         "export interface Author { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "path",
         type: "string",
@@ -228,6 +234,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         "interface Logs { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "method",
         type: "string",
@@ -257,6 +264,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         "export interface Author { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       multiple: false,
       argument: {
         name: "depth",
@@ -359,6 +367,7 @@ function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec 
       "}\n" +
       "```\n",
     nodeType: ["interface"],
+    passedWhenReferred: false,
     multiple: false,
     argument: {
       optional: true,

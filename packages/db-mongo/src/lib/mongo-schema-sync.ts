@@ -282,7 +282,9 @@ export async function syncColumnsImpl(
     await host.collection.updateMany({}, { $rename: renameSpec }, host._getSessionOpts());
   }
 
-  // Adds — see defaultBackfill.
+  // Adds — see defaultBackfill. (A derived field never appears here: it
+  // stores nothing on a document adapter and schema sync leaves it out of
+  // the diff — `TableMetadata.columnDescriptors`.)
   for (const field of diff.added) {
     const value = resolveSyncDefault(field);
     if (value !== undefined) {

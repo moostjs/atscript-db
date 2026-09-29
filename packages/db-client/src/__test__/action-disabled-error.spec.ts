@@ -128,6 +128,65 @@ describe("ActionDisabledError — client-side typed marker", () => {
     expect(err.id).toBeUndefined();
   });
 
+  it("exposes the row-level reason (message already carries it)", async () => {
+    const fetchFn = fetchWith([shipAction], {
+      status: 409,
+      body: {
+        name: "ActionDisabledError",
+        message: "Order already shipped",
+        statusCode: 409,
+        action: "ship",
+        id: { id: 7 },
+        reason: "Order already shipped",
+      },
+    });
+    const c = new Client("/api/users", { fetch: fetchFn });
+    const err = await c.action("ship", { id: 7 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ActionDisabledError);
+    const typed = err as ActionDisabledError;
+    expect(typed.reason).toBe("Order already shipped");
+    expect(typed.reasons).toBeUndefined();
+    expect(typed.message).toBe("Order already shipped");
+  });
+
+  it("exposes rows-level reasons aligned with ids", async () => {
+    const fetchFn = fetchWith([archiveAction], {
+      status: 409,
+      body: {
+        name: "ActionDisabledError",
+        message: 'Action "archive" is disabled for 2 of the selected rows: Locked',
+        statusCode: 409,
+        action: "archive",
+        ids: [{ id: 2 }, { id: 3 }],
+        reasons: ["Locked", null],
+      },
+    });
+    const c = new Client("/api/users", { fetch: fetchFn });
+    const err = await c.action("archive", [{ id: 2 }, { id: 3 }]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ActionDisabledError);
+    const typed = err as ActionDisabledError;
+    expect(typed.ids).toEqual([{ id: 2 }, { id: 3 }]);
+    expect(typed.reasons).toEqual(["Locked", null]);
+    expect(typed.reason).toBeUndefined();
+  });
+
+  it("reason accessors are undefined for bodies without reasons (older servers)", async () => {
+    const fetchFn = fetchWith([shipAction], {
+      status: 409,
+      body: {
+        name: "ActionDisabledError",
+        message: 'Action "ship" is disabled for this row',
+        statusCode: 409,
+        action: "ship",
+        id: { id: 7 },
+      },
+    });
+    const c = new Client("/api/users", { fetch: fetchFn });
+    const err = (await c.action("ship", { id: 7 }).catch((e: unknown) => e)) as ActionDisabledError;
+    expect(err.reason).toBeUndefined();
+    expect(err.reasons).toBeUndefined();
+  });
+
   it("falls back to plain ClientError when error body has no `name: 'ActionDisabledError'`", async () => {
     const fetchFn = fetchWith([shipAction], {
       status: 400,

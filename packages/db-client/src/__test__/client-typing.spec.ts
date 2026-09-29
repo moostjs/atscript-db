@@ -115,6 +115,15 @@ describe("Client<T> — generic typing (compile-only assertions)", () => {
       void c.action("foo", { id: 1 });
     }
   });
+  it("rows carry optional $actions / $disabledReasons", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Post>("/api/posts");
+      const rows = c.query({ controls: { $actions: true } as const });
+      type Row = Awaited<typeof rows>[number];
+      expectTypeOf<Row["$actions"]>().toEqualTypeOf<string[] | undefined>();
+      expectTypeOf<Row["$disabledReasons"]>().toEqualTypeOf<Record<string, string> | undefined>();
+    }
+  });
 });
 
 // Non-inlinable false guard — keeps the body type-checked but unreachable at

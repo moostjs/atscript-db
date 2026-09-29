@@ -129,11 +129,13 @@ export interface TReplaceColumn {
 }
 
 /**
- * The columns a full replace assigns on a SQL adapter: every non-ignored
- * descriptor (the same set `CREATE TABLE` emits) except the primary key —
- * the row is matched by the filter, and an omitted PK must never be nulled
- * or re-defaulted. Static value defaults are filled SDK-side before the
- * adapter sees the row, so only native function defaults are flagged.
+ * The columns a full replace assigns on a SQL adapter: the readable's
+ * `storedDescriptors` (non-ignored, not derived — a generated column is
+ * never assigned) except the primary key — the row is matched by the filter,
+ * and an omitted PK must never be nulled or re-defaulted. Static value
+ * defaults are filled SDK-side before the adapter sees the row, so only
+ * native function defaults are flagged. Ignored and derived descriptors in
+ * `fields` are skipped, so `fieldDescriptors` works too.
  */
 export function replaceColumnsFor(
   fields: readonly TDbFieldMeta[],
@@ -141,7 +143,7 @@ export function replaceColumnsFor(
 ): TReplaceColumn[] {
   const out: TReplaceColumn[] = [];
   for (const fd of fields) {
-    if (fd.ignored || fd.isPrimaryKey) continue;
+    if (fd.ignored || fd.isPrimaryKey || fd.derived) continue;
     const def = fd.defaultValue;
     out.push({
       name: fd.physicalName,
@@ -274,6 +276,33 @@ export function buildDelete(
     sql += ` LIMIT ${limit}`;
   }
   return finalizeParams(dialect, { sql, params: where.params });
+}
+
+/**
+ * The expression a `@db.column.derived` column is generated from: the
+ * dialect's typed {@link SqlDialect.jsonExtract} over the (unqualified,
+ * quoted) JSON source column — the same extraction a view's JSON leaf uses,
+ * so both read a leaf identically. Parameter-free by contract; rendered in
+ * `CREATE TABLE` / `ADD COLUMN` as `GENERATED ALWAYS AS (<expr>)`.
+ *
+ * @throws when `field` is not derived or the dialect has no `jsonExtract`.
+ * @since 0.1.141
+ */
+export function derivedColumnExpr(dialect: SqlDialect, field: TDbFieldMeta): string {
+  const derived = field.derived;
+  if (!derived) {
+    throw new Error(`Column "${field.physicalName}" is not a derived column`);
+  }
+  if (!dialect.jsonExtract) {
+    throw new Error(
+      `Derived column "${field.physicalName}": JSON extraction is not supported by this adapter`,
+    );
+  }
+  return dialect.jsonExtract(
+    dialect.quoteIdentifier(derived.sourceColumn),
+    derived.jsonPath,
+    derived.type,
+  );
 }
 
 /**

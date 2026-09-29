@@ -13,9 +13,134 @@ import type { BaseDbAdapter } from "../base-adapter";
 import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
-import { isPlainObject } from "../shared/object";
+import {
+  deletePath,
+  findAncestorInSet,
+  getPath,
+  isPlainObject,
+  selfOrAncestor,
+} from "../shared/object";
 import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
+
+/**
+ * The raw (logical, pre-translation) read controls a row was fetched with —
+ * what {@link FieldMappingStrategy.reconstructFromRead} needs to fill
+ * `@db.column.derived` fields on document adapters and to prune the source
+ * paths the caller did not ask for. `$select` is the uniqu shape (array,
+ * inclusion or exclusion object); `$groupBy` the grouped query's dimensions.
+ * @since 0.1.141
+ */
+export interface TReadControls {
+  $select?: unknown;
+  $groupBy?: unknown;
+}
+
+/**
+ * How a document-adapter read handles the table's derived fields — a pure
+ * function of the logical read controls, computed once per read (the
+ * translation computes it again for an exclusion projection; no state
+ * travels through the adapter).
+ */
+interface TDerivedReadPlan {
+  /** Derived fields to fill from their source after the read: name → source path segments. */
+  fill: Array<[name: string, source: readonly string[]]>;
+  /** Fetched logical paths the caller did NOT ask for — deleted after filling. */
+  prune: TPrunePath[];
+  /** Exclusion keys the translation must drop (the source of a wanted derived field lives under them). */
+  unexclude: ReadonlySet<string>;
+}
+
+/**
+ * A path to delete from a row after the read, with the number of leading
+ * segments to keep: an ancestor left empty by the deletion goes too — unless
+ * it is one of the first `keep` (something under it was requested, so the
+ * row keeps it, as the adapter's own projection would).
+ */
+interface TPrunePath {
+  segments: readonly string[];
+  keep: number;
+}
+
+const NO_PLAN: TDerivedReadPlan = { fill: [], prune: [], unexclude: new Set() };
+
+/** The no-projection plan of a table (every derived field, nothing pruned) — built once per table. */
+const fullPlans = new WeakMap<TableMetadata, TDerivedReadPlan>();
+
+/** An object-form `$select` (inclusion or exclusion) — not an array. */
+function isObjectForm(select: unknown): select is Record<string, unknown> {
+  return select !== null && typeof select === "object" && !Array.isArray(select);
+}
+
+/** An exclusion projection: object form whose first flag is not `1` / `true`. */
+function isExclusionProjection(select: unknown): select is Record<string, unknown> {
+  if (!isObjectForm(select)) return false;
+  for (const flag of Object.values(select)) return flag !== 1 && flag !== true;
+  return false;
+}
+
+/**
+ * The logical keys a read names, in one pass: the `$groupBy` dimensions
+ * (array or single string) and the `$select` inclusions (array-form strings,
+ * object-form keys flagged `1` / `true`). Empty without a projection.
+ */
+function requestedKeys(controls: TReadControls | undefined): string[] {
+  const out: string[] = [];
+  const groupBy = controls?.$groupBy;
+  if (typeof groupBy === "string") {
+    out.push(groupBy);
+  } else if (Array.isArray(groupBy)) {
+    for (const key of groupBy) if (typeof key === "string") out.push(key);
+  }
+  const select = controls?.$select;
+  if (Array.isArray(select)) {
+    for (const item of select) if (typeof item === "string") out.push(item);
+  } else if (isObjectForm(select)) {
+    for (const [key, flag] of Object.entries(select)) {
+      if (flag === 1 || flag === true) out.push(key);
+    }
+  }
+  return out;
+}
+
+/** {@link TPrunePath} of `path`, keeping the ancestors something in `requested` lives under. */
+function prunePath(path: string, requested: ReadonlySet<string>): TPrunePath {
+  const segments = path.split(".");
+  for (let depth = segments.length - 1; depth >= 1; depth--) {
+    const prefix = `${segments.slice(0, depth).join(".")}.`;
+    for (const r of requested) {
+      if (r.startsWith(prefix)) return { segments, keep: depth };
+    }
+  }
+  return { segments, keep: 0 };
+}
+
+/** Deletes a pruned path from a row, then every ancestor it left empty (down to `keep`). */
+function pruneNestedPath(row: Record<string, unknown>, { segments, keep }: TPrunePath): void {
+  deletePath(row, segments);
+  for (let depth = segments.length - 1; depth > keep; depth--) {
+    const ancestor = segments.slice(0, depth);
+    const value = getPath(row, ancestor);
+    if (!isObjectForm(value) || Object.keys(value).length > 0) return;
+    deletePath(row, ancestor);
+  }
+}
+
+/**
+ * Fills the `@db.column.derived` fields a read asked for from their source
+ * leaf (as stored — no type guard; `null` for a missing leaf) and removes
+ * the source paths the caller did not select, so an inclusion `$select` of
+ * a derived field never leaks its source and an exclusion of the source
+ * still yields the derived value.
+ */
+function fillDerived(row: Record<string, unknown>, plan: TDerivedReadPlan): void {
+  for (const [name, source] of plan.fill) {
+    row[name] = getPath(row, source) ?? null;
+  }
+  for (const path of plan.prune) {
+    pruneNestedPath(row, path);
+  }
+}
 
 // ── Coercion helpers ────────────────────────────────────────────────────────
 
@@ -50,10 +175,32 @@ export function toDecimalString(value: unknown): unknown {
 export abstract class FieldMappingStrategy {
   // ── Read path ───────────────────────────────────────────────────────────
 
+  /**
+   * Physical row → logical row. `controls` (since 0.1.141) are the raw read
+   * controls the row was fetched with — document adapters fill
+   * `@db.column.derived` fields from their source paths and prune sources
+   * the caller did not select; relational adapters ignore them (the derived
+   * column is a real column).
+   */
   abstract reconstructFromRead(
     row: Record<string, unknown>,
     meta: TableMetadata,
+    controls?: TReadControls,
   ): Record<string, unknown>;
+
+  /**
+   * {@link reconstructFromRead} over every row of one read — the per-read
+   * work (the derived read plan on document adapters) is done once for all
+   * of them. The default maps the rows one by one.
+   * @since 0.1.141
+   */
+  reconstructRows(
+    rows: Record<string, unknown>[],
+    meta: TableMetadata,
+    controls?: TReadControls,
+  ): Record<string, unknown>[] {
+    return rows.map((row) => this.reconstructFromRead(row, meta, controls));
+  }
 
   abstract translateQuery(query: Uniquery, meta: TableMetadata): DbQuery;
 
@@ -183,7 +330,7 @@ export abstract class FieldMappingStrategy {
     if (!filter || typeof filter !== "object") {
       return filter;
     }
-    if (!meta.toStorageFormatters && meta.columnMap.size === 0) {
+    if (!meta.toStorageFormatters && meta.columnMap.size === 0 && meta.derivedFields.size === 0) {
       return filter;
     }
 
@@ -430,6 +577,9 @@ export abstract class FieldMappingStrategy {
         delete data[field];
       }
     }
+
+    // Strip @db.column.derived fields — computed from the row, never written
+    meta.stripDerived(data);
   }
 }
 
@@ -441,14 +591,137 @@ export abstract class FieldMappingStrategy {
  * value coercion.
  */
 export class DocumentFieldMapper extends FieldMappingStrategy {
-  reconstructFromRead(row: Record<string, unknown>, meta: TableMetadata): Record<string, unknown> {
+  reconstructFromRead(
+    row: Record<string, unknown>,
+    meta: TableMetadata,
+    controls?: TReadControls,
+  ): Record<string, unknown> {
+    return this._reconstruct(row, meta, this._derivedPlanFor(meta, controls));
+  }
+
+  override reconstructRows(
+    rows: Record<string, unknown>[],
+    meta: TableMetadata,
+    controls?: TReadControls,
+  ): Record<string, unknown>[] {
+    const plan = this._derivedPlanFor(meta, controls);
+    return rows.map((row) => this._reconstruct(row, meta, plan));
+  }
+
+  private _derivedPlanFor(
+    meta: TableMetadata,
+    controls: TReadControls | undefined,
+  ): TDerivedReadPlan | undefined {
+    return meta.derivedFields.size > 0 ? this.derivedReadPlan(controls, meta) : undefined;
+  }
+
+  private _reconstruct(
+    row: Record<string, unknown>,
+    meta: TableMetadata,
+    plan: TDerivedReadPlan | undefined,
+  ): Record<string, unknown> {
     // Coerce/format while row still has physical keys, then rename
     this.coerceFieldValues(row, meta);
     this.applyFromStorageFormatters(row, meta);
     if (meta.columnMap.size > 0) {
       this.reverseColumnRenames(row, meta);
     }
+    if (plan) {
+      fillDerived(row, plan);
+    }
     return row;
+  }
+
+  /** See {@link TDerivedReadPlan}. */
+  private derivedReadPlan(
+    controls: TReadControls | undefined,
+    meta: TableMetadata,
+  ): TDerivedReadPlan {
+    if (meta.derivedFields.size === 0) return NO_PLAN;
+    const select = controls?.$select;
+    const groupBy = controls?.$groupBy;
+    const grouped = Array.isArray(groupBy) ? groupBy.length > 0 : typeof groupBy === "string";
+
+    // No projection (or an empty one): every derived field, nothing pruned
+    if (
+      !grouped &&
+      (select === undefined ||
+        select === null ||
+        (isObjectForm(select) && Object.keys(select).length === 0))
+    ) {
+      let plan = fullPlans.get(meta);
+      if (!plan) {
+        plan = {
+          fill: [...meta.derivedFields].map(([name, d]) => [name, d.sourcePath.split(".")]),
+          prune: [],
+          unexclude: new Set(),
+        };
+        fullPlans.set(meta, plan);
+      }
+      return plan;
+    }
+
+    // The stored paths the read asks for (a derived field is never one of its own)
+    const keys = requestedKeys(controls);
+    const requested = new Set(keys.filter((key) => !meta.derivedFields.has(key)));
+    const fill: TDerivedReadPlan["fill"] = [];
+    const prune = new Set<string>();
+
+    if (isExclusionProjection(select)) {
+      const excluded = new Set(
+        Object.entries(select)
+          .filter(([, flag]) => flag === 0 || flag === false)
+          .map(([key]) => key),
+      );
+      const unexclude = new Set<string>();
+      for (const [name, derived] of meta.derivedFields) {
+        if (excluded.has(name)) continue;
+        fill.push([name, derived.sourcePath.split(".")]);
+        // The source was excluded (itself or through an ancestor): fetch that
+        // subtree for the derived value, drop it again afterwards
+        for (
+          let key = selfOrAncestor(derived.sourcePath, excluded);
+          key !== undefined;
+          key = findAncestorInSet(key, excluded)
+        ) {
+          unexclude.add(key);
+          prune.add(key);
+        }
+      }
+      return { fill, prune: [...prune].map((p) => prunePath(p, requested)), unexclude };
+    }
+
+    // Inclusion (array / object form) or a grouped query: the derived fields
+    // named are filled; a source nobody asked for is pruned
+    const names = new Set(keys);
+    for (const [name, derived] of meta.derivedFields) {
+      if (!names.has(name)) continue;
+      fill.push([name, derived.sourcePath.split(".")]);
+      if (selfOrAncestor(derived.sourcePath, requested) === undefined)
+        prune.add(derived.sourcePath);
+    }
+    return { fill, prune: [...prune].map((p) => prunePath(p, requested)), unexclude: new Set() };
+  }
+
+  /**
+   * {@link FieldMappingStrategy.physicalSelect} plus the derived-field rules
+   * of an exclusion projection: a derived key is not a stored path (dropping
+   * it just leaves the field unfilled), and the source subtree of a wanted
+   * derived field is fetched even when excluded (pruned after the read).
+   */
+  protected override physicalSelect(
+    select: NonNullable<UniqueryControls["$select"]>,
+    meta: TableMetadata,
+  ): NonNullable<UniqueryControls["$select"]> {
+    if (meta.derivedFields.size === 0 || !isExclusionProjection(select)) {
+      return super.physicalSelect(select, meta);
+    }
+    const { unexclude } = this.derivedReadPlan({ $select: select }, meta);
+    const stored: Record<string, unknown> = {};
+    for (const [key, flag] of Object.entries(select)) {
+      if (!meta.derivedFields.has(key) && !unexclude.has(key)) stored[key] = flag;
+    }
+    return super.physicalSelect(stored as NonNullable<UniqueryControls["$select"]>, meta);
   }
 
   /**
@@ -477,7 +750,7 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
   }
 
   protected override renamesPaths(meta: TableMetadata): boolean {
-    return meta.columnMap.size > 0;
+    return meta.columnMap.size > 0 || meta.derivedFields.size > 0;
   }
 
   prepareForWrite(

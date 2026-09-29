@@ -628,7 +628,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     // MySQL supports native UPDATE ... LIMIT 1
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -649,7 +649,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -676,7 +676,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     // their DDL DEFAULT — matching the document adapters' whole-row replace
     // instead of silently merging with the old row.
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const full = fillReplacePayload(
       data,
       replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
@@ -698,7 +698,7 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -931,9 +931,10 @@ export class MysqlAdapter extends BaseDbAdapter {
       IS_NULLABLE: string;
       COLUMN_DEFAULT: string | null;
       SRS_ID: number | null;
+      EXTRA: string | null;
       IS_PK: number | boolean | null;
     }>(
-      `SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.SRS_ID,
+      `SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.SRS_ID, c.EXTRA,
               (k.COLUMN_NAME IS NOT NULL) AS IS_PK
        FROM INFORMATION_SCHEMA.COLUMNS c
        LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
@@ -943,18 +944,26 @@ export class MysqlAdapter extends BaseDbAdapter {
        ORDER BY c.ORDINAL_POSITION`,
       [tableName, this._schema],
     );
-    return rows.map((r) => ({
-      name: r.COLUMN_NAME,
-      // Geometry columns report SRID separately (COLUMN_TYPE is just "point") —
-      // fold it back in to match `mysqlTypeFromField` ("POINT SRID 4326").
-      type:
-        r.SRS_ID == null
-          ? r.COLUMN_TYPE.toUpperCase()
-          : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
-      notnull: r.IS_NULLABLE === "NO",
-      pk: Boolean(Number(r.IS_PK ?? 0)),
-      dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT),
-    }));
+    return rows.map((r) => {
+      const column: TExistingColumn = {
+        name: r.COLUMN_NAME,
+        // Geometry columns report SRID separately (COLUMN_TYPE is just "point") —
+        // fold it back in to match `mysqlTypeFromField` ("POINT SRID 4326").
+        type:
+          r.SRS_ID == null
+            ? r.COLUMN_TYPE.toUpperCase()
+            : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
+        notnull: r.IS_NULLABLE === "NO",
+        pk: Boolean(Number(r.IS_PK ?? 0)),
+        dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT),
+      };
+      // `VIRTUAL GENERATED` / `STORED GENERATED` (MySQL and MariaDB) — not
+      // `DEFAULT_GENERATED`, which marks an expression default.
+      if (/\b(VIRTUAL|STORED) GENERATED\b/i.test(r.EXTRA ?? "")) {
+        column.generated = true;
+      }
+      return column;
+    });
   }
 
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
@@ -1000,6 +1009,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       // silently reset by a partial MODIFY). Columns entering a pending primary
       // key are left to `rebuildPrimaryKey`, which re-declares them in the swap
       // statement (their AUTO_INCREMENT needs the key in the same statement).
+      // A derived column never appears in these lists — its drift is a
+      // derived rebuild (`TColumnDiff.derivedChanged`), drop + add.
       const enteringKey = new Set(diff.primaryKeyChanged?.to ?? []);
       const modified = new Map<string, TDbFieldMeta>();
       for (const { field } of diff.typeChanged ?? []) {
@@ -1076,10 +1087,10 @@ export class MysqlAdapter extends BaseDbAdapter {
         // 2. Get columns that exist in both old and new
         // Read on the held connection: a second pool checkout could wait forever
         // on a one-connection pool.
+        // Generated (derived) columns are computed, never inserted — the new
+        // table recomputes them from the copied JSON source.
         const oldCols = (await this._readColumns(conn, this._table.tableName)).map((c) => c.name);
-        const newCols = this._table.fieldDescriptors
-          .filter((f) => !f.ignored)
-          .map((f) => f.physicalName);
+        const newCols = this._table.storedDescriptors.map((f) => f.physicalName);
         const oldColSet = new Set(oldCols);
         const commonCols = newCols.filter((c) => oldColSet.has(c));
 

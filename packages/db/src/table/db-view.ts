@@ -15,11 +15,13 @@ import type { NullableOptional } from "../types";
 import { AtscriptDbReadable } from "./db-readable";
 import type { TViewPlan, TViewJoin } from "../query/query-tree";
 import { SUPPORTED_AGGREGATE_FNS, type TDbAggregateFn } from "../query/aggregate-fns";
-import { tableNameOf } from "../rel/relation-helpers";
-import { resolveViewSource, type TViewSource } from "./view-source";
+import { resolveViewSource, viewSourceOf, type TViewSource } from "./view-source";
+import { isJsonLeafType } from "../shared/derived-rules";
+import type { TViewJsonType } from "../types";
 
-/** Primitive result type of a JSON-leaf extraction. */
-export type TViewJsonType = "string" | "number" | "boolean";
+// Since 0.1.141 the primitive JSON-leaf type lives in `types.ts` (derived
+// columns share it); re-exported here so the public import path is unchanged.
+export type { TViewJsonType } from "../types";
 
 export interface TViewColumnMapping {
   /**
@@ -103,8 +105,6 @@ function readViewAgg(
   return undefined;
 }
 
-const JSON_LEAF_TYPES: ReadonlySet<string> = new Set(["string", "number", "boolean"]);
-
 /**
  * Database view abstraction driven by Atscript `@db.view.*` annotations.
  *
@@ -169,8 +169,13 @@ export class AtscriptDbView<
     // Resolve entry type from @db.view.for (AtscriptRef)
     const forRef = metadata.get("db.view.for") as AtscriptRef;
     const entryType = typeof forRef === "function" ? forRef : forRef.type;
-    const entryTypeResolved = entryType();
-    const entryTable = tableNameOf(entryTypeResolved);
+    const entry = viewSourceOf(entryType());
+    if (entry.alias) {
+      throw new Error(
+        `View "${this.tableName}": @db.view.for "${entry.name}" is a @db.alias — a join alias cannot be the entry table`,
+      );
+    }
+    const entryTable = entry.table;
 
     // Resolve joins from @db.view.joins (array of { target: AtscriptRef, condition: AtscriptQueryNode })
     const rawJoins = metadata.get("db.view.joins") as
@@ -182,10 +187,11 @@ export class AtscriptDbView<
       for (const join of rawJoins) {
         const targetRef = join.target;
         const targetType = typeof targetRef === "function" ? targetRef : targetRef.type;
-        const targetTypeResolved = targetType();
+        const target = viewSourceOf(targetType());
         joins.push({
           targetType: targetType,
-          targetTable: tableNameOf(targetTypeResolved),
+          targetTable: target.table,
+          scope: target.name,
           condition: join.condition,
           kind: join.kind === "left" ? "left" : "inner",
         });
@@ -220,19 +226,22 @@ export class AtscriptDbView<
 
   /**
    * Resolves a view query field ref (join condition, `@db.view.filter`,
-   * conditional-aggregate predicate) to its table name and PHYSICAL source on
+   * conditional-aggregate predicate) to its scope name and PHYSICAL source on
    * this view's adapter — the column (or document path) with `TableMetadata`'s
    * layout rules, the path inside a JSON column, and whether the value may be
-   * absent. An unqualified ref resolves against the entry table.
+   * absent. An unqualified ref resolves against the entry table. `table` is
+   * the physical table / view name, or the alias name for a `@db.alias`
+   * target (since 0.1.141); a source that is itself a managed view resolves
+   * to that view's own columns.
    * @throws for a ref without storage (`@db.ignore`, navigation relation) or
    *   inside an `@db.encrypted` field (relational adapters).
    * @since 0.1.136
    */
   resolveRefSource(ref: AtscriptQueryFieldRef): { table: string; source: TViewSource } {
-    const type = ref.type ? ref.type() : this.viewPlan.entryType();
+    const src = viewSourceOf(ref.type ? ref.type() : this.viewPlan.entryType());
     return {
-      table: tableNameOf(type),
-      source: resolveViewSource(type, ref.field, this._nested),
+      table: src.name,
+      source: resolveViewSource(src.type, ref.field, this._nested),
     };
   }
 
@@ -302,9 +311,7 @@ export class AtscriptDbView<
     const fail = (field: string, message: string): never => {
       throw new Error(`View "${this.tableName}" field "${field}": ${message}`);
     };
-    const leftJoined = new Set(
-      plan.joins.filter((j) => j.kind === "left").map((j) => j.targetTable),
-    );
+    const leftJoined = new Set(plan.joins.filter((j) => j.kind === "left").map((j) => j.scope));
 
     for (const [fieldName, fieldType] of this._type.type.props.entries()) {
       if (ignored.has(fieldName)) {
@@ -322,17 +329,21 @@ export class AtscriptDbView<
       // Source: the chain ref, else the aggregate's field, else the same name on the entry table
       let sourceType: TAtscriptAnnotatedType;
       let sourcePath: string;
-      if (fieldType.ref) {
-        sourceType = fieldType.ref.type();
-        sourcePath = fieldType.ref.field || fieldName;
+      // A plain ref (a field typed with a named type, `status: OrderStatus`) is no
+      // chain: it reads the entry table's same-named column like an untyped field.
+      const chainRef = fieldType.ref?.field ? fieldType.ref : undefined;
+      if (chainRef) {
+        sourceType = chainRef.type();
+        sourcePath = chainRef.field;
       } else {
         sourceType = plan.entryType();
         sourcePath = aggField && aggField !== "*" ? aggField : fieldName;
       }
-      const sourceTable = tableNameOf(sourceType);
+      const src = viewSourceOf(sourceType);
+      const sourceTable = src.name;
       const joinNullable = leftJoined.has(sourceTable);
 
-      if (aggField === "*" && !fieldType.ref) {
+      if (aggField === "*" && !chainRef) {
         mappings.push({
           viewColumn: viewName(fieldName) ?? fieldName,
           viewPath: fieldName,
@@ -343,7 +354,7 @@ export class AtscriptDbView<
         continue;
       }
 
-      const source = resolveViewSource(sourceType, sourcePath, nested);
+      const source = resolveViewSource(src.type, sourcePath, nested);
       const ownColumn = viewName(fieldName);
 
       if (ownColumn === undefined && !nested) {
@@ -355,7 +366,7 @@ export class AtscriptDbView<
         for (const [viewPath, viewColumn] of meta.pathToPhysical) {
           if (!viewPath.startsWith(prefix) || ignored.has(viewPath)) continue;
           const leafPath = `${sourcePath}.${viewPath.slice(prefix.length)}`;
-          const leaf = resolveViewSource(sourceType, leafPath, nested);
+          const leaf = resolveViewSource(src.type, leafPath, nested);
           mappings.push(this._leafMapping(viewPath, viewColumn, sourceTable, leaf, joinNullable));
         }
         continue;
@@ -395,12 +406,12 @@ export class AtscriptDbView<
       mapping.nullable = true;
     }
     if (source.jsonPath) {
-      if (!JSON_LEAF_TYPES.has(source.designType)) {
+      if (!isJsonLeafType(source.designType)) {
         throw new Error(
           `View "${this.tableName}" field "${viewPath}": JSON extraction supports string, number and boolean leaves only`,
         );
       }
-      mapping.json = { path: source.jsonPath, type: source.designType as TViewJsonType };
+      mapping.json = { path: source.jsonPath, type: source.designType };
     }
     return mapping;
   }

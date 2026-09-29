@@ -8,6 +8,7 @@ import { prepareFixtures } from "./test-utils";
 // Populated after fixtures compile.
 let VersionedUserTable: any;
 let PlainWidgetTable: any;
+let VersionedRenamedTable: any;
 
 describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable", () => {
   let server: any;
@@ -18,12 +19,15 @@ describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable",
   let widgets: AtscriptDbTable;
   let usersAdapter: MongoAdapter;
   let widgetsAdapter: MongoAdapter;
+  let renamed: AtscriptDbTable;
+  let renamedAdapter: MongoAdapter;
 
   beforeAll(async () => {
     await prepareFixtures();
     const fixtures = await import("./fixtures/version-occ.as");
     VersionedUserTable = fixtures.VersionedUserTable;
     PlainWidgetTable = fixtures.PlainWidgetTable;
+    VersionedRenamedTable = fixtures.VersionedRenamedTable;
 
     const { MongoMemoryServer } = await import("mongodb-memory-server-core");
     const { MongoClient: MC } = await import("mongodb");
@@ -36,6 +40,8 @@ describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable",
     widgets = space.getTable(PlainWidgetTable);
     usersAdapter = space.getAdapter(VersionedUserTable) as unknown as MongoAdapter;
     widgetsAdapter = space.getAdapter(PlainWidgetTable) as unknown as MongoAdapter;
+    renamed = space.getTable(VersionedRenamedTable);
+    renamedAdapter = space.getAdapter(VersionedRenamedTable) as unknown as MongoAdapter;
   }, 60000);
 
   afterAll(async () => {
@@ -46,7 +52,7 @@ describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable",
   beforeEach(async () => {
     // Drop the underlying mongo collections between tests (collection name is
     // taken from @db.table, not the export name).
-    for (const name of ["versioned_users", "plain_widgets"]) {
+    for (const name of ["versioned_users", "plain_widgets", "versioned_renamed"]) {
       try {
         await db.collection(name).drop();
       } catch {
@@ -55,6 +61,7 @@ describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable",
     }
     usersAdapter.clearCollectionCache();
     widgetsAdapter.clearCollectionCache();
+    renamedAdapter.clearCollectionCache();
   });
 
   // WHY: §4.6 — versioned columns are server-managed. Mongo has no DDL
@@ -226,5 +233,66 @@ describe("OCC ($cas + auto-bump) end-to-end via MongoAdapter + AtscriptDbTable",
     const row = (await users.findOne({ filter: { id: 1 }, controls: {} })) as any;
     expect(row.counter).toBe(5);
     expect(row.version).toBe(1);
+  });
+
+  // ── Renamed version column (`@db.column 'row_version'` on logical `version`) ──
+  // The table API speaks `version`; the adapter bumps / CASes / backfills the
+  // PHYSICAL `row_version` document key (`versionColumnPhysical`). ≤ 0.1.140
+  // passed the physical name to the table layer too, so a `version` write hit
+  // `$set` + `$inc` on the same path (Mongo conflict → 500) and `$cas` missed.
+  describe("renamed version column", () => {
+    const readDoc = () => db.collection("versioned_renamed").findOne({ id: 1 });
+    const read = async () => (await renamed.findOne({ filter: { id: 1 }, controls: {} })) as any;
+
+    beforeEach(async () => {
+      await renamed.insertOne({ id: 1, name: "Ada", counter: 0 } as any);
+    });
+
+    it("backfills the physical key on insert and reads back the logical field", async () => {
+      const doc = await readDoc();
+      expect(doc?.row_version).toBe(0);
+      expect(doc).not.toHaveProperty("version");
+      const row = await read();
+      expect(row.version).toBe(0);
+      expect(row).not.toHaveProperty("row_version");
+    });
+
+    it("fresh `$cas: { version }` bumps the physical key; stale reports { 0, 0 }", async () => {
+      const fresh = await renamed.updateOne({ id: 1, name: "B", $cas: { version: 0 } } as any);
+      expect(fresh).toEqual({ matchedCount: 1, modifiedCount: 1 });
+      const stale = await renamed.updateOne({ id: 1, name: "C", $cas: { version: 0 } } as any);
+      expect(stale).toEqual({ matchedCount: 0, modifiedCount: 0 });
+      expect((await readDoc())?.row_version).toBe(1);
+      expect(await read()).toMatchObject({ name: "B", version: 1 });
+    });
+
+    it("replaceOne CASes and bumps via the $replaceWith pipeline on the physical key", async () => {
+      const stale = await renamed.replaceOne({
+        id: 1,
+        name: "X",
+        counter: 9,
+        $cas: { version: 3 },
+      } as any);
+      expect(stale.matchedCount).toBe(0);
+      const fresh = await renamed.replaceOne({
+        id: 1,
+        name: "R",
+        counter: 9,
+        $cas: { version: 0 },
+      } as any);
+      expect(fresh.matchedCount).toBe(1);
+      expect(await read()).toMatchObject({ name: "R", counter: 9, version: 1 });
+    });
+
+    it("rejects a direct write to the logical version field", async () => {
+      await expect(renamed.updateOne({ id: 1, version: 5 } as any)).rejects.toThrow(DbError);
+      expect((await readDoc())?.row_version).toBe(0);
+    });
+
+    it("`$cas` + `$inc`, then updateMany, bump the physical key exactly once each", async () => {
+      await renamed.updateOne({ id: 1, counter: { $inc: 2 }, $cas: { version: 0 } } as any);
+      await renamed.updateMany({ id: 1 } as any, { name: "M" } as any);
+      expect(await read()).toMatchObject({ counter: 2, name: "M", version: 2 });
+    });
   });
 });

@@ -4,8 +4,8 @@ import { defineBeforeInterceptor, TInterceptorPriority, type TInterceptorDef } f
 import { ActionDisabledError } from "./action-disabled-error";
 import { boundTableKey, controllerTable, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
 import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
-import type { TOnDisabledRows } from "./types";
-import { assertVerdictLength } from "./verdict";
+import type { TDbActionDisabledVerdict, TOnDisabledRows } from "./types";
+import { assertVerdictLength, verdictReason } from "./verdict";
 
 const GATE_PRIORITY = TInterceptorPriority.AFTER_GUARD;
 
@@ -20,7 +20,7 @@ function injectBoundTable(fallback: unknown): void {
 export interface GateInterceptorOpts {
   action: string;
   level: "row" | "rows";
-  disabled: (rows: unknown[]) => boolean[];
+  disabled: (rows: unknown[]) => TDbActionDisabledVerdict[];
   onDisabledRows: TOnDisabledRows;
   table?: unknown;
 }
@@ -36,7 +36,7 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
       assertVerdictLength(action, verdicts, 1);
       if (verdicts[0]) {
         const id = await ctx.get(dbActionIdSlot);
-        throw new ActionDisabledError(action, id);
+        throw new ActionDisabledError(action, id, undefined, [verdictReason(verdicts[0])]);
       }
       return;
     }
@@ -54,14 +54,16 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
     assertVerdictLength(action, verdicts, existingRows.length);
 
     const failingIds: Record<string, unknown>[] = [];
+    const failingReasons: (string | undefined)[] = [];
     const passingRows: unknown[] = [];
     const passingIds: Record<string, unknown>[] = [];
     let verdictIndex = 0;
     for (let i = 0; i < ids.length; i++) {
       const row = rows[i];
-      const failed = row === undefined || verdicts[verdictIndex++];
-      if (failed) {
+      const verdict = row === undefined ? undefined : verdicts[verdictIndex++];
+      if (row === undefined || verdict) {
         failingIds.push(ids[i]);
+        failingReasons.push(verdictReason(verdict));
       } else {
         passingRows.push(row);
         passingIds.push(ids[i]);
@@ -70,7 +72,8 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
 
     if (onDisabledRows === "skip") {
       if (passingRows.length === 0) {
-        throw new ActionDisabledError(action, undefined, [...ids]);
+        // Zero survivors: every request id failed, so failingReasons aligns with `ids`.
+        throw new ActionDisabledError(action, undefined, [...ids], failingReasons);
       }
       if (failingIds.length > 0) {
         ctx.set(dbActionRowsSlot, Promise.resolve(passingRows));
@@ -79,7 +82,7 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
       return;
     }
     if (failingIds.length > 0) {
-      throw new ActionDisabledError(action, undefined, failingIds);
+      throw new ActionDisabledError(action, undefined, failingIds, failingReasons);
     }
   }, GATE_PRIORITY);
 }

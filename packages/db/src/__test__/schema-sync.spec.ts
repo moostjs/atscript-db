@@ -18,7 +18,7 @@ import type {
   TDbObjectKind,
 } from "../types";
 
-import { prepareFixtures } from "./test-utils";
+import { deleteRowsWhere, prepareFixtures, updateRowsWhere } from "./test-utils";
 
 let UsersTable: any;
 let ProfileTable: any;
@@ -138,14 +138,14 @@ class MockAdapter extends BaseDbAdapter {
     return { deletedCount: 0 };
   }
 
-  async updateMany(): Promise<TDbUpdateResult> {
-    return { matchedCount: 0, modifiedCount: 0 };
+  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+    return updateRowsWhere(this._getTable(), filter, data);
   }
   async replaceMany(): Promise<TDbUpdateResult> {
     return { matchedCount: 0, modifiedCount: 0 };
   }
-  async deleteMany(): Promise<TDbDeleteResult> {
-    return { deletedCount: 0 };
+  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
+    return deleteRowsWhere(this._getTable(), filter);
   }
 
   async ensureTable(opts?: TEnsureTableOptions): Promise<void> {
@@ -375,14 +375,14 @@ class SchemalessAdapter extends BaseDbAdapter {
     }
     return { deletedCount: 0 };
   }
-  async updateMany(): Promise<TDbUpdateResult> {
-    return { matchedCount: 0, modifiedCount: 0 };
+  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+    return updateRowsWhere(this._getTable(), filter, data);
   }
   async replaceMany(): Promise<TDbUpdateResult> {
     return { matchedCount: 0, modifiedCount: 0 };
   }
-  async deleteMany(): Promise<TDbDeleteResult> {
-    return { deletedCount: 0 };
+  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
+    return deleteRowsWhere(this._getTable(), filter);
   }
 
   async tableExists(): Promise<boolean> {
@@ -2152,14 +2152,14 @@ class SnapshotMockAdapter extends BaseDbAdapter {
     }
     return { deletedCount: 0 };
   }
-  async updateMany(): Promise<TDbUpdateResult> {
-    return { matchedCount: 0, modifiedCount: 0 };
+  async updateMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
+    return updateRowsWhere(this._getTable(), filter, data);
   }
   async replaceMany(): Promise<TDbUpdateResult> {
     return { matchedCount: 0, modifiedCount: 0 };
   }
-  async deleteMany(): Promise<TDbDeleteResult> {
-    return { deletedCount: 0 };
+  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
+    return deleteRowsWhere(this._getTable(), filter);
   }
 
   async tableExists(): Promise<boolean> {

@@ -1,4 +1,4 @@
-import type { TDbFieldMeta, TTableOptionDiff } from "../types";
+import type { TDbFieldMeta, TDerivedChangeReason, TTableOptionDiff } from "../types";
 
 // ── Colors ───────────────────────────────────────────────────────────────
 
@@ -32,7 +32,32 @@ export type TSyncEntryStatus = "create" | "alter" | "drop" | "in-sync" | "error"
  * recreate a destructive table-option change needs, and nullable/default
  * changes on adapters that need DDL for them.
  */
-export type TSyncSkippedWork = "pk-rebuild" | "recreate" | "table-options" | "nullable-defaults";
+export type TSyncSkippedWork =
+  | "pk-rebuild"
+  | "recreate"
+  | "table-options"
+  | "nullable-defaults"
+  /** A derived column's drop + add (kind / expression / type change) — since 0.1.141. */
+  | "derived";
+
+/**
+ * One derived-column rebuild as plan and run entries report it (since 0.1.141):
+ * `reason` as the column diff classified it, `derived` whether the MODEL side
+ * is the derived one (`kind` reads `regular → derived` / `derived → regular`).
+ */
+export interface TSyncDerivedChange {
+  column: string;
+  reason: TDerivedChangeReason;
+  derived: boolean;
+}
+
+/** `regular → derived` / `expression changed` / `type changed`. */
+export function derivedChangeLabel(change: TSyncDerivedChange): string {
+  if (change.reason === "kind") {
+    return change.derived ? "regular → derived" : "derived → regular";
+  }
+  return change.reason === "expression" ? "expression changed" : "type changed";
+}
 
 export interface TSyncEntryInit {
   name: string;
@@ -50,6 +75,13 @@ export interface TSyncEntryInit {
   fkAdded?: Array<{ fields: string[]; targetTable: string }>;
   fkRemoved?: Array<{ fields: string[]; targetTable: string }>;
   fkChanged?: Array<{ fields: string[]; targetTable: string; details: string }>;
+  /**
+   * Derived columns the run drops and re-adds (a generated column's
+   * expression cannot be altered in place) — kept on the entry when safe
+   * mode skipped the rebuild (`skipped` includes `'derived'`).
+   * @since 0.1.141
+   */
+  derivedChanges?: TSyncDerivedChange[];
   columnsAdded?: string[];
   columnsRenamed?: string[];
   columnsDropped?: string[];
@@ -93,6 +125,13 @@ export interface TSyncEntryInit {
    * @since 0.1.128
    */
   refused?: boolean;
+  /**
+   * Managed views this view reads whose recreate forces this view's own
+   * drop-and-recreate (its definition is unchanged). Printed as
+   * `· upstream view "x" recreated`.
+   * @since 0.1.141
+   */
+  cascadeFrom?: string[];
 }
 
 export class SyncEntry {
@@ -113,6 +152,8 @@ export class SyncEntry {
   readonly fkAdded: Array<{ fields: string[]; targetTable: string }>;
   readonly fkRemoved: Array<{ fields: string[]; targetTable: string }>;
   readonly fkChanged: Array<{ fields: string[]; targetTable: string; details: string }>;
+  /** @since 0.1.141 — see {@link TSyncEntryInit.derivedChanges}. */
+  readonly derivedChanges: TSyncDerivedChange[];
 
   // Result fields
   readonly columnsAdded: string[];
@@ -131,6 +172,8 @@ export class SyncEntry {
   readonly dropGroup?: string[];
   /** @since 0.1.128 — see {@link TSyncEntryInit.refused}. */
   readonly refused: boolean;
+  /** @since 0.1.141 — see {@link TSyncEntryInit.cascadeFrom}. */
+  readonly cascadeFrom: string[];
 
   constructor(init: TSyncEntryInit) {
     this.name = init.name;
@@ -147,6 +190,7 @@ export class SyncEntry {
     this.fkAdded = init.fkAdded ?? [];
     this.fkRemoved = init.fkRemoved ?? [];
     this.fkChanged = init.fkChanged ?? [];
+    this.derivedChanges = init.derivedChanges ?? [];
     this.columnsAdded = init.columnsAdded ?? [];
     this.columnsRenamed = init.columnsRenamed ?? [];
     this.columnsDropped = init.columnsDropped ?? [];
@@ -158,6 +202,7 @@ export class SyncEntry {
     this.dependsOn = init.dependsOn ?? [];
     this.dropGroup = init.dropGroup;
     this.refused = init.refused ?? false;
+    this.cascadeFrom = init.cascadeFrom ?? [];
   }
 
   /**
@@ -206,6 +251,10 @@ export class SyncEntry {
       // A primary-key rebuild recreates the table on SQLite and rewrites the
       // key everywhere else; a skipped (safe-mode) change is not destructive.
       this.pkChange?.rebuild === true ||
+      // A regular column turning derived (or back) drops stored values; an
+      // expression / type change only recomputes.
+      (this.derivedChanges.some((dc) => dc.reason === "kind") &&
+        !this.skipped.includes("derived")) ||
       (this.optionChanges.some((c) => c.destructive) && !this.skipped.includes("table-options"))
     );
   }
@@ -272,6 +321,22 @@ export class SyncEntry {
     });
   }
 
+  /**
+   * `~ col — derived column (expression changed) — drop + add` (plan) /
+   * `— rebuilt` (result), or `! … — skipped (safe mode)` when pending.
+   */
+  private printDerivedChanges(c: TSyncColors, mode: "plan" | "result"): string[] {
+    const skipped = this.skipped.includes("derived");
+    return this.derivedChanges.map((dc) => {
+      const head = `${dc.column} — derived column (${derivedChangeLabel(dc)})`;
+      if (skipped) {
+        return `      ${c.yellow(`! ${head} — skipped (safe mode)`)}`;
+      }
+      const line = `${dc.reason === "kind" ? "!" : "~"} ${head} — ${mode === "plan" ? "drop + add" : "rebuilt"}`;
+      return `      ${dc.reason === "kind" ? c.red(line) : c.yellow(line)}`;
+    });
+  }
+
   /** `~ col — nullable` / `~ col — default a → b`, `— skipped (safe mode)` when pending. */
   private printNullableDefaults(c: TSyncColors): string[] {
     const suffix = this.skipped.includes("nullable-defaults") ? " — skipped (safe mode)" : "";
@@ -315,6 +380,11 @@ export class SyncEntry {
     return [`      ${c.dim(`· after: ${this.dependsOn.join(", ")}`)}`];
   }
 
+  /** `· upstream view "x" recreated` — why an unchanged view is recreated. */
+  private printCascade(c: TSyncColors): string[] {
+    return this.cascadeFrom.map((name) => `      ${c.dim(`· upstream view "${name}" recreated`)}`);
+  }
+
   private printDropGroup(c: TSyncColors): string[] {
     const others = this.dropGroup?.filter((n) => n !== this.name) ?? [];
     if (others.length === 0) {
@@ -346,7 +416,7 @@ export class SyncEntry {
         `  ${c.green(`+ ${vp}${label} — create`)}`,
         ...this.columnsToAdd.map(
           (col) =>
-            `      ${c.green(`+ ${col.physicalName} (${col.designType})${col.isPrimaryKey ? " PK" : ""}${col.optional ? " nullable" : ""} — add`)}`,
+            `      ${c.green(`+ ${col.physicalName} (${col.designType})${col.isPrimaryKey ? " PK" : ""}${col.optional ? " nullable" : ""}${col.derived ? " derived" : ""} — add`)}`,
         ),
         ...this.printDependsOn(c),
         "",
@@ -360,11 +430,13 @@ export class SyncEntry {
       return [
         `  ${c.cyan(`~ ${vp}${label} — alter${renameInfo}`)}`,
         ...this.columnsToAdd.map(
-          (col) => `      ${c.green(`+ ${col.physicalName} (${col.designType}) — add`)}`,
+          (col) =>
+            `      ${c.green(`+ ${col.physicalName} (${col.designType})${col.derived ? " derived" : ""} — add`)}`,
         ),
         ...this.columnsToRename.map((r) => `      ${c.yellow(`~ ${r.from} → ${r.to} — rename`)}`),
         ...this.printTypeChanges(c),
         ...this.printNullableDefaults(c),
+        ...this.printDerivedChanges(c, "plan"),
         ...this.printPkChange(c, "plan"),
         ...this.columnsToDrop.map((col) => `      ${c.red(`- ${col} — drop`)}`),
         ...this.printOptionChanges(c, "plan"),
@@ -378,6 +450,7 @@ export class SyncEntry {
           (fk) =>
             `      ${c.yellow(`~ FK(${fk.fields.join(",")}) → ${fk.targetTable} — ${fk.details}`)}`,
         ),
+        ...this.printCascade(c),
         ...this.printDependsOn(c),
         "",
       ];
@@ -414,6 +487,7 @@ export class SyncEntry {
       this.columnsDropped.length > 0 ||
       this.optionChanges.length > 0 ||
       this.pkChange !== undefined ||
+      this.derivedChanges.length > 0 ||
       this.skipped.length > 0;
 
     if (hasChanges || this.recreated || this.renamedFrom) {
@@ -431,8 +505,10 @@ export class SyncEntry {
         ...this.printPkChange(c, "result"),
         ...this.printTypeChanges(c),
         ...this.printNullableDefaults(c),
+        ...this.printDerivedChanges(c, "result"),
         ...this.columnsDropped.map((col) => `      ${c.red(`- ${col} — dropped`)}`),
         ...this.printOptionChanges(c, "result"),
+        ...this.printCascade(c),
         "",
       ];
     }

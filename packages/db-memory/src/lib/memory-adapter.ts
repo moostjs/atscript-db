@@ -437,7 +437,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
     // Memory has no DDL DEFAULT; fill version=0 at insert when missing so OCC
     // stays consistent with the SQL/Mongo adapters.
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (versionColumn !== undefined && !(versionColumn in row)) {
       row[versionColumn] = 0;
     }
@@ -554,7 +554,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion: number | undefined,
     many: boolean,
   ): Array<{ key: string; row: Record<string, unknown> }> {
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (expectedVersion !== undefined && versionColumn === undefined) {
       throw new Error("expectedVersion requires a versioned table");
     }
@@ -587,7 +587,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * {@link replaceOne} (full-replace path).
    */
   private _bumpVersion(target: Record<string, unknown>, oldRow: Record<string, unknown>): void {
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     if (versionColumn !== undefined) {
       target[versionColumn] = ((oldRow[versionColumn] as number | undefined) ?? 0) + 1;
     }

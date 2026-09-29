@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "@atscript/core";
 import { tsPlugin } from "@atscript/typescript";
-import { beforeAll, describe, expect, it } from "vite-plus/test";
+import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
+import { DbError } from "../db-error";
 import dbPlugin from "../plugin";
 import { AtscriptDbTable } from "../table/db-table";
+import { withOptimisticRetry } from "../with-optimistic-retry";
 import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let VersionedUser: any;
@@ -36,13 +38,25 @@ describe("@db.column.version → table.versionColumn", () => {
     expect(table.versionColumn).toBe("version");
   });
 
-  // WHY: downstream layers (SQL builder injecting `version = version + 1`,
-  // REST `versionColumn` meta) use this string verbatim. If the @db.column
-  // rename isn't honored, OCC silently targets the wrong physical column.
-  it("respects @db.column rename when reporting the physical version column", () => {
+  // WHY: `versionColumn` is the consumer-facing key ($cas, write bodies, rows
+  // read back, REST `/meta`) — all of which speak LOGICAL field names. A
+  // @db.column rename moves only the storage column, which adapters reach
+  // through `versionColumnPhysical`. Mixing the two broke OCC end to end
+  // for renamed version fields (≤ 0.1.140 returned the physical name here).
+  it("reports the logical field for a @db.column-renamed version column", () => {
     const adapter = new MockAdapter();
     const table = new AtscriptDbTable(VersionedOrder, adapter);
-    expect(table.versionColumn).toBe("v");
+    expect(table.versionColumn).toBe("revision");
+    expect(table.versionColumnPhysical).toBe("v");
+  });
+
+  // WHY: un-renamed tables keep logical == physical, so every adapter and
+  // REST path behaves byte-identically to before the split.
+  it("reports the same name for both getters when the field is not renamed", () => {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(VersionedUser, adapter);
+    expect(table.versionColumn).toBe("version");
+    expect(table.versionColumnPhysical).toBe("version");
   });
 
   // WHY: the feature must be strictly opt-in (locked decision row 1). A
@@ -52,6 +66,106 @@ describe("@db.column.version → table.versionColumn", () => {
     const adapter = new MockAdapter();
     const table = new AtscriptDbTable(PlainWidget, adapter);
     expect(table.versionColumn).toBeUndefined();
+    expect(table.versionColumnPhysical).toBeUndefined();
+  });
+});
+
+// ── Renamed version column: logical at the table API, physical at the adapter ──
+
+async function codeOf(p: Promise<unknown>): Promise<string | undefined> {
+  const err = await p.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(DbError);
+  return (err as DbError).code;
+}
+
+describe("@db.column-renamed version column (logical `revision` → physical `v`)", () => {
+  function makeOrders(rows: Array<Record<string, unknown>> = []) {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(VersionedOrder, adapter);
+    adapter.store.set(table.tableName, rows);
+    return { table, adapter };
+  }
+
+  // WHY: separateCas matches the `$cas` key against `versionColumn`; with the
+  // logical name the SDK operator lifts, and the adapter receives only the
+  // numeric expectedVersion (it CASes on the physical column itself).
+  it("updateOne lifts `$cas: { revision }` into the adapter's expectedVersion", async () => {
+    const { table, adapter } = makeOrders();
+    const updateOne = vi.spyOn(adapter, "updateOne");
+    await table.updateOne({ id: 1, status: "paid", $cas: { revision: 2 } } as any);
+    const [filter, data, , expectedVersion] = updateOne.mock.calls[0]! as unknown[];
+    expect(filter).toEqual({ id: 1 });
+    expect(data).toEqual({ status: "paid" });
+    expect(expectedVersion).toBe(2);
+  });
+
+  // WHY: the physical name is storage detail — a `$cas` keyed by it is a key
+  // mismatch, same as any other wrong key (fails loud, never silently drops).
+  it("rejects `$cas` keyed by the physical column name", async () => {
+    const { table } = makeOrders();
+    expect(await codeOf(table.updateOne({ id: 1, $cas: { v: 2 } } as any))).toBe("INVALID_QUERY");
+  });
+
+  // WHY: bulkReplace/replaceOne share the same lift — per-row expectedVersion
+  // reaches the adapter's replaceOne as its third argument.
+  it("replaceOne lifts `$cas: { revision }` into the adapter's expectedVersion", async () => {
+    const { table, adapter } = makeOrders();
+    const replaceOne = vi.spyOn(adapter, "replaceOne");
+    await table.replaceOne({ id: 1, status: "paid", $cas: { revision: 5 } } as any);
+    const [, data, expectedVersion] = replaceOne.mock.calls[0]! as unknown[];
+    expect(data).not.toHaveProperty("v");
+    expect(data).not.toHaveProperty("revision");
+    expect(expectedVersion).toBe(5);
+  });
+
+  // WHY: assertNoVersionWrites runs on the LOGICAL payload — before the
+  // physical-name fix it looked for `v`, so a `revision` write slipped
+  // through into the SET list (SQL `SET v = ?, v = v + 1`, Mongo $set+$inc).
+  it.each([
+    ["updateOne", (t: AtscriptDbTable) => t.updateOne({ id: 1, revision: 9 } as any)],
+    [
+      "updateOne ($inc)",
+      (t: AtscriptDbTable) => t.updateOne({ id: 1, revision: { $inc: 1 } } as any),
+    ],
+    [
+      "replaceOne",
+      (t: AtscriptDbTable) => t.replaceOne({ id: 1, status: "x", revision: 9 } as any),
+    ],
+    ["bulkUpdate", (t: AtscriptDbTable) => t.bulkUpdate([{ id: 1, revision: 9 }] as any)],
+    [
+      "bulkReplace",
+      (t: AtscriptDbTable) => t.bulkReplace([{ id: 1, status: "x", revision: 9 }] as any),
+    ],
+    [
+      "updateMany",
+      (t: AtscriptDbTable) => t.updateMany({ status: "new" } as any, { revision: 9 } as any),
+    ],
+  ])("%s rejects a direct write to the logical version field", async (_name, run) => {
+    const { table, adapter } = makeOrders([{ id: 1, status: "new", v: 2 }]);
+    expect(await codeOf(run(table))).toBe("VERSION_COLUMN_WRITE");
+    expect(adapter.calls.filter((c) => c.method !== "count" && c.method !== "findOne")).toEqual([]);
+  });
+
+  // WHY: withOptimisticRetry reads `row[versionColumn]` off a LOGICAL row
+  // (findOne maps `v` → `revision`) and re-emits `$cas: { [versionColumn] }`.
+  // With the physical name it read `undefined` and sent `$cas: { v }`, which
+  // separateCas then rejected — the helper was unusable on renamed tables.
+  it("withOptimisticRetry reads the logical version and CASes on it", async () => {
+    const { table, adapter } = makeOrders([{ id: 1, status: "new", v: 2 }]);
+    const updateOne = vi.spyOn(adapter, "updateOne");
+    const seen: unknown[] = [];
+    const result = await withOptimisticRetry(table, { id: 1 }, (row) => {
+      seen.push(row.revision);
+      return { status: "paid" };
+    });
+    expect(result).toEqual({ matchedCount: 1, modifiedCount: 1 });
+    expect(seen).toEqual([2]);
+    const [, data, , expectedVersion] = updateOne.mock.calls[0]! as unknown[];
+    expect(data).toEqual({ status: "paid" });
+    expect(expectedVersion).toBe(2);
   });
 });
 

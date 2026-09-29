@@ -101,15 +101,17 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─
     if (value === undefined && (dbCtx.mode === "insert" || dbCtx.mode === "replace")) {
       const meta = def.metadata;
-      // Server-managed fields: defaulted columns, and the OCC version column
-      // (adapter-initialised to 0 on insert, auto-bumped on every write) —
+      // Server-managed fields: defaulted columns, the OCC version column
+      // (adapter-initialised to 0 on insert, auto-bumped on every write) and
+      // derived columns (computed from the row; a payload value is dropped) —
       // single source of truth for both the server validators and db-client.
       const serverManaged =
         meta.has("db.default") ||
         meta.has("db.default.increment") ||
         meta.has("db.default.uuid") ||
         meta.has("db.default.now") ||
-        meta.has("db.column.version");
+        meta.has("db.column.version") ||
+        meta.has("db.column.derived");
       const hasFK = meta.has("db.rel.FK");
 
       if (serverManaged || hasFK) {
@@ -130,6 +132,14 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     if (dbCtx.mode === "patch") {
       // Field operation handling ($inc / $dec / $mul)
       if (isDbFieldOp(value)) {
+        // A derived column is computed from its JSON source — arithmetic on it
+        // has nothing to write to (the source leaf is the thing to patch).
+        if (def.metadata.has("db.column.derived")) {
+          ctx.error(
+            "Field operations ($inc/$dec/$mul) are not allowed on a @db.column.derived field — it is computed from its @db.json source; patch the source leaf instead",
+          );
+          return false;
+        }
         // Context check first: @db.json, non-merge objects, nav field passthrough
         if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap, dbCtx.navFields)) {
           ctx.error(

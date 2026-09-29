@@ -10,9 +10,13 @@ import type { TGenericLogger } from "../logger";
 import { isJsonValueField } from "../query/buckets";
 import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
+import { resolveViewSource } from "./view-source";
+import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
+import { findAncestorInSet, selfOrAncestor } from "../shared/object";
 import type {
   TDbCollation,
   TDbDefaultValue,
+  TDerivedColumn,
   TDbFieldMeta,
   TDbForeignKey,
   TDbIndex,
@@ -33,21 +37,9 @@ function indexKey(type: string, name: string): string {
   return `${INDEX_PREFIX}${type}__${cleanName}`;
 }
 
-/**
- * Finds the nearest ancestor of `path` that belongs to `set`.
- * Used by both the build pipeline (in `_classifyFields`) and
- * runtime reconstruction on the Readable.
- */
-export function findAncestorInSet(path: string, set: ReadonlySet<string>): string | undefined {
-  let pos = path.length;
-  while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
-    const ancestor = path.slice(0, pos);
-    if (set.has(ancestor)) {
-      return ancestor;
-    }
-  }
-  return undefined;
-}
+// The dot-path set helpers live in the dependency-free `shared/object`
+// (the field mappers need them too); re-exported here, where they always were.
+export { findAncestorInSet, selfOrAncestor };
 
 /**
  * Whether a `@db.column` / `@db.column.renamed` on `path` applies: always on
@@ -145,6 +137,22 @@ export class TableMetadata {
 
   flatMap!: Map<string, TAtscriptAnnotatedType>;
   fieldDescriptors!: readonly TDbFieldMeta[];
+  /**
+   * The descriptors schema sync manages as columns of this table: the
+   * non-ignored ones — on nested-object adapters without the
+   * `@db.column.derived` fields, which store nothing there (their
+   * `physicalName` is the source's document path). The desired side of every
+   * column diff and the column list of a fresh create.
+   * @since 0.1.141
+   */
+  columnDescriptors: readonly TDbFieldMeta[] = [];
+  /**
+   * The columns that hold a value of their own — non-ignored and not derived
+   * (a generated column is computed, never assigned): what a table recreation
+   * copies and a full replace assigns.
+   * @since 0.1.141
+   */
+  storedDescriptors: readonly TDbFieldMeta[] = [];
   primaryKeys: string[] = [];
   preferredId: string[] = [];
   originalMetaIdFields: string[] = [];
@@ -165,6 +173,13 @@ export class TableMetadata {
   quantityRefByField = new Map<string, string>();
   /** Logical paths annotated with `@db.encrypted` — stored as one opaque ciphertext column. */
   encryptedFields = new Set<string>();
+  /**
+   * `@db.column.derived` fields (top-level logical name → what they read),
+   * since 0.1.141. A generated column on relational adapters; on nested-object
+   * adapters nothing is stored — {@link physicalPath} maps the name to the
+   * source's document path and reads fill the field from it.
+   */
+  derivedFields = new Map<string, TDerivedColumn>();
 
   // ── Hot-path lookup indexes — derived during build() ─────────────────────
 
@@ -238,9 +253,12 @@ export class TableMetadata {
     return this._built;
   }
 
-  /** {@link documentPath} over this table's `columnMap`. */
+  /**
+   * {@link documentPath} over this table's `columnMap`. A `@db.column.derived`
+   * field has no stored path of its own: it maps to its source leaf.
+   */
   documentPath(path: string): string {
-    return documentPath(this.columnMap, path);
+    return documentPath(this.columnMap, this.derivedFields.get(path)?.sourcePath ?? path);
   }
 
   /**
@@ -249,9 +267,20 @@ export class TableMetadata {
    * `@db.column` override).
    */
   physicalPath(logical: string): string {
-    return this.nestedObjects
-      ? this.documentPath(logical)
-      : (this.pathToPhysical.get(logical) ?? this.columnMap.get(logical) ?? logical);
+    if (this.nestedObjects) return this.documentPath(logical);
+    return this.pathToPhysical.get(logical) ?? this.columnMap.get(logical) ?? logical;
+  }
+
+  /**
+   * Drops the `@db.column.derived` keys of a write payload in place (a
+   * derived field is always top-level): the column is computed from the row
+   * and never written, so a row read back can be written back as-is.
+   * @since 0.1.141
+   */
+  stripDerived(data: Record<string, unknown>): void {
+    for (const field of this.derivedFields.keys()) {
+      delete data[field];
+    }
   }
 
   // ── Build pipeline ───────────────────────────────────────────────────────
@@ -306,12 +335,24 @@ export class TableMetadata {
 
     // Phase 2: Scan only non-nav-descendant fields into metadata maps.
     // Nav descendants remain in flatMap (validation needs them) but never
-    // pollute primaryKeys, defaults, indexes, foreignKeys, etc.
+    // pollute primaryKeys, defaults, indexes, foreignKeys, etc. They are the
+    // target's fields, never columns of this table: `ignored`, like the nav
+    // field itself, so a document adapter's descriptors (which keep the
+    // nested shape) leave them out of `columnDescriptors`, the snapshot and
+    // the plan — relational storage drops the subtree anyway.
     for (const entry of collected) {
       if (findAncestorInSet(entry.path, this.navFields) !== undefined) {
+        this.ignoredFields.add(entry.path);
         continue;
       }
       this._scanGenericAnnotations(entry.path, entry.type, entry.metadata, logger);
+      // @db.column.derived — a scalar computed from a JSON leaf of the same row
+      if (entry.metadata.has("db.column.derived")) {
+        this.derivedFields.set(
+          entry.path,
+          this._validateDerivedField(entry.path, entry.type, entry.metadata, type),
+        );
+      }
       adapter.onFieldScanned?.(entry.path, entry.type, entry.metadata);
     }
 
@@ -374,16 +415,12 @@ export class TableMetadata {
     // Build physical field list for UniquSelect exclusion inversion.
     // Skip nav-relation fields and their descendants — they aren't selectable
     // columns on this table, so they must not appear in an inverted SELECT list.
-    if (this.nestedObjects && this.flatMap) {
-      for (const path of this.flatMap.keys()) {
-        if (
-          path &&
-          !this.ignoredFields.has(path) &&
-          !this.navFields.has(path) &&
-          findAncestorInSet(path, this.navFields) === undefined
-        ) {
-          this.allPhysicalFields.push(this.documentPath(path));
-        }
+    if (this.nestedObjects) {
+      // `columnDescriptors` is nav-free (nav fields and their descendants are
+      // `ignored`). A derived field is not stored on a document adapter — its
+      // source path is already listed, and it is filled from it after the read.
+      for (const fd of this.columnDescriptors) {
+        this.allPhysicalFields.push(fd.physicalName);
       }
     } else {
       for (const [path, physical] of this.pathToPhysical) {
@@ -682,6 +719,89 @@ export class TableMetadata {
         "ciphertext is opaque — partial merges would silently drop omitted keys",
       );
     }
+  }
+
+  /**
+   * Build-time diagnostics for `@db.column.derived` (rules D1–D8 of the
+   * derived-column design) — the runtime mirror of the compile-time check, so
+   * pre-compiled models fail fast — and the resolution of what the field
+   * reads: the source leaf's JSON column + path (relational layout, via the
+   * views' `resolveViewSource`) and its declared type.
+   */
+  private _validateDerivedField(
+    fieldName: string,
+    fieldType: TAtscriptAnnotatedType,
+    metadata: TMetadataMap<AtscriptMetadata>,
+    rootType: TAtscriptAnnotatedType<TAtscriptTypeObject>,
+  ): TDerivedColumn {
+    const reject = (why: string): never => {
+      throw new Error(`@db.column.derived on "${fieldName}": ${why}`);
+    };
+    if (fieldName.includes(".")) {
+      reject("only a top-level field of a table can be derived");
+    }
+    for (const [name, why] of DERIVED_INCOMPATIBLE) {
+      if (metadata.has(name as never)) {
+        reject(`cannot coexist with @${name} — ${why}`);
+      }
+    }
+    const ref = fieldType.ref;
+    if (!ref?.field) {
+      reject(
+        "requires a chain reference into a @db.json field of the same table (e.g. `customerId: Order.payload.customer.id`)",
+      );
+    }
+    const target = ref!.type();
+    if (target !== rootType) {
+      reject(
+        `must reference the enclosing table "${rootType.id ?? ""}", not "${target?.id ?? ""}" — a derived column reads its own row`,
+      );
+    }
+    const sourcePath = ref!.field;
+    const segments = sourcePath.split(".");
+    let jsonRoot: string | undefined;
+    for (let i = 1; i <= segments.length; i++) {
+      const prefix = segments.slice(0, i).join(".");
+      const node = this.flatMap.get(prefix);
+      if (!node) {
+        reject(`path "${sourcePath}" does not exist on the table`);
+      }
+      if (node!.metadata.has("db.encrypted")) {
+        reject(
+          `path "${sourcePath}" reads inside the @db.encrypted field "${prefix}" — ciphertext cannot be extracted`,
+        );
+      }
+      if (resolveDesignType(node!) === "array") {
+        reject(
+          `path "${sourcePath}" crosses the array "${prefix}" — a derived column reads one scalar leaf`,
+        );
+      }
+      if (jsonRoot === undefined && node!.metadata.has("db.json")) {
+        jsonRoot = prefix;
+      }
+    }
+    if (jsonRoot === undefined || jsonRoot === sourcePath) {
+      reject(
+        `path "${sourcePath}" does not read inside a @db.json field — a flattened or scalar column needs no derived column`,
+      );
+    }
+    const leafType = resolveDesignType(this.flatMap.get(sourcePath)!);
+    if (!isJsonLeafType(leafType)) {
+      return reject(
+        `path "${sourcePath}" must end at a string, number or boolean leaf (got "${leafType}")`,
+      );
+    }
+    // The relational layout of the source — the one JSON extraction views
+    // use (it throws for a path without storage: @db.ignore, a navigation
+    // relation). The walk above guarantees a JSON root strictly above the
+    // leaf, so the source always carries a JSON path.
+    const source = resolveViewSource(rootType, sourcePath, false);
+    return {
+      sourcePath,
+      sourceColumn: source.column,
+      jsonPath: source.jsonPath!,
+      type: leafType,
+    };
   }
 
   /** Build-time diagnostics for `@db.index.geo` (§3 of the geo-index spec). */
@@ -1026,16 +1146,26 @@ export class TableMetadata {
         unitRefField,
         encrypted: isEncrypted || underEncrypted || undefined,
         isGeoPoint: isGeoPointType(type) || undefined,
+        derived: this.derivedFields.get(path),
       });
     }
 
     // Second pass: resolve fkTargetField for FK fields.
     this._resolveFkTargetFields(descriptors);
 
-    // Build value formatters from adapter hook
+    Object.freeze(descriptors);
+    this.fieldDescriptors = descriptors;
+    this.columnDescriptors = Object.freeze(
+      descriptors.filter((fd) => !fd.ignored && !(skipFlattening && fd.derived)),
+    );
+    this.storedDescriptors = Object.freeze(descriptors.filter((fd) => !fd.ignored && !fd.derived));
+
+    // Build value formatters from adapter hook — per column (a derived field
+    // on a document adapter shares its physical path with the source leaf,
+    // which has its own — nested: none — formatting rules)
     const fmtHook = adapter.formatValue?.bind(adapter);
     if (fmtHook) {
-      for (const fd of descriptors) {
+      for (const fd of this.columnDescriptors) {
         const fmt = fmtHook(fd);
         if (fmt) {
           if (typeof fmt === "function") {
@@ -1061,9 +1191,6 @@ export class TableMetadata {
         }
       }
     }
-
-    Object.freeze(descriptors);
-    this.fieldDescriptors = descriptors;
   }
 
   /**

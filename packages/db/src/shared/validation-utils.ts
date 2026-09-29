@@ -10,10 +10,36 @@ import type {
   TAnnotationTokens,
   Token,
   TMessages,
+  TQueryScope,
 } from "@atscript/core";
 import { isInterface, isQueryComparison, isQueryLogical, isRef, isStructure } from "@atscript/core";
 
 import { getAnnotationAlias } from "./annotation-utils";
+import { DB_ENTITY_ANNOTATIONS } from "./derived-rules";
+
+/** Options of {@link validateRefArgument}. */
+export interface TRefArgumentOptions {
+  /**
+   * The declarations the argument may name — the same predicate its editor
+   * `refFilter` completes with (`lsp-scopes`), so a diagnostic and the
+   * completion list never disagree. A `@db.alias` declaration it rejects
+   * gets the alias-specific message.
+   * @since 0.1.141
+   */
+  accept?: (decl: SemanticNode) => boolean;
+  /** What {@link accept} demands, for the diagnostic: `Type 'X' <expected>`. */
+  expected?: string;
+}
+
+/** Whether a declaration node is a `@db.table` or a `@db.view` (managed or external). */
+export function isDbSourceDecl(node: SemanticNode): boolean {
+  return DB_ENTITY_ANNOTATIONS.some((name) => node.countAnnotations(name) > 0);
+}
+
+/** Whether a declaration node is a `@db.alias` type. @since 0.1.141 */
+export function isAliasDecl(node: SemanticNode): boolean {
+  return node.countAnnotations("db.alias") > 0;
+}
 
 /**
  * Validate a ref annotation argument against the document's type registry.
@@ -22,7 +48,7 @@ import { getAnnotationAlias } from "./annotation-utils";
 export function validateRefArgument(
   token: Token,
   doc: AtscriptDoc,
-  options?: { requireDbTable?: boolean },
+  options?: TRefArgumentOptions,
 ): TMessages {
   const messages: TMessages = [];
   const text = token.text;
@@ -56,18 +82,75 @@ export function validateRefArgument(
     }
   }
 
-  if (options?.requireDbTable && decl.node) {
-    const hasDbTable = decl.node.countAnnotations("db.table") > 0;
-    if (!hasDbTable) {
-      messages.push({
-        severity: 1,
-        message: `Type '${typeName}' must have @db.table annotation.`,
-        range: token.range,
-      });
-    }
+  if (options?.accept && decl.node && !options.accept(decl.node)) {
+    messages.push({
+      severity: 1,
+      message: isAliasDecl(decl.node)
+        ? `Type '${typeName}' is a @db.alias — a join alias cannot be used here, reference the aliased table or view.`
+        : `Type '${typeName}' ${options.expected ?? "is not accepted here."}`,
+      range: token.range,
+    });
   }
 
   return messages;
+}
+
+/**
+ * The declaration a view source name stands for: the named table / view, or
+ * — for a `@db.alias` type — the aliased table / view. `undefined` when the
+ * name does not resolve (unknown, or an import that is not loaded yet).
+ * @since 0.1.141
+ */
+function resolveViewSourceDecl(
+  name: string,
+  doc: AtscriptDoc,
+): { doc: AtscriptDoc; node: SemanticNode } | undefined {
+  const decl = doc.getDeclarationOwnerNode(name);
+  if (!decl?.node) {
+    return undefined;
+  }
+  const aliasTarget = getAnnotationAlias(decl.node, "db.alias");
+  if (aliasTarget !== undefined) {
+    const target = decl.doc.getDeclarationOwnerNode(aliasTarget);
+    return target?.node ? { doc: target.doc, node: target.node } : undefined;
+  }
+  return { doc: decl.doc, node: decl.node };
+}
+
+/**
+ * VW9 — the dependency cycle a view closes, as the list of view names from
+ * the view back to itself (`["A", "B", "A"]`), or `undefined`. Walks
+ * `@db.view.for` / `@db.view.joins` of the referenced declarations across
+ * documents; `@db.alias` sources resolve to their target.
+ * @since 0.1.141
+ */
+export function findViewCycle(owner: SemanticNode, doc: AtscriptDoc): string[] | undefined {
+  const start = owner.id;
+  if (!start) {
+    return undefined;
+  }
+  const visited = new Set<SemanticNode>();
+  const walk = (node: SemanticNode, nodeDoc: AtscriptDoc, path: string[]): string[] | undefined => {
+    for (const name of viewScopeTypes(node)) {
+      const source = resolveViewSourceDecl(name, nodeDoc);
+      if (!source) {
+        continue;
+      }
+      if (source.node === owner) {
+        return [...path, start];
+      }
+      if (visited.has(source.node)) {
+        continue;
+      }
+      visited.add(source.node);
+      const cycle = walk(source.node, source.doc, [...path, source.node.id ?? name]);
+      if (cycle) {
+        return cycle;
+      }
+    }
+    return undefined;
+  };
+  return walk(owner, doc, [start]);
 }
 
 export interface TFKFieldMatch {
@@ -169,6 +252,20 @@ export function joinTargets(joins: readonly TAnnotationTokens[]): string[] {
 }
 
 /**
+ * The targets of the `@db.view.joins` declared before `join` among the
+ * view's `joins` ({@link viewJoins}) — what a chained join condition may
+ * reference besides its target and the entry.
+ * @since 0.1.141
+ */
+export function earlierJoinTargets(
+  joins: readonly TAnnotationTokens[],
+  join: TAnnotationTokens,
+): string[] {
+  const position = joins.indexOf(join);
+  return joinTargets(position === -1 ? [] : joins.slice(0, position));
+}
+
+/**
  * The type names a view predicate (`@db.view.filter`, a conditional
  * `@db.agg.*`) may reference: the `@db.view.for` entry table, then every
  * `@db.view.joins` target.
@@ -187,18 +284,20 @@ export function hasAnyViewAnnotation(node: SemanticNode): boolean {
 }
 
 /**
- * Validate that all type refs in a query expression are within the allowed scope.
+ * Validate that all field refs in a query expression are within `scope` —
+ * the same {@link TQueryScope} the editor completes (`lsp-scopes`):
+ * qualified refs must name one of `scope.allowedTypes`; an unqualified ref
+ * (a dotted path included) must be a field of `scope.unqualifiedTarget`, or
+ * is rejected outright when that is `null`.
  *
  * @param queryToken - The query arg token (must have .queryNode)
- * @param allowedTypes - Type names allowed as qualified refs
- * @param unqualifiedTarget - Type name for resolving unqualified refs, or null to disallow them
+ * @param scope - The scope of the argument
  * @param doc - The document for type lookups
  * @param scopeHint - Replaces the default "expected 'A' or 'B'" tail of the out-of-scope message
  */
 export function validateQueryScope(
   queryToken: Token,
-  allowedTypes: string[],
-  unqualifiedTarget: string | null,
+  scope: TQueryScope,
   doc: AtscriptDoc,
   scopeHint?: string,
 ): TMessages {
@@ -207,8 +306,9 @@ export function validateQueryScope(
   if (!queryNode) {
     return errors;
   }
+  const { allowedTypes, unqualifiedTarget } = scope;
 
-  function walkFieldRef(ref: SemanticQueryFieldRefNode): void {
+  forEachFieldRef(queryNode.expression, (ref) => {
     if (ref.typeRef) {
       // Qualified ref: check type is in scope
       const typeName = ref.typeRef.text;
@@ -227,40 +327,44 @@ export function validateQueryScope(
         range: ref.fieldRef.range,
       });
     } else {
-      // Validate unqualified ref against the target type
-      const unwound = doc.unwindType(unqualifiedTarget);
-      if (unwound) {
-        const targetDef = unwound.def;
-        if (isInterface(targetDef) || isStructure(targetDef)) {
-          const struct = isInterface(targetDef)
-            ? (targetDef.getDefinition() as SemanticStructureNode | undefined)
-            : targetDef;
-          if (struct && isStructure(struct) && !struct.props.has(ref.fieldRef.text)) {
-            errors.push({
-              message: `Field '${ref.fieldRef.text}' does not exist on '${unqualifiedTarget}'`,
-              severity: 1,
-              range: ref.fieldRef.range,
-            });
-          }
-        }
+      // Validate an unqualified ref (a dotted path included) against the
+      // target type — a type that is not an object is not checked here
+      const targetDef = doc.unwindType(unqualifiedTarget)?.def;
+      if (
+        targetDef &&
+        (isInterface(targetDef) || isStructure(targetDef)) &&
+        !doc.unwindType(unqualifiedTarget, ref.fieldRef.text.split("."))
+      ) {
+        errors.push({
+          message: `Field '${ref.fieldRef.text}' does not exist on '${unqualifiedTarget}'`,
+          severity: 1,
+          range: ref.fieldRef.range,
+        });
       }
     }
-  }
+  });
 
-  function walkExpr(expr: SemanticQueryExprNode): void {
-    if (isQueryLogical(expr)) {
-      for (const operand of expr.operands) {
-        walkExpr(operand);
-      }
-    } else if (isQueryComparison(expr)) {
-      walkFieldRef(expr.left);
-      // right can also be a field ref (ref-to-ref comparison)
-      if (expr.right && "fieldRef" in expr.right) {
-        walkFieldRef(expr.right as SemanticQueryFieldRefNode);
-      }
-    }
-  }
-
-  walkExpr(queryNode.expression);
   return errors;
+}
+
+/**
+ * Calls `fn` for every field reference of a query expression — both operands
+ * of a field-to-field comparison included.
+ * @since 0.1.141
+ */
+export function forEachFieldRef(
+  expr: SemanticQueryExprNode,
+  fn: (ref: SemanticQueryFieldRefNode) => void,
+): void {
+  if (isQueryLogical(expr)) {
+    for (const operand of expr.operands) {
+      forEachFieldRef(operand, fn);
+    }
+  } else if (isQueryComparison(expr)) {
+    fn(expr.left);
+    // right can also be a field ref (ref-to-ref comparison)
+    if (expr.right && "fieldRef" in expr.right) {
+      fn(expr.right as SemanticQueryFieldRefNode);
+    }
+  }
 }

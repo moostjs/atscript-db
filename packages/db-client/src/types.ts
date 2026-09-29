@@ -182,8 +182,8 @@ export type IdOf<T> = T extends { __pk: infer PK } ? PK : unknown;
  * query, mirroring the backend's `DbResponse<Data, Nav, Q>` algebra. Nav
  * properties are stripped by default and re-added only for relations the
  * caller listed in `$with`. When `T` carries no nav-prop brand, `DbResponse`
- * short-circuits to the data type. `$actions` is always optional — the
- * server emits it only when the request set `?$actions=true`.
+ * short-circuits to the data type. `$actions` / `$disabledReasons` are always
+ * optional — the server emits them only when the request set `?$actions=true`.
  */
 export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q> & {
   /**
@@ -192,4 +192,12 @@ export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q> & {
    * this row.
    */
   $actions?: string[];
+  /**
+   * Action name → human-readable reason, for actions disabled on this row
+   * whose `disabled` predicate returned a reason string. Present only on
+   * rows with at least one such reason; keys never appear in `$actions`.
+   *
+   * @since 0.1.141
+   */
+  $disabledReasons?: Record<string, string>;
 };

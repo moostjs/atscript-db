@@ -1,10 +1,12 @@
 import type { AtscriptDbReadable } from "../table/db-readable";
 import type { AtscriptDbView } from "../table/db-view";
 import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "../query/query-tree";
+import { findAncestorInSet } from "../shared/object";
 import type {
   TDbDefaultValue,
   TDbFieldMeta,
   TDbStorageType,
+  TDerivedColumn,
   TExistingColumn,
   TExistingTableOption,
 } from "../types";
@@ -22,6 +24,15 @@ export interface TFieldSnapshot {
   mappedType?: string;
   /** `@db.encrypted` — toggling encryption changes the snapshot hash on every adapter. */
   encrypted?: boolean;
+  /**
+   * `@db.column.derived` — what the generated column reads (physical JSON
+   * column, path, leaf type). Present for derived fields only, so a table
+   * without one hashes exactly as before; the column diff compares it with
+   * the model to detect an expression change (engines normalize the stored
+   * expression text, so the snapshot is the baseline).
+   * @since 0.1.141
+   */
+  derived?: Omit<TDerivedColumn, "sourcePath">;
 }
 
 interface TIndexSnapshot {
@@ -53,7 +64,17 @@ export interface TTableSnapshot {
  * the ON predicate is now part of the view definition.
  */
 export interface TViewJoinSnapshot {
+  /**
+   * Scope name of the join: the physical table / view, or the `@db.alias`
+   * type name when the join is aliased (then {@link table} holds the physical name).
+   */
   targetTable: string;
+  /**
+   * Physical table / view of an aliased join. Emitted only when the target
+   * is a `@db.alias` type — a plain join serializes exactly as before.
+   * @since 0.1.141
+   */
+  table?: string;
   /** Canonical JSON of the join condition (see {@link canonicalizeQueryNode}). */
   condition: string;
   /** Emitted only for `"left"` — an inner join (the default) carries no key. @since 0.1.136 */
@@ -102,15 +123,44 @@ export interface TViewSnapshot {
   fields: TFieldSnapshot[];
 }
 
+/**
+ * The physical sources a stored view snapshot reads: its entry table and the
+ * physical table of every join (an aliased join's `table`). External views
+ * (no plan) yield `[]`.
+ * @since 0.1.141
+ */
+export function viewSnapshotSources(snapshot: TViewSnapshot): string[] {
+  const sources = (snapshot.joinTables ?? []).map((j) => j.table ?? j.targetTable);
+  return snapshot.entryTable ? [snapshot.entryTable, ...sources] : sources;
+}
+
 // ── Shared helpers ────────────────────────────────────────────────────────
 
-/** Extracts sorted field snapshots from a readable's field descriptors. */
+/**
+ * The descriptors a snapshot lists: the non-ignored ones — plus, on a
+ * nested-object adapter, the subfields of navigation properties. Those are
+ * `ignored` since 0.1.141 (never columns: out of the plan, the column diff
+ * and every write), but earlier releases wrote them into a document
+ * adapter's snapshot; they stay listed so the upgrade leaves every stored
+ * hash unchanged. {@link snapshotToExistingColumns} (given the readable)
+ * leaves them out when a stored snapshot stands in for the live columns.
+ */
+function snapshotFields(readable: AtscriptDbReadable): readonly TDbFieldMeta[] {
+  const nav = readable.navFields;
+  if (!nav?.size || !readable.dbAdapter.supportsNestedObjects()) {
+    return readable.fieldDescriptors.filter((f) => !f.ignored);
+  }
+  return readable.fieldDescriptors.filter(
+    (f) => !f.ignored || findAncestorInSet(f.path, nav) !== undefined,
+  );
+}
+
+/** Extracts sorted field snapshots from a readable's {@link snapshotFields}. */
 function extractFieldSnapshots(
-  fields: readonly TDbFieldMeta[],
+  readable: AtscriptDbReadable,
   typeMapper?: (field: TDbFieldMeta) => string,
 ): TFieldSnapshot[] {
-  return fields
-    .filter((f: TDbFieldMeta) => !f.ignored)
+  return snapshotFields(readable)
     .map((f: TDbFieldMeta) => {
       const snap: TFieldSnapshot = {
         physicalName: f.physicalName,
@@ -127,6 +177,13 @@ function extractFieldSnapshots(
       }
       if (f.encrypted) {
         snap.encrypted = true;
+      }
+      if (f.derived) {
+        snap.derived = {
+          sourceColumn: f.derived.sourceColumn,
+          jsonPath: [...f.derived.jsonPath],
+          type: f.derived.type,
+        };
       }
       return snap;
     })
@@ -149,7 +206,7 @@ export function computeTableSnapshot(
   typeMapper?: (field: TDbFieldMeta) => string,
   tableOptions?: TExistingTableOption[],
 ): TTableSnapshot {
-  const fields = extractFieldSnapshots(readable.fieldDescriptors, typeMapper);
+  const fields = extractFieldSnapshots(readable, typeMapper);
 
   const indexes: TIndexSnapshot[] = [...readable.indexes.values()]
     .map((idx) => ({
@@ -191,7 +248,7 @@ export function computeTableSnapshot(
  * detecting view definition changes.
  */
 export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
-  const fields = extractFieldSnapshots(view.fieldDescriptors);
+  const fields = extractFieldSnapshots(view);
 
   if (view.isExternal) {
     return {
@@ -231,14 +288,19 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
   // Key order is part of the hash: tableName, viewType, entryTable,
   // joinTables, columns, filterHash, havingHash, materialized,
   // renderRevision, fields. Optional keys are omitted when unset, so an
-  // adapter without a render revision hashes exactly as before 0.1.137.
+  // adapter without a render revision hashes exactly as before 0.1.137, and
+  // a view without aliased joins or view sources exactly as before 0.1.141
+  // (an upstream view's own definition is NOT embedded — sync recreates
+  // dependents when an upstream view is recreated instead).
   const result: Omit<TViewSnapshot, "fields"> = {
     tableName: view.tableName,
     viewType: plan.materialized ? "M" : "V",
     entryTable: plan.entryTable,
     joinTables: plan.joins.map((j) => {
       const join: TViewJoinSnapshot = {
-        targetTable: j.targetTable,
+        targetTable: j.scope,
+        // Key order: targetTable, table (aliased joins only), condition, kind
+        ...(j.scope !== j.targetTable ? { table: j.targetTable } : {}),
         condition: canonical(j.condition),
       };
       if (j.kind === "left") join.kind = "left";
@@ -341,16 +403,35 @@ export function computeTableHash(snapshot: TTableSnapshot | TViewSnapshot): stri
  * native column introspection (e.g., MongoDB).
  *
  * The `type` field uses `mappedType` when available (adapter-specific),
- * falling back to `designType`.
+ * falling back to `designType`. Derived fields are left out (since 0.1.141):
+ * an adapter without column introspection stores no derived column, and a
+ * `physicalName` of one is its SOURCE path — reporting it as an existing
+ * column would have the diff drop the source leaf.
+ *
+ * With `readable`, the subfields of its navigation properties are left out
+ * too: a document adapter's snapshot lists them (for hash stability — see
+ * `snapshotFields`) although nothing is stored under a nav field — they are
+ * not columns to drop.
  */
-export function snapshotToExistingColumns(snapshot: TTableSnapshot): TExistingColumn[] {
-  return snapshot.fields.map((f) => ({
-    name: f.physicalName,
-    type: f.mappedType ?? f.designType,
-    notnull: !f.optional,
-    pk: f.isPrimaryKey,
-    dflt_value: serializeDefaultValue(f.defaultValue),
-  }));
+export function snapshotToExistingColumns(
+  snapshot: TTableSnapshot,
+  readable?: AtscriptDbReadable,
+): TExistingColumn[] {
+  const navPrefixes =
+    readable && readable.navFields.size > 0
+      ? readable.fieldDescriptors
+          .filter((fd) => readable.navFields.has(fd.path))
+          .map((fd) => `${fd.physicalName}.`)
+      : [];
+  return snapshot.fields
+    .filter((f) => !f.derived && !navPrefixes.some((p) => f.physicalName.startsWith(p)))
+    .map((f) => ({
+      name: f.physicalName,
+      type: f.mappedType ?? f.designType,
+      notnull: !f.optional,
+      pk: f.isPrimaryKey,
+      dflt_value: serializeDefaultValue(f.defaultValue),
+    }));
 }
 
 /**

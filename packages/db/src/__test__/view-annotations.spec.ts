@@ -50,12 +50,18 @@ export interface VaCountry {
 }
 `;
 
-async function diagnosticsFor(source: string): Promise<string[]> {
+async function diagnosticsFor(
+  source: string,
+  extraFiles: Record<string, string> = {},
+): Promise<string[]> {
   const rootDir = mkdtempSync(join(tmpdir(), "view-annotations-diagnostics-"));
   writeFileSync(join(rootDir, "fixture.as"), TABLES + source);
+  for (const [name, content] of Object.entries(extraFiles)) {
+    writeFileSync(join(rootDir, name), content);
+  }
   const repo = await build({
     rootDir,
-    entries: ["fixture.as"],
+    entries: ["fixture.as", ...Object.keys(extraFiles)],
     plugins: [tsPlugin(), dbPlugin()],
   });
   const diagnostics = await repo.diagnostics();
@@ -116,7 +122,7 @@ export interface VaDup {
 }
 `);
     expect(messages).toContain(
-      "'VaRegion' is joined more than once — no join aliases / self-joins yet",
+      "'VaRegion' is joined more than once — declare a @db.alias type (`@db.alias VaRegion` + `export type Other = VaRegion`) to join it under another name",
     );
   });
 
@@ -130,7 +136,7 @@ export interface VaSelf {
 }
 `);
     expect(messages).toContain(
-      "@db.view.joins cannot join the entry table 'VaUser' — no join aliases / self-joins yet",
+      "@db.view.joins cannot join the entry table 'VaUser' directly — declare a @db.alias type (`@db.alias VaUser` + `export type Other = VaUser`) to join it under another name",
     );
   });
 });
@@ -322,5 +328,294 @@ export interface VaAggExternal {
 }
 `);
     expect(messages).toContain("A conditional @db.agg.count requires @db.view.for on the view");
+  });
+});
+
+// ── Views over views (since 0.1.141) ────────────────────────────────────
+
+const UPSTREAM = `
+@db.view 'va_people'
+@db.view.for VaUser
+@db.view.joins VaRegion, \`VaRegion.id = VaUser.regionId\`, 'left'
+export interface VaPeople {
+    id: VaUser.id
+    name: VaUser.name
+    regionName?: VaRegion.name
+    regionId?: VaUser.regionId
+}
+
+@db.view 'va_legacy'
+export interface VaLegacy {
+    @meta.id
+    id: number
+    label: string
+}
+`;
+
+describe("views over views — @db.view.for / @db.view.joins accept a @db.view source", () => {
+  it("accepts a managed view as the entry and a managed / external view as a join target", async () => {
+    const messages = await diagnosticsFor(
+      UPSTREAM +
+        `
+@db.view 'va_over'
+@db.view.for VaPeople
+@db.view.joins VaCountry, \`VaCountry.id = VaPeople.regionId\`, 'left'
+@db.view.joins VaLegacy, \`VaLegacy.id = VaPeople.id\`, 'left'
+@db.view.filter \`VaPeople.regionName exists\`
+export interface VaOver {
+    id: VaPeople.id
+    name: VaPeople.name
+    regionName?: VaPeople.regionName
+    countryName?: VaCountry.name
+    label?: VaLegacy.label
+}
+
+@db.view 'va_over_legacy'
+@db.view.for VaLegacy
+export interface VaOverLegacy {
+    id: VaLegacy.id
+}
+`,
+    );
+    expect(messages).toEqual([]);
+  });
+
+  it("rejects a plain interface (neither @db.table nor @db.view) as entry or join target", async () => {
+    const messages = await diagnosticsFor(`
+export interface VaPlain {
+    id: number
+}
+
+@db.view 'va_bad_entry'
+@db.view.for VaPlain
+export interface VaBadEntry {
+    id: VaPlain.id
+}
+
+@db.view 'va_bad_join'
+@db.view.for VaUser
+@db.view.joins VaPlain, \`VaPlain.id = VaUser.id\`
+export interface VaBadJoin {
+    id: VaUser.id
+}
+`);
+    expect(
+      messages.filter((m) => m === "Type 'VaPlain' must be a @db.table or a @db.view."),
+    ).toHaveLength(2);
+  });
+
+  it("VW9: reports a view that depends on itself through another view (same file)", async () => {
+    const messages = await diagnosticsFor(`
+@db.view 'va_a'
+@db.view.for VaB
+export interface VaA {
+    id: VaB.id
+}
+
+@db.view 'va_b'
+@db.view.for VaUser
+@db.view.joins VaA, \`VaA.id = VaUser.id\`
+export interface VaB {
+    id: VaUser.id
+}
+`);
+    expect(messages).toContain("View 'VaA' depends on itself: VaA → VaB → VaA");
+    expect(messages).toContain("View 'VaB' depends on itself: VaB → VaA → VaB");
+  });
+
+  it("VW9: follows imports and @db.alias sources across files", async () => {
+    const messages = await diagnosticsFor(
+      `
+import { VaOther } from './other'
+
+@db.alias VaOther
+export type VaOtherAlias = VaOther
+
+@db.view 'va_first'
+@db.view.for VaUser
+@db.view.joins VaOtherAlias, \`VaOtherAlias.id = VaUser.id\`
+export interface VaFirst {
+    id: VaUser.id
+}
+`,
+      {
+        "other.as": `
+import { VaFirst } from './fixture'
+
+@db.view 'va_other'
+@db.view.for VaFirst
+export interface VaOther {
+    id: VaFirst.id
+}
+`,
+      },
+    );
+    expect(messages).toContain("View 'VaFirst' depends on itself: VaFirst → VaOther → VaFirst");
+    expect(messages).toContain("View 'VaOther' depends on itself: VaOther → VaFirst → VaOther");
+  });
+});
+
+// ── Join aliases (since 0.1.141) ────────────────────────────────────────
+
+describe("@db.alias — join aliases", () => {
+  it("accepts a self-join and a second join of one table through aliases", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaUser
+export type VaManager = VaUser
+
+@db.alias VaRegion
+export type VaHomeRegion = VaRegion
+
+@db.view 'va_staff'
+@db.view.for VaUser
+@db.view.joins VaManager, \`VaManager.id = VaUser.regionId\`, 'left'
+@db.view.joins VaRegion, \`VaRegion.id = VaUser.regionId\`, 'left'
+@db.view.joins VaHomeRegion, \`VaHomeRegion.id = VaManager.regionId\`, 'left'
+@db.view.filter \`VaManager.name != 'x' or VaManager.id not exists\`
+export interface VaStaff {
+    id: VaUser.id
+    managerName?: VaManager.name
+    regionName?: VaRegion.name
+    homeRegionName?: VaHomeRegion.name
+}
+`);
+    expect(messages).toEqual([]);
+  });
+
+  it("VA1: the alias must be 'export type X = Target' with the annotation argument as target", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaRegion
+export type VaWrongTarget = VaUser
+
+@db.alias VaUser
+export type VaChain = VaUser.name
+`);
+    expect(messages).toContain(
+      "@db.alias VaRegion must be declared on 'export type VaWrongTarget = VaRegion' — the type must be a plain reference to the aliased VaRegion",
+    );
+    expect(messages).toContain(
+      "@db.alias VaUser must be declared on 'export type VaChain = VaUser' — the type must be a plain reference to the aliased VaUser",
+    );
+  });
+
+  it("VA2: the target is a table or a view, never another alias", async () => {
+    const messages = await diagnosticsFor(`
+export interface VaPlain {
+    id: number
+}
+
+@db.alias VaPlain
+export type VaPlainAlias = VaPlain
+
+@db.alias VaUser
+export type VaManager = VaUser
+
+@db.alias VaManager
+export type VaBoss = VaManager
+`);
+    expect(messages).toContain("Type 'VaPlain' must be a @db.table or a @db.view.");
+    expect(messages).toContain(
+      "Type 'VaManager' is a @db.alias — a join alias cannot be used here, reference the aliased table or view.",
+    );
+  });
+
+  it("VA3 / nodeType: an alias is not an interface and cannot be a table or view", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaUser
+export interface VaNotAType {
+    id: number
+}
+`);
+    expect(messages.some((m) => m.includes("applies only to type nodes"))).toBe(true);
+  });
+
+  it("rejects an alias as the @db.view.for entry (not in this version)", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaUser
+export type VaManager = VaUser
+
+@db.view 'va_alias_entry'
+@db.view.for VaManager
+export interface VaAliasEntry {
+    id: VaManager.id
+}
+`);
+    expect(messages).toContain(
+      "Type 'VaManager' is a @db.alias — a join alias cannot be used here, reference the aliased table or view.",
+    );
+  });
+
+  it("VJ5: an alias is joined once; the hint is omitted when the duplicate is already an alias", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaUser
+export type VaManager = VaUser
+
+@db.view 'va_dup_alias'
+@db.view.for VaUser
+@db.view.joins VaManager, \`VaManager.id = VaUser.regionId\`, 'left'
+@db.view.joins VaManager, \`VaManager.id = VaUser.id\`, 'left'
+export interface VaDupAlias {
+    id: VaUser.id
+}
+`);
+    expect(messages).toContain("'VaManager' is joined more than once");
+  });
+
+  it("VW7 applies to a left-joined alias", async () => {
+    const messages = await diagnosticsFor(`
+@db.alias VaUser
+export type VaManager = VaUser
+
+@db.view 'va_required_alias'
+@db.view.for VaUser
+@db.view.joins VaManager, \`VaManager.id = VaUser.regionId\`, 'left'
+export interface VaRequiredAlias {
+    id: VaUser.id
+    managerName: VaManager.name
+}
+`);
+    expect(messages).toContain(
+      'Field "managerName" reads from left-joined "VaManager" and must be optional (managerName?: …)',
+    );
+  });
+});
+
+// ── VH1 — @db.view.having references the view's own fields (since 0.1.141) ──
+
+describe("VH1 — @db.view.having field references", () => {
+  it("accepts aggregate aliases and dimensions, unqualified", async () => {
+    const messages = await diagnosticsFor(`
+@db.view 'va_stats'
+@db.view.for VaUser
+@db.view.having \`total > 10 and city = 'Paris' and users >= 1\`
+export interface VaStats {
+    city: VaUser.address.city
+
+    @db.agg.sum "regionId"
+    total: number
+
+    @db.agg.count
+    users: number
+}
+`);
+    expect(messages).toEqual([]);
+  });
+
+  it("rejects a qualified source-table reference and an unknown field", async () => {
+    const messages = await diagnosticsFor(`
+@db.view 'va_bad_having'
+@db.view.for VaUser
+@db.view.having \`VaUser.name = 'x' and nope > 1\`
+export interface VaBadHaving {
+    name: VaUser.name
+
+    @db.agg.count
+    users: number
+}
+`);
+    expect(messages).toContain(
+      "Query references 'VaUser' which is not in scope — @db.view.having references the view's own fields unqualified",
+    );
+    expect(messages).toContain("Field 'nope' does not exist on 'VaBadHaving'");
   });
 });

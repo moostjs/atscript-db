@@ -56,11 +56,12 @@ import {
   defaultValueToSqlLiteral,
   geoPointToEwkt,
   parseEwkbPointHex,
+  pgCollateClause,
+  pgDerivedColumnDef,
   pgGeoDistanceExpr,
   pgTypeFromField,
   qi,
   quoteTableName,
-  collationToPg,
   refActionToSql,
   pgDialect,
   finalizeParams,
@@ -578,6 +579,22 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
+  /**
+   * The predicate that narrows a single-row UPDATE/DELETE to the first row
+   * matching `whereSql`: `<key> <op> (SELECT <cols> … LIMIT 1)`. Single-col
+   * PKs use `<col> = (SELECT <col> …)`; composite PKs the row-constructor form
+   * `(c1, c2) IN (SELECT c1, c2 …)`. Tables with no declared PK fall back to
+   * ctid — concurrency on PK-less tables is already ill-defined; preserve
+   * existing behavior rather than guess.
+   */
+  private _limitOnePredicate(quotedTable: string, whereSql: string): string {
+    const pkCols = this._table.primaryKeys;
+    const quotedKeys = pkCols.length > 0 ? pkCols.map((c) => qi(c)) : ["ctid"];
+    const colList = quotedKeys.join(", ");
+    const keyMatch = quotedKeys.length === 1 ? `${colList} =` : `(${colList}) IN`;
+    return `${keyMatch} (SELECT ${colList} FROM ${quotedTable} WHERE ${whereSql} LIMIT 1)`;
+  }
+
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
@@ -595,21 +612,11 @@ export class PostgresAdapter extends BaseDbAdapter {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
     const quotedTable = quoteTableName(tableName);
-    const pkCols = this._table.primaryKeys;
-    // Single-col PKs use `<col> = (SELECT <col> …)`; composite PKs use the
-    // row-constructor form `(c1, c2) IN (SELECT c1, c2 …)`. Tables with no
-    // declared PK fall back to ctid — concurrency on PK-less tables is
-    // already ill-defined; preserve existing behavior rather than guess.
-    const keyCols = pkCols.length > 0 ? pkCols : ["ctid"];
-    const quotedKeys = keyCols.map((c) => (c === "ctid" ? "ctid" : qi(c)));
-    const colList = quotedKeys.join(", ");
-    const keyExpr = quotedKeys.length === 1 ? quotedKeys[0]! : `(${colList})`;
-    const op = quotedKeys.length === 1 ? "=" : "IN";
     const limitedWhere = {
-      sql: `${keyExpr} ${op} (SELECT ${colList} FROM ${quotedTable} WHERE ${where.sql} LIMIT 1)`,
+      sql: this._limitOnePredicate(quotedTable, where.sql),
       params: where.params,
     };
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       tableName,
       data,
@@ -630,7 +637,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -659,7 +666,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const full = fillReplacePayload(
       data,
       replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
-      this._table.versionColumn,
+      this._table.versionColumnPhysical,
     );
     return this.updateOne(filter, full, undefined, expectedVersion);
   }
@@ -671,13 +678,19 @@ export class PostgresAdapter extends BaseDbAdapter {
   // ── CRUD: Delete ──────────────────────────────────────────────────────────
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
-    // PostgreSQL does not support DELETE ... LIMIT 1.
-    // Use ctid subquery: DELETE FROM t WHERE ctid = (SELECT ctid FROM t WHERE ... LIMIT 1)
+    // PostgreSQL does not support DELETE ... LIMIT 1 — re-key the outer DELETE
+    // on the primary key via a subquery, for the same reason as updateOne:
+    // a ctid key silently deletes NOTHING when a concurrent UPDATE of the row
+    // commits first (the new tuple has a new ctid, so the EvalPlanQual recheck
+    // fails), while a PK predicate follows the updated tuple. The filter is
+    // repeated on the outer DELETE so that recheck also re-applies it — a row
+    // updated out of the filter meanwhile is left alone, as a plain
+    // `DELETE … WHERE <filter>` would.
     const where = buildWhere(filter);
-    const tableName = this.resolveTableName();
+    const quotedTable = quoteTableName(this.resolveTableName());
     const raw = {
-      sql: `DELETE FROM ${quoteTableName(tableName)} WHERE ctid = (SELECT ctid FROM ${quoteTableName(tableName)} WHERE ${where.sql} LIMIT 1)`,
-      params: where.params,
+      sql: `DELETE FROM ${quotedTable} WHERE ${where.sql} AND ${this._limitOnePredicate(quotedTable, where.sql)}`,
+      params: [...where.params, ...where.params],
     };
     const { sql, params } = finalizeParams(pgDialect, raw);
     this._log(sql, params);
@@ -901,10 +914,11 @@ export class PostgresAdapter extends BaseDbAdapter {
       is_nullable: string;
       column_default: string | null;
       is_identity: string;
+      is_generated: string;
       formatted_type: string;
       is_pk: boolean;
     }>(
-      `SELECT c.column_name, c.data_type, c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable, c.column_default, c.is_identity,
+      `SELECT c.column_name, c.data_type, c.udt_name, c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable, c.column_default, c.is_identity, c.is_generated,
               format_type(a.atttypid, a.atttypmod) AS formatted_type,
               EXISTS (
                 SELECT 1 FROM pg_index i
@@ -918,20 +932,26 @@ export class PostgresAdapter extends BaseDbAdapter {
       [tableName, schema],
     );
 
-    return rows.map((r) => ({
-      name: r.column_name,
-      type: normalizePgType(
-        r.data_type,
-        r.character_maximum_length,
-        r.numeric_precision,
-        r.numeric_scale,
-        r.udt_name,
-        r.formatted_type,
-      ),
-      notnull: r.is_nullable === "NO",
-      pk: r.is_pk,
-      dflt_value: normalizePgDefault(r.column_default, r.is_identity),
-    }));
+    return rows.map((r) => {
+      const column: TExistingColumn = {
+        name: r.column_name,
+        type: normalizePgType(
+          r.data_type,
+          r.character_maximum_length,
+          r.numeric_precision,
+          r.numeric_scale,
+          r.udt_name,
+          r.formatted_type,
+        ),
+        notnull: r.is_nullable === "NO",
+        pk: r.is_pk,
+        dflt_value: normalizePgDefault(r.column_default, r.is_identity),
+      };
+      if (r.is_generated === "ALWAYS") {
+        column.generated = true;
+      }
+      return column;
+    });
   }
 
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
@@ -952,9 +972,17 @@ export class PostgresAdapter extends BaseDbAdapter {
       renamed.push(field.physicalName);
     }
 
-    // Adds
+    // Adds. The derived (STORED generated) columns go in ONE statement after
+    // the others: PostgreSQL computes them for every existing row as part of
+    // the ADD COLUMN — a table rewrite — so several derived adds rewrite once.
+    const derivedAdds: string[] = [];
     for (const field of diff.added) {
       const sqlType = this.typeMapper(field);
+      if (field.derived) {
+        derivedAdds.push(`ADD COLUMN ${pgDerivedColumnDef(field, sqlType)}`);
+        added.push(field.physicalName);
+        continue;
+      }
       let ddl = `ALTER TABLE ${quoteTableName(tableName)} ADD COLUMN ${qi(field.physicalName)} ${sqlType}`;
       // GENERATED BY DEFAULT AS IDENTITY for increment fields
       if (field.defaultValue?.kind === "fn" && field.defaultValue.fn === "increment") {
@@ -975,25 +1003,22 @@ export class PostgresAdapter extends BaseDbAdapter {
           ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
         }
       }
-      if (field.collate) {
-        const nativeCollate = field.type?.metadata?.get("db.pg.collate") as string | undefined;
-        if (nativeCollate) {
-          ddl += ` COLLATE "${nativeCollate}"`;
-        } else {
-          const pgCollate = collationToPg(field.collate);
-          if (pgCollate) {
-            ddl += ` COLLATE ${pgCollate}`;
-          }
-        }
-      }
+      ddl += pgCollateClause(field);
       this._log(ddl);
       await this._exec().exec(ddl);
       added.push(field.physicalName);
     }
+    if (derivedAdds.length > 0) {
+      const ddl = `ALTER TABLE ${quoteTableName(tableName)} ${derivedAdds.join(", ")}`;
+      this._log(ddl);
+      await this._exec().exec(ddl);
+    }
 
     // Type changes — PostgreSQL supports ALTER TABLE ALTER COLUMN TYPE
     // USING clause required when no implicit cast exists (e.g., TEXT → INTEGER)
-    // Double-cast via TEXT as intermediate handles most non-trivial transitions
+    // Double-cast via TEXT as intermediate handles most non-trivial transitions.
+    // (A derived column never appears here — its type drift is a derived
+    // rebuild, drop + add: a generated column's type cannot be altered with USING.)
     for (const { field } of diff.typeChanged ?? []) {
       const sqlType = this.typeMapper(field);
       const col = qi(field.physicalName);
@@ -1177,8 +1202,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       const oldTypes = new Map(
         (await this._readColumns(conn, this._table.tableName)).map((c) => [c.name, c.type]),
       );
-      const commonFields = this._table.fieldDescriptors.filter(
-        (f) => !f.ignored && oldTypes.has(f.physicalName),
+      // Generated (derived) columns are computed, never inserted — the new
+      // table recomputes them from the copied JSON source.
+      const commonFields = this._table.storedDescriptors.filter((f) =>
+        oldTypes.has(f.physicalName),
       );
 
       if (commonFields.length > 0) {

@@ -106,3 +106,61 @@ export function reachable(seeds: Iterable<string>, edges: Iterable<TDependencyEd
   }
   return out;
 }
+
+/**
+ * Orders `nodes` so that every node comes AFTER the nodes it depends on,
+ * keeping the given order wherever the dependencies allow it: a depth-first
+ * walk in `nodes` order that emits a node's dependencies (recursively, in
+ * their listed order) right before the node itself. Unlike {@link topoOrder}
+ * the result follows the caller's order, not the names — schema sync uses it
+ * for managed views, which are created upstream-first in inventory order.
+ *
+ * - Dependencies outside `nodes` are ignored.
+ * - A dependency cycle is reported as `cycle` (the closed path, e.g.
+ *   `["a", "b", "a"]`) and the order is undefined.
+ * @since 0.1.141
+ */
+export function stableTopo(
+  nodes: Iterable<string>,
+  dependsOn: (node: string) => Iterable<string>,
+): { order: string[]; cycle?: string[] } {
+  const listed = [...new Set(nodes)];
+  const nodeSet = new Set(listed);
+  const done = new Set<string>();
+  const path: string[] = [];
+  const onPath = new Set<string>();
+  const order: string[] = [];
+
+  const visit = (node: string): string[] | undefined => {
+    if (done.has(node)) {
+      return undefined;
+    }
+    if (onPath.has(node)) {
+      return [...path.slice(path.indexOf(node)), node];
+    }
+    onPath.add(node);
+    path.push(node);
+    for (const dep of dependsOn(node)) {
+      if (dep === node || !nodeSet.has(dep)) {
+        continue;
+      }
+      const cycle = visit(dep);
+      if (cycle) {
+        return cycle;
+      }
+    }
+    path.pop();
+    onPath.delete(node);
+    done.add(node);
+    order.push(node);
+    return undefined;
+  };
+
+  for (const node of listed) {
+    const cycle = visit(node);
+    if (cycle) {
+      return { order, cycle };
+    }
+  }
+  return { order };
+}

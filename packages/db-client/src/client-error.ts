@@ -34,6 +34,10 @@ export interface ActionDisabledErrorBody extends ServerError {
   action: string;
   id?: Record<string, unknown>;
   ids?: Record<string, unknown>[];
+  /** Reason shared by every rejected row, when the server's predicate gave one. @since 0.1.141 */
+  reason?: string;
+  /** `'rows'` level: index-aligned with `ids`, `null` = no reason for that row. @since 0.1.141 */
+  reasons?: (string | null)[];
 }
 
 /**
@@ -41,7 +45,8 @@ export interface ActionDisabledErrorBody extends ServerError {
  * `name === 'ActionDisabledError'`. The transport / status / base body are
  * identical to a generic `ClientError`; this subclass adds typed accessors
  * so consumers can write `catch (e) { if (e instanceof ActionDisabledError) … }`
- * to access `action` / `id` / `ids` without indexing into `body`.
+ * to access `action` / `id` / `ids` / `reason` / `reasons` without indexing
+ * into `body`.
  */
 export class ActionDisabledError extends ClientError {
   override name = "ActionDisabledError";
@@ -59,6 +64,28 @@ export class ActionDisabledError extends ClientError {
   /** Present only for `'rows'`-level rejections (full list of failing IDs). */
   get ids(): Record<string, unknown>[] | undefined {
     return (this.body as ActionDisabledErrorBody).ids;
+  }
+
+  /**
+   * Human-readable reason shared by every rejected row — present only when
+   * the server's `disabled` predicate returned one. `message` already
+   * carries it.
+   *
+   * @since 0.1.141
+   */
+  get reason(): string | undefined {
+    return (this.body as ActionDisabledErrorBody).reason;
+  }
+
+  /**
+   * `'rows'`-level only: per-row reasons index-aligned with {@link ids}
+   * (`null` where that row has none). Present only when at least one
+   * rejected row carries a reason.
+   *
+   * @since 0.1.141
+   */
+  get reasons(): (string | null)[] | undefined {
+    return (this.body as ActionDisabledErrorBody).reasons;
   }
 }
 

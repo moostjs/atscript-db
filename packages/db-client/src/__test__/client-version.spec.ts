@@ -18,6 +18,7 @@ import { ClientValidationError } from "../validator";
 
 let versionedMeta: Record<string, unknown>;
 let plainMeta: Record<string, unknown>;
+let revisionMeta: Record<string, unknown>;
 
 function serialize(type: TAtscriptAnnotatedType) {
   return serializeAnnotatedType(type, {
@@ -58,6 +59,13 @@ beforeAll(async () => {
     ...base,
     versionColumn: "version",
     type: serialize(fixtures.VersionedUser as unknown as TAtscriptAnnotatedType),
+  };
+  // `@db.column 'rev'` on logical `revision`: `/meta.versionColumn` is the
+  // LOGICAL name (since 0.1.141 — before, a rename leaked the physical one).
+  revisionMeta = {
+    ...base,
+    versionColumn: "revision",
+    type: serialize(fixtures.VersionedRevision as unknown as TAtscriptAnnotatedType),
   };
   plainMeta = {
     ...base,
@@ -273,5 +281,60 @@ describe("409 version_mismatch after a $cas lift", () => {
     expect(err).toBeInstanceOf(VersionMismatchError);
     expect((err as VersionMismatchError).currentVersion).toBe(6);
     expect(sentBody(fetchFn)).toEqual({ id: 1, version: 4 });
+  });
+});
+
+describe("a version field not named `version` (renamed column, logical `revision`)", () => {
+  // WHY: the lift keys on `/meta.versionColumn` — the logical field name, even
+  // when `@db.column` renames the storage column. Pins that the client never
+  // assumes a literal `version` key.
+  it("lifts `$cas: { revision }` to the wire shape `revision: N`", async () => {
+    const fetchFn = mockFetch(revisionMeta, {
+      status: 202,
+      body: { matchedCount: 1, modifiedCount: 1 },
+    });
+    const client = new Client("/api/vrevs", { fetch: fetchFn });
+    await client.update({ id: 1, name: "B", $cas: { revision: 4 } } as any);
+    expect(sentBody(fetchFn)).toEqual({ id: 1, name: "B", revision: 4 });
+  });
+
+  it("the version field is optional in replace preflight", async () => {
+    const fetchFn = mockFetch(revisionMeta, {
+      status: 202,
+      body: { matchedCount: 1, modifiedCount: 1 },
+    });
+    const client = new Client("/api/vrevs", { fetch: fetchFn });
+    await client.replace({ id: 1, name: "C" } as any);
+    expect(sentBody(fetchFn)).toEqual({ id: 1, name: "C" });
+  });
+
+  it("`$cas` keyed by the physical column (or by `version`) is rejected client-side", async () => {
+    const fetchFn = mockFetch(revisionMeta, { status: 202, body: {} });
+    const client = new Client("/api/vrevs", { fetch: fetchFn });
+    let err = await caught(client.update({ id: 1, $cas: { rev: 4 } } as any));
+    expect((err as ClientValidationError).errors[0]).toEqual({
+      path: "$cas.rev",
+      message: '$cas operator: key "rev" does not match version column "revision"',
+    });
+    err = await caught(client.update({ id: 1, $cas: { version: 4 } } as any));
+    expect((err as ClientValidationError).errors[0]!.path).toBe("$cas.version");
+    noWrite(fetchFn);
+  });
+
+  it("a 409 dispatches VersionMismatchError with currentVersion", async () => {
+    const fetchFn = mockFetch(revisionMeta, {
+      status: 409,
+      body: {
+        statusCode: 409,
+        error: "Conflict",
+        message: "version_mismatch",
+        kind: "version_mismatch",
+        currentVersion: 5,
+      },
+    });
+    const client = new Client("/api/vrevs", { fetch: fetchFn });
+    const err = await caught(client.update({ id: 1, revision: 4 } as any));
+    expect(err).toBeInstanceOf(VersionMismatchError);
+    expect((err as VersionMismatchError).currentVersion).toBe(5);
   });
 });

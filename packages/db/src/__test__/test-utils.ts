@@ -23,7 +23,7 @@ export class MockAdapter extends BaseDbAdapter {
     this.calls.push({ method, args });
   }
 
-  private _rows(): Array<Record<string, unknown>> {
+  protected _rows(): Array<Record<string, unknown>> {
     const name = this._table?.tableName ?? "";
     if (!this.store.has(name)) {
       this.store.set(name, []);
@@ -89,14 +89,7 @@ export class MockAdapter extends BaseDbAdapter {
     ops?: any,
   ): Promise<TDbUpdateResult> {
     this.record("updateMany", filter, data, ops);
-    let modified = 0;
-    for (const row of this._rows()) {
-      if (matchesFilter(row, filter)) {
-        Object.assign(row, data);
-        modified++;
-      }
-    }
-    return { matchedCount: modified, modifiedCount: modified };
+    return updateRowsWhere(this._rows(), filter, data);
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
@@ -141,9 +134,18 @@ export function matchesFilter(row: Record<string, unknown>, filter: FilterExpr):
       }
       continue;
     }
-    if (value && typeof value === "object" && "$in" in (value as Record<string, unknown>)) {
-      const inValues = (value as Record<string, unknown>).$in as unknown[];
+    const ops = value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+    if (ops && "$in" in ops) {
+      const inValues = ops.$in as unknown[];
       if (!inValues.includes(row[key])) {
+        return false;
+      }
+    } else if (ops && "$eq" in ops) {
+      if (row[key] !== ops.$eq) {
+        return false;
+      }
+    } else if (ops && "$lt" in ops) {
+      if (!((row[key] as number) < (ops.$lt as number))) {
         return false;
       }
     } else if (row[key] !== value) {
@@ -151,6 +153,37 @@ export function matchesFilter(row: Record<string, unknown>, filter: FilterExpr):
     }
   }
   return true;
+}
+
+/** `updateMany` over an in-memory row array (in place): merges `data` into every match. */
+export function updateRowsWhere(
+  rows: Array<Record<string, unknown>>,
+  filter: FilterExpr,
+  data: Record<string, unknown>,
+): TDbUpdateResult {
+  let matched = 0;
+  for (const row of rows) {
+    if (matchesFilter(row, filter)) {
+      Object.assign(row, data);
+      matched++;
+    }
+  }
+  return { matchedCount: matched, modifiedCount: matched };
+}
+
+/** `deleteMany` over an in-memory row array (in place, keeping the array's identity). */
+export function deleteRowsWhere(
+  rows: Array<Record<string, unknown>>,
+  filter: FilterExpr,
+): TDbDeleteResult {
+  let deleted = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (matchesFilter(rows[i]!, filter)) {
+      rows.splice(i, 1);
+      deleted++;
+    }
+  }
+  return { deletedCount: deleted };
 }
 
 // ── Fixture preparation ─────────────────────────────────────────────────────

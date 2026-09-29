@@ -1,3 +1,4 @@
+import { aliasTargetOf } from "@atscript/db";
 import {
   serializeAnnotatedType,
   type TAtscriptAnnotatedType,
@@ -57,14 +58,18 @@ export function resolveProp(
 /**
  * Follows `def.ref` hop by hop until a prop without a `ref` (a primary key or
  * a plain column) is reached. Cycle-safe (visited on `<typeId>.<field>`) and
- * bounded by chain length.
+ * bounded by chain length. Only chain hops count — a plain ref (`field: ""`,
+ * a column typed with a named type) is the end of the chain. A hop into a
+ * `@db.alias` type (a view's join alias, since 0.1.141) continues on the
+ * aliased table / view — the alias is no value domain for a picker.
  */
 export function resolveTerminalRef(def: TAtscriptAnnotatedType): TTerminalRef | undefined {
   const ref = def.ref;
-  if (!ref) return undefined;
+  if (!ref?.field) return undefined;
   let type = ref.type();
   let field = ref.field;
   if (!type) return undefined;
+  type = aliasTargetOf(type) ?? type;
   let fk = def.metadata.has("db.rel.FK");
   const visited = new Set<string>([`${type.id ?? ""}.${field}`]);
   for (;;) {
@@ -72,9 +77,10 @@ export function resolveTerminalRef(def: TAtscriptAnnotatedType): TTerminalRef | 
     if (!prop) break;
     if (prop.metadata.has("db.rel.FK")) fk = true;
     const next = prop.ref;
-    if (!next) break;
-    const nextType = next.type();
-    if (!nextType) break;
+    if (!next?.field) break;
+    const resolved = next.type();
+    if (!resolved) break;
+    const nextType = aliasTargetOf(resolved) ?? resolved;
     const key = `${nextType.id ?? ""}.${next.field}`;
     if (visited.has(key)) break;
     visited.add(key);
@@ -133,7 +139,7 @@ function walk(
       if (!sProp) continue;
       // Nav subtrees expand fully and their FK props are direct hops — skip.
       if (isNav(prop.metadata)) continue;
-      if (prop.ref && sProp.ref && !("type" in sProp.ref.type)) {
+      if (prop.ref?.field && sProp.ref && !("type" in sProp.ref.type)) {
         const terminal = resolveTerminalRef(prop);
         if (terminal) {
           const direct = prop.ref.type();

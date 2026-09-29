@@ -1,4 +1,4 @@
-import { getPath } from "./memory-filter";
+import { deletePath, getPath } from "@atscript/db";
 
 /**
  * Pure, store-agnostic core of the in-memory query engine: the `$sort`
@@ -9,9 +9,9 @@ import { getPath } from "./memory-filter";
  * instead of hand-rolling a second copy. The adapter wires its own PK-derived
  * tie-break / physical-PK fields in as parameters.
  *
- * Dot-path READ (`getPath`) lives in {@link ./memory-filter} and is shared;
- * the dot-path WRITE/DELETE helpers ({@link setPath}/{@link deletePath}) live
- * here because projection (and the adapter's update path) are their only users.
+ * The dot-path READ / DELETE helpers (`getPath` / `deletePath`) are the
+ * core's (`@atscript/db`); the dot-path WRITE helper ({@link setPath}) lives
+ * here because projection (and the adapter's update path) are its only users.
  */
 
 /**
@@ -63,24 +63,8 @@ export function setPath(target: Record<string, unknown>, path: string, value: un
   current[segments[segments.length - 1]!] = value;
 }
 
-/**
- * Dot-path deleter used by exclusion projection. No-op when any intermediate
- * segment is missing or not a plain object. Top-level keys and nested dot-paths
- * both work.
- */
-export function deletePath(target: Record<string, unknown>, path: string): void {
-  const segments = path.split(".");
-  let current: unknown = target;
-  for (let i = 0; i < segments.length - 1; i++) {
-    if (current === null || typeof current !== "object" || Array.isArray(current)) {
-      return;
-    }
-    current = (current as Record<string, unknown>)[segments[i]!];
-  }
-  if (current !== null && typeof current === "object" && !Array.isArray(current)) {
-    delete (current as Record<string, unknown>)[segments[segments.length - 1]!];
-  }
-}
+/** Dot-path deleter used by exclusion projection — the core's `deletePath`. */
+export { deletePath };
 
 /**
  * Stable multi-key sort from `$sort`, applied over plain rows.

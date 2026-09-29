@@ -3,14 +3,24 @@ import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import { getAnnotationAlias } from "../../shared/annotation-utils";
 import {
+  earlierJoinTargets,
+  findViewCycle,
   hasAnyViewAnnotation,
-  joinTargets,
+  isAliasDecl,
+  isDbSourceDecl,
   validateQueryScope,
   validateRefArgument,
   viewJoins,
-  viewScopeTypes,
 } from "../../shared/validation-utils";
+import {
+  fieldScopes,
+  isJoinTarget,
+  viewFilterScope,
+  viewHavingScope,
+  viewJoinScope,
+} from "../lsp-scopes";
 import { validateViewInterface } from "../../shared/view-validation";
+import { VIEW_SOURCE_ARGUMENT } from "./alias";
 
 export const dbViewAnnotations: TAnnotationsTree = {
   view: {
@@ -24,6 +34,7 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface ActivePremiumUser { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         optional: true,
         name: "name",
@@ -47,7 +58,9 @@ export const dbViewAnnotations: TAnnotationsTree = {
 
     for: new AnnotationSpec({
       description:
-        "Specifies the entry/primary table for a computed view. Required for views that map fields via chain refs.\n\n" +
+        "Specifies the entry/primary source for a computed view — a `@db.table`, or another " +
+        "`@db.view` (views over views, since 0.1.141). Required for views that map fields via chain refs. " +
+        "A `@db.alias` type cannot be the entry.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         "@db.view.for Order\n" +
@@ -55,10 +68,12 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface ActiveOrderDetails { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "entry",
         type: "ref",
-        description: "The primary/entry table type (must have @db.table).",
+        description: "The primary/entry table or view type (must have @db.table or @db.view).",
+        refFilter: isDbSourceDecl,
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
@@ -71,9 +86,18 @@ export const dbViewAnnotations: TAnnotationsTree = {
             range: token.range,
           });
         }
-        // Entry type must be @db.table
+        // The entry is a table or a view (never a @db.alias)
         if (args[0]) {
-          errors.push(...validateRefArgument(args[0], doc, { requireDbTable: true }));
+          errors.push(...validateRefArgument(args[0], doc, VIEW_SOURCE_ARGUMENT));
+        }
+        // VW9: a view cannot read itself through its sources
+        const cycle = findViewCycle(owner, doc);
+        if (cycle) {
+          errors.push({
+            message: `View '${cycle[0]}' depends on itself: ${cycle.join(" → ")}`,
+            severity: 1,
+            range: args[0]?.range ?? token.range,
+          });
         }
         // VW7 (left-joined fields optional) / VW8 (JSON chains end at a primitive)
         errors.push(...validateViewInterface(owner, doc));
@@ -86,7 +110,9 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "Declares an explicit join for a view. Joins are INNER by default — pass `'left'` as the " +
         "third argument to keep entry rows without a match (fields read from a left-joined table " +
         "must be optional). A join condition may reference the entry table and joins declared " +
-        "before it (chained joins); a table can be joined once (no aliases / self-joins).\n\n" +
+        "before it (chained joins). The target is a `@db.table`, a `@db.view` (since 0.1.141), or a " +
+        "`@db.alias` type — the way to join one table twice or to self-join the entry table: " +
+        "every scope name (entry + joins) must be unique.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         "@db.view.for Order\n" +
@@ -95,18 +121,23 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface OrderRegion { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       multiple: true,
       mergeStrategy: "append",
       argument: [
         {
           name: "target",
           type: "ref",
-          description: "The table type to join (must have @db.table).",
+          description:
+            "The type to join: a @db.table, a @db.view, or a @db.alias of one (for a second join of the same table / a self-join).",
+          refFilter: isJoinTarget,
         },
         {
           name: "condition",
           type: "query",
-          description: "Join condition expression.",
+          description:
+            "Join condition expression — may reference the join target, the entry table and the joins declared before this one.",
+          fieldScope: fieldScopes.viewJoin,
         },
         {
           name: "kind",
@@ -131,9 +162,14 @@ export const dbViewAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        // Validate join target is @db.table
+        // The join target is a table, a view, or a @db.alias of one
         if (args[0]) {
-          errors.push(...validateRefArgument(args[0], doc, { requireDbTable: true }));
+          errors.push(
+            ...validateRefArgument(args[0], doc, {
+              accept: isJoinTarget,
+              expected: "must be a @db.table or a @db.view.",
+            }),
+          );
         }
 
         // VJ3: Must have @db.view.for
@@ -147,23 +183,30 @@ export const dbViewAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        // Joins declared before this one (token identity locates it)
-        const allJoins = viewJoins(owner);
-        const position = allJoins.findIndex((a) => a.token === token);
-        const earlier = joinTargets(position === -1 ? [] : allJoins.slice(0, position));
+        // This join (token identity locates it) and the joins declared before it
+        const joins = viewJoins(owner);
+        const join = joins.find((a) => a.token === token);
+        const earlier = join ? earlierJoinTargets(joins, join) : [];
 
-        // VJ5: one join per table, never the entry table (no aliases / self-joins yet)
+        // VJ5: every scope name (the entry + each join) is unique — a second
+        // join of one table, or a self-join, goes through a @db.alias type
         if (args[0]) {
           const target = args[0].text;
+          const aliasHint = (name: string): string => {
+            const decl = doc.getDeclarationOwnerNode(target)?.node;
+            return decl && isAliasDecl(decl)
+              ? ""
+              : ` — declare a @db.alias type (\`@db.alias ${name}\` + \`export type Other = ${name}\`) to join it under another name`;
+          };
           if (target === entryTypeName) {
             errors.push({
-              message: `@db.view.joins cannot join the entry table '${target}' — no join aliases / self-joins yet`,
+              message: `@db.view.joins cannot join the entry table '${target}' directly${aliasHint(target)}`,
               severity: 1,
               range: args[0].range,
             });
           } else if (earlier.includes(target)) {
             errors.push({
-              message: `'${target}' is joined more than once — no join aliases / self-joins yet`,
+              message: `'${target}' is joined more than once${aliasHint(target)}`,
               severity: 1,
               range: args[0].range,
             });
@@ -171,14 +214,14 @@ export const dbViewAnnotations: TAnnotationsTree = {
         }
 
         // VJ1/VJ2: the condition may reference the join target, the entry
-        // table and joins declared before this one (chained joins)
-        if (args[1]?.queryNode && args[0]) {
-          const joinTargetName = args[0].text;
+        // table and joins declared before this one (chained joins) — the
+        // scope the editor completes (lsp-scopes)
+        const scope = join && viewJoinScope(owner, join, earlier);
+        if (args[1]?.queryNode && scope) {
           errors.push(
             ...validateQueryScope(
               args[1],
-              [joinTargetName, entryTypeName, ...earlier],
-              entryTypeName,
+              scope,
               doc,
               "a join may reference the entry table and joins declared before it",
             ),
@@ -199,10 +242,13 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface ActiveUser { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "condition",
         type: "query",
-        description: "Filter expression for the view WHERE clause.",
+        description:
+          "Filter expression for the view WHERE clause — may reference the entry table and every join; unqualified fields belong to the entry.",
+        fieldScope: fieldScopes.viewFilter,
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
@@ -223,8 +269,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
         }
 
         // VF3: Must have @db.view.for
-        const entryTypeName = getAnnotationAlias(owner, "db.view.for");
-        if (!entryTypeName) {
+        const scope = viewFilterScope(owner);
+        if (!scope) {
           errors.push({
             message: "@db.view.filter requires @db.view.for to identify the entry table",
             severity: 1,
@@ -233,8 +279,9 @@ export const dbViewAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        // VF1/VF2: the entry table and every joined table are in scope
-        errors.push(...validateQueryScope(args[0], viewScopeTypes(owner), entryTypeName, doc));
+        // VF1/VF2: the entry table and every joined table are in scope — the
+        // scope the editor completes (lsp-scopes)
+        errors.push(...validateQueryScope(args[0], scope, doc));
 
         return errors;
       },
@@ -254,6 +301,7 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface ActiveUsers { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       validate(token, _args, _doc) {
         const errors = [] as TMessages;
         const owner = token.parentNode!;
@@ -283,6 +331,7 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface ActivePremiumUser { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "oldName",
         type: "string",
@@ -305,7 +354,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
     having: new AnnotationSpec({
       description:
         "Post-aggregation filter (HAVING clause) for analytical views. " +
-        "References view field aliases with applied aggregate functions.\n\n" +
+        "References the view's own fields, unqualified (`totalRevenue > 100`) — aggregate " +
+        "fields by their alias, plain fields as GROUP BY dimensions; source-table refs are not in scope.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         "@db.view\n" +
@@ -314,12 +364,14 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "export interface TopCategories { ... }\n" +
         "```\n",
       nodeType: ["interface"],
+      passedWhenReferred: false,
       argument: {
         name: "condition",
         type: "query",
-        description: "HAVING condition referencing view aliases.",
+        description: "HAVING condition — the view's own fields, unqualified.",
+        fieldScope: fieldScopes.viewHaving,
       },
-      validate(token, _args, _doc) {
+      validate(token, args, doc) {
         const errors = [] as TMessages;
         const owner = token.parentNode!;
         if (!hasAnyViewAnnotation(owner)) {
@@ -328,6 +380,20 @@ export const dbViewAnnotations: TAnnotationsTree = {
             severity: 1,
             range: token.range,
           });
+          return errors;
+        }
+        // VH1: refs name the view's own fields, unqualified — the scope the
+        // editor completes (lsp-scopes)
+        const scope = viewHavingScope(owner);
+        if (args[0]?.queryNode && scope) {
+          errors.push(
+            ...validateQueryScope(
+              args[0],
+              scope,
+              doc,
+              "@db.view.having references the view's own fields unqualified",
+            ),
+          );
         }
         return errors;
       },

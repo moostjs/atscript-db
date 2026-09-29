@@ -874,7 +874,7 @@ export class AsDbReadableController<
    *
    * Convention (not enforced): name decoration keys with a `$` prefix, like
    * `$actions` and `$distance`, so they can never collide with a field name.
-   * Do not overwrite `$actions`. Columns the
+   * Do not overwrite `$actions` or `$disabledReasons`. Columns the
    * hook needs but the client did not select must be added in
    * {@link transformProjection} — they are then part of the response.
    *
@@ -1470,6 +1470,11 @@ export class AsDbReadableController<
       if (cap.bucketable) {
         // Exactly when the gate accepts a calendar bucket over this field.
         entry.bucketable = true;
+      }
+      if (fd.derived) {
+        // Computed from a @db.json leaf of the row; a write payload value is
+        // dropped — UIs render it read-only.
+        entry.derived = true;
       }
       fields[path] = entry;
     }

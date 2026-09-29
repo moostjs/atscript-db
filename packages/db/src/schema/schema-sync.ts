@@ -1,6 +1,7 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { AtscriptDbView } from "../table/db-view";
+import { aliasTargetOf } from "../table/view-source";
 import type { AtscriptDbReadable } from "../table/db-readable";
 import type { BaseDbAdapter } from "../base-adapter";
 import type { DbSpace } from "../table/db-space";
@@ -22,12 +23,13 @@ import {
   computeSchemaHash,
   snapshotToExistingColumns,
   snapshotToExistingTableOptions,
+  viewSnapshotSources,
 } from "./schema-hash";
 import type { TTableSnapshot, TViewSnapshot } from "./schema-hash";
 import { computeColumnDiff } from "./column-diff";
 import { computeForeignKeyDiff, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import { computeTableOptionDiff } from "./table-option-diff";
-import { topoOrder, reachable, type TDependencyEdge } from "./dependency-order";
+import { topoOrder, reachable, stableTopo, type TDependencyEdge } from "./dependency-order";
 import { SyncStore } from "./sync-store";
 import { SyncEntry, type TSyncEntryInit, type TSyncSkippedWork } from "./sync-entry";
 import {
@@ -37,12 +39,15 @@ import {
   planViewSync,
   dropOutdatedView,
   viewPlanStatus,
+  viewRecreated,
   willDropRecreate,
   planTableInit,
   typeChangeStrategy,
   typeChangeErrors,
   pkLabel,
   pkRebuildUnsupported,
+  derivedRebuildUnsupported,
+  describeDerivedChanges,
   describeTypeChanges,
   describeNullableDefaults,
   type TSyncExecutorDeps,
@@ -143,6 +148,10 @@ interface TDiscovery {
   tableByName: ReadonlyMap<string, TTableFacts>;
   /** Keyed by the name the table has in the database right now. */
   tableByDbName: ReadonlyMap<string, TTableFacts>;
+  /**
+   * Managed views in execution order: a view after the managed views it
+   * reads, inventory order otherwise (since 0.1.141; inventory order before).
+   */
   views: AtscriptDbView[];
   externalViews: AtscriptDbView[];
   allReadables: AtscriptDbReadable[];
@@ -151,6 +160,12 @@ interface TDiscovery {
   viewPlans: Map<string, TViewSyncPlan>;
   /** Parallel to `views`. */
   viewEntries: SyncEntry[];
+  /** Direct sources of each managed view — entry + join targets, physical names (since 0.1.141). */
+  viewSources: ReadonlyMap<string, string[]>;
+  /** Managed views that read each other in a cycle (pre-flight refusal), if any. */
+  viewCycle?: string[];
+  /** Removed views in drop order — dependents first, from their stored snapshots (since 0.1.141). */
+  removedViewOrder: string[];
   /** Physical object kind under each managed view's name. */
   viewObjectKinds: Map<string, TDbObjectKind | undefined>;
   externalEntries: SyncEntry[];
@@ -267,6 +282,7 @@ const SKIPPED_LABELS: Record<TSyncSkippedWork, string> = {
   recreate: "drop-and-recreate",
   "table-options": "table-option recreate",
   "nullable-defaults": "nullable/default change",
+  derived: "derived-column rebuild",
 };
 
 /**
@@ -328,6 +344,9 @@ export class SchemaSync {
     const views: AtscriptDbView[] = [];
     const externalViews: AtscriptDbView[] = [];
     for (const type of types) {
+      // A @db.alias type names a join scope inside view definitions — never
+      // an object to sync (a namespace of models may list it).
+      if (aliasTargetOf(type)) continue;
       const readable = this.space.get(type);
       if (readable.isView) {
         const view = readable as AtscriptDbView;
@@ -432,22 +451,24 @@ export class SchemaSync {
    * Starts a periodic heartbeat that extends the lock's TTL while sync runs.
    * Returns a handle with `stop()` to cancel and `getAbortReason()` to check
    * whether the lock was stolen or unexpectedly removed.
+   *
+   * At most one refresh is in flight; `stop()` resolves once it has settled,
+   * so the lock is released only after the last refresh — a late refresh must
+   * never race the release (or the next holder's lock).
    */
   private startHeartbeat(
     podId: string,
     ttlMs: number,
   ): {
-    stop: () => void;
+    stop: () => Promise<void>;
     getAbortReason: () => string | undefined;
   } {
     let abortReason: string | undefined;
     let stopped = false;
+    let inFlight: Promise<void> | undefined;
     const intervalMs = Math.max(Math.floor(ttlMs / 3), 1000);
 
-    const timer = setInterval(async () => {
-      if (stopped) {
-        return;
-      }
+    const refresh = async (): Promise<void> => {
       try {
         const status = await this.store.refreshLock(podId, ttlMs);
         if (stopped) {
@@ -471,6 +492,15 @@ export class SchemaSync {
           error instanceof Error ? error.message : error,
         );
       }
+    };
+
+    const timer = setInterval(() => {
+      if (stopped || inFlight) {
+        return;
+      }
+      inFlight = refresh().finally(() => {
+        inFlight = undefined;
+      });
     }, intervalMs);
 
     // Don't keep the Node.js process alive just for the heartbeat
@@ -479,12 +509,38 @@ export class SchemaSync {
     }
 
     return {
-      stop() {
+      async stop() {
         stopped = true;
         clearInterval(timer);
+        await inFlight;
       },
       getAbortReason: () => abortReason,
     };
+  }
+
+  /**
+   * Acquires the sync lock, waiting for a peer that holds it. Resolves
+   * `"acquired"`, or `"synced-by-peer"` when a non-forced run finds, after a
+   * wait, that the peer stored this schema's hash. A forced run never
+   * short-circuits — it waits its turn and runs. Losing the race for a freed
+   * lock to another waiter just waits again, within the same `waitTimeoutMs`.
+   */
+  private async acquireLock(
+    podId: string,
+    hash: string,
+    opts: { lockTtlMs: number; waitTimeoutMs: number; pollIntervalMs: number; force: boolean },
+  ): Promise<"acquired" | "synced-by-peer"> {
+    const deadline = Date.now() + opts.waitTimeoutMs;
+    while (!(await this.store.tryAcquireLock(podId, opts.lockTtlMs))) {
+      const free = await this.store.waitForLock(deadline - Date.now(), opts.pollIntervalMs);
+      if (!free) {
+        throw new Error(`Schema sync lock wait timed out after ${opts.waitTimeoutMs}ms`);
+      }
+      if (!opts.force && (await this.store.readHash()) === hash) {
+        return "synced-by-peer";
+      }
+    }
+    return "acquired";
   }
 
   /** Throws if the heartbeat detected a stolen/missing lock. */
@@ -496,6 +552,21 @@ export class SchemaSync {
   }
 
   /**
+   * Releases the lock without masking the run's outcome: a failed release is
+   * logged (the row expires after `lockTtlMs`, blocking peers until then).
+   */
+  private async releaseLock(podId: string): Promise<void> {
+    try {
+      await this.store.releaseLock(podId);
+    } catch (error) {
+      this.logger.warn(
+        "[schema-sync] Failed to release the sync lock — peers wait until it expires:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  /**
    * Runs schema synchronization with distributed locking, in three phases:
    *
    * 1. **Discover** (read-only, under the lock): introspect every table once,
@@ -503,12 +574,12 @@ export class SchemaSync {
    * 2. **Pre-flight** (pure): every change that no order of DDL can apply
    *    safely becomes a refusal. One refusal → `status: "refused"`, no DDL,
    *    nothing persisted, lock released.
-   * 3. **Execute** in dependency order: stale/removed views → inbound FKs of
-   *    key-changing tables → tables (parents first; a removed table that
-   *    blocks a table's drop-and-recreate or key rebuild is dropped right
-   *    before it) → deferred FKs of cycles → managed views → external-view
-   *    checks → remaining removed tables (children first) →
-   *    snapshots/tracking/hash.
+   * 3. **Execute** in dependency order: removed views, then stale views
+   *    (dependents first) → inbound FKs of key-changing tables → tables
+   *    (parents first; a removed table that blocks a table's drop-and-recreate
+   *    or key rebuild is dropped right before it) → deferred FKs of cycles →
+   *    managed views (upstream views first) → external-view checks →
+   *    remaining removed tables (children first) → snapshots/tracking/hash.
    */
   async run(types: readonly TAtscriptAnnotatedType[], opts?: TSyncOptions): Promise<TSyncResult> {
     this.logger = opts?.logger ?? this.logger;
@@ -533,20 +604,15 @@ export class SchemaSync {
       }
     }
 
-    // Acquire lock
-    const acquired = await this.store.tryAcquireLock(podId, lockTtlMs);
-    if (!acquired) {
-      await this.store.waitForLock(waitTimeoutMs, pollIntervalMs);
-
-      const storedHash = await this.store.readHash();
-      if (storedHash === hash) {
-        return { status: "synced-by-peer", schemaHash: hash, entries: [] };
-      }
-
-      const retryAcquired = await this.store.tryAcquireLock(podId, lockTtlMs);
-      if (!retryAcquired) {
-        throw new Error("Failed to acquire schema sync lock after waiting");
-      }
+    // Acquire lock (waiting for a peer that holds it)
+    const lock = await this.acquireLock(podId, hash, {
+      lockTtlMs,
+      waitTimeoutMs,
+      pollIntervalMs,
+      force,
+    });
+    if (lock === "synced-by-peer") {
+      return { status: "synced-by-peer", schemaHash: hash, entries: [] };
     }
 
     // Start heartbeat — extends lock TTL every ttl/3 while sync is in progress
@@ -582,16 +648,16 @@ export class SchemaSync {
       this.reportOutcome(result, onError);
       return result;
     } finally {
-      heartbeat.stop();
-      await this.store.releaseLock(podId);
+      await heartbeat.stop();
+      await this.releaseLock(podId);
     }
   }
 
   // ── Phase 1: discovery ─────────────────────────────────────────────────
 
   private async discover(resolved: TResolvedInventory, safe: boolean): Promise<TDiscovery> {
-    const { tables, views, externalViews, hash } = resolved;
-    const allReadables = [...tables, ...views, ...externalViews];
+    const { tables, views: inventoryViews, externalViews, hash } = resolved;
+    const allReadables = [...tables, ...inventoryViews, ...externalViews];
     const previouslyTracked = await this.store.readTrackedList();
     const trackedNames = new Set(previouslyTracked.map((e) => e.name));
     const removedTracked = this.detectRemoved(allReadables, previouslyTracked);
@@ -609,7 +675,29 @@ export class SchemaSync {
     const tableByName = new Map(tableFacts.map((t) => [t.name, t]));
     const tableByDbName = new Map(tableFacts.map((t) => [t.dbName, t]));
 
-    // Managed views — plan + object kind under the name they will have
+    // Managed views — a view may read other managed views (since 0.1.141):
+    // order them upstream-first (inventory order otherwise), so creates run
+    // in that order and drops in the reverse. A cycle is refused in pre-flight.
+    const viewNames = new Set(inventoryViews.map((v) => v.tableName));
+    const externalViewNames = new Set(externalViews.map((v) => v.tableName));
+    const viewSources = new Map<string, string[]>();
+    for (const view of inventoryViews) {
+      const plan = view.viewPlan;
+      viewSources.set(
+        view.tableName,
+        sortedUnique([plan.entryTable, ...plan.joins.map((j) => j.targetTable)]),
+      );
+    }
+    const viewTopo = stableTopo(
+      inventoryViews.map((v) => v.tableName),
+      (name) => viewSources.get(name) ?? [],
+    );
+    const viewByName = new Map(inventoryViews.map((v) => [v.tableName, v]));
+    const views = viewTopo.cycle
+      ? inventoryViews
+      : viewTopo.order.map((name) => viewByName.get(name)!);
+
+    // Plan + object kind under the name each view will have
     const viewFacts = await Promise.all(
       views.map(async (view) => ({
         plan: await planViewSync(view, trackedNames, this.store),
@@ -619,8 +707,26 @@ export class SchemaSync {
     const viewPlans = new Map<string, TViewSyncPlan>();
     const viewEntries: SyncEntry[] = [];
     const viewObjectKinds = new Map<string, TDbObjectKind | undefined>();
+    /** Managed views the run drops and recreates (own change, rename, or cascade). */
+    const recreatedViews = new Set<string>();
     for (const [i, view] of views.entries()) {
       const { plan, kind } = viewFacts[i];
+      // A tracked view whose upstream managed view is recreated is recreated
+      // with it (its snapshot embeds no upstream definition — this rule does)
+      const upstreamRecreated = viewSources
+        .get(view.tableName)!
+        .filter((n) => recreatedViews.has(n));
+      if (
+        upstreamRecreated.length > 0 &&
+        trackedNames.has(view.tableName) &&
+        !plan.isRenamed &&
+        !plan.definitionChanged
+      ) {
+        plan.upstreamRecreated = upstreamRecreated;
+      }
+      if (plan.isRenamed || viewRecreated(plan)) {
+        recreatedViews.add(view.tableName);
+      }
       viewPlans.set(view.tableName, plan);
       viewObjectKinds.set(view.tableName, kind);
       viewEntries.push(
@@ -629,12 +735,12 @@ export class SchemaSync {
           status: viewPlanStatus(view, plan, trackedNames),
           viewType: view.viewPlan.materialized ? "M" : "V",
           renamedFrom: plan.isRenamed ? view.renamedFrom : undefined,
-          recreated: plan.definitionChanged || undefined,
-          dependsOn: sortedUnique(
-            [view.viewPlan.entryTable, ...view.viewPlan.joins.map((j) => j.targetTable)].filter(
-              (n) => tableNames.has(n),
-            ),
-          ),
+          recreated: viewRecreated(plan) || undefined,
+          cascadeFrom: plan.upstreamRecreated,
+          // Every inventory source — tables, managed views and external views
+          dependsOn: viewSources
+            .get(view.tableName)!
+            .filter((n) => tableNames.has(n) || viewNames.has(n) || externalViewNames.has(n)),
         }),
       );
     }
@@ -658,12 +764,20 @@ export class SchemaSync {
     );
     const removedByName = new Map(removed.map((r) => [r.name, r]));
 
-    // FK targets outside the inventory — do they exist in the database?
+    // FK targets and view sources outside the inventory — do they exist in
+    // the database? (A view may read an external view, or one synced elsewhere.)
     const externalTargetAdapters = new Map<string, BaseDbAdapter>();
     for (const t of tableFacts) {
       for (const fk of t.readable.foreignKeys.values()) {
         if (fk.targetTable !== t.name && !tableNames.has(fk.targetTable)) {
           externalTargetAdapters.set(fk.targetTable, t.readable.dbAdapter);
+        }
+      }
+    }
+    for (const view of views) {
+      for (const source of viewSources.get(view.tableName)!) {
+        if (!tableNames.has(source) && !viewNames.has(source)) {
+          externalTargetAdapters.set(source, view.dbAdapter);
         }
       }
     }
@@ -740,6 +854,18 @@ export class SchemaSync {
     }
     const lateDropOrder = dropOrder.filter((group) => !earlyGroups.has(group));
 
+    // Removed views: a view that reads another removed view is dropped first
+    // (PostgreSQL refuses to drop a view another view depends on; no CASCADE).
+    // The stored snapshots know the sources — the physical names of aliased joins.
+    const removedViewNames = removed.filter((r) => r.isView).map((r) => r.name);
+    const removedViewTopo = stableTopo(removedViewNames, (name) => {
+      const snapshot = removedByName.get(name)?.snapshot;
+      return snapshot && "viewType" in snapshot ? viewSnapshotSources(snapshot) : [];
+    });
+    const removedViewOrder = removedViewTopo.cycle
+      ? removedViewNames
+      : removedViewTopo.order.toReversed();
+
     // Drop entries: views first, then tables children-first (cycles as groups)
     const dropEntries = new Map<string, SyncEntry>();
     for (const r of removed) {
@@ -777,6 +903,9 @@ export class SchemaSync {
       trackedNames,
       viewPlans,
       viewEntries,
+      viewSources,
+      viewCycle: viewTopo.cycle,
+      removedViewOrder,
       viewObjectKinds,
       externalEntries,
       removed,
@@ -852,10 +981,12 @@ export class SchemaSync {
       facts.existing = pendingRename && liveColumns?.length === 0 ? undefined : liveColumns;
       if (facts.existing && facts.existing.length === 0) {
         init.status = "create";
-        init.columnsToAdd = readable.fieldDescriptors.filter((f) => !f.ignored);
+        init.columnsToAdd = [...readable.columnDescriptors];
       } else if (facts.existing && facts.existing.length > 0) {
         const typeMapper = adapter.typeMapper?.bind(adapter);
-        facts.diff = computeColumnDiff(readable.fieldDescriptors, facts.existing, typeMapper);
+        facts.diff = computeColumnDiff(readable.columnDescriptors, facts.existing, typeMapper, {
+          snapshot: storedSnapshot,
+        });
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
     } else if (adapter.syncColumns) {
@@ -865,15 +996,16 @@ export class SchemaSync {
           const exists = adapter.tableExists ? await adapter.tableExists() : false;
           if (!exists) {
             init.status = "create";
-            init.columnsToAdd = readable.fieldDescriptors.filter((f) => !f.ignored);
+            init.columnsToAdd = [...readable.columnDescriptors];
           }
         }
       } else {
-        const existing = snapshotToExistingColumns(storedSnapshot);
+        const existing = snapshotToExistingColumns(storedSnapshot, readable);
         facts.diff = computeColumnDiff(
-          readable.fieldDescriptors,
+          readable.columnDescriptors,
           existing,
           this.resolveTypeMapper(adapter),
+          { snapshot: storedSnapshot },
         );
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
@@ -1079,6 +1211,17 @@ export class SchemaSync {
       }
     }
 
+    // Managed views reading each other in a cycle — no order can create them
+    if (d.viewCycle) {
+      for (const name of new Set(d.viewCycle)) {
+        addRefusal(
+          refusals,
+          name,
+          `Managed views form a dependency cycle: ${d.viewCycle.join(" → ")}`,
+        );
+      }
+    }
+
     for (const view of d.views) {
       // A physical table sits where a managed view is declared
       if (d.viewObjectKinds.get(view.tableName) === "table") {
@@ -1099,25 +1242,33 @@ export class SchemaSync {
           );
         }
       }
+      // A source that is neither in the inventory nor in the database
+      for (const source of d.viewSources.get(view.tableName)!) {
+        if (d.externalTargets.get(source) === false) {
+          addRefusal(
+            refusals,
+            view.tableName,
+            `View "${view.tableName}" reads "${source}" which is neither in the sync inventory nor present in the database`,
+          );
+        }
+      }
     }
 
-    // A removed table still referenced by the inventory (no drops in safe mode)
+    // A removed table or view still referenced by the inventory (no drops in safe mode)
     if (!safe) {
       for (const r of d.removed) {
-        if (r.isView) {
-          continue;
-        }
         const referencers: string[] = [];
-        for (const t of d.tables) {
-          for (const fk of t.readable.foreignKeys.values()) {
-            if (fk.targetTable === r.name) {
-              referencers.push(`${t.name}.${fk.fields.join(",")} (@db.rel.FK)`);
+        if (!r.isView) {
+          for (const t of d.tables) {
+            for (const fk of t.readable.foreignKeys.values()) {
+              if (fk.targetTable === r.name) {
+                referencers.push(`${t.name}.${fk.fields.join(",")} (@db.rel.FK)`);
+              }
             }
           }
         }
         for (const view of d.views) {
-          const plan = view.viewPlan;
-          if (plan.entryTable === r.name || plan.joins.some((j) => j.targetTable === r.name)) {
+          if (d.viewSources.get(view.tableName)!.includes(r.name)) {
             referencers.push(`view "${view.tableName}"`);
           }
         }
@@ -1125,7 +1276,7 @@ export class SchemaSync {
           addRefusal(
             refusals,
             r.name,
-            `Cannot drop "${r.name}": it is still referenced by ${referencers.join(", ")}. Add "${r.name}" to the sync inventory or remove the reference.`,
+            `Cannot drop ${r.isView ? "view " : ""}"${r.name}": it is still referenced by ${referencers.join(", ")}. Add "${r.name}" to the sync inventory or remove the reference.`,
           );
         }
       }
@@ -1159,10 +1310,8 @@ export class SchemaSync {
     for (const [index] of d.externalEntries.entries()) {
       yield { kind: "external", index };
     }
-    for (const r of d.removed) {
-      if (r.isView) {
-        yield { kind: "drop-view", name: r.name };
-      }
+    for (const name of d.removedViewOrder) {
+      yield { kind: "drop-view", name };
     }
     for (const group of d.lateDropOrder) {
       yield { kind: "drop", group };
@@ -1233,12 +1382,20 @@ export class SchemaSync {
     const retained: TTrackedEntry[] = [];
     const droppedNames = new Set<string>();
 
-    // 1. Drop tracked views whose definition changed (or that are being
-    //    renamed) and removed views BEFORE table ops — their old definitions
-    //    may reference columns the table sync is about to drop (SQLite and
-    //    Postgres refuse DROP COLUMN while a view depends on the column).
-    //    Removed-view outcomes are reported at their place in the walk.
-    /** Managed views whose stale definition could not be dropped (→ error entry, not recreated). */
+    // 1. Drop removed views, then tracked views whose definition changed (or
+    //    that are being renamed, or that read a recreated view) BEFORE table
+    //    ops — their old definitions may reference columns the table sync is
+    //    about to drop (SQLite and Postgres refuse DROP COLUMN while a view
+    //    depends on the column). Dependents go first (removed views may read
+    //    stale managed views; managed views drop in reverse creation order):
+    //    PostgreSQL refuses to drop a view another view depends on, and sync
+    //    never drops with CASCADE. Removed-view outcomes are reported at their
+    //    place in the walk.
+    /**
+     * Managed views whose step failed, with the message: a stale definition
+     * that could not be dropped (→ error entry, not recreated), or a create
+     * that errored — their dependents are not created over a missing source.
+     */
     const failedViews = new Map<string, string>();
     /**
      * Pending renames that did NOT run (the rename failed, or the entry
@@ -1247,26 +1404,9 @@ export class SchemaSync {
      * rename as pending again. Keyed by the readable's (new) name.
      */
     const stillUnderOldName = new Map<string, TTrackedEntry>();
-    for (const view of d.views) {
-      const plan = d.viewPlans.get(view.tableName)!;
-      try {
-        await dropOutdatedView(view, plan, this.space);
-      } catch (error) {
-        failedViews.set(view.tableName, this.stepFailed(error, "View sync", view.tableName));
-        if (plan.isRenamed) {
-          stillUnderOldName.set(view.tableName, {
-            name: view.renamedFrom!,
-            isView: true,
-            viewType: view.viewPlan.materialized ? "M" : "V",
-          });
-        }
-      }
-    }
     const droppedViewEntries = new Map<string, SyncEntry>();
-    for (const r of d.removed) {
-      if (!r.isView) {
-        continue;
-      }
+    for (const name of d.removedViewOrder) {
+      const r = d.removedByName.get(name)!;
       if (safe) {
         retained.push(r);
         continue;
@@ -1285,7 +1425,21 @@ export class SchemaSync {
         retained.push(r);
       }
     }
-
+    for (const view of d.views.toReversed()) {
+      const plan = d.viewPlans.get(view.tableName)!;
+      try {
+        await dropOutdatedView(view, plan, this.space);
+      } catch (error) {
+        failedViews.set(view.tableName, this.stepFailed(error, "View sync", view.tableName));
+        if (plan.isRenamed) {
+          stillUnderOldName.set(view.tableName, {
+            name: view.renamedFrom!,
+            isView: true,
+            viewType: view.viewPlan.materialized ? "M" : "V",
+          });
+        }
+      }
+    }
     // 2. Live inbound FKs of key-changing tables: MySQL/PostgreSQL refuse to
     //    drop a key a constraint depends on. Pre-flight guaranteed every
     //    referencing child is in the inventory (under its live name) and
@@ -1373,6 +1527,15 @@ export class SchemaSync {
           const planned = d.viewEntries[step.index];
           let msg = failedViews.get(view.tableName);
           if (msg === undefined) {
+            const failedUpstream = d.viewSources
+              .get(view.tableName)!
+              .filter((n) => failedViews.has(n));
+            if (failedUpstream.length > 0) {
+              msg = `Upstream view ${failedUpstream.map((n) => `"${n}"`).join(", ")} failed — "${view.tableName}" was not created over it`;
+              this.logger.error?.(`[schema-sync] ${msg}`);
+            }
+          }
+          if (msg === undefined) {
             try {
               entries.push(await executeSyncView(view, planned));
               break;
@@ -1380,6 +1543,7 @@ export class SchemaSync {
               msg = this.stepFailed(error, "View sync", view.tableName);
             }
           }
+          failedViews.set(view.tableName, msg);
           entries.push(planned.withError(msg));
           break;
         }
@@ -1625,6 +1789,7 @@ export class SchemaSync {
     init.columnsToRename = diff.renamed.map((r) => ({ from: r.oldName, to: r.field.physicalName }));
     init.typeChanges = describeTypeChanges(diff);
     Object.assign(init, describeNullableDefaults(diff));
+    init.derivedChanges = describeDerivedChanges(diff);
     init.columnsToDrop = diff.removed.map((c) => c.name);
     const hasChanges =
       diff.added.length > 0 ||
@@ -1633,6 +1798,7 @@ export class SchemaSync {
       diff.nullableChanged.length > 0 ||
       diff.defaultChanged.length > 0 ||
       diff.removed.length > 0 ||
+      init.derivedChanges.length > 0 ||
       diff.primaryKeyChanged !== undefined;
     if (hasChanges) {
       init.status = "alter";
@@ -1655,6 +1821,23 @@ export class SchemaSync {
     if (diff.typeChanged.length > 0 && typeChangeStrategy(readable, diff) === "none") {
       init.status = "error";
       init.errors = [...(init.errors ?? []), ...typeChangeErrors(readable, diff)];
+    }
+    // A derived-column rebuild the adapter has no primitives for → error
+    // (safe mode skips the rebuild instead, see `safeModeSkips`)
+    if (
+      init.derivedChanges.length > 0 &&
+      !safe &&
+      (!adapter.dropColumns || !adapter.syncColumns) &&
+      init.status !== "error"
+    ) {
+      init.status = "error";
+      init.errors = [
+        ...(init.errors ?? []),
+        derivedRebuildUnsupported(
+          name,
+          init.derivedChanges.map((dc) => dc.column),
+        ),
+      ];
     }
     // A key rebuild the adapter has no primitive for → error (safe mode
     // skips the rebuild instead, see `safeModeSkips`)

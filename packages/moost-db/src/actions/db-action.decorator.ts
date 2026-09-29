@@ -5,7 +5,7 @@ import { isAsValueHelpControllerSubclass } from "./controller-registry";
 import { buildGateInterceptor, buildThinInterceptor } from "./gate-interceptor";
 import { WARN_PREFIX, mergeActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
-import type { DbActionOpts, FlatKey, TOnDisabledRows } from "./types";
+import type { DbActionOpts, FlatKey, TDbActionDisabledVerdict, TOnDisabledRows } from "./types";
 
 /**
  * Mark a controller method as a database action surfaced via `/meta`. Writes
@@ -62,7 +62,7 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
       const def = buildGateInterceptor({
         action: name,
         level: scan.level,
-        disabled: rawOpts.disabled as (rows: unknown[]) => boolean[],
+        disabled: rawOpts.disabled as (rows: unknown[]) => TDbActionDisabledVerdict[],
         onDisabledRows: rawOpts.onDisabledRows ?? "reject",
         table: rawOpts.table,
       });

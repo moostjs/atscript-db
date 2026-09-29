@@ -3,12 +3,15 @@ import { isAnnotationSpec, type AnnotationSpec, type TAnnotationsTree } from "@a
 
 import { AtscriptDbTable } from "../table/db-table";
 import { dbAggAnnotations } from "../plugin/annotations/agg";
+import { dbAliasAnnotations } from "../plugin/annotations/alias";
 import { dbAmountAnnotations } from "../plugin/annotations/amount";
 import { dbUnitAnnotations } from "../plugin/annotations/unit";
 import { dbColumnAnnotations } from "../plugin/annotations/column";
 import { dbIndexAnnotations } from "../plugin/annotations/index-ann";
 import { dbRelAnnotations } from "../plugin/annotations/rel";
 import { dbSearchAnnotations } from "../plugin/annotations/search";
+import { dbTableAnnotations } from "../plugin/annotations/table";
+import { dbViewAnnotations } from "../plugin/annotations/view";
 import { prepareFixtures, MockAdapter } from "./test-utils";
 
 // Populated by beforeAll after fixtures are compiled
@@ -89,34 +92,48 @@ describe("ref-inherited annotation scoping", () => {
 
 // The scoping above only works if every structural spec opts out of ref
 // inheritance individually — a new annotation that forgets the flag silently
-// reintroduces the phantom-index bug. Enforce the invariant over the trees.
+// reintroduces the phantom-index bug (prop level), or makes a field typed
+// with a table a second runtime entity of it (interface / type level —
+// `@db.table`, `@db.view.*`, `@db.alias`, …; since 0.1.141). Enforce the
+// invariant over every tree.
+function collectSpecs(tree: TAnnotationsTree, path: string): Array<[string, AnnotationSpec]> {
+  const specs: Array<[string, AnnotationSpec]> = [];
+  for (const [key, node] of Object.entries(tree)) {
+    if (isAnnotationSpec(node)) {
+      specs.push([`${path}.${key}`, node]);
+    } else if (node) {
+      specs.push(...collectSpecs(node, `${path}.${key}`));
+    }
+  }
+  return specs;
+}
+
 describe("structural annotation trees", () => {
   const structuralTrees: Record<string, TAnnotationsTree> = {
     agg: dbAggAnnotations,
+    alias: dbAliasAnnotations,
     column: dbColumnAnnotations,
     index: dbIndexAnnotations,
     rel: dbRelAnnotations,
     search: dbSearchAnnotations,
+    table: dbTableAnnotations,
+    view: dbViewAnnotations,
   };
+  const STRUCTURAL_NODE_TYPES = new Set(["prop", "interface", "type"]);
 
-  function collectPropSpecs(tree: TAnnotationsTree, path: string): Array<[string, AnnotationSpec]> {
-    const specs: Array<[string, AnnotationSpec]> = [];
-    for (const [key, node] of Object.entries(tree)) {
-      if (isAnnotationSpec(node)) {
-        specs.push([`${path}.${key}`, node]);
-      } else if (node) {
-        specs.push(...collectPropSpecs(node, `${path}.${key}`));
-      }
-    }
-    return specs;
-  }
-
-  it("declares every prop-level structural annotation with passedWhenReferred: false", () => {
-    const missing = Object.entries(structuralTrees)
-      .flatMap(([name, tree]) => collectPropSpecs(tree, name))
+  it("declares every structural annotation — prop, interface and type level — with passedWhenReferred: false", () => {
+    const specs = Object.entries(structuralTrees).flatMap(([name, tree]) =>
+      collectSpecs(tree, name),
+    );
+    // The guard covers the entity annotations too (a spec without a nodeType would slip through)
+    expect(specs.map(([path]) => path)).toEqual(
+      expect.arrayContaining(["table.table.$self", "view.view.for", "alias.alias", "table.space"]),
+    );
+    const missing = specs
       .filter(
         ([, spec]) =>
-          spec.config.nodeType?.includes("prop") && spec.config.passedWhenReferred !== false,
+          spec.config.nodeType?.some((n) => STRUCTURAL_NODE_TYPES.has(n)) &&
+          spec.config.passedWhenReferred !== false,
       )
       .map(([path]) => path);
     expect(missing).toEqual([]);

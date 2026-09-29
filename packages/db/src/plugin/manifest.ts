@@ -1,11 +1,12 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { AtscriptRepo, SemanticNode, TOutput } from "@atscript/core";
+import type { AtscriptRepo, TOutput } from "@atscript/core";
 import { DEFAULT_FORMAT } from "@atscript/core";
 
 import { getAnnotationAlias } from "../shared/annotation-utils";
 import { DEFAULT_DB_SPACE } from "../shared/consts";
+import { isDbSourceDecl } from "../shared/validation-utils";
 
 /** Options for the generated model manifest (see {@link dbPlugin}). */
 export interface TDbManifestOptions {
@@ -14,12 +15,6 @@ export interface TDbManifestOptions {
    * (with `rootDir: "src"`, `"models.gen.ts"` emits `src/models.gen.ts`).
    */
   path: string;
-}
-
-const DB_ENTITY_ANNOTATIONS = ["db.table", "db.view", "db.view.for"];
-
-function isDbEntity(node: SemanticNode): boolean {
-  return DB_ENTITY_ANNOTATIONS.some((name) => node.countAnnotations(name) > 0);
 }
 
 interface TManifestEntry {
@@ -80,7 +75,7 @@ export async function generateModelManifest(
     for (const [exportName, node] of [...doc.exports.entries()].toSorted(([a], [b]) =>
       a.localeCompare(b),
     )) {
-      if (!isDbEntity(node)) continue;
+      if (!isDbSourceDecl(node)) continue;
       let alias = exportName;
       for (let n = 1; usedAliases.has(alias); n++) {
         alias = `${exportName}_${n}`;

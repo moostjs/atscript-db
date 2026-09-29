@@ -1,5 +1,5 @@
 import type { FilterExpr, FilterVisitor } from "@atscript/db";
-import { walkFilter, DbError } from "@atscript/db";
+import { walkFilter, DbError, getPath } from "@atscript/db";
 
 /**
  * In-memory row predicate: given a document, decide whether it matches a
@@ -9,7 +9,7 @@ import { walkFilter, DbError } from "@atscript/db";
 type Predicate = (row: Record<string, unknown>) => boolean;
 
 /**
- * Dot-path getter. Splits `path` on `.` and walks plain objects, returning the
+ * Dot-path getter — the core's `getPath`: walks plain objects, returning the
  * value at the end of the path or `undefined` if any intermediate segment is
  * missing or is not a plain object.
  *
@@ -19,17 +19,7 @@ type Predicate = (row: Record<string, unknown>) => boolean;
  * later concern; the SQL/Mongo adapters flatten differently and we do not want
  * to fake a semantic the store can't back yet.
  */
-export function getPath(row: Record<string, unknown>, path: string): unknown {
-  const segments = path.split(".");
-  let current: unknown = row;
-  for (const seg of segments) {
-    if (current === null || typeof current !== "object" || Array.isArray(current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[seg];
-  }
-  return current;
-}
+export { getPath };
 
 /**
  * {@link getPath} compiled for one path: split once, and a single segment is

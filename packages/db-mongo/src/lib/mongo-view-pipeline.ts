@@ -32,7 +32,10 @@ function joinedAs(table: string): string {
  *    pipeline paths (SQL null semantics — `queryNodeToExpr`).
  *
  * All field paths are PHYSICAL document paths (`@db.column` renames), joined
- * tables live under `__joined_<table>`. A column whose source may be missing
+ * tables live under `__joined_<scope>` — the physical collection, or the
+ * `@db.alias` type name for an aliased join (`__joined_Manager`), whose
+ * `$lookup.from` stays the physical collection (since 0.1.141).
+ * The entry collection and a `$lookup.from` may be views. A column whose source may be missing
  * (`nullable` mapping) reads as null; every other column is a plain path, so
  * a `$match` / `$sort` on the view can still push down to an index.
  * @since 0.1.136
@@ -58,11 +61,11 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
     pipeline.push(buildLookup(view, join, prefixes));
     pipeline.push({
       $unwind: {
-        path: `$${joinedAs(join.targetTable)}`,
+        path: `$${joinedAs(join.scope)}`,
         preserveNullAndEmptyArrays: join.kind === "left",
       },
     });
-    prefixes.set(join.targetTable, `${joinedAs(join.targetTable)}.`);
+    prefixes.set(join.scope, `${joinedAs(join.scope)}.`);
   }
 
   // $match for view filter (query-operator semantics: `!=` also matches null / missing)
@@ -149,7 +152,8 @@ function buildLookup(
   join: TViewJoin,
   outer: ReadonlyMap<string, string>,
 ): Document {
-  const as = joinedAs(join.targetTable);
+  const scope = join.scope;
+  const as = joinedAs(scope);
 
   const simple = simpleJoinFields(view, join, outer);
   if (simple) {
@@ -160,13 +164,13 @@ function buildLookup(
   const varByPath = new Map<string, string>();
   const pathOf = (ref: AtscriptQueryFieldRef): string => {
     const { table, source } = view.resolveRefSource(ref);
-    if (table === join.targetTable) {
+    if (table === scope) {
       return `$${source.column}`;
     }
     const prefix = outer.get(table);
     if (prefix === undefined) {
       throw new Error(
-        `View "${view.tableName}": the join on "${join.targetTable}" references "${table}", which is not joined before it`,
+        `View "${view.tableName}": the join on "${scope}" references "${table}", which is not joined before it`,
       );
     }
     const outerPath = prefix + source.column;
@@ -206,14 +210,15 @@ function simpleJoinFields(
   const comp = node as { left: AtscriptQueryFieldRef; op: string; right?: unknown };
   if (comp.op !== "$eq" || !isFieldRef(comp.right)) return undefined;
 
+  const scope = join.scope;
   const left = view.resolveRefSource(comp.left);
   const right = view.resolveRefSource(comp.right);
   let target: typeof left;
   let local: typeof left;
-  if (left.table === join.targetTable && right.table !== join.targetTable) {
+  if (left.table === scope && right.table !== scope) {
     target = left;
     local = right;
-  } else if (right.table === join.targetTable && left.table !== join.targetTable) {
+  } else if (right.table === scope && left.table !== scope) {
     target = right;
     local = left;
   } else {

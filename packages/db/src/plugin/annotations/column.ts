@@ -1,12 +1,15 @@
 import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isRef, isStructure, isPrimitive } from "@atscript/core";
-import type { TMessages } from "@atscript/core";
+import type { SemanticRefNode, TMessages } from "@atscript/core";
 import {
   getDbTableOwner,
   getParentStruct,
+  getParentTypeName,
   validateFieldBaseType,
 } from "../../shared/annotation-utils";
+import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
+import { jsonChainInfo } from "../../shared/view-validation";
 
 export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
@@ -164,6 +167,123 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       ],
       validate(token, args, doc) {
         return validateFieldBaseType(token, doc, "@db.column.precision", ["number", "decimal"]);
+      },
+    }),
+
+    derived: new AnnotationSpec({
+      description:
+        "Declares a **derived column**: a read-only column computed from one `string`, " +
+        "`number` or `boolean` leaf inside a `@db.json` field of the **same table**, so the " +
+        "leaf can be filtered, sorted, grouped and indexed like a real column. The field's " +
+        "type is a chain reference into that field (`customerId: Order.payload.customer.id`); " +
+        "the path may not cross an array or a `@db.encrypted` field. Declare the field " +
+        "optional when the path can be absent (a missing leaf reads as `null`). A value " +
+        "written to it is dropped; `$inc` / `$dec` / `$mul` on it are rejected.\n\n" +
+        "Storage per adapter, schema sync and the compatible annotations: " +
+        "https://atscript.dev/db/api/storage#derived-columns\n\n" +
+        "**Example:**\n" +
+        "```atscript\n" +
+        "@db.table 'orders'\n" +
+        "export interface Order {\n" +
+        "  @meta.id\n" +
+        "  id: number\n\n" +
+        "  @db.json\n" +
+        "  payload: {\n" +
+        "    customer: { id: string, vip: boolean }\n" +
+        "    total: number\n" +
+        "  }\n\n" +
+        "  @db.column.derived\n" +
+        "  @db.index.plain\n" +
+        "  customerId: Order.payload.customer.id\n\n" +
+        "  @db.column.derived\n" +
+        "  vip?: Order.payload.customer.vip\n" +
+        "}\n" +
+        "```\n",
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      multiple: false,
+      validate(token, _args, doc) {
+        const errors = [] as TMessages;
+        const field = token.parentNode!;
+        const fail = (message: string, severity: 1 | 2 = 1) => {
+          errors.push({ message, severity, range: token.range });
+        };
+
+        // D1: a top-level field of a @db.table
+        const owner = getDbTableOwner(token);
+        if (!owner || !isInterface(owner) || owner.countAnnotations("db.table") === 0) {
+          fail("@db.column.derived is only valid on a top-level field of a @db.table interface");
+          return errors;
+        }
+
+        // D8: exclusive with every annotation that needs a stored / writable column
+        for (const [name, why] of DERIVED_INCOMPATIBLE) {
+          if (field.countAnnotations(name) > 0) {
+            fail(`@db.column.derived cannot coexist with @${name} — ${why}`);
+          }
+        }
+
+        // D2/D3: the type is a chain reference into the enclosing table
+        const definition = field.getDefinition();
+        if (!definition || !isRef(definition) || !(definition as SemanticRefNode).hasChain) {
+          fail(
+            "@db.column.derived requires a chain reference into a @db.json field of the same table (e.g. `customerId: Order.payload.customer.id`)",
+          );
+          return errors;
+        }
+        const ref = definition as SemanticRefNode;
+        const tableName = getParentTypeName(token);
+        if (ref.id !== tableName) {
+          fail(
+            `@db.column.derived must reference the enclosing table '${tableName ?? ""}', not '${ref.id ?? ""}' — a derived column reads its own row`,
+          );
+          return errors;
+        }
+
+        const info = jsonChainInfo(ref, doc);
+        const path = `${info.typeName}.${info.chain.join(".")}`;
+        const notInsideJson = `@db.column.derived path '${path}' does not read inside a @db.json field — a flattened or scalar column needs no derived column`;
+        if (info.chain.length < 2) {
+          fail(notInsideJson);
+          return errors;
+        }
+        if (!info.resolved) return errors;
+        // D5: no arrays anywhere on the path
+        if (info.viaArray) {
+          fail(
+            `@db.column.derived path '${path}' crosses an array — a derived column reads one scalar leaf`,
+          );
+          return errors;
+        }
+        // D4: the path descends into a @db.json field (no array — D5 above —
+        // so the JSON root is a @db.json prop, and it is a step ABOVE the leaf)
+        if (info.jsonRoot === undefined || info.jsonRoot >= info.chain.length) {
+          fail(notInsideJson);
+          return errors;
+        }
+        // D7: not inside an encrypted field
+        if (info.viaEncrypted) {
+          fail(
+            `@db.column.derived path '${path}' reads inside a @db.encrypted field — ciphertext cannot be extracted`,
+          );
+          return errors;
+        }
+        // D6: string | number | boolean leaf
+        if (info.leafType === undefined || !JSON_LEAF_TYPES.has(info.leafType)) {
+          fail(
+            `@db.column.derived path '${path}' must end at a string, number or boolean leaf` +
+              (info.leafType ? ` (got '${info.leafType}')` : ""),
+          );
+          return errors;
+        }
+        // D9: an optional path may be absent → the field should be optional (warning)
+        if (info.optional && !field.has("optional")) {
+          fail(
+            `@db.column.derived path '${path}' may be absent — declare the field optional (\`${field.id ?? ""}?:\`) so a missing leaf reads as null`,
+            2,
+          );
+        }
+        return errors;
       },
     }),
 

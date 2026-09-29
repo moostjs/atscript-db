@@ -101,6 +101,13 @@ export interface TFieldMeta {
    * (`bucketUnits`). Since 0.1.132.
    */
   bucketable?: true;
+  /**
+   * Present (true) when the field is a `@db.column.derived` column: its value
+   * is computed from a `@db.json` field of the same row and is never written
+   * — a write payload carrying it is accepted and the key is dropped. UIs
+   * render it read-only. Since 0.1.141.
+   */
+  derived?: true;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
@@ -137,9 +144,11 @@ export interface TMetaResponse {
   actions: TDbActionInfo[];
   crud: TCrudPermissions;
   /**
-   * Physical column name annotated with `@db.column.version`, when the table
-   * opts into optimistic concurrency control (OCC). Absent for tables without
-   * the annotation, i.e. last-write-wins (default) behavior.
+   * Logical field name of the `@db.column.version` field, when the table opts
+   * into optimistic concurrency control (OCC) — the key a client sends in a
+   * write body / `$cas` and reads back on rows. A `@db.column` rename on the
+   * field changes only the storage column, never this name. Absent for tables
+   * without the annotation, i.e. last-write-wins (default) behavior.
    */
   versionColumn?: string;
   /**
@@ -221,11 +230,13 @@ export interface TDbActionInfo {
   /**
    * Stringified gate predicate (`fn.toString()`). Present only for `'row'`
    * and `'rows'` level actions whose decorator declared a `disabled` function.
-   * The function is the batch shape `(rows: TRow[]) => boolean[]` (sync). The
+   * The function is the batch shape `(rows: TRow[]) => (boolean | string)[]`
+   * (sync). Per entry: truthy = disabled — test truthiness, not `=== true`; a
+   * non-empty string is also the human-readable reason (since 0.1.141). The
    * UI evaluates against a level-specific scope to grey-out / hide the
    * button. The server has already enforced this predicate before the
    * action's handler ran — the server is authoritative; this field is purely
-   * a UI hint.
+   * a UI hint. Server-evaluated reasons arrive per row in `$disabledReasons`.
    */
   disabled?: string;
   /**
@@ -337,6 +348,28 @@ export interface TIdentification {
 
 export type TDbStorageType = "column" | "flattened" | "json";
 
+/** Primitive result type of a JSON-leaf extraction (view JSON leaves, derived columns). */
+export type TViewJsonType = "string" | "number" | "boolean";
+
+/**
+ * Where a `@db.column.derived` field reads its value from: a primitive leaf
+ * inside a `@db.json` field of the SAME table (since 0.1.141).
+ */
+export interface TDerivedColumn {
+  /** Logical path of the source leaf (`payload.customer.id`). */
+  sourcePath: string;
+  /**
+   * Physical column of the JSON field the leaf lives in (relational layout:
+   * `@db.column` rename applied, unqualified) — what the generated column's
+   * expression reads.
+   */
+  sourceColumn: string;
+  /** Segments inside {@link sourceColumn} down to the leaf. */
+  jsonPath: string[];
+  /** Declared leaf type — the extraction's type guard. */
+  type: TViewJsonType;
+}
+
 // ── Field Metadata ──────────────────────────────────────────────────────────
 
 export interface TDbFieldMeta {
@@ -408,6 +441,16 @@ export interface TDbFieldMeta {
    * Adapters map this to their native geo storage (e.g. MongoDB GeoJSON Point).
    */
   isGeoPoint?: boolean;
+  /**
+   * `@db.column.derived` (since 0.1.141): the value is computed from a JSON
+   * leaf of the same row. Relational adapters store it as a generated column
+   * (`physicalName` is that column); document adapters store nothing —
+   * `physicalName` is the source's document path, which filters, sorts,
+   * projections and indexes address, and reads fill the field from it.
+   * Never written: write payloads drop it, `$inc` / `$dec` / `$mul` on it are
+   * rejected.
+   */
+  derived?: TDerivedColumn;
 }
 
 // ── Value Formatters ─────────────────────────────────────────────────────
@@ -450,7 +493,24 @@ export interface TExistingColumn {
   pk: boolean;
   /** Serialized default value (e.g., "'active'", "NULL"). */
   dflt_value?: string;
+  /**
+   * `true` for a generated (computed) column — what a `@db.column.derived`
+   * field is stored as on relational adapters. Adapters that introspect it
+   * set it (SQLite `table_xinfo.hidden`, MySQL `EXTRA`, PostgreSQL
+   * `is_generated`); the column diff then decides kind changes by it.
+   * @since 0.1.141
+   */
+  generated?: boolean;
 }
+
+/**
+ * Why a `@db.column.derived` column is dropped and re-added by schema sync:
+ * `kind` — a regular column became derived or a derived one became regular;
+ * `expression` — the source column, path or leaf type changed (compared with
+ * the stored snapshot); `type` — the mapped column type differs.
+ * @since 0.1.141
+ */
+export type TDerivedChangeReason = "kind" | "expression" | "type";
 
 /** Result of comparing desired schema against existing database columns. */
 export interface TColumnDiff {
@@ -461,6 +521,25 @@ export interface TColumnDiff {
   nullableChanged: Array<{ field: TDbFieldMeta; wasNullable: boolean }>;
   defaultChanged: Array<{ field: TDbFieldMeta; oldDefault?: string; newDefault?: string }>;
   conflicts: Array<{ field: TDbFieldMeta; oldName: string; conflictsWith: string }>;
+  /**
+   * Derived columns whose live column no longer matches the model and must
+   * be dropped and re-added (a generated column's expression cannot be
+   * altered in place): `kind` — a regular column became derived or a derived
+   * one became regular (the column-drop policy applies: normal mode rebuilds,
+   * safe mode skips); `expression` — the source path or leaf type in the
+   * stored snapshot differs (engines normalize expression text, so the
+   * snapshot is the baseline); `type` — the mapped column type differs.
+   * Absent (or empty) when nothing changed.
+   *
+   * Invariant: a derived field, and a live generated column, is reported
+   * HERE only — never in `typeChanged`, `nullableChanged` or
+   * `defaultChanged` (a generated column is nullable and has no DEFAULT). On
+   * nested-object adapters derived fields are not part of the diff at all
+   * (`TableMetadata.columnDescriptors` leaves them out: they store nothing
+   * there), so `added` never carries one either.
+   * @since 0.1.141
+   */
+  derivedChanged?: Array<{ field: TDbFieldMeta; reason: TDerivedChangeReason }>;
   /**
    * The primary-key FIELD SET differs between the live table and the model
    * (set semantics — a composite-key reorder is not a change, consistent with

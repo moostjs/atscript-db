@@ -266,10 +266,12 @@ describe("PostgresAdapter", () => {
 
       const deleteCall = driver.calls.find((c) => c.sql.includes("DELETE"));
       expect(deleteCall).toBeDefined();
-      expect(deleteCall!.sql).toContain("ctid");
+      expect(deleteCall!.sql).not.toContain("ctid");
       expect(deleteCall!.sql).toMatch(/\$1/);
-      expect(deleteCall!.sql).toMatch(/\$2/);
+      expect(deleteCall!.sql).toMatch(/\$4/);
       expect(deleteCall!.sql).not.toContain("?");
+      // The filter is bound twice: outer recheck + the LIMIT 1 subquery.
+      expect(deleteCall!.params).toEqual([1, 2, 1, 2]);
     });
   });
 
@@ -388,7 +390,12 @@ describe("PostgresAdapter", () => {
       expect(updateCall!.sql).not.toContain("?");
     });
 
-    it("deleteOne uses ctid subquery", async () => {
+    // WHY: a ctid-keyed DELETE racing a concurrent UPDATE of the row deletes
+    // NOTHING (the committed update moved the tuple to a new ctid, so the
+    // EvalPlanQual recheck fails) — schema sync's lock release lost to its own
+    // in-flight heartbeat refresh this way. The PK follows the updated tuple;
+    // the repeated filter keeps the recheck honest.
+    it("deleteOne keys the outer DELETE on the PK and rechecks the filter", async () => {
       const { UsersTable } = await import("./fixtures/test-table.as");
       const driver = createMockDriver();
       const space = new DbSpace(() => new PostgresAdapter(driver));
@@ -401,10 +408,11 @@ describe("PostgresAdapter", () => {
 
       const deleteCall = driver.calls.find((c) => c.sql.includes("DELETE"));
       expect(deleteCall).toBeDefined();
-      expect(deleteCall!.sql).toContain("ctid");
-      expect(deleteCall!.sql).toContain("LIMIT 1");
-      expect(deleteCall!.sql).toMatch(/\$\d/);
-      expect(deleteCall!.sql).not.toContain("?");
+      expect(deleteCall!.sql).not.toContain("ctid");
+      expect(deleteCall!.sql).toMatch(
+        /^DELETE FROM "auth"."users" WHERE "id" = \$1 AND "id" = \(SELECT "id" FROM "auth"."users" WHERE "id" = \$2 LIMIT 1\)$/,
+      );
+      expect(deleteCall!.params).toEqual([1, 1]);
     });
 
     it("deleteMany uses $N placeholders without ctid", async () => {

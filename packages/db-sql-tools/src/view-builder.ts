@@ -65,9 +65,12 @@ export function viewAggExpr(
  * Builds a CREATE VIEW statement from a view plan and column mappings.
  *
  * Joins render in declaration order — `JOIN` (inner, the default) or
- * `LEFT JOIN` for `kind: "left"`. Column mappings carry PHYSICAL source
- * names; `resolveFieldRef` renders predicate refs (join ON, WHERE, HAVING
- * fallbacks) as `"table"."column"`.
+ * `LEFT JOIN` for `kind: "left"`; a `@db.alias` target renders as
+ * `JOIN "table" AS "Alias"` and is addressed by the alias everywhere else
+ * (since 0.1.141). Column mappings carry PHYSICAL source names (the alias
+ * name for an aliased join); `resolveFieldRef` renders predicate refs (join
+ * ON, WHERE, HAVING fallbacks) as `"table"."column"`. The entry table and a
+ * join target may be views.
  */
 export function buildCreateView(
   dialect: SqlDialect,
@@ -91,7 +94,11 @@ export function buildCreateView(
   for (const join of plan.joins) {
     const onClause = queryNodeToSql(join.condition, resolveFieldRef);
     const keyword = join.kind === "left" ? "LEFT JOIN" : "JOIN";
-    sql += ` ${keyword} ${dialect.quoteIdentifier(join.targetTable)} ON ${onClause}`;
+    const target =
+      join.scope === join.targetTable
+        ? dialect.quoteIdentifier(join.targetTable)
+        : `${dialect.quoteIdentifier(join.targetTable)} AS ${dialect.quoteIdentifier(join.scope)}`;
+    sql += ` ${keyword} ${target} ON ${onClause}`;
   }
 
   // WHERE filter

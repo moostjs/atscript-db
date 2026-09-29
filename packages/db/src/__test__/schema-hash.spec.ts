@@ -2,6 +2,7 @@ import { describe, it, expect } from "vite-plus/test";
 import {
   computeTableSnapshot,
   computeSchemaHash,
+  snapshotToExistingColumns,
   type TTableSnapshot,
 } from "../schema/schema-hash";
 
@@ -556,5 +557,79 @@ describe("computeViewSnapshot — adapter render revision (since 0.1.137)", () =
     );
     expect(snap.viewType).toBe("E");
     expect(snap).not.toHaveProperty("renderRevision");
+  });
+});
+
+// ── Derived columns (since 0.1.141) ────────────────────────────────────────
+
+describe("computeTableSnapshot — derived fields", () => {
+  it("emits `derived` for derived fields only, after `encrypted`, so other snapshots are byte-identical", () => {
+    const plain = mockReadable();
+    const before = JSON.stringify(computeTableSnapshot(plain));
+    const withDerived = mockReadable({
+      fieldDescriptors: [
+        ...plain.fieldDescriptors,
+        {
+          path: "customerId",
+          physicalName: "customerId",
+          designType: "string",
+          optional: true,
+          isPrimaryKey: false,
+          ignored: false,
+          storage: "column",
+          derived: {
+            sourcePath: "payload.customer.id",
+            sourceColumn: "payload",
+            jsonPath: ["customer", "id"],
+            type: "string",
+          },
+        },
+      ],
+    });
+    const snapshot = computeTableSnapshot(withDerived);
+    const derived = snapshot.fields.find((f) => f.physicalName === "customerId")!;
+    expect(Object.keys(derived)).toEqual([
+      "physicalName",
+      "designType",
+      "optional",
+      "isPrimaryKey",
+      "storage",
+      "derived",
+    ]);
+    expect(derived.derived).toEqual({
+      sourceColumn: "payload",
+      jsonPath: ["customer", "id"],
+      type: "string",
+    });
+    expect(snapshot.fields.filter((f) => f.physicalName !== "customerId")).toEqual(
+      computeTableSnapshot(plain).fields,
+    );
+    expect(JSON.stringify(computeTableSnapshot(plain))).toBe(before);
+  });
+
+  it("snapshotToExistingColumns leaves derived snapshot fields out", () => {
+    const snapshot: TTableSnapshot = {
+      tableName: "t",
+      fields: [
+        {
+          physicalName: "id",
+          designType: "number",
+          optional: false,
+          isPrimaryKey: true,
+          storage: "column",
+        },
+        {
+          physicalName: "payload.customer.id",
+          designType: "string",
+          optional: true,
+          isPrimaryKey: false,
+          storage: "column",
+          derived: { sourceColumn: "payload", jsonPath: ["customer", "id"], type: "string" },
+        },
+      ],
+      indexes: [],
+      foreignKeys: [],
+    };
+    expect(snapshotToExistingColumns(snapshot).map((c) => c.name)).toEqual(["id"]);
   });
 });

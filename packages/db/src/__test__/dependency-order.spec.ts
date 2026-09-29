@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vite-plus/test";
-import { reachable, topoOrder } from "../schema/dependency-order";
+import { reachable, stableTopo, topoOrder } from "../schema/dependency-order";
 
 /** Position of `name` in the flattened order. */
 function pos(order: string[][], name: string): number {
@@ -132,5 +132,44 @@ describe("reachable", () => {
       "parent",
     ]);
     expect(reachable([], edges).size).toBe(0);
+  });
+});
+
+// ── stableTopo (since 0.1.141) ──────────────────────────────────────────
+
+const deps = (map: Record<string, string[]>) => (n: string) => map[n] ?? [];
+
+describe("stableTopo", () => {
+  it("keeps the given order when nothing depends on anything", () => {
+    expect(stableTopo(["c", "a", "b"], deps({}))).toEqual({ order: ["c", "a", "b"] });
+  });
+
+  it("emits a node's dependencies right before it, recursively, in their listed order", () => {
+    const result = stableTopo(
+      ["top", "mid", "base", "other"],
+      deps({ top: ["mid"], mid: ["base"], other: ["base"] }),
+    );
+    expect(result).toEqual({ order: ["base", "mid", "top", "other"] });
+  });
+
+  it("ignores self-dependencies and dependencies outside the node set", () => {
+    expect(stableTopo(["v"], deps({ v: ["v", "some_table"] }))).toEqual({ order: ["v"] });
+  });
+
+  it("de-duplicates nodes and never emits a node twice", () => {
+    const result = stableTopo(["a", "b", "a"], deps({ a: ["b"], b: [] }));
+    expect(result).toEqual({ order: ["b", "a"] });
+  });
+
+  it("reports a cycle as the closed path", () => {
+    const result = stableTopo(["x", "a", "b", "c"], deps({ a: ["b"], b: ["c"], c: ["a"] }));
+    expect(result.cycle).toEqual(["a", "b", "c", "a"]);
+    expect(result.order).toEqual(["x"]);
+  });
+
+  it("differs from topoOrder by following inventory order, not names", () => {
+    const nodes = ["z", "y"];
+    expect(stableTopo(nodes, deps({})).order).toEqual(["z", "y"]);
+    expect(topoOrder(nodes, []).flat()).toEqual(["y", "z"]);
   });
 });

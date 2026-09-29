@@ -23,6 +23,7 @@ import {
   validateQueryScope,
   validateRefArgument,
 } from "../../shared/validation-utils";
+import { fieldScopes, isDbTable, relFilterScope } from "../lsp-scopes";
 
 export const dbRelAnnotations: TAnnotationsTree = {
   rel: {
@@ -469,6 +470,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         type: "ref",
         description:
           "The junction table type (must have @db.table and @db.rel.FK fields pointing to both sides).",
+        refFilter: isDbTable,
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
@@ -501,7 +503,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
         const junctionName = args[0].text;
 
         // V2: Junction type must have @db.table (via validateRefArgument)
-        errors.push(...validateRefArgument(args[0], doc, { requireDbTable: true }));
+        errors.push(
+          ...validateRefArgument(args[0], doc, {
+            accept: isDbTable,
+            expected: "must have @db.table annotation.",
+          }),
+        );
         if (errors.length > 0) {
           return errors;
         }
@@ -582,7 +589,9 @@ export const dbRelAnnotations: TAnnotationsTree = {
       argument: {
         name: "condition",
         type: "query",
-        description: "Filter expression restricting which related records are loaded.",
+        description:
+          "Filter expression restricting which related records are loaded — references the related type (and the @db.rel.via junction); unqualified fields belong to the related type.",
+        fieldScope: fieldScopes.relFilter,
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
@@ -607,22 +616,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        // Determine scope based on nav type
-        const targetTypeName = getNavTargetTypeName(field);
-        if (!targetTypeName) {
-          return errors;
+        // FL2/FL3: the related type (+ the junction of a @db.rel.via) is in
+        // scope — the scope the editor completes (lsp-scopes)
+        const scope = relFilterScope(field);
+        if (scope) {
+          errors.push(...validateQueryScope(args[0], scope, doc));
         }
-
-        const allowedTypes: string[] = [targetTypeName];
-        if (hasVia) {
-          const junctionType = getAnnotationAlias(field, "db.rel.via");
-          if (junctionType) {
-            allowedTypes.push(junctionType);
-          }
-        }
-
-        // FL2/FL3: Validate query scope
-        errors.push(...validateQueryScope(args[0], allowedTypes, targetTypeName, doc));
 
         return errors;
       },

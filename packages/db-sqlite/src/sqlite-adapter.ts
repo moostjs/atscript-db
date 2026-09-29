@@ -48,6 +48,8 @@ import {
   esc,
   haversineDistanceExpr,
   similarityToVecMetric,
+  sqliteCollateClause,
+  sqliteDerivedClause,
   sqliteDialect,
   sqliteTypeFromDesignType,
   thresholdToVecDistance,
@@ -457,7 +459,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
@@ -483,7 +485,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
     const result = await this._stmt(() =>
@@ -501,7 +503,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     // Use UPDATE instead of DELETE+INSERT to avoid triggering CASCADE deletes.
     // Full replace (since 0.1.128): every column is assigned — omitted ones
     // become NULL — so the result matches the whole-row replace of the
@@ -533,7 +535,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     // For replaceMany we do a full UPDATE (set all columns)
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumn;
+    const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -657,17 +659,21 @@ export class SqliteAdapter extends BaseDbAdapter {
       for (const field of diff.added) {
         const sqlType = this.typeMapper(field);
         let ddl = `ALTER TABLE "${esc(tableName)}" ADD COLUMN "${esc(field.physicalName)}" ${sqlType}`;
-        if (!field.optional && !field.isPrimaryKey) {
-          ddl += " NOT NULL";
-        }
-        // SQLite ADD COLUMN with NOT NULL requires a DEFAULT; also emit explicit @db.default
-        if (field.defaultValue?.kind === "value") {
-          ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
-        } else if (!field.optional && !field.isPrimaryKey) {
-          ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
-        }
-        if (field.collate) {
-          ddl += ` COLLATE ${field.collate.toUpperCase()}`;
+        if (field.derived) {
+          // A VIRTUAL generated column is the only kind ADD COLUMN accepts —
+          // and it needs no backfill: existing rows compute it on read.
+          ddl += sqliteDerivedClause(field);
+        } else {
+          if (!field.optional && !field.isPrimaryKey) {
+            ddl += " NOT NULL";
+          }
+          // SQLite ADD COLUMN with NOT NULL requires a DEFAULT; also emit explicit @db.default
+          if (field.defaultValue?.kind === "value") {
+            ddl += ` DEFAULT ${defaultValueToSqlLiteral(field.designType, field.defaultValue.value)}`;
+          } else if (!field.optional && !field.isPrimaryKey) {
+            ddl += ` DEFAULT ${defaultValueForType(field.designType)}`;
+          }
+          ddl += sqliteCollateClause(field);
         }
         this._log(ddl);
         this.driver.exec(ddl);
@@ -706,10 +712,10 @@ export class SqliteAdapter extends BaseDbAdapter {
           this.driver.exec(createSql);
 
           // 2. Get columns that exist in both old and new
+          // Generated (derived) columns are computed, never inserted — the
+          // new table recomputes them from the copied JSON source.
           const oldCols = (await this.getExistingColumns()).map((c) => c.name);
-          const newCols = this._table.fieldDescriptors
-            .filter((f) => !f.ignored)
-            .map((f) => f.physicalName);
+          const newCols = this._table.storedDescriptors.map((f) => f.physicalName);
           const oldColSet = new Set(oldCols);
           const commonCols = newCols.filter((c) => oldColSet.has(c));
 
@@ -940,6 +946,12 @@ export class SqliteAdapter extends BaseDbAdapter {
     return sqliteTypeFromDesignType(field.designType);
   }
 
+  /**
+   * `PRAGMA table_xinfo` (since 0.1.141; `table_info` before): it lists
+   * generated columns too (`hidden` 2 = VIRTUAL, 3 = STORED — `table_info`
+   * omits them, so a `@db.column.derived` column would be re-added on every
+   * sync). A virtual table's hidden columns (`hidden` 1) are skipped.
+   */
   async getExistingColumnsForTable(tableName: string): Promise<TExistingColumn[]> {
     return this._stmt(() => {
       const rows = this.driver.all<{
@@ -948,14 +960,23 @@ export class SqliteAdapter extends BaseDbAdapter {
         notnull: number;
         pk: number;
         dflt_value: string | null;
-      }>(`PRAGMA table_info("${esc(tableName)}")`);
-      return rows.map((r) => ({
-        name: r.name,
-        type: r.type,
-        notnull: r.notnull === 1,
-        pk: r.pk > 0,
-        dflt_value: normalizeSqliteDefault(r.dflt_value),
-      }));
+        hidden: number;
+      }>(`PRAGMA table_xinfo("${esc(tableName)}")`);
+      return rows
+        .filter((r) => r.hidden !== 1)
+        .map((r) => {
+          const column: TExistingColumn = {
+            name: r.name,
+            type: r.type,
+            notnull: r.notnull === 1,
+            pk: r.pk > 0,
+            dflt_value: normalizeSqliteDefault(r.dflt_value),
+          };
+          if (r.hidden === 2 || r.hidden === 3) {
+            column.generated = true;
+          }
+          return column;
+        });
     });
   }
 

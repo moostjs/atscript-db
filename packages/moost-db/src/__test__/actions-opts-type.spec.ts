@@ -23,10 +23,10 @@ describe("DbActionOpts type derivation", () => {
     expectTypeOf<DbActionOpts>().toMatchTypeOf<Structural>();
   });
 
-  it("disabled (loose, TRow=unknown) is a batch function (any[] → boolean[])", () => {
+  it("disabled (loose, TRow=unknown) is a batch function (any[] → (boolean | string)[])", () => {
     type DisabledField = NonNullable<DbActionOpts["disabled"]>;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expectTypeOf<DisabledField>().toEqualTypeOf<(rows: any[]) => boolean[]>();
+    expectTypeOf<DisabledField>().toEqualTypeOf<(rows: any[]) => (boolean | string)[]>();
   });
 
   it("requiredFields (loose, TRow=unknown) is plain string[]", () => {

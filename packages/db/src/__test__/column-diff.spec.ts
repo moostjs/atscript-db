@@ -1,7 +1,12 @@
 /* eslint-disable unicorn/consistent-function-scoping */
 import { describe, it, expect } from "vite-plus/test";
 import { computeColumnDiff } from "../schema/column-diff";
-import type { TDbFieldMeta, TExistingColumn } from "../types";
+import type { TFieldSnapshot, TTableSnapshot } from "../schema/schema-hash";
+import type { TDbFieldMeta, TDerivedColumn, TExistingColumn } from "../types";
+import { TableMetadata } from "../table/table-metadata";
+import { MockAdapter, NestedMockAdapter } from "./test-utils";
+import { NoopLogger } from "../logger";
+import { defineAnnotatedType as $ } from "@atscript/typescript/utils";
 
 function field(overrides: Partial<TDbFieldMeta> & { physicalName: string }): TDbFieldMeta {
   return {
@@ -374,5 +379,204 @@ describe("computeColumnDiff — primaryKeyChanged", () => {
       [col("id", "INTEGER", true, true)],
     );
     expect(losing.primaryKeyChanged).toEqual({ from: ["id"], to: [] });
+  });
+});
+
+// ── Derived columns (since 0.1.141) ────────────────────────────────────────
+
+describe("computeColumnDiff — derived columns", () => {
+  const derived = (over: Partial<TDbFieldMeta> = {}): TDbFieldMeta =>
+    ({
+      path: "customerId",
+      physicalName: "customerId",
+      designType: "string",
+      optional: false,
+      isPrimaryKey: false,
+      ignored: false,
+      storage: "column",
+      derived: {
+        sourcePath: "payload.customer.id",
+        sourceColumn: "payload",
+        jsonPath: ["customer", "id"],
+        type: "string",
+      },
+      ...over,
+    }) as TDbFieldMeta;
+  const regular = (over: Partial<TDbFieldMeta> = {}): TDbFieldMeta =>
+    ({
+      path: "customerId",
+      physicalName: "customerId",
+      designType: "string",
+      optional: true,
+      isPrimaryKey: false,
+      ignored: false,
+      storage: "column",
+      ...over,
+    }) as TDbFieldMeta;
+  const live = (over: Partial<TExistingColumn> = {}): TExistingColumn => ({
+    name: "customerId",
+    type: "STRING",
+    notnull: false,
+    pk: false,
+    ...over,
+  });
+  const typeMapper = (f: TDbFieldMeta) => f.designType.toUpperCase();
+  const snapshot = (fieldDerived: TFieldSnapshot["derived"]): TTableSnapshot => ({
+    tableName: "t",
+    fields: [
+      {
+        physicalName: "customerId",
+        designType: "string",
+        optional: false,
+        isPrimaryKey: false,
+        storage: "column",
+        derived: fieldDerived,
+      },
+    ],
+    indexes: [],
+    foreignKeys: [],
+  });
+
+  it("an unchanged derived column reports nothing — not even nullability or a default", () => {
+    const diff = computeColumnDiff(
+      [derived()],
+      [live({ generated: true, dflt_value: "x" })],
+      typeMapper,
+      {
+        snapshot: snapshot({
+          sourceColumn: "payload",
+          jsonPath: ["customer", "id"],
+          type: "string",
+        }),
+      },
+    );
+    expect(diff.derivedChanged).toBeUndefined();
+    expect(diff.nullableChanged).toEqual([]);
+    expect(diff.defaultChanged).toEqual([]);
+    expect(diff.typeChanged).toEqual([]);
+  });
+
+  it("classifies kind (both ways), expression and type changes", () => {
+    const kind = computeColumnDiff([derived()], [live()], typeMapper);
+    expect(kind.derivedChanged).toMatchObject([
+      { reason: "kind", field: { derived: expect.anything() } },
+    ]);
+
+    const back = computeColumnDiff([regular()], [live({ generated: true })], typeMapper);
+    expect(back.derivedChanged).toMatchObject([{ reason: "kind" }]);
+    expect(back.nullableChanged).toEqual([]);
+
+    for (const stored of [
+      { sourceColumn: "payload", jsonPath: ["code"], type: "string" },
+      { sourceColumn: "payload", jsonPath: ["customer", "id"], type: "number" },
+      { sourceColumn: "payload2", jsonPath: ["customer", "id"], type: "string" },
+    ] as Array<Omit<TDerivedColumn, "sourcePath">>) {
+      const expression = computeColumnDiff([derived()], [live({ generated: true })], typeMapper, {
+        snapshot: snapshot(stored),
+      });
+      expect(expression.derivedChanged, JSON.stringify(stored)).toMatchObject([
+        { reason: "expression" },
+      ]);
+    }
+
+    const type = computeColumnDiff(
+      [derived()],
+      [live({ generated: true, type: "BLOB" })],
+      typeMapper,
+      {
+        snapshot: snapshot({
+          sourceColumn: "payload",
+          jsonPath: ["customer", "id"],
+          type: "string",
+        }),
+      },
+    );
+    expect(type.derivedChanged).toMatchObject([{ reason: "type" }]);
+    expect(type.typeChanged).toEqual([]);
+  });
+
+  it("a renamed derived column whose expression also changed is renamed AND rebuilt", () => {
+    const moved = derived({ physicalName: "custId", path: "custId", renamedFrom: "customerId" });
+    const diff = computeColumnDiff([moved], [live({ generated: true })], typeMapper, {
+      snapshot: snapshot({ sourceColumn: "payload", jsonPath: ["code"], type: "string" }),
+    });
+    expect(diff.renamed).toEqual([{ field: moved, oldName: "customerId" }]);
+    expect(diff.derivedChanged).toMatchObject([
+      { reason: "expression", field: { physicalName: "custId" } },
+    ]);
+    expect(diff.removed).toEqual([]);
+    // Same expression: a plain rename
+    const same = computeColumnDiff([moved], [live({ generated: true })], typeMapper, {
+      snapshot: snapshot({ sourceColumn: "payload", jsonPath: ["customer", "id"], type: "string" }),
+    });
+    expect(same.renamed).toHaveLength(1);
+    expect(same.derivedChanged).toBeUndefined();
+    // A regular column renamed onto a generated one: rename + kind rebuild
+    const kind = computeColumnDiff(
+      [regular({ physicalName: "custId", path: "custId", renamedFrom: "customerId" })],
+      [live({ generated: true })],
+      typeMapper,
+    );
+    expect(kind.renamed).toHaveLength(1);
+    expect(kind.derivedChanged).toMatchObject([{ reason: "kind" }]);
+  });
+
+  it("without a snapshot only kind and type drift are visible", () => {
+    const diff = computeColumnDiff([derived()], [live({ generated: true })], typeMapper);
+    expect(diff.derivedChanged).toBeUndefined();
+  });
+
+  it("a new derived column is an add; a dropped one a removal", () => {
+    expect(computeColumnDiff([derived()], [], typeMapper).added).toHaveLength(1);
+    expect(computeColumnDiff([], [live({ generated: true })], typeMapper).removed).toHaveLength(1);
+  });
+
+  it("TableMetadata.columnDescriptors leaves derived fields out on nested-object adapters only; storedDescriptors always", () => {
+    const Order = {
+      __is_atscript_annotated_type: true,
+      type: {},
+      metadata: new Map(),
+      id: "Order",
+    };
+    $("object", Order as any)
+      .prop("id", $().designType("number").$type)
+      .prop(
+        "payload",
+        $("object").prop("customer", $("object").prop("id", $().designType("string").$type).$type)
+          .$type,
+      )
+      .prop("customerId", $().designType("string").$type)
+      .prop("hidden", $().designType("string").$type)
+      .annotate("db.table", "orders");
+    const props = (Order as any).type.props as Map<string, any>;
+    props.get("payload").metadata.set("db.json", true);
+    props.get("hidden").metadata.set("db.ignore", true);
+    const customerId = props.get("customerId");
+    customerId.metadata.set("db.column.derived", true);
+    customerId.ref = { type: () => Order, field: "payload.customer.id" };
+
+    const paths = (list: readonly TDbFieldMeta[]) => list.map((f) => f.path);
+    const relational = new TableMetadata(false);
+    relational.build(Order as any, new MockAdapter(), NoopLogger);
+    expect(paths(relational.columnDescriptors)).toEqual(["id", "payload", "customerId"]);
+    expect(paths(relational.storedDescriptors)).toEqual(["id", "payload"]);
+
+    const nested = new TableMetadata(true);
+    nested.build(Order as any, new NestedMockAdapter(), NoopLogger);
+    expect(paths(nested.columnDescriptors)).toEqual([
+      "id",
+      "payload",
+      "payload.customer",
+      "payload.customer.id",
+    ]);
+    expect(paths(nested.storedDescriptors)).toEqual([
+      "id",
+      "payload",
+      "payload.customer",
+      "payload.customer.id",
+    ]);
+    expect(nested.fieldDescriptors.find((f) => f.path === "customerId")?.derived?.sourcePath).toBe(
+      "payload.customer.id",
+    );
   });
 });

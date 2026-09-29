@@ -22,6 +22,7 @@ import {
   refActionToSql,
   defaultValueForType,
   defaultValueToSqlLiteral,
+  derivedColumnExpr,
   parseRegexString,
   jsonDollarPath,
 } from "@atscript/db-sql-tools";
@@ -218,12 +219,20 @@ export function mysqlIndexPrefix(mappedType: string, bytesPerChar: number): numb
  *    required default-less column on `add`;
  * 5. COLLATE (native `@db.mysql.collate` or portable `@db.column.collate`);
  * 6. ON UPDATE.
+ *
+ * A `@db.column.derived` field (since 0.1.141) renders as a VIRTUAL generated
+ * column — `type [COLLATE …] GENERATED ALWAYS AS (<json extraction>) VIRTUAL`
+ * — with no nullability, DEFAULT, AUTO_INCREMENT or ON UPDATE, on every purpose.
  */
 export function buildColumnDefinition(
   field: TDbFieldMeta,
   ctx: TMysqlColumnContext,
 ): TMysqlColumnDefinition {
   const sqlType = ctx.typeMapper?.(field) ?? mysqlTypeFromField(field);
+  if (field.derived) {
+    const def = `${qi(field.physicalName)} ${sqlType}${mysqlCollateClause(field)} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
+    return { def, inventedDefault: false };
+  }
   const increment =
     ctx.purpose !== "add" && (ctx.incrementFields?.has(field.physicalName) ?? false);
   let def = `${qi(field.physicalName)} ${sqlType}`;
@@ -261,12 +270,7 @@ export function buildColumnDefinition(
     inventedDefault = true;
   }
 
-  const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
-  if (nativeCollate) {
-    def += ` COLLATE ${nativeCollate}`;
-  } else if (field.collate) {
-    def += ` COLLATE ${collationToMysql(field.collate)}`;
-  }
+  def += mysqlCollateClause(field);
 
   const onUpdate = ctx.onUpdateFields?.get(field.physicalName);
   if (onUpdate) {
@@ -595,6 +599,18 @@ export function buildAggregateCount(
 /**
  * Maps portable collation values to MySQL collation names.
  */
+/**
+ * The `COLLATE` clause of a column (native `@db.mysql.collate`, else the
+ * portable `@db.column.collate` mapping) — `""` when none applies.
+ */
+export function mysqlCollateClause(field: TDbFieldMeta): string {
+  const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
+  if (nativeCollate) {
+    return ` COLLATE ${nativeCollate}`;
+  }
+  return field.collate ? ` COLLATE ${collationToMysql(field.collate)}` : "";
+}
+
 export function collationToMysql(collation: TDbCollation): string {
   switch (collation) {
     case "binary": {
@@ -724,8 +740,10 @@ export function mysqlTypeFromField(field: TDbFieldMeta): string {
       if (maxLen !== undefined && maxLen > 65535) {
         return "LONGTEXT";
       }
-      // MySQL requires VARCHAR for primary keys and columns with DEFAULT values
-      if (field.isPrimaryKey || field.defaultValue) {
+      // MySQL requires VARCHAR for primary keys and columns with DEFAULT values;
+      // a derived (generated) string column is VARCHAR too, so a plain index
+      // on it needs no key-length prefix (declare @expect.maxLength to size it)
+      if (field.isPrimaryKey || field.defaultValue || field.derived) {
         return "VARCHAR(255)";
       }
       return "TEXT";

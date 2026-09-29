@@ -1,3 +1,4 @@
+import { DbError } from "../db-error";
 import { AtscriptDbTable } from "../table/db-table";
 import { AtscriptDbView } from "../table/db-view";
 import type { AtscriptDbReadable } from "../table/db-readable";
@@ -129,101 +130,120 @@ export class SyncStore {
   }
 
   // ── Distributed lock ──────────────────────────────────────────────────
+  //
+  // Every lock write is ONE conditional statement (compare-and-set on the
+  // row), never a read followed by an unconditional write: a peer can act
+  // between the two, and a stale write would then delete or overwrite ITS
+  // lock. Mutual exclusion itself rests on the `_id` primary key — the
+  // insert that loses the race fails with a `CONFLICT`.
 
+  private async readLock(): Promise<Record<string, unknown> | null> {
+    const row = await this.controlTable!.findOne({ filter: lockFilter(), controls: {} });
+    return row as Record<string, unknown> | null;
+  }
+
+  /**
+   * Deletes the lock row only while it is still expired — a peer that took
+   * the expired lock over in the meantime keeps its fresh one.
+   */
+  private async deleteExpiredLock(now: number): Promise<void> {
+    await this.controlTable!.deleteMany(lockFilter({ expiresAt: { $lt: now } }));
+  }
+
+  /**
+   * One acquisition attempt: `true` when this pod now holds the lock, `false`
+   * when a live lock (or a peer's concurrent insert) holds it. Any other error
+   * propagates — a failing insert is not contention.
+   */
   async tryAcquireLock(podId: string, ttlMs: number): Promise<boolean> {
     const now = Date.now();
-
-    const existing = (await this.controlTable!.findOne({
-      filter: { _id: { $eq: "sync_lock" } },
-      controls: {},
-    })) as Record<string, unknown> | null;
-
+    const existing = await this.readLock();
     if (existing) {
-      const expiresAt = existing.expiresAt as number;
-      if (expiresAt && expiresAt < now) {
-        await this.controlTable!.deleteOne("sync_lock" as any);
-      } else {
+      if (!isExpired(existing, now)) {
         return false;
       }
+      await this.deleteExpiredLock(now);
     }
 
     try {
       await this.controlTable!.insertOne({
-        _id: "sync_lock",
+        _id: LOCK_ID,
         lockedBy: podId,
         lockedAt: now,
         expiresAt: now + ttlMs,
       } as any);
       return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async refreshLock(podId: string, ttlMs: number): Promise<"refreshed" | "stolen" | "missing"> {
-    const existing = (await this.controlTable!.findOne({
-      filter: { _id: { $eq: "sync_lock" } },
-      controls: {},
-    })) as Record<string, unknown> | null;
-
-    if (!existing) {
-      return "missing";
-    }
-    if (existing.lockedBy !== podId) {
-      return "stolen";
-    }
-
-    await this.controlTable!.replaceOne({
-      _id: "sync_lock",
-      lockedBy: podId,
-      lockedAt: existing.lockedAt,
-      expiresAt: Date.now() + ttlMs,
-    } as any);
-
-    return "refreshed";
-  }
-
-  async releaseLock(podId: string): Promise<void> {
-    try {
-      const existing = (await this.controlTable!.findOne({
-        filter: { _id: { $eq: "sync_lock" } },
-        controls: {},
-      })) as Record<string, unknown> | null;
-
-      if (existing && existing.lockedBy === podId) {
-        await this.controlTable!.deleteOne("sync_lock" as any);
+    } catch (error) {
+      if (error instanceof DbError && error.code === "CONFLICT") {
+        return false;
       }
-    } catch {
-      // Best effort — lock will expire anyway
+      throw error;
     }
   }
 
-  async waitForLock(timeoutMs: number, pollIntervalMs: number): Promise<void> {
+  /** Extends this pod's lock; never touches a lock another pod holds. */
+  async refreshLock(podId: string, ttlMs: number): Promise<"refreshed" | "stolen" | "missing"> {
+    const { matchedCount } = await this.controlTable!.updateMany(
+      lockFilter({ lockedBy: { $eq: podId } }),
+      { expiresAt: Date.now() + ttlMs } as any,
+    );
+    if (matchedCount > 0) {
+      return "refreshed";
+    }
+    return (await this.readLock()) ? "stolen" : "missing";
+  }
+
+  /**
+   * Deletes this pod's lock. Resolves `false` when there was none to delete
+   * (it expired and a peer took it over, or it was removed); errors propagate.
+   */
+  async releaseLock(podId: string): Promise<boolean> {
+    const { deletedCount } = await this.controlTable!.deleteMany(
+      lockFilter({ lockedBy: { $eq: podId } }),
+    );
+    return deletedCount > 0;
+  }
+
+  /**
+   * Polls until the lock is free (or expired — then it is cleared). Resolves
+   * `true` then, `false` once `timeoutMs` has passed with the lock still held.
+   * Acquiring it is the caller's next step.
+   */
+  async waitForLock(timeoutMs: number, pollIntervalMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
-      const lock = (await this.controlTable!.findOne({
-        filter: { _id: { $eq: "sync_lock" } },
-        controls: {},
-      })) as Record<string, unknown> | null;
-
+      const lock = await this.readLock();
       if (!lock) {
-        return;
+        return true;
       }
 
-      const expiresAt = lock.expiresAt as number;
-      if (expiresAt && expiresAt < Date.now()) {
-        await this.controlTable!.deleteOne("sync_lock" as any);
-        return;
+      const now = Date.now();
+      if (isExpired(lock, now)) {
+        await this.deleteExpiredLock(now);
+        return true;
       }
 
       await new Promise<void>((resolve) => {
-        setTimeout(resolve, pollIntervalMs);
+        setTimeout(resolve, Math.min(pollIntervalMs, Math.max(deadline - Date.now(), 0)));
       });
     }
 
-    throw new Error(`Schema sync lock wait timed out after ${timeoutMs}ms`);
+    return false;
   }
+}
+
+const LOCK_ID = "sync_lock";
+
+/** The lock row's filter, narrowed by `conditions` (the compare-and-set part). */
+function lockFilter(conditions?: Record<string, unknown>): any {
+  return { _id: { $eq: LOCK_ID }, ...conditions };
+}
+
+/** A lock row without an expiry never expires (it blocks until the wait times out). */
+function isExpired(lock: Record<string, unknown>, now: number): boolean {
+  const expiresAt = Number(lock.expiresAt);
+  return expiresAt > 0 && expiresAt < now;
 }
 
 // ── Public snapshot reader ───────────────────────────────────────────────

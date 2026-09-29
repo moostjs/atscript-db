@@ -4,7 +4,7 @@ import type { BaseDbAdapter } from "../base-adapter";
 import { UniquSelect } from "../query/uniqu-select";
 import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
-import { FieldMappingStrategy, toBool, toDecimalString } from "./field-mapping";
+import { FieldMappingStrategy, toBool, toDecimalString, type TReadControls } from "./field-mapping";
 
 /**
  * Field mapper for relational adapters (e.g. SQLite, MySQL).
@@ -15,7 +15,12 @@ import { FieldMappingStrategy, toBool, toDecimalString } from "./field-mapping";
 export class RelationalFieldMapper extends FieldMappingStrategy {
   // ── Read path ───────────────────────────────────────────────────────────
 
-  reconstructFromRead(row: Record<string, unknown>, meta: TableMetadata): Record<string, unknown> {
+  // A derived column is a real (generated) column here — `_controls` is unused.
+  reconstructFromRead(
+    row: Record<string, unknown>,
+    meta: TableMetadata,
+    _controls?: TReadControls,
+  ): Record<string, unknown> {
     if (!meta.requiresMappings) {
       return this.applyFromStorageFormatters(this.coerceFieldValues(row, meta), meta);
     }
