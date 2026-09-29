@@ -9,15 +9,27 @@ export function findFKForRelation(
   relation: TDbRelation,
   foreignKeys: ReadonlyMap<string, TDbForeignKey>,
 ): { localFields: string[]; targetFields: string[] } | undefined {
+  const fk = findFKEntryForRelation(relation, foreignKeys);
+  return fk && { localFields: fk.fields, targetFields: fk.targetFields };
+}
+
+/**
+ * The `@db.rel.FK` entry {@link findFKForRelation} pairs with a relation: the
+ * one sharing its alias, else (no alias) the first one targeting its table.
+ */
+export function findFKEntryForRelation(
+  relation: TDbRelation,
+  foreignKeys: ReadonlyMap<string, TDbForeignKey>,
+): TDbForeignKey | undefined {
+  if (relation.alias) {
+    for (const fk of foreignKeys.values()) {
+      if (fk.alias === relation.alias) return fk;
+    }
+    return undefined;
+  }
   const targetTable = resolveRelationTargetTable(relation);
   for (const fk of foreignKeys.values()) {
-    if (relation.alias) {
-      if (fk.alias === relation.alias) {
-        return { localFields: fk.fields, targetFields: fk.targetFields };
-      }
-    } else if (fk.targetTable === targetTable) {
-      return { localFields: fk.fields, targetFields: fk.targetFields };
-    }
+    if (fk.targetTable === targetTable) return fk;
   }
   return undefined;
 }

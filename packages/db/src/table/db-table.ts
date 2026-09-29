@@ -29,7 +29,9 @@ import {
   batchReplaceNestedTo,
   batchReplaceNestedFrom,
   batchReplaceNestedVia,
-  batchPatchNestedTo,
+  planPatchNestedTo,
+  applyPatchNestedTo,
+  planNestedFromVia,
   batchPatchNestedFrom,
   batchPatchNestedVia,
 } from "../rel/nested-writer";
@@ -54,9 +56,11 @@ import type {
   TDbRemoveGuardContext,
   TDbUpdateResult,
   TDbWriteAction,
+  TDbWriteCheck,
   TDbWriteGuardContext,
   TDeleteOptions,
   TFkLookupResolver,
+  TNestedOwner,
   TIdResolveOptions,
   TTableResolver,
   TWriteOptions,
@@ -64,6 +68,7 @@ import type {
   TWriteTableResolver,
   NullableOptional,
 } from "../types";
+import { pkTupleKey, rowMatchesKey, sameKey } from "../shared/keys";
 import { isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
@@ -166,30 +171,121 @@ function _shallowPrunedClone(source: Record<string, unknown>): Record<string, un
 type TInternalWriteOptions<Row> = TWriteOptions<Row> & {
   _depth?: number;
   _action?: TDbWriteAction;
+  /**
+   * Nested FROM children: every row filter also pins `field` (the child's
+   * foreign key to its parent) to the item's value, and an item flagged
+   * `strict` that matches nothing is a concurrent re-parenting → `CONFLICT`.
+   */
+  _ownedBy?: TNestedOwner;
 };
 
+/** The stored row a write item targets (`null` = none), pinned once per call. */
+type TWriteTarget = Record<string, unknown> | null | undefined;
+
+/** Same keys, same key values (across driver representations). */
+function sameFilter(a: FilterExpr, b: FilterExpr): boolean {
+  const aKeys = Object.keys(a);
+  return (
+    aKeys.length === Object.keys(b).length &&
+    aKeys.every((key) =>
+      sameKey((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+    )
+  );
+}
+
 /**
- * {@link TDbWriteGuardContext} handed to a write guard: a sparse per-index
- * cache of pre-image reads, allocated only when `current(i)` is first used.
+ * {@link TDbWriteGuardContext} handed to a write guard: sparse per-index
+ * caches of record filters and pre-image reads, allocated on first use.
+ * The write reuses a read for its own target pin ({@link readFor}).
  */
 class WriteGuardContext<Row> implements TDbWriteGuardContext<Row> {
-  private _pending?: Array<Promise<Row | null> | undefined>;
+  private _filters?: Array<FilterExpr | null | undefined>;
+  private _reads?: Array<Promise<Row | null> | undefined>;
 
   constructor(
     readonly action: TDbWriteAction,
     readonly rows: Row[],
     readonly expectedVersions: ReadonlyArray<number | undefined>,
     private readonly _table: AtscriptDbTable,
+    private readonly _opts?: TIdResolveOptions,
   ) {}
 
-  current(i: number): Promise<Row | null> {
-    const cache = (this._pending ??= []);
-    let pending = cache[i];
-    if (!pending) {
-      pending = this._table._readPreImage(this.rows[i]) as Promise<Row | null>;
-      cache[i] = pending;
+  filterFor(i: number): FilterExpr | null {
+    const filters = (this._filters ??= []);
+    let filter = filters[i];
+    if (filter === undefined) {
+      filter = this._table._recordFilterOrNull(this.rows[i], this._opts);
+      filters[i] = filter;
     }
-    return pending;
+    return filter;
+  }
+
+  current(i: number): Promise<Row | null> {
+    const reads = (this._reads ??= []);
+    let read = reads[i];
+    if (!read) {
+      const filter = this.filterFor(i);
+      read = filter
+        ? (this._table.findOne({ filter, controls: {} } as never) as Promise<Row | null>)
+        : Promise.resolve(null);
+      reads[i] = read;
+    }
+    return read;
+  }
+
+  currentAll(): Promise<Array<Row | null>> {
+    const reads = (this._reads ??= []);
+    const pending: number[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      if (reads[i]) continue;
+      if (this.filterFor(i)) pending.push(i);
+      else reads[i] = Promise.resolve(null);
+    }
+    if (pending.length > 0) {
+      // Memoised synchronously, so a concurrent `current(i)` joins this read.
+      const found = this._readMany(pending.map((i) => this.filterFor(i)!));
+      pending.forEach((i, k) => {
+        reads[i] = found.then((rows) => rows[k]!);
+      });
+    }
+    return Promise.all(this.rows.map((_, i) => reads[i]!));
+  }
+
+  /**
+   * One `findMany` for the `filters` (full rows, like `current(i)`), matched
+   * back in memory; a filter the store matched differently (e.g. a
+   * case-insensitive collation) is re-read on its own.
+   */
+  private async _readMany(filters: FilterExpr[]): Promise<Array<Row | null>> {
+    const table = this._table;
+    const rows = (await table.findMany({
+      filter: filters.length === 1 ? filters[0] : { $or: filters },
+      controls: {},
+    } as never)) as Array<Record<string, unknown>>;
+    const used = new Set<Record<string, unknown>>();
+    const out = filters.map((filter) => {
+      const row = rows.find((r) => rowMatchesKey(r, filter as Record<string, unknown>));
+      if (row) used.add(row);
+      return (row ?? null) as Row | null;
+    });
+    if (used.size < rows.length) {
+      for (let k = 0; k < filters.length; k++) {
+        if (out[k] === null) {
+          out[k] = (await table.findOne({
+            filter: filters[k],
+            controls: {},
+          } as never)) as Row | null;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** The pre-image `current(i)` read by exactly `filter`, if the guard asked for it. */
+  readFor(i: number, filter: FilterExpr): Promise<Row | null> | undefined {
+    const read = this._reads?.[i];
+    const readBy = this._filters?.[i];
+    return read && readBy && sameFilter(readBy, filter) ? read : undefined;
   }
 }
 
@@ -210,6 +306,24 @@ class RemoveGuardContext<Row> implements TDbRemoveGuardContext<Row> {
     } as never) as Promise<Row | null>;
     return this._pending;
   }
+}
+
+/** Number of `true` entries. */
+function countTrue(flags: readonly boolean[]): number {
+  let n = 0;
+  for (const flag of flags) if (flag) n++;
+  return n;
+}
+
+/**
+ * A write item matched nothing although its row was relied upon — a replace
+ * whose nested TO rows were already written, or a nested child re-parented
+ * since the plan. The row changed meanwhile; thrown to roll back.
+ */
+function concurrentChange(): DbError {
+  return new DbError("CONFLICT", [
+    { path: "", message: "The record changed during the write — nothing was written, retry" },
+  ]);
 }
 
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
@@ -322,7 +436,9 @@ export class AtscriptDbTable<
    * Recursive up to `maxDepth` (default 3).
    *
    * `opts.guard` (since 0.1.128) runs once inside the transaction, after
-   * defaults + validation, with the prepared rows — see {@link TWriteOptions}.
+   * defaults + validation, with the prepared rows; `opts.check` (since
+   * 0.1.143) runs once after every phase with the inserted rows' primary-key
+   * filters — see {@link TWriteOptions}.
    */
   public async insertMany(
     payloads: Array<DbPatch<DataType>>,
@@ -334,6 +450,7 @@ export class AtscriptDbTable<
       _action,
       maxDepth: userMax,
       guard,
+      check,
     } = (opts ?? {}) as TInternalWriteOptions<DataType>;
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
@@ -369,6 +486,7 @@ export class AtscriptDbTable<
               items as DataType[],
               Array.from({ length: items.length }),
               this as AtscriptDbTable,
+              opts,
             ),
           );
           validateBatch(validator, items, ctx);
@@ -420,6 +538,15 @@ export class AtscriptDbTable<
           await batchInsertNestedVia(host, originals, result.insertedIds, maxDepth, depth);
         }
 
+        // Post-write check: every inserted row by its resulting primary key.
+        if (check) {
+          await this._runWriteCheck(
+            check,
+            _action ?? "insertMany",
+            this._insertedPkFilters(items, prepared, result.insertedIds),
+          );
+        }
+
         return result;
       }),
     );
@@ -448,7 +575,9 @@ export class AtscriptDbTable<
    * re-create junction rows. Fully recursive up to `maxDepth` (default 3).
    *
    * `opts.guard` (since 0.1.128) runs once inside the transaction, after
-   * `$cas` extraction, defaults + validation — see {@link TWriteOptions}.
+   * `$cas` extraction, defaults + validation; `opts.check` (since 0.1.143)
+   * after every phase — see {@link TWriteOptions}. The nested phases run only
+   * for the rows the main replace matched.
    */
   public async bulkReplace(
     payloads: Array<DbRow<DataType>>,
@@ -458,8 +587,10 @@ export class AtscriptDbTable<
     const {
       _depth,
       _action,
+      _ownedBy,
       maxDepth: userMax,
       guard,
+      check,
     } = (opts ?? {}) as TInternalWriteOptions<DataType>;
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
@@ -492,15 +623,16 @@ export class AtscriptDbTable<
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, items, ctx);
 
+        let guardCtx: WriteGuardContext<DataType> | undefined;
         if (guard) {
-          await guard(
-            new WriteGuardContext<DataType>(
-              _action ?? "replaceMany",
-              items as DataType[],
-              expectedVersions,
-              this as AtscriptDbTable,
-            ),
+          guardCtx = new WriteGuardContext<DataType>(
+            _action ?? "replaceMany",
+            items as DataType[],
+            expectedVersions,
+            this as AtscriptDbTable,
+            opts,
           );
+          await guard(guardCtx);
           validateBatch(validator, items, ctx);
         }
 
@@ -508,9 +640,29 @@ export class AtscriptDbTable<
         await this._encryptItems(items, "write");
 
         const host = this as any as TNestedWriterHost;
+        // The one row each item targets — identified exactly like the main
+        // replace below (primary key first).
+        const rowFilters = this._rowFilters(items, opts);
 
-        // Phase 1: TO dependencies (replace parents)
-        if (canNest) {
+        // FROM ownership checks BEFORE any write: a rejected nested operation
+        // never leaves a partial write, transactions or not.
+        const nestedPlan = canNest
+          ? await planNestedFromVia(host, originals, "replace")
+          : undefined;
+
+        // Each item's stored row, read once — for its check filter and its
+        // nested TO gate.
+        const nestedTo = canNest ? items.map((item) => this._carriesNestedTo(item)) : [];
+        const targets = await this._pinTargets(
+          rowFilters,
+          (i) => nestedTo[i] || (check !== undefined && !this._isPkFilter(rowFilters[i]!)),
+          guardCtx,
+        );
+
+        // Phase 1: TO dependencies (replace parents). Skipped for an item whose
+        // main replace cannot match (missing row / stale `$cas`).
+        const toApplied = this._gateNestedTo(items, nestedTo, targets, expectedVersions);
+        if (toApplied.some(Boolean)) {
           await batchReplaceNestedTo(host, items, maxDepth, depth);
         }
 
@@ -529,8 +681,8 @@ export class AtscriptDbTable<
 
         // Phase 2: Main replace — strip nav fields, reject direct version writes,
         // prepare, replace each (with per-item expectedVersion when supplied).
-        let matchedCount = 0;
         let modifiedCount = 0;
+        const matched: boolean[] = [];
         for (let i = 0; i < items.length; i++) {
           const data = items[i]!;
           for (const navField of this._meta.navFields) {
@@ -539,28 +691,41 @@ export class AtscriptDbTable<
           if (versionColumn !== undefined) {
             assertNoVersionWrites(data, versionColumn);
           }
-          const filter = this._extractRecordFilter(data, opts);
           const prepared = this._fieldMapper.prepareForWrite(data, this._meta, this.adapter);
           const result = await this.adapter.replaceOne(
-            this._fieldMapper.translateFilter(filter, this._meta),
+            this._fieldMapper.translateFilter(rowFilters[i]!, this._meta),
             prepared,
             expectedVersions[i],
           );
-          matchedCount += result.matchedCount;
           modifiedCount += result.modifiedCount;
+          matched[i] = result.matchedCount > 0;
+          if (!matched[i] && (toApplied[i] || _ownedBy?.strict?.[i])) {
+            throw concurrentChange();
+          }
         }
 
+        // Nested FROM / VIA phases only for the rows the main replace matched.
+        const matchedOriginals = canNest ? originals.filter((_, i) => matched[i]) : [];
+
         // Phase 3: FROM dependencies (replace children)
-        if (canNest) {
-          await batchReplaceNestedFrom(host, originals, maxDepth, depth);
+        if (matchedOriginals.length > 0) {
+          await batchReplaceNestedFrom(host, matchedOriginals, maxDepth, depth, nestedPlan);
         }
 
         // Phase 4: VIA dependencies (replace junction records)
-        if (canNest) {
-          await batchReplaceNestedVia(host, originals, maxDepth, depth);
+        if (matchedOriginals.length > 0) {
+          await batchReplaceNestedVia(host, matchedOriginals, maxDepth, depth);
         }
 
-        return { matchedCount, modifiedCount };
+        if (check) {
+          await this._runWriteCheck(
+            check,
+            _action ?? "replaceMany",
+            this._writtenPkFilters(rowFilters, targets, matched),
+          );
+        }
+
+        return { matchedCount: countTrue(matched), modifiedCount };
       }),
     );
   }
@@ -588,7 +753,10 @@ export class AtscriptDbTable<
    *
    * `opts.guard` (since 0.1.128) runs once inside the transaction, after
    * `$cas` extraction and validation, with the patches (identifying fields
-   * present, `$cas` removed) — see {@link TWriteOptions}.
+   * present, `$cas` removed); `opts.check` (since 0.1.143) after every
+   * phase — see {@link TWriteOptions}. The nested phases run only for the
+   * rows the main patch matched; a nested TO object patches the row the
+   * STORED foreign key references.
    */
   public async bulkUpdate(
     payloads: Array<DbPatch<DataType>>,
@@ -598,8 +766,10 @@ export class AtscriptDbTable<
     const {
       _depth,
       _action,
+      _ownedBy,
       maxDepth: userMax,
       guard,
+      check,
     } = (opts ?? {}) as TInternalWriteOptions<DataType>;
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
@@ -637,15 +807,16 @@ export class AtscriptDbTable<
         this._applyDepthCtx(ctx, depth);
         validateBatch(validator, cloned, ctx);
 
+        let guardCtx: WriteGuardContext<DataType> | undefined;
         if (guard) {
-          await guard(
-            new WriteGuardContext<DataType>(
-              _action ?? "updateMany",
-              cloned as DataType[],
-              expectedVersions,
-              this as AtscriptDbTable,
-            ),
+          guardCtx = new WriteGuardContext<DataType>(
+            _action ?? "updateMany",
+            cloned as DataType[],
+            expectedVersions,
+            this as AtscriptDbTable,
+            opts,
           );
+          await guard(guardCtx);
           validateBatch(validator, cloned, ctx);
         }
 
@@ -657,11 +828,28 @@ export class AtscriptDbTable<
         await this._encryptItems(cloned, "patch");
 
         const host = this as any as TNestedWriterHost;
+        // The one row each patch targets — primary key first (the filter keys
+        // are stripped from the SET below, so they never change).
+        const rowFilters = this._rowFilters(cloned, opts);
 
-        // Phase 1: TO relation patches
-        if (canNest) {
-          await batchPatchNestedTo(host, cloned, maxDepth, depth);
-        }
+        // FROM ownership / VIA link checks BEFORE any write: a rejected nested
+        // operation never leaves a partial write, transactions or not.
+        const nestedPlan = canNest ? await planNestedFromVia(host, originals, "patch") : undefined;
+
+        // Each item's stored row, read once — for its check filter and its
+        // nested TO patch.
+        const nestedTo = canNest ? cloned.map((payload) => this._carriesNestedTo(payload)) : [];
+        const targets = await this._pinTargets(
+          rowFilters,
+          (i) => nestedTo[i] || (check !== undefined && !this._isPkFilter(rowFilters[i]!)),
+          guardCtx,
+        );
+
+        // Phase 1: plan the TO relation patches against the STORED foreign keys
+        // (applied after the main patch, only for the rows it matched).
+        const toPlans = nestedTo.includes(true)
+          ? await planPatchNestedTo(host, cloned, targets)
+          : [];
 
         // Validate FK references (application-level, for adapters without native FK support)
         await this._integrity.validateForeignKeys(
@@ -675,8 +863,8 @@ export class AtscriptDbTable<
         // Phase 2: Main patch — strip nav fields, separate ops, decompose, update each.
         // $cas has already been stripped above; direct-write rejection still runs
         // here so the version column never reaches the SET path.
-        let matchedCount = 0;
         let modifiedCount = 0;
+        const matched: boolean[] = [];
         for (let i = 0; i < cloned.length; i++) {
           const payload = cloned[i]!;
           const expectedVersion = expectedVersions[i];
@@ -684,7 +872,7 @@ export class AtscriptDbTable<
           for (const navField of this._meta.navFields) {
             delete data[navField];
           }
-          const filter = this._extractRecordFilter(data, opts);
+          const filter = rowFilters[i]!;
 
           // Strip filter keys from data — they identify the record, not in the SET clause
           for (const key of Object.keys(filter)) {
@@ -710,8 +898,8 @@ export class AtscriptDbTable<
           //     PK-indexed count tells whether the row exists.
           //  3. non-empty          → unchanged below.
           if (isEmptyObject(data) && expectedVersion === undefined) {
-            const exists = await this.adapter.count({ filter: translatedFilter, controls: {} });
-            matchedCount += exists > 0 ? 1 : 0;
+            matched[i] = (await this.adapter.count({ filter: translatedFilter, controls: {} })) > 0;
+            if (!matched[i] && _ownedBy?.strict?.[i]) throw concurrentChange();
             continue;
           }
 
@@ -762,21 +950,36 @@ export class AtscriptDbTable<
               );
             }
           }
-          matchedCount += result.matchedCount;
           modifiedCount += result.modifiedCount;
+          matched[i] = result.matchedCount > 0;
+          if (!matched[i] && _ownedBy?.strict?.[i]) throw concurrentChange();
         }
 
+        // Nested phases only for the rows the main patch matched.
+        if (toPlans.length > 0) {
+          await applyPatchNestedTo(toPlans, maxDepth, depth, matched);
+        }
+        const matchedOriginals = canNest ? originals.filter((_, i) => matched[i]) : [];
+
         // Phase 3: FROM relation patches
-        if (canNest) {
-          await batchPatchNestedFrom(host, originals, maxDepth, depth);
+        if (matchedOriginals.length > 0) {
+          await batchPatchNestedFrom(host, matchedOriginals, maxDepth, depth, nestedPlan);
         }
 
         // Phase 4: VIA relation patches
-        if (canNest) {
-          await batchPatchNestedVia(host, originals, maxDepth, depth);
+        if (matchedOriginals.length > 0) {
+          await batchPatchNestedVia(host, matchedOriginals, maxDepth, depth, nestedPlan);
         }
 
-        return { matchedCount, modifiedCount };
+        if (check) {
+          await this._runWriteCheck(
+            check,
+            _action ?? "updateMany",
+            this._writtenPkFilters(rowFilters, targets, matched),
+          );
+        }
+
+        return { matchedCount: countTrue(matched), modifiedCount };
       }),
     );
   }
@@ -890,26 +1093,37 @@ export class AtscriptDbTable<
 
   /**
    * Deletes a single record by any type-compatible identifier — primary key
-   * or single-field unique index. Uses the same resolution logic as `findById`.
+   * or single-field unique index. Uses the same resolution logic as `findById`:
+   * the id addresses exactly ONE row, primary key first (since 0.1.143 — see
+   * {@link resolveRowFilter}); an id that could name several rows is pinned
+   * inside the transaction, so the guard, the cascade and the delete all see
+   * the same row.
    *
    * When the adapter does not support native foreign keys (e.g. MongoDB),
    * cascade and setNull actions are applied before the delete.
    *
    * `opts.guard` (since 0.1.128) runs inside the transaction once the id has
    * resolved to a filter, before cascade / delete — see {@link TDeleteOptions}.
+   * `opts.scope` (since 0.1.143) is a row scope: an ambiguous id is pinned
+   * among in-scope rows only (see {@link TRowResolveOptions}) and the delete
+   * — guard `current()` and cascade included — targets the row only while it
+   * matches the scope, so an out-of-scope row answers `{ deletedCount: 0 }`
+   * exactly like a missing one.
    * An id that resolves to no filter answers `{ deletedCount: 0 }` without
    * calling the guard.
    */
   public async deleteOne(id: IdType, opts?: TDeleteOptions<DataType>): Promise<TDbDeleteResult> {
     this._ensureBuilt();
-    const filter = this._resolveIdFilter(id, opts);
-    if (!filter) {
+    const candidates = this._idCandidates(id, opts);
+    if (candidates.length === 0) {
       return { deletedCount: 0 };
     }
     const guard = opts?.guard;
     const needsCascade = this._integrity.needsCascade(this._cascadeResolver);
-    const translated = this._fieldMapper.translateFilter(filter, this._meta);
     const run = async (): Promise<TDbDeleteResult> => {
+      const pinned = (await this._pinIdCandidates(candidates, opts?.scope))!;
+      const filter = this._andScope(pinned, opts?.scope);
+      const translated = this._fieldMapper.translateFilter(filter, this._meta);
       if (guard) {
         await guard(new RemoveGuardContext<DataType>(id, filter, this as AtscriptDbTable));
       }
@@ -926,7 +1140,7 @@ export class AtscriptDbTable<
       return this.adapter.deleteOne(translated);
     };
     return remapDeleteFkViolation(this.tableName, () =>
-      guard || needsCascade ? this.adapter.withTransaction(run) : run(),
+      guard || needsCascade || candidates.length > 1 ? this.adapter.withTransaction(run) : run(),
     );
   }
 
@@ -1108,21 +1322,253 @@ export class AtscriptDbTable<
   }
 
   /**
-   * Lazy pre-image read for a guard's `current(i)`: `null` when the row has
-   * no identifying key (e.g. an auto-increment insert) or the key cannot be
-   * resolved — never throws for a missing key.
+   * The record filter a guard's `current(i)` reads its pre-image by: `null`
+   * when the row has no identifying key (e.g. an auto-increment insert) or
+   * the key cannot be resolved — never throws for a missing key. Identified
+   * exactly like the write itself (primary key first, then a unique index —
+   * since 0.1.143), so it is always the row the write targets.
    * @internal
    */
-  async _readPreImage(row: unknown): Promise<DataType | null> {
-    if (!row) return null;
-    let filter: FilterExpr | null;
+  _recordFilterOrNull(row: unknown, opts?: TIdResolveOptions): FilterExpr | null {
+    if (!row || typeof row !== "object") return null;
     try {
-      filter = this._resolveIdFilter(row);
+      return this._extractRecordFilter(row as Record<string, unknown>, opts);
     } catch {
       return null;
     }
-    if (!filter) return null;
-    return (await this.findOne({ filter, controls: {} } as never)) as DataType | null;
+  }
+
+  // ── Internal: write targets, post-write check + nested gating ───────────────
+
+  /**
+   * Each item's record filter (see {@link _extractRecordFilter}). A nested
+   * FROM re-entry (`_ownedBy`) also pins the child's foreign key to its
+   * parent, so the write never touches a child of another parent.
+   */
+  private _rowFilters(
+    items: Array<Record<string, unknown>>,
+    opts: TWriteOptions<DataType> | undefined,
+  ): FilterExpr[] {
+    const owner = (opts as TInternalWriteOptions<DataType> | undefined)?._ownedBy?.field;
+    return items.map((item) => {
+      const filter = this._extractRecordFilter(item, opts);
+      return owner === undefined || item[owner] === undefined
+        ? filter
+        : { ...filter, [owner]: this._prepareFilterValue(owner, item[owner]) };
+    });
+  }
+
+  /** Whether `filter` names every primary-key field (so it IS the row's exact key). */
+  private _isPkFilter(filter: FilterExpr): boolean {
+    const pkFields = this.primaryKeys;
+    return (
+      pkFields.length > 0 &&
+      pkFields.every((f) => (filter as Record<string, unknown>)[f] !== undefined)
+    );
+  }
+
+  /**
+   * The TO relations with their single-field local foreign key (lazily
+   * listed) — what a write pins per item for its nested TO phase.
+   */
+  private _toRelationsCache?: Array<{ navField: string; fkField?: string }>;
+
+  private _toRelations(): Array<{ navField: string; fkField?: string }> {
+    if (!this._toRelationsCache) {
+      const out: Array<{ navField: string; fkField?: string }> = [];
+      for (const [navField, relation] of this._meta.relations) {
+        if (relation.direction !== "to") continue;
+        const fk = this._findFKForRelation(relation);
+        out.push({
+          navField,
+          fkField: fk?.localFields.length === 1 ? fk.localFields[0] : undefined,
+        });
+      }
+      this._toRelationsCache = out;
+    }
+    return this._toRelationsCache;
+  }
+
+  /** Whether `item` carries a nested TO object (Phase 1 work). */
+  private _carriesNestedTo(item: Record<string, unknown>): boolean {
+    return this._toRelations().some(({ navField }) => {
+      const nested = item[navField];
+      return !!nested && typeof nested === "object" && !Array.isArray(nested);
+    });
+  }
+
+  /**
+   * Reads — once per write call, inside its transaction — the stored row
+   * each item `need`s, by the item's record filter: its primary key, version
+   * and single-field TO foreign keys, in ONE read for the batch. A pre-image
+   * the guard's `current(i)` already read by the same filter is reused.
+   * `null` = no such row; `undefined` = not needed.
+   */
+  private async _pinTargets(
+    rowFilters: FilterExpr[],
+    need: (i: number) => boolean,
+    guardCtx?: WriteGuardContext<unknown>,
+  ): Promise<TWriteTarget[]> {
+    const targets: TWriteTarget[] = [];
+    const pending: number[] = [];
+    for (let i = 0; i < rowFilters.length; i++) {
+      if (!need(i)) continue;
+      const read = guardCtx?.readFor(i, rowFilters[i]!);
+      if (read) {
+        targets[i] = (await read) as TWriteTarget;
+      } else {
+        pending.push(i);
+      }
+    }
+    if (pending.length === 0) return targets;
+
+    const select = new Set<string>(this.primaryKeys);
+    const versionField = this._meta.versionField;
+    if (versionField !== undefined) select.add(versionField);
+    for (const { fkField } of this._toRelations()) {
+      if (fkField !== undefined) select.add(fkField);
+    }
+    for (const i of pending) {
+      for (const field in rowFilters[i]) select.add(field);
+    }
+    const controls = { $select: [...select] };
+    const filters = pending.map((i) => rowFilters[i]!);
+    const rows = (await this.findMany({
+      filter: filters.length === 1 ? filters[0] : { $or: filters },
+      controls,
+    } as never)) as Array<Record<string, unknown>>;
+    const used = new Set<Record<string, unknown>>();
+    for (const i of pending) {
+      const row = rows.find((r) => rowMatchesKey(r, rowFilters[i] as Record<string, unknown>));
+      targets[i] = row ?? null;
+      if (row) used.add(row);
+    }
+    // A row the keys did not match in memory (the store compares them
+    // differently, e.g. a case-insensitive collation) — read those one by one.
+    if (used.size < rows.length) {
+      for (const i of pending) {
+        if (targets[i] === null) {
+          targets[i] = (await this.findOne({
+            filter: rowFilters[i],
+            controls,
+          } as never)) as TWriteTarget;
+        }
+      }
+    }
+    return targets;
+  }
+
+  /**
+   * The exact primary-key filter of every row the write matched: the record
+   * filter itself when it is the primary key, else the pinned row's key.
+   */
+  private _writtenPkFilters(
+    rowFilters: FilterExpr[],
+    targets: TWriteTarget[],
+    matched: boolean[],
+  ): FilterExpr[] {
+    const out: FilterExpr[] = [];
+    for (let i = 0; i < rowFilters.length; i++) {
+      if (!matched[i]) continue;
+      const target = targets[i];
+      const filter = this._isPkFilter(rowFilters[i]!)
+        ? rowFilters[i]!
+        : target
+          ? this._pkFilterFrom(target)
+          : null;
+      if (filter) out.push(filter);
+    }
+    return out;
+  }
+
+  /** Invokes a {@link TWriteOptions.check} with de-duplicated PK filters (inside the transaction). */
+  private async _runWriteCheck(
+    check: TDbWriteCheck,
+    action: TDbWriteAction,
+    filters: FilterExpr[],
+  ): Promise<void> {
+    const pkFields = this.primaryKeys;
+    const seen = new Set<string>();
+    const unique: Array<Record<string, unknown>> = [];
+    for (const filter of filters) {
+      const key = pkTupleKey(filter as Record<string, unknown>, pkFields);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(filter as Record<string, unknown>);
+    }
+    await check({
+      action,
+      filters: unique,
+      transactional: this.adapter.isInTransaction(),
+      count: (filter) => this.count({ filter, controls: {} } as never),
+    });
+  }
+
+  /**
+   * The exact primary-key filter of each inserted row: the logical key from
+   * the row (SDK defaults applied), else the stored key the adapter wrote into
+   * the prepared row (e.g. a driver-assigned `_id`), else — single-field keys
+   * only — the adapter's `insertedIds` (auto-increment).
+   */
+  private _insertedPkFilters(
+    items: Array<Record<string, unknown>>,
+    prepared: Array<Record<string, unknown>>,
+    insertedIds: unknown[],
+  ): FilterExpr[] {
+    const pkFields = this.primaryKeys;
+    if (pkFields.length === 0 && items.length > 0) {
+      throw new DbError("INVALID_QUERY", [
+        { path: "", message: "Write check requires a primary key on the table" },
+      ]);
+    }
+    return items.map((item, i) => {
+      const key: Record<string, unknown> = {};
+      for (const field of pkFields) {
+        let value = item[field];
+        if (value === undefined) value = prepared[i]?.[this._meta.columnMap.get(field) ?? field];
+        if (value === undefined && pkFields.length === 1) value = insertedIds[i];
+        if (value === undefined || value === null) {
+          throw new DbError("INVALID_QUERY", [
+            {
+              path: field,
+              message: `Write check: cannot resolve the primary key of inserted row [${i}]`,
+            },
+          ]);
+        }
+        key[field] = value;
+      }
+      return this._pkFilterFrom(key)!;
+    });
+  }
+
+  /**
+   * Drops the nested TO objects of every replace item whose main replace
+   * cannot match (pinned row missing, or stale `$cas`) so Phase 1 never
+   * writes a related row for a replace that does nothing. Returns, per item,
+   * whether its TO objects stay (a later 0-match for such an item is a
+   * concurrent change and rolls back).
+   */
+  private _gateNestedTo(
+    items: Array<Record<string, unknown>>,
+    nestedTo: boolean[],
+    targets: TWriteTarget[],
+    expectedVersions: ReadonlyArray<number | undefined>,
+  ): boolean[] {
+    const versionField = this._meta.versionField;
+    return items.map((item, i) => {
+      if (!nestedTo[i]) return false;
+      const row = targets[i];
+      const expected = expectedVersions[i];
+      const kept =
+        !!row &&
+        (expected === undefined ||
+          versionField === undefined ||
+          sameKey(row[versionField], expected));
+      if (!kept) {
+        for (const { navField } of this._toRelations()) delete item[navField];
+      }
+      return kept;
+    });
   }
 
   /**
@@ -1184,6 +1630,20 @@ export class AtscriptDbTable<
   }
 
   /**
+   * The filter an `updateOne` / `replaceOne` of `payload` targets its row by
+   * — the write's own resolution (primary key first, then a unique index;
+   * see {@link _extractRecordFilter}), so a caller explaining a write's
+   * outcome (e.g. a CAS mismatch) reads exactly the row the write addressed.
+   * Throws `NOT_FOUND` when the payload carries no identifying fields.
+   *
+   * @since 0.1.143
+   */
+  public recordFilter(payload: Record<string, unknown>, opts?: TIdResolveOptions): FilterExpr {
+    this._ensureBuilt();
+    return this._extractRecordFilter(payload, opts);
+  }
+
+  /**
    * Extracts a record-identifying filter from a payload.
    *
    * Resolution order:
@@ -1202,21 +1662,9 @@ export class AtscriptDbTable<
     const pkFields = this.primaryKeys;
 
     // 1. Try primary key
-    if (pkFields.length > 0) {
-      let allPresent = true;
-      for (const field of pkFields) {
-        if (payload[field] === undefined) {
-          allPresent = false;
-          break;
-        }
-      }
-      if (allPresent) {
-        const filter: FilterExpr = {};
-        for (const field of pkFields) {
-          filter[field] = this._prepareFilterValue(field, payload[field]);
-        }
-        return filter;
-      }
+    const pkFilter = this._pkFilterFrom(payload);
+    if (pkFilter) {
+      return pkFilter;
     }
 
     const identifications = this.identificationsVisibleTo(opts?.isFieldVisible);

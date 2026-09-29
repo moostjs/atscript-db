@@ -38,6 +38,7 @@ import type {
   TIdDescriptor,
   TIdentification,
   TIdResolveOptions,
+  TRowResolveOptions,
   TSearchIndexInfo,
   TTableResolver,
   TWriteTableResolver,
@@ -47,13 +48,32 @@ import {
   type FieldMappingStrategy,
   type TReadControls,
   DocumentFieldMapper,
+  isExclusionProjection,
 } from "../strategies/field-mapping";
 import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
 import type { TRelationLoaderHost } from "../rel/relation-loader";
-import { findFKForRelation, findRemoteFK, tableNameOf } from "../rel/relation-helpers";
+import {
+  findFKEntryForRelation,
+  findFKForRelation,
+  findRemoteFK,
+  tableNameOf,
+} from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
 import { assertGeoPoint, guardAggregate, guardQuery, isStrictTable } from "../query/query-guards";
 import { normalizeComputedSelect } from "../query/buckets";
+import { geoIndexNotFoundMessage } from "../shared/index-messages";
+import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
+import { rowMatchesKey } from "../shared/keys";
+
+/** A read translated for the adapter, with what finishing its rows needs — see `_translateRead`. */
+interface TReadPlan {
+  translated: ReturnType<FieldMappingStrategy["translateQuery"]>;
+  /** The controls the rows were read with (`$select` widened by join keys). */
+  controls: TReadControls | undefined;
+  withRelations?: WithRelation[];
+  /** Join keys added to `$select` for `$with` — stripped after loading. */
+  widened: string[];
+}
 
 /**
  * Extracts nav prop names from a query's `$with` array.
@@ -573,6 +593,36 @@ export class AtscriptDbReadable<
     return this._meta.relations;
   }
 
+  /**
+   * The `@db.rel.FK` entry a `@db.rel.to` relation is backed by — paired
+   * exactly like relation loading and nested writes pair them: by the
+   * relation's alias when it has one, else by the target table. `undefined`
+   * for an unknown name, a `@db.rel.from` / `@db.rel.via` relation (their key
+   * lives on the other table) or a TO relation without a matching FK.
+   *
+   * @since 0.1.143
+   */
+  public foreignKeyOf(relationName: string): TDbForeignKey | undefined {
+    const relation = this.relations.get(relationName);
+    if (relation?.direction !== "to") return undefined;
+    return findFKEntryForRelation(relation, this._meta.foreignKeys);
+  }
+
+  /**
+   * Logical paths stored as ONE JSON column (`storage: "json"` — `@db.json`
+   * fields and nested objects / arrays a relational adapter serializes): the
+   * engine cannot address a sub-path of such a column in a projection,
+   * filter or sort, so a permission layer treats it atomically (visible whole
+   * or not at all). Navigation fields excluded; empty on document adapters
+   * (they store nested values natively).
+   *
+   * @since 0.1.143
+   */
+  public get jsonParents(): ReadonlySet<string> {
+    this._ensureBuilt();
+    return this._meta.jsonParents;
+  }
+
   /** The underlying database adapter instance. */
   public get dbAdapter(): A {
     return this.adapter;
@@ -617,6 +667,121 @@ export class AtscriptDbReadable<
     controls: TReadControls | undefined,
   ): Record<string, unknown>[] {
     return this._fieldMapper.reconstructRows(rows, this._meta, controls);
+  }
+
+  /**
+   * Translates a read query for the adapter. A `$select` that leaves out a
+   * key a `$with` relation joins on — a TO relation's foreign key, the key a
+   * FROM / VIA relation is looked up by — is widened with it for the read
+   * (since 0.1.143), and {@link _finishRead} strips it again once the
+   * relations are loaded: the joined object never reads `null` just because
+   * its key was not selected.
+   */
+  private _translateRead(query: Uniquery | undefined): TReadPlan {
+    let readQuery = (query ?? {}) as Uniquery;
+    const controls = readQuery.controls as UniqueryControls | undefined;
+    const withRelations = controls?.$with as WithRelation[] | undefined;
+    let widened: string[] = [];
+    if (withRelations?.length && controls?.$select) {
+      const widen = this._widenSelectForWith(controls.$select, withRelations);
+      if (widen) {
+        readQuery = { ...readQuery, controls: { ...controls, $select: widen.select } } as Uniquery;
+        widened = widen.added;
+      }
+    }
+    return {
+      translated: this._fieldMapper.translateQuery(readQuery, this._meta),
+      controls: readQuery.controls as TReadControls | undefined,
+      withRelations,
+      widened,
+    };
+  }
+
+  /** Reconstructs + decrypts a read's rows, loads its `$with` relations and strips widened keys. */
+  private async _finishRead(
+    results: Record<string, unknown>[],
+    read: TReadPlan,
+  ): Promise<Record<string, unknown>[]> {
+    const rows = this._fromRead(results, read.controls);
+    await this._decryptRows(rows);
+    if (read.withRelations?.length) {
+      await this.loadRelations(rows, read.withRelations);
+      for (const key of read.widened) {
+        for (const row of rows) deletePath(row, key);
+      }
+    }
+    return rows;
+  }
+
+  /** `$select` plus the join keys of `withRelations` it leaves out — `undefined` when none is missing. */
+  private _widenSelectForWith(
+    select: NonNullable<UniqueryControls["$select"]>,
+    withRelations: WithRelation[],
+  ): { select: NonNullable<UniqueryControls["$select"]>; added: string[] } | undefined {
+    const keys = new Set<string>();
+    for (const rel of withRelations) {
+      for (const key of this._joinKeysOf(rel.name)) keys.add(key);
+    }
+    if (keys.size === 0) return undefined;
+    if (isExclusionProjection(select)) {
+      const added = [...keys].filter((key) => key in select);
+      if (added.length === 0) return undefined;
+      const next = { ...select };
+      for (const key of added) delete next[key];
+      return { select: next as NonNullable<UniqueryControls["$select"]>, added };
+    }
+    const named = new Set<string>(
+      Array.isArray(select)
+        ? select.filter((key): key is string => typeof key === "string")
+        : Object.keys(select).filter((key) => (select as Record<string, unknown>)[key]),
+    );
+    // An empty projection reads every field.
+    if (named.size === 0) return undefined;
+    const added = [...keys].filter((key) => selfOrAncestor(key, named) === undefined);
+    if (added.length === 0) return undefined;
+    const next = Array.isArray(select)
+      ? [...select, ...added]
+      : { ...(select as Record<string, unknown>), ...Object.fromEntries(added.map((k) => [k, 1])) };
+    return { select: next as NonNullable<UniqueryControls["$select"]>, added };
+  }
+
+  private _joinKeysCache?: Map<string, readonly string[]>;
+
+  /**
+   * The keys of THIS table a `$with` relation joins on: a TO relation's
+   * foreign-key fields; the fields a FROM relation's (or a VIA junction's)
+   * foreign key references — typically the primary key. An adapter that
+   * loads relations natively re-reads the rows by primary key, so it is
+   * always included there. Empty for an unknown or nested (`a.b`) name.
+   */
+  private _joinKeysOf(relName: string): readonly string[] {
+    const cache = (this._joinKeysCache ??= new Map());
+    let keys = cache.get(relName);
+    if (keys === undefined) {
+      keys = [];
+      const relation = this._meta.relations.get(relName);
+      if (relation?.direction === "to") {
+        keys = this._findFKForRelation(relation)?.localFields ?? [];
+      } else if (relation && this._tableResolver) {
+        const remote =
+          relation.direction === "from"
+            ? this._tableResolver(relation.targetType())
+            : relation.viaType && this._tableResolver(relation.viaType());
+        const fk =
+          remote &&
+          this._findRemoteFK(
+            remote,
+            this.tableName,
+            relation.direction === "from" ? relation.alias : undefined,
+          );
+        keys = fk?.targetFields ?? [];
+      }
+      if (relation && this.adapter.supportsNativeRelations()) {
+        keys = [...new Set([...keys, ...this.primaryKeys])];
+      }
+      cache.set(relName, keys);
+    }
+    return keys;
   }
 
   /**
@@ -724,17 +889,12 @@ export class AtscriptDbReadable<
   ): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
-    const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
-    const translatedQuery = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
-    const result = await this.adapter.findOne(translatedQuery);
+    const read = this._translateRead(query as Uniquery);
+    const result = await this.adapter.findOne(read.translated);
     if (!result) {
       return null;
     }
-    const [row] = this._fromRead([result], query.controls);
-    await this._decryptRows([row]);
-    if (withRelations?.length) {
-      await this.loadRelations([row], withRelations);
-    }
+    const [row] = await this._finishRead([result], read);
     return row as DbResponse<DataType, NavType, Q>;
   }
 
@@ -748,14 +908,8 @@ export class AtscriptDbReadable<
   ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
-    const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
-    const translatedQuery = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
-    const results = await this.adapter.findMany(translatedQuery);
-    const rows = this._fromRead(results, query.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery);
+    const rows = await this._finishRead(await this.adapter.findMany(read.translated), read);
     return rows as Array<DbResponse<DataType, NavType, Q>>;
   }
 
@@ -777,14 +931,9 @@ export class AtscriptDbReadable<
   ): Promise<{ data: Array<DbResponse<DataType, NavType, Q>>; count: number }> {
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
-    const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
-    const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
-    const result = await this.adapter.findManyWithCount(translated);
-    const rows = this._fromRead(result.data, query.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery);
+    const result = await this.adapter.findManyWithCount(read.translated);
+    const rows = await this._finishRead(result.data, read);
     return {
       data: rows as Array<DbResponse<DataType, NavType, Q>>,
       count: result.count,
@@ -971,14 +1120,9 @@ export class AtscriptDbReadable<
     this._ensureBuilt();
     this._ensureSearchable();
     this._guardQuery(query as Uniquery);
-    const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
-    const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
-    const results = await this.adapter.search(text, translated, indexName);
-    const rows = this._fromRead(results, query.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery);
+    const results = await this.adapter.search(text, read.translated, indexName);
+    const rows = await this._finishRead(results, read);
     return rows as Array<DbResponse<DataType, NavType, Q>>;
   }
 
@@ -993,14 +1137,9 @@ export class AtscriptDbReadable<
     this._ensureBuilt();
     this._ensureSearchable();
     this._guardQuery(query as Uniquery);
-    const withRelations = (query.controls as UniqueryControls)?.$with as WithRelation[] | undefined;
-    const translated = this._fieldMapper.translateQuery(query as Uniquery, this._meta);
-    const result = await this.adapter.searchWithCount(text, translated, indexName);
-    const rows = this._fromRead(result.data, query.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery);
+    const result = await this.adapter.searchWithCount(text, read.translated, indexName);
+    const rows = await this._finishRead(result.data, read);
     return {
       data: rows as Array<DbResponse<DataType, NavType, Q>>,
       count: result.count,
@@ -1033,16 +1172,9 @@ export class AtscriptDbReadable<
     );
     this._ensureBuilt();
     this._guardQuery(query as Uniquery | undefined);
-    const withRelations = (query?.controls as UniqueryControls)?.$with as
-      | WithRelation[]
-      | undefined;
-    const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
-    const results = await this.adapter.vectorSearch(vector, translated, indexName);
-    const rows = this._fromRead(results, query?.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery | undefined);
+    const results = await this.adapter.vectorSearch(vector, read.translated, indexName);
+    const rows = await this._finishRead(results, read);
     return rows as Array<DbResponse<DataType, NavType, Q>>;
   }
 
@@ -1065,16 +1197,9 @@ export class AtscriptDbReadable<
     );
     this._ensureBuilt();
     this._guardQuery(query as Uniquery | undefined);
-    const withRelations = (query?.controls as UniqueryControls)?.$with as
-      | WithRelation[]
-      | undefined;
-    const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
-    const result = await this.adapter.vectorSearchWithCount(vector, translated, indexName);
-    const rows = this._fromRead(result.data, query?.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._translateRead(query as Uniquery | undefined);
+    const result = await this.adapter.vectorSearchWithCount(vector, read.translated, indexName);
+    const rows = await this._finishRead(result.data, read);
     return {
       data: rows as Array<DbResponse<DataType, NavType, Q>>,
       count: result.count,
@@ -1126,13 +1251,9 @@ export class AtscriptDbReadable<
       maybePointOrQuery,
       maybeQuery,
     );
-    const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
-    const results = await this.adapter.geoSearch(point, translated, indexName);
-    const rows = this._fromRead(results, query?.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._prepareGeoSearch(point, query, indexName);
+    const results = await this.adapter.geoSearch(point, read.translated, indexName);
+    const rows = await this._finishRead(results, read);
     return rows as Array<DbResponse<DataType, NavType, Q> & { $distance: number }>;
   }
 
@@ -1156,13 +1277,9 @@ export class AtscriptDbReadable<
       maybePointOrQuery,
       maybeQuery,
     );
-    const { translated, withRelations } = this._prepareGeoSearch(point, query, indexName);
-    const result = await this.adapter.geoSearchWithCount(point, translated, indexName);
-    const rows = this._fromRead(result.data, query?.controls);
-    await this._decryptRows(rows);
-    if (withRelations?.length) {
-      await this.loadRelations(rows, withRelations);
-    }
+    const read = this._prepareGeoSearch(point, query, indexName);
+    const result = await this.adapter.geoSearchWithCount(point, read.translated, indexName);
+    const rows = await this._finishRead(result.data, read);
     return {
       data: rows as Array<DbResponse<DataType, NavType, Q> & { $distance: number }>,
       count: result.count,
@@ -1196,25 +1313,18 @@ export class AtscriptDbReadable<
     point: [number, number],
     query: Uniquery | undefined,
     indexName: string | undefined,
-  ): {
-    translated: ReturnType<FieldMappingStrategy["translateQuery"]>;
-    withRelations?: WithRelation[];
-  } {
+  ): TReadPlan {
     this._ensureBuilt();
-    if (!this.adapter.isGeoSearchable()) {
-      throw new DbError("GEO_NOT_SUPPORTED", [
-        {
-          path: "",
-          message: `Geo search is not supported by the adapter behind table "${this.tableName}"`,
-        },
-      ]);
-    }
+    // Schema facts first, adapter capability last: a table without the geo
+    // index answers the same on every adapter (PostgreSQL only learns PostGIS
+    // for tables with geo columns), so a permission layer hiding an index can
+    // answer exactly like a table that has none.
     const geoIndexes = [...this._meta.indexes.values()].filter((index) => index.type === "geo");
     if (geoIndexes.length === 0) {
       throw new DbError("GEO_INDEX_MISSING", [
         {
           path: "",
-          message: `Table "${this.tableName}" declares no @db.index.geo — geoSearch requires a geo index`,
+          message: geoIndexNotFoundMessage(this.tableName),
         },
       ]);
     }
@@ -1222,7 +1332,15 @@ export class AtscriptDbReadable<
       throw new DbError("GEO_INDEX_MISSING", [
         {
           path: indexName,
-          message: `Geo index "${indexName}" not found on table "${this.tableName}"`,
+          message: geoIndexNotFoundMessage(this.tableName, indexName),
+        },
+      ]);
+    }
+    if (!this.adapter.isGeoSearchable()) {
+      throw new DbError("GEO_NOT_SUPPORTED", [
+        {
+          path: "",
+          message: `Geo search is not supported by the adapter behind table "${this.tableName}"`,
         },
       ]);
     }
@@ -1245,11 +1363,7 @@ export class AtscriptDbReadable<
       }
     }
     this._guardQuery(query);
-    const withRelations = (query?.controls as UniqueryControls)?.$with as
-      | WithRelation[]
-      | undefined;
-    const translated = this._fieldMapper.translateQuery((query || {}) as Uniquery, this._meta);
-    return { translated, withRelations };
+    return this._translateRead(query);
   }
 
   // ── Find by ID ──────────────────────────────────────────────────────────
@@ -1258,6 +1372,10 @@ export class AtscriptDbReadable<
    * Finds a single record by any type-compatible identifier — primary key
    * or single-field unique index.
    * The return type excludes nav props unless `$with` is provided in controls.
+   *
+   * The id addresses exactly ONE row, primary key first (since 0.1.143) —
+   * see {@link resolveRowFilter}: when a scalar id equals one row's primary
+   * key and another row's unique key, the primary-key row is returned.
    *
    * ```typescript
    * // Without relations — nav props stripped from result
@@ -1270,39 +1388,114 @@ export class AtscriptDbReadable<
   public async findById<
     Q extends { controls?: UniqueryControls<OwnProps, NavType> } = Record<string, never>,
   >(id: IdType, query?: Q): Promise<DbResponse<DataType, NavType, Q> | null> {
+    return this.findOneByRow(id, { controls: query?.controls }) as Promise<DbResponse<
+      DataType,
+      NavType,
+      Q
+    > | null>;
+  }
+
+  /**
+   * Reads the ONE row an id addresses — resolved exactly like
+   * {@link resolveRowFilter} (primary key first, `opts.scope` /
+   * `opts.isFieldVisible` as there) — with `opts.controls` applied, in one
+   * step: the identifications are probed in order with the caller's
+   * controls and the first row found wins, so no pin-then-reread. The row
+   * must also match `opts.scope` (an out-of-scope row answers `null` like a
+   * missing one).
+   *
+   * @since 0.1.143
+   */
+  public async findOneByRow<
+    Q extends { controls?: UniqueryControls<OwnProps, NavType> } = Record<string, never>,
+  >(id: unknown, opts?: TRowResolveOptions & Q): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
-    const filter = this._resolveIdFilter(id);
-    if (!filter) {
-      return null;
+    const controls = opts?.controls ?? {};
+    for (const candidate of this._idCandidates(id, opts)) {
+      const row = await this.findOne({
+        filter: this._andScope(candidate, opts?.scope),
+        controls,
+      } as Uniquery<OwnProps, NavType>);
+      if (row) return row as DbResponse<DataType, NavType, Q>;
     }
-    return (await this.findOne({
-      filter,
-      controls: query?.controls || {},
-    } as Uniquery<OwnProps, NavType>)) as DbResponse<DataType, NavType, Q> | null;
+    return null;
   }
 
   /**
    * Resolve an id value (scalar or object) into a {@link FilterExpr} using the
-   * same identification resolution as {@link findById}. Public so callers can
+   * same identifications as {@link findById}. Public so callers can
    * AND-combine the id-filter with a row-level read overlay before issuing
    * `findOne` (avoiding the existence leak that `findById` would cause).
    * `opts.isFieldVisible` (since 0.1.134) drops unique indexes over hidden
    * fields — see {@link identificationsVisibleTo}.
+   *
+   * The result is a plain `$or` over every identification the id is
+   * type-compatible with (a scalar can equal one row's primary key AND
+   * another row's unique key), so it may match more than one row. Code that
+   * must address exactly one row — writes, pre-images, `/one` reads — uses
+   * {@link resolveRowFilter} instead.
    */
   public resolveIdFilter(id: unknown, opts?: TIdResolveOptions): FilterExpr | null {
     return this._resolveIdFilter(id, opts);
   }
 
   /**
-   * Resolve an id value into a filter expression.
+   * Resolve an id value (scalar or object) into a filter that matches exactly
+   * ONE row, deterministically and primary key first (since 0.1.143):
+   *
+   * - an id that yields a single identification (e.g. a numeric PK with no
+   *   type-compatible unique key) resolves to it without a read;
+   * - an object id carrying the complete primary key resolves by the primary
+   *   key alone — exactly like a write payload is identified;
+   * - otherwise the identifications are tried in order (primary key first,
+   *   then each unique index): the first one that matches a row wins and the
+   *   result is that row's exact primary-key filter;
+   * - when none matches, the first identification is returned (it matches
+   *   nothing, so callers answer "not found" as usual).
+   *
+   * `null` when the id resolves to no identification at all. Every write
+   * (`deleteOne`, the guards' `current()`) and `findById` go through this
+   * resolution; call it inside the write's transaction when the answer must
+   * stay pinned. `opts.isFieldVisible` as in {@link resolveIdFilter}.
+   *
+   * `opts.scope` (a row-level overlay) restricts which rows count as matches
+   * while the identifications are tried — a row outside it never shadows one
+   * inside it, so the answer is the same as if that row did not exist. AND
+   * the scope onto the result to exclude an out-of-scope row the id names
+   * unambiguously. See {@link TRowResolveOptions}.
+   */
+  public async resolveRowFilter(
+    id: unknown,
+    opts?: TRowResolveOptions,
+  ): Promise<FilterExpr | null> {
+    this._ensureBuilt();
+    return this._pinIdCandidates(this._idCandidates(id, opts), opts?.scope);
+  }
+
+  /**
+   * Resolve an id value into a filter expression (the `$or` of
+   * {@link _idCandidates}; a single candidate is returned as-is).
+   */
+  protected _resolveIdFilter(id: unknown, opts?: TIdResolveOptions): FilterExpr | null {
+    const candidates = this._idCandidates(id, opts, false);
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0]!;
+    return { $or: candidates } as FilterExpr;
+  }
+
+  /**
+   * The ordered identification filters an id value can resolve through —
+   * primary key first, then each unique index.
    *
    * When `preferredId` differs from the PK, scalar ids resolve only against
    * the preferred field (deterministic addressing). Otherwise scalars try PK
    * + every single-field unique index; objects try PK + compound unique
    * indexes. With `opts.isFieldVisible`, only the identifications
-   * {@link identificationsVisibleTo} keeps are tried.
+   * {@link identificationsVisibleTo} keeps are tried. With `pkWins` (the
+   * default), an object id carrying the complete primary key yields the
+   * primary-key filter alone.
    */
-  protected _resolveIdFilter(id: unknown, opts?: TIdResolveOptions): FilterExpr | null {
+  protected _idCandidates(id: unknown, opts?: TIdResolveOptions, pkWins = true): FilterExpr[] {
     const pkFields = this.primaryKeys;
     const preferredFields = this.preferredId;
     const isExplicitPreferred =
@@ -1311,24 +1504,30 @@ export class AtscriptDbReadable<
     const isScalar = id === null || typeof id !== "object";
 
     if (isScalar && isExplicitPreferred && preferredFields.length === 1) {
-      return this._tryFieldFilter(preferredFields[0]!, id);
+      const filter = this._tryFieldFilter(preferredFields[0]!, id);
+      return filter ? [filter] : [];
+    }
+
+    const idObj = isScalar ? null : (id as Record<string, unknown>);
+    if (idObj && pkWins && pkFields.length > 0) {
+      const pkFilter = this._tryCompoundFilter(pkFields, idObj);
+      if (pkFilter) return [pkFilter];
     }
 
     // Accept both scalar id and `{[field]: scalar}` object form.
     const tryScalarOrField = (field: string): FilterExpr | null => {
-      const value = isScalar ? id : (id as Record<string, unknown>)[field];
+      const value = isScalar ? id : idObj![field];
       return value === undefined ? null : this._tryFieldFilter(field, value);
     };
 
-    const orFilters: FilterExpr[] = [];
-    const idObj = isScalar ? null : (id as Record<string, unknown>);
+    const candidates: FilterExpr[] = [];
     const identifications = this.identificationsVisibleTo(opts?.isFieldVisible);
 
     // Single-field identifications (PK + every single-field unique index).
     for (const ident of identifications) {
       if (ident.fields.length !== 1) continue;
       const filter = tryScalarOrField(ident.fields[0]!);
-      if (filter) orFilters.push(filter);
+      if (filter) candidates.push(filter);
     }
 
     // Compound identifications (object form only). PK is unconditional;
@@ -1337,15 +1536,97 @@ export class AtscriptDbReadable<
     if (idObj) {
       for (const ident of identifications) {
         if (ident.fields.length < 2) continue;
-        if (ident.source !== "primaryKey" && orFilters.length > 0) break;
+        if (ident.source !== "primaryKey" && candidates.length > 0) break;
         const filter = this._tryCompoundFilter(ident.fields, idObj);
-        if (filter) orFilters.push(filter);
+        if (filter) candidates.push(filter);
       }
     }
 
-    if (orFilters.length === 0) return null;
-    if (orFilters.length === 1) return orFilters[0];
-    return { $or: orFilters } as FilterExpr;
+    return candidates;
+  }
+
+  /**
+   * Picks the one row a list of identification candidates addresses — see
+   * {@link resolveRowFilter}. A lone candidate needs no read. With a
+   * non-empty `scope`, only rows matching it count as matches.
+   */
+  protected async _pinIdCandidates(
+    candidates: FilterExpr[],
+    scope?: FilterExpr,
+  ): Promise<FilterExpr | null> {
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0]!;
+    // One read over every candidate; the candidate order is applied in memory.
+    const pkFields = this.primaryKeys;
+    const select = new Set<string>(pkFields);
+    for (const candidate of candidates) {
+      for (const field in candidate) select.add(field);
+    }
+    const rows = (await this.findMany({
+      filter: this._andScope({ $or: candidates } as FilterExpr, scope),
+      controls: { $select: [...select] },
+    } as Uniquery<OwnProps, NavType>)) as Array<Record<string, unknown>>;
+    if (rows.length === 0) return candidates[0]!;
+    for (const candidate of candidates) {
+      const row = rows.find((r) => rowMatchesKey(r, candidate as Record<string, unknown>));
+      if (row) return this._pkFilterFrom(row) ?? candidate;
+    }
+    // Values the store compares differently than the key (e.g. a
+    // case-insensitive collation) — probe the candidates one by one.
+    return this._probeIdCandidates(candidates, scope);
+  }
+
+  /** Sequential fallback of {@link _pinIdCandidates}: first candidate matching a row wins. */
+  private async _probeIdCandidates(
+    candidates: FilterExpr[],
+    scope?: FilterExpr,
+  ): Promise<FilterExpr> {
+    for (const candidate of candidates) {
+      const pinned = await this._readPkFilter(candidate, scope);
+      if (pinned) return pinned;
+    }
+    return candidates[0]!;
+  }
+
+  /**
+   * The exact primary-key filter of `row` (values prepared like ids) — `null`
+   * when the table has no primary key or `row` lacks a key field.
+   */
+  protected _pkFilterFrom(row: Record<string, unknown>): FilterExpr | null {
+    const pkFields = this.primaryKeys;
+    if (pkFields.length === 0) return null;
+    const filter: FilterExpr = {};
+    for (const field of pkFields) {
+      const value = row[field];
+      if (value === undefined) return null;
+      const fieldType = this.flatMap.get(field);
+      filter[field] = fieldType ? this.adapter.prepareId(value, fieldType) : value;
+    }
+    return filter;
+  }
+
+  /**
+   * Reads the row `filter` (AND `scope`) matches and returns its exact
+   * primary-key filter (`filter` itself on a table without one); `undefined`
+   * when no row matches.
+   */
+  protected async _readPkFilter(
+    filter: FilterExpr,
+    scope?: FilterExpr,
+  ): Promise<FilterExpr | undefined> {
+    const pkFields = this.primaryKeys;
+    const row = (await this.findOne({
+      filter: this._andScope(filter, scope),
+      controls: pkFields.length > 0 ? { $select: [...pkFields] } : {},
+    } as Uniquery<OwnProps, NavType>)) as Record<string, unknown> | null;
+    return row ? (this._pkFilterFrom(row) ?? filter) : undefined;
+  }
+
+  /** `filter` AND a row scope — `filter` itself when the scope is absent or empty. */
+  protected _andScope(filter: FilterExpr, scope?: FilterExpr): FilterExpr {
+    return scope === undefined || isEmptyObject(scope as Record<string, unknown>)
+      ? filter
+      : ({ $and: [filter, scope] } as FilterExpr);
   }
 
   /** Build a single-key filter from `idObj` over `fields`, or null if any field is missing/incompatible. */

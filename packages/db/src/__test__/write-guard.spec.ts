@@ -59,6 +59,10 @@ class TxAdapter extends MockAdapter {
     this.order.push("findOne");
     return super.findOne(query);
   }
+  override async findMany(query: DbQuery) {
+    this.order.push("findMany");
+    return super.findMany(query);
+  }
 }
 
 describe("table write guards", () => {
@@ -156,6 +160,17 @@ describe("table write guards", () => {
       expect(pre).toBeNull();
       expect(adapter.order).toEqual(["begin", "insertMany", "commit"]);
     });
+
+    it("filterFor(i) / currentAll() without an identifying key: null, no read", async () => {
+      let seen: unknown[] = [];
+      await table.insertMany([{ name: "a" }, { name: "b" }] as any[], {
+        guard: async (ctx) => {
+          seen = [ctx.filterFor(0), ctx.filterFor(1), await ctx.currentAll()];
+        },
+      });
+      expect(seen).toEqual([null, null, [null, null]]);
+      expect(adapter.order).toEqual(["begin", "insertMany", "commit"]);
+    });
   });
 
   describe("update", () => {
@@ -202,6 +217,71 @@ describe("table write guards", () => {
       });
       expect(pre).toMatchObject({ id: 1, name: "old", status: "todo" });
       expect(adapter.order).toEqual(["begin", "findOne", "guard-done", "updateOne", "commit"]);
+    });
+
+    it("currentAll(): every pre-image in ONE findMany, filling current(i)'s memo", async () => {
+      await table.insertOne({ id: 2, name: "two" } as any);
+      adapter.order.length = 0;
+      let all: unknown[] = [];
+      let again: unknown;
+      await table.bulkUpdate([{ id: 1, name: "a" }, { id: 99, name: "b" }, { id: 2 }] as any[], {
+        guard: async (ctx) => {
+          all = await ctx.currentAll();
+          again = await ctx.current(2);
+          expect(await ctx.currentAll()).toEqual(all);
+          adapter.order.push("guard-done");
+        },
+      });
+      expect(all).toHaveLength(3);
+      expect(all[0]).toMatchObject({ id: 1, name: "old" });
+      expect(all[1]).toBeNull();
+      expect(all[2]).toMatchObject({ id: 2, name: "two" });
+      expect(again).toBe(all[2]);
+      expect(adapter.order.slice(0, 3)).toEqual(["begin", "findMany", "guard-done"]);
+      expect(adapter.order).not.toContain("findOne");
+    });
+
+    it("currentAll() reuses a pre-image current(i) already read and reads only the rest", async () => {
+      await table.insertOne({ id: 2, name: "two" } as any);
+      adapter.order.length = 0;
+      const findMany = vi.spyOn(adapter, "findMany");
+      await table.bulkUpdate(
+        [
+          { id: 1, name: "a" },
+          { id: 2, name: "b" },
+        ] as any[],
+        {
+          guard: async (ctx) => {
+            const first = await ctx.current(0);
+            const all = await ctx.currentAll();
+            expect(all[0]).toBe(first);
+            expect(all[1]).toMatchObject({ id: 2, name: "two" });
+          },
+        },
+      );
+      expect(adapter.order.slice(0, 3)).toEqual(["begin", "findOne", "findMany"]);
+      expect(findMany.mock.calls[0]![0].filter).toEqual({ id: 2 });
+    });
+
+    it("filterFor(i): the exact filter the write targets row i by — and current(i) reads by", async () => {
+      const filters: unknown[] = [];
+      await table.bulkUpdate(
+        [
+          { id: 1, name: "a" },
+          { id: 7, name: "b" },
+        ] as any[],
+        {
+          guard: (ctx) => {
+            filters.push(ctx.filterFor(0), ctx.filterFor(1), ctx.filterFor(5));
+            expect(ctx.filterFor(0)).toBe(filters[0]); // memoised
+          },
+        },
+      );
+      expect(filters).toEqual([{ id: 1 }, { id: 7 }, null]);
+      expect(argsOf("updateOne").map((c) => c.args[0])).toEqual([{ id: 1 }, { id: 7 }]);
+      // No read happened for filterFor alone.
+      expect(adapter.order).not.toContain("findOne");
+      expect(adapter.order).not.toContain("findMany");
     });
 
     it("a guard throw leaves the row untouched", async () => {

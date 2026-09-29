@@ -1479,18 +1479,42 @@ describe("AtscriptDbTable — Relations", () => {
       expect(authors[0].name).toBe("Alice From DB");
     });
 
-    it("should use FK from payload when present", async () => {
+    it("should reject a payload that changes the FK AND patches the TO relation (since 0.1.143)", async () => {
       seedAll();
       const postTable = db.getTable(Post);
-      await postTable.updateOne({
-        id: 1,
-        authorId: 2,
-        author: { name: "Bob Patched" },
-      } as any);
+      await expect(
+        postTable.updateOne({
+          id: 1,
+          authorId: 2,
+          author: { name: "Bob Patched" },
+        } as any),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY", errors: [{ path: "authorId" }] });
 
       const authorTable = db.getTable(Author);
       const bob = (await authorTable.findMany({ filter: { id: 2 }, controls: {} })) as any[];
-      expect(bob[0].name).toBe("Bob Patched");
+      expect(bob[0].name).toBe("Bob");
+      const post = (await postTable.findMany({ filter: { id: 1 }, controls: {} })) as any[];
+      expect(post[0].authorId).toBe(1);
+    });
+
+    it("should accept a payload FK equal to the stored one alongside the TO patch", async () => {
+      seedAll();
+      const postTable = db.getTable(Post);
+      await postTable.updateOne({ id: 1, authorId: 1, author: { name: "Alice Same" } } as any);
+      const authorTable = db.getTable(Author);
+      const alice = (await authorTable.findMany({ filter: { id: 1 }, controls: {} })) as any[];
+      expect(alice[0].name).toBe("Alice Same");
+    });
+
+    it("should reject a nested TO key that names a row other than the referenced one", async () => {
+      seedAll();
+      const postTable = db.getTable(Post);
+      await expect(
+        postTable.updateOne({ id: 1, author: { id: 2, name: "Bob Patched" } } as any),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY", errors: [{ path: "author.id" }] });
+      const authorTable = db.getTable(Author);
+      const bob = (await authorTable.findMany({ filter: { id: 2 }, controls: {} })) as any[];
+      expect(bob[0].name).toBe("Bob");
     });
 
     it("should error on null FK when patching TO relation", async () => {
@@ -1609,15 +1633,14 @@ describe("AtscriptDbTable — Relations", () => {
       expect(alice[0].name).toBe("Alice Bulk2");
     });
 
-    it("should error when source record not found for FK read", async () => {
+    it("should skip the TO patch when the source record does not exist (matched 0)", async () => {
       seedAll();
       const postTable = db.getTable(Post);
-      await expect(
-        postTable.updateOne({
-          id: 999,
-          author: { name: "Ghost" },
-        } as any),
-      ).rejects.toThrow("Cannot patch relation 'author' — source record not found");
+      const result = await postTable.updateOne({ id: 999, author: { name: "Ghost" } } as any);
+      expect(result).toEqual({ matchedCount: 0, modifiedCount: 0 });
+      const authorTable = db.getTable(Author);
+      const authors = (await authorTable.findMany({ filter: {}, controls: {} })) as any[];
+      expect(authors.map((a) => a.name)).toEqual(["Alice", "Bob"]);
     });
   });
 

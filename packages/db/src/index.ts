@@ -52,10 +52,17 @@ export type {
 export { getDbFieldOp, separateFieldOps, separateCas, reconcileCas } from "./ops";
 export type { TFieldOps } from "./ops";
 export { isPlainObject, isEmptyObject, getPath, deletePath } from "./shared/object";
+// ── Since 0.1.143 ────────────────────────────────────────────────────────────
+export { selfOrAncestor } from "./shared/object";
+export {
+  searchIndexNotFoundMessage,
+  vectorIndexNotFoundMessage,
+  geoIndexNotFoundMessage,
+} from "./shared/index-messages";
 
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
-export { AtscriptDbView, isAtscriptDbView } from "./table/db-view";
+export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";
 export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 export { BaseDbAdapter, ALL_BUCKET_UNITS } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
@@ -150,10 +157,13 @@ export type {
   TDbWriteGuardContext,
   TDbRemoveGuardContext,
   TDbWriteGuard,
+  TDbWriteCheck,
+  TDbWriteCheckContext,
   TDbRemoveGuard,
   TWriteOptions,
   TDeleteOptions,
   TIdResolveOptions,
+  TRowResolveOptions,
   TTouchManyOptions,
 } from "./types";
 export type { TGenericLogger } from "./logger";

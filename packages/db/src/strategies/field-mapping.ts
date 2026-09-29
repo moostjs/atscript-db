@@ -73,7 +73,7 @@ function isObjectForm(select: unknown): select is Record<string, unknown> {
 }
 
 /** An exclusion projection: object form whose first flag is not `1` / `true`. */
-function isExclusionProjection(select: unknown): select is Record<string, unknown> {
+export function isExclusionProjection(select: unknown): select is Record<string, unknown> {
   if (!isObjectForm(select)) return false;
   for (const flag of Object.values(select)) return flag !== 1 && flag !== true;
   return false;

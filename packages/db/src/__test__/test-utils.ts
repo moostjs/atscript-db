@@ -124,12 +124,16 @@ export class NestedMockAdapter extends MockAdapter {
   }
 }
 
-/** Simple filter matching for tests — supports exact match, $in, and $or */
+/**
+ * Simple filter matching for tests — supports exact match (`null` matches a
+ * missing value), $in, $eq, $lt, $and and $or.
+ */
 export function matchesFilter(row: Record<string, unknown>, filter: FilterExpr): boolean {
   for (const [key, value] of Object.entries(filter)) {
-    if (key === "$or") {
+    if (key === "$or" || key === "$and") {
       const clauses = value as Array<Record<string, unknown>>;
-      if (!clauses.some((clause) => matchesFilter(row, clause))) {
+      const test = (clause: Record<string, unknown>) => matchesFilter(row, clause);
+      if (!(key === "$or" ? clauses.some(test) : clauses.every(test))) {
         return false;
       }
       continue;
@@ -148,7 +152,7 @@ export function matchesFilter(row: Record<string, unknown>, filter: FilterExpr):
       if (!((row[key] as number) < (ops.$lt as number))) {
         return false;
       }
-    } else if (row[key] !== value) {
+    } else if ((row[key] ?? null) !== (value ?? null)) {
       return false;
     }
   }

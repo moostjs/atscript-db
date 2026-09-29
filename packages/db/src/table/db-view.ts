@@ -15,8 +15,9 @@ import type { NullableOptional } from "../types";
 import { AtscriptDbReadable } from "./db-readable";
 import type { TViewPlan, TViewJoin } from "../query/query-tree";
 import { SUPPORTED_AGGREGATE_FNS, type TDbAggregateFn } from "../query/aggregate-fns";
-import { resolveViewSource, viewSourceOf, type TViewSource } from "./view-source";
+import { resolveViewSource, sourceFieldSeals, viewSourceOf, type TViewSource } from "./view-source";
 import { isJsonLeafType } from "../shared/derived-rules";
+import { tableNameOf } from "../rel/relation-helpers";
 import type { TViewJsonType } from "../types";
 
 // Since 0.1.141 the primitive JSON-leaf type lives in `types.ts` (derived
@@ -105,6 +106,101 @@ function readViewAgg(
   return undefined;
 }
 
+/** The type getter of a `@db.view.for` / join / chain ref (a bare getter or `{ type }`). */
+function refType(ref: AtscriptRef): () => TAtscriptAnnotatedType {
+  return typeof ref === "function" ? ref : ref.type;
+}
+
+/**
+ * Where a view field reads from: its chain ref, else — on the entry table —
+ * the aggregate's field, else the same-named field. `sourceType` is
+ * `undefined` for an external view's untyped field (no entry table).
+ */
+function viewFieldSource(
+  fieldName: string,
+  fieldType: TAtscriptAnnotatedType,
+  entryType: (() => TAtscriptAnnotatedType) | undefined,
+): {
+  agg?: TViewAgg;
+  chained: boolean;
+  sourceType?: TAtscriptAnnotatedType;
+  sourcePath: string;
+} {
+  const agg = readViewAgg(fieldType.metadata);
+  // A plain ref (a field typed with a named type, `status: OrderStatus`) is no
+  // chain: it reads the entry table's same-named column like an untyped field.
+  const chainRef = fieldType.ref?.field ? fieldType.ref : undefined;
+  if (chainRef) {
+    return { agg, chained: true, sourceType: chainRef.type(), sourcePath: chainRef.field };
+  }
+  const aggField = agg?.aggField;
+  return {
+    agg,
+    chained: false,
+    sourceType: entryType?.(),
+    sourcePath: aggField && aggField !== "*" ? aggField : fieldName,
+  };
+}
+
+/** View types whose fields already carry their inherited seals. */
+const sealedViews = new WeakSet<TAtscriptAnnotatedType>();
+
+/**
+ * Whether `type` declares a view (managed `@db.view.for` or external
+ * `@db.view`) — how `DbSpace.get` tells views from tables.
+ * @since 0.1.143
+ */
+export function isViewType(type: TAtscriptAnnotatedType): boolean {
+  return type.metadata.has("db.view") || type.metadata.has("db.view.for");
+}
+
+/**
+ * Carries the read seals of each view column's source field onto the view
+ * type's own field metadata (since 0.1.143), so a view never exposes a value
+ * differently from the table it reads:
+ *
+ * - `@db.writeOnly` — a column reading a write-only field (or a leaf of a
+ *   write-only object), or aggregating one, is write-only on the view too, so
+ *   HTTP layers seal it exactly as on the table.
+ * - `@db.encrypted` — a column reading an encrypted field reads its
+ *   ciphertext, so it is encrypted on the view too: rows come back decrypted
+ *   and filters / sorts on it are rejected, as on the table. An aggregate over
+ *   an encrypted field is rejected (the table refuses it as well).
+ *
+ * The source is resolved exactly like {@link AtscriptDbView.getViewColumnMappings}
+ * does ({@link viewFieldSource}); a source that is itself a view is sealed
+ * first. Runs once per view type, when a view over it is first built.
+ */
+function inheritViewFieldSeals(viewType: TAtscriptAnnotatedType): void {
+  if (sealedViews.has(viewType) || viewType.type.kind !== "object") return;
+  sealedViews.add(viewType);
+  try {
+    const forRef = viewType.metadata.get("db.view.for") as AtscriptRef | undefined;
+    const entryType = forRef && refType(forRef);
+    for (const [fieldName, fieldType] of viewType.type.props.entries()) {
+      const { agg, sourceType, sourcePath } = viewFieldSource(fieldName, fieldType, entryType);
+      // COUNT(*) reads no field; an external view's untyped field has no source.
+      if (agg?.aggField === "*" || !sourceType) continue;
+      const source = viewSourceOf(sourceType).type;
+      if (isViewType(source)) inheritViewFieldSeals(source);
+      const seals = sourceFieldSeals(source, sourcePath);
+      if (seals.writeOnly) fieldType.metadata.set("db.writeOnly", true);
+      if (!seals.encrypted) continue;
+      if (agg) {
+        throw new Error(
+          `View "${tableNameOf(viewType)}" field "${fieldName}": @db.agg.${agg.aggFn} over the ` +
+            `@db.encrypted field "${sourcePath}" — ciphertext cannot be aggregated`,
+        );
+      }
+      fieldType.metadata.set("db.encrypted", true);
+    }
+  } catch (error) {
+    // Not sealed: every later use of the view reports the same error.
+    sealedViews.delete(viewType);
+    throw error;
+  }
+}
+
 /**
  * Database view abstraction driven by Atscript `@db.view.*` annotations.
  *
@@ -133,6 +229,16 @@ export class AtscriptDbView<
 
   override get isView(): boolean {
     return true;
+  }
+
+  /**
+   * Builds the view's metadata — first stamping its fields with their
+   * sources' read seals (`inheritViewFieldSeals`, once per view type), so
+   * every metadata consumer sees the sealed type.
+   */
+  protected override _ensureBuilt(): void {
+    if (!this._meta.isBuilt) inheritViewFieldSeals(this._type);
+    super._ensureBuilt();
   }
 
   /**
@@ -167,8 +273,7 @@ export class AtscriptDbView<
     const metadata = this._type.metadata;
 
     // Resolve entry type from @db.view.for (AtscriptRef)
-    const forRef = metadata.get("db.view.for") as AtscriptRef;
-    const entryType = typeof forRef === "function" ? forRef : forRef.type;
+    const entryType = refType(metadata.get("db.view.for") as AtscriptRef);
     const entry = viewSourceOf(entryType());
     if (entry.alias) {
       throw new Error(
@@ -185,8 +290,7 @@ export class AtscriptDbView<
     const joins: TViewJoin[] = [];
     if (rawJoins) {
       for (const join of rawJoins) {
-        const targetRef = join.target;
-        const targetType = typeof targetRef === "function" ? targetRef : targetRef.type;
+        const targetType = refType(join.target);
         const target = viewSourceOf(targetType());
         joins.push({
           targetType: targetType,
@@ -317,33 +421,23 @@ export class AtscriptDbView<
       if (ignored.has(fieldName)) {
         continue;
       }
-      // Aggregate annotation on this field (function, source field, condition)
-      const agg = readViewAgg(fieldType.metadata);
+      // Source: the chain ref, else the aggregate's field, else the same name on the entry table
+      const { agg, chained, sourceType, sourcePath } = viewFieldSource(
+        fieldName,
+        fieldType,
+        plan.entryType,
+      );
       const aggField = agg?.aggField;
       // The one runtime check of the aggregate rules (the compiler reports
       // them too) — renderers rely on it.
       if (aggField === "*" && agg?.aggFn !== "count") {
         fail(fieldName, `aggregate "${agg?.aggFn}" needs a field — only count accepts *`);
       }
-
-      // Source: the chain ref, else the aggregate's field, else the same name on the entry table
-      let sourceType: TAtscriptAnnotatedType;
-      let sourcePath: string;
-      // A plain ref (a field typed with a named type, `status: OrderStatus`) is no
-      // chain: it reads the entry table's same-named column like an untyped field.
-      const chainRef = fieldType.ref?.field ? fieldType.ref : undefined;
-      if (chainRef) {
-        sourceType = chainRef.type();
-        sourcePath = chainRef.field;
-      } else {
-        sourceType = plan.entryType();
-        sourcePath = aggField && aggField !== "*" ? aggField : fieldName;
-      }
-      const src = viewSourceOf(sourceType);
+      const src = viewSourceOf(sourceType!);
       const sourceTable = src.name;
       const joinNullable = leftJoined.has(sourceTable);
 
-      if (aggField === "*" && !chainRef) {
+      if (aggField === "*" && !chained) {
         mappings.push({
           viewColumn: viewName(fieldName) ?? fieldName,
           viewPath: fieldName,

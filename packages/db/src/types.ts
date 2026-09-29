@@ -53,6 +53,19 @@ export interface TSearchIndexInfo {
   description?: string;
   /** Index type: text search or vector similarity search. */
   type?: "text" | "vector";
+  /**
+   * LOGICAL field paths the index reads. Absent when the adapter cannot tell
+   * (e.g. a dynamic document search mapping) — treat it as "every field"
+   * (fail closed) when gating access by field visibility.
+   * @since 0.1.143
+   */
+  fields?: string[];
+  /**
+   * `true` on the index of its `type` that answers a request naming none
+   * (at most one per type).
+   * @since 0.1.143
+   */
+  isDefault?: boolean;
 }
 
 // ── Meta Response ───────────────────────────────────────────────────────────
@@ -680,6 +693,17 @@ export interface AtscriptDbTableLike {
 
 // ── Write Table Resolver ─────────────────────────────────────────────────
 
+/**
+ * Nested FROM re-entry option (internal): pins every child's foreign key
+ * `field` to its parent in the write's row filter; a `strict` item that
+ * matches nothing → `CONFLICT`.
+ * @internal
+ */
+export interface TNestedOwner {
+  field: string;
+  strict?: ReadonlyArray<boolean>;
+}
+
 /** Minimal writable table interface for nested creation/update. */
 export interface AtscriptDbWritable {
   insertOne(
@@ -696,7 +720,7 @@ export interface AtscriptDbWritable {
   ): Promise<TDbUpdateResult>;
   bulkReplace(
     payloads: Array<Record<string, unknown>>,
-    opts?: { maxDepth?: number; _depth?: number },
+    opts?: { maxDepth?: number; _depth?: number; _ownedBy?: TNestedOwner },
   ): Promise<TDbUpdateResult>;
   updateOne(
     payload: Record<string, unknown>,
@@ -704,7 +728,7 @@ export interface AtscriptDbWritable {
   ): Promise<TDbUpdateResult>;
   bulkUpdate(
     payloads: Array<Record<string, unknown>>,
-    opts?: { maxDepth?: number; _depth?: number },
+    opts?: { maxDepth?: number; _depth?: number; _ownedBy?: TNestedOwner },
   ): Promise<TDbUpdateResult>;
   findOne(query: unknown): Promise<Record<string, unknown> | null>;
   count(query: { filter: Record<string, unknown> }): Promise<number>;
@@ -831,10 +855,33 @@ export interface TDbWriteGuardContext<Row = Record<string, unknown>> {
   readonly expectedVersions: ReadonlyArray<number | undefined>;
   /**
    * Lazy, memoised pre-image of `rows[i]` by its identifying filter, read
-   * inside the transaction. `null` when the row is missing OR when it carries
+   * inside the transaction. Identified exactly like the write (primary key
+   * first, then a unique index — since 0.1.143), so it is always the row the
+   * write targets. `null` when the row is missing OR when it carries
    * no identifying key yet (e.g. auto-increment inserts) — never throws.
    */
   current(i: number): Promise<Row | null>;
+  /**
+   * Every row's pre-image in ONE read (since 0.1.143): parallel to `rows`,
+   * each entry exactly what `current(i)` resolves to — a single `findMany`
+   * by the rows' record filters inside the transaction, which fills the
+   * same per-index memo (an index `current(i)` already read is reused, a
+   * later `current(i)` reads nothing). Prefer it over a `current(i)` loop
+   * for batches.
+   */
+  currentAll(): Promise<Array<Row | null>>;
+  /**
+   * The exact filter the write identifies `rows[i]` by (since 0.1.143) —
+   * its primary key, else the unique index it carries (see `current(i)`),
+   * each naming at most ONE row — or `null` when the row has no identifying
+   * key yet (e.g. an auto-increment insert). The filter `current(i)` reads
+   * by; memoised per index on first use (change a row's identifying fields
+   * before asking, not after). Combine it with a policy filter to check
+   * the batch in the database without reading it — every targeted row
+   * matches `policy` iff `count({ $and: [{ $or: filters }, policy] })`
+   * equals the number of DISTINCT filters (a missing row counts as a miss).
+   */
+  filterFor(i: number): _FilterExpr | null;
 }
 
 /**
@@ -846,7 +893,10 @@ export interface TDbWriteGuardContext<Row = Record<string, unknown>> {
 export interface TDbRemoveGuardContext<Row = Record<string, unknown>> {
   /** The id `deleteOne` was called with. */
   readonly id: unknown;
-  /** `table.resolveIdFilter(id)` — never null here. */
+  /**
+   * The exact filter the delete targets — `table.resolveRowFilter(id)`, pinned
+   * inside the transaction (primary key first, since 0.1.143). Never null here.
+   */
   readonly filter: _FilterExpr;
   /** Lazy, memoised pre-image of the row about to be deleted (`null` when missing). */
   current(): Promise<Row | null>;
@@ -877,6 +927,12 @@ export interface TTouchManyOptions {
  * `isFieldVisible` (since 0.1.134, see {@link TIdResolveOptions}) applies to the
  * top-level rows only — a payload without its primary key identifies through
  * a unique index; nested-relation writes ignore it.
+ *
+ * The nested re-entries a deep write performs on related tables get neither
+ * `guard`, `check` nor `isFieldVisible` — they run with the table's own
+ * integrity rules only (a nested write touches only rows related to the
+ * record being written). A permission layer that must authorize related
+ * tables rejects nested payloads up front.
  */
 export interface TWriteOptions<Row = Record<string, unknown>> extends TIdResolveOptions {
   /** Nested-relation write recursion limit (default 3). */
@@ -890,10 +946,54 @@ export interface TWriteOptions<Row = Record<string, unknown>> extends TIdResolve
    * for the nested re-entries a deep write performs on related tables.
    */
   guard?: TDbWriteGuard<Row>;
+  /**
+   * Post-write check (since 0.1.143): invoked exactly once per top-level call,
+   * inside the table's transaction, AFTER the main write and every
+   * nested-relation phase — see {@link TDbWriteCheckContext}. A throw rolls
+   * the transaction back (when `ctx.transactional`) and propagates unchanged.
+   * Never runs for the nested re-entries a deep write performs on related tables.
+   */
+  check?: TDbWriteCheck;
 }
 
-/** Options of `deleteOne`. `isFieldVisible` since 0.1.134 — see {@link TIdResolveOptions}. */
-export interface TDeleteOptions<Row = Record<string, unknown>> extends TIdResolveOptions {
+/**
+ * Context handed to a write {@link TWriteOptions.check} (since 0.1.143) — and
+ * through it to `AsDbController.checkWrite()`. Lets a permission layer verify
+ * the POST-image of a write with the database's own filter semantics (a
+ * row-level "WITH CHECK"): count the written rows that still match a policy
+ * filter and throw when one does not.
+ */
+export interface TDbWriteCheckContext {
+  /** The table method the check runs for (`insertOne` → `insert`, …). */
+  readonly action: TDbWriteAction;
+  /**
+   * One exact primary-key filter per row the call wrote (inserted rows by
+   * their resulting PK, updated / replaced rows by the PK of the row the
+   * write actually targeted), de-duplicated. Rows the write matched nothing
+   * for are absent.
+   */
+  readonly filters: ReadonlyArray<Record<string, unknown>>;
+  /**
+   * `true` when the check runs inside a real transaction, so a throw rolls
+   * the write back. `false` on adapters whose transaction is a pass-through
+   * (e.g. a standalone MongoDB) — the write is already durable, so a caller
+   * that needs a hard guarantee must validate BEFORE the write instead.
+   */
+  readonly transactional: boolean;
+  /** Counts rows matching `filter` inside the check's transaction. */
+  count(filter: Record<string, unknown>): Promise<number>;
+}
+
+/** A post-write check — see {@link TWriteOptions.check}. */
+export type TDbWriteCheck = (ctx: TDbWriteCheckContext) => void | Promise<void>;
+
+/**
+ * Options of `deleteOne`. `isFieldVisible` since 0.1.134 — see
+ * {@link TIdResolveOptions}. `scope` since 0.1.143 — see
+ * {@link TRowResolveOptions}; on `deleteOne` it also restricts the delete
+ * itself (an out-of-scope row is not deleted, `{ deletedCount: 0 }`).
+ */
+export interface TDeleteOptions<Row = Record<string, unknown>> extends TRowResolveOptions {
   /**
    * Validated-stage guard (since 0.1.128): invoked inside the table's
    * transaction after the id resolved to a filter and before cascade /
@@ -912,6 +1012,25 @@ export interface TIdResolveOptions {
    * `@meta.id` fields always count as visible.
    */
   isFieldVisible?: (path: string) => boolean;
+}
+
+/**
+ * Options of `resolveRowFilter` (and `deleteOne`) — see {@link TIdResolveOptions}.
+ *
+ * @since 0.1.143
+ */
+export interface TRowResolveOptions extends TIdResolveOptions {
+  /**
+   * Row scope (e.g. a per-request row-level read overlay). When an id could
+   * name several rows (a scalar equal to one row's primary key and another
+   * row's unique key), only rows matching `scope` count while the
+   * identifications are tried primary key first — so a row outside the scope
+   * can never shadow one inside it, and the outcome is exactly what it would
+   * be if the out-of-scope row did not exist. It does not filter the result
+   * itself: AND the scope onto the returned filter (or guard the write) to
+   * exclude an out-of-scope row the id names unambiguously. Empty = no scope.
+   */
+  scope?: _FilterExpr;
 }
 
 // ── Nullable typing (Group C: read-side generics; since 0.1.128) ─────────────

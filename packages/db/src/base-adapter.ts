@@ -11,6 +11,7 @@ import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from
 import { DbError } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
 import { createFailureCollector } from "./shared/failure-collector";
+import { geoIndexNotFoundMessage } from "./shared/index-messages";
 
 import type {
   DbQuery,
@@ -232,6 +233,17 @@ export abstract class BaseDbAdapter {
    */
   protected _getTransactionState(): unknown {
     return findTxContext(this._transactionOwner())?.state;
+  }
+
+  /**
+   * `true` when the current async context runs inside a REAL transaction of
+   * this adapter (its owner) — one a throw rolls back (since 0.1.143).
+   * `false` outside any transaction and inside a pass-through
+   * `withTransaction` (adapters without transaction primitives such as the
+   * in-memory one, a standalone MongoDB topology).
+   */
+  isInTransaction(): boolean {
+    return this._getTransactionState() !== undefined;
   }
 
   /**
@@ -697,6 +709,27 @@ export abstract class BaseDbAdapter {
     return [];
   }
 
+  private _physicalToLogical?: Map<string, string>;
+
+  /**
+   * The LOGICAL field paths an index reads (its `fields` carry physical
+   * names) — what adapters report as {@link TSearchIndexInfo.fields}. A
+   * derived column never shadows the regular field sharing its physical name.
+   * @since 0.1.143
+   */
+  protected _indexLogicalPaths(index: TDbIndex): string[] {
+    let logical = this._physicalToLogical;
+    if (!logical) {
+      logical = new Map();
+      for (const fd of this._table.fieldDescriptors) {
+        if (fd.ignored || (fd.derived && logical.has(fd.physicalName))) continue;
+        logical.set(fd.physicalName, fd.path);
+      }
+      this._physicalToLogical = logical;
+    }
+    return index.fields.map((field) => logical.get(field.name) ?? field.name);
+  }
+
   /**
    * Whether this adapter can run TEXT search — `search()`, `searchWithCount()`
    * and the grouped `$search` path all gate on it. Vector capability is a
@@ -812,7 +845,7 @@ export abstract class BaseDbAdapter {
       throw new DbError("GEO_INDEX_MISSING", [
         {
           path: indexName ?? "",
-          message: `No geo index${indexName ? ` "${indexName}"` : ""} on "${this._table.tableName}"`,
+          message: geoIndexNotFoundMessage(this._table.tableName, indexName),
         },
       ]);
     }

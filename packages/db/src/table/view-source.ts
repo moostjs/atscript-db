@@ -207,6 +207,36 @@ function sourceIndex(type: TAtscriptAnnotatedType): TSourceIndex {
 }
 
 /**
+ * The read seals a view column inherits from the source path it reads
+ * (since 0.1.143): `writeOnly` when the path or any ancestor object is
+ * `@db.writeOnly` (a leaf of a sealed object is sealed too); `encrypted` when
+ * the path itself is `@db.encrypted` (it reads the ciphertext column).
+ * Reads the source's live field metadata, so a source VIEW whose own fields
+ * inherited a seal (see `inheritViewFieldSeals`) passes it on.
+ * @since 0.1.143
+ */
+export function sourceFieldSeals(
+  sourceType: TAtscriptAnnotatedType,
+  logicalPath: string,
+): { writeOnly: boolean; encrypted: boolean } {
+  const { flatMap } = sourceIndex(sourceType);
+  // Top-level props are read off the type itself: a seal stamped after the
+  // (cached) index was built is on the prop, not on a flat-union copy.
+  const props = sourceType.type.kind === "object" ? sourceType.type.props : undefined;
+  const seals = { writeOnly: false, encrypted: false };
+  let prefix = "";
+  for (const segment of logicalPath.split(".")) {
+    const node = prefix ? flatMap.get(`${prefix}.${segment}`) : props?.get(segment);
+    prefix = prefix ? `${prefix}.${segment}` : segment;
+    const metadata = node?.metadata;
+    if (!metadata) break;
+    if (metadata.has("db.writeOnly")) seals.writeOnly = true;
+    if (prefix === logicalPath && metadata.has("db.encrypted")) seals.encrypted = true;
+  }
+  return seals;
+}
+
+/**
  * Resolves a LOGICAL path of a source table (a view field's chain ref, an
  * aggregate's field, a predicate operand) to where it is physically stored.
  * Internal — `AtscriptDbView.resolveRefSource` is the public entry.

@@ -2,7 +2,7 @@ export type { TRelationLoaderHost } from "./relation-loader";
 export { loadRelationsImpl } from "./relation-loader";
 export { findFKForRelation, findRemoteFK, resolveRelationTargetTable } from "./relation-helpers";
 
-export type { TNestedWriterHost } from "./nested-writer";
+export type { TNestedWriterHost, TNestedToPatchPlan, TNestedFromViaPlan } from "./nested-writer";
 export {
   checkDepthOverflow,
   validateBatch,
@@ -14,6 +14,9 @@ export {
   batchReplaceNestedFrom,
   batchReplaceNestedVia,
   batchPatchNestedTo,
+  planPatchNestedTo,
+  applyPatchNestedTo,
+  planNestedFromVia,
   batchPatchNestedFrom,
   batchPatchNestedVia,
 } from "./nested-writer";

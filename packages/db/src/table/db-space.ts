@@ -1,7 +1,7 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
 import { AtscriptDbTable } from "./db-table";
-import { AtscriptDbView } from "./db-view";
+import { AtscriptDbView, isViewType } from "./db-view";
 import type { AtscriptDbReadable } from "./db-readable";
 import { aliasTargetOf } from "./view-source";
 import type { BaseDbAdapter } from "../base-adapter";
@@ -100,7 +100,7 @@ export class DbSpace {
    * appropriate instance. Uses `@db.view` or `@db.view.for` presence to distinguish.
    */
   get<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbReadable<T> {
-    if (type.metadata.has("db.view") || type.metadata.has("db.view.for")) {
+    if (isViewType(type)) {
       return this.getView(type, logger);
     }
     return this.getTable(type, logger);
