@@ -9,7 +9,7 @@ CRUD operations the controller exposes. UI clients read it to decide which
 edit / delete / insert affordances to render.
 
 ```typescript
-type TCrudOp = "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove";
+type TCrudOp = "query" | "pages" | "one" | "geo" | "insert" | "update" | "replace" | "remove";
 type TCrudPermissions = Partial<Record<TCrudOp, string[]>>;
 ```
 
@@ -33,6 +33,7 @@ A typical writable controller emits all seven keys:
       "select",
       "search",
       "index",
+      "fuzzy",
       "vector",
       "threshold",
       "with",
@@ -47,6 +48,7 @@ A typical writable controller emits all seven keys:
       "select",
       "search",
       "index",
+      "fuzzy",
       "vector",
       "threshold",
       "with",
@@ -65,12 +67,14 @@ A typical writable controller emits all seven keys:
 
 | Class                       | Emitted keys                                       |
 | --------------------------- | -------------------------------------------------- |
-| `AsDbReadableController`    | `query`, `pages`, `one`                            |
+| `AsDbReadableController`    | `query`, `pages`, `one`; `geo` when geo-searchable |
 | `AsDbController`            | inherits + `insert`, `update`, `replace`, `remove` |
 | `AsValueHelpController`     | `query`, `pages`, `one`                            |
 | `AsJsonValueHelpController` | `query`, `pages`, `one`                            |
 
-The read-op control whitelists are static per handler. Importable as constants:
+`geo` advertises the [`/geo` endpoint](/search/geo-search#http-access-get-geo). It is emitted only when `/meta` reports `geoSearchable: true` — the adapter supports geo search **and** the table declares a `@db.index.geo` index — and is absent otherwise (so `AsDbController` inherits it on the same condition). Value-help controllers never emit it.
+
+The read-op control whitelists are static per handler. The `query`, `pages` and `one` lists are importable as constants (the `geo` list has none):
 
 ```typescript
 import { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "@atscript/moost-db";
@@ -81,6 +85,7 @@ import { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "@atscript/moost-db
 | `query` | `filter, insights, skip, limit, count, sort, select, search, index, fuzzy, vector, threshold, with, actions, groupBy` |
 | `pages` | `filter, page, size, sort, select, search, index, fuzzy, vector, threshold, with, actions`                            |
 | `one`   | `select, with, actions`                                                                                               |
+| `geo`   | `filter, insights, center, maxDistance, minDistance, index, select, skip, limit, page, size, with, actions`           |
 
 `actions` is the URL-control name for [`$actions=true`](./actions#actions-augmentation) — when the caller asks the server to compute per-row action availability.
 

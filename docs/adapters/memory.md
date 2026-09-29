@@ -140,6 +140,7 @@ Schema sync provisions an in-memory `__atscript_control` table, takes the distri
 - **Drop** (since 0.1.137) — a model removed from the schema has its table dropped: rows, unique indexes and increment counter. Added back, it is reported `create` and starts empty. Removed views are dropped the same way. Before 0.1.137, sync reported the drop but the rows stayed, and a model added back was reported `in-sync` with its old rows.
 - **Pre-flight** (since 0.1.138) — sync refuses a managed view declared where a table sits, a table declared where a view sits, and a foreign key whose target is neither in the inventory nor already in the space. Include FK targets in the same sync, or sync them first on the same `DbSpace` — a new space starts empty.
 - **Columns** — sync does not diff or migrate columns. See [Limitations](#limitations).
+- **Derived columns** (since 0.1.141) — a [`@db.column.derived`](/api/storage#derived-columns) field stores nothing: queries and unique indexes address its source path (`payload.customer.id`), reads copy the value as stored (no type guard; a missing leaf is `null`).
 
 ## Comparison semantics
 

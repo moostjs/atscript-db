@@ -346,94 +346,13 @@ await users.remove({ tenantId: "t1", userId: "u1" });
 
 ## Metadata {#meta}
 
-`GET /meta` — fetch table/view metadata. The result is cached after the first call.
+`GET /meta` — fetch table/view metadata. The result is cached after the first call; `action()`, `getActionForm()` and write validation reuse it.
 
 ```typescript
 const meta = await users.meta();
 ```
 
-**Response shape:**
-
-```json
-{
-  "searchable": true,
-  "vectorSearchable": false,
-  "searchIndexes": [{ "name": "title_idx", "type": "text" }],
-  "primaryKeys": ["id"],
-  "preferredId": ["id"],
-  "relations": [{ "name": "posts", "direction": "from", "isArray": true }],
-  "fields": {
-    "id": { "sortable": true, "filterable": true },
-    "name": { "sortable": false, "filterable": true }
-  },
-  "type": { "...": "serialized Atscript type schema" },
-  "actions": [
-    {
-      "name": "ship",
-      "label": "Ship",
-      "level": "row",
-      "processor": "backend",
-      "value": "/orders/actions/ship",
-      "intent": "primary",
-      "disabled": "(orders) => orders.map((o) => o.status !== \"processing\")"
-    }
-  ],
-  "crud": {
-    "query": [
-      "filter",
-      "insights",
-      "skip",
-      "limit",
-      "count",
-      "sort",
-      "select",
-      "search",
-      "index",
-      "vector",
-      "threshold",
-      "with",
-      "groupBy",
-      "actions"
-    ],
-    "pages": [
-      "filter",
-      "page",
-      "size",
-      "sort",
-      "select",
-      "search",
-      "index",
-      "vector",
-      "threshold",
-      "with",
-      "actions"
-    ],
-    "one": ["select", "with", "actions"],
-    "insert": [],
-    "update": [],
-    "replace": [],
-    "remove": []
-  }
-}
-```
-
-| Field              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `searchable`       | Table has fulltext search indexes                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `vectorSearchable` | Table has vector search indexes                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `searchIndexes`    | Available search index definitions                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `primaryKeys`      | Primary key field names                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `preferredId`      | Logical field names of the table's preferred identifier (PK or a `@db.index.unique` group via `@db.table.preferredId.uniqueIndex`). Always populated; defaults to `primaryKeys`. Used for navigate `$1` substitution and as a guaranteed read-response baseline (see [Read-response baseline](./crud#read-response-baseline)).                                                                                                                                                               |
-| `relations`        | Available navigation properties                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `fields`           | Per-field capability flags (`sortable`, `filterable`, advisory `indexed`, plus `encrypted` / `geo` / `writeOnly`, `filterOps` when only narrower operators such as `$exists` pass, and `bucketable` on fields that accept a calendar bucket — both since 0.1.132). Since 0.1.128 exact: `sortable: true` ⇔ `$sort` accepted, `filterable: true` ⇔ filter accepted — so `name` above is sortable (not index-backed, hence no `indexed`). See [Query Gate](../adapters/annotations#query-gate) |
-| `type`             | Full serialized Atscript type definition. Fields declared through a reference chain carry the terminal `ref` (and inherit `db.rel.FK`) since 0.1.128 — value-help resolves to the dictionary                                                                                                                                                                                                                                                                                                 |
-| `bucketUnits`      | Calendar-bucket units the adapter supports; absent when none. Since 0.1.132 — see [Calendar Buckets](/api/calendar-buckets#discovering-support-through-meta)                                                                                                                                                                                                                                                                                                                                 |
-| `aggregateFns`     | Aggregate functions the adapter renders in grouped queries — see [GET /meta](./crud#get-meta)                                                                                                                                                                                                                                                                                                                                                                                                |
-| `actions`          | Declared domain actions — see [Actions](./actions) for the wire shape and how UIs consume the `processor` / `value` / `level` fields                                                                                                                                                                                                                                                                                                                                                         |
-| `crud`             | Built-in CRUD permissions — see [Permissions](./permissions). Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops).                                                                                                                                                                                                                                                                                                                                    |
-
-> **Read-only check:** consumers derive the boolean from `crud` inline:
-> `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
+The payload is documented field by field in [CRUD Endpoints — GET /meta](./crud#get-meta). To tell whether the table is read-only, derive it from `meta.crud` — see [Permissions — Read-only check](./permissions#read-only-check).
 
 ## Actions {#actions}
 
@@ -591,13 +510,15 @@ try {
     e.action; // "ship"
     e.id; // { id: "abc" }  (row-level rejection — submitted identifier object)
     e.ids; // [...]          (rows-level rejection — full list of failing identifier objects)
+    e.reason; // "Order already shipped" — shared reason, when the predicate returned one
+    e.reasons; // ["Locked", null]      — rows-level, aligned with e.ids (null = no reason)
   } else if (e instanceof ClientError) {
     /* any other server non-2xx — same shape as other endpoints */
   }
 }
 ```
 
-`ActionDisabledError extends ClientError`, so a generic `instanceof ClientError` catch still handles gate rejections — use the typed branch when you want `e.action` / `e.id` / `e.ids` without indexing into `body`. See [Actions — Server-side Gate](./actions#server-side-gate) for the server-side declaration.
+`ActionDisabledError extends ClientError`, so a generic `instanceof ClientError` catch still handles gate rejections — use the typed branch when you want `e.action` / `e.id` / `e.ids` / `e.reason` / `e.reasons` without indexing into `body`. When the server's predicate returned a [reason](./actions#disabled-reasons), `e.message` is already that reason — show it as is. See [Actions — Server-side Gate](./actions#server-side-gate) for the server-side declaration.
 
 `processor: 'custom'` actions cannot be invoked through the client — those describe UI events your application dispatches itself. The client throws `ActionUnsupportedError` in that case.
 
@@ -628,7 +549,12 @@ page.data[0].$actions;
 
 const single = await users.one({ id: "abc" }, { controls: { $actions: true } as const });
 single?.$actions;
+
+// Actions disabled WITH a reason (predicate returned a string) — action name → reason
+r[0].$disabledReasons?.ship; // Record<string, string> | undefined
 ```
+
+`$disabledReasons` is present only on rows where some action was disabled with a reason; its keys never appear in `$actions`. See [Actions — `$disabledReasons`](./actions#disabled-reasons-augmentation).
 
 NOT augmented on `count()` and `aggregate()` — no row shape. `'table'`-level actions never appear in `$actions`. Action ordering follows `/meta.actions[]` declaration order.
 
@@ -757,7 +683,7 @@ See [Identifier rendering helpers](#identifier-helpers) for usage.
 All error classes — generic and action-specific — are exported as runtime values for `instanceof` discrimination:
 
 - `ClientError` — base class for every non-2xx response. `status`, `body`, `errors` accessors.
-- `ActionDisabledError extends ClientError` — HTTP 409 from the server-side action gate. Typed `action`, `id`, `ids` accessors.
+- `ActionDisabledError extends ClientError` — HTTP 409 from the server-side action gate. Typed `action`, `id`, `ids`, `reason`, `reasons` accessors.
 - `TransportError` — no server verdict: `fetch` rejected, or a 2xx body was not JSON. `method`, `url`, `cause`. Does **not** extend `ClientError`. See [TransportError](#transport-error).
 - `ActionNotFoundError` — `Client.action(name)` called with a name not present in `/meta`.
 - `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option.
@@ -786,6 +712,8 @@ import type { ClientValidationError } from "@atscript/db-client";
   action: string;                          // action name that rejected
   id?: Record<string, unknown>;            // 'row'-level rejections
   ids?: Record<string, unknown>[];         // 'rows'-level rejections
+  reason?: string;                         // reason shared by every rejected row (since 0.1.141)
+  reasons?: (string | null)[];             // 'rows'-level, aligned with ids (since 0.1.141)
 }
 ```
 

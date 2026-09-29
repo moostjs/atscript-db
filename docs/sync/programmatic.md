@@ -103,7 +103,7 @@ interface TSyncResult {
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `'up-to-date'`     | Schema hash matched, no sync needed                                                                                                                                                            |
 | `'synced'`         | This process applied changes                                                                                                                                                                   |
-| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock                                                                                                                         |
+| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock (never for a `force` run)                                                                                               |
 | `'refused'`        | Pre-flight refused the run (since 0.1.128): **no DDL ran**, nothing was persisted, the lock was released. `entries` is the full plan; refused entries are `error` entries with `refused: true` |
 
 `'refused'` follows the `onError` policy like error entries do — `"warn"` (default) logs each refusal at error level and returns, `"throw"` throws after the lock is released, `"silent"` returns. `plan()` reports the same refusals with its status unchanged (`'changes-needed'`).
@@ -140,19 +140,31 @@ interface SyncEntry {
 
   // Since 0.1.128
   pkChange?: { from: string[]; to: string[]; rebuild: boolean }; // primary-key field set change; rebuild=false when safe mode skipped it
-  dependsOn: string[]; // tables this entry's DDL waits for (FK parents / view sources / referencing children of a drop)
+  dependsOn: string[]; // tables and views this entry's DDL waits for (FK parents / view sources / referencing children of a drop)
   dropGroup?: string[]; // set when a foreign-key cycle is dropped as one group
   refused: boolean; // this `error` entry is a pre-flight refusal — no DDL ran
+  skipped: ReadonlyArray<
+    "pk-rebuild" | "recreate" | "table-options" | "nullable-defaults" | "derived"
+  >; // work safe mode skipped ('derived' since 0.1.141)
   toInit(): TSyncEntryInit; // the init object, for deriving a modified copy
+
+  // Since 0.1.141
+  derivedChanges: Array<{
+    column: string;
+    reason: "kind" | "expression" | "type";
+    derived: boolean;
+  }>; // derived-column rebuilds (drop + add)
+  cascadeFrom: string[]; // upstream views whose recreation recreates this unchanged view
 
   // Computed properties
   destructive: boolean; // involves drops, type changes, recreation, or a primary-key rebuild
   hasChanges: boolean; // status is not 'in-sync' or 'error'
   hasErrors: boolean; // status is 'error' or errors array is non-empty
+  pending: boolean; // (since 0.1.128) desired work not applied — an `error` entry (not an external view) or non-empty `skipped`
 }
 ```
 
-Entries come back in **execution order** — tables parents-first, then views, then drops children-first — identically from `plan()` and `run()`. Safe mode is reported identically as well: a skipped primary-key rebuild is `pkChange: { from, to, rebuild: false }` in both (printed `! PK … — skipped (safe mode)`, not destructive).
+Entries come back in **execution order** — tables parents-first, then views, then drops children-first — identically from `plan()` and `run()`. Safe mode is reported identically as well: a skipped primary-key rebuild is `pkChange: { from, to, rebuild: false }` in both (printed `! PK … — skipped (safe mode)`, not destructive). What each `skipped` value means and why a `pending` entry withholds its snapshot and the schema hash is covered in [Safe Mode](./index.md#safe-mode).
 
 ## Plan-Then-Decide Pattern
 
@@ -212,14 +224,11 @@ try {
     // Another process holds the lock and didn't release in time
     // Increase waitTimeoutMs or investigate the other process
   }
-  if (error.message.includes("Failed to acquire")) {
-    // Lock acquisition failed after waiting
-  }
   if (error.message.includes("lock was stolen")) {
     // Another pod took over the lock mid-sync — the current sync aborted safely.
     // Usually transient (network partition recovery). Retry or rely on `synced-by-peer`.
   }
-  // Other errors: DB connection issues, DDL failures
+  // Other errors: DB connection issues (also while taking the lock), DDL failures
 }
 ```
 
@@ -250,6 +259,19 @@ for (const entry of plan.entries) {
 ```
 
 Pass a colour adapter (matching the `TSyncColors` shape — `green/red/cyan/yellow/bold/dim/underline`) as the second argument to control styling. Omit it for plain text output suitable for logs.
+
+## Syncing a module namespace
+
+A compiled `.as` module exports more than its tables — helper interfaces, `@db.alias` types, plain type aliases. `isDbEntityType` (from `@atscript/db`, since 0.1.141) keeps only what a `DbSpace` accepts: types whose own declaration carries `@db.table`, `@db.view` or `@db.view.for`. It turns a namespace into an inventory:
+
+```typescript
+import { isDbEntityType } from "@atscript/db";
+import * as models from "./schema/index.as.js";
+
+await syncSchema(db, Object.values(models).filter(isDbEntityType));
+```
+
+A `@db.alias` type in the list is skipped by the sync itself; any other non-entity type would be synced as a table named after its type id, so filter first. The [generated model manifest](./model-manifest) applies the same selection at build time.
 
 ## Exported Utilities
 

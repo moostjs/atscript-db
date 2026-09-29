@@ -235,7 +235,7 @@ The decorator is generic over `TRow` (the bound table's row type) and `R` (the l
 | `promptText`     | `string \| [string, string]`                                        | Confirmation prompt. Tuple form is `[singular, plural]` — UI picks `[0]` when executing against a single ID, `[1]` otherwise. UI substitutes `$1` (preferred-id values) and `$N` (count).                                                                                                                                         |
 | `shortcut`       | `string`                                                            | Single-character keyboard hint. Modifier prefix (Alt+, Ctrl+, bare key) and activation scope are UI/UX concerns; server forwards the character verbatim and does no conflict resolution.                                                                                                                                          |
 | `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-notation paths the predicate references. Server-internal — never on the wire. Type-narrows `disabled`'s row argument and drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation). Listing a relation field is a TS error. See [`requiredFields`](#required-fields). |
-| `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`              | Sync batch gate predicate. One verdict per input row, parallel by index. Without `requiredFields` → action dropped at discovery. See [Server-side Gate](#server-side-gate).                                                                                                                                                       |
+| `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean \| string)[]`  | Sync batch gate predicate. One verdict per input row, parallel by index: truthy = disabled, a string also gives the [reason](#disabled-reasons). Without `requiredFields` → action dropped at discovery. See [Server-side Gate](#server-side-gate).                                                                               |
 | `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level batch policy. Default `'reject'`. See [Batch mode](#rows-batch-mode).                                                                                                                                                                                                                                              |
 | `table`          | `AtscriptDbTable<TRow>`                                             | Required when declaring `disabled` or any `@DbActionRow*` on a class that does **not** extend `AsDbReadableController`. Silently ignored on subclasses (the bound table wins). See [Bound-table requirement](#bound-table-requirement).                                                                                           |
 
@@ -588,11 +588,12 @@ export class OrdersController extends AsDbController<typeof Order> {
 }
 ```
 
-The gate interceptor runs **after** auth guards and **before** the handler. When `disabled[i]` is `true`, the request is rejected with `ActionDisabledError` (HTTP 409) and the handler never runs. No guard code in the handler body — by the time `ship()` executes, the gate has already vetted the row.
+The gate interceptor runs **after** auth guards and **before** the handler. When `disabled[i]` is truthy, the request is rejected with `ActionDisabledError` (HTTP 409) and the handler never runs. No guard code in the handler body — by the time `ship()` executes, the gate has already vetted the row.
 
-The predicate signature is `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`:
+The predicate signature is `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean | string)[]`:
 
-- **Sync** — `Promise<boolean[]>` is rejected by the type system.
+- **Truthy = disabled** — `false` (or `""`) enables the row, `true` disables it, a non-empty string disables it with that [reason](#disabled-reasons).
+- **Sync** — a `Promise` return is rejected by the type system.
 - **Batched** — for `'row'`-level the gate calls `disabled([row])` and reads `verdicts[0]`; for `'rows'`-level it calls `disabled(survivorRows)` once.
 - **Parallel by index** — verdict array length MUST equal input length. Length mismatch (e.g. `() => [true]` ignoring inputs, or `rows.filter(...).map(...)`) throws HTTP 500 — the gate cannot map verdicts back to rows.
 - **Type-narrowed row arg** — only fields listed in `requiredFields` are visible. Reading another field is a TS error.
@@ -620,6 +621,33 @@ import { perRow } from "@atscript/moost-db";
 ```
 
 Equivalent to `disabled: (rows) => rows.map(o => o.status === "archived")`. Use the explicit batch form when the predicate genuinely needs the whole list (e.g. cross-row checks).
+
+### Disabled reasons {#disabled-reasons}
+
+Return a string instead of `true` to say **why** the action is disabled for that row. The string is the human-readable reason; `false` still means enabled:
+
+```typescript
+@DbAction<Order, ["status"]>("ship", {
+  label: "Ship",
+  requiredFields: ["status"],
+  disabled: perRow((o) => {
+    if (o.status === "shipped") return "Order already shipped";
+    if (o.status !== "processing") return "Only processing orders can be shipped";
+    return false;
+  }),
+})
+```
+
+The reason reaches clients in two places:
+
+- **POST rejected by the gate** — the 409 `message` is the reason, and the body carries `reason` / `reasons`. See [`ActionDisabledError`](#action-disabled-error).
+- **`$actions=true` reads** — each row gets `$disabledReasons: { ship: "Order already shipped" }` next to `$actions`, so a UI can show a disabled button with a tooltip instead of hiding it. See [`$disabledReasons`](#disabled-reasons-augmentation).
+
+Boolean predicates are unaffected — `true` still disables without a reason, and nothing new appears on the wire. The verdict type is exported as `TDbActionDisabledVerdict` (`boolean | string`) from `@atscript/moost-db`.
+
+::: warning Reasons are user-facing text
+Reasons go to the browser verbatim. Don't put data in them that the caller may not see (other rows' values, internal state) — the `requiredFields` projection strip does not apply to reason strings.
+:::
 
 ### Row injection — `@DbActionRow()` / `@DbActionRows()` {#row-injection}
 
@@ -653,10 +681,10 @@ In `'rows'` + `'skip'` mode, `@DbActionRows()` resolves to filtered survivors on
 
 For `@DbActionIDs()` / `@DbActionRows()` actions, `onDisabledRows` controls how the gate handles partial failures:
 
-| Mode                 | Predicate evaluated     | On any failure                                                    | Handler runs with  |
-| -------------------- | ----------------------- | ----------------------------------------------------------------- | ------------------ |
-| `'reject'` (default) | every survivor row once | throws `ActionDisabledError` listing **all** failing IDs          | n/a                |
-| `'skip'`             | every survivor row once | filters cached IDs + rows to passing-only; zero survivors → throw | only the survivors |
+| Mode                 | Predicate evaluated     | On any failure                                                             | Handler runs with  |
+| -------------------- | ----------------------- | -------------------------------------------------------------------------- | ------------------ |
+| `'reject'` (default) | every survivor row once | throws `ActionDisabledError` listing **all** failing IDs (+ their reasons) | n/a                |
+| `'skip'`             | every survivor row once | filters cached IDs + rows to passing-only; zero survivors → throw          | only the survivors |
 
 Identifiers whose row didn't resolve (no DB match) are treated as failing without invoking `disabled` against `undefined`. Surviving rows are passed in one batched `disabled` call.
 
@@ -679,6 +707,7 @@ Two notes:
 
 - `'reject'` is the default because it preserves request-atomicity — partial success is opt-in.
 - The cached identifier slot stores **the original submitted object references** — `'skip'`-mode filtering preserves reference equality; `useDbActionIds().load()` returns the filtered subset.
+- `'skip'` drops rows disabled with a [reason](#disabled-reasons) exactly like `true` ones; the reasons of skipped rows are not reported. Only a zero-survivor rejection carries them.
 
 ### Bound-table requirement {#bound-table-requirement}
 
@@ -749,7 +778,7 @@ disabled: (orders) => orders.map((o) => o.tenantId === this.currentTenant);
 
 :::
 
-### `ActionDisabledError` (HTTP 409)
+### `ActionDisabledError` (HTTP 409) {#action-disabled-error}
 
 When the gate rejects, the response is HTTP 409 with this body:
 
@@ -767,6 +796,25 @@ For `'rows'`-level rejections, `ids: [...]` replaces `id` — each entry is the 
 
 - `'reject'` mode: `ids` lists ALL failing identifiers in original request order (predicate-rejected + missing-row both included).
 - `'skip'` mode with zero survivors: `ids` lists ALL request identifiers.
+
+When the predicate returned [reasons](#disabled-reasons) (since 0.1.141):
+
+| Field     | Present when                                                      | Value                                                                                                                                                                         |
+| --------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reason`  | every rejected row has the same reason (`'row'`: the row has one) | that reason                                                                                                                                                                   |
+| `reasons` | `'rows'` level, at least one rejected row has a reason            | `(string \| null)[]` aligned index-by-index with `ids`; `null` = no reason (`true` verdict or row not found)                                                                  |
+| `message` | always                                                            | `reason` when set; otherwise the generic text, followed by up to three distinct reasons — `Action "archive" is disabled for 3 of the selected rows: Locked; Already archived` |
+
+```json
+{
+  "name": "ActionDisabledError",
+  "message": "Order already shipped",
+  "statusCode": 409,
+  "action": "ship",
+  "id": { "id": "abc" },
+  "reason": "Order already shipped"
+}
+```
 
 The error class lives in `@atscript/moost-db` (`ActionDisabledError extends HttpError`). The discriminator `name: 'ActionDisabledError'` lets `@atscript/db-client` construct the typed `ActionDisabledError` subclass on the consumer side — see [HTTP Client — Actions § Error cases](./client#error-cases).
 
@@ -947,7 +995,7 @@ interface TDbActionInfo {
   default?: boolean;
   promptText?: string | [string, string]; // [singular, plural]
   shortcut?: string; // single character; UI binds the modifier
-  disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
+  disabled?: string; // fn.toString() — UI mirror only; truthy verdict = disabled, string = reason; server-evaluated availability is in row-level $actions / $disabledReasons
   inputForm?: string; // form name (@InputForm param or class-level inputForm); client fetches GET /meta/form/<name>
   formUrl?: string; // class-level inputForm { name, url }; client fetches baseUrl + formUrl instead
 }
@@ -974,6 +1022,21 @@ Available on `/query`, `/pages`, `/one`, `/one/:id` (including `$search` and vec
 
 Action ordering follows `/meta.actions[]` declaration order. `'table'`-level actions never appear in `$actions`. Actions without a `disabled` predicate are unconditionally present in every row's array.
 
+### `$disabledReasons` {#disabled-reasons-augmentation}
+
+When a predicate returns a [reason](#disabled-reasons) for a row, that row also carries `$disabledReasons` — action name → reason — for the actions it disabled with a reason:
+
+```bash
+GET /orders/query?$actions=true
+# → [{ "id": "o1", "status": "processing", "$actions": ["ship", "edit"] },
+#    { "id": "o2", "status": "shipped", "$actions": ["edit"],
+#      "$disabledReasons": { "ship": "Order already shipped" } }]
+```
+
+- Present only on rows with at least one reason — rows (and whole responses) from boolean-only predicates look exactly as before.
+- Its keys are never in `$actions`. An action missing from `$actions` **and** from `$disabledReasons` was disabled without a reason (`true`).
+- UI rule of thumb: in `$actions` → enabled; in `$disabledReasons` → show disabled with the reason as tooltip; in neither → hide.
+
 ### Pipeline
 
 For each request that sets `$actions=true` on a controller extending `AsDbReadableController`:
@@ -993,6 +1056,7 @@ const r = await users.query({
   controls: { $actions: true } as const,
 });
 r[0].$actions; // typed `string[] | undefined` via ClientResponse<T, Q>
+r[0].$disabledReasons?.ship; // typed `Record<string, string> | undefined`
 ```
 
 The control is also accepted on the URL (`?$actions=true` or `?$actions=1`); the server coerces the string back to a boolean before DTO validation.

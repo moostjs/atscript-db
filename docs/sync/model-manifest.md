@@ -45,7 +45,7 @@ export const modelsBySpace = {
 } as const;
 ```
 
-Selection rule: every export carrying `@db.table` or `@db.view` metadata — the same rule the [`asc db sync` CLI](./cli) uses for discovery. Colliding export names across `.as` files are alias-deduplicated in the imports (`import { User as User_1 } from …`).
+Selection rule: every export whose own declaration carries `@db.table` or `@db.view` — the same rule the [`asc db sync` CLI](./cli) uses for discovery. A `@db.alias`, a plain `export type Admin = User` and an interface that merely references a table are not entities (since 0.1.141 they carry no `db.table` metadata either); [`isDbEntityType`](./programmatic#syncing-a-module-namespace) is the runtime form of the rule. Colliding export names across `.as` files are alias-deduplicated in the imports (`import { User as User_1 } from …`).
 
 ## The manifest is an inventory, not an action
 
@@ -81,7 +81,7 @@ const missing = assertExposed(app, atscriptModels, {
 if (missing.length && process.env.CI) throw new Error("unexposed models");
 ```
 
-Lazy-factory bindings can't name their model and will false-positive under `all: true` — list them in `exclude`.
+Lazy-factory bindings can't name their model and will false-positive under `all: true` — list them in `exclude`. A `@db.alias` type in the list is skipped (since 0.1.141) — it is a join scope, not a model a controller serves.
 
 ## DOs and DON'Ts
 

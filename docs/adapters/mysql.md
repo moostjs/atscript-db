@@ -375,6 +375,10 @@ MySQL cannot convert to time zone "Europe/Berlin": its time zone tables are not 
 Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
 :::
 
+## Derived Columns
+
+A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) VIRTUAL` column over `JSON_TYPE()` / `JSON_EXTRACT()` of its source (booleans compare the unquoted value to `'true'`; numbers are `+ 0`). A string leaf maps to `VARCHAR(255)` instead of `TEXT` so a plain or unique index over it needs no key prefix; `@db.column.collate` goes between the type and the generated clause. The definition never carries `NOT NULL` or `DEFAULT`, and in-place `MODIFY COLUMN` is never used on it: a changed extraction is `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first). Introspection reads `INFORMATION_SCHEMA.COLUMNS.EXTRA` (`VIRTUAL GENERATED` / `STORED GENERATED`, MariaDB included); a `recreateTable` copies every column but the generated ones.
+
 ## Limitations
 
 - **UUID generated client-side** — MySQL's `DEFAULT (UUID())` generates the value server-side, but the adapter cannot retrieve it via `insertId` (which only works for `AUTO_INCREMENT` columns). UUIDs are generated client-side via `crypto.randomUUID()` to ensure the generated ID is immediately available in the insert result

@@ -44,6 +44,7 @@ import type {
   TDbActionProcessor,
   TDbActionsEntry,
   DbActionOpts,
+  TDbActionDisabledVerdict, // boolean | string — one `disabled` verdict (0.1.141)
   TDbActionInputFormMeta,
   TDbActionMeta,
   TDbActionParamKind,
@@ -165,26 +166,26 @@ Every row-returning read endpoint (`GET /query`, `/pages`, `/one`, `/one/:id`, i
 
 `@DbAction<TRow, const R>(name, opts)` — annotate `<TRow>` at the call site (TS decorators can't infer it from the enclosing class). `R` is the literal `requiredFields` tuple (inferred via `const R`).
 
-| Opt              | Type                                                                | Semantics                                                                                                                                                                                                                                                                 |
-| ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `label`          | `string`                                                            | Required (or `@Label('...')`; `opts.label` wins).                                                                                                                                                                                                                         |
-| `icon`           | `string`                                                            | UI icon name.                                                                                                                                                                                                                                                             |
-| `intent`         | `'positive' \| 'negative' \| 'warning' \| 'primary' \| 'secondary'` | Color/prominence.                                                                                                                                                                                                                                                         |
-| `description`    | `string`                                                            | Tooltip.                                                                                                                                                                                                                                                                  |
-| `order`          | `number`                                                            | Display order.                                                                                                                                                                                                                                                            |
-| `default`        | `boolean`                                                           | One per `(controller × level)`; later demoted with warn.                                                                                                                                                                                                                  |
-| `promptText`     | `string \| [string, string]`                                        | Tuple = `[singular, plural]`. UI substitutes `$1` (preferred-id values), `$N` (count).                                                                                                                                                                                    |
-| `shortcut`       | `string`                                                            | Single char. UI binds modifier.                                                                                                                                                                                                                                           |
-| `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-paths the predicate reads. Server-internal — never on the wire. Type-narrows `disabled`'s row arg AND drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation read). Listing a relation field is a TS error. |
-| `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`              | **Sync batch gate.** Row arg is narrowed to `requiredFields` only; reading another field is a TS error. One verdict per input row, parallel by index. Length mismatch → HTTP 500. `Promise<boolean[]>` not permitted. Without `requiredFields` → action dropped.          |
-| `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level only. Default `'reject'`.                                                                                                                                                                                                                                  |
-| `table`          | `AtscriptDbTable<TRow>`                                             | Required on plain controllers when `disabled`, `@DbActionID*`, or `@DbActionRow*` present. Ignored on `AsDbReadableController` subclasses.                                                                                                                                |
+| Opt              | Type                                                                | Semantics                                                                                                                                                                                                                                                                                                                           |
+| ---------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `label`          | `string`                                                            | Required (or `@Label('...')`; `opts.label` wins).                                                                                                                                                                                                                                                                                   |
+| `icon`           | `string`                                                            | UI icon name.                                                                                                                                                                                                                                                                                                                       |
+| `intent`         | `'positive' \| 'negative' \| 'warning' \| 'primary' \| 'secondary'` | Color/prominence.                                                                                                                                                                                                                                                                                                                   |
+| `description`    | `string`                                                            | Tooltip.                                                                                                                                                                                                                                                                                                                            |
+| `order`          | `number`                                                            | Display order.                                                                                                                                                                                                                                                                                                                      |
+| `default`        | `boolean`                                                           | One per `(controller × level)`; later demoted with warn.                                                                                                                                                                                                                                                                            |
+| `promptText`     | `string \| [string, string]`                                        | Tuple = `[singular, plural]`. UI substitutes `$1` (preferred-id values), `$N` (count).                                                                                                                                                                                                                                              |
+| `shortcut`       | `string`                                                            | Single char. UI binds modifier.                                                                                                                                                                                                                                                                                                     |
+| `requiredFields` | `readonly FlatKey<TRow>[]` (literal tuple)                          | **Required when `disabled` is set.** Dot-paths the predicate reads. Server-internal — never on the wire. Type-narrows `disabled`'s row arg AND drives projection widening (`@DbActionRow*` fetch + `$actions` augmentation read). Listing a relation field is a TS error.                                                           |
+| `disabled`       | `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean \| string)[]`  | **Sync batch gate.** Row arg is narrowed to `requiredFields` only; reading another field is a TS error. One verdict per input row, parallel by index: truthy = disabled, non-empty string = disabled + reason (§ Disabled reasons). Length mismatch → HTTP 500. `Promise` not permitted. Without `requiredFields` → action dropped. |
+| `onDisabledRows` | `'reject' \| 'skip'`                                                | `'rows'`-level only. Default `'reject'`.                                                                                                                                                                                                                                                                                            |
+| `table`          | `AtscriptDbTable<TRow>`                                             | Required on plain controllers when `disabled`, `@DbActionID*`, or `@DbActionRow*` present. Ignored on `AsDbReadableController` subclasses.                                                                                                                                                                                          |
 
 `FlatKey<TRow> = keyof FlatOf<TRow> & string` (dot-paths over scalars; relations excluded). When `TRow = unknown` (no `<TRow>` generic), all string keys allowed; `disabled` row arg falls back to `any[]` and `requiredFields` is loosely `string[]` — runtime still drops `disabled` without `requiredFields`.
 
 ### `perRow()` helper
 
-Lift a per-row predicate into batch shape; polarity preserved (`true` = disabled).
+Lift a per-row predicate into batch shape; polarity preserved (`true` = disabled; a string = disabled with that reason).
 
 ```ts
 import { perRow } from "@atscript/moost-db";
@@ -319,7 +320,7 @@ Any other shape is a type error (and `inputForm` is `never` on `processor: "navi
 
 `disabled` predicate — Moost interceptor at `AFTER_GUARD` priority (auth → gate → handler). Server is authoritative. Wire ships `fn.toString()` for UI mirror.
 
-**Signature:** sync `(rows: Pick<FlatOf<TRow>, R[number]>[]) => boolean[]`. Runs **once per request**. `Promise<boolean[]>` not permitted.
+**Signature:** sync `(rows: Pick<FlatOf<TRow>, R[number]>[]) => (boolean | string)[]`. Runs **once per request**. `Promise` not permitted. Verdict truthiness decides; `false`/`""` = enabled.
 
 | Level    | Gate calls                                    |
 | -------- | --------------------------------------------- |
@@ -341,6 +342,23 @@ Same predicate runs in three places: gate enforcement on POST, `$actions` augmen
 
 Cached identifier slot holds the original submitted object references; skip-mode filtering preserves reference equality.
 
+### Disabled reasons (since 0.1.141)
+
+Return a non-empty string instead of `true` → action disabled AND the string is the user-facing reason.
+
+```ts
+disabled: perRow((o) => (o.status === "shipped" ? "Order already shipped" : false)),
+```
+
+| #   | Rule                                                                                                                                                                                                                   |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Gate 409: `message` = the reason; body `reason` (shared by every rejected row) + `'rows'` level `reasons: (string \| null)[]` aligned with `ids`. Mixed reasons → generic message + up to 3 distinct reasons appended. |
+| 2   | `$actions=true` reads: rows with ≥1 reason get `$disabledReasons: { [action]: reason }`; keys never in `$actions`. In neither → disabled without reason (hide).                                                        |
+| 3   | `'skip'` mode drops reasoned rows like `true` ones; skipped rows' reasons are not reported (only a zero-survivor 409 carries them).                                                                                    |
+| 4   | Boolean predicates → wire unchanged (no `reason`/`reasons`/`$disabledReasons`).                                                                                                                                        |
+| 5   | Reasons ship verbatim to the browser — never embed data the caller can't see.                                                                                                                                          |
+| 6   | Code evaluating the `/meta` `disabled` string must test truthiness, not `=== true`.                                                                                                                                    |
+
 **Closure-emission rule:** `disabled` body must reference only the rows arg — outer-scope captures (`this`, imports, `const`s) work server-side but break UI eval (`ReferenceError`).
 
 ### `ActionDisabledError` (HTTP 409)
@@ -355,9 +373,9 @@ Cached identifier slot holds the original submitted object references; skip-mode
 }
 ```
 
-`'rows'` rejection: `ids: [...]` instead of `id` — all failing identifier objects in `'reject'`, all request identifiers in `'skip'`-zero-survivors. Each entry is `Record<string, unknown>` in the shape originally submitted by the client (PK or unique-index form).
+`'rows'` rejection: `ids: [...]` instead of `id` — all failing identifier objects in `'reject'`, all request identifiers in `'skip'`-zero-survivors. Each entry is `Record<string, unknown>` in the shape originally submitted by the client (PK or unique-index form). Optional `reason` / `reasons` — see § Disabled reasons.
 
-Server class: `@atscript/moost-db` (`extends HttpError`). Client class: `@atscript/db-client` (`extends ClientError`, typed `e.action` / `e.id` / `e.ids`). Bridged by JSON body's `name` discriminator — neither package depends on the other.
+Server class: `@atscript/moost-db` (`extends HttpError`). Client class: `@atscript/db-client` (`extends ClientError`, typed `e.action` / `e.id` / `e.ids` / `e.reason` / `e.reasons`). Bridged by JSON body's `name` discriminator — neither package depends on the other.
 
 ### Class-level dict gating is UI-only
 
@@ -505,7 +523,7 @@ interface TDbActionInfo {
   default?: boolean;
   promptText?: string | [string, string]; // [singular, plural]; UI substitutes $1 (preferred-id values), $N (count)
   shortcut?: string; // single char; UI binds modifier
-  disabled?: string; // fn.toString() — UI mirror only; server-evaluated availability is in row-level $actions
+  disabled?: string; // fn.toString() — UI mirror only; truthy = disabled, string = reason; server-evaluated availability is in row-level $actions / $disabledReasons
   inputForm?: string; // form name (@InputForm param or class-level inputForm); client fetches GET /meta/form/<name>
   formUrl?: string; // class-level inputForm { name, url }; client fetches baseUrl + formUrl instead
 }
@@ -557,7 +575,7 @@ Pipeline (per request, on `AsDbReadableController`):
 2. Filter through per-request `applyMetaOverlay()` — actions stripped by overlay are absent. Skipped when overlay is the default no-op.
 3. Pre-widen `$select` to union all `requiredFields` (only when caller restricted projection).
 4. Run the read.
-5. Run each `disabled` once on the full result, fan verdicts into per-row `$actions`. Actions without `disabled` are unconditionally included.
+5. Run each `disabled` once on the full result, fan verdicts into per-row `$actions` (+ `$disabledReasons` on rows where a verdict was a reason string). Actions without `disabled` are unconditionally included.
 6. Strip `requiredFields`-only fields the caller didn't ask for (so the response shape matches the original `$select`).
 
 Notes:
@@ -610,7 +628,7 @@ const form = await users.getActionForm("approve"); // TAtscriptAnnotatedType | n
 - `'rows'` / `'table'` navigate: `value` verbatim (no `$1` substitution).
 - `'custom'` → `ActionUnsupportedError` (UI dispatches itself).
 - Unknown name → `ActionNotFoundError`.
-- HTTP 409 (gate) → `ActionDisabledError extends ClientError` with `e.action` / `e.id` / `e.ids`.
+- HTTP 409 (gate) → `ActionDisabledError extends ClientError` with `e.action` / `e.id` / `e.ids` / `e.reason` / `e.reasons` (`e.message` is the reason when one exists).
 - Other non-2xx → `ClientError` (same shape as other endpoints).
 
 See [db-client.md](db-client.md) for the full client surface.

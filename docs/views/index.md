@@ -36,7 +36,7 @@ An interface cannot be both `@db.table` and `@db.view` — it's one or the other
 
 ## Entry Table
 
-The `@db.view.for` annotation specifies the primary (entry) table for the view. This is the table that drives the query — all joins are relative to it:
+The `@db.view.for` annotation specifies the primary (entry) table for the view — or, since 0.1.141, another [view](#views-over-views). This is the source that drives the query — all joins are relative to it:
 
 ```atscript
 @db.view 'active_tasks'
@@ -87,7 +87,12 @@ Rules for joined fields (checked at compile time):
 
   Referencing a join declared later is an error (`… not in scope — a join may reference the entry table and joins declared before it`).
 
-- **One join per table.** Joining the same table twice, or joining the entry table, is rejected — join aliases and self-joins are not supported yet.
+- **Every scope name is unique.** The entry and each join are addressed by their type name. Joining the same table twice, or joining the entry table, is rejected — declare a [join alias](#join-aliases-and-self-joins) to join it under another name.
+- **A join target may be a view** — see [Views over views](#views-over-views).
+
+::: tip Editor support
+Inside the backticks the VSCode extension completes, hovers and jumps to the fields in scope — the same scope the compiler checks. See [Annotations → Editor support](/adapters/annotations#editor-support) for each argument's scope.
+:::
 
 ::: warning A filter on a left-joined table makes the join inner
 `@db.view.filter` runs after the joins, so a condition on a left-joined table (`` `User.status = 'active'` ``) is false for unmatched rows and drops them — the view behaves as an inner join. Put conditions that should only restrict the _match_ into the join condition instead:
@@ -97,6 +102,77 @@ Rules for joined fields (checked at compile time):
 ::: info Upgrading to 0.1.136
 MongoDB used to keep unmatched documents for every join. Add `'left'` where you relied on that — see [Upgrading → 0.1.136](/guide/upgrading#v0-1-136).
 :::
+
+### Join Aliases and Self-Joins
+
+Since 0.1.141 a view can join one table twice, or join its own entry table, through a **join alias**: a type alias of the table (or view) annotated with `@db.alias`. The alias is a scope name — inside the view it is addressed like any joined type, and its fields are read through it:
+
+```atscript
+@db.alias Employee
+export type Manager = Employee
+
+@db.alias Employee
+export type Mentor = Employee
+
+@db.view 'staff'
+@db.view.for Employee
+@db.view.joins Manager, `Manager.id = Employee.managerId`, 'left'
+@db.view.joins Mentor, `Mentor.id = Employee.mentorId`, 'left'
+@db.view.filter `Manager.city = 'Paris' or Manager.id not exists`
+export interface Staff {
+    id: Employee.id
+    name: Employee.name
+    managerName?: Manager.name   // left-joined alias — optional, as for any left join
+    mentorName?: Mentor.name
+}
+```
+
+On SQL adapters the join renders as `LEFT JOIN "employees" AS "Manager"`; on MongoDB the joined documents live under `__joined_Manager` (see [MongoDB → Views](/adapters/mongodb#views)). The physical table is still `employees` — the alias exists only inside view definitions.
+
+Rules (checked at compile time):
+
+- The alias must be declared as `export type X = Target`, where `Target` is the annotation argument and a `@db.table` or `@db.view` (not another alias).
+- An alias cannot carry `@db.table` or `@db.view`, is never synced, and cannot be registered on a `DbSpace` (`db.get(Manager)` throws — use `Employee`). At runtime it carries no entity metadata (`isDbEntityType(Manager)` is `false`), and one listed in a `syncSchema` inventory is skipped.
+- An alias cannot be the `@db.view.for` entry.
+- Each alias is joined at most once per view — declare another alias for another join of the same table.
+
+## Views over Views
+
+Since 0.1.141 the entry (`@db.view.for`) and the join targets (`@db.view.joins`) may be **views** — managed views, or [external views](./view-types#external-views) that already exist in the database. A view over a view reads the upstream view's **own** columns: a field the upstream renamed with `@db.column`, flattened, extracted from JSON, or computed with `@db.agg.*` is a plain column of the downstream view.
+
+```atscript
+@db.view 'city_counts'
+@db.view.for Employee
+export interface CityCounts {
+    city: Employee.address.city
+
+    @db.agg.count
+    people: number
+}
+
+@db.view 'big_cities'
+@db.view.for CityCounts
+@db.view.filter `CityCounts.people >= 100`
+export interface BigCities {
+    city: CityCounts.city
+    people: CityCounts.people     // the aggregate, read as a plain column
+}
+
+@db.view 'dept_sizes'
+@db.view.for Department
+@db.view.joins CityCounts, `CityCounts.city = Department.city`, 'left'
+export interface DeptSizes {
+    id: Department.id
+    people?: CityCounts.people
+}
+```
+
+- A field read from a left-joined view must be optional (the [left-join rule](#joins)); a field that is optional in the upstream view is `null` when missing, like any optional source.
+- A chain into an upstream view's `@db.json` field follows the [JSON leaf](#reading-json-leaves) rules; a leaf the upstream view already extracted is read as a plain column.
+- A view cannot read itself, directly or through other views (`View 'A' depends on itself: A → B → A`).
+- A filter on the downstream view runs after the upstream's `GROUP BY` — the database cannot push it into the aggregation.
+
+Schema sync creates views in dependency order and recreates a view whenever a view it reads is recreated — see [What gets synced → Views that read views](/sync/what-gets-synced#views-that-read-views).
 
 ## View Filters
 
@@ -129,7 +205,7 @@ export interface ActiveUser {
 
 ## HAVING Clause
 
-The `@db.view.having` annotation adds a post-aggregation filter (SQL `HAVING` clause). It references **view field aliases**, not source table columns:
+The `@db.view.having` annotation adds a post-aggregation filter (SQL `HAVING` clause). It references the view's **own fields**, unqualified — never source table columns (a qualified `Order.amount` or an unknown field is a compile error since 0.1.141):
 
 ```atscript
 @db.view 'category_stats'
@@ -215,7 +291,7 @@ Values are never coerced — the string `"14"` is not a number, `1` is not `true
 The leaf works everywhere a view column does: in the `SELECT` list, as a `GROUP BY` dimension of an [aggregation view](./aggregation-views), as the source of `@db.agg.*`, and in `@db.view.having`. Join conditions and `@db.view.filter` can't read inside a JSON column — on SQL adapters sync fails with `JSON paths are not supported in view conditions`.
 
 ::: warning Not indexed
-An extracted column is computed per row when the view is read. Filters and sorts on it scan the source table; no index backs them.
+An extracted column is computed per row when the view is read. Filters and sorts on it scan the source table; no index backs them. When the leaf needs an index, or you want it on the table itself, declare a [derived column](/api/storage#derived-columns) (`@db.column.derived`, since 0.1.141) on the table — a view can then read that column like any other.
 :::
 
 **Per adapter:**

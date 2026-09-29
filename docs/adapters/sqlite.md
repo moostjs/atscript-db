@@ -381,6 +381,10 @@ A waiter that exceeds `transactionWaitTimeoutMs` rejects with `DbError("TX_WAIT_
 - **Do** keep `journal_mode = WAL` + `busy_timeout` for multi-process deployments (see [WAL mode and pragma tuning](#wal-mode-and-pragma-tuning)); the gate only covers one process, and `BEGIN IMMEDIATE` blocks the event loop for up to `busy_timeout` under cross-process contention.
 - A transaction on another adapter family (MySQL, MongoDB) is **not** a SQLite transaction: SQLite statements issued inside it still queue behind SQLite's own transactions and run autocommit — see [Transactions](/api/transactions#transaction-state-is-per-adapter-family).
 
+## Derived Columns
+
+A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) VIRTUAL` column: `json_type()` guards the declared type and `json_extract()` reads the leaf, so a missing key, JSON `null` or a value of another type is `NULL`. Nothing is stored unless the column is indexed (SQLite materializes indexed virtual columns). Booleans are `1` / `0` in the column and read back as `true` / `false`. `@db.column.collate` applies after the generated clause. Adding one to a populated table is a plain `ADD COLUMN`; a changed extraction is a `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first) — no table recreation. Introspection uses `PRAGMA table_xinfo` (`hidden` = 2 virtual, 3 stored); a `recreateTable` copies every column but the generated ones, which the new table recomputes.
+
 ## Limitations
 
 - **No ALTER COLUMN type changes** — column type modifications require full table recreation. Use `@db.sync.method 'recreate'` to opt in. See [Schema Sync](/sync/) for details.

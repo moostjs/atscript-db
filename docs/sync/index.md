@@ -48,7 +48,9 @@ When multiple instances of your application start simultaneously (Kubernetes rol
 
 1. **Quick hash check** — if the stored hash matches, sync returns `up-to-date` without touching the lock.
 2. **Lock acquisition** — the first instance writes a lock row to `__atscript_control` keyed by `podId`. Other instances wait, polling at `pollIntervalMs`.
-3. **Peer sync detection** — after the holder finishes, waiting instances re-check the hash. If it now matches, they return `synced-by-peer` without running any DDL. This is the common case in multi-pod deployments.
+3. **Peer sync detection** — after the holder finishes, waiting instances re-check the hash. If it now matches, they return `synced-by-peer` without running any DDL. This is the common case in multi-pod deployments. A `force` run skips this check: it waits its turn, takes the lock and runs.
+
+The lock row is written only by conditional statements: an instance refreshes or releases its own lock, never another's, and clears an expired lock only while it is still expired. A waiter that loses a freed lock to another waiter goes back to waiting (within `waitTimeoutMs`). A release that fails is logged as a warning and does not fail the run; the row then blocks peers until it expires after `lockTtlMs`.
 
 A background heartbeat keeps the lock alive while sync runs, so long-running migrations don't lose their lock to TTL expiry. If a process crashes, the lock expires naturally and the next instance picks up.
 
@@ -140,13 +142,14 @@ When a managed view's definition changes (different entry table, joins, filter, 
 The `--safe` flag suppresses all destructive operations during sync:
 
 - Column drops are skipped
-- Table and view drops are skipped
+- Table and view drops are skipped — a managed view whose definition changed is still dropped and recreated (views hold no data), and so are the views built on it (since 0.1.141)
 - `@db.sync.method 'drop'` recreates for type changes are skipped (since 0.1.128 — earlier releases dropped the table, data and all, even in safe mode; `'recreate'` and in-place `MODIFY COLUMN` still apply): both the plan and the result keep `typeChanges`, `entry.skipped` includes `'recreate'`, printed as `! type priority (REAL → string) — skipped (safe mode)`, and it does not count as destructive
 - Table option changes that require recreation are skipped: `optionChanges` is kept, `entry.skipped` includes `'table-options'`, printed as `! option capped: 1000 → 2000 — skipped (safe mode)`, not destructive (non-destructive option changes are not applied in safe mode either, and are not reported)
 - Nullable and default changes are skipped on adapters that need DDL for them (in-place `MODIFY COLUMN` or a table recreation): `nullableChanges` / `defaultChanges` are kept, `entry.skipped` includes `'nullable-defaults'`, printed as `~ bio — non-nullable — skipped (safe mode)`; a snapshot-only adapter (MongoDB without a recreate) just records the change and nothing is pending
+- A [derived column](/sync/what-gets-synced#derived-columns) rebuild (expression, type or kind change, since 0.1.141) is skipped: `derivedChanges` is kept, `entry.skipped` includes `'derived'`, printed as `! customerId — derived column (expression changed) — skipped (safe mode)`
 - Primary-key rebuilds are skipped (logged as a warning; both the plan and the result show `pkChange` with `rebuild: false` and `entry.skipped` includes `'pk-rebuild'`, printed as `! PK (id) → (code) — skipped (safe mode)`, and it does not count as destructive; a populated-table key change is still refused)
 
-Only additive and non-destructive changes are applied: new tables, new columns, column renames, index updates, and foreign key additions. `entry.skipped` (since 0.1.128) lists the work a safe run skipped — `'pk-rebuild'`, `'recreate'`, `'table-options'`, `'nullable-defaults'` — identically in the plan and in the result, so `plan({ safe: true })` shows exactly what `run({ safe: true })` leaves pending; `entry.pending` is `true` for such an entry (and for an `error` entry).
+Only additive and non-destructive changes are applied: new tables, new columns, column renames, index updates, and foreign key additions. `entry.skipped` (since 0.1.128) lists the work a safe run skipped — `'pk-rebuild'`, `'recreate'`, `'table-options'`, `'nullable-defaults'`, `'derived'` — identically in the plan and in the result, so `plan({ safe: true })` shows exactly what `run({ safe: true })` leaves pending; `entry.pending` is `true` for such an entry (and for an `error` entry).
 
 Objects skipped by safe mode **stay tracked** (since 0.1.128): a removed table or view that safe mode did not drop remains in `synced_tables` with its snapshot, and is dropped by the next run that actually executes — a `--force` run or the next schema change. The schema hash is still written after a safe run, so a safe production boot does not re-plan on every start — with one exception (since 0.1.128): when the run skipped work on a desired table (a primary-key rebuild, a `'drop'` recreate, a destructive table-option recreate or nullable/default DDL — `entry.pending`), that change is still pending, so the table's snapshot and the hash are withheld exactly as for an `error` entry, with a warning per table: `Safe mode: "projects" — nullable/default change skipped, snapshot and hash withheld; the next run without safe applies it`. The next run without `--safe` applies it (no `--force` needed), and a safe-only deployment re-plans and repeats the warning on every start until it does.
 
@@ -169,7 +172,7 @@ The `run()` method returns a result object with one of four statuses:
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `up-to-date`     | Schema hash matched — no introspection or DDL was performed                                                                                          |
 | `synced`         | Changes were detected and applied (inspect `entries` — an `error` entry means that table did not converge and the hash was withheld)                 |
-| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock                                                                          |
+| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock (never for a `force` run)                                                |
 | `refused`        | A [pre-flight refusal](#pre-flight-refusals) stopped the run (since 0.1.128); `entries` is the full plan with the refused entries as `error` entries |
 
 Both `up-to-date` and `synced-by-peer` are success statuses that indicate no work was needed by the current instance. The `synced` status includes a list of `SyncEntry` objects detailing what was changed. A `refused` run follows the `onError` policy: `"warn"` (default) logs every refusal at error level and returns normally, `"throw"` throws, `"silent"` returns — a boot script that only checks `status === "synced"` should treat `refused` as a failed migration.

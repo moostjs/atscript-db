@@ -204,7 +204,7 @@ Throws:
 
 - `ActionNotFoundError` — unknown name (not in `/meta`).
 - `ActionUnsupportedError` — `'custom'` processor (UI dispatches the event itself); or `'navigate'` with no browser + no `navigate` option.
-- `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.id` / `e.ids` accessors. See [actions.md § Server-side gate](actions.md#server-side-gate).
+- `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.id` / `e.ids` / `e.reason` / `e.reasons` accessors (reasons since 0.1.141; `e.message` is the reason when one exists). See [actions.md § Server-side gate](actions.md#server-side-gate).
 - `VersionMismatchError` — HTTP 409 from OCC `$cas` mismatch. `extends ClientError`; adds typed `e.currentVersion: number` accessor. Auto-dispatched when the server response body has `kind: "version_mismatch"`. See [versioning.md § Handling 409](versioning.md#handling-409).
 - `ClientError` — server non-2xx (other). `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works. Non-JSON error body → `e.body = { message, statusCode }` with `message` = statusText or `HTTP <status>` (never empty).
 - `TransportError` (since 0.1.129) — NO server verdict: `fetch` rejected (network, DNS, CORS, `AbortError`) or a 2xx body was not JSON. `e.method`, `e.url`, standard `e.cause` (an abort keeps `cause.name === "AbortError"`). Does NOT extend `ClientError`. A write may have committed — reload the row before retrying a non-idempotent write.
@@ -219,7 +219,7 @@ Throws:
 // Nav<User>: nav-relation fields (Record<string, unknown> when no nav present)
 // Id<User>:  composite id shape when PK is composite, scalar otherwise
 // Data<T>:   full data shape (Own + Nav)
-// ClientResponse<T, Q>: response row — narrowed by literal $with; carries optional $actions?: string[]
+// ClientResponse<T, Q>: response row — narrowed by literal $with; carries optional $actions?: string[] and $disabledReasons?: Record<string, string>
 ```
 
 Autocomplete works on every filter path, sort key, and `$select` element. The query/one/pages return-type narrowing is automatic when `$with` is a literal (use `as const` if TS doesn't infer it as literal).
@@ -234,7 +234,10 @@ const r = await users.query({
   controls: { $actions: true } as const,
 });
 r[0].$actions; // string[] | undefined  (typed via ClientResponse<T, Q>)
+r[0].$disabledReasons?.ship; // reason string — only rows where an action was disabled WITH a reason
 ```
+
+`$disabledReasons` keys never appear in `$actions`; how a UI renders the three cases → [actions.md § Disabled reasons](actions.md#disabled-reasons-since-01141) rule 2.
 
 Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$groupBy` paths are not augmented. `'table'`-level actions never appear.
 
@@ -256,6 +259,8 @@ try {
     e.action; // the @DbAction name that rejected
     e.id; // row-level rejection — Record<string, unknown> (the submitted identifier object)
     e.ids; // rows-level rejection — Record<string, unknown>[]
+    e.reason; // reason shared by every rejected row (predicate returned a string)
+    e.reasons; // rows-level: (string | null)[] aligned with e.ids
   } else if (e instanceof VersionMismatchError) {
     // HTTP 409 from OCC $cas mismatch (PATCH/PUT with `version` or `$cas` in body).
     e.currentVersion; // row's now-stored version — refresh + retry
@@ -281,7 +286,7 @@ try {
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.
 - The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`. Since 0.1.128 a prop declared through a reference chain carries the terminal `ref` (e.g. the dictionary, not the intermediate table) plus `db.rel.FK: true` — `deserializeAnnotatedType` yields `prop.ref.type().metadata.get('db.http.path')` of the dictionary.
 - `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone. `bucketable?: true` (since 0.1.132) marks fields that accept a calendar bucket; top-level `meta.bucketUnits` (absent when none).
-- The meta envelope carries `crud: TCrudPermissions` (see [moost-db.md](moost-db.md) for the full shape) — built-in CRUD discoverability surface. Key absent = denied; value is the accepted UniQuery control whitelist (`[]` for write ops). There is no `readOnly` field; consumers compute it inline as `!('insert' in meta.crud) && !('update' in meta.crud) && !('replace' in meta.crud) && !('remove' in meta.crud)`.
+- Every `/meta` field (incl. `crud` whitelists, `versionColumn`, the inline read-only check — there is no `readOnly` field) → [moost-db.md § Meta endpoint shape](moost-db.md#meta-endpoint-shape).
 - `TCrudOp` and `TCrudPermissions` are re-exported from `@atscript/db-client` for consumer convenience.
 
 ```ts

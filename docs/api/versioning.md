@@ -40,7 +40,7 @@ Constraints (enforced at compile time):
 
 - **At most one** version column per table — composite versioning makes no semantic sense.
 - The field must resolve to a SQL `INTEGER` (or Mongo `Number`). String / timestamp versioning is not supported.
-- The annotation is **boolean only** — column renaming uses the existing [`@db.column.renamed`](/api/tables) annotation.
+- The annotation takes no arguments. To store the field under another column name, add [`@db.column`](/api/tables#custom-column-names) as for any field (`@db.column 'row_version'`). The rename changes only the storage column: `$cas`, write bodies, rows read back and `/meta`'s `versionColumn` keep using the field name (`version`). Renamed version fields are supported since 0.1.141.
 - The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update. See [defaults](./defaults#version-defaults).
 
 ::: tip Auto-bump is mandatory
@@ -65,7 +65,7 @@ if (ok.matchedCount === 0) {
 }
 ```
 
-The map shape (`{ [versionColumn]: N }`) keys by the table's version column name. No exception is thrown on mismatch — the call returns `{ matchedCount: 0, modifiedCount: 0 }` and the caller decides what to do.
+The map shape (`{ [versionColumn]: N }`) keys by the version field's name (the logical name, even when `@db.column` renames its column). No exception is thrown on mismatch — the call returns `{ matchedCount: 0, modifiedCount: 0 }` and the caller decides what to do.
 
 ::: tip No throw on mismatch
 Throwing creates an asymmetry where every retry path needs `try/catch` instead of a clean `if (!result.matchedCount)`. Distinguish "row missing" from "version mismatch" with an extra `findOne` if you care; for the dominant retry-on-conflict use case both states warrant the same response.
@@ -189,7 +189,7 @@ What it does, in order:
 
 1. `findOne(filter)` — read the current row (throws `DbError("NOT_FOUND")` if missing).
 2. Call `mutator(row)` to compute the patch.
-3. `updateOne({ ...filter, ...patch, $cas: { [versionColumn]: row.version } })`.
+3. `updateOne({ ...filter, ...patch, $cas: { [versionColumn]: row[versionColumn] } })`.
 4. On `matchedCount === 0`, retry from step 1 up to `maxAttempts` times.
 5. After `maxAttempts` consecutive conflicts, throw [`CasExhaustedError`](#casexhaustederror).
 

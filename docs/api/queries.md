@@ -311,6 +311,10 @@ controls: { $sort: { status: 1, name: -1 } }
 // ORDER BY status ASC, name DESC
 ```
 
+::: info NULL position
+Where `null` / missing values land follows the engine: SQLite, MySQL, MongoDB and the memory adapter put them **first** in ascending order (last in descending); PostgreSQL puts them **last** in ascending order (first in descending). When the position must be the same on every engine, filter `null` out (or query it separately) instead of relying on the sort.
+:::
+
 ### Pagination
 
 ```typescript

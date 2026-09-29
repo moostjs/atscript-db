@@ -15,6 +15,7 @@ Atscript fields can be stored in the database in three different ways. Understan
 | **Column**    | Scalar fields (`string`, `number`, `boolean`, `decimal`) | One field → one database column             | Yes               |
 | **Flattened** | Nested objects (default)                                 | Each nested field → a `__`-separated column | Yes               |
 | **JSON**      | `@db.json` objects, all arrays                           | Entire value → single JSON column           | Adapter-dependent |
+| **Derived**   | `@db.column.derived` fields                              | One leaf of a JSON field → its own column   | Yes               |
 
 ## Column Storage
 
@@ -105,6 +106,69 @@ When to use `@db.json`:
 ::: tip
 Arrays are always stored as JSON regardless of `@db.json`. You only need the annotation for plain objects you want to keep as a single column.
 :::
+
+## Derived Columns
+
+Since 0.1.141 a `@db.column.derived` field promotes **one scalar leaf** of a `@db.json` field of the same table to a real column of its own — filterable, sortable, groupable and indexable like any column, while the JSON value stays the single source of truth. The field's type is a chain reference into the JSON field:
+
+```atscript
+@db.table 'orders'
+export interface Order {
+    @meta.id
+    id: number
+
+    @db.json
+    payload: {
+        customer: {
+            id: string
+            vip: boolean
+            tier?: string
+        }
+        total: number
+    }
+
+    @db.column.derived
+    @db.index.plain
+    customerId: Order.payload.customer.id
+
+    @db.column.derived
+    vip?: Order.payload.customer.vip
+
+    @db.column.derived
+    @db.column.collate 'nocase'
+    tier?: Order.payload.customer.tier
+}
+```
+
+The column holds the **declared** type, or `null` when the path is missing, the JSON value is `null`, or it has another JSON type — the same rules as a view's [JSON leaf](/views/#reading-json-leaves), with no coercion (`"14"` is not a number, `1` is not `true`). A path that may be absent (an optional step, or an optional leaf) should be declared optional (`tier?:`) — the compiler warns otherwise.
+
+**What the compiler checks** (each is an error in the editor and at build time):
+
+| Rule                                                                 | Message                                                                                                              |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Only a top-level field of a `@db.table` interface                    | `@db.column.derived is only valid on a top-level field of a @db.table interface`                                     |
+| The type is a chain reference (`Order.payload.customer.id`)          | `@db.column.derived requires a chain reference into a @db.json field of the same table …`                            |
+| … into the **same** table                                            | `@db.column.derived must reference the enclosing table 'Order', not 'Customer' — a derived column reads its own row` |
+| … that descends into a `@db.json` field                              | `… does not read inside a @db.json field — a flattened or scalar column needs no derived column`                     |
+| No array on the path                                                 | `… crosses an array — a derived column reads one scalar leaf`                                                        |
+| Not inside a `@db.encrypted` field                                   | `… reads inside a @db.encrypted field — ciphertext cannot be extracted`                                              |
+| The leaf is a `string`, `number` or `boolean`                        | `… must end at a string, number or boolean leaf (got 'decimal')`                                                     |
+| Not combined with an annotation that needs a stored, writable column | `@db.column.derived cannot coexist with @<name> — <why>`                                                             |
+
+The last rule covers `@meta.id`, `@db.rel.FK`, `@db.default*`, `@db.column.version`, `@db.encrypted`, `@db.json`, `@db.ignore`, `@db.writeOnly`, `@db.index.fulltext` / `.geo`, `@db.search.vector` and the MongoDB search annotations. `@db.column`, `@db.column.renamed`, `@db.column.collate`, `@db.index.plain` / `.unique`, `@db.column.dimension` / `.measure` / `.filterable` / `.sortable` / `.searchable` and `@expect.*` are allowed.
+
+**Reads and writes.** Every read fills the derived field; an inclusion `$select` of a derived field does not pull its JSON source along. A value supplied for a derived field on insert, replace or patch is **dropped silently** — the column is computed, never written — and a field operation on it (`$inc` / `$dec` / `$mul`) is a validation error (HTTP 400): patch the source leaf instead. `/meta.fields[path].derived` is `true` for such a field.
+
+**Per adapter** — each adapter page has the DDL, the type guard and the introspection details:
+
+| Adapter                                                                                | Storage                                                                             |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| [SQLite](/adapters/sqlite#derived-columns)                                             | `GENERATED ALWAYS AS (…) VIRTUAL` — computed on read                                |
+| [MySQL / MariaDB](/adapters/mysql#derived-columns)                                     | `GENERATED ALWAYS AS (…) VIRTUAL` — a string leaf is `VARCHAR(255)`                 |
+| [PostgreSQL](/adapters/postgresql#derived-columns)                                     | `GENERATED ALWAYS AS (…) STORED` — computed on write                                |
+| [MongoDB](/adapters/mongodb#schema-sync-notes), [memory](/adapters/memory#schema-sync) | Nothing is stored: the derived name maps to its source path (`payload.customer.id`) |
+
+Adding, changing or removing a derived column is a schema-sync operation — see [What Gets Synced → Derived Columns](/sync/what-gets-synced#derived-columns).
 
 ## Queryability
 

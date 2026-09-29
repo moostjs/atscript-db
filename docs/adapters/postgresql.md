@@ -417,6 +417,10 @@ The `PgDriver` configures custom type parsers for consistent JavaScript value ha
 
 These parsers are applied per-pool (not globally), so they don't affect other `pg` usage in the same process. When using a pre-created `pg.Pool`, type parsing is the caller's responsibility.
 
+## Derived Columns
+
+A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) STORED` column — PostgreSQL has no virtual generated columns, so the value is computed on every write of the row and occupies storage. The expression is `jsonb_typeof()`-guarded `#>>` extraction with a cast to `boolean` / `double precision` for those leaves; a `@db.column.collate 'nocase'` leaf is `CITEXT` like a stored one, other collations render `COLLATE "…"` before the generated clause. `ALTER COLUMN TYPE` is never used on a generated column: a changed extraction or type is `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first). Introspection reads `information_schema.columns.is_generated`; a `recreateTable` copies every column but the generated ones, which the new table recomputes from the copied JSON.
+
 ## Limitations
 
 - **No unsigned integer types** — unsigned types are promoted to the next-larger signed type (see [Unsigned Integer Promotion](#unsigned-integer-promotion))

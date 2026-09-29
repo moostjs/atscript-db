@@ -90,6 +90,8 @@ const missing = assertExposed(app, atscriptModels); // default: only @db.http.pa
 assertExposed(app, atscriptModels, { all: true, exclude: [InternalCache] });
 ```
 
+A `@db.alias` type in the list is skipped (0.1.141) — a join scope, not a model a controller serves.
+
 Detects token + instance bindings; lazy-factory bindings can't name their model — with `all: true` they false-positive, so list them in `exclude`.
 
 ## Writable table access in readable controllers
@@ -162,7 +164,7 @@ Opt-in URL/control flag (`?$actions=true`, or `controls: { $actions: true }`). W
 2. Filter through per-request `applyMetaOverlay()` (`meta()` skipped when overlay is identity).
 3. Pre-widen `$select` to union all `requiredFields` when caller restricted projection.
 4. Run the read.
-5. Run each `disabled` predicate once on the full result (length-mismatch → HTTP 500).
+5. Run each `disabled` predicate once on the full result (length-mismatch → HTTP 500); string verdicts also set `$disabledReasons: { [action]: reason }` on that row.
 6. Strip widened-only fields the caller didn't ask for.
 
 Not augmented: `$count`, `$groupBy`. See [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability).
@@ -218,23 +220,15 @@ export class UsersController extends AsDbController<typeof User> {
 - `version` + differing `$cas` → 400 at `$cas` (`Ambiguous version: "version" and "$cas.version" differ`, `[i].$cas` in bulk); a malformed `$cas` beside `version` reports `separateCas`'s own message (shared `reconcileCas` from `@atscript/db`).
 - Built-in write failures are THROWN `HttpError`s (wire-identical; a throw also rolls back a wrapper `withTransaction` around `super.update()`; on a throw the router may fall through to a later matching route).
 - `computeEmbedding` enables `$vector` on `/query` — without it, `$vector` → HTTP 501.
-- `decorateRows(rows, ctx)` (since 0.1.136; `TDbDecorateContext` exported from `@atscript/moost-db`): post-read hook with no base impl — defining it switches it on. Mutate `rows` in place (return ignored; may be async). Runs ONCE per response with the top-level rows on `/query`, `/pages`, `/geo`, `/one` (`/one/:id` + `/one?…`), AFTER `$actions` augmentation. `ctx = { endpoint: "query" | "pages" | "geo" | "one", projection, controls }` — `projection` = effective `$select` after `transformProjection` + write-only seal (`undefined` = all columns). NOT called for `$count`, `$groupBy`, a `/one` 404, value-help controllers; nested `$with` rows are never passed on their own. Rules: prefix added keys with `$` (convention, not enforced); never overwrite `$actions`; columns pulled in only by an action's `requiredFields` are already stripped — widen via `transformProjection` if the hook needs a column (it then ships in the response).
+- `decorateRows(rows, ctx)` (since 0.1.136; `TDbDecorateContext` exported from `@atscript/moost-db`): post-read hook with no base impl — defining it switches it on. Mutate `rows` in place (return ignored; may be async). Runs ONCE per response with the top-level rows on `/query`, `/pages`, `/geo`, `/one` (`/one/:id` + `/one?…`), AFTER `$actions` augmentation. `ctx = { endpoint: "query" | "pages" | "geo" | "one", projection, controls }` — `projection` = effective `$select` after `transformProjection` + write-only seal (`undefined` = all columns). NOT called for `$count`, `$groupBy`, a `/one` 404, value-help controllers; nested `$with` rows are never passed on their own. Rules: prefix added keys with `$` (convention, not enforced); never overwrite `$actions` / `$disabledReasons`; columns pulled in only by an action's `requiredFields` are already stripped — widen via `transformProjection` if the hook needs a column (it then ships in the response).
 
 ## Optimistic concurrency over HTTP
 
-Tables annotated with `@db.column.version` get auto-lifted CAS on PATCH and PUT. The full SDK side lives in [versioning.md](versioning.md); this section covers the wire contract.
+Tables annotated with `@db.column.version` get auto-lifted CAS on PATCH and PUT. This section is the canonical wire contract; the SDK side (`$cas`, `withOptimisticRetry`, `touchMany`) and client-side 409 handling live in [versioning.md](versioning.md).
 
 ### `/meta` exposes `versionColumn`
 
-```jsonc
-// Versioned table
-{ "primaryKeys": ["id"], "versionColumn": "version", "fields": { … }, … }
-
-// Non-versioned table — key omitted
-{ "primaryKeys": ["id"], "fields": { … }, … }
-```
-
-Clients use this pointer to decide whether to round-trip `version`. UI generators may render the version field as read-only.
+Present only on versioned tables — see [§ Meta endpoint shape](#meta-endpoint-shape). Its value is the LOGICAL field name — the body / `$cas` / row key; a `@db.column` rename never changes it (0.1.141; ≤ 0.1.140 it was the stored column → renamed version fields got no HTTP OCC). Examples below say `version` = whatever it names. Clients round-trip the field only when it is set; UI generators render it read-only.
 
 ### Auto-lift on PATCH / PUT
 
@@ -259,7 +253,7 @@ When CAS misses on a row that exists, the controller does a disambiguation `find
 }
 ```
 
-Discriminate on `kind === "version_mismatch"` plus `currentVersion`. The Wooks framework owns the `error` field and overrides whatever the controller sets — that's why the discriminator lives on `kind`.
+Discriminate on `kind === "version_mismatch"` plus `currentVersion`. The Wooks framework owns the `error` field and overrides whatever the controller sets — that's why the discriminator lives on `kind`. Client side (`VersionMismatchError`, raw `fetch`): [versioning.md § Handling 409](versioning.md#handling-409).
 
 ### 404 disambiguation
 
@@ -381,23 +375,34 @@ Behavior-change gotchas (were silent before the shared-engine move):
 ## Meta endpoint shape
 
 ```ts
-type TCrudOp = "query" | "pages" | "one" | "insert" | "update" | "replace" | "remove";
+type TCrudOp = "query" | "pages" | "one" | "geo" | "insert" | "update" | "replace" | "remove";
 type TCrudPermissions = Partial<Record<TCrudOp, string[]>>;
 
 interface TMetaResponse {
   searchable: boolean;
   vectorSearchable: boolean;
+  geoSearchable?: boolean; // adapter supports geo AND the table has a geo index (then `crud.geo` is set). See geo-search.md.
   searchIndexes: { name; description?; type? }[];
   primaryKeys: string[];
   preferredId: string[]; // logical field names, always populated; defaults to primaryKeys
-  versionColumn?: string; // logical field name of the `@db.column.version` field; omitted when none. See versioning.md.
+  versionColumn?: string; // LOGICAL field name of the `@db.column.version` field (a `@db.column` rename does not change it); omitted when none → round-trip it only when set. See § Optimistic concurrency over HTTP.
   bucketUnits?: BucketUnit[]; // calendar-bucket units; omitted when none (since 0.1.132). See calendar-buckets.md.
   aggregateFns?: AggregateFn[]; // the adapter's aggregateFns(), canonical order; always sent by moost-db. See aggregation.md.
   relations: { name; direction: "to" | "from" | "via"; isArray }[];
   fields: Record<
     string,
-    { sortable; filterable; filterOps?; indexed?; bucketable?; encrypted?; geo?; writeOnly? }
-  >; // exact — see Gate mode
+    {
+      sortable;
+      filterable;
+      filterOps?;
+      indexed?;
+      bucketable?;
+      encrypted?;
+      geo?;
+      writeOnly?;
+      derived?;
+    }
+  >; // exact — see Gate mode; `derived: true` (0.1.141) = `@db.column.derived`, read-only (a written value is dropped)
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; chained refs resolve to the terminal field — see relations.md)
   actions: TDbActionInfo[]; // declared actions; `[]` when none. See actions.md.
   crud: TCrudPermissions; // built-in CRUD surface; key absent = denied
@@ -407,11 +412,11 @@ interface TMetaResponse {
 `crud` declares which built-in CRUD operations the controller exposes and the
 accepted UniQuery control whitelist per read op (`[]` for write ops). Per-base-class emission:
 
-- `AsDbReadableController` → `{ query, pages, one }`
+- `AsDbReadableController` → `{ query, pages, one }` (+ `geo` when `geoSearchable`)
 - `AsDbController` → inherits + `{ insert: [], update: [], replace: [], remove: [] }`
 - `AsValueHelpController` / `AsJsonValueHelpController` → `{ query, pages, one }`
 
-Whitelists are exported as constants from `@atscript/moost-db`: `QUERY_CONTROLS`, `PAGES_CONTROLS`, `ONE_CONTROLS`.
+Whitelists are exported as constants from `@atscript/moost-db`: `QUERY_CONTROLS`, `PAGES_CONTROLS`, `ONE_CONTROLS`. `crud.geo` (no exported constant) = `filter, insights, center, maxDistance, minDistance, index, select, skip, limit, page, size, with, actions`.
 
 There is no `readOnly` field; consumers compute it inline as
 `!('insert' in crud) && !('update' in crud) && !('replace' in crud) && !('remove' in crud)`.

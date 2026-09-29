@@ -65,7 +65,7 @@ Since 0.1.128 drops are **dependency-ordered and refused when unsafe**:
 
 ## Columns
 
-Column-level changes are detected by `computeColumnDiff()`, which compares the desired field definitions from your `.as` types against the existing columns in the database. Six change types are tracked:
+Column-level changes are detected by `computeColumnDiff()`, which compares the desired field definitions from your `.as` types against the existing columns in the database. Seven change types are tracked:
 
 ### Add
 
@@ -145,6 +145,21 @@ Fields removed from your `.as` type are dropped from the database table.
 ::: danger
 Dropping a column permanently deletes all data stored in it. Use `--safe` mode to suppress column drops, or review carefully with `--dry-run`.
 :::
+
+### Derived Columns
+
+A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a generated column on the SQL adapters and no column at all on document adapters. Sync treats it accordingly:
+
+- **Add** — `ALTER TABLE … ADD COLUMN … GENERATED ALWAYS AS (…)` on a populated table: every existing row shows its value at once and the column's indexes are created as usual. Printed `+ customerId (string) derived — add`.
+- **Change** — the column is **dropped and re-added** (its managed indexes dropped first and recreated after) when the extraction changed: the source path or the leaf type (`~ customerId — derived column (expression changed) — drop + add`), the live column's type drifted (`type changed`), or the field turned from a regular column into a derived one or back (`regular → derived` / `derived → regular`, printed with `!`: the kind change is **destructive** — a regular column's stored values are lost, and the values of a column that becomes regular start as `NULL`). The expression is compared against the table's stored snapshot, so a change made in the model is detected without introspecting the database's own rendering of it.
+- **Rename** — `@db.column.renamed` renames the generated column in place; when the expression changed as well, the rename runs first and the rebuild follows under the new name.
+- **Drop** — like any column (indexes first).
+- **Never diffed for nullability or defaults** — a generated column is nullable and has no `DEFAULT`; a `@db.default` on it is a compile error.
+- **Safe mode** — a rebuild is skipped and stays pending: `! customerId — derived column (expression changed) — skipped (safe mode)`, `entry.skipped` includes `'derived'`, the snapshot and the hash are withheld until a run without `--safe` (which then applies it without `--force`). Adds and renames still run.
+- **MongoDB and the memory adapter** store nothing for a derived field — only the index over the source path is managed; see [MongoDB](/adapters/mongodb#schema-sync-notes) and [memory](/adapters/memory#schema-sync).
+- An adapter that cannot drop or add columns (`dropColumns` / `syncColumns` missing) reports the rebuild as an `error` entry.
+
+Tables without derived columns hash exactly as before the upgrade: the snapshot records the extraction only for derived fields. How each SQL adapter introspects a generated column is on its page ([SQLite](/adapters/sqlite#derived-columns), [MySQL](/adapters/mysql#derived-columns), [PostgreSQL](/adapters/postgresql#derived-columns)).
 
 ## Indexes
 
@@ -306,6 +321,17 @@ definition still depends on it. Update the view definition in the same deploy
 that removes the column.
 
 Before creating a managed view, sync checks what already exists under that name: a **physical table** there (typically left behind by an older build that mistook the view for a table) is a pre-flight refusal, not a silent no-op — and symmetrically a view under a declared table's name.
+
+### Views That Read Views
+
+Since 0.1.141 a managed view may read other views ([Views over views](/views/#views-over-views)). Sync treats them as one dependency graph:
+
+- **Order** — views are created after the views they read (otherwise in inventory order); the plan lists a view's sources — tables and views — in `entry.dependsOn`. Dropped views go dependents-first: removed views (ordered from their stored definitions) before the managed views whose definition changed, and those in reverse creation order. PostgreSQL refuses to drop a view another view depends on, and sync never drops with `CASCADE`.
+- **Cascade** — a view's stored definition does not embed the definitions of the views it reads. Instead, when a view is dropped and recreated (its definition changed, or it is renamed), every managed view that reads it is recreated with it, unchanged. The entry is an `alter` with `recreated: true` and `cascadeFrom: ["<upstream view>"]`, printed as `· upstream view "x" recreated`, in the plan and in the run.
+- **Refusals** (no DDL runs): a removed view that a managed view still reads (`Cannot drop view "x": it is still referenced by view "y"`), a source that is neither in the inventory nor present in the database (`View "y" reads "x" which is neither in the sync inventory nor present in the database`), and managed views that read each other in a cycle.
+- **Failures** — when creating a view fails, the views that read it are not created; each reports an `error` entry naming the failed upstream view (`Upstream view "x" failed — "y" was not created over it`) and the hash is withheld, so the next run retries the whole chain.
+- **External views** as sources are checked for presence only; keep them in the inventory as [external views](/views/view-types#external-views) to have their columns verified too.
+- A [join alias](/views/#join-aliases-and-self-joins) is not an object: it is neither created nor tracked, one listed in the inventory is skipped, and `dependsOn` names the aliased table.
 
 ### View Renames
 

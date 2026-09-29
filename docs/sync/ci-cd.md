@@ -87,7 +87,7 @@ When multiple pods start simultaneously (Kubernetes rolling deploys, serverless 
 1. First pod acquires the lock, a heartbeat keeps it alive
 2. Other pods wait, polling every 500ms
 3. First pod completes sync, stores the new hash, releases the lock
-4. Waiting pods see the updated hash → `synced-by-peer`, skip sync
+4. Waiting pods see the updated hash → `synced-by-peer`, skip sync (a pod started with `--force` runs after the first one instead)
 
 See [Distributed Locking](./#distributed-locking) for the full flow.
 

@@ -85,7 +85,20 @@ this._table.defaults;
 this._table.ignoredFields;
 this._table.isView;
 this._table.fieldDescriptors; // pre-built TDbFieldMeta[]
+this._table.columnDescriptors; // what schema sync manages as columns (0.1.141)
+this._table.storedDescriptors; // columns holding their own value — insert / copy these, never generated ones (0.1.141)
+this._table.versionColumnPhysical; // STORED column of @db.column.version (undefined when none) — see § Versioned tables
 ```
+
+## Versioned tables (OCC)
+
+| #   | Rule                                                                                                                                                                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Use `this._table.versionColumnPhysical` for every adapter-side version operation. NEVER `versionColumn` — that is the LOGICAL field (the `$cas` / HTTP key); it differs from the column under `@db.column 'x'` (0.1.141). |
+| 2   | Bump `+1` in the same statement on `updateOne` / `updateMany` / `replaceOne` / `replaceMany`, with or without `expectedVersion`.                                                                                          |
+| 3   | `expectedVersion` (4th arg of `updateOne`, 3rd of `replaceOne`) → AND `<physical> = expectedVersion` into the match; stale → `{ 0, 0 }`, never throw.                                                                     |
+| 4   | `data` never carries the version (table strips `$cas`, rejects direct writes). Insert: default it to `0` when the engine has no DDL `DEFAULT` (Mongo / memory).                                                           |
+| 5   | SQL: `buildUpdate(..., versionColumnPhysical, expectedVersion)` + `fillReplacePayload(data, cols, versionColumnPhysical)` from `@atscript/db-sql-tools` do 2–3 and keep a full replace from NULLing the column.           |
 
 ## Overridable flags
 
@@ -172,6 +185,20 @@ Adapters using session-style APIs (MongoDB) can override `withTransaction()` dir
 | `dropTablesByName(names)` (0.1.128)                                                                                     | Concrete base default loops `dropTableByName`; override for one-statement group drops (PG `DROP TABLE a, b`) or FK-check toggling (SQLite PRAGMA). NEVER `CASCADE` in sync-owned drops — let the engine refuse; sync turns it into an `error` entry. |
 | `renderDesiredColumn?(index, field)` (option of `syncIndexesWithDiff`, 0.1.128)                                         | Render a desired key part the way `listExisting` renders live ones (MySQL prefixes) so definition drift compares like with like.                                                                                                                     |
 
+## Derived columns (0.1.141)
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                          |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Document adapters (`supportsNestedObjects()` → `true`): nothing to do — the core maps a `@db.column.derived` field to its source path and leaves it out of `columnDescriptors`.                                                                                                                                                               |
+| 2   | SQL: render `field.derived` fields in `ensureTable()` and `syncColumns({ added })` as `GENERATED ALWAYS AS (<derivedColumnExpr(dialect, field)>)` — no `NOT NULL`, no `DEFAULT`. `derivedColumnExpr` (`@atscript/db-sql-tools`) needs `SqlDialect.jsonExtract`; without it the sync fails `JSON extraction is not supported by this adapter`. |
+| 3   | `getExistingColumns()` returns `generated: true` for generated columns — the diff compares a derived column as a whole.                                                                                                                                                                                                                       |
+| 4   | A derived column never arrives in `typeChanged` / `nullableChanged` / `defaultChanged`; any drift is `derivedChanged`, which sync applies itself as `dropIndexesForColumns` → `dropColumns` → `syncColumns({ added })`.                                                                                                                       |
+| 5   | Never insert into a generated column: `recreateTable()` copies `storedDescriptors`; the core already drops derived values from write payloads.                                                                                                                                                                                                |
+
+## Views (0.1.141)
+
+`ensureView`: an entry or join source may itself be a view — render it like a table. Each `TViewJoin` carries `scope` (the alias name of a `@db.alias` join, else `targetTable`); when `scope !== targetTable` render `JOIN "<targetTable>" AS "<scope>"` — conditions, filters, `resolveRefSource(ref).table` and `TViewColumnMapping.sourceTable` use the scope name. `buildCreateView` (`@atscript/db-sql-tools`) already does this.
+
 ## Index sync helper
 
 Reuse the template method. `prefix` defaults to `'atscript__'` — omit unless overriding.
@@ -237,6 +264,7 @@ Return adapter-specific validators from `getValidatorPlugins(): TValidatorPlugin
 - Implements all abstract methods.
 - Detects views with `this._table.isView` / `isAtscriptDbView()` — never `instanceof AtscriptDbView`.
 - Implements `hasRows(tableName?)` (an `EXISTS` probe that accepts a table name) if it implements column introspection — the base default is a `count()` (a full scan on most engines) and answers "cannot tell" for a renamed table.
+- Versioned tables: bumps / compares / defaults the version through `this._table.versionColumnPhysical` (§ Versioned tables).
 - `syncIndexesWithDiff({...})` in `syncIndexes()` for uniform index naming.
 - Exports a `createAdapter(connection, options?)` one-liner that returns a `DbSpace`.
 - Does **not** import another adapter package.

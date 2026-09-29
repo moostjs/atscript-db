@@ -73,7 +73,7 @@ Metadata is built lazily on first access — safe to reference from peer tables.
 | `viewPlan`                     | Computed plan (entry table + joins + filter + groupBy).                                                                                                                                                                                                                                                                                                                                                                             |
 | `isExternal`                   | True when neither `@db.view.for` nor joins are present — assumed pre-existing in DB.                                                                                                                                                                                                                                                                                                                                                |
 | `getViewColumnMappings()`      | View column → source table/column; `@db.ignore` fields are excluded (0.1.128) so they never reach `CREATE VIEW`. Names are PHYSICAL on both sides (`viewColumn` = the view's own column, `sourceColumn` = flattened `__` / `@db.column` / document path; `viewPath` = logical view path, required; `json` set for a JSON leaf; `nullable` when the source may be missing — left join, optional, JSON leaf). Computed once per view. |
-| `resolveRefSource(ref)`        | A view query ref (join condition, filter, conditional aggregate) → `{ table, source }`: the PHYSICAL column / document path on this view's adapter (+ `jsonPath` inside a JSON column), same layout rules as `TableMetadata`. The only public view-source resolver — use it in custom adapters instead of re-deriving names.                                                                                                        |
+| `resolveRefSource(ref)`        | A view query ref (join condition, filter, conditional aggregate) → `{ table, source }`: the PHYSICAL column / document path on this view's adapter (+ `jsonPath` inside a JSON column), same layout rules as `TableMetadata`. `table` = physical table/view name, or the alias name for a `@db.alias` join (0.1.141). The only public view-source resolver — use it in custom adapters instead of re-deriving names.                |
 | `findOne/Many/count/aggregate` | Read-only ops; writes throw.                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### View kinds
@@ -105,7 +105,7 @@ View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `ta
 | 1   | Joins are INNER by default on every adapter; 3rd arg `'left'` keeps unmatched entry rows: ``@db.view.joins User, `User.id = Task.assigneeId`, 'left'``.                                                                                         |
 | 2   | A field read from a left-joined table MUST be optional (`assigneeName?: User.name`) — compile error otherwise. `@db.agg.count` / `countDistinct` fields exempt; `sum`/`avg`/`min`/`max` not.                                                    |
 | 3   | Joins apply in declaration order; a join condition may reference the entry table + joins declared BEFORE it (chains `Order → Customer → Region`). Forward refs = compile error.                                                                 |
-| 4   | One join per table; joining the entry table or the same table twice = compile error (no aliases / self-joins).                                                                                                                                  |
+| 4   | Every scope name (entry + joins) is unique: joining the entry table or the same table twice = compile error, the message suggests a `@db.alias` type (§ Join aliases). A join target may be a `@db.view` (§ Views over views).                  |
 | 5   | `@db.view.filter` on a left-joined table's field drops unmatched rows (acts inner) — put match restrictions into the join condition.                                                                                                            |
 | 6   | View predicates support `= != < <= > >= in, not in, exists, not exists, and/or/not`. `matches` fails sync on SQL (and in Mongo join conditions). JSON paths in conditions fail sync.                                                            |
 | 7   | Object view field over a flattened source → one view column per leaf; over a `@db.json` source → needs `@db.json` on the view field (sync error otherwise). A chain into a JSON field must end at a string/number/boolean leaf (compile error). |
@@ -120,10 +120,41 @@ View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `ta
 | 1   | Leaf must be `string` / `number` / `boolean` (compile error otherwise). Declare the view field optional — it is `null` for a missing key, SQL `NULL` column, JSON `null`, or a value of ANOTHER JSON type. |
 | 2   | No coercion: `"14"` is not a number, `1` is not `true`. Numbers are doubles (ints > 2^53 lose precision).                                                                                                  |
 | 3   | Usable as SELECT column, GROUP BY dimension, `@db.agg.*` source (`@db.agg.sum "settings.score"`), `@db.view.having` operand. NOT in join ON / `@db.view.filter` (sync error).                              |
-| 4   | Computed per row — no index; filters/sorts on it scan the source. Need speed → promote the leaf to a real column.                                                                                          |
+| 4   | Computed per row — no index; filters/sorts on it scan the source. Need speed → `@db.column.derived` on the table (below), then read that column from the view.                                             |
 | 5   | MongoDB: reads the document path with NO type guard (off-type values written outside atscript-db pass through). SQL adapters guard with `json_type` / `JSON_TYPE` / `jsonb_typeof`.                        |
 | 6   | A path segment containing `"`, `\` or a control char fails sync (`JSON path segment … can't be extracted`).                                                                                                |
 | 7   | Custom SQL adapters: implement `SqlDialect.jsonExtract` → `creating-adapters.md § SQL helpers`.                                                                                                            |
+
+### Derived columns (0.1.141)
+
+`@db.column.derived` on a TABLE field typed `Order.payload.customer.id` (chain ref into the table's own `@db.json` field) → a real, indexable column; a view reads it like any column (`customer: Order.customerId`; on Mongo/memory that resolves to the source path, nullable). Every read fills it; an inclusion `$select` of it never pulls its JSON source along; writes drop it. Rules → [annotations.md](annotations.md); sync → [schema-sync.md](schema-sync.md); custom-adapter contract → [creating-adapters.md § Derived columns](creating-adapters.md#derived-columns-01141).
+
+### Join aliases (0.1.141)
+
+`@db.alias <Target>` on `export type Alias = Target` (Target = `@db.table` or `@db.view`, never another alias) declares a scope name a view can join under — the way to join one table twice or self-join the entry:
+
+```atscript
+@db.alias Employee
+export type Manager = Employee
+
+@db.view.for Employee
+@db.view.joins Manager, `Manager.id = Employee.managerId`, 'left'
+interface Staff {
+    id: Employee.id
+    managerName?: Manager.name
+}
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                 |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Compile errors: not a plain `export type X = Target` equal to the argument; target not a table/view; `@db.table` / `@db.view` on the alias; an alias cannot be the `@db.view.for` entry; each alias joined once per view.                                                                                                                            |
+| 2   | Runtime: `TViewJoin.scope` = the alias name (`"Manager"`), `targetTable` = physical (`"employees"`); `resolveRefSource(ref).table` and `TViewColumnMapping.sourceTable` = the scope name; `aliasTargetOf(Alias)` = the aliased type.                                                                                                                 |
+| 3   | SQL: `LEFT JOIN "employees" AS "Manager"`; Mongo: `$lookup.from` physical, docs under `__joined_Manager`. Non-aliased views hash as before (snapshot shape → `schema-sync.md § View sync`).                                                                                                                                                          |
+| 4   | Not an object: never synced/tracked (`dependsOn` names the physical table); `DbSpace.get/getTable/getView(Alias)` throw; an alias in a `syncSchema` inventory is skipped; its runtime metadata carries no `db.table` / `db.view` (`isDbEntityType(Alias) === false`). `/meta` chains through an alias resolve to the aliased table's terminal field. |
+
+### Views over views (0.1.141)
+
+`@db.view.for` / `@db.view.joins` accept a managed or external `@db.view`. The downstream view reads the upstream view's OWN physical columns (`@db.column` renames, flattened `__` leaves, JSON root + `json` leaf path, `@db.agg.*` measures as plain leaves; optional upstream fields → `nullable`). `tableNameOf(view)` = its `@db.view` name. Cycle = compile error (`View 'A' depends on itself: A → B → A`) and a sync refusal. A downstream filter cannot push past an upstream `GROUP BY`. Sync order / cascade / refusals → `schema-sync.md § View sync`.
 
 Sync detail: a view's definition = entry table + joins WITH their ON conditions and kind + each column's physical source + aggregate + filter + having + materialized flag + fields; a physical table already sitting under a managed view's name is a pre-flight refusal, not a silent skip. See `schema-sync.md § View sync`.
 

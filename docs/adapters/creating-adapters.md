@@ -59,6 +59,10 @@ These are abstract — every adapter must implement all of them.
 
 Data is already validated, defaults applied, and columns mapped by the table layer. Your adapter only needs to translate to the database's native insert syntax.
 
+::: warning Constraint errors must be `DbError`s
+Wrap every write (insert, update, replace, patch, delete) so that a native constraint error is rethrown as `DbError` from `@atscript/db`: a duplicate primary or unique key as `DbError("CONFLICT")`, a foreign-key violation as `DbError("FK_VIOLATION")`. moost-db maps them to 409 / 400, and schema sync relies on `CONFLICT` to recognise a lock held by another pod — a raw driver error there makes `run()` reject when two pods start together (since 0.1.141).
+:::
+
 ::: tip
 Use `this._resolveInsertedId(data, dbGeneratedId)` in your `insertOne` implementation to return the correct inserted ID. It prefers the user-supplied primary key value from the data over the DB-generated fallback (e.g., `RETURNING id`, `lastInsertRowid`).
 :::
@@ -75,6 +79,16 @@ Use `this._resolveInsertedId(data, dbGeneratedId)` in your `insertOne` implement
 - **`updateMany(filter, data)`** — Update all records matching the filter.
 - **`replaceOne(filter, data)`** — Full replacement of a single record (all columns overwritten).
 - **`replaceMany(filter, data)`** — Full replacement of all matching records.
+
+#### Versioned tables {#versioned-tables}
+
+When the table declares [`@db.column.version`](/api/versioning), `this._table.versionColumnPhysical` names its stored column (`undefined` otherwise). The table layer has already removed `$cas` from the payload and rejected direct writes to the version field, so `data` never contains it. The adapter:
+
+- **bumps** it by 1 in every `updateOne`, `updateMany`, `replaceOne` and `replaceMany`, in the same statement as the write;
+- **compares** it when `updateOne(filter, data, ops, expectedVersion)` or `replaceOne(filter, data, expectedVersion)` receives an `expectedVersion`: add `<column> = expectedVersion` to the match, so a stale version matches nothing and returns `{ matchedCount: 0, modifiedCount: 0 }`;
+- **defaults** it to `0` on insert when the engine has no DDL `DEFAULT` for it (document stores).
+
+Use `versionColumnPhysical`, not `versionColumn`: `versionColumn` is the field name clients use in `$cas` and write bodies, and it differs from the stored column under a `@db.column` rename (since 0.1.141). SQL adapters get the bump and the comparison from `buildUpdate` in `@atscript/db-sql-tools` (pass it `versionColumnPhysical` and `expectedVersion`), the insert default from the `DEFAULT 0` that schema sync declares, and should pass `versionColumnPhysical` to `fillReplacePayload` so a full replace never resets the column.
 
 ### Delete
 
@@ -273,7 +287,7 @@ These optional methods enable the schema sync system (`asc db sync`) to introspe
 
 #### `getExistingColumns()`
 
-Return the current table structure as an array of `TExistingColumn` (name, type, nullability, default, PK status). The sync system diffs these against the current Atscript field descriptors to determine what has changed. Query `information_schema.columns` or your database's equivalent to build the result.
+Return the current table structure as an array of `TExistingColumn` (name, type, nullability, default, PK status). The sync system diffs these against the current Atscript field descriptors to determine what has changed. Query `information_schema.columns` or your database's equivalent to build the result. Flag a generated column with `generated: true` (since 0.1.141) — see [Derived columns](#derived-columns).
 
 #### `getExistingColumnsForTable(tableName)`
 
@@ -322,7 +336,7 @@ Apply column-level changes from a computed diff. The diff object contains `added
 
 #### `recreateTable()`
 
-Full table recreation with data migration. Used when structural changes cannot be handled by `ALTER TABLE` (e.g., column drops in SQLite, or when `@db.sync.method "recreate"` is specified). Typical pattern: create a temporary table with the new schema, copy data (only columns that exist in both old and new), drop the old table, rename the temp table to the original name. Run it in a transaction where the engine's DDL is transactional. Where DDL auto-commits (MySQL), drop the temp table when a step fails before the original is gone; after that the temp table holds the only copy of the rows, so keep it and name it in the error.
+Full table recreation with data migration. Used when structural changes cannot be handled by `ALTER TABLE` (e.g., column drops in SQLite, or when `@db.sync.method "recreate"` is specified). Typical pattern: create a temporary table with the new schema, copy data (only columns of `this._table.storedDescriptors` that exist in both old and new — never a generated column), drop the old table, rename the temp table to the original name. Run it in a transaction where the engine's DDL is transactional. Where DDL auto-commits (MySQL), drop the temp table when a step fails before the original is gone; after that the temp table holds the only copy of the rows, so keep it and name it in the error.
 
 #### `renameTable(oldName)`
 
@@ -370,6 +384,8 @@ Drop managed (`atscript__`-prefixed) indexes that reference any of the given col
 
 Create or update a database view. Called when the adapter's readable is a view — detect that structurally with `this._table.isView` / `isAtscriptDbView(this._table)`, never with `instanceof AtscriptDbView` (see [Schema](#schema)). The `view` parameter contains the view definition, including the source table, joins, and filter expressions; `view.getViewColumnMappings()` already excludes `@db.ignore` fields.
 
+Since 0.1.141 an entry or join source may be another view (render it like a table), and a join is addressed by its `scope`: the physical `targetTable`, or the alias name of a [`@db.alias` join](/views/#join-aliases-and-self-joins). When the two differ, alias the physical source under the scope name (`LEFT JOIN "employees" AS "Manager"`) — conditions, filters and `resolveRefSource(ref).table` use the scope name. The `@atscript/db-sql-tools` view builder does this for you.
+
 #### `dropViewByName(name)`
 
 Drop a view by name. Used by schema sync to remove views that are no longer present in the schema, and to drop a managed view before recreating it. A missing view is not an error. The base class throws, like `dropTableByName()`, and sync reports the view as an `error` entry.
@@ -390,6 +406,15 @@ class MyAdapter extends BaseDbAdapter {
   }
 }
 ```
+
+### Derived columns {#derived-columns}
+
+A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141, `field.derived` set on its descriptor) needs work only on SQL adapters. On an adapter whose `supportsNestedObjects()` is `true` the core maps the field to its source path and leaves it out of `columnDescriptors`, so nothing reaches the adapter.
+
+- **DDL** — in `ensureTable()` and for the `added` entries of `syncColumns()`, render the field as a generated column over `derivedColumnExpr(dialect, field)` (from `@atscript/db-sql-tools`), without `NOT NULL` or `DEFAULT`. The expression calls your dialect's `jsonExtract` hook ([below](#calendar-buckets)), which becomes required.
+- **Introspection** — `getExistingColumns()` returns `generated: true` for generated columns.
+- **Changes** — a derived column never appears in `typeChanged`, `nullableChanged` or `defaultChanged`. Any drift is a `derivedChanged` entry that schema sync applies itself as `dropIndexesForColumns()` → `dropColumns()` → `syncColumns({ added })`.
+- **Writes** — the core drops derived values from every write payload; `recreateTable()` copies `storedDescriptors`, which leave them out.
 
 ### Foreign Keys
 
@@ -532,7 +557,7 @@ For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlD
 
 - **`calendarBucket?(quotedCol: string, b: TResolvedBucket): string`** — the label expression over one column. It must be **parameter-free**: the builders render it in `SELECT`, `GROUP BY` and `HAVING`, and PostgreSQL matches `GROUP BY` expressions structurally. Inline the zone with `sqlTimeZoneLiteral(b.tz)`, which re-checks the name's charset before quoting it. Without this hook the builders throw `BUCKET_NOT_SUPPORTED`.
 - **`bucketAliasInHaving?: boolean`** — render a bucket in `HAVING` by its `SELECT` alias instead of repeating the expression. MySQL needs it (it rejects the raw column there but resolves aliases); PostgreSQL needs the default expression form.
-- **`jsonExtract?(quotedCol: string, path: readonly string[], type: "string" | "number" | "boolean"): string`** — the typed read of one primitive leaf inside a JSON column, used by [view fields that read a JSON leaf](/views/#reading-json-leaves) (since 0.1.136). It must be **parameter-free**, because it runs in `CREATE VIEW`. Return the declared type, or `NULL` when the path is missing, the value is JSON `null`, or the value has another JSON type. Never coerce: the JSON string `"5"` is `NULL` for a `number` leaf. Build the path literal from `quotedJsonPathSegments(path)` (exported from `@atscript/db-sql-tools`), which quotes each segment and rejects segments that can't be quoted portably. Without this hook, syncing a view with a JSON-leaf field fails with `JSON extraction is not supported by this adapter`.
+- **`jsonExtract?(quotedCol: string, path: readonly string[], type: "string" | "number" | "boolean"): string`** — the typed read of one primitive leaf inside a JSON column, used by [view fields that read a JSON leaf](/views/#reading-json-leaves) (since 0.1.136) and, through `derivedColumnExpr`, by [derived columns](#derived-columns) (since 0.1.141). It must be **parameter-free**, because it runs in `CREATE VIEW` and in column DDL. Return the declared type, or `NULL` when the path is missing, the value is JSON `null`, or the value has another JSON type. Never coerce: the JSON string `"5"` is `NULL` for a `number` leaf. Build the path literal from `quotedJsonPathSegments(path)` (exported from `@atscript/db-sql-tools`), which quotes each segment and rejects segments that can't be quoted portably. Without this hook, syncing a view with a JSON-leaf field fails with `JSON extraction is not supported by this adapter`, and so does syncing a table with a derived column.
 
 `groupKeySql(dialect, controls, key)` renders a `$groupBy` key — the bucket expression for a bucket alias, the quoted column otherwise.
 

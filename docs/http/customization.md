@@ -210,7 +210,7 @@ export class TicketsController extends AsDbController<typeof Ticket> {
 When it runs:
 
 - Once per response on `/query`, `/pages`, `/geo` and `/one`, including `$search` and `$vector` reads.
-- After [`$actions`](./actions#actions-augmentation) augmentation, so rows already carry `$actions`.
+- After [`$actions`](./actions#actions-augmentation) augmentation, so rows already carry `$actions` (and `$disabledReasons` where set).
 - Not for `$count`, `$groupBy` aggregates, a `/one` 404, or [value-help controllers](./actions#value-help-controllers-are-excluded).
 - Nested `$with` rows are not passed on their own — reach them through the parent row.
 
@@ -221,7 +221,7 @@ When it runs:
 
 **DON'T**
 
-- Overwrite or remove `$actions`.
+- Overwrite or remove `$actions` or `$disabledReasons`.
 - Rely on columns that only an action's `requiredFields` pulled in — they are stripped again before the hook runs.
 
 ## Write Hooks

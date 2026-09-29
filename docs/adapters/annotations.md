@@ -12,6 +12,8 @@ Complete reference for all `@db.*` annotations available in `.as` files. Generic
 
 A field that references another interface's field (an FK like `authorId: User.id`, or a view/dict field) inherits the target's **value and presentation** annotations (`@meta.label`, `@expect.*`, UI hints, literal `@db.amount.currency`/`@db.unit` tags) — but **never** its structural `@db.*` annotations. All `@db.index.*`, `@db.column.*`, `@db.default.*`, `@db.rel.*`, `@db.search.*`, `@db.agg.*`, `@db.encrypted`, `@db.json`, `@db.ignore`, and adapter-specific field annotations describe the storage of the table that declares them and stay there.
 
+The same holds for the annotations that describe an **entity** rather than a field — `@db.table` and `@db.table.*`, `@db.view` and `@db.view.*`, `@db.schema`, `@db.space`, `@db.http.path`, `@db.sync.method`, `@db.depth.limit`, and the interface-level adapter annotations: a field typed with a table (`customer?: Customer`), a plain `export type Admin = User` and a `@db.alias` type carry none of them (since 0.1.141 — before, they inherited the table's `db.table` and each was a second runtime entity of the same table). Only the interface that declares `@db.table` / `@db.view` is a DB entity; [`isDbEntityType`](/sync/programmatic#syncing-a-module-namespace) is the runtime test.
+
 The sibling-ref quantity bindings — `@db.amount.currency.ref` and `@db.unit.ref` — also stay: they name a field of the **declaring** interface, which the referring interface may not have. A view that mirrors a measure and its currency/unit column re-declares the one-line `.ref` binding on its own field.
 
 Practically: declaring `@db.index.unique` on `User.id` never creates an index on tables that FK-ref it; if the referring table needs an index on its FK column, declare one on the FK field itself. This holds at any ref depth (including refs through an intermediate dict/view interface). `extends` is different — inherited props keep all their annotations, structural ones included, because the child table physically owns those columns.
@@ -28,6 +30,7 @@ Practically: declaring `@db.index.unique` on `User.id` never creates an index on
 | `@db.column`            | Field      | `name` (string)                        | Override the physical column name ([perf note](#db-column-perf))                                                                                                                                                                                             |
 | `@db.column.renamed`    | Field      | `oldName` (string)                     | Previous column name for [schema sync](../sync/what-gets-synced) migration                                                                                                                                                                                   |
 | `@db.column.collate`    | Field      | `collation` (string)                   | Portable collation: `'binary'`, `'nocase'`, or `'unicode'`                                                                                                                                                                                                   |
+| `@db.column.derived`    | Field      | —                                      | A `string` / `number` / `boolean` leaf of a `@db.json` field of the same table as its own read-only, indexable column (`customerId: Order.payload.customer.id`) — see [Derived Columns](/api/storage#derived-columns) (since 0.1.141)                        |
 | `@db.column.precision`  | Field      | `precision` (number), `scale` (number) | Decimal precision/scale for DB storage (e.g., `DECIMAL(10,2)`)                                                                                                                                                                                               |
 | `@db.column.dimension`  | Field      | —                                      | Mark as dimension field — groupable in [aggregate queries](../views/aggregations)                                                                                                                                                                            |
 | `@db.column.measure`    | Field      | —                                      | Mark as measure field — aggregatable (sum, avg, count, min, max). Numeric/decimal only                                                                                                                                                                       |
@@ -312,8 +315,9 @@ For `@db.rel.onDelete` and `@db.rel.onUpdate`:
 | Annotation              | Applies To | Arguments                                                           | Description                                                                     |
 | ----------------------- | ---------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `@db.view`              | Interface  | `name?` (string)                                                    | Mark as database [view](../views/) (defaults to interface name)                 |
-| `@db.view.for`          | Interface  | `entry` (ref)                                                       | Entry/primary table for a managed view                                          |
+| `@db.view.for`          | Interface  | `entry` (ref)                                                       | Entry table — or [view](../views/#views-over-views) — of a managed view         |
 | `@db.view.joins`        | Interface  | `target` (ref), `condition` (expr), `kind?` (`'inner'` \| `'left'`) | Explicit join (repeatable, applied in order; [kinds & chains](../views/#joins)) |
+| `@db.alias`             | Type       | `target` (ref)                                                      | [Join alias](../views/#join-aliases-and-self-joins) of a table or view          |
 | `@db.view.filter`       | Interface  | `condition` (expr)                                                  | View WHERE clause                                                               |
 | `@db.view.having`       | Interface  | `condition` (expr)                                                  | Post-aggregation HAVING clause                                                  |
 | `@db.view.materialized` | Interface  | —                                                                   | Mark the view as materialized                                                   |
@@ -544,6 +548,22 @@ interface Product {
 ::: info Generic search annotations
 `@db.search.vector` and `@db.search.filter` are generic annotations (not MongoDB-specific) and work across all adapters that support vector search. See the [Search](#search) section above.
 :::
+
+## Editor support {#editor-support}
+
+In the Atscript VSCode extension (with `@atscript/core` 0.1.94 or later) the arguments that name fields and types get completion, hover, go-to-definition, find-references and rename. Each argument's editor scope is the one its diagnostics check:
+
+| Argument                                           | Scope                                                                                                     |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `@db.view.filter` condition                        | The entry table and every join (`@db.alias` names included); an unqualified field belongs to the entry    |
+| `@db.view.joins` condition                         | The join target, the entry table and the joins declared before it (chained joins)                         |
+| `@db.view.having` condition                        | The view's own fields, unqualified                                                                        |
+| `@db.agg.*` condition                              | The same scope as the view's `@db.view.filter`                                                            |
+| `@db.agg.*` field (`'amount'`, `'settings.level'`) | A field path of the entry table (of the field's chain-ref type when it has one), completed level by level |
+| `@db.rel.filter` condition                         | The related type, plus the junction table of a `@db.rel.via`                                              |
+| `@db.view.for`, `@db.alias` target                 | Completes `@db.table` and `@db.view` types                                                                |
+| `@db.view.joins` target                            | Completes tables, views and `@db.alias` types                                                             |
+| `@db.rel.via` junction                             | Completes `@db.table` types                                                                               |
 
 ## Related Annotations {#related}
 

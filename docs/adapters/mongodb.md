@@ -556,6 +556,7 @@ MongoDB uses **snapshot-based** schema sync (Path B — no column introspection)
 - Standard indexes use the `atscript__` prefix so sync only touches managed indexes
 - Atlas Search indexes are managed separately from standard MongoDB indexes
 - **Unique indexes over optional fields are partial.** A `@db.index.unique` that includes an optional field gets a `partialFilterExpression` restricting it to documents where the optional field is present — so many documents may lack the field while present values stay unique, matching SQL's `NULLS DISTINCT` behavior. Changing a field's optionality changes the filter, which drops and recreates the index on the next sync.
+- **Derived columns store nothing.** A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) has no document key of its own: filters, sorts, projections, `$groupBy` and indexes address its source path (`payload.customer.id`, `@db.column` renames applied), reads copy the value as stored (no type guard — a value of another type written outside atscript-db passes through, a missing leaf reads as `null`), and sync never `$unset`s or backfills the source leaf; only the index over the source path is managed.
 
 See [Schema Sync](../sync/) for the full sync workflow.
 
@@ -609,7 +610,7 @@ const results = await cursor.toArray();
 
 ## Views
 
-Managed [views](../views/) become native MongoDB views (`createCollection` with `viewOn` + an aggregation pipeline). Each join becomes a `$lookup` + `$unwind`; field paths are the physical document paths (a `@db.column` renames a top-level key only — see [Renamed Fields](#renamed-fields)), joined documents live under `__joined_<table>`.
+Managed [views](../views/) become native MongoDB views (`createCollection` with `viewOn` + an aggregation pipeline). Each join becomes a `$lookup` + `$unwind`; field paths are the physical document paths (a `@db.column` renames a top-level key only — see [Renamed Fields](#renamed-fields)), joined documents live under `__joined_<table>` — `__joined_<Alias>` for a [join alias](../views/#join-aliases-and-self-joins), whose `$lookup.from` is still the physical collection. A [view over a view](../views/#views-over-views) is a view whose `viewOn` (or `$lookup.from`) is another view; MongoDB resolves the chain at read time.
 
 | Join condition                                                                                                                               | `$lookup` form                                 |
 | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |

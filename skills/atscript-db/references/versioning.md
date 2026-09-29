@@ -33,7 +33,7 @@ Constraints:
 - Field type MUST resolve to `int` (SQL `INTEGER`, Mongo `Number`).
 - At most one version column per table.
 - Field must be non-optional. Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically on `ALTER TABLE`.
-- Default column name is `version`. Renaming the field via `@db.column 'v'` is **not currently recommended** — see [§ Limitations](#limitations).
+- `@db.column 'row_version'` renames ONLY the stored column (supported since 0.1.141). `$cas` key, write bodies, rows read back, `table.versionColumn` and `/meta.versionColumn` all use the FIELD name (`version`). ≤ 0.1.140 `versionColumn` returned the column name → renamed version fields had no working OCC; don't key anything on the column name.
 
 The field appears in `findOne` / `findMany` results like any other column. Clients are expected to round-trip it back on writes.
 
@@ -126,7 +126,7 @@ Mechanics:
 
 1. `findOne(filter)` reads the current row (must return a row, else helper throws).
 2. Mutator receives the row, returns a patch object.
-3. `updateOne` with `$cas: { [versionColumn]: row.version }` and the patch.
+3. `updateOne` with `$cas: { [versionColumn]: row[versionColumn] }` and the patch.
 4. On `matchedCount === 0`, loop. Up to `maxAttempts` (default `5`).
 5. Throws `CasExhaustedError` if every attempt loses the race.
 
@@ -165,59 +165,11 @@ await orders.touchMany(keys, { require: "any" }); // bump what matches, honest c
 
 ## HTTP — moost-db auto-lift
 
-`@atscript/moost-db` makes OCC seamless for REST clients on versioned tables: the controller auto-lifts a `version` field in the body to `$cas`.
-
-### `/meta` exposes `versionColumn`
-
-```jsonc
-// GET /users/meta
-{ "primaryKeys": ["id"], "versionColumn": "version", "fields": { … }, … }
-
-// Non-versioned tables omit the key entirely.
-{ "primaryKeys": ["id"], "fields": { … }, … }
-```
-
-Clients use this pointer to decide whether to round-trip `version`. UI generators may render it read-only.
-
-### PATCH / PUT auto-lift
-
-```
-PATCH /users/
-Body: { "id": "u1", "name": "Ada", "version": 4 }
-```
-
-Controller behavior:
-
-- `version` present → stripped from SET, lifted to `$cas: { version: 4 }`, dispatched to `updateOne` / `replaceOne`.
-- `version` absent → write goes through with no `$cas` (last-write-wins; client opted out).
-- Raw `$cas: { version: N }` in the body → accepted as sent, same 404/409 disambiguation (since 0.1.128).
-- `version` + `$cas` with DIFFERENT values → 400, `errors[0].path === "$cas"` (`[i].$cas` in arrays); identical values pass.
-- PK-only `PATCH { id, version }` is a WRITE (versioned touch → bump); `PATCH { id }` writes nothing and reports `{ 1|0, 0 }`.
-
-Policy is presence-based. No 428 "Precondition Required" gate.
-
-### Conflict response — 409
-
-When CAS misses, the controller does a single disambiguation `findOne(id)`:
-
-- Row missing → `404 Not Found`.
-- Row present → `409 Conflict` with body:
-
-```jsonc
-{
-  "statusCode": 409,
-  "error": "Conflict", // overridden by Wooks framework
-  "message": "version_mismatch",
-  "kind": "version_mismatch", // ← discriminator (use this)
-  "currentVersion": 6, // ← row's current version
-}
-```
-
-**Discriminate on `kind === "version_mismatch"` + `currentVersion`.** The `error` field is overridden by the Wooks framework and not a reliable discriminator. The 404 path fires only when the row is actually gone — `findOne` is paid only on the conflict path, never on the happy path.
-
-Standard usage from a client: catch 409, re-GET the row, re-apply changes, retry the PATCH with the fresh `version`.
+`@atscript/moost-db` lifts a body `version` (the field `/meta.versionColumn` names) to `$cas` on PATCH / PUT and answers a stale CAS with `409 { kind: "version_mismatch", currentVersion }` (404 when the row is gone). The wire contract — `/meta.versionColumn`, auto-lift rules, 409 / 404 / 400 bodies, bulk aggregate response — lives in [moost-db.md § Optimistic concurrency over HTTP](moost-db.md#optimistic-concurrency-over-http). Client-side handling below.
 
 ### Handling 409
+
+On a 409: re-GET the row, re-apply the change, retry with the fresh `version`.
 
 With `@atscript/db-client`, catch the typed `VersionMismatchError` subclass — the client auto-dispatches it when the response body has `kind: "version_mismatch"`. The client also accepts the SDK shape `update({ id, $cas: { version } })` and lifts it to the wire `version` (since 0.1.128; `$cas` on `insert()` / on a non-versioned table / disagreeing with `version` → `ClientValidationError` at `$cas` before any request):
 
@@ -250,22 +202,6 @@ try {
 }
 ```
 
-### Bulk PATCH / PUT
-
-Each item in an array body carries its own optional `version`. Mismatches are **silently skipped**; the response is the aggregate `{ matchedCount, modifiedCount }` shape:
-
-```
-PATCH /users/
-Body: [
-  { "id": "u1", "name": "a", "version": 5 },  // matches → applies
-  { "id": "u2", "name": "b", "version": 9 },  // stale   → skipped
-  { "id": "u3", "name": "c" }                 // no $cas → always applies
-]
-Response: 200 OK { "matchedCount": 2, "modifiedCount": 2 }
-```
-
-Detect partial failure via `matchedCount < items.length`. **Per-item conflict status (e.g. 207 Multi-Status with per-row entries) is deferred** — see [§ Limitations](#limitations).
-
 ## Migration story
 
 OCC is opt-in per table. Tables without `@db.column.version` behave exactly as before.
@@ -293,16 +229,15 @@ Behavior is identical across adapters from the consumer's perspective. No transa
 Documented gaps in v1 — don't rely on these features yet:
 
 1. **Per-item conflict disambiguation in bulk responses.** Bulk PATCH / PUT returns aggregate `{ matchedCount, modifiedCount }`. There is no per-item 207 Multi-Status response. If you need per-row conflict reporting, do the calls one at a time.
-2. **Renamed version columns.** A schema declaring `@db.column 'v' @db.column.version revision: int` may not work correctly — `$cas` and `withOptimisticRetry` assume the version field uses its logical name in the row payload. Use the default column name (`version`, or whatever the logical field is named without `@db.column` rename) until a follow-up lands.
-3. **External writers bypass auto-bump.** Anything that writes to a versioned row outside the adapter (raw SQL migrations, ETL pipelines, ops scripts, replication catchup) will NOT increment the version. A subsequent `$cas`-protected caller will then succeed against a stale state. Install per-engine DB triggers if you need defense-in-depth — atscript-db does not install them.
-4. **No timestamp-based, hash-based, or per-field versioning.** Integer row-version only.
-5. **No pessimistic locking** (`SELECT FOR UPDATE`). Separate concept; not in scope.
+2. **External writers bypass auto-bump.** Anything that writes to a versioned row outside the adapter (raw SQL migrations, ETL pipelines, ops scripts, replication catchup) will NOT increment the version. A subsequent `$cas`-protected caller will then succeed against a stale state. Install per-engine DB triggers if you need defense-in-depth — atscript-db does not install them.
+3. **No timestamp-based, hash-based, or per-field versioning.** Integer row-version only.
+4. **No pessimistic locking** (`SELECT FOR UPDATE`). Separate concept; not in scope.
 
 ## See also
 
 - [annotations.md § `@db.column.version`](./annotations.md#dbcolumnversion--optimistic-concurrency) — annotation reference.
 - [crud.md § Optimistic concurrency](./crud.md#optimistic-concurrency) — SDK call shapes.
-- [moost-db.md § Optimistic concurrency over HTTP](./moost-db.md#optimistic-concurrency-over-http) — controller behavior + 409 body shape.
+- [moost-db.md § Optimistic concurrency over HTTP](./moost-db.md#optimistic-concurrency-over-http) — canonical HTTP wire contract (auto-lift, 409/404/400, bulk).
 - [patch.md § Field ops](./patch.md#field-ops) — composing `$cas` with `$inc` / `$mul`.
 - [validation.md § Version column](./validation.md#version-column) — direct-write rejection.
 - [testing.md § Testing OCC](./testing.md#testing-occ) — CAS hit/miss test patterns.

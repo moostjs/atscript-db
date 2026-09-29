@@ -189,7 +189,7 @@ curl "http://localhost:3000/todos/query?\$sort=-createdAt"           # descendin
 curl "http://localhost:3000/todos/query?\$sort=status,-priority"     # multi-field
 ```
 
-Prefix a field with `-` for descending order.
+Prefix a field with `-` for descending order. Where `null` values land depends on the engine — see [Sorting](/api/queries#sorting).
 
 ### Offset Pagination ($limit, $skip)
 
