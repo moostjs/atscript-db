@@ -3,19 +3,19 @@ packages:
   - docs
 
 catalog:
-  "@atscript/core": ^0.1.95
-  "@atscript/typescript": ^0.1.95
-  "@moostjs/event-http": ^0.6.37
+  "@atscript/core": ^0.1.96
+  "@atscript/typescript": ^0.1.96
+  "@moostjs/event-http": ^0.6.40
   "@types/node": ^24
   "@uniqu/core": ^0.1.11
   "@uniqu/url": ^0.1.11
-  "@wooksjs/event-core": ^0.7.23
-  "@wooksjs/event-http": ^0.7.23
-  "@wooksjs/http-body": ^0.7.23
-  moost: ^0.6.37
+  "@wooksjs/event-core": ^0.7.24
+  "@wooksjs/event-http": ^0.7.24
+  "@wooksjs/http-body": ^0.7.24
+  moost: ^0.6.40
   sqlite-vec: ^0.1.9
   typescript: ^5
-  unplugin-atscript: ^0.1.95
+  unplugin-atscript: ^0.1.96
   vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest
   vitest: npm:@voidzero-dev/vite-plus-test@latest
