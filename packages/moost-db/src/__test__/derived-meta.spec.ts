@@ -6,7 +6,9 @@ import { MockAdapter } from "../../../db/src/__test__/test-utils";
 import { createMockApp as makeApp, errorsOf, prepareFixtures, transformed } from "./test-utils";
 
 // `@db.column.derived` through the HTTP controller (since 0.1.141): `/meta`
-// flags derived fields, writes drop them, `$inc` on one is a 400.
+// flags derived fields, writes drop them, `$inc` on one is a 400; `/meta.type`
+// keeps the `db.column.derived` annotation (since 0.1.142) for db-client
+// preflight — covered in db-client's client-derived.spec.ts.
 
 let DvOrder: any;
 
@@ -62,5 +64,19 @@ describe("derived columns over HTTP", () => {
       message: expect.stringContaining("not allowed on a @db.column.derived field"),
     });
     expect(adapter.calls.some((c) => c.method === "updateOne")).toBe(false);
+  });
+
+  it("/meta.type keeps db.column.derived on every derived prop and still strips other db.* keys", async () => {
+    const { props } = ((await bind().controller.meta()) as any).type.type;
+    for (const name of ["customerId", "vip", "amount", "region", "tier"]) {
+      expect(props[name].metadata["db.column.derived"]).toBe(true);
+    }
+    expect(props.status.metadata["db.column.derived"]).toBeUndefined();
+    expect(props.payload.metadata["db.column.derived"]).toBeUndefined();
+    // Physical/storage annotations on the same props are still stripped.
+    expect(props.region.metadata["db.column"]).toBeUndefined();
+    expect(props.region.metadata["db.index.unique"]).toBeUndefined();
+    expect(props.customerId.metadata["db.index.plain"]).toBeUndefined();
+    expect(props.tier.metadata["db.column.collate"]).toBeUndefined();
   });
 });

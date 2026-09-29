@@ -52,3 +52,27 @@ export interface VersionedRevision {
   @db.column.version
   revision: number
 }
+
+// @db.column.derived — scalar columns computed from a @db.json leaf.
+@db.table 'derived_orders'
+export interface DerivedOrder {
+  @meta.id
+  id: number
+
+  status: string
+
+  @db.json
+  payload: {
+    customer: {
+      id: string
+    }
+    total: number
+  }
+
+  @db.column.derived
+  @db.index.plain
+  customerId: DerivedOrder.payload.customer.id
+
+  @db.column.derived
+  amount: DerivedOrder.payload.total
+}

@@ -162,9 +162,13 @@ export abstract class AsReadableController<
    * `ref` (`field: ""`) and their bodies always expand fully regardless of
    * `refDepth` — the write-payload shape clients need is unaffected.
    *
-   * Annotation whitelist: keeps `meta.*`, `expect.*`, and `db.rel.*`; strips
-   * other `db.*` (table, column, index, default, etc.). Override in subclass
-   * to customise.
+   * Annotation whitelist: keeps `meta.*`, `expect.*`, `db.rel.*`, the `db.*`
+   * keys the shared db validator plugin reads in db-client (`db.json`,
+   * `db.patch.strategy`, `db.default*`, `db.column.version`,
+   * `db.column.derived`) and the client-facing `db.http.path` /
+   * `db.writeOnly`; strips every other `db.*` (table, column, index, etc.).
+   * Override in subclass to customise — keep the validator keys, or client
+   * preflight diverges from the server.
    */
   protected getSerializeOptions(): TSerializeOptions {
     return {
@@ -181,9 +185,11 @@ export abstract class AsReadableController<
           // Clients need the write-only marker: forms render set-only inputs,
           // validators accept the field in writes and never expect it in reads.
           key === "db.writeOnly" ||
-          // The db-client validator skips a missing server-managed version on
-          // insert only when it can see the annotation (since 0.1.128).
-          key === "db.column.version"
+          // Server-managed: the db-client validator lets insert/replace omit
+          // them (and rejects $inc/$dec/$mul on a derived one) only when it
+          // can see the annotation.
+          key === "db.column.version" ||
+          key === "db.column.derived"
         ) {
           return { key, value };
         }
