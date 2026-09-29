@@ -1,7 +1,13 @@
 import type { Collection, Document } from "mongodb";
-import { DbError } from "@atscript/db";
+import {
+  DbError,
+  geoIndexNotFoundMessage,
+  searchIndexNotFoundMessage,
+  vectorIndexNotFoundMessage,
+} from "@atscript/db";
 import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
+import { DEFAULT_INDEX_NAME } from "./mongo-types";
 import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
 import { buildMongoFilter } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
@@ -12,6 +18,8 @@ import { joinPath } from "./path-utils";
 
 export interface TMongoSearchHost {
   readonly collection: Collection<any>;
+  readonly _table: { indexes: Map<string, TDbIndex> };
+  _indexLogicalPaths(index: TDbIndex): string[];
   getMongoSearchIndex(name?: string): TMongoIndex | undefined;
   getMongoSearchIndexes(): Map<string, TMongoIndex>;
   getVectorThreshold(indexKey?: string): number | undefined;
@@ -29,17 +37,39 @@ export interface TMongoGeoHost {
 
 // ── Exported functions ───────────────────────────────────────────────────────
 
-/** Returns available search indexes as generic metadata for UI. */
+/**
+ * Returns available search indexes as generic metadata for UI. The text
+ * default is the `DEFAULT` entry (an alias of the index `search()` answers
+ * with when none is named); the vector default is the first vector index.
+ */
 export function getSearchIndexesImpl(host: TMongoSearchHost): TSearchIndexInfo[] {
   const result: TSearchIndexInfo[] = [];
+  let firstVector = true;
   for (const [name, index] of host.getMongoSearchIndexes()) {
+    const isVector = index.type === "vector";
     result.push({
       name,
       description: `${index.type} index`,
-      type: index.type === "vector" ? ("vector" as const) : ("text" as const),
+      type: isVector ? ("vector" as const) : ("text" as const),
+      fields: searchIndexPaths(host, index),
+      isDefault: isVector ? firstVector : name === DEFAULT_INDEX_NAME,
     });
+    if (isVector) firstVector = false;
   }
   return result;
+}
+
+/**
+ * LOGICAL paths an index reads: a classic text index by its `@db.index.fulltext`
+ * definition, an Atlas index by the paths it maps; `undefined` (every field)
+ * for a dynamic mapping or an index whose fields cannot be told.
+ */
+function searchIndexPaths(host: TMongoSearchHost, index: TMongoIndex): string[] | undefined {
+  if (index.type === "text") {
+    const source = host._table.indexes.get(index.key);
+    return source ? host._indexLogicalPaths(source) : undefined;
+  }
+  return "paths" in index && index.paths ? [...index.paths] : undefined;
 }
 
 /** Checks if any vector search index is available. */
@@ -64,9 +94,7 @@ function requireSearchStage(
 ): { stage: Document; classicText: boolean } {
   const plan = buildSearchStage(host, text, indexName, controls);
   if (!plan) {
-    throw new Error(
-      indexName ? `Search index "${indexName}" not found` : "No search index available",
-    );
+    throw new Error(searchIndexNotFoundMessage(indexName));
   }
   return plan;
 }
@@ -262,7 +290,7 @@ function resolveGeoKeyPath(host: TMongoGeoHost, indexName?: string): string {
     throw new DbError("GEO_INDEX_MISSING", [
       {
         path: indexName ?? "",
-        message: `No geo index${indexName ? ` "${indexName}"` : ""} on "${host._table.tableName}"`,
+        message: geoIndexNotFoundMessage(host._table.tableName, indexName),
       },
     ]);
   }
@@ -524,7 +552,7 @@ function buildVectorSearchStage(
   if (indexName) {
     const found = host.getMongoSearchIndex(indexName);
     if (!found || found.type !== "vector") {
-      throw new Error(`Vector index "${indexName}" not found`);
+      throw new Error(vectorIndexNotFoundMessage(indexName));
     }
     index = found as TSearchIndex;
   } else {
@@ -536,7 +564,7 @@ function buildVectorSearchStage(
     }
   }
   if (!index) {
-    throw new Error("No vector index available");
+    throw new Error(vectorIndexNotFoundMessage());
   }
 
   let vectorField: { path: string } | undefined;

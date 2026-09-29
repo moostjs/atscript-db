@@ -52,4 +52,45 @@ describe("MongoAdapter search capability", () => {
     expect(adapter.isSearchable()).toBe(true);
     expect(adapter.isVectorSearchable()).toBe(true);
   });
+
+  // since 0.1.143 — the logical fields each index reads + the default of each type.
+  it("publishes each index's logical fields and the per-type default", () => {
+    expect(adapterFor(fixtures.CapBoth).getSearchIndexes()).toEqual([
+      expect.objectContaining({
+        name: "embedding",
+        type: "vector",
+        fields: ["embedding"],
+        isDefault: true,
+      }),
+      expect.objectContaining({
+        name: "DEFAULT",
+        type: "text",
+        fields: ["title"],
+        isDefault: true,
+      }),
+    ]);
+  });
+
+  it("a dynamic mapping reads every field (fields omitted)", () => {
+    const [index] = adapterFor(fixtures.CapAtlas).getSearchIndexes();
+    expect(index).toMatchObject({ name: "DEFAULT", type: "text", isDefault: true });
+    expect(index!.fields).toBeUndefined();
+  });
+
+  it("static Atlas indexes list their mapped fields; DEFAULT aliases the first", async () => {
+    const { Member, Person } = await import("./fixtures/search-collection.as");
+    expect(
+      adapterFor(Member)
+        .getSearchIndexes()
+        .map((i) => [i.name, i.fields, i.isDefault]),
+    ).toEqual([
+      ["members_exact", ["username"], false],
+      ["members_prefix", ["username"], false],
+      ["DEFAULT", ["username"], true],
+    ]);
+    expect(adapterFor(Person).getSearchIndexes()[0]).toMatchObject({
+      name: "people",
+      fields: ["username", "bio"],
+    });
+  });
 });

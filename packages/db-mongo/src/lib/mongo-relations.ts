@@ -1,6 +1,8 @@
 import type { Collection, Document } from "mongodb";
 import {
   tableNameOf,
+  UniquSelect,
+  type UniqueryControls,
   type TDbRelation,
   type TDbForeignKey,
   type TTableResolver,
@@ -361,7 +363,7 @@ function buildLookupInnerPipeline(withRel: WithRelation, requiredFields: string[
   const sort = (nested.$sort || flatRel.$sort) as Record<string, 1 | -1> | undefined;
   const limit = (nested.$limit ?? flatRel.$limit) as number | undefined;
   const skip = (nested.$skip ?? flatRel.$skip) as number | undefined;
-  const select = (nested.$select || flatRel.$select) as string[] | undefined;
+  const select = (nested.$select || flatRel.$select) as UniqueryControls["$select"] | undefined;
 
   // Additional filter on the relation
   if (filter && Object.keys(filter).length > 0) {
@@ -378,20 +380,22 @@ function buildLookupInnerPipeline(withRel: WithRelation, requiredFields: string[
     pipeline.push({ $limit: limit });
   }
 
-  if (select) {
-    const projection: Record<string, 1 | 0> = {};
-    for (const f of select) {
-      projection[f] = 1;
+  // Array, inclusion-map and exclusion-map forms — the same projection the
+  // top-level `$select` renders (`UniquSelect.asProjection`).
+  const projection = select ? new UniquSelect(select).asProjection : undefined;
+  if (projection) {
+    const project: Record<string, unknown> = { ...projection };
+    if (Object.values(project).some((flag) => flag === 1 || flag === true)) {
+      // Inclusion: the join keys are always read; `_id` only when asked for.
+      for (const f of requiredFields) project[f] = 1;
+      if (!("_id" in projection) && !requiredFields.includes("_id")) project._id = 0;
+    } else {
+      // Exclusion: a join key is never excluded.
+      for (const f of requiredFields) delete project[f];
     }
-    // Ensure required FK/PK fields are in projection
-    for (const f of requiredFields) {
-      projection[f] = 1;
+    if (Object.keys(project).length > 0) {
+      pipeline.push({ $project: dedupeProjection(project as Record<string, 0 | 1>) });
     }
-    // Suppress _id if not explicitly selected
-    if (!select.includes("_id") && !requiredFields.includes("_id")) {
-      projection["_id"] = 0;
-    }
-    pipeline.push({ $project: dedupeProjection(projection) });
   }
 
   return pipeline;

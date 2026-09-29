@@ -43,6 +43,12 @@ export interface TSearchIndex {
    * - `text` — single `text` operator over all string-mapped fields.
    */
   strategy?: "compound" | "autocomplete" | "text";
+  /**
+   * LOGICAL paths of the fields the index maps (search_text) or embeds
+   * (vector); absent for a dynamic mapping (every field). Reported as
+   * `TSearchIndexInfo.fields` (since 0.1.143).
+   */
+  paths?: string[];
 }
 
 export type TMongoIndex = TPlainIndex | TSearchIndex;

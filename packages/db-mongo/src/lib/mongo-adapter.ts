@@ -602,19 +602,24 @@ export class MongoAdapter extends BaseDbAdapter {
     const vectorIndex = metadata.get("db.search.vector");
     if (vectorIndex) {
       const indexName = vectorIndex.indexName || field;
-      this._setSearchIndex("vector", indexName, {
-        fields: [
-          {
-            type: "vector",
-            path: field,
-            similarity: (vectorIndex.similarity || "cosine") as
-              | "cosine"
-              | "euclidean"
-              | "dotProduct",
-            numDimensions: vectorIndex.dimensions,
-          },
-        ],
-      });
+      this._setSearchIndex(
+        "vector",
+        indexName,
+        {
+          fields: [
+            {
+              type: "vector",
+              path: field,
+              similarity: (vectorIndex.similarity || "cosine") as
+                | "cosine"
+                | "euclidean"
+                | "dotProduct",
+              numDimensions: vectorIndex.dimensions,
+            },
+          ],
+        },
+        { paths: [field] },
+      );
       // @db.search.vector.threshold
       const threshold = metadata.get("db.search.vector.threshold");
       if (threshold !== undefined) {
@@ -1348,7 +1353,11 @@ export class MongoAdapter extends BaseDbAdapter {
     type: TSearchIndex["type"],
     name: string | undefined,
     definition: TMongoSearchIndexDefinition,
-    meta?: { fuzzy?: { maxEdits: number }; strategy?: TSearchIndex["strategy"] },
+    meta?: {
+      fuzzy?: { maxEdits: number };
+      strategy?: TSearchIndex["strategy"];
+      paths?: string[];
+    },
   ): TSearchIndex {
     const key = mongoIndexKey(type, name || DEFAULT_INDEX_NAME);
     const index: TSearchIndex = {
@@ -1358,6 +1367,7 @@ export class MongoAdapter extends BaseDbAdapter {
       definition,
       fuzzy: meta?.fuzzy,
       strategy: meta?.strategy,
+      paths: meta?.paths ?? (type === "search_text" ? [] : undefined),
     };
     this._mongoIndexes.set(key, index);
     return index;
@@ -1384,6 +1394,7 @@ export class MongoAdapter extends BaseDbAdapter {
     if (!index) {
       return;
     }
+    if (index.paths && !index.paths.includes(fieldName)) index.paths.push(fieldName);
     const rootFields = index.definition.mappings!.fields!;
     // MongoDB's DocumentFieldMapper renames ONLY the top-level document key
     // (`@db.column`); nested object keys are stored as-is. Mirror that so the

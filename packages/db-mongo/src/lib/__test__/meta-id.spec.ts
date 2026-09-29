@@ -162,13 +162,15 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
         const findOneSpy = vi.spyOn(adapter, "findOne").mockResolvedValue(expectedDoc);
         const result = await table.findById(HEX_C);
 
-        const query = findOneSpy.mock.calls[0][0];
         // Both _id (ObjectId) and code (string) are type-compatible → $or
-        const filter = query.filter as any;
+        const filter = table.resolveIdFilter(HEX_C) as any;
         expect(filter.$or).toBeDefined();
-        expect(filter.$or[0]._id).toBeDefined();
         expect(filter.$or[0]._id.toString()).toBe(HEX_C);
         expect(filter.$or[1]).toEqual({ code: HEX_C });
+        // findById pins ONE row, primary key first (since 0.1.143): the PK is
+        // probed first and the row is read by its exact primary key.
+        expect((findOneSpy.mock.calls[0][0].filter as any)._id.toString()).toBe(HEX_C);
+        expect((findOneSpy.mock.calls.at(-1)![0].filter as any)._id.toString()).toBe(HEX_C);
         expect(result).toEqual(expectedDoc);
       });
 
@@ -299,12 +301,13 @@ describe("[mongo] @meta.id, auto-increment, and _id as PK", () => {
 
         const result = await table.findById(HEX_A);
 
-        expect(findOneSpy).toHaveBeenCalledOnce();
-        const query = findOneSpy.mock.calls[0][0];
-        const filter = query.filter as any;
         // Should include _id lookup (ObjectId) via unique field
+        const filter = table.resolveIdFilter(HEX_A) as any;
         expect(filter.$or).toBeDefined();
         expect(filter.$or.some((f: any) => f._id?.toString() === HEX_A)).toBe(true);
+        // findById reads the first identification that finds a row, with the
+        // caller's controls — one read, no pin-then-reread (since 0.1.143).
+        expect(findOneSpy).toHaveBeenCalledOnce();
         expect(result).toEqual(expectedDoc);
         findOneSpy.mockRestore();
       });
