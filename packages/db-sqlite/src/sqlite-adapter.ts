@@ -1,5 +1,12 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
-import { ALL_AGGREGATE_FNS, ALL_BUCKET_UNITS, BaseDbAdapter, DbError } from "@atscript/db";
+import {
+  ALL_AGGREGATE_FNS,
+  ALL_BUCKET_UNITS,
+  BaseDbAdapter,
+  DbError,
+  searchIndexNotFoundMessage,
+  vectorIndexNotFoundMessage,
+} from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
   AtscriptDbView,
@@ -21,12 +28,15 @@ import type {
   TSearchIndexInfo,
   TValueFormatterPair,
 } from "@atscript/db";
-import type { AggregateFn, BucketUnit, DbQuery, FilterExpr } from "@atscript/db";
+import type { AggregateFn, BucketUnit, DbQuery, FilterExpr, UniquSelect } from "@atscript/db";
 import {
+  type TGeoSearchControls,
   type TSqlFragment,
   EMPTY_AND,
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  buildVectorSearchCount,
+  buildVectorSearchSelect,
   fillReplacePayload,
   geoWindowFromControls,
   renameGeoDistance,
@@ -1027,19 +1037,26 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   override getSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
+    // The first index of each type answers a request naming none.
     for (const idx of this._getFulltextIndexes()) {
       indexes.push({
         name: idx.name,
         description: `FTS5 index (${idx.fields.map((f) => f.name).join(", ")})`,
         type: "text",
+        fields: this._indexLogicalPaths(idx),
+        isDefault: indexes.length === 0,
       });
     }
+    let firstVector = true;
     for (const [field, vec] of this._vectorFields) {
       indexes.push({
         name: vec.indexName,
         description: `vec0 index on ${field} (${vec.dimensions}, ${vec.similarity})`,
         type: "vector",
+        fields: [field],
+        isDefault: firstVector,
       });
+      firstVector = false;
     }
     return indexes;
   }
@@ -1132,12 +1149,12 @@ export class SqliteAdapter extends BaseDbAdapter {
   private _resolveFtsIndex(indexName?: string): TDbIndex {
     const ftIndexes = this._getFulltextIndexes();
     if (ftIndexes.length === 0) {
-      throw new Error("No search index available");
+      throw new Error(searchIndexNotFoundMessage());
     }
     if (indexName) {
       const found = ftIndexes.find((idx) => idx.name === indexName);
       if (!found) {
-        throw new Error(`Search index "${indexName}" not found`);
+        throw new Error(searchIndexNotFoundMessage(indexName));
       }
       return found;
     }
@@ -1323,27 +1340,19 @@ export class SqliteAdapter extends BaseDbAdapter {
       );
     }
     const base = this._buildVectorSearchBase(vector, query, indexName);
-    const countSql = `SELECT COUNT(*) AS cnt ${base.fromWhere}`;
+    const count = buildVectorSearchCount(sqliteDialect, base.source, base);
     return this._stmt(() => {
       const data = this._runVectorSearch(base);
-      this._log(countSql, base.params);
-      const row = this.driver.get<{ cnt: number }>(countSql, base.params);
+      this._log(count.sql, count.params);
+      const row = this.driver.get<{ cnt: number }>(count.sql, count.params);
       return { data, count: row?.cnt ?? 0 };
     });
   }
 
-  private _runVectorSearch(base: {
-    fromWhere: string;
-    params: unknown[];
-    limit: number;
-    skip: number;
-  }): Array<Record<string, unknown>> {
-    let sql = `SELECT * ${base.fromWhere} ORDER BY _distance ASC LIMIT ?`;
-    const params = [...base.params, base.limit];
-    if (base.skip > 0) {
-      sql += ` OFFSET ?`;
-      params.push(base.skip);
-    }
+  private _runVectorSearch(
+    base: ReturnType<SqliteAdapter["_buildVectorSearchBase"]>,
+  ): Array<Record<string, unknown>> {
+    const { sql, params } = buildVectorSearchSelect(sqliteDialect, base.source, base);
     this._log(sql, params);
     return this.driver.all(sql, params);
   }
@@ -1363,7 +1372,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         }
       }
       if (!entry) {
-        throw new Error(`Vector index "${indexName}" not found`);
+        throw new Error(vectorIndexNotFoundMessage(indexName));
       }
     } else {
       const first = this._vectorFields.entries().next();
@@ -1424,15 +1433,23 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Builds the shared FROM+WHERE fragment for vec0 KNN queries (without ORDER/LIMIT).
-   * Both `vectorSearch` and `vectorSearchWithCount` reuse this — the former appends
-   * ORDER BY + LIMIT/OFFSET, the latter wraps it in a COUNT(*).
+   * Builds the shared parts of a vec0 KNN query: the row source (the vec0
+   * index joined to the table), the threshold, the residual filter and the
+   * page. `vectorSearch` pages it (`buildVectorSearchSelect`),
+   * `vectorSearchWithCount` also counts it (`buildVectorSearchCount`).
    */
   private _buildVectorSearchBase(
     vector: number[],
     query: DbQuery,
     indexName?: string,
-  ): { fromWhere: string; params: unknown[]; limit: number; skip: number } {
+  ): {
+    source: TSqlFragment;
+    limit: number;
+    skip: number;
+    maxDistance?: number;
+    residual: TSqlFragment;
+    select?: UniquSelect;
+  } {
     const { vec, partitionPhysicalNames } = this._resolveVectorIndex(indexName);
     if (vector.length !== vec.dimensions) {
       throw new Error(
@@ -1446,9 +1463,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const skip = (controls.$skip as number | undefined) ?? 0;
     const threshold = this._resolveVectorThreshold(controls, vec.indexName);
 
-    const { partition, residual } = this._splitVectorFilter(query.filter, partitionPhysicalNames);
-    const residualWhere = buildPrefixedWhere("_vs", residual);
-    const hasResidual = residualWhere.sql !== "1=1";
+    const split = this._splitVectorFilter(query.filter, partitionPhysicalNames);
+    const residual = buildPrefixedWhere("_v", split.residual);
+    const hasResidual = residual.sql !== "1=1";
     const hasThreshold = threshold !== undefined;
 
     const k =
@@ -1459,28 +1476,22 @@ export class SqliteAdapter extends BaseDbAdapter {
 
     const innerWhereParts = ["v.embedding MATCH ?", "v.k = ?"];
     const params: unknown[] = [vecBuf, k];
-    for (const p of partition) {
+    for (const p of split.partition) {
       innerWhereParts.push(`v."${esc(p.name)}" = ?`);
       params.push(p.value);
     }
 
-    const inner = `SELECT t.*, v.distance AS _distance FROM "${esc(vecTable)}" v JOIN "${esc(tableName)}" t ON t.rowid = v.rowid WHERE ${innerWhereParts.join(" AND ")}`;
-    let fromWhere = `FROM (${inner}) _vs`;
-
-    const outerWhereParts: string[] = [];
-    if (hasThreshold) {
-      outerWhereParts.push(`_distance <= ?`);
-      params.push(thresholdToVecDistance(threshold, vec.similarity));
-    }
-    if (hasResidual) {
-      outerWhereParts.push(`(${residualWhere.sql})`);
-      params.push(...residualWhere.params);
-    }
-    if (outerWhereParts.length > 0) {
-      fromWhere += ` WHERE ${outerWhereParts.join(" AND ")}`;
-    }
-
-    return { fromWhere, params, limit, skip };
+    return {
+      source: {
+        sql: `SELECT t.*, v.distance AS _distance FROM "${esc(vecTable)}" v JOIN "${esc(tableName)}" t ON t.rowid = v.rowid WHERE ${innerWhereParts.join(" AND ")}`,
+        params,
+      },
+      limit,
+      skip,
+      maxDistance: hasThreshold ? thresholdToVecDistance(threshold, vec.similarity) : undefined,
+      residual,
+      select: query.controls?.$select,
+    };
   }
 
   // ── Geo search ───────────────────────────────────────────────────────────
@@ -1571,10 +1582,14 @@ export class SqliteAdapter extends BaseDbAdapter {
     sql: string;
     params: unknown[];
   } {
-    return buildGeoSearchSelect(sqliteDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
-      $limit: ctx.controls.$limit as number | undefined,
-      $skip: ctx.controls.$skip as number | undefined,
-    });
+    return buildGeoSearchSelect(
+      sqliteDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+      ctx.controls as TGeoSearchControls,
+    );
   }
 
   // ── Vector search internals ───────────────────────────────────────────────

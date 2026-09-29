@@ -6,6 +6,7 @@ import {
   DbError,
   bucketTimeZoneUnavailable,
   isColumnTypeChanged,
+  vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -33,6 +34,11 @@ import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  buildVectorSearchCount,
+  buildVectorSearchSelect,
+  vectorDistanceSource,
+  type TGeoSearchControls,
+  type TSqlFragment,
   fillReplacePayload,
   geoWindowFromControls,
   insertManyColumns,
@@ -65,7 +71,6 @@ import {
   refActionToSql,
   pgDialect,
   finalizeParams,
-  offsetPlaceholders,
 } from "./sql-builder";
 import type { TPgConnection, TPgDriver } from "./types";
 
@@ -1645,22 +1650,29 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   override getSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
+    // The first index of each type answers a request naming none.
     for (const index of this._table.indexes.values()) {
       if (index.type === "fulltext") {
         indexes.push({
           name: index.key,
           description: `GIN tsvector index on ${index.fields.map((f) => f.name).join(", ")}`,
           type: "text",
+          fields: this._indexLogicalPaths(index),
+          isDefault: indexes.length === 0,
         });
       }
     }
     // Add vector indexes
+    let firstVector = true;
     for (const [field, vec] of this._vectorFields) {
       indexes.push({
         name: vec.indexName,
         description: `vector(${vec.dimensions}) on ${field}, ${vec.similarity}`,
         type: "vector",
+        fields: [field],
+        isDefault: firstVector,
       });
+      firstVector = false;
     }
     return indexes;
   }
@@ -1822,7 +1834,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         }
       }
       if (!found) {
-        throw new Error(`Vector index "${indexName}" not found`);
+        throw new Error(vectorIndexNotFoundMessage(indexName));
       }
     } else {
       const first = this._vectorFields.entries().next();
@@ -1851,32 +1863,38 @@ export class PostgresAdapter extends BaseDbAdapter {
     };
   }
 
+  /** The row source + distance cap (threshold on pgvector's distance scale) of a vector search. */
+  private _vectorSearchSource(
+    ctx: ReturnType<PostgresAdapter["_prepareVectorSearch"]>,
+    withRows: boolean,
+  ): { source: TSqlFragment; maxDistance?: number } {
+    const distExpr = {
+      sql: `(${qi(ctx.field)} ${ctx.distanceOp} ?::vector)`,
+      params: [ctx.vectorStr],
+    };
+    return {
+      source: vectorDistanceSource(pgDialect, ctx.tableName, ctx.where, distExpr, withRows),
+      maxDistance:
+        ctx.threshold === undefined
+          ? undefined
+          : thresholdToDistance(ctx.threshold, ctx.vec.similarity),
+    };
+  }
+
   private _buildVectorSearchQuery(
     vector: number[],
     query: DbQuery,
     indexName?: string,
   ): { sql: string; params: unknown[] } {
     const ctx = this._prepareVectorSearch(vector, query, indexName);
-
-    // Subquery computes distance once per row, then filter/sort on the alias
-    let inner = `SELECT *, (${qi(ctx.field)} ${ctx.distanceOp} $1::vector) AS _distance FROM ${quoteTableName(ctx.tableName)} WHERE ${offsetPlaceholders(finalizeParams(pgDialect, ctx.where), 1).sql}`;
-    const params: unknown[] = [ctx.vectorStr, ...ctx.where.params];
-
-    let sql = `SELECT * FROM (${inner}) _v`;
-    if (ctx.threshold !== undefined) {
-      sql += ` WHERE _distance <= $${params.length + 1}`;
-      params.push(thresholdToDistance(ctx.threshold, ctx.vec.similarity));
-    }
-    sql += ` ORDER BY _distance ASC`;
-    if (ctx.controls.$skip) {
-      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-      params.push(ctx.controls.$limit || 1000, ctx.controls.$skip);
-    } else {
-      sql += ` LIMIT $${params.length + 1}`;
-      params.push(ctx.controls.$limit || 20);
-    }
-
-    return { sql, params };
+    const { source, maxDistance } = this._vectorSearchSource(ctx, true);
+    const skip = Number(ctx.controls.$skip) || 0;
+    return buildVectorSearchSelect(pgDialect, source, {
+      select: ctx.controls.$select,
+      limit: Number(ctx.controls.$limit) || (skip ? 1000 : 20),
+      skip,
+      maxDistance,
+    });
   }
 
   private _buildVectorSearchCountQuery(
@@ -1884,18 +1902,11 @@ export class PostgresAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): { sql: string; params: unknown[] } {
-    const ctx = this._prepareVectorSearch(vector, query, indexName);
-
-    let inner = `SELECT (${qi(ctx.field)} ${ctx.distanceOp} $1::vector) AS _distance FROM ${quoteTableName(ctx.tableName)} WHERE ${offsetPlaceholders(finalizeParams(pgDialect, ctx.where), 1).sql}`;
-    const params: unknown[] = [ctx.vectorStr, ...ctx.where.params];
-
-    let sql = `SELECT COUNT(*) AS cnt FROM (${inner}) _v`;
-    if (ctx.threshold !== undefined) {
-      sql += ` WHERE _distance <= $${params.length + 1}`;
-      params.push(thresholdToDistance(ctx.threshold, ctx.vec.similarity));
-    }
-
-    return { sql, params };
+    const { source, maxDistance } = this._vectorSearchSource(
+      this._prepareVectorSearch(vector, query, indexName),
+      false,
+    );
+    return buildVectorSearchCount(pgDialect, source, { maxDistance });
   }
 
   /** Resolves threshold: query-time $threshold > schema-level @db.search.vector.threshold. */
@@ -1999,10 +2010,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     sql: string;
     params: unknown[];
   } {
-    return buildGeoSearchSelect(pgDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
-      $limit: ctx.controls.$limit as number | undefined,
-      $skip: ctx.controls.$skip as number | undefined,
-    });
+    return buildGeoSearchSelect(
+      pgDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+      ctx.controls as TGeoSearchControls,
+    );
   }
 }
 

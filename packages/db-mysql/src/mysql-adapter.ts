@@ -5,6 +5,7 @@ import {
   BaseDbAdapter,
   DbError,
   bucketTimeZoneUnavailable,
+  vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -32,6 +33,11 @@ import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  buildVectorSearchCount,
+  buildVectorSearchSelect,
+  vectorDistanceSource,
+  type TGeoSearchControls,
+  type TSqlFragment,
   fillReplacePayload,
   geoWindowFromControls,
   insertManyColumns,
@@ -1388,22 +1394,29 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   override getSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
+    // The first index of each type answers a request naming none.
     for (const index of this._table.indexes.values()) {
       if (index.type === "fulltext") {
         indexes.push({
           name: index.key,
           description: `FULLTEXT index on ${index.fields.map((f) => f.name).join(", ")}`,
           type: "text",
+          fields: this._indexLogicalPaths(index),
+          isDefault: indexes.length === 0,
         });
       }
     }
     // Add vector indexes
+    let firstVector = true;
     for (const [field, vec] of this._vectorFields) {
       indexes.push({
         name: vec.indexName,
         description: `VECTOR(${vec.dimensions}) on ${field}, ${vec.similarity}`,
         type: "vector",
+        fields: [field],
+        isDefault: firstVector,
       });
+      firstVector = false;
     }
     return indexes;
   }
@@ -1557,7 +1570,7 @@ export class MysqlAdapter extends BaseDbAdapter {
         }
       }
       if (!found) {
-        throw new Error(`Vector index "${indexName}" not found`);
+        throw new Error(vectorIndexNotFoundMessage(indexName));
       }
     } else {
       const first = this._vectorFields.entries().next();
@@ -1586,33 +1599,40 @@ export class MysqlAdapter extends BaseDbAdapter {
     };
   }
 
+  /**
+   * The row source + distance cap of a vector search. The threshold is a
+   * normalized score matching MongoDB Atlas semantics: cosine score =
+   * (1 + cos_sim) / 2, VEC_DISTANCE_COSINE = 1 - cos_sim, so the distance cap
+   * is 2 * (1 - score).
+   */
+  private _vectorSearchSource(
+    ctx: ReturnType<MysqlAdapter["_prepareVectorSearch"]>,
+    withRows: boolean,
+  ): { source: TSqlFragment; maxDistance?: number } {
+    const distExpr = {
+      sql: `${ctx.distanceFn}(${qi(ctx.field)}, STRING_TO_VECTOR(?))`,
+      params: [ctx.vectorStr],
+    };
+    return {
+      source: vectorDistanceSource(mysqlDialect, ctx.tableName, ctx.where, distExpr, withRows),
+      maxDistance: ctx.threshold === undefined ? undefined : 2 * (1 - ctx.threshold),
+    };
+  }
+
   private _buildVectorSearchQuery(
     vector: number[],
     query: DbQuery,
     indexName?: string,
   ): { sql: string; params: unknown[] } {
     const ctx = this._prepareVectorSearch(vector, query, indexName);
-
-    // Use subquery so distance is computed once per row, then filter/sort on the alias
-    const inner = `SELECT *, ${ctx.distanceFn}(${qi(ctx.field)}, STRING_TO_VECTOR(?)) AS _distance FROM ${quoteTableName(ctx.tableName)} WHERE ${ctx.where.sql}`;
-    const params: unknown[] = [ctx.vectorStr, ...ctx.where.params];
-
-    let sql = `SELECT * FROM (${inner}) _v`;
-    if (ctx.threshold !== undefined) {
-      // Threshold is a normalized score matching MongoDB Atlas semantics:
-      // cosine score = (1 + cos_sim) / 2. VEC_DISTANCE_COSINE = 1 - cos_sim.
-      // Conversion: distance = 2 * (1 - score).
-      sql += ` WHERE _distance <= ?`;
-      params.push(2 * (1 - ctx.threshold));
-    }
-    sql += ` ORDER BY _distance ASC`;
-    if (ctx.controls.$skip) {
-      sql += ` LIMIT ${Number(ctx.controls.$limit) || 1000} OFFSET ${Number(ctx.controls.$skip)}`;
-    } else {
-      sql += ` LIMIT ${Number(ctx.controls.$limit) || 20}`;
-    }
-
-    return { sql, params };
+    const { source, maxDistance } = this._vectorSearchSource(ctx, true);
+    const skip = Number(ctx.controls.$skip) || 0;
+    return buildVectorSearchSelect(mysqlDialect, source, {
+      select: ctx.controls.$select,
+      limit: Number(ctx.controls.$limit) || (skip ? 1000 : 20),
+      skip,
+      maxDistance,
+    });
   }
 
   private _buildVectorSearchCountQuery(
@@ -1620,18 +1640,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): { sql: string; params: unknown[] } {
-    const ctx = this._prepareVectorSearch(vector, query, indexName);
-
-    const inner = `SELECT ${ctx.distanceFn}(${qi(ctx.field)}, STRING_TO_VECTOR(?)) AS _distance FROM ${quoteTableName(ctx.tableName)} WHERE ${ctx.where.sql}`;
-    const params: unknown[] = [ctx.vectorStr, ...ctx.where.params];
-
-    let sql = `SELECT COUNT(*) AS cnt FROM (${inner}) _v`;
-    if (ctx.threshold !== undefined) {
-      sql += ` WHERE _distance <= ?`;
-      params.push(2 * (1 - ctx.threshold));
-    }
-
-    return { sql, params };
+    const { source, maxDistance } = this._vectorSearchSource(
+      this._prepareVectorSearch(vector, query, indexName),
+      false,
+    );
+    return buildVectorSearchCount(mysqlDialect, source, { maxDistance });
   }
 
   /** Resolves threshold: query-time $threshold > schema-level @db.search.vector.threshold. */
@@ -1709,10 +1722,14 @@ export class MysqlAdapter extends BaseDbAdapter {
     sql: string;
     params: unknown[];
   } {
-    return buildGeoSearchSelect(mysqlDialect, ctx.tableName, ctx.where, ctx.dist, ctx.window, {
-      $limit: ctx.controls.$limit as number | undefined,
-      $skip: ctx.controls.$skip as number | undefined,
-    });
+    return buildGeoSearchSelect(
+      mysqlDialect,
+      ctx.tableName,
+      ctx.where,
+      ctx.dist,
+      ctx.window,
+      ctx.controls as TGeoSearchControls,
+    );
   }
 
   /**

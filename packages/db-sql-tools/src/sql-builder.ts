@@ -307,20 +307,29 @@ export function derivedColumnExpr(dialect: SqlDialect, field: TDbFieldMeta): str
 
 /**
  * Builds a column projection (SELECT clause fields).
+ *
+ * @param qualifier - optional table alias every column (and the `*`
+ *   fallback) is qualified with (`"t"."col"`), for projections over a joined
+ *   or aliased source such as the geo / vector search subqueries (since 0.1.143).
  */
-export function buildProjection(dialect: SqlDialect, select?: UniquSelect): string {
+export function buildProjection(
+  dialect: SqlDialect,
+  select?: UniquSelect,
+  qualifier?: string,
+): string {
+  const prefix = qualifier === undefined ? "" : `${dialect.quoteTable(qualifier)}.`;
   const fields = select?.asArray;
   if (!fields) {
-    return "*";
+    return `${prefix}*`;
   }
   let sql = "";
   for (let i = 0; i < fields.length; i++) {
     if (i > 0) {
       sql += ", ";
     }
-    sql += dialect.quoteIdentifier(fields[i]);
+    sql += prefix + dialect.quoteIdentifier(fields[i]);
   }
-  return sql || "*";
+  return sql || `${prefix}*`;
 }
 
 export { buildCreateView } from "./view-builder";

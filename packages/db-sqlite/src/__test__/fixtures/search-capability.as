@@ -32,3 +32,21 @@ export interface CapBoth {
     @db.search.vector 512, "cosine"
     embedding: number[]
 }
+
+// since 0.1.143 — `getSearchIndexes()` reports LOGICAL field paths.
+@db.table 'cap_renamed'
+@db.depth.limit 0
+export interface CapRenamed {
+    @meta.id
+    id: string
+
+    @db.column 'ttl_col'
+    @db.index.fulltext 'cap_ren_ft'
+    title: string
+
+    @db.index.fulltext 'cap_ren_ft'
+    body: string
+
+    @db.index.fulltext 'cap_ren_second'
+    note: string
+}

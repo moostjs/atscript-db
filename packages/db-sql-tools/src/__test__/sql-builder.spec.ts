@@ -285,6 +285,12 @@ describe("buildProjection", () => {
     const select = { asArray: ["id", "name", "email"] } as UniquSelect;
     expect(buildProjection(mockDialect, select)).toBe("[id], [name], [email]");
   });
+
+  it("qualifies every column (and the * fallback) with a table alias", () => {
+    const select = { asArray: ["id", "name"] } as UniquSelect;
+    expect(buildProjection(mockDialect, select, "t")).toBe("[t].[id], [t].[name]");
+    expect(buildProjection(mockDialect, undefined, "t")).toBe("[t].*");
+  });
 });
 
 describe("buildCreateView", () => {

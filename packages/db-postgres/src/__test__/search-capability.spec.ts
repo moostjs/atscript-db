@@ -55,4 +55,17 @@ describe("PostgresAdapter search capability", () => {
     expect(types(adapter.getSearchIndexes())).toEqual(["text", "vector"]);
     expect(adapter.isSearchable()).toBe(true);
   });
+
+  // since 0.1.143 — the logical fields each index reads + the default of each type.
+  it("publishes each index's logical fields and the per-type default", () => {
+    expect(bind(CapBoth).getSearchIndexes()).toEqual([
+      expect.objectContaining({ type: "text", fields: ["title"], isDefault: true }),
+      expect.objectContaining({
+        name: "embedding",
+        type: "vector",
+        fields: ["embedding"],
+        isDefault: true,
+      }),
+    ]);
+  });
 });

@@ -15,6 +15,7 @@ import { prepareFixtures } from "./test-utils";
 let CapText: any;
 let CapVector: any;
 let CapBoth: any;
+let CapRenamed: any;
 
 const drivers: BetterSqlite3Driver[] = [];
 
@@ -44,6 +45,7 @@ describe("SqliteAdapter search capability", () => {
     CapText = fixtures.CapText;
     CapVector = fixtures.CapVector;
     CapBoth = fixtures.CapBoth;
+    CapRenamed = fixtures.CapRenamed;
   });
 
   it("a text index makes the table searchable", () => {
@@ -76,5 +78,26 @@ describe("SqliteAdapter search capability", () => {
     expect(err).toBeInstanceOf(DbError);
     expect(err.code).toBe("INVALID_QUERY");
     expect(err.errors[0]?.path).toBe("$search");
+  });
+
+  // since 0.1.143 — the logical fields each index reads + the default of each type.
+  it("publishes each index's logical fields and the per-type default", () => {
+    expect(bind(CapBoth).getSearchIndexes()).toEqual([
+      expect.objectContaining({ type: "text", fields: ["title"], isDefault: true }),
+      expect.objectContaining({
+        name: "embedding",
+        type: "vector",
+        fields: ["embedding"],
+        isDefault: true,
+      }),
+    ]);
+    expect(
+      bind(CapRenamed)
+        .getSearchIndexes()
+        .map((i) => [i.name, i.fields, i.isDefault]),
+    ).toEqual([
+      ["cap_ren_ft", ["title", "body"], true],
+      ["cap_ren_second", ["note"], false],
+    ]);
   });
 });

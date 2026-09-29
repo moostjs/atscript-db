@@ -10,6 +10,13 @@ export {
   normalizeGeoPointValue,
   renameGeoDistance,
 } from "./geo";
+export type { TGeoSearchControls } from "./geo";
+export {
+  VECTOR_DISTANCE_ALIAS,
+  buildVectorSearchSelect,
+  buildVectorSearchCount,
+  vectorDistanceSource,
+} from "./vector";
 export type { TReplaceColumn } from "./sql-builder";
 export {
   SQL_DEFAULT,

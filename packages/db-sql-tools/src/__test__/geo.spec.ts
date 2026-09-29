@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vite-plus/test";
+import { UniquSelect } from "@atscript/db";
 
 import type { SqlDialect } from "../dialect";
 import {
@@ -39,6 +40,35 @@ describe("geo SQL builders", () => {
         `ORDER BY "__atscript_distance" ASC LIMIT ? OFFSET ?`,
     );
     expect(params).toEqual([1, 2, "SF", 500, 10, 5, 2]);
+  });
+
+  it("projects $select (inclusion form) and always keeps the distance column", () => {
+    const { sql } = buildGeoSearchSelect(
+      dialect,
+      "places",
+      { sql: "1=1", params: [] },
+      DIST,
+      {},
+      { $select: new UniquSelect(["id", "name"], ["id", "name", "geo", "pin"]) },
+    );
+    expect(sql).toBe(
+      `SELECT * FROM (SELECT "t"."id", "t"."name", dist("geo", ?, ?) AS "__atscript_distance" FROM "places" AS "t" WHERE 1=1) AS "_g" ` +
+        `WHERE "__atscript_distance" IS NOT NULL ORDER BY "__atscript_distance" ASC`,
+    );
+  });
+
+  it("projects $select (exclusion form — e.g. a write-only seal) over every other column", () => {
+    const { sql } = buildGeoSearchSelect(
+      dialect,
+      "places",
+      { sql: "1=1", params: [] },
+      DIST,
+      {},
+      { $select: new UniquSelect({ pin: 0 }, ["id", "name", "geo", "pin"]) },
+    );
+    expect(sql).toContain(`SELECT "t"."id", "t"."name", "t"."geo", dist(`);
+    expect(sql).not.toContain(`"pin"`);
+    expect(sql).not.toContain(`"t".*`);
   });
 
   it("omits LIMIT when no pagination controls are given (MongoDB parity)", () => {

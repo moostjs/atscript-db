@@ -1,5 +1,8 @@
+import type { UniquSelect } from "@atscript/db";
+
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
+import { buildProjection } from "./sql-builder";
 
 /**
  * Internal alias for the computed distance column in geo search queries.
@@ -8,6 +11,13 @@ import { finalizeParams } from "./dialect";
  * across dialects, so the public name can't be used directly.
  */
 export const GEO_DISTANCE_ALIAS = "__atscript_distance";
+
+/** The query controls a geo search page reads — an adapter passes its `query.controls` as-is. */
+export interface TGeoSearchControls {
+  $limit?: number;
+  $skip?: number;
+  $select?: UniquSelect;
+}
 
 /** Distance window for geo search: `$maxDistance` / `$minDistance` in meters. */
 export interface TGeoWindow {
@@ -20,7 +30,7 @@ export interface TGeoWindow {
  *
  * ```sql
  * SELECT * FROM (
- *   SELECT t.*, <distExpr> AS __atscript_distance FROM <table> t WHERE <filter>
+ *   SELECT <t.cols | t.*>, <distExpr> AS __atscript_distance FROM <table> t WHERE <filter>
  * ) _g
  * WHERE __atscript_distance IS NOT NULL [AND <= ?] [AND >= ?]
  * ORDER BY __atscript_distance ASC LIMIT ? [OFFSET ?]
@@ -28,7 +38,10 @@ export interface TGeoWindow {
  *
  * `distExpr` computes meters from the query point to the geo column (NULL for
  * rows without a point — those are excluded, matching MongoDB `$geoNear`).
- * Placeholders stay `?`-style; callers finalize for `$N` dialects.
+ * `controls.$select` projects the row columns exactly like `buildSelect` does
+ * (inclusion and exclusion forms, resolved by `UniquSelect.asArray`); the
+ * distance column is always returned. Placeholders stay `?`-style; callers
+ * finalize for `$N` dialects.
  */
 export function buildGeoSearchSelect(
   dialect: SqlDialect,
@@ -36,10 +49,11 @@ export function buildGeoSearchSelect(
   where: TSqlFragment,
   distExpr: TSqlFragment,
   window: TGeoWindow,
-  controls: { $limit?: number; $skip?: number },
+  controls: TGeoSearchControls,
 ): TSqlFragment {
   const alias = dialect.quoteIdentifier(GEO_DISTANCE_ALIAS);
-  const inner = `SELECT ${dialect.quoteTable("t")}.*, ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable("t")} WHERE ${where.sql}`;
+  const cols = buildProjection(dialect, controls.$select, "t");
+  const inner = `SELECT ${cols}, ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable("t")} WHERE ${where.sql}`;
   let sql = `SELECT * FROM (${inner}) AS ${dialect.quoteTable("_g")} WHERE ${alias} IS NOT NULL`;
   const params: unknown[] = [...distExpr.params, ...where.params];
 
