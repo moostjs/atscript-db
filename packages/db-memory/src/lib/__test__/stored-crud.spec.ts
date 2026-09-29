@@ -72,7 +72,7 @@ describe("MemoryAdapter stored mode (driven through AtscriptDbTable)", () => {
 
   // WHY: inclusion projection returns only the chosen paths PLUS the pk (Mongo
   // parity), and must reach into nested objects via a dot-path.
-  it("inclusion projection keeps pk + selected paths only (incl. nested)", async () => {
+  it("inclusion projection keeps the selected paths only (incl. nested) — no implicit pk", async () => {
     await users.insertOne(
       user({ id: "u1", name: "Ada", age: 30, profile: { city: "NYC", age: 5 } }),
     );
@@ -81,8 +81,9 @@ describe("MemoryAdapter stored mode (driven through AtscriptDbTable)", () => {
       controls: { $select: { name: 1, "profile.city": 1 } },
     })) as any[];
     const row = rows[0];
-    // pk auto-included, name selected, profile narrowed to just city.
-    expect(row).toEqual({ id: "u1", name: "Ada", profile: { city: "NYC" } });
+    // Exactly the selection (like the SQL adapters, since 0.1.145): name, and
+    // profile narrowed to just city.
+    expect(row).toEqual({ name: "Ada", profile: { city: "NYC" } });
     expect(row.age).toBeUndefined();
     expect(row.email).toBeUndefined();
   });

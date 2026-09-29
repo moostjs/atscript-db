@@ -749,8 +749,9 @@ export class MemoryAdapter extends BaseDbAdapter {
    * so the store can never be mutated through a returned value.
    *
    * - No projection → a full clone.
-   * - INCLUSION form (`{ field: 1 }`) → a new object with only the selected
-   *   paths PLUS the primary-key field(s) (mirrors Mongo including `_id`).
+   * - INCLUSION form (`{ field: 1 }`) → a new object with exactly the selected
+   *   paths — like the SQL adapters (since 0.1.145; it used to add the primary
+   *   key, which made projected responses differ across adapters).
    * - EXCLUSION form (`{ field: 0 }`) → a clone with those paths removed.
    *
    * Top-level and nested dot-paths are supported; exotic Mongo projection
@@ -760,13 +761,10 @@ export class MemoryAdapter extends BaseDbAdapter {
     row: Record<string, unknown>,
     $select?: UniquSelect,
   ): Record<string, unknown> {
-    // Delegate to the shared pure {@link projectRow}: pass the resolved
-    // projection map and this table's physical PK fields (added by inclusion),
-    // and force `clone: true` so a returned value can never mutate the store.
-    return projectRow(row, $select?.asProjection, {
-      pkFields: this._physicalPkFields(),
-      clone: true,
-    });
+    // Delegate to the shared pure {@link projectRow} with the resolved
+    // projection map, and force `clone: true` so a returned value can never
+    // mutate the store.
+    return projectRow(row, $select?.asProjection, { clone: true });
   }
 
   /**

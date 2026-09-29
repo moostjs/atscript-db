@@ -173,7 +173,7 @@ The package exports its query engine as three pure functions — the same engine
 
 - `buildMemoryPredicate(filter)` — compiles a `FilterExpr` into a JS-native `(row) => boolean` predicate.
 - `sortRows(rows, $sort, tieBreak?)` — stable multi-key `$sort` with the adapter's leaf ordering (null-low, `Date`-by-instant, no collation); an optional `tieBreak` yields a deterministic total order.
-- `projectRow(row, projection, opts?)` — dot-path `$select` inclusion/exclusion projection over one row, with an optional deep-clone.
+- `projectRow(row, projection, opts?)` — dot-path `$select` inclusion/exclusion projection over one row, with an optional deep-clone. `opts.pkFields` adds the named fields to an inclusion projection. The adapter itself does not pass it: since 0.1.145 an inclusion `$select` returns exactly the selected fields, as on the SQL adapters. Earlier versions also returned the primary key.
 
 ```typescript
 import { buildMemoryPredicate, sortRows, projectRow } from "@atscript/db-memory";
