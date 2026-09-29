@@ -3,6 +3,7 @@ import { HttpError } from "@moostjs/event-http";
 
 import { readCurrentActionMeta } from "./current-action";
 import { dbActionIdSlot, dbActionIdsSlot, getActionTable, noTableError } from "./id-cache";
+import { actionFieldVisibility, dbActionOverlaySlot, withOverlay } from "./row-scope";
 
 interface RowFetchTable {
   primaryKeys: readonly string[];
@@ -38,14 +39,29 @@ function readActionFieldSet(ctx: EventContext): readonly string[] | null {
   return Array.isArray(opts.requiredFields) ? (opts.requiredFields as string[]) : null;
 }
 
+/**
+ * Id columns plus the action's `requiredFields` — minus any the controller's
+ * field visibility hides (since 0.1.143; `hasField`, and a derived field over
+ * a hidden source): a hidden column is never loaded, so a `disabled`
+ * predicate sees it as `undefined`.
+ */
 function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> {
   const fields = new Set<string>();
   for (const f of table.preferredId ?? table.primaryKeys) fields.add(f);
   const action = readActionFieldSet(ctx);
-  if (action) for (const f of action) fields.add(f);
+  if (action) {
+    const visible = actionFieldVisibility(ctx);
+    for (const f of action) if (!visible || visible(f)) fields.add(f);
+  }
   return fields;
 }
 
+/**
+ * Loaded row / rows are ANDed with the controller's row overlay (see
+ * `dbActionOverlaySlot`, since 0.1.143): an out-of-scope id loads nothing —
+ * exactly like a missing one (the same 404 on `'row'` actions, so the two
+ * can't be told apart).
+ */
 async function loadRow(ctx: EventContext): Promise<unknown> {
   const id = (await ctx.get(dbActionIdSlot)) as Record<string, unknown>;
   const table = asFetchTable(getActionTable(ctx));
@@ -55,7 +71,7 @@ async function loadRow(ctx: EventContext): Promise<unknown> {
   for (const k of Object.keys(id)) fields.add(k);
 
   const row = await table.findOne({
-    filter: id,
+    filter: withOverlay(id, await ctx.get(dbActionOverlaySlot)),
     controls: { $select: [...fields] },
   });
   if (row == null) {
@@ -94,7 +110,7 @@ async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown
   }
 
   const rows = await table.findMany({
-    filter: { $or: dedupedIds },
+    filter: withOverlay({ $or: dedupedIds }, await ctx.get(dbActionOverlaySlot)),
     controls: { $select: [...fields] },
   });
 

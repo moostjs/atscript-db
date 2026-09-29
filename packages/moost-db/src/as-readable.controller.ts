@@ -18,9 +18,73 @@ import { Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
-import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "./dto/controls.dto.as";
+import {
+  GeoControlsDto,
+  GetOneControlsDto,
+  PagesControlsDto,
+  QueryControlsDto,
+} from "./dto/controls.dto.as";
 import { discoverActions, getControllerFormType } from "./actions/discover";
 import { applyTerminalRefs } from "./meta/terminal-ref";
+
+/**
+ * Endpoint a {@link AsReadableController.prepareRequest} call serves. `/one`
+ * and `/one/:id` both report `"one"`; `DELETE /:id` and `DELETE /?…` both
+ * report `"remove"`; value-help controllers report `query` / `pages` / `one`
+ * like DB readables do; every `@DbAction` handler (row, rows and table
+ * level) reports `"action"` with the action's name in
+ * {@link TDbRequestContext.action}.
+ *
+ * @since 0.1.143
+ */
+export type TDbRequestEndpoint =
+  | "query"
+  | "pages"
+  | "geo"
+  | "one"
+  | "meta"
+  | "metaForm"
+  | "insert"
+  | "replace"
+  | "update"
+  | "remove"
+  | "action";
+
+/**
+ * Context passed to {@link AsReadableController.prepareRequest}.
+ *
+ * @since 0.1.143
+ */
+export interface TDbRequestContext {
+  /** The endpoint being served. */
+  readonly endpoint: TDbRequestEndpoint;
+  /**
+   * The parsed Uniquery controls (`$select`, `$with`, `$search`, …) on read
+   * endpoints (`query`, `pages`, `geo`, `one`) — the object the rest of
+   * the pipeline validates and reads with. `undefined` on `meta`,
+   * `metaForm`, writes and actions.
+   */
+  readonly controls?: Record<string, unknown>;
+  /** `"action"` endpoint only: the `@DbAction` name being run. */
+  readonly action?: string;
+}
+
+/** Control DTO a {@link AsReadableController.validateControls} call checks against. @since 0.1.143 (`"geo"`) */
+export type TDbControlsType = "query" | "pages" | "getOne" | "geo";
+
+/**
+ * A read request as {@link AsReadableController.parseRequest} hands it back.
+ *
+ * @since 0.1.143
+ */
+export interface TDbParsedRequest {
+  /** The parsed URL (filter, controls, insights). */
+  parsed: ReturnType<typeof parseUrl>;
+  /** `parsed.controls` — the object `prepareRequest` saw and the pipeline validates. */
+  controls: Record<string, unknown>;
+  /** `"one"` only: the URL carried non-control (filter) parts, which `/one/:id` rejects. */
+  hasNonControl: boolean;
+}
 
 /**
  * Abstract base class for read-only HTTP controllers over an Atscript interface.
@@ -202,10 +266,12 @@ export abstract class AsReadableController<
   }
 
   // ── Lazily built validators ────────────────────────────────────────────
+  // Kept as protected getters (pre-0.1.143 surface); `validateControls` picks one per type.
 
   private _queryControlsValidator?: Validator<any>;
   private _pagesControlsValidator?: Validator<any>;
   private _getOneControlsValidator?: Validator<any>;
+  private _geoControlsValidator?: Validator<any>;
 
   protected get queryControlsValidator() {
     if (!this._queryControlsValidator) {
@@ -228,11 +294,103 @@ export abstract class AsReadableController<
     return this._getOneControlsValidator;
   }
 
+  /** `/geo` controls validator (since 0.1.143 — `/geo` runs {@link validateParsed} like `/query`). */
+  protected get geoControlsValidator() {
+    if (!this._geoControlsValidator) {
+      this._geoControlsValidator = GeoControlsDto.validator();
+    }
+    return this._geoControlsValidator;
+  }
+
+  // ── Request preparation ────────────────────────────────────────────────
+
+  /**
+   * Per-request preparation hook — THE entry point for a permission layer to
+   * resolve per-request policy asynchronously (load the principal's scopes,
+   * evaluate grants) so the synchronous hooks that follow (`hasField`,
+   * `validateControls`, `checkCapabilities`) can consult it. Not
+   * implemented by default — defining it in a subclass switches it on (it is
+   * awaited only then, so unmodified controllers pay nothing).
+   *
+   * Runs once per request, before anything else consults the request:
+   * - read endpoints (`query`, `pages`, `geo`, `one`) — right after the
+   *   URL is parsed, BEFORE validation, `hasField`, `validateControls`,
+   *   `transformFilter` / `transformProjection`; `ctx.controls` are the
+   *   parsed controls (mutating them is allowed and is what the pipeline
+   *   then validates);
+   * - writes (`insert`, `replace`, `update`, `remove`) — at handler start,
+   *   before the shape gate, `onWrite` / `onRemove` and any guard;
+   * - `meta` / `metaForm` — first;
+   * - `@DbAction` handlers of every level (`action`, with `ctx.action` = the
+   *   action name) — from the action's interceptor (after the guards),
+   *   before its ids are validated, its rows loaded, its row overlay built
+   *   and the handler runs. A permission layer needs no separate action
+   *   guard.
+   *
+   * A throw aborts the request with the thrown error (throw an `HttpError`
+   * for a specific status). Value-help controllers get it too.
+   *
+   * ```ts
+   * protected async prepareRequest(ctx: TDbRequestContext) {
+   *   const scopes = await loadScopes(useAuthorization(), ctx.endpoint)
+   *   if (!scopes) throw new HttpError(403)
+   *   requestScopes.set(scopes) // read back by hasField / transformFilter
+   * }
+   * ```
+   *
+   * @since 0.1.143
+   */
+  protected prepareRequest?(ctx: TDbRequestContext): void | Promise<void>;
+
+  /**
+   * The ONE request entry of every built-in route: with a `url` (read
+   * endpoints) it parses the query string — `/one` keeps only the `$`
+   * controls ({@link parseControlsOnlyFromUrl}), every other endpoint the
+   * whole query ({@link parseQueryString}) — and coerces boolean controls the
+   * URL grammar leaves as strings (`$actions=true`); then it awaits
+   * {@link prepareRequest} (when implemented) with the parsed controls.
+   * Without a `url` (writes, `meta`, `metaForm`) only the hook runs. Custom
+   * routes on a subclass should call it too.
+   *
+   * @since 0.1.143
+   */
+  protected parseRequest(endpoint: TDbRequestEndpoint): Promise<undefined>;
+  protected parseRequest(endpoint: TDbRequestEndpoint, url: string): Promise<TDbParsedRequest>;
+  protected async parseRequest(
+    endpoint: TDbRequestEndpoint,
+    url?: string,
+  ): Promise<TDbParsedRequest | undefined> {
+    let request: TDbParsedRequest | undefined;
+    if (url !== undefined) {
+      const { parsed, hasNonControl } =
+        endpoint === "one"
+          ? this.parseControlsOnlyFromUrl(url)
+          : { parsed: this.parseQueryString(url), hasNonControl: false };
+      const controls = parsed.controls as Record<string, unknown>;
+      // The URL parser only auto-coerces `$count`; a boolean control arrives
+      // as `"true"` / `"1"` and would fail the controls DTO.
+      if (typeof controls.$actions === "string") {
+        controls.$actions =
+          controls.$actions === "true" || controls.$actions === "1" || controls.$actions === "";
+      }
+      request = { parsed, controls, hasNonControl };
+    }
+    if (typeof this.prepareRequest === "function") {
+      await this.prepareRequest(request ? { endpoint, controls: request.controls } : { endpoint });
+    }
+    return request;
+  }
+
   // ── Validation ─────────────────────────────────────────────────────────
 
+  /**
+   * Validates the parsed controls against the endpoint's DTO — the hook for
+   * per-control authorization (override, call `super`, add rules). `"geo"`
+   * since 0.1.143 (`/geo` used to skip it).
+   */
   protected validateControls(
     controls: Record<string, unknown>,
-    type: "query" | "pages" | "getOne",
+    type: TDbControlsType,
   ): string | undefined {
     // Aggregate queries (presence of `$groupBy`) bypass the base DTO check —
     // `$groupBy` and aggregate-mode `$select` (carrying `AggregateExpr` objects)
@@ -242,12 +400,20 @@ export abstract class AsReadableController<
     if (type === "query" && controls.$groupBy !== undefined) {
       return undefined;
     }
-    const v =
-      type === "query"
-        ? this.queryControlsValidator
-        : type === "pages"
-          ? this.pagesControlsValidator
-          : this.getOneControlsValidator;
+    let v: Validator<any>;
+    switch (type) {
+      case "query":
+        v = this.queryControlsValidator;
+        break;
+      case "pages":
+        v = this.pagesControlsValidator;
+        break;
+      case "geo":
+        v = this.geoControlsValidator;
+        break;
+      default:
+        v = this.getOneControlsValidator;
+    }
     if (!v.validate(controls, true)) {
       return v.errors[0]?.message || "Invalid controls";
     }
@@ -266,10 +432,7 @@ export abstract class AsReadableController<
     return undefined;
   }
 
-  protected validateParsed(
-    parsed: Uniquery,
-    type: "query" | "pages" | "getOne",
-  ): HttpError | undefined {
+  protected validateParsed(parsed: Uniquery, type: TDbControlsType): HttpError | undefined {
     const controlsError = this.validateControls(
       parsed.controls as unknown as Record<string, unknown>,
       type,
@@ -378,6 +541,20 @@ export abstract class AsReadableController<
    */
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
+    await this.parseRequest("meta");
+    return this.resolveMeta();
+  }
+
+  /**
+   * The `/meta` payload for the current request — the cached envelope
+   * through {@link applyMetaOverlay} — WITHOUT the `/meta` route's
+   * {@link prepareRequest} call. Internal consumers (e.g. `$actions`
+   * filtering on a read) use this, so the hook runs once per request with
+   * the endpoint actually being served.
+   *
+   * @since 0.1.143
+   */
+  protected resolveMeta(): TMetaResponse | Promise<TMetaResponse> {
     const key = this.metaCacheKey();
     if (!this._metaResponse || key !== this._metaResponseKey) {
       this._metaResponse = this.buildMetaResponse();
@@ -402,15 +579,24 @@ export abstract class AsReadableController<
    * compiled `.as` class's `.name`, registered when an action's parameter is
    * decorated with `@InputForm(FormType)`. Schemas are serialized once and
    * cached per controller; the response uses the same annotation-allowlist
-   * policy as {@link getSerializeOptions}.
+   * policy as {@link getSerializeOptions}. Since 0.1.143 the form must pass
+   * {@link authorizeForm} — a refused form answers exactly like an unknown one.
    */
   @Get("meta/form/:name")
   async metaForm(@Param("name") name: string): Promise<TSerializedAnnotatedType> {
+    await this.parseRequest("metaForm");
     // Form registry is populated as a side-effect of action discovery — run
     // it here so /meta/form works even before the first /meta hit.
-    discoverActions(this.constructor as Function, this.app, this.logger);
+    const envelopes = discoverActions(this.constructor as Function, this.app, this.logger);
     const formType = getControllerFormType(this.constructor as Function, name);
-    if (!formType) {
+    // A refused form answers exactly like an unknown one.
+    if (
+      !formType ||
+      !(await this.authorizeForm(
+        name,
+        envelopes.filter((e) => e.info.inputForm === name).map((e) => e.info.name),
+      ))
+    ) {
       throw new HttpError(404, `Unknown form "${name}"`);
     }
     let cached = this._formSchemas.get(name);
@@ -419,6 +605,22 @@ export abstract class AsReadableController<
       this._formSchemas.set(name, cached);
     }
     return cached;
+  }
+
+  /**
+   * Per-request gate for `GET /meta/form/:name`: return `false` to refuse the
+   * form — the response is then the same 404 an unknown form gets, so a
+   * refused form's existence does not leak. `actionNames` are the discovered
+   * actions whose input form is `name` (a permission layer typically allows
+   * the form iff the caller may run at least one of them). Default: `true`.
+   *
+   * @since 0.1.143
+   */
+  protected authorizeForm(
+    _name: string,
+    _actionNames: readonly string[],
+  ): boolean | Promise<boolean> {
+    return true;
   }
 
   /**

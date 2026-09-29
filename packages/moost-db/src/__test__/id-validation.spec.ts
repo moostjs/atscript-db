@@ -234,3 +234,22 @@ describe("isIdValidationSource", () => {
     expect(isIdValidationSource(42)).toBe(false);
   });
 });
+
+describe("identifier values are scalars (since 0.1.143)", () => {
+  // A field whose designType is neither string / number / boolean used to
+  // accept anything — an operator object would reach the filter verbatim.
+  const loosePkSource = makeSource(
+    [{ fields: ["id"], source: "primaryKey" }],
+    [{ path: "id", designType: "any" as TDbFieldMeta["designType"] }],
+  );
+
+  it.each([[{ $ne: null }], [["a"]]])("rejects %j whatever the field's designType", (value) => {
+    expect(() => validateSingleId({ id: value }, loosePkSource)).toThrow(ValidatorError);
+    expect(() => validateMultiId([{ id: value }], loosePkSource)).toThrow(ValidatorError);
+  });
+
+  it("still accepts scalars on a loosely typed field", () => {
+    expect(validateSingleId({ id: "x" }, loosePkSource)).toEqual({ id: "x" });
+    expect(validateSingleId({ id: 7 }, loosePkSource)).toEqual({ id: 7 });
+  });
+});

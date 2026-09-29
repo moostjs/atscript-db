@@ -1,18 +1,25 @@
 import { Intercept } from "moost";
 
 import { getAtscriptDbMate } from "../mate";
-import { isAsValueHelpControllerSubclass } from "./controller-registry";
+import { isAsValueHelpControllerSubclass, valueHelpActionError } from "./controller-registry";
 import { buildGateInterceptor, buildThinInterceptor } from "./gate-interceptor";
 import { WARN_PREFIX, mergeActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
+import { actionPrepareInterceptor } from "./prepare-request";
 import type { DbActionOpts, FlatKey, TDbActionDisabledVerdict, TOnDisabledRows } from "./types";
 
 /**
  * Mark a controller method as a database action surfaced via `/meta`. Writes
- * `atscript_db_action` metadata and registers a Moost interceptor when needed
- * (gate when `disabled` is set, thin bound-table injector when only
- * `@DbActionRow*` is present). Stacking two `@DbAction` on the same method
- * is undefined and emits a warning.
+ * `atscript_db_action` metadata and, for every `'row'` / `'rows'` action,
+ * registers a Moost interceptor: the gate when `disabled` is set, else the
+ * bound-table injector that also verifies the ids against the controller's
+ * row overlay (since 0.1.143). Either first awaits the controller's
+ * `prepareRequest({ endpoint: "action", action })` when it defines one —
+ * before any id is validated or row loaded; a `'table'`-level action on an
+ * `AsReadableController` subclass gets an interceptor for that alone
+ * (since 0.1.143). Stacking two `@DbAction` on the same method
+ * is undefined and emits a warning. Throws on a value-help controller
+ * (since 0.1.143 — value-help controllers do not support actions).
  *
  * Generic over `TRow` (annotate at the call site: `@DbAction<Order>(...)`)
  * and `R` (the literal `requiredFields` tuple, inferred via `const R`).
@@ -43,10 +50,11 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
       }),
     }))(target, propertyKey, descriptor);
 
-    // Value-help controllers don't surface actions; skip interceptor registration.
+    // Value-help controllers don't surface actions — and the `@Post` route
+    // would run ungated — so an action there is a hard error.
     const ctor = typeof target === "function" ? target : target.constructor;
     if (isAsValueHelpControllerSubclass(ctor)) {
-      return descriptor;
+      throw valueHelpActionError(ctor.name, [name]);
     }
 
     const merged = mate.read(target, propertyKey as string);
@@ -67,8 +75,25 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
         table: rawOpts.table,
       });
       Intercept(def)(target, propertyKey, descriptor);
-    } else if (scan.hasRowParam) {
-      Intercept(buildThinInterceptor({ table: rawOpts.table }))(target, propertyKey, descriptor);
+    } else if (scan.level !== "table" || scan.hasRowParam) {
+      const scope =
+        scan.level === "table"
+          ? undefined
+          : {
+              action: name,
+              level: scan.level,
+              onDisabledRows: rawOpts.onDisabledRows ?? "reject",
+            };
+      Intercept(buildThinInterceptor({ table: rawOpts.table, scope }))(
+        target,
+        propertyKey,
+        descriptor,
+      );
+    } else if (typeof (target as { parseRequest?: unknown }).parseRequest === "function") {
+      // An `AsReadableController` subclass (the prototype chain is fixed, so
+      // only these can carry `prepareRequest`); the interceptor returns
+      // without awaiting when none is defined.
+      Intercept(actionPrepareInterceptor)(target, propertyKey, descriptor);
     }
 
     return descriptor;

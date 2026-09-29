@@ -112,6 +112,14 @@ interface BaseActionOpts extends Partial<
    * `AsDbController`) — the bound table from the controller wins.
    */
   table?: AtscriptDbTable<any>;
+  /**
+   * `'rows'` level (`@DbActionIDs` / `@DbActionRows`): the most identifiers
+   * one request may carry. Above it the request is rejected with 400 before
+   * any row is loaded. Default `1000`. Server-internal — never on the wire.
+   *
+   * @since 0.1.143
+   */
+  maxIds?: number;
 }
 
 /**

@@ -15,9 +15,13 @@ import {
   DbError,
   checkHavingKeys,
   collectQueryPaths,
-  findAncestorInSet,
+  geoIndexNotFoundMessage,
+  isEmptyObject,
   normalizeComputedSelect,
+  searchIndexNotFoundMessage,
+  selfOrAncestor,
   unsupportedOperatorMessage,
+  vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
@@ -26,9 +30,11 @@ import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions } from "./actions/list-augmenter";
-import { AsReadableController } from "./as-readable.controller";
+import { withOverlay } from "./actions/row-scope";
+import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
-import { FieldCapabilityIndex } from "./meta/field-capabilities";
+import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilities";
+import { unknownRelationError } from "./http-errors";
 import { badRequest } from "./validation-interceptor";
 
 /** Gate positions checked after the filter entries, in order; `refs[op]` are their paths. */
@@ -68,6 +74,68 @@ export interface TDbDecorateContext {
   /** The request's parsed controls (`$select`, `$with`, `$actions`, …). Read-only by convention. */
   controls: Record<string, unknown>;
 }
+
+/**
+ * One text / vector / geo index of the bound readable with the LOGICAL field
+ * paths it reads — see {@link AsDbReadableController.indexFieldPaths}.
+ *
+ * @since 0.1.143
+ */
+export interface TDbIndexFieldPaths {
+  /** The name a request addresses the index by (`$index` for text and geo, `$vector` for vector). */
+  name: string;
+  type: "text" | "vector" | "geo";
+  /**
+   * Logical field paths the index reads. An index whose coverage cannot be
+   * derived from the model (e.g. a dynamic document-search mapping) lists
+   * every field — fail-closed for visibility gating.
+   */
+  fields: readonly string[];
+  /** `true` for the index a request of this type uses when it names none. */
+  isDefault: boolean;
+}
+
+/**
+ * The field visibility of a DB readable controller — see
+ * {@link AsDbReadableController.fieldVisibility}.
+ *
+ * @since 0.1.143
+ */
+export interface TDbFieldVisibility {
+  /** `true` when `hasField` is overridden (visibility is request-scoped); else every real path is visible. */
+  readonly scoped: boolean;
+  /**
+   * `hasField(path)` and — when {@link scoped} — a `@db.column.derived`
+   * field of the bound readable only while its source path is visible too
+   * (a derived copy must not outlive a hidden source).
+   */
+  readonly isVisible: (path: string) => boolean;
+  /**
+   * The paths sealed out of `readable`'s read projection for this request:
+   * its `@db.writeOnly` fields plus, when {@link scoped}, its derived fields
+   * whose source `hasField` hides. `prefix` is `readable`'s path from the
+   * controller: `""` for the bound readable, `"rel."` for a `$with` target.
+   */
+  readonly sealedFor: (readable: AtscriptDbReadable<any>, prefix?: string) => ReadonlySet<string>;
+}
+
+/** A parsed `$with` entry; `controls` may be absent (legacy flat shape: `$select` / `$sort` / `$with` on the entry). */
+type TWithEntry = {
+  name: string;
+  filter?: FilterExpr;
+  controls?: Record<string, unknown>;
+} & Record<string, unknown>;
+
+/** The 400 of a filter / sort on a `@db.writeOnly` field. */
+function writeOnlyError(path: string, op: "filter" | "sort"): HttpError {
+  const verdict = writeOnlyVerdict(path, op);
+  return badRequest(verdict.path, verdict.message);
+}
+
+/** Read controls with every projection level sealed — see `_sealControls`. */
+type TSealedControls = Record<string, unknown> & {
+  $select: UniqueryControls["$select"] | undefined;
+};
 
 /** What `$actions` augmentation of a read needs, prepared before the read runs. */
 interface TAugmentationPrep {
@@ -144,13 +212,31 @@ export class AsDbReadableController<
   protected override metaCacheKey(): unknown {
     return this.capabilities;
   }
-  /** Bound once: the visibility check ({@link hasField}) the gate hands to `capabilities.check`. */
-  private readonly _exists = (path: string): boolean => this.hasField(path);
   /**
-   * Id-resolution options (since 0.1.134): `{ isFieldVisible: hasField }`
-   * when a subclass overrides {@link hasField}, else `undefined` (the default
-   * accepts every real path, so resolution stays unfiltered). A unique index
-   * over a hidden field is never an identification.
+   * THE field-visibility answer (since 0.1.143) every read surface consults:
+   * the capability gate, the index gate and `$search` fallback, id
+   * resolution, the `@db.writeOnly` / derived seals of the projection and of
+   * every `$with` level, `$actions` widening and action `requiredFields`
+   * (the actions module reaches it duck-typed, like {@link idSource}).
+   */
+  protected readonly fieldVisibility: TDbFieldVisibility;
+  /** A subclass overrides {@link hasField}: visibility is request-scoped (derived rule, index gate, id options). */
+  private readonly _hasFieldOverridden: boolean;
+  /** `@db.column.derived` path → its source's logical path, per readable (bound + `$with` targets). */
+  private readonly _derivedSources = new WeakMap<object, ReadonlyMap<string, string>>();
+  /** The bound readable's entry of {@link _derivedSources}. */
+  private readonly _derivedSource: ReadonlyMap<string, string>;
+  /** `@db.writeOnly` paths of `$with` target readables, collected once per target. */
+  private readonly _targetWriteOnly = new WeakMap<object, ReadonlySet<string>>();
+  private _indexFieldPathsCache?: readonly TDbIndexFieldPaths[];
+  /** {@link _nativeSearch} per request, keyed by the request's parsed controls. */
+  private readonly _nativeSearchByRequest = new WeakMap<object, boolean>();
+  /**
+   * Id-resolution options (since 0.1.134): `{ isFieldVisible }` (the
+   * {@link fieldVisibility} check) when a subclass overrides {@link hasField},
+   * else `undefined` (the default accepts every real path, so resolution
+   * stays unfiltered). A unique index over a hidden field is never an
+   * identification.
    */
   protected readonly _idOpts: TIdResolveOptions | undefined;
   /** Narrowed id sources, one stable object per distinct visible-identification set. */
@@ -159,6 +245,8 @@ export class AsDbReadableController<
   private readonly _overlayIsNoOp: boolean;
   /** `true` when a subclass implements {@link decorateRows} (the override switches the hook on). */
   private readonly _decorates: boolean;
+  /** `true` when a subclass overrides {@link transformOne} or {@link transformFilter} (a row overlay may exist). */
+  private readonly _hasRowOverlay: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
   /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
@@ -186,6 +274,7 @@ export class AsDbReadableController<
     super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
     this.readable = resolved;
     this._writeOnlySet = this._collectAnnotated("db.writeOnly");
+    this._derivedSource = this._derivedSourcesOf(resolved);
     this._invertibleFields = this._collectInvertibleFields();
     this._searchFallbackFields = this._collectSearchFallbackFields();
     this._preferredIdSet = new Set(resolved.preferredId ?? []);
@@ -195,10 +284,22 @@ export class AsDbReadableController<
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
     this._decorates = typeof this.decorateRows === "function";
-    this._idOpts =
-      this.hasField === AsDbReadableController.prototype.hasField
-        ? undefined
-        : { isFieldVisible: this._exists };
+    const proto = AsDbReadableController.prototype;
+    this._hasRowOverlay =
+      this.transformOne !== proto.transformOne || this.transformFilter !== proto.transformFilter;
+    const scoped = this.hasField !== proto.hasField;
+    this._hasFieldOverridden = scoped;
+    const isVisible = (path: string): boolean => {
+      if (!this.hasField(path)) return false;
+      const source = scoped ? this._derivedSource.get(path) : undefined;
+      return source === undefined || this.hasField(source);
+    };
+    this.fieldVisibility = {
+      scoped,
+      isVisible,
+      sealedFor: (readable, prefix = "") => this._sealedFor(readable, prefix),
+    };
+    this._idOpts = scoped ? { isFieldVisible: isVisible } : undefined;
   }
 
   /**
@@ -226,7 +327,7 @@ export class AsDbReadableController<
     const nav = this.capabilities.navFields;
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
-      if (nav.has(fd.path) || findAncestorInSet(fd.path, nav) !== undefined) continue;
+      if (selfOrAncestor(fd.path, nav) !== undefined) continue;
       out.push(fd.path);
     }
     return out;
@@ -243,6 +344,20 @@ export class AsDbReadableController<
       if (ref) out.set(path, ref);
     }
     return out;
+  }
+
+  /** `readable`'s `@db.column.derived` path → source path map, collected once per readable. */
+  private _derivedSourcesOf(readable: AtscriptDbReadable<any>): ReadonlyMap<string, string> {
+    let map = this._derivedSources.get(readable);
+    if (!map) {
+      const out = new Map<string, string>();
+      for (const fd of readable.fieldDescriptors ?? []) {
+        if (fd.derived?.sourcePath) out.set(fd.path, fd.derived.sourcePath);
+      }
+      map = out;
+      this._derivedSources.set(readable, map);
+    }
+    return map;
   }
 
   private _collectAnnotated(annotation: string): Set<string> {
@@ -267,9 +382,18 @@ export class AsDbReadableController<
    * an action id (primary key and `preferredId` always are) — and the
    * nested-object 400 hint lists visible leaves only. The default accepts every real path
    * (`isValidFieldPath`). `/meta` does NOT consult it — prune hidden fields
-   * there with `applyMetaOverlay`. Native text search and vector search
-   * (`$vector` names an index) run inside the engine over its indexes, out of
-   * this hook's reach — keep hidden fields out of those indexes.
+   * there with `applyMetaOverlay` ({@link indexFieldPaths} names what each
+   * search / geo index reads).
+   *
+   * Since 0.1.143 an override also gates the engine's indexes: a native
+   * text-search index (`$index`, or the default one), a vector index
+   * (`$vector`) or a geo index (`/geo`, `$index`) reading a hidden path
+   * answers exactly like a nonexistent index (400); a hidden DEFAULT text
+   * index falls back to the `@db.column.searchable` substring search over
+   * visible fields (or ignores the term when there are none). A
+   * `@db.column.derived` field is visible only while its source path is,
+   * and one whose source is hidden is sealed out of every read projection
+   * for the request, like a `@db.writeOnly` field.
    */
   protected hasField(path: string): boolean {
     // Guarded for the partial-mock readables in *.spec.ts that omit
@@ -295,13 +419,16 @@ export class AsDbReadableController<
    * ran first); a bucket's source is checked like any other path (op
    * `bucket`). After the per-path checks the core `$having` rule runs
    * (`checkHavingKeys`: aliases or `$groupBy` fields only), so a readable mock
-   * and a real table answer alike.
+   * and a real table answer alike. Last (since 0.1.143, when {@link hasField}
+   * is overridden) the index gate: a text / vector / geo index the request
+   * uses must read only visible paths — see {@link indexFieldPaths}.
    */
   protected checkCapabilities(parsed: {
     filter?: FilterExpr;
     controls?: object;
   }): HttpError | undefined {
     const capabilities = this.capabilities;
+    const isVisible = this.fieldVisibility.isVisible;
     const refs = collectQueryPaths(parsed);
     if (refs.unsupportedOperator !== undefined) {
       return badRequest(
@@ -313,12 +440,12 @@ export class AsDbReadableController<
     // classification the core guard applies — so an existence-only
     // `{ metrics: { $exists: true } }` never exempts `{ metrics: … }` elsewhere.
     for (const { path, predicate } of refs.filter) {
-      const verdict = capabilities.check(path, "filter", this._exists, predicate);
+      const verdict = capabilities.check(path, "filter", isVisible, predicate);
       if (verdict) return badRequest(verdict.path, verdict.message);
     }
     for (const op of PATH_OPS) {
       for (const path of refs[op]) {
-        const verdict = capabilities.check(path, op, this._exists);
+        const verdict = capabilities.check(path, op, isVisible);
         if (verdict) return badRequest(verdict.path, verdict.message);
       }
     }
@@ -326,7 +453,10 @@ export class AsDbReadableController<
     // `$groupBy` fields — the core rule, answered here with the same wording.
     const having = checkHavingKeys(refs);
     if (having) return badRequest(having.path, having.message);
-    return this.checkGates(parsed);
+    return (
+      this.checkGates(parsed) ??
+      this._checkIndexGate((parsed.controls ?? {}) as Record<string, unknown>)
+    );
   }
 
   /**
@@ -376,39 +506,361 @@ export class AsDbReadableController<
     return undefined;
   }
 
-  /** {@link checkComputedSelect} (before the controls DTO), then $with relations against the readable. */
+  /**
+   * {@link checkComputedSelect} (before the controls DTO), the controls DTO
+   * ({@link validateControls}), then the `$with` relation names at every
+   * level — BEFORE the `$with` sub-query paths ({@link validateInsights}),
+   * so a hidden or nonexistent nested relation answers `Unknown relation`,
+   * never `Unknown field "rel.sub"` (since 0.1.143) — then the insights and
+   * the joined-row write-only veto.
+   */
   protected override validateParsed(
     parsed: Uniquery,
-    type: "query" | "pages" | "getOne",
+    type: TDbControlsType,
   ): HttpError | undefined {
     const computedError = this.checkComputedSelect(parsed.controls);
     if (computedError) {
       return computedError;
     }
-    const baseError = super.validateParsed(parsed, type);
-    if (baseError) {
-      return baseError;
+    const controls = parsed.controls as Record<string, unknown>;
+    const controlsError = this.validateControls(controls, type);
+    if (controlsError) {
+      return new HttpError(400, controlsError);
     }
-    const withRelations = (parsed.controls as Record<string, unknown>).$with as
-      | Array<{ name: string }>
-      | undefined;
+    const withRelations = controls.$with as Array<{ name: string }> | undefined;
+    const unknown = withRelations?.length
+      ? this._checkWithRelations(withRelations, this.readable, "")
+      : undefined;
+    if (unknown) {
+      return unknown;
+    }
+    if (parsed.insights) {
+      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
+      if (insightsError) {
+        return new HttpError(400, insightsError);
+      }
+    }
     if (withRelations?.length) {
-      const relations = this.readable.relations;
-      for (const rel of withRelations) {
-        // A relation hidden by `hasField` is answered like a missing one.
-        const dot = rel.name.indexOf(".");
-        const known =
-          dot === -1
-            ? relations.has(rel.name) && this.hasField(rel.name)
-            : this.hasField(rel.name.slice(0, dot));
-        if (!known) {
-          const visible = [...relations.keys()].filter((name) => this.hasField(name));
-          return badRequest(
-            "$with",
-            `Unknown relation "${rel.name}"`,
-            `Unknown relation "${rel.name}" in $with. Available relations: ${visible.join(", ") || "(none)"}`,
-          );
+      // A `$with` sub-filter / sub-sort on a joined table's `@db.writeOnly`
+      // field is rejected exactly like the same filter / sort on this table's
+      // own write-only field (an equality probe or sort order would leak the
+      // sealed value). Recursive through nested `$with`.
+      const vetoed = this._walkWith(
+        withRelations,
+        this.readable,
+        "",
+        (rel, target, path, nested) => {
+          const sealed = this._writeOnlyOf(target);
+          if (sealed.size === 0) return undefined;
+          const refs = collectQueryPaths({
+            filter: rel.filter,
+            controls: { $sort: nested.$sort ?? rel.$sort },
+          });
+          const filtered = refs.filter.find(
+            (ref) => selfOrAncestor(ref.path, sealed) !== undefined,
+          )?.path;
+          if (filtered !== undefined) return writeOnlyError(`${path}.${filtered}`, "filter");
+          const sorted = refs.sort.find((p) => selfOrAncestor(p, sealed) !== undefined);
+          return sorted === undefined ? undefined : writeOnlyError(`${path}.${sorted}`, "sort");
+        },
+      );
+      if (vetoed instanceof HttpError) return vetoed;
+    }
+    return undefined;
+  }
+
+  // ── $with: one visitor for the veto and the seal (since 0.1.143) ────────
+
+  /**
+   * `$with` relation names at every level (nested `$with` since 0.1.143):
+   * each segment of an entry's (dotted) name must be a relation of its
+   * level's readable that {@link hasField} accepts at its full path from
+   * this controller (`rel`, then `rel.sub` for a nested / dotted one) —
+   * hidden answers exactly like nonexistent: {@link unknownRelationError}
+   * with the entry's name and the relations visible at the level it failed
+   * at. A level whose target readable cannot be resolved is not descended.
+   */
+  private _checkWithRelations(
+    withRels: unknown,
+    readable: AtscriptDbReadable<any>,
+    prefix: string,
+  ): HttpError | undefined {
+    if (!Array.isArray(withRels)) return undefined;
+    for (const rel of withRels as TWithEntry[]) {
+      if (typeof rel?.name !== "string") continue;
+      let level: AtscriptDbReadable<any> | undefined = readable;
+      let path = prefix;
+      for (const segment of rel.name.split(".")) {
+        if (!level) break;
+        const relations: ReadonlyMap<string, unknown> = level.relations ?? new Map();
+        if (!relations.has(segment) || !this.hasField(path + segment)) {
+          const visible = [...relations.keys()].filter((name) => this.hasField(path + name));
+          return unknownRelationError(rel.name, visible);
         }
+        path += `${segment}.`;
+        level =
+          typeof level.relatedTable === "function"
+            ? (level.relatedTable(segment) as AtscriptDbReadable<any> | undefined)
+            : undefined;
+      }
+      if (!level) continue;
+      const nested = this._checkWithRelations(rel.controls?.$with ?? rel.$with, level, path);
+      if (nested) return nested;
+    }
+    return undefined;
+  }
+
+  /**
+   * `@db.writeOnly` paths of a `$with` target — its own fields only (its
+   * navigation descendants are sealed one level down, by their own target).
+   */
+  private _writeOnlyOf(readable: AtscriptDbReadable<any>): ReadonlySet<string> {
+    let set = this._targetWriteOnly.get(readable);
+    if (!set) {
+      const own = new Set<string>();
+      const nav: ReadonlySet<string> = readable.navFields ?? new Set();
+      for (const [path, entry] of readable.flatMap ?? []) {
+        if (!entry?.metadata?.has?.("db.writeOnly")) continue;
+        if (selfOrAncestor(path, nav) !== undefined) continue;
+        own.add(path);
+      }
+      set = own;
+      this._targetWriteOnly.set(readable, set);
+    }
+    return set;
+  }
+
+  /** {@link TDbFieldVisibility.sealedFor}. */
+  private _sealedFor(readable: AtscriptDbReadable<any>, prefix: string): ReadonlySet<string> {
+    const writeOnly = readable === this.readable ? this._writeOnlySet : this._writeOnlyOf(readable);
+    if (!this._hasFieldOverridden) return writeOnly;
+    let out: Set<string> | undefined;
+    for (const [path, source] of this._derivedSourcesOf(readable)) {
+      if (writeOnly.has(path) || this.hasField(prefix + source)) continue;
+      (out ??= new Set(writeOnly)).add(path);
+    }
+    return out ?? writeOnly;
+  }
+
+  /** The readable a `$with` entry name (`rel` or dotted `rel.sub`) loads from, if resolvable. */
+  private _relTarget(
+    readable: AtscriptDbReadable<any>,
+    name: string,
+  ): AtscriptDbReadable<any> | undefined {
+    let current: AtscriptDbReadable<any> | undefined = readable;
+    for (const segment of name.split(".")) {
+      if (typeof current?.relatedTable !== "function") return undefined;
+      current = current.relatedTable(segment) as AtscriptDbReadable<any> | undefined;
+    }
+    return current;
+  }
+
+  /**
+   * Walks a `$with` tree pre-order: `visit(rel, target, path, controls)` for
+   * every entry whose target readable resolves (`path` = the entry's dotted
+   * path from this controller, `controls` = its sub-controls). The visitor
+   * returns replacement sub-controls, an `HttpError` to stop the walk (it is
+   * returned as-is), or `undefined` to keep the entry. Returns the rebuilt
+   * tree — the same array when nothing changed.
+   */
+  private _walkWith(
+    withRels: unknown,
+    readable: AtscriptDbReadable<any>,
+    prefix: string,
+    visit: (
+      rel: TWithEntry,
+      target: AtscriptDbReadable<any>,
+      path: string,
+      controls: Record<string, unknown>,
+    ) => Record<string, unknown> | HttpError | undefined,
+  ): unknown {
+    if (!Array.isArray(withRels) || withRels.length === 0) return withRels;
+    let out: unknown[] | undefined;
+    for (let i = 0; i < withRels.length; i++) {
+      const rel = withRels[i] as TWithEntry;
+      const target = this._relTarget(readable, rel.name);
+      if (!target) continue;
+      const path = `${prefix}${rel.name}`;
+      const nested = rel.controls ?? {};
+      const visited = visit(rel, target, path, nested);
+      if (visited instanceof HttpError) return visited;
+      const children = nested.$with ?? rel.$with;
+      const walked = this._walkWith(children, target, `${path}.`, visit);
+      if (walked instanceof HttpError) return walked;
+      if (visited === undefined && walked === children) continue;
+      const controls = { ...(visited ?? nested) };
+      if (walked !== undefined) controls.$with = walked;
+      out ??= [...withRels];
+      out[i] = { ...rel, controls };
+    }
+    return out ?? withRels;
+  }
+
+  /**
+   * The read controls with every level sealed — the root `$select` (`select`,
+   * the {@link transformProjection} result) and each `$with` entry's
+   * `$select` lose the paths {@link TDbFieldVisibility.sealedFor} names for
+   * their readable (an exclusion is forced when there is no projection), so
+   * sealed values never leave the database. Runs AFTER `transformProjection`
+   * so permission overlays compose: they see the wire `$select`, this
+   * guarantees the seal on whatever they return.
+   */
+  private _sealControls(
+    controls: Record<string, unknown>,
+    select: UniqueryControls["$select"] | undefined,
+  ): TSealedControls {
+    const vis = this.fieldVisibility;
+    const $with = this._walkWith(controls.$with, this.readable, "", (rel, target, path, nested) => {
+      const sealed = vis.sealedFor(target, `${path}.`);
+      if (sealed.size === 0) return undefined;
+      const sub = (nested.$select ?? rel.$select) as UniqueryControls["$select"] | undefined;
+      return { ...nested, $select: this._sealSelect(sub, sealed) };
+    });
+    const out: TSealedControls = {
+      ...controls,
+      $select: this._sealSelect(select, vis.sealedFor(this.readable)),
+    };
+    if ($with !== controls.$with) out.$with = $with;
+    return out;
+  }
+
+  // ── Index visibility gating (since 0.1.143) ────────────────────────────
+
+  /**
+   * The text / vector / geo indexes of the bound readable with the LOGICAL
+   * field paths each reads, and which one answers when a request names none.
+   * Text and vector entries are the adapter's `getSearchIndexes()` (the names
+   * `$index` / `$vector` address, their `fields` and `isDefault`; an entry
+   * without `fields` lists every field — fail-closed); geo entries are the
+   * `@db.index.geo` indexes. The request gate checks every listed path against
+   * {@link hasField} (only when `hasField` is overridden); permission
+   * overlays use it to prune `/meta` (`searchIndexes`, `searchable`,
+   * `vectorSearchable`, `geoSearchable`). Computed once. Override to describe
+   * an index the model cannot express.
+   *
+   * @since 0.1.143
+   */
+  protected indexFieldPaths(): readonly TDbIndexFieldPaths[] {
+    return (this._indexFieldPathsCache ??= [
+      ...this._searchIndexFieldPaths(),
+      ...this._geoIndexFieldPaths(),
+    ]);
+  }
+
+  private _searchIndexFieldPaths(): TDbIndexFieldPaths[] {
+    const advertised =
+      typeof this.readable.getSearchIndexes === "function" ? this.readable.getSearchIndexes() : [];
+    const out = advertised.map(
+      (info): TDbIndexFieldPaths => ({
+        name: info.name,
+        type: info.type === "vector" ? "vector" : "text",
+        fields: info.fields ?? this._invertibleFields,
+        isDefault: info.isDefault === true,
+      }),
+    );
+    // An adapter that flags no default: its `DEFAULT`-named index (document
+    // adapters alias their default there), else the first of that type.
+    for (const type of ["text", "vector"] as const) {
+      const ofType = out.filter((entry) => entry.type === type);
+      if (ofType.some((entry) => entry.isDefault)) continue;
+      const fallback = ofType.find((entry) => entry.name === "DEFAULT") ?? ofType[0];
+      if (fallback) fallback.isDefault = true;
+    }
+    return out;
+  }
+
+  /** `@db.index.geo` indexes — their fields carry physical names, mapped back to logical paths. */
+  private _geoIndexFieldPaths(): TDbIndexFieldPaths[] {
+    const readable = this.readable;
+    if (!(readable.indexes instanceof Map)) return [];
+    // A derived column never shadows the regular field sharing its physical
+    // name (document adapters).
+    const logical = new Map<string, string>();
+    for (const fd of readable.fieldDescriptors) {
+      if (fd.ignored) continue;
+      const prev = logical.get(fd.physicalName);
+      if (prev === undefined || this._derivedSource.has(prev))
+        logical.set(fd.physicalName, fd.path);
+    }
+    const out: TDbIndexFieldPaths[] = [];
+    for (const index of readable.indexes.values()) {
+      if (index.type !== "geo") continue;
+      out.push({
+        name: index.name,
+        type: "geo",
+        fields: index.fields.map((field) => logical.get(field.name) ?? field.name),
+        isDefault: out.length === 0,
+      });
+    }
+    return out;
+  }
+
+  /** Every path `entry` reads is visible to this request. */
+  private _indexVisible(entry: TDbIndexFieldPaths): boolean {
+    return entry.fields.every(this.fieldVisibility.isVisible);
+  }
+
+  /**
+   * Native text search serves this request: the adapter searches natively
+   * and — under an overridden {@link hasField} — the default index (when the
+   * request names none) reads only visible fields. A named index is gated by
+   * {@link checkCapabilities}. Answered once per request (keyed by its
+   * parsed controls).
+   */
+  private _nativeSearch(controls: Record<string, unknown>): boolean {
+    let native = this._nativeSearchByRequest.get(controls);
+    if (native === undefined) {
+      native = this._resolveNativeSearch(controls);
+      this._nativeSearchByRequest.set(controls, native);
+    }
+    return native;
+  }
+
+  private _resolveNativeSearch(controls: Record<string, unknown>): boolean {
+    if (!this.readable.isSearchable()) return false;
+    if (!this._hasFieldOverridden) return true;
+    if (typeof controls.$index === "string" && controls.$index) return true;
+    const def = this.indexFieldPaths().find((e) => e.type === "text" && e.isDefault);
+    return def === undefined || this._indexVisible(def);
+  }
+
+  /**
+   * Index visibility gate (only when {@link hasField} is overridden), run by
+   * {@link checkCapabilities} on every read: the geo index `/geo` reads
+   * (`$index`, or the default one), the vector index `$vector` names (or the
+   * default one) and the text index `$index` names must read only visible
+   * paths; otherwise the request is answered exactly like one naming a
+   * nonexistent index (the core's wording).
+   */
+  private _checkIndexGate(controls: Record<string, unknown>): HttpError | undefined {
+    if (!this._hasFieldOverridden) return undefined;
+    const name = typeof controls.$index === "string" ? controls.$index : undefined;
+    // `$center` marks a geo search (`/geo` requires it; the other endpoints'
+    // controls DTOs reject it). The text / vector gate below still runs.
+    if (controls.$center !== undefined) {
+      const geoIndexes = this.indexFieldPaths().filter((e) => e.type === "geo");
+      const entry =
+        name === undefined
+          ? geoIndexes.find((e) => e.isDefault)
+          : geoIndexes.find((e) => e.name === name);
+      // A nonexistent geo index is the core's own 400 — the same wording.
+      if (entry && !this._indexVisible(entry)) {
+        return badRequest(name ?? "", geoIndexNotFoundMessage(this.readable.tableName, name));
+      }
+    }
+    if (!controls.$search) return undefined;
+    if (controls.$vector !== undefined) {
+      const vectorName = typeof controls.$vector === "string" ? controls.$vector : "";
+      const entry = this.indexFieldPaths().find(
+        (e) => e.type === "vector" && (vectorName ? e.name === vectorName : e.isDefault),
+      );
+      if (entry && this._indexVisible(entry)) return undefined;
+      return badRequest("$vector", vectorIndexNotFoundMessage(vectorName || undefined));
+    }
+    if (name && this.readable.isSearchable()) {
+      const entry = this.indexFieldPaths().find((e) => e.type === "text" && e.name === name);
+      if (!entry || !this._indexVisible(entry)) {
+        return badRequest("$index", searchIndexNotFoundMessage(name));
       }
     }
     return undefined;
@@ -537,7 +989,7 @@ export class AsDbReadableController<
    */
   private _invertExclusion(excluded: ReadonlySet<string>): string[] {
     return this._invertibleFields.filter((path) => {
-      if (excluded.has(path) || findAncestorInSet(path, excluded) !== undefined) return false;
+      if (selfOrAncestor(path, excluded) !== undefined) return false;
       const prefix = `${path}.`;
       for (const key of excluded) {
         if (key.startsWith(prefix)) return false;
@@ -615,14 +1067,6 @@ export class AsDbReadableController<
     return projection as UniqueryControls["$select"];
   }
 
-  /** WHY: the URL parser only auto-coerces `$count`; every other boolean control reaches us as `"true"`/`"1"` and would fail DTO validation. */
-  private _coerceActionsControl(controls: Record<string, unknown>): void {
-    const v = controls.$actions;
-    if (typeof v === "string") {
-      controls.$actions = v === "true" || v === "1" || v === "";
-    }
-  }
-
   /** Normalize a post-`widenPreferredIdProjection` $select into `string[] | null` (`null` = all fields). */
   private _resolveProjectionForAugmenter(
     select: UniqueryControls["$select"] | undefined,
@@ -665,13 +1109,18 @@ export class AsDbReadableController<
     );
     if (rowLevelEnvelopes.length === 0) return null;
     if (this._overlayIsNoOp) return rowLevelEnvelopes;
-    const overlayMeta = await this.meta();
+    const overlayMeta = await this.resolveMeta();
     const allowedNames = new Set(overlayMeta.actions.map((a) => a.name));
     const filtered = rowLevelEnvelopes.filter((e) => allowedNames.has(e.info.name));
     return filtered.length === 0 ? null : filtered;
   }
 
-  /** Returns a widened `$select` only when at least one `requiredFields` entry is missing; `null` means "no widening needed". */
+  /**
+   * Returns a widened `$select` only when at least one `requiredFields` entry
+   * is missing; `null` means "no widening needed". A field the request may
+   * not see (`hasField`, derived source) is never added (since 0.1.143) —
+   * the action predicate sees it as `undefined`.
+   */
   private _widenSelectForActions(
     envelopes: readonly TDbActionEnvelope[],
     baseSelect: readonly string[],
@@ -683,7 +1132,7 @@ export class AsDbReadableController<
       if (!Array.isArray(raw.requiredFields)) continue;
       for (const f of raw.requiredFields as string[]) {
         const present = resultSet ? resultSet.has(f) : baseSelect.includes(f);
-        if (present) continue;
+        if (present || !this.fieldVisibility.isVisible(f)) continue;
         if (resultSet === null) {
           resultSet = new Set(baseSelect);
           result = [...baseSelect];
@@ -728,16 +1177,14 @@ export class AsDbReadableController<
   }
 
   /**
-   * Removes `@db.writeOnly` fields from any `$select` shape — and forces an
-   * exclusion when no projection was requested — so sealed values never leave
-   * the database on a read. Runs AFTER `transformProjection` so permission
-   * overlays compose (they see the wire `$select`; this guarantees the seal on
-   * whatever they return).
+   * `select` without the `sealed` paths (see {@link _sealControls}); an
+   * exclusion of them is forced when there is no projection, or when every
+   * requested path was sealed.
    */
-  private _sealProjection(
+  private _sealSelect(
     select: UniqueryControls["$select"] | undefined,
+    writeOnly: ReadonlySet<string>,
   ): UniqueryControls["$select"] | undefined {
-    const writeOnly = this._writeOnlySet;
     if (writeOnly.size === 0) return select;
     const exclusion = (): UniqueryControls["$select"] => {
       const out: Record<string, 0> = {};
@@ -773,7 +1220,7 @@ export class AsDbReadableController<
   ): string | undefined {
     if (this._writeOnlySet.size === 0) return undefined;
     // A field hidden by `hasField` falls through to the gate's `Unknown field`.
-    const sealed = (f: string) => this._writeOnlySet.has(f) && this.hasField(f);
+    const sealed = (f: string) => this._writeOnlySet.has(f) && this.fieldVisibility.isVisible(f);
     for (const f of groupBy) {
       if (sealed(f)) return f;
     }
@@ -789,8 +1236,10 @@ export class AsDbReadableController<
   /**
    * Merges the `$search` fallback into the filter: a case-insensitive literal
    * substring match OR'd across the `@db.column.searchable` fields, `$and`-combined
-   * with the existing filter. Applies only when the adapter has no native search
-   * (native wins) and the request isn't a vector search (`$vector` consumes the term).
+   * with the existing filter. Applies only when native search does not serve
+   * the request (no native search, or — since 0.1.143 — its default index
+   * reads a field {@link hasField} hides) and the request isn't a vector
+   * search (`$vector` consumes the term).
    */
   protected applySearchFallback(
     filter: FilterExpr | undefined,
@@ -798,16 +1247,16 @@ export class AsDbReadableController<
   ): FilterExpr | undefined {
     const term = controls.$search as string | undefined;
     if (!term || controls.$vector !== undefined) return filter;
-    if (this.readable.isSearchable()) return filter;
+    if (this._nativeSearch(controls)) return filter;
     // Only fields visible to this request — a hidden field would turn the
     // term into a substring oracle over its values.
-    const fields = this._searchFallbackFields.filter((f) => this.hasField(f));
+    const fields = this._searchFallbackFields.filter((f) => this.fieldVisibility.isVisible(f));
     if (fields.length === 0) return filter;
     const rx = `/${term.replace(/[.*+?^${}()|[\]\\/]/g, String.raw`\$&`)}/i`;
     const fragment = {
       $or: fields.map((f) => ({ [f]: { $regex: rx } })),
     } as FilterExpr;
-    return filter && Object.keys(filter).length > 0
+    return filter && !isEmptyObject(filter)
       ? ({ $and: [filter, fragment] } as FilterExpr)
       : fragment;
   }
@@ -832,7 +1281,7 @@ export class AsDbReadableController<
    * the same shape as the one this whole path exists to remove.
    */
   private _aggregateControls(controls: Record<string, unknown>): Record<string, unknown> {
-    if (controls.$search === undefined || this.readable.isSearchable()) {
+    if (controls.$search === undefined || this._nativeSearch(controls)) {
       return controls;
     }
     const rest = { ...controls };
@@ -855,7 +1304,7 @@ export class AsDbReadableController<
       const vector = await this.computeEmbedding(searchTerm, vectorField || undefined);
       return { kind: "vector", vector, vectorField };
     }
-    if (searchTerm && this.readable.isSearchable()) {
+    if (searchTerm && this._nativeSearch(controls)) {
       return { kind: "search", term: searchTerm, index: indexName };
     }
     return { kind: "plain" };
@@ -953,6 +1402,64 @@ export class AsDbReadableController<
   }
 
   /**
+   * The filter addressing exactly the ONE row `id` means — the readable's
+   * PK-first `resolveRowFilter` (since 0.1.143) under this request's
+   * identifications (`_idOpts`). `scope` (the row overlay) restricts which
+   * rows count while the id is pinned, so a row outside it never shadows one
+   * inside it. Readables without it (partial mocks) fall back to
+   * `resolveIdFilter`.
+   */
+  protected resolveRowFilter(id: unknown, scope?: FilterExpr): Promise<FilterExpr | null> {
+    const readable = this.readable;
+    if (typeof (readable as Partial<typeof readable>).resolveRowFilter === "function") {
+      return readable.resolveRowFilter(id, scope ? { ...this._idOpts, scope } : this._idOpts);
+    }
+    return Promise.resolve(readable.resolveIdFilter(id, this._idOpts));
+  }
+
+  /**
+   * The ONE row `id` addresses, read with `controls`. A hidden unique key is
+   * not an identification (since 0.1.134): the id resolves as if that index
+   * did not exist. Since 0.1.143 it resolves primary key first, counting
+   * only rows inside the overlay — an out-of-scope row never shadows an
+   * in-scope one, so the answer is the same as if it did not exist — in one
+   * step (`findOneByRow`). Readables without it (partial mocks) pin the row
+   * with {@link resolveRowFilter}, then read it.
+   */
+  private async _findRow(
+    id: unknown,
+    overlay: FilterExpr | undefined,
+    controls: Record<string, unknown>,
+  ): Promise<DataType | null> {
+    const readable = this.readable;
+    if (typeof (readable as Partial<typeof readable>).findOneByRow === "function") {
+      return (await readable.findOneByRow(id, {
+        ...this._idOpts,
+        scope: overlay,
+        controls: controls as never,
+      })) as DataType | null;
+    }
+    const idFilter = await this.resolveRowFilter(id, overlay);
+    if (!idFilter) return null;
+    return (await readable.findOne({
+      filter: withOverlay(idFilter, overlay),
+      controls,
+    } as Uniquery<any, any>)) as DataType | null;
+  }
+
+  /**
+   * The row overlay id-addressed endpoints (`/one`, `DELETE`) apply:
+   * `transformOne({})` when non-empty, and only when a subclass overrides
+   * {@link transformOne} / {@link transformFilter} — `undefined` otherwise,
+   * at no cost (since 0.1.143).
+   */
+  protected async rowOverlay(): Promise<FilterExpr | undefined> {
+    if (!this._hasRowOverlay) return undefined;
+    const overlay = await this.transformOne({} as FilterExpr);
+    return overlay && !isEmptyObject(overlay) ? overlay : undefined;
+  }
+
+  /**
    * Pick the first identification (PK or unique index) whose fields are all
    * present in the query. A unique index over a field {@link hasField} hides
    * is not a candidate (since 0.1.134) — `?hidden=x` answers exactly like
@@ -982,9 +1489,7 @@ export class AsDbReadableController<
    */
   @Get("query")
   async query(@Url() url: string): Promise<DataType[] | number | HttpError> {
-    const parsed = this.parseQueryString(url);
-    const controls = parsed.controls;
-    this._coerceActionsControl(controls as Record<string, unknown>);
+    const { parsed, controls } = await this.parseRequest("query", url);
 
     const groupBy = controls.$groupBy as string[] | undefined;
     if (groupBy?.length && (controls.$with as unknown[])?.length) {
@@ -1020,13 +1525,10 @@ export class AsDbReadableController<
 
     // ── Aggregate path ──────────────────────────────────────────────
     if (groupBy?.length) {
-      const filter = this.applySearchFallback(
-        await this.transformFilter(parsed.filter),
-        controls as Record<string, unknown>,
-      );
+      const filter = this.applySearchFallback(await this.transformFilter(parsed.filter), controls);
       return this.readable.aggregate({
         filter,
-        controls: this._aggregateControls(controls as Record<string, unknown>) as any,
+        controls: this._aggregateControls(controls) as any,
         insights: parsed.insights,
       }) as Promise<any>;
     }
@@ -1035,19 +1537,19 @@ export class AsDbReadableController<
 
     const [transformedFilter, transformedSelect] = await Promise.all([
       this.transformFilter(parsed.filter),
-      this.transformProjection(controls.$select),
+      this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
-    const filter = this.applySearchFallback(transformedFilter, controls as Record<string, unknown>);
-    const rawSelect = this._sealProjection(transformedSelect);
+    const filter = this.applySearchFallback(transformedFilter, controls);
+    const sealed = this._sealControls(controls, transformedSelect);
 
     if (controls.$count) {
       return this.readable.count({
         filter,
-        controls: { ...controls, $select: rawSelect },
+        controls: { ...controls, $select: sealed.$select },
       } as Uniquery<any, any>);
     }
 
-    const select = this.widenPreferredIdProjection(rawSelect);
+    const select = this.widenPreferredIdProjection(sealed.$select);
     if (select instanceof HttpError) {
       return select;
     }
@@ -1057,9 +1559,9 @@ export class AsDbReadableController<
     const queryObj = {
       filter,
       controls: {
-        ...controls,
+        ...sealed,
         $select: select,
-        $limit: controls.$limit || 1000,
+        $limit: (controls.$limit as number | undefined) || 1000,
         $threshold: threshold,
       },
     } as Uniquery<any, any>;
@@ -1067,7 +1569,7 @@ export class AsDbReadableController<
     const wrapped = await this._runReadWithActions(
       "query",
       queryObj,
-      controls as Record<string, unknown>,
+      controls,
       select,
       async (q, strategy): Promise<{ data: DataType[] }> => {
         switch (strategy.kind) {
@@ -1103,16 +1605,12 @@ export class AsDbReadableController<
       }
     | HttpError
   > {
-    const parsed = this.parseQueryString(url);
-
-    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
+    const { parsed, controls } = await this.parseRequest("pages", url);
 
     const error = this.validateParsed(parsed, "pages");
     if (error) {
       return error;
     }
-
-    const controls = parsed.controls as Record<string, unknown>;
 
     const gateError = this.checkCapabilities(parsed);
     if (gateError) {
@@ -1127,8 +1625,8 @@ export class AsDbReadableController<
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
     const filter = this.applySearchFallback(transformedFilter, controls);
-    const rawSelect = this._sealProjection(transformedSelect);
-    const select = this.widenPreferredIdProjection(rawSelect);
+    const sealed = this._sealControls(controls, transformedSelect);
+    const select = this.widenPreferredIdProjection(sealed.$select);
     if (select instanceof HttpError) {
       return select;
     }
@@ -1138,7 +1636,7 @@ export class AsDbReadableController<
     const query = {
       filter,
       controls: {
-        ...controls,
+        ...sealed,
         $select: select,
         $skip: skip,
         $limit: size,
@@ -1190,7 +1688,9 @@ export class AsDbReadableController<
    * (meters), `$index` (geo index name), plus the standard filter / `$select` /
    * `$with` / pagination syntax. Each row carries a computed `$distance`
    * (meters). With `$page` / `$size` the response is the `/pages` envelope;
-   * otherwise a plain row array (`$skip` / `$limit` compose).
+   * otherwise a plain row array (`$skip` / `$limit` compose). Since 0.1.143
+   * the controls pass {@link validateParsed} (type `"geo"`) like `/query`'s,
+   * and the geo index must read only fields {@link hasField} shows.
    */
   @Get("geo")
   async geo(
@@ -1200,9 +1700,7 @@ export class AsDbReadableController<
     | { data: DataType[]; page: number; itemsPerPage: number; pages: number; count: number }
     | HttpError
   > {
-    const parsed = this.parseQueryString(url);
-    const controls = parsed.controls as Record<string, unknown>;
-    this._coerceActionsControl(controls);
+    const { parsed, controls } = await this.parseRequest("geo", url);
 
     const point = this._parseGeoCenter(controls.$center);
     if (point instanceof HttpError) {
@@ -1219,16 +1717,11 @@ export class AsDbReadableController<
     }
     const indexName = typeof controls.$index === "string" ? controls.$index : undefined;
 
-    if (parsed.insights) {
-      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
-      if (insightsError) {
-        return new HttpError(400, insightsError);
-      }
-    }
-    // The one endpoint that skips `validateParsed` — normalize `$select` here.
-    const computedError = this.checkComputedSelect(controls);
-    if (computedError) {
-      return computedError;
+    // Same pipeline as `/query` (since 0.1.143 — `/geo` used to skip the
+    // controls DTO / `validateControls` and the `$with` relation check).
+    const error = this.validateParsed(parsed, "geo");
+    if (error) {
+      return error;
     }
     const gateError = this.checkCapabilities(parsed);
     if (gateError) {
@@ -1239,7 +1732,8 @@ export class AsDbReadableController<
       this.transformFilter(parsed.filter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
-    const select = this.widenPreferredIdProjection(this._sealProjection(transformedSelect));
+    const sealed = this._sealControls(controls, transformedSelect);
+    const select = this.widenPreferredIdProjection(sealed.$select);
     if (select instanceof HttpError) {
       return select;
     }
@@ -1251,13 +1745,13 @@ export class AsDbReadableController<
     const queryObj = {
       filter,
       controls: {
-        ...controls,
+        ...sealed,
         $center: undefined,
         $index: undefined,
         $select: select,
         ...(paginated
           ? { $skip: (page - 1) * size, $limit: size }
-          : { $limit: controls.$limit || 1000 }),
+          : { $limit: (controls.$limit as number | undefined) || 1000 }),
       },
     } as Uniquery<any, any>;
 
@@ -1325,27 +1819,11 @@ export class AsDbReadableController<
    */
   @Get("one/:id")
   async getOne(@Param("id") id: string, @Url() url: string): Promise<DataType | HttpError> {
-    const { parsed, hasNonControl } = this.parseControlsOnlyFromUrl(url);
+    const { parsed, controls, hasNonControl } = await this.parseRequest("one", url);
     if (hasNonControl) {
       return new HttpError(400, 'Filtering is not allowed for "one" endpoint');
     }
-    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
-
-    const error = this.validateParsed(parsed, "getOne");
-    if (error) {
-      return error;
-    }
-    const gateError = this.checkCapabilities(parsed);
-    if (gateError) {
-      return gateError;
-    }
-
-    const rawSelect = await this.transformProjection(parsed.controls.$select);
-    const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
-    if (select instanceof HttpError) {
-      return select;
-    }
-    return this._findByIdAndAugment(id, parsed.controls, select);
+    return this._readOne(id, parsed, controls);
   }
 
   /**
@@ -1358,57 +1836,50 @@ export class AsDbReadableController<
     @Query() query: Record<string, string>,
     @Url() url: string,
   ): Promise<DataType | HttpError> {
+    const { parsed, controls } = await this.parseRequest("one", url);
+    // After `prepareRequest`: the identifications consult `hasField`.
     const idObj = this.extractIdShape(query);
     if (idObj instanceof HttpError) {
       return idObj;
     }
+    return this._readOne(idObj, parsed, controls);
+  }
 
-    const { parsed } = this.parseControlsOnlyFromUrl(url);
-    this._coerceActionsControl(parsed.controls as Record<string, unknown>);
-    // Same validation + capability gate as `/one/:id` (since 0.1.128) — an
-    // unknown `$select` path used to reach the driver here.
-    const error = this.validateParsed(parsed, "getOne");
+  /**
+   * The shared `/one` pipeline: validation + capability gate (since 0.1.128
+   * on the composite form too — an unknown `$select` path used to reach the
+   * driver there), the sealed projection, the row read and its augmentation.
+   */
+  private async _readOne(
+    id: string | Record<string, unknown>,
+    parsed: Uniquery,
+    controls: Record<string, unknown>,
+  ): Promise<DataType | HttpError> {
+    const error = this.validateParsed(parsed, "getOne") ?? this.checkCapabilities(parsed);
     if (error) {
       return error;
     }
-    const gateError = this.checkCapabilities(parsed);
-    if (gateError) {
-      return gateError;
-    }
-    const rawSelect = await this.transformProjection(parsed.controls.$select);
-    const select = this.widenPreferredIdProjection(this._sealProjection(rawSelect));
+    const sealed = this._sealControls(
+      controls,
+      await this.transformProjection(controls.$select as UniqueryControls["$select"]),
+    );
+    const select = this.widenPreferredIdProjection(sealed.$select);
     if (select instanceof HttpError) {
       return select;
     }
-    return this._findByIdAndAugment(idObj, parsed.controls, select);
-  }
 
-  private async _findByIdAndAugment(
-    id: string | Record<string, unknown>,
-    parsedControls: UniqueryControls,
-    select: UniqueryControls["$select"] | undefined,
-  ): Promise<DataType | HttpError> {
-    const prep = await this._prepareAugmentation(parsedControls as Record<string, unknown>, select);
-    const initialSelect = prep?.widenedSelect ?? select;
-    const controls = { ...parsedControls, $select: initialSelect };
+    const [prep, overlay] = await Promise.all([
+      this._prepareAugmentation(controls, select),
+      this.rowOverlay(),
+    ]);
+    const readControls = { ...sealed, $select: prep?.widenedSelect ?? select };
 
-    // A hidden unique key is not an identification (since 0.1.134): the id
-    // resolves as if that index did not exist.
-    const idFilter = this.readable.resolveIdFilter(id, this._idOpts);
-    let row: DataType | null = null;
-    if (idFilter) {
-      const overlay = await this.transformOne({} as FilterExpr);
-      const hasOverlay = overlay && Object.keys(overlay).length > 0;
-      const filter = hasOverlay ? ({ $and: [idFilter, overlay] } as FilterExpr) : idFilter;
-      row = (await this.readable.findOne({ filter, controls } as any)) as DataType | null;
-    }
-
-    const item = await this.returnOne(Promise.resolve(row));
+    const item = await this.returnOne(this._findRow(id, overlay, readControls));
     if (item instanceof HttpError) return item;
     const pending = this._finishRows([item as unknown as Record<string, unknown>], prep, {
       endpoint: "one",
       projection: select,
-      controls: parsedControls as Record<string, unknown>,
+      controls,
     });
     if (pending) await pending;
     return item;
@@ -1485,7 +1956,9 @@ export class AsDbReadableController<
       searchable: this.readable.isSearchable() || this._searchFallbackFields.length > 0,
       vectorSearchable: this.readable.isVectorSearchable(),
       geoSearchable: this._isGeoSearchable(),
-      searchIndexes: this.readable.getSearchIndexes(),
+      // `fields` is server-side gating data (index gate, permission overlays) —
+      // never on the wire, where it would name columns the caller cannot see.
+      searchIndexes: this.readable.getSearchIndexes().map(({ fields: _fields, ...index }) => index),
       primaryKeys: [...this.readable.primaryKeys],
       preferredId: [...this.readable.preferredId],
       relations,

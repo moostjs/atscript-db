@@ -30,8 +30,8 @@ import { AsValueHelpController, type ValueHelpQuery } from "./as-value-help.cont
  *   ties). Direction via `-` prefix on the field name or `{ [field]: 'asc' |
  *   'desc' | 1 | -1 }`.
  * - Search is case-insensitive substring matching across every field listed in
- *   {@link searchableFields}. This is value-help's own concern — the shared
- *   engine has no `$search`.
+ *   {@link searchableFields} that {@link hasField} keeps visible. This is
+ *   value-help's own concern — the shared engine has no `$search`.
  * - Projection (`$select`) supports inclusion (`[fields]` / `{ f: 1 }`) and
  *   exclusion (`{ f: 0 }`) with dot-path nesting; the primary key is NOT auto-
  *   added (a value-help projection returns exactly the selected fields).
@@ -87,11 +87,12 @@ export class AsJsonValueHelpController<
     }
 
     // 2. $search — value-help's own case-insensitive substring match across the
-    //    searchable fields (the shared engine has no `$search`).
+    //    searchable fields (the shared engine has no `$search`). A field
+    //    `hasField` hides never matches, so search can't probe its values.
     const search = controls.controls.$search as string | undefined;
     if (search) {
       const needle = search.toLowerCase();
-      const fields = this.searchableFields;
+      const fields = this.searchableFields.filter((field) => this.hasField(field));
       rows = rows.filter((row) => {
         for (const field of fields) {
           const v = (row as Record<string, unknown>)[field];
@@ -171,30 +172,5 @@ export class AsJsonValueHelpController<
       }
     }
     return Object.keys(out).length > 0 ? out : undefined;
-  }
-
-  /**
-   * Normalizes the raw `parseUrl` `$select` form to the engine's `{ path: 0 |
-   * 1 }` projection map:
-   * - `string[]` (e.g. from `?$select=a,b`) → inclusion map `{ a: 1, b: 1 }`,
-   * - a plain `{ path: 0 | 1 }` object → passed through (0 / falsy → exclude),
-   * - anything else / empty → `undefined` (no projection; whole rows returned).
-   */
-  private normalizeSelect(select: unknown): Record<string, 0 | 1> | undefined {
-    if (Array.isArray(select)) {
-      const out: Record<string, 0 | 1> = {};
-      for (const field of select) {
-        if (typeof field === "string" && field) out[field] = 1;
-      }
-      return Object.keys(out).length > 0 ? out : undefined;
-    }
-    if (select && typeof select === "object") {
-      const out: Record<string, 0 | 1> = {};
-      for (const [path, v] of Object.entries(select as Record<string, unknown>)) {
-        out[path] = v === 0 || v === false ? 0 : 1;
-      }
-      return Object.keys(out).length > 0 ? out : undefined;
-    }
-    return undefined;
   }
 }

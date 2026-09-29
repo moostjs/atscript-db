@@ -61,13 +61,24 @@ export function validateSingleId(
   return body as Record<string, unknown>;
 }
 
+/** `maxIds`: an array longer than it is rejected (400) before any per-id work. */
 export function validateMultiId(
   body: unknown,
   source: IdValidationSource,
+  maxIds = Infinity,
 ): Record<string, unknown>[] {
   if (!Array.isArray(body)) {
     throw new ValidatorError([
       { path: "", message: "Expected JSON array of identifier objects", details: [] },
+    ]);
+  }
+  if (body.length > maxIds) {
+    throw new ValidatorError([
+      {
+        path: "",
+        message: `Too many identifiers: ${body.length} (at most ${maxIds} per request)`,
+        details: [],
+      },
     ]);
   }
 
@@ -121,6 +132,11 @@ function checkScalar(
   path: string,
 ): IdError | undefined {
   const expected = fd?.designType ?? "string";
+  // An identifier value is always a scalar: an object would reach the filter
+  // as an operator expression (`{ $ne: null }`) whatever the field's type.
+  if (typeof value === "object" && value !== null) {
+    return scalarMismatch(path, "a scalar", value);
+  }
   if (expected === "string" && typeof value !== "string") {
     return scalarMismatch(path, expected, value);
   }

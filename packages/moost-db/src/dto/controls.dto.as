@@ -35,6 +35,25 @@ export interface GetOneControlsDto {
     $actions?: boolean
 }
 
+// `/geo` (since 0.1.143 — validated like `/query`). `$center` / `$maxDistance` /
+// `$minDistance` are parsed by the handler first (distances arrive as numbers).
+// Property order is the `crud.geo` control list order.
+export interface GeoControlsDto {
+    $center?: string | string[] | number[]
+    $maxDistance?: number
+    $minDistance?: number
+    $index?: string
+    $select?: SelectControlDto | string[]
+    $skip?: number.int.positive
+    $limit?: number.int.positive
+    @expect.pattern "^\d+$", "u", "Expected positive number"
+    $page?: string
+    @expect.pattern "^\d+$", "u", "Expected positive number"
+    $size?: string
+    $with?: WithRelationDto[]
+    $actions?: boolean
+}
+
 interface WithRelationDto {
     name: string
     filter?: WithFilterDto

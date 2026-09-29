@@ -1,16 +1,19 @@
 import { describe, it, expect, vi } from "vite-plus/test";
+import { Inherit } from "moost";
 
 import { AsJsonValueHelpController } from "../as-json-value-help.controller";
 import { AsValueHelpController } from "../as-value-help.controller";
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionID } from "../actions/db-action-id.decorator";
-import { DbTableActions } from "../actions/db-actions.decorator";
+import { DbRowActions, DbTableActions } from "../actions/db-actions.decorator";
 import { makeTable } from "./actions-test-utils";
 
 /**
- * Value-help controllers do NOT participate in action discovery. Even when
- * the developer applies `@DbTableActions(...)` to a value-help class, the
- * `/meta` envelope MUST emit `actions: []` and no warnings.
+ * Value-help controllers do NOT support actions (since 0.1.143 a hard
+ * error): `@DbAction` / `@DbActions*` on a value-help class throws at
+ * decoration, and an action inherited from a non-value-help base throws at
+ * construction — before, the action was dropped from `/meta` while its
+ * `@Post` route still ran with no gate.
  */
 
 type Status = { id: string; label: string };
@@ -41,32 +44,25 @@ function makeApp() {
   };
 }
 
-describe("AsJsonValueHelpController + @DbTableActions", () => {
-  @DbTableActions({
-    refresh: { label: "Refresh", processor: "custom" },
-  })
-  class JsonHelp extends AsJsonValueHelpController<any, Status> {}
-
-  it("returns actions: [] and emits no [moost-db actions] warnings", async () => {
-    const ctx = makeApp();
-    const ctrl = new JsonHelp(makeValueHelpType(), [], ctx.app);
-    const meta = await ctrl.meta();
-    expect(meta.actions).toEqual([]);
-    const warned = ctx.logger.warn.mock.calls.some((args: unknown[]) =>
-      typeof args[0] === "string" ? args[0].includes("[moost-db actions]") : false,
-    );
-    expect(warned).toBe(false);
+describe("value-help controllers reject actions", () => {
+  it("@DbTableActions / @DbRowActions on a value-help class throw at decoration", () => {
+    expect(() => {
+      @DbTableActions({ refresh: { label: "Refresh", processor: "custom" } })
+      class JsonHelp extends AsJsonValueHelpController<any, Status> {}
+      return JsonHelp;
+    }).toThrow(/JsonHelp is a value-help controller .*"refresh"/);
+    expect(() => {
+      @DbRowActions({ open: { label: "Open", processor: "navigate", value: "/x/$1" } })
+      class RowHelp extends AsJsonValueHelpController<any, Status> {}
+      return RowHelp;
+    }).toThrow(/value-help controller/);
   });
 
-  it("@DbAction with disabled on a value-help class is silently ignored (no interceptor registers, no warning)", () => {
-    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
+  it("@DbAction on a value-help method throws at decoration (with or without a gate)", () => {
+    expect(() => {
       class MyValueHelp extends AsValueHelpController<any, Status> {
         @DbAction("foo", {
           label: "Foo",
-          // table satisfies the static check (clause 2) — without the
-          // value-help carve-out in db-action.decorator.ts, an interceptor
-          // would register at module load. The carve-out blocks it.
           table: makeTable() as never,
           disabled: () => [true],
         })
@@ -81,13 +77,40 @@ describe("AsJsonValueHelpController + @DbTableActions", () => {
           return null;
         }
       }
-      // Class definition completes without console.warn (decorator factory
-      // doesn't multi-stack-warn or fail).
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      // The class is constructible (the decorator body didn't blow up).
-      expect(MyValueHelp).toBeDefined();
-    } finally {
-      consoleWarnSpy.mockRestore();
+      return MyValueHelp;
+    }).toThrow(/MyValueHelp is a value-help controller .*"foo"/);
+    expect(() => {
+      class Plain extends AsJsonValueHelpController<any, Status> {
+        @DbAction("bar", { label: "Bar" })
+        bar() {
+          return "ok";
+        }
+      }
+      return Plain;
+    }).toThrow(/"bar"/);
+  });
+
+  it("an action inherited from a non-value-help base throws at construction", () => {
+    @Inherit()
+    class Mixin {
+      @DbAction("inherited", { label: "Inherited" })
+      inherited() {
+        return "ok";
+      }
     }
+    // A non-value-help mixin spliced between the value-help base and the class.
+    class Mixed extends AsJsonValueHelpController<any, Status> {}
+    Object.setPrototypeOf(Mixin.prototype, AsJsonValueHelpController.prototype);
+    Object.setPrototypeOf(Mixed.prototype, Mixin.prototype);
+    expect(() => new Mixed(makeValueHelpType(), [], makeApp().app)).toThrow(
+      /Mixed is a value-help controller .*"inherited"/,
+    );
+  });
+
+  it("a value-help controller without actions constructs and emits actions: []", async () => {
+    const ctx = makeApp();
+    class JsonHelp extends AsJsonValueHelpController<any, Status> {}
+    const ctrl = new JsonHelp(makeValueHelpType(), [], ctx.app);
+    expect((await ctrl.meta()).actions).toEqual([]);
   });
 });

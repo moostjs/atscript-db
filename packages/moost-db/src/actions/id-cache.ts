@@ -5,6 +5,7 @@ import { useControllerContext } from "moost";
 import { readCurrentActionMeta } from "./current-action";
 import { dbActionBodySlot } from "./input-form-cache";
 import { WARN_PREFIX } from "./keys";
+import { awaitActionPrepared } from "./prepare-request";
 import {
   isIdValidationSource,
   validateMultiId,
@@ -22,7 +23,7 @@ interface TActionController {
   idSource?: IdValidationSource;
 }
 
-function controllerOf(ctx: EventContext): TActionController | null | undefined {
+export function controllerOf(ctx: EventContext): TActionController | null | undefined {
   return useControllerContext(ctx).getController() as TActionController | null | undefined;
 }
 
@@ -63,12 +64,14 @@ export function noTableError(ctx: EventContext): HttpError {
  * the controller's own table that is its `idSource` (since 0.1.134): a unique
  * index over a field `hasField` hides neither addresses a row nor appears in
  * the "must exactly match one of" message. An `opts.table` binding has no
- * visibility hook.
+ * visibility hook. The controller's `prepareRequest` (since 0.1.143) runs
+ * first, so the visibility the ids are validated against is the request's.
  */
 async function resolveValidatedId(
   ctx: EventContext,
   validate: (body: unknown, src: IdValidationSource) => unknown,
 ): Promise<unknown> {
+  await awaitActionPrepared(ctx);
   const fromSlot = ctx.has(boundTableKey) ? ctx.get(boundTableKey) : undefined;
   let source = fromSlot;
   if (!source) {
@@ -87,8 +90,18 @@ export const dbActionIdSlot = cached<Promise<Record<string, unknown>>>(
   (ctx) => resolveValidatedId(ctx, validateSingleId) as Promise<Record<string, unknown>>,
 );
 
+/** Default cap on the identifiers one `'rows'`-level request may carry — see `DbActionOpts.maxIds`. */
+export const DEFAULT_MAX_ACTION_IDS = 1000;
+
+function maxIdsOf(ctx: EventContext): number {
+  const max = (readCurrentActionMeta(ctx)?.opts as { maxIds?: unknown } | undefined)?.maxIds;
+  return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_ACTION_IDS;
+}
+
 export const dbActionIdsSlot = cached<Promise<Record<string, unknown>[]>>(async (ctx) => {
-  const result = await resolveValidatedId(ctx, validateMultiId);
+  const result = await resolveValidatedId(ctx, (body, src) =>
+    validateMultiId(body, src, maxIdsOf(ctx)),
+  );
   return result as Record<string, unknown>[];
 });
 

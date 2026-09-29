@@ -117,7 +117,8 @@ describe("hasField hides a field from every gated position", () => {
     expect(errorsOf(hidden)).toEqual([{ path: "password", message: 'Unknown field "password"' }]);
     expect(errorsOf(missing)).toEqual([{ path: "nope", message: 'Unknown field "nope"' }]);
     await unknownField(controller.getOne("1", "?$select=password"), "password", "one/:id");
-    await unknownField(controller.geo("?$center=0,0&$sort=password" as any), "password", "geo");
+    // `/geo` validates its controls DTO since 0.1.143 (`$sort` is not a geo control).
+    await unknownField(controller.geo("?$center=0,0&$select=password"), "password", "geo");
   });
 
   it("a hidden relation in $with is an unknown relation, and is not listed", async () => {

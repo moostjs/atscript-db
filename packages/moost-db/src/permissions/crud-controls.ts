@@ -1,4 +1,9 @@
-import { GetOneControlsDto, PagesControlsDto, QueryControlsDto } from "../dto/controls.dto.as";
+import {
+  GeoControlsDto,
+  GetOneControlsDto,
+  PagesControlsDto,
+  QueryControlsDto,
+} from "../dto/controls.dto.as";
 
 /**
  * Static control whitelists per read op. Each list is the matching DTO's
@@ -22,21 +27,12 @@ export const PAGES_CONTROLS: readonly string[] = ["filter", ...dtoControls(Pages
 export const ONE_CONTROLS: readonly string[] = dtoControls(GetOneControlsDto);
 
 /**
- * Controls accepted by the `/geo` endpoint. No backing DTO — `$center` /
- * `$maxDistance` / `$minDistance` are parsed and validated by the handler.
+ * Controls accepted by the `/geo` endpoint — `GeoControlsDto` (since 0.1.143;
+ * `$center` / `$maxDistance` / `$minDistance` are parsed by the handler
+ * before the DTO check) plus the URL-grammar `filter` / `insights`.
  */
 export const GEO_CONTROLS: readonly string[] = [
   "filter",
   "insights",
-  "center",
-  "maxDistance",
-  "minDistance",
-  "index",
-  "select",
-  "skip",
-  "limit",
-  "page",
-  "size",
-  "with",
-  "actions",
+  ...dtoControls(GeoControlsDto),
 ];

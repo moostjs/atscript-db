@@ -1,15 +1,17 @@
 import type { TAtscriptAnnotatedType, TAtscriptDataType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbTable,
+  FilterExpr,
   TCrudPermissions,
   TDbRemoveGuardContext,
   TDbUpdateResult,
   TDbWriteAction,
+  TDbWriteCheckContext,
   TDbWriteGuardContext,
   TDeleteOptions,
   TWriteOptions,
 } from "@atscript/db";
-import { DbError, isPlainObject, reconcileCas } from "@atscript/db";
+import { DbError, isEmptyObject, isPlainObject, reconcileCas } from "@atscript/db";
 import { Body, Delete, HttpError, Patch, Post, Put, Query } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
@@ -54,15 +56,18 @@ function hasWriteShape(data: unknown, many: boolean): boolean {
  * ### Write pipeline (since 0.1.128)
  *
  * ```
- * shape gate (400) → onWrite / onRemove (outside any transaction)
+ * prepareRequest (when implemented) → shape gate (400)
+ *   → onWrite / onRemove (outside any transaction)
  *   → table op — the table's own transaction: validate → guardWrite / guardRemove
- *                (only when overridden) → re-validate → write
+ *                (only when overridden) → re-validate → write → nested phases
+ *                → checkWrite (only when overridden)
  *   → 404 / 409 disambiguation
  * ```
  *
  * The guard is the table's `guard` write option (`TWriteOptions.guard` /
  * `TDeleteOptions.guard`); overriding `guardWrite` / `guardRemove` is the
- * switch that passes it. Built-in failures are THROWN as `HttpError`
+ * switch that passes it. `checkWrite` is the `check` write option, with
+ * the same switch (since 0.1.143). Built-in failures are THROWN as `HttpError`
  * (wire-identical to returning them; a throw also rolls back a user-level
  * `withTransaction` wrapper).
  */
@@ -85,6 +90,9 @@ export class AsDbController<
     this._writeArgs = this._hookArgs<TWriteOptions<any>>(
       this.guardWrite !== proto.guardWrite
         ? (ctx: TDbWriteGuardContext<DataType>) => this.guardWrite(ctx)
+        : undefined,
+      this.checkWrite !== proto.checkWrite
+        ? (ctx: TDbWriteCheckContext) => this.checkWrite(ctx)
         : undefined,
     );
     this._removeArgs = this._hookArgs<TDeleteOptions<any>>(
@@ -159,6 +167,31 @@ export class AsDbController<
    */
   protected guardRemove(_ctx: TDbRemoveGuardContext<DataType>): void | Promise<void> {}
 
+  /**
+   * Post-write check (since 0.1.143) — a row-level "WITH CHECK". Overriding it
+   * is the switch (as with {@link guardWrite}): the override is passed to the
+   * table as its `check` write option and runs once per insert / replace /
+   * update call (bulk forms included), inside the table's transaction, AFTER
+   * the main write and every nested-relation phase. `ctx.filters` holds one
+   * exact primary-key filter per written row; `ctx.count(filter)` counts
+   * inside the same transaction — e.g. verify every written row still matches
+   * a policy filter:
+   *
+   * ```ts
+   * protected async checkWrite(ctx: TDbWriteCheckContext) {
+   *   const n = await ctx.count({ $and: [{ $or: ctx.filters }, tenantFilter()] })
+   *   if (n !== ctx.filters.length) throw new HttpError(403)
+   * }
+   * ```
+   *
+   * Throw to reject: the transaction rolls back and the error propagates
+   * unchanged. When `ctx.transactional` is `false` (the adapter's
+   * transaction is a pass-through, e.g. a standalone MongoDB) the write is
+   * already durable — validate before the write instead (`guardWrite`).
+   * Removes have no post-image and never call it.
+   */
+  protected checkWrite(_ctx: TDbWriteCheckContext): void | Promise<void> {}
+
   // ── Transactions ───────────────────────────────────────────────────────
 
   /**
@@ -182,17 +215,20 @@ export class AsDbController<
   private readonly _removeArgs: [] | [TDeleteOptions<any>];
 
   /**
-   * A table call's trailing options, built once: `guard` only when the guard
-   * hook is overridden, `isFieldVisible` only when `hasField` is (an id or a
-   * PK-less payload never resolves through a hidden unique key) — else
-   * nothing, so an unmodified controller calls the table exactly as before.
+   * A table call's trailing options, built once: `guard` / `check` only when
+   * the matching hook is overridden, `isFieldVisible` only when `hasField`
+   * is (an id or a PK-less payload never resolves through a hidden unique
+   * key) — else nothing, so an unmodified controller calls the table exactly
+   * as before.
    */
   private _hookArgs<O extends TWriteOptions<any> | TDeleteOptions<any>>(
     guard: O["guard"] | undefined,
+    check?: TWriteOptions<any>["check"],
   ): [] | [O] {
     const opts = { ...this._idOpts } as O;
     if (guard) opts.guard = guard;
-    return Object.keys(opts).length > 0 ? [opts] : [];
+    if (check) (opts as TWriteOptions<any>).check = check;
+    return isEmptyObject(opts as Record<string, unknown>) ? [] : [opts];
   }
 
   /** Resolves a hook result: `undefined` aborts with `abortMessage`, an `Error` is thrown, anything else passes. */
@@ -267,9 +303,19 @@ export class AsDbController<
     }
   }
 
-  /** Deletes by id (guard forwarded when overridden) and maps "nothing deleted" to 404. */
+  /**
+   * Deletes by id (guard forwarded when overridden) and maps "nothing
+   * deleted" to 404. Since 0.1.143 the row overlay ({@link rowOverlay}) is
+   * the delete's `scope`: the id is pinned among in-scope rows inside the
+   * table's transaction and an out-of-scope row is not deleted — a 404,
+   * exactly like a missing one.
+   */
   private async _deleteOrThrow(id: unknown): Promise<unknown> {
-    const result = await this.table.deleteOne(id as never, ...this._removeArgs);
+    const scope = await this.rowOverlay();
+    const args: [] | [TDeleteOptions<any>] = scope
+      ? [{ ...this._removeArgs[0], scope }]
+      : this._removeArgs;
+    const result = await this.table.deleteOne(id as never, ...args);
     if (result.deletedCount < 1) {
       throw new HttpError(404);
     }
@@ -283,6 +329,7 @@ export class AsDbController<
    */
   @Post("")
   async insert(@Body() payload: unknown): Promise<unknown> {
+    await this.parseRequest("insert");
     assertWriteShape(payload);
     if (Array.isArray(payload)) {
       const rows = await this._writeBody("insertMany", payload, true);
@@ -303,6 +350,7 @@ export class AsDbController<
    */
   @Put("")
   async replace(@Body() payload: unknown): Promise<unknown> {
+    await this.parseRequest("replace");
     assertWriteShape(payload);
     const versionColumn = this.table.versionColumn;
 
@@ -335,6 +383,7 @@ export class AsDbController<
    */
   @Patch("")
   async update(@Body() payload: unknown): Promise<unknown> {
+    await this.parseRequest("update");
     assertWriteShape(payload);
     const versionColumn = this.table.versionColumn;
 
@@ -363,14 +412,28 @@ export class AsDbController<
    * returns 404 when the row is genuinely missing, 409 with
    * `{ error: "version_mismatch", currentVersion: N }` when it's present
    * but the supplied version is stale (§6.3). Callers throw the result.
+   *
+   * The row is the one the write targeted (since 0.1.143): the table's
+   * `recordFilter` — the write's own resolution, primary key first — so a
+   * payload carrying the full primary key addresses that row only, never a
+   * different row that merely shares a unique value with the payload.
+   * Tables without it (partial mocks) resolve through {@link resolveRowFilter}.
    */
   protected async _disambiguateMismatch(data: unknown, versionColumn: string): Promise<HttpError> {
-    const filter = this.table.resolveIdFilter(data, this._idOpts);
+    const table = this.table;
+    let filter: FilterExpr | null;
+    if (typeof (table as Partial<typeof table>).recordFilter === "function") {
+      try {
+        filter = table.recordFilter(data as Record<string, unknown>, this._idOpts);
+      } catch (error) {
+        if (!(error instanceof DbError)) throw error;
+        filter = null; // no identifying fields → nothing to report but a 404
+      }
+    } else {
+      filter = await this.resolveRowFilter(data);
+    }
     const row = filter
-      ? ((await this.table.findOne({ filter, controls: {} } as any)) as Record<
-          string,
-          unknown
-        > | null)
+      ? ((await table.findOne({ filter, controls: {} } as any)) as Record<string, unknown> | null)
       : null;
     if (row === null) {
       return new HttpError(404);
@@ -397,6 +460,7 @@ export class AsDbController<
    */
   @Delete(":id")
   async remove(@Param("id") id: string): Promise<unknown> {
+    await this.parseRequest("remove");
     const resolvedId = await this._checkHook(this.onRemove(id), "Not deleted");
     return this._deleteOrThrow(resolvedId);
   }
@@ -407,6 +471,7 @@ export class AsDbController<
    */
   @Delete("")
   async removeComposite(@Query() query: Record<string, string>): Promise<unknown> {
+    await this.parseRequest("remove");
     const idObj = this.extractIdShape(query);
     if (idObj instanceof HttpError) {
       throw idObj;

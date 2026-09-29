@@ -1,4 +1,5 @@
 import { getAtscriptDbMate } from "../mate";
+import { isAsValueHelpControllerSubclass, valueHelpActionError } from "./controller-registry";
 import type { TDbClassActionMeta } from "./keys";
 import type { TDbActionsEntry, ValidatedDict, ValidatedUnpinnedDict } from "./types";
 import type { TDbActionLevel } from "@atscript/db";
@@ -15,7 +16,7 @@ import type { TDbActionLevel } from "@atscript/db";
  * `disabled` predicate is type-narrowed by its own `requiredFields` literal.
  *
  * Multiple `@DbActions` (and shortcut) decorators on the same class
- * accumulate.
+ * accumulate. Throws on a value-help controller (since 0.1.143).
  */
 export function DbActions<TRow = unknown, const D extends Record<string, unknown> = {}>(
   dict: D & ValidatedDict<TRow, D>,
@@ -53,8 +54,17 @@ function classLevelActions(
     const merged = (forcedLevel ? { ...entry, level: forcedLevel } : entry) as TDbActionsEntry;
     entries.push({ name, entry: merged });
   }
-  return getAtscriptDbMate().decorate((current) => ({
+  const decorate = getAtscriptDbMate().decorate((current) => ({
     ...current,
     atscript_db_actions: [...(current.atscript_db_actions ?? []), ...entries],
   })) as ClassDecorator;
+  return (target) => {
+    if (isAsValueHelpControllerSubclass(target)) {
+      throw valueHelpActionError(
+        target.name,
+        entries.map((e) => e.name),
+      );
+    }
+    return decorate(target);
+  };
 }

@@ -32,3 +32,20 @@ export function errorEnvelope(
 export function badRequest(path: string, message: string, top: string = message): HttpError {
   return errorEnvelope(400, top, [{ path, message }]);
 }
+
+/**
+ * The 400 of a `$with` relation the request cannot reach — nonexistent, or
+ * hidden by `hasField` (the two answer alike): `Unknown relation "<name>"`,
+ * the envelope message listing `visible` (the relations the caller CAN
+ * load at that level). The single source of this wording — a permission
+ * layer that rejects a relation itself should throw this.
+ *
+ * @since 0.1.143
+ */
+export function unknownRelationError(name: string, visible: readonly string[]): HttpError {
+  return badRequest(
+    "$with",
+    `Unknown relation "${name}"`,
+    `Unknown relation "${name}" in $with. Available relations: ${visible.join(", ") || "(none)"}`,
+  );
+}

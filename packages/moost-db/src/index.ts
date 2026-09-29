@@ -17,6 +17,7 @@ export {
 } from "./mate";
 
 export { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "./permissions/crud-controls";
+export { DB_CRUD_HANDLERS, VALUE_HELP_CRUD_HANDLERS } from "./permissions/crud-handlers";
 
 // Re-export the action + permission types from @atscript/db so consumers can
 // import them from `@atscript/moost-db` in a single line.
@@ -42,9 +43,15 @@ export type { TTerminalRef } from "./meta/terminal-ref";
 // walker for the HTTP gate and the core backstop) — re-exported for convenience.
 export { collectQueryPaths } from "@atscript/db";
 export type { TQueryPathOp, TQueryPathRefs } from "@atscript/db";
-export { badRequest, errorEnvelope } from "./http-errors";
+export { badRequest, errorEnvelope, unknownRelationError } from "./http-errors";
 export type { THttpErrorEntry } from "./http-errors";
 
 // Validated-stage guard contexts for `AsDbController.guardWrite` / `guardRemove`
-// (since 0.1.128) — re-exported so controllers need a single import.
-export type { TDbWriteAction, TDbWriteGuardContext, TDbRemoveGuardContext } from "@atscript/db";
+// (since 0.1.128) and the post-write `checkWrite` context (since 0.1.143) —
+// re-exported so controllers need a single import.
+export type {
+  TDbWriteAction,
+  TDbWriteGuardContext,
+  TDbRemoveGuardContext,
+  TDbWriteCheckContext,
+} from "@atscript/db";

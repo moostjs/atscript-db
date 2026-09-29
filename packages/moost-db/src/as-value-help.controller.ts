@@ -4,12 +4,25 @@ import type {
   TAtscriptTypeObject,
 } from "@atscript/typescript/utils";
 import type { FilterExpr, TCrudPermissions, TMetaResponse } from "@atscript/db";
+import { isEmptyObject } from "@atscript/db";
+import { buildMemoryPredicate, projectRow } from "@atscript/db-memory";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Moost, Param } from "moost";
 
-import { registerAsValueHelpController } from "./actions/controller-registry";
+import {
+  assertNoValueHelpActions,
+  registerAsValueHelpController,
+} from "./actions/controller-registry";
 import { AsReadableController } from "./as-readable.controller";
 import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
+
+/**
+ * A value-help projection: the parsed `$select` (inclusion list, or a
+ * `{ path: 0 | 1 }` map for the `-field` exclusion form).
+ *
+ * @since 0.1.143
+ */
+export type ValueHelpSelect<T> = (keyof T | string)[] | Record<string, 0 | 1>;
 
 /**
  * Parsed Uniquery controls with the `$search` field carved out for value-help
@@ -44,11 +57,19 @@ export interface ValueHelpQuery<T> {
  * one of their own (see {@link AsDbReadableController} for the
  * `@db.column.filterable` / `@db.column.sortable` pattern).
  *
- * **Actions are intentionally NOT supported on value-help controllers.** The
- * `/meta` payload still includes `actions: []` for shape uniformity, and any
- * `@DbAction*` / `@DbActions*` decorators applied here are silently ignored.
- * Value-help is for FK pickers and dictionary surfaces — adding row/table
- * actions there would muddy the contract.
+ * **Per-request scoping** (since 0.1.143) — the same three seams as the DB
+ * controllers, applied by the base routes to every value-help source:
+ * {@link transformFilter} (row overlay: `/query` / `/pages` filter, `/one`
+ * rows), {@link transformProjection} (returned columns) and {@link hasField}
+ * (a hidden field answers like an unknown one in filter / sort / select and
+ * never matches `$search`).
+ *
+ * **Actions are NOT supported on value-help controllers.** The `/meta`
+ * payload still includes `actions: []` for shape uniformity; since 0.1.143
+ * any `@DbAction` / `@DbActions*` on a value-help controller is a hard error
+ * (at decoration, or at construction for actions inherited from a base) —
+ * previously it was dropped from `/meta` while its `@Post` route still ran
+ * without any gate. Value-help is for FK pickers and dictionary surfaces.
  */
 @Inherit()
 export abstract class AsValueHelpController<
@@ -72,6 +93,7 @@ export abstract class AsValueHelpController<
 
   constructor(boundType: T, controllerName: string, app: Moost) {
     super(boundType, controllerName, app, "value-help");
+    assertNoValueHelpActions(this.constructor);
 
     const fieldMeta = new Map<string, Map<string, unknown>>();
     const explicitlySearchable: string[] = [];
@@ -107,11 +129,114 @@ export abstract class AsValueHelpController<
     count: number;
   }>;
 
-  /** Returns the row whose primary key matches `id`, or `null` on miss. */
+  /**
+   * Returns the row whose primary key matches `id`, or `null` on miss. The
+   * `/one` routes then apply {@link transformFilter} (a row outside the
+   * overlay is a 404) and {@link transformProjection} to it in memory.
+   */
   protected abstract getOne(id: string | number): Promise<DataType | null>;
 
+  // ── Hooks (overridable) ────────────────────────────────────────────────
+
+  /**
+   * THE field-visibility hook: `true` when `path` is a field of the bound
+   * interface visible to this request. A path it rejects in the request's
+   * filter / `$sort` / `$select` gets the same `Unknown field "x"` 400 as a
+   * nonexistent one, and a hidden field never takes part in `$search`
+   * (`AsJsonValueHelpController`). Override to hide fields per request — it
+   * gates the request only; strip the column from responses with
+   * {@link transformProjection}.
+   */
   protected hasField(path: string): boolean {
     return this.fieldMeta.has(path);
+  }
+
+  /**
+   * Row overlay — the value-help counterpart of the DB controllers'
+   * `transformFilter`. Receives the request filter of `/query` / `/pages`
+   * and returns the one to run (AND your scope in: `{ $and: [filter, scope] }`).
+   * `/one` evaluates `transformFilter({})` against the found row in memory: a
+   * row outside it answers 404, exactly like a missing one. Default: identity.
+   * May be async.
+   *
+   * @since 0.1.143
+   */
+  protected transformFilter(filter: FilterExpr): FilterExpr | Promise<FilterExpr> {
+    return filter;
+  }
+
+  /**
+   * Projection hook — receives the request `$select` (`undefined` when
+   * absent; `/one` always passes `undefined`) and returns the projection to
+   * apply: an inclusion list / `{ path: 1 }` map, or an exclusion
+   * `{ path: 0 }` map. Default: identity. May be async.
+   *
+   * @since 0.1.143
+   */
+  protected transformProjection(
+    select: ValueHelpSelect<DataType> | undefined,
+  ): ValueHelpSelect<DataType> | undefined | Promise<ValueHelpSelect<DataType> | undefined> {
+    return select;
+  }
+
+  /**
+   * Normalizes a value-help `$select` (the raw `parseUrl` form or a
+   * {@link transformProjection} result) to the `@atscript/db-memory`
+   * `{ path: 0 | 1 }` projection map:
+   * - `string[]` (e.g. from `?$select=a,b`) → inclusion map `{ a: 1, b: 1 }`,
+   * - a plain `{ path: 0 | 1 }` object → passed through (0 / falsy → exclude),
+   * - anything else / empty → `undefined` (no projection; whole rows returned).
+   */
+  protected normalizeSelect(select: unknown): Record<string, 0 | 1> | undefined {
+    const out: Record<string, 0 | 1> = {};
+    if (Array.isArray(select)) {
+      for (const field of select) {
+        if (typeof field === "string" && field) out[field] = 1;
+      }
+    } else if (select && typeof select === "object") {
+      for (const [path, v] of Object.entries(select as Record<string, unknown>)) {
+        out[path] = v === 0 || v === false ? 0 : 1;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  /** `filter` through {@link transformFilter} and `controls.$select` through {@link transformProjection}. */
+  private async _scopedQuery(
+    filter: FilterExpr,
+    controls: ValueHelpQuery<DataType>["controls"],
+  ): Promise<ValueHelpQuery<DataType>> {
+    const [scopedFilter, select] = await Promise.all([
+      this.transformFilter(filter),
+      this.transformProjection(controls.$select),
+    ]);
+    const out = { ...controls };
+    if (select === undefined) delete out.$select;
+    else out.$select = select as ValueHelpQuery<DataType>["controls"]["$select"];
+    return { filter: scopedFilter, controls: out };
+  }
+
+  /**
+   * `getOne` + the row overlay (miss → 404) + the projection, applied in
+   * memory — `getOne` is the subclass's own lookup (id coercion included),
+   * so it is not re-expressed as a {@link query} filter.
+   */
+  private async _scopedOne(id: string | number): Promise<DataType | HttpError> {
+    const [item, overlay, select] = await Promise.all([
+      this.returnOne(this.getOne(id)),
+      this.transformFilter({} as FilterExpr),
+      this.transformProjection(undefined),
+    ]);
+    if (item instanceof HttpError) return item;
+    if (overlay && !isEmptyObject(overlay)) {
+      if (!buildMemoryPredicate(overlay)(item as Record<string, unknown>)) {
+        return new HttpError(404);
+      }
+    }
+    const projection = this.normalizeSelect(select);
+    return projection
+      ? (projectRow(item as Record<string, unknown>, projection, { clone: false }) as DataType)
+      : item;
   }
 
   // ── Routes ─────────────────────────────────────────────────────────────
@@ -121,15 +246,14 @@ export abstract class AsValueHelpController<
    */
   @Get("query")
   async runQuery(@Url() url: string): Promise<DataType[] | HttpError> {
-    const parsed = this.parseQueryString(url);
+    const { parsed, controls } = await this.parseRequest("query", url);
     const validateError = this.validateParsed(parsed, "query");
     if (validateError) {
       return validateError;
     }
-    const result = await this.query({
-      filter: parsed.filter,
-      controls: parsed.controls as ValueHelpQuery<DataType>["controls"],
-    });
+    const result = await this.query(
+      await this._scopedQuery(parsed.filter, controls as ValueHelpQuery<DataType>["controls"]),
+    );
     return result.data;
   }
 
@@ -147,19 +271,21 @@ export abstract class AsValueHelpController<
       }
     | HttpError
   > {
-    const parsed = this.parseQueryString(url);
+    const { parsed, controls } = await this.parseRequest("pages", url);
     const validateError = this.validateParsed(parsed, "pages");
     if (validateError) {
       return validateError;
     }
-    const controls = parsed.controls as Record<string, unknown>;
     const page = Math.max(Number(controls.$page || 1), 1);
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
-    const result = await this.query({
-      filter: parsed.filter,
-      controls: { ...controls, $skip: skip, $limit: size } as ValueHelpQuery<DataType>["controls"],
-    });
+    const result = await this.query(
+      await this._scopedQuery(parsed.filter, {
+        ...controls,
+        $skip: skip,
+        $limit: size,
+      } as ValueHelpQuery<DataType>["controls"]),
+    );
     return {
       data: result.data,
       page,
@@ -174,7 +300,9 @@ export abstract class AsValueHelpController<
    */
   @Get("one/:id")
   async runGetOne(@Param("id") id: string): Promise<DataType | HttpError> {
-    return this.returnOne(this.getOne(id));
+    // No URL controls on value-help `/one` — `prepareRequest` sees `{}`.
+    await this.parseRequest("one", "");
+    return this._scopedOne(id);
   }
 
   /**
@@ -182,6 +310,7 @@ export abstract class AsValueHelpController<
    */
   @Get("one")
   async runGetOneComposite(@Query() query: Record<string, string>): Promise<DataType | HttpError> {
+    await this.parseRequest("one", "");
     const pk = this.primaryKey;
     if (!pk) {
       return new HttpError(400, "No primary key (@meta.id) on value-help interface");
@@ -190,7 +319,7 @@ export abstract class AsValueHelpController<
     if (id === undefined) {
       return new HttpError(400, `Missing PK field "${pk}"`);
     }
-    return this.returnOne(this.getOne(id));
+    return this._scopedOne(id);
   }
 
   /**
@@ -234,7 +363,7 @@ export abstract class AsValueHelpController<
   }
 }
 
-// Self-register so the @DbAction decorator factory can apply the value-help
-// carve-out (skip interceptor registration) without forming an import cycle
-// through the actions module.
+// Self-register so the @DbAction decorator factory can reject actions on
+// value-help controllers without forming an import cycle through the actions
+// module.
 registerAsValueHelpController(AsValueHelpController);

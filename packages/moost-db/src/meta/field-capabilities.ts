@@ -20,6 +20,7 @@ import {
   findAncestorInSet,
   isJsonValueField,
   narrowerFilterOps,
+  selfOrAncestor,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
 
@@ -129,6 +130,18 @@ const OP_VERB: Record<TQueryPathOp, string> = {
   bucket: "bucket",
 };
 
+/**
+ * The verdict of a filter / sort on a `@db.writeOnly` path — the same
+ * sentence {@link FieldCapabilityIndex.check} answers for this table's own
+ * fields; used for `$with` sub-queries on a joined table's.
+ */
+export function writeOnlyVerdict(path: string, op: "filter" | "sort"): TCapabilityVerdict {
+  return {
+    path,
+    message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${REASON_WRITE_ONLY}`,
+  };
+}
+
 /** The one "nonexistent path" verdict — hidden paths answer with it byte for byte. */
 function unknownField(path: string): TCapabilityVerdict {
   return { path, message: `Unknown field "${path}"` };
@@ -234,8 +247,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       for (const name of source.relations.keys()) nav.add(name);
     }
     this.navFields = nav;
-    const isNavOrDescendant = (path: string) =>
-      nav.has(path) || findAncestorInSet(path, nav) !== undefined;
+    const isNavOrDescendant = (path: string) => selfOrAncestor(path, nav) !== undefined;
 
     const flatMap = source.flatMap;
     const annotated = (fd: TDbFieldMeta, key: string): boolean => {
@@ -279,7 +291,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       if (isNavOrDescendant(path)) continue;
       if (ignored.has(path)) continue;
       if (findAncestorInSet(path, jsonParents) !== undefined) continue;
-      if (encrypted.has(path) || findAncestorInSet(path, encrypted) !== undefined) continue;
+      if (selfOrAncestor(path, encrypted) !== undefined) continue;
       this._objectParents.set(path, []);
     }
     for (const [parent, leaves] of this._objectParents) {
