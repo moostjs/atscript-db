@@ -15,6 +15,7 @@ import {
 } from "@atscript/typescript/utils";
 import type {
   TDbActionInfo,
+  TDbAvailableActions,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
@@ -210,21 +211,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
     const controlStr = query?.controls
       ? buildUrl({ controls: query.controls as UniqueryControls })
       : "";
-
-    if (id !== null && typeof id === "object") {
-      const params = this._idToParams(id as Record<string, unknown>);
-      if (controlStr) {
-        for (const [k, v] of new URLSearchParams(controlStr)) {
-          params.set(k, v);
-        }
-      }
-      const qs = params.toString();
-      return this._getOrNull<Q>(`one${qs ? `?${qs}` : ""}`);
-    }
-
-    return this._getOrNull<Q>(
-      `one/${encodeURIComponent(String(id))}${controlStr ? `?${controlStr}` : ""}`,
-    );
+    return this._getOrNull<Q>(this._idUrl("one", id, controlStr));
   }
 
   // ── POST / ─────────────────────────────────────────────────────────────────
@@ -281,13 +268,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * `DELETE /:id` or `DELETE /?k1=v1&k2=v2` — remove a record by primary key.
    */
   async remove(id: Id<T>): Promise<TDbDeleteResult> {
-    if (id !== null && typeof id === "object") {
-      return this._request(
-        "DELETE",
-        `?${this._idToParams(id as Record<string, unknown>).toString()}`,
-      ) as Promise<TDbDeleteResult>;
-    }
-    return this._request("DELETE", encodeURIComponent(String(id))) as Promise<TDbDeleteResult>;
+    return this._request("DELETE", this._idUrl("", id)) as Promise<TDbDeleteResult>;
   }
 
   // ── GET /meta ──────────────────────────────────────────────────────────────
@@ -371,6 +352,19 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
 
     const body = this._buildActionBody(action, id, input);
     return this._postAction(action, body) as Promise<R>;
+  }
+
+  /**
+   * `GET /meta/actions/:id` or `GET /meta/actions?k1=v1&k2=v2` — the
+   * row-level actions the caller may run on one row right now, and the
+   * reasons of those disabled with one: `{ actions, disabledReasons? }`.
+   * Works for rows the caller cannot read; an unknown or out-of-scope id
+   * resolves to `{ actions: [] }`. Id forms as {@link one}.
+   *
+   * @since 0.1.145
+   */
+  async availableActions(id: Id<T>): Promise<TDbAvailableActions> {
+    return this._request("GET", this._idUrl("meta/actions", id)) as Promise<TDbAvailableActions>;
   }
 
   /**
@@ -521,6 +515,22 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       params.set(k, String(v));
     }
     return params;
+  }
+
+  /**
+   * The endpoint addressing one row under `base`: `base/<id>` for a scalar
+   * id, `base?k1=v1&k2=v2` for an object id; `query` (a query string) is
+   * appended.
+   */
+  private _idUrl(base: string, id: unknown, query = ""): string {
+    if (id !== null && typeof id === "object") {
+      const params = this._idToParams(id as Record<string, unknown>);
+      for (const [k, v] of new URLSearchParams(query)) params.set(k, v);
+      const qs = params.toString();
+      return qs ? `${base}?${qs}` : base;
+    }
+    const path = `${base ? `${base}/` : ""}${encodeURIComponent(String(id))}`;
+    return query ? `${path}?${query}` : path;
   }
 
   private async _getOrNull<Q>(endpoint: string): Promise<Response<T, Q> | null> {

@@ -386,7 +386,7 @@ Server class: `@atscript/moost-db` (`extends HttpError`). Client class: `@atscri
 
 ## Row scoping (0.1.143)
 
-Action ids and rows obey the controller's row overlay — `transformOne({})` (defaults to `transformFilter`), the one `GET /one/:id` uses. Active only when the controller overrides `transformOne` or `transformFilter` AND the overlay is non-empty (otherwise no hook, no query). Applies with or without `disabled`:
+Action ids and rows obey the controller's row overlay — `transformOne({})` (defaults to `transformFilter`), the one `GET /one/:id` uses. Since 0.1.145 ANDed with the action's [`actionRowScope`](#actionrowscope--per-action-row-scope-01145). Active only when the controller overrides `transformOne`, `transformFilter` or `actionRowScope` AND the overlay is non-empty (otherwise no hook, no query). Applies with or without `disabled`:
 
 | Action                                                   | Id outside the overlay                                                                                                           |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -401,6 +401,17 @@ Action ids and rows obey the controller's row overlay — `transformOne({})` (de
 | 3   | The check lives in the interceptor `@DbAction` registers — a `@DbActionID*` param on a route WITHOUT `@DbAction` is not checked.                                                                                                                                   |
 | 4   | Overlay = the controller's own table only; an `opts.table` binding on a plain controller has none.                                                                                                                                                                 |
 | 5   | A `requiredFields` entry the controller's `hasField` hides (or a `@db.column.derived` field whose source it hides) is never loaded — `disabled` and `@DbActionRow*` see `undefined` (also on `$actions=true` widening), so a hidden column never drives a verdict. |
+
+### `actionRowScope` — per-action row scope (0.1.145)
+
+`protected actionRowScope(actionName): FilterExpr | undefined | Promise<…>` on the `AsDbReadableController` / `AsDbController` subclass — the rows that action may run on. Default `undefined` (no restriction, zero cost).
+
+| #   | Rule                                                                                                                                                                               |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | ENFORCED by the action gate: ANDed with `transformOne({})` for that action's ids/rows → out-of-scope = the table above (404 / missing-id slot). No `transformOne` override needed. |
+| 2   | Reflected in `$actions` and `GET /meta/actions/:id` through the SAME rule — never a UI-only hint.                                                                                  |
+| 3   | Runs after `prepareRequest`, once per action per request. `undefined` / `{}` = unrestricted. Return the SAME object for several actions to share one `$actions` query.             |
+| 4   | Filter may reference `hasField`-hidden fields; never exposed. Own table only (a plain controller's `opts.table` action is never scoped).                                           |
 
 ## prepareRequest on actions (0.1.143)
 
@@ -597,15 +608,17 @@ GET /users/query?status=active&$actions=true
 Pipeline (per request, on `AsDbReadableController`):
 
 1. Discover row/rows-level envelopes (memoized per controller ctor).
-2. Filter through per-request `applyMetaOverlay()` — actions stripped by overlay are absent. Skipped when overlay is the default no-op.
+2. Filter through `allowedActions(names)` (0.1.145; default = the per-request `applyMetaOverlay()` set) — actions stripped by overlay are absent. Skipped when overlay is the default no-op. Then `actionRowScope(name)` per surviving action (only when overridden, 0.1.145).
 3. Pre-widen `$select` to union all `requiredFields` (only when caller restricted projection).
 4. Run the read.
-5. Run each `disabled` once on the full result, fan verdicts into per-row `$actions` (+ `$disabledReasons` on rows where a verdict was a reason string). Actions without `disabled` are unconditionally included.
+5. One id-only query per distinct non-empty `actionRowScope` filter OBJECT (parallel); run each `disabled` once on the full result — narrowed to that action's gate columns (id cols + visible `requiredFields`, 0.1.145; = the gate's verdict), fan verdicts into per-row `$actions` (+ `$disabledReasons` on rows where a verdict was a reason string). Actions without `disabled` are unconditionally included.
 6. Strip `requiredFields`-only fields the caller didn't ask for (so the response shape matches the original `$select`).
 
 Notes:
 
 - `'table'`-level actions never appear in `$actions`.
+- [`actionRowScope`](#actionrowscope--per-action-row-scope-01145) (0.1.145): a row lists an action only inside its scope; out-of-scope → absent from `$actions` AND `$disabledReasons`. Check = `findMany({ filter: { $and: [{ $or: <page ids> }, scope AND transformOne({})] }, $select: id cols })` per distinct scope OBJECT (the gate's composition), straight on the bound readable — NOT subject to `hasField`, response shape unchanged. Rows matched by `preferredId` (= PK unless re-pointed); no PK → every scoped action withheld (+ warn once per class).
+- One row, no read grant: `GET /meta/actions/:id` → [§ Available actions](#get-metaactionsid--available-actions-for-one-row-01145).
 - `$count` / `$groupBy` paths are NOT augmented (no row shape).
 - A `disabled` length mismatch on the result-set still throws HTTP 500 — same contract as the gate.
 - Caller boolean control: URL (`?$actions=true`/`1`) → server coerces; programmatic (`controls: { $actions: true }`) → boolean.
@@ -619,6 +632,18 @@ const r = await users.query({
 });
 r[0].$actions; // typed string[] on ClientResponse<T, Q>
 ```
+
+## `GET /meta/actions/:id` — available actions for one row (0.1.145)
+
+`$actions` needs a read; this route answers for ONE row the caller may act on but not read. `GET <ctrl>/meta/actions/:id` or `GET <ctrl>/meta/actions?k1=v1&k2=v2` (the `/one/:id` / `/one?…` id forms; no identification match → 400) → `{ actions: string[], disabledReasons?: Record<string, string> }` (`TDbAvailableActions` from `@atscript/db`). Client: `await client.availableActions(id)`.
+
+| #   | Rule                                                                                                                                                                                                                              |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | = what calling each `'row'`/`'rows'` action would do: in `allowedActions` (default: the `applyMetaOverlay` set); row inside `transformOne({})` AND its `actionRowScope`; `disabled` passes on exactly the columns its gate loads. |
+| 2   | Unknown id ≡ out-of-scope id → `200 { actions: [] }` (no existence oracle). No row data returned; no read grant needed.                                                                                                           |
+| 3   | `prepareRequest({ endpoint: "availableActions" })` runs first — authorize it there; `transformOne` / `transformFilter` then run in this request like in an action's.                                                              |
+| 4   | Id resolves ONCE like `/one/:id` (under `transformOne({})`); scoped actions are then checked on that row like `$actions` rows. Use `$actions` for lists.                                                                          |
+| 5   | Per row AND per caller — never cache it like `/meta`.                                                                                                                                                                             |
 
 ## Client side: `client.action(name, id?, input?)` + `client.getActionForm(name)`
 

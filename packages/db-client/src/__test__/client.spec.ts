@@ -247,6 +247,26 @@ describe("Client", () => {
     expect(result).toBeNull();
   });
 
+  // ── availableActions (GET /meta/actions/:id) ───────────────────────────
+
+  it("availableActions with scalar id sends GET /meta/actions/:id", async () => {
+    fetchFn = mockFetch({ actions: ["approve"], disabledReasons: { ship: "shipped" } });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const result = await client.availableActions("a b" as any);
+    expect(fetchFn).toHaveBeenCalledWith(
+      "/api/users/meta/actions/a%20b",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(result).toEqual({ actions: ["approve"], disabledReasons: { ship: "shipped" } });
+  });
+
+  it("availableActions with composite key sends GET /meta/actions?k1=v1&k2=v2", async () => {
+    fetchFn = mockFetch({ actions: [] });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    await client.availableActions({ tenantId: "t1", userId: "u1" } as any);
+    expect(fetchFn.mock.calls[0][0]).toBe("/api/users/meta/actions?tenantId=t1&userId=u1");
+  });
+
   // ── insert (POST /) ────────────────────────────────────────────────────
 
   it("insert single sends POST with JSON body", async () => {

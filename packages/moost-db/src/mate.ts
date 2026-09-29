@@ -2,6 +2,7 @@ import type { AtscriptDbReadable } from "@atscript/db";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { type Mate, type TMateParamMeta, type TMoostMetadata, getMoostMate } from "moost";
 
+import type { TDbRequestEndpoint } from "./as-readable.controller";
 import type {
   TDbActionInputFormMeta,
   TDbActionMeta,
@@ -51,6 +52,12 @@ export interface AtscriptDbMeta {
   atscript_db_action_rows?: true;
   /** Class-level — written by `@TableController` / `@ReadableController` / `@ViewController`. */
   atscript_db_readable_binding?: TReadableBindingMeta;
+  /**
+   * Method-level — the `prepareRequest` endpoint a framework handler
+   * delegates its authorization to (since 0.1.145). Read it with
+   * {@link getDbEndpoint}.
+   */
+  atscript_db_endpoint?: TDbRequestEndpoint;
 }
 
 /**

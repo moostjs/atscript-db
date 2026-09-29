@@ -4,6 +4,7 @@ import { HttpError } from "@moostjs/event-http";
 import { readCurrentActionMeta } from "./current-action";
 import { dbActionIdSlot, dbActionIdsSlot, getActionTable, noTableError } from "./id-cache";
 import { actionFieldVisibility, dbActionOverlaySlot, withOverlay } from "./row-scope";
+import { actionRowFields, findRowsByIds, requiredFieldsOf } from "./rows-by-id";
 
 interface RowFetchTable {
   primaryKeys: readonly string[];
@@ -25,35 +26,14 @@ function asFetchTable(value: unknown): RowFetchTable | null {
   return null;
 }
 
-function stringifyScalar(value: unknown): string {
-  if (value === null) return "null";
-  if (value === undefined) return "undefined";
-  return String(value as string | number | boolean | bigint);
-}
-
-/** Returns the action's `requiredFields` or null when called outside a controller context (e.g. direct wook usage in tests). */
-function readActionFieldSet(ctx: EventContext): readonly string[] | null {
-  const action = readCurrentActionMeta(ctx);
-  if (!action) return null;
-  const opts = action.opts as { requiredFields?: unknown };
-  return Array.isArray(opts.requiredFields) ? (opts.requiredFields as string[]) : null;
-}
-
 /**
- * Id columns plus the action's `requiredFields` — minus any the controller's
- * field visibility hides (since 0.1.143; `hasField`, and a derived field over
- * a hidden source): a hidden column is never loaded, so a `disabled`
- * predicate sees it as `undefined`.
+ * What this action's gate loads: {@link actionRowFields} of its
+ * `requiredFields` (none outside a controller context, e.g. direct wook
+ * usage in tests) under the controller's field visibility.
  */
 function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> {
-  const fields = new Set<string>();
-  for (const f of table.preferredId ?? table.primaryKeys) fields.add(f);
-  const action = readActionFieldSet(ctx);
-  if (action) {
-    const visible = actionFieldVisibility(ctx);
-    for (const f of action) if (!visible || visible(f)) fields.add(f);
-  }
-  return fields;
+  const required = requiredFieldsOf(readCurrentActionMeta(ctx)?.opts);
+  return actionRowFields(table, required, actionFieldVisibility(ctx));
 }
 
 /**
@@ -93,54 +73,7 @@ async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown
   const ids = (await ctx.get(dbActionIdsSlot)) as Record<string, unknown>[];
   const table = asFetchTable(getActionTable(ctx));
   if (!table) throw noTableError(ctx);
-  if (ids.length === 0) return [];
-
-  const fields = seedActionFields(ctx, table);
-
-  const idKeys: string[] = [];
-  const shapes = new Map<string, readonly string[]>();
-  const dedupedIds: Record<string, unknown>[] = [];
-  const seenKeys = new Set<string>();
-
-  for (const id of ids) {
-    const sortedFields = Object.keys(id).toSorted();
-    const sig = sortedFields.join("\x1f");
-    let key = "";
-    for (const f of sortedFields) {
-      fields.add(f);
-      key += `${f}\x1f${stringifyScalar(id[f])}\x1e`;
-    }
-    idKeys.push(key);
-    if (!shapes.has(sig)) shapes.set(sig, sortedFields);
-    if (!seenKeys.has(key)) {
-      seenKeys.add(key);
-      dedupedIds.push(id);
-    }
-  }
-
-  const rows = await table.findMany({
-    filter: withOverlay({ $or: dedupedIds }, overlay),
-    controls: { $select: [...fields] },
-  });
-
-  const rowByKey = new Map<string, Record<string, unknown>>();
-  for (const row of rows) {
-    for (const sortedFields of shapes.values()) {
-      let key = "";
-      let ok = true;
-      for (const f of sortedFields) {
-        const v = row[f];
-        if (v === undefined) {
-          ok = false;
-          break;
-        }
-        key += `${f}\x1f${stringifyScalar(v)}\x1e`;
-      }
-      if (ok && !rowByKey.has(key)) rowByKey.set(key, row);
-    }
-  }
-
-  return ids.map((_, i) => rowByKey.get(idKeys[i]));
+  return findRowsByIds(table, ids, overlay, seedActionFields(ctx, table));
 }
 
 export const dbActionRowSlot = cached<Promise<unknown>>((ctx) => loadRow(ctx));

@@ -148,7 +148,7 @@ A `'rows'` request carries at most `maxIds` identifiers (default 1000, since 0.1
 
 ## Row scoping {#row-scoping}
 
-Since 0.1.143, action ids and rows obey the controller's row overlay. The overlay is the one `GET /one/:id` uses: `transformOne({})`, which defaults to [`transformFilter`](./customization#transformfilter). If the controller overrides `transformOne` or `transformFilter` and the overlay is not empty, every `'row'` and `'rows'` action checks its ids before the handler runs. This applies with or without `disabled`:
+Since 0.1.143, action ids and rows obey the controller's row overlay. The overlay is the one `GET /one/:id` uses: `transformOne({})`, which defaults to [`transformFilter`](./customization#transformfilter). Since 0.1.145 the overlay also includes the action's own [`actionRowScope`](#action-row-scope). If the controller overrides `transformOne`, `transformFilter` or `actionRowScope` and the overlay is not empty, every `'row'` and `'rows'` action checks its ids before the handler runs. This applies with or without `disabled`:
 
 | Action                                                       | Id outside the overlay                                                                                                                       |
 | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -175,11 +175,30 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 
 Notes:
 
-- The check costs nothing when neither `transformOne` nor `transformFilter` is overridden. No hook runs and no query is added. Without an overlay, `'rows'` actions keep today's behavior: an unmatched id is an `undefined` gap in `@DbActionRows()` (gated actions still fail it).
+- The check costs nothing when none of `transformOne`, `transformFilter` and `actionRowScope` is overridden. No hook runs and no query is added. Without an overlay, `'rows'` actions keep today's behavior: an unmatched id is an `undefined` gap in `@DbActionRows()` (gated actions still fail it).
 - Under an overlay, an ungated `'rows'` action rejects unmatched ids by default, missing and out-of-scope alike. Set `onDisabledRows: 'skip'` to drop them instead.
 - The checks run in an interceptor that `@DbAction` registers. A `@DbActionID*` param on a route without `@DbAction` is not checked. `@DbActionRow*` loads still include the overlay.
 - The overlay applies only to the controller's own table. An `opts.table` binding on a plain controller has no overlay.
 - A `requiredFields` entry that the controller's [`hasField`](./customization#hasfield) hides is never loaded, nor is a `@db.column.derived` field whose source it hides. The `disabled` predicate and `@DbActionRow*` see it as `undefined`, so a hidden column never drives a verdict.
+
+### Per-action scope — `actionRowScope` {#action-row-scope}
+
+Since 0.1.145. A permission layer may let a caller read many rows but run an action on only some of them, for example `approve` only on their own orders. Override `actionRowScope(actionName)` to return the rows that action may run on, as a filter. `undefined` or `{}` means no restriction, which is the default:
+
+```typescript
+@TableController(OrderTable)
+export class OrdersController extends AsDbController<typeof OrderTable> {
+  protected override actionRowScope(action: string) {
+    return action === "approve" ? { ownerId: currentUserId() } : undefined; // may be async
+  }
+}
+```
+
+- **Enforced by the action gate.** The filter is ANDed with the row overlay above for that action's ids and rows, with the same outcomes as the table: an out-of-scope id gets `404 "Row not found for action identifier"` on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
+- **Reflected in reads.** [`$actions`](#actions-row-scope) and [`GET /meta/actions/:id`](#available-actions) list the action only on rows inside its scope.
+- It runs after [`prepareRequest`](#preparerequest-on-actions), once per action per request, and may be async. Return the same filter object for several actions and `$actions` checks them with one query.
+- The filter may use fields [`hasField`](./customization#hasfield) hides. It is never exposed in a response.
+- It applies only to the controller's own table, like the overlay. Nothing extra runs when it is not overridden.
 
 ## prepareRequest on actions {#preparerequest-on-actions}
 
@@ -1119,16 +1138,37 @@ GET /orders/query?$actions=true
 - Its keys are never in `$actions`. An action missing from `$actions` **and** from `$disabledReasons` was disabled without a reason (`true`).
 - UI rule of thumb: in `$actions` → enabled; in `$disabledReasons` → show disabled with the reason as tooltip; in neither → hide.
 
+### Per-action row scope {#actions-row-scope}
+
+Since 0.1.145, a row lists an action only when it lies inside that action's [`actionRowScope`](#action-row-scope), the same filter the action gate enforces. An action outside its scope gets no `$disabledReasons` entry either. For each distinct filter object, the server runs one extra query over the page's rows, `{ $and: [{ $or: <row ids> }, <filter AND the row overlay>] }`. The row overlay is included because the gate applies it too, so a `transformOne` stricter than the read's `transformFilter` is honored for scoped actions. The query selects only the id columns (`preferredId`, which is the primary key unless re-pointed) and runs directly on the bound table or view. [`hasField`](./customization#hasfield) does not apply to it, and the response keeps its shape. A readable without a primary key withholds every scoped action, and a warning is logged once per controller class.
+
 ### Pipeline
 
 For each request that sets `$actions=true` on a controller extending `AsDbReadableController`:
 
 1. Discover row/rows-level action envelopes (memoized per controller ctor).
-2. Filter through the per-request `applyMetaOverlay()` hook — actions stripped by the overlay are absent from `$actions`. The `meta()` call is skipped when `applyMetaOverlay` is the default no-op.
+2. Filter through [`allowedActions(names)`](./customization#allowedactions) (since 0.1.145), which defaults to the per-request `applyMetaOverlay()` hook — actions stripped by the overlay are absent from `$actions`. The `meta()` call is skipped when `applyMetaOverlay` is the default no-op. When [`actionRowScope`](#action-row-scope) is overridden, start resolving it for each surviving action; it runs alongside the read.
 3. Pre-widen `$select` to union all `requiredFields` across the surviving envelopes (only when the caller restricted projection).
 4. Run the underlying read (find / pages / search / vector / findById).
-5. Run each `disabled` predicate **once** against the full result set (length-mismatch verdict → HTTP 500, same contract as the gate).
+5. Run one id-only scope query per distinct `actionRowScope` filter object (in parallel), then each `disabled` predicate **once** against the full result set (length-mismatch verdict → HTTP 500, same contract as the gate). An action is listed only on rows inside its scope. Since 0.1.145 each predicate sees the rows narrowed to the columns its gate loads (id columns plus visible `requiredFields`), so it gives the same verdict as the gate. A predicate that reads an undeclared column sees `undefined` in both places.
 6. Strip widened-only fields the caller didn't ask for, so the response shape matches the original `$select`.
+
+### Available actions for one row — `GET /meta/actions/:id` {#available-actions}
+
+Since 0.1.145. `$actions` rides on a read, so it cannot answer for a row the caller may act on but not read. `GET /meta/actions/:id` answers for one row without a read grant and without returning row data:
+
+```bash
+GET /orders/meta/actions/o2
+# → { "actions": ["edit"], "disabledReasons": { "ship": "Order already shipped" } }
+GET /orders/meta/actions?tenantId=t1&orderNo=42   # composite key, the /one?… rules
+```
+
+- The id forms are those of [`/one/:id` and `/one?…`](./crud#get-one); a query that matches no identification is a 400.
+- The answer is exactly what calling each `'row'` / `'rows'` action would do. The id resolves once, like `/one/:id`, under the [row overlay](#row-scoping). An action is then listed when it is in [`allowedActions`](./customization#allowedactions), which defaults to the `applyMetaOverlay()` set, the row lies inside its [`actionRowScope`](#action-row-scope), and its `disabled` rule passes on the columns its gate loads.
+- The answer is per row and per caller. Unlike `/meta`, a cache or CDN must not share it across rows or callers.
+- An unknown id and an out-of-scope id both answer `200 { "actions": [] }`, so the route never reveals whether a row exists.
+- [`prepareRequest`](./customization#preparerequest) runs first with `endpoint: "availableActions"`, so a permission layer can authorize the route. [`getDbEndpoint`](./customization#getdbendpoint) reports that endpoint for both handlers, so an authorization interceptor can let them through without naming them. `transformOne` / `transformFilter` then run in this request exactly as they do for the action itself.
+- The response keys match the `$actions` / `$disabledReasons` rules above; the type is `TDbAvailableActions` from `@atscript/db`. On the client, use [`availableActions(id)`](./client#available-actions).
 
 ### Programmatic use from `@atscript/db-client`
 

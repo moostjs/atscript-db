@@ -1,8 +1,7 @@
 import type { TDbActionEnvelope } from "./discover";
+import { exceedsFields, projectRow, requiredFieldsOf } from "./rows-by-id";
 import type { TDbActionDisabledVerdict } from "./types";
-import { assertVerdictLength, verdictReason } from "./verdict";
-
-type DisabledFn = (rows: unknown[]) => TDbActionDisabledVerdict[];
+import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
 
 export type AugmentedRow<TRow extends Record<string, unknown>> = TRow & {
   $actions?: string[];
@@ -15,34 +14,46 @@ export interface AugmentArgs<TRow extends Record<string, unknown> = Record<strin
   rows: TRow[];
   /** `null` = caller asked for all fields (no field stripping). */
   resolvedProjection: string[] | null;
+  /**
+   * Action name → per-row mask (parallel to `rows`), `true` where the row is
+   * outside the action's row scope: the action is neither listed nor given
+   * a `$disabledReasons` entry there.
+   */
+  outOfScope?: ReadonlyMap<string, readonly boolean[]>;
+  /**
+   * The columns an action's gate loads: a `disabled` predicate is judged on
+   * rows narrowed to them, exactly as at execution time (rows already within
+   * them are passed as-is). Omitted: judged on the rows as read.
+   */
+  gateFields?: (envelope: TDbActionEnvelope) => ReadonlySet<string>;
 }
 
-interface Candidate {
+/** A row-level action envelope with its server-internal `disabled` / `requiredFields`. */
+export interface TActionCandidate {
   envelope: TDbActionEnvelope;
-  disabledFn?: DisabledFn;
+  disabledFn?: TDisabledFn;
   requiredFields: readonly string[];
 }
 
-const candidateCache = new WeakMap<TDbActionEnvelope, Candidate | null>();
+const candidateCache = new WeakMap<TDbActionEnvelope, TActionCandidate | null>();
 
 /** WHY: envelopes are immutable post-discovery, so derived `Candidate` shape is cached for the envelope's lifetime; `null` sentinel pins table-level skip. */
-function getCandidate(e: TDbActionEnvelope): Candidate | null {
+export function getCandidate(e: TDbActionEnvelope): TActionCandidate | null {
   const cached = candidateCache.get(e);
   if (cached !== undefined) return cached;
   if (e.info.level !== "row" && e.info.level !== "rows") {
     candidateCache.set(e, null);
     return null;
   }
-  const raw = e.raw as { disabled?: unknown; requiredFields?: unknown };
-  const disabledFn = typeof raw.disabled === "function" ? (raw.disabled as DisabledFn) : undefined;
-  const requiredFields = Array.isArray(raw.requiredFields) ? (raw.requiredFields as string[]) : [];
-  const c: Candidate = { envelope: e, disabledFn, requiredFields };
+  const raw = e.raw as { disabled?: unknown };
+  const disabledFn = typeof raw.disabled === "function" ? (raw.disabled as TDisabledFn) : undefined;
+  const c: TActionCandidate = { envelope: e, disabledFn, requiredFields: requiredFieldsOf(e.raw) };
   candidateCache.set(e, c);
   return c;
 }
 
-function collectCandidates(envelopes: readonly TDbActionEnvelope[]): Candidate[] {
-  const out: Candidate[] = [];
+function collectCandidates(envelopes: readonly TDbActionEnvelope[]): TActionCandidate[] {
+  const out: TActionCandidate[] = [];
   for (const e of envelopes) {
     const c = getCandidate(e);
     if (c !== null) out.push(c);
@@ -51,7 +62,7 @@ function collectCandidates(envelopes: readonly TDbActionEnvelope[]): Candidate[]
 }
 
 function computeStripFields(
-  candidates: readonly Candidate[],
+  candidates: readonly TActionCandidate[],
   resolvedProjection: readonly string[],
 ): Set<string> | null {
   let userSet: Set<string> | null = null;
@@ -76,7 +87,7 @@ function computeStripFields(
 export function augmentRowsWithActions<
   TRow extends Record<string, unknown> = Record<string, unknown>,
 >(args: AugmentArgs<TRow>): AugmentedRow<TRow>[] {
-  const { envelopes, rows, resolvedProjection } = args;
+  const { envelopes, rows, resolvedProjection, outOfScope, gateFields } = args;
 
   const candidates = collectCandidates(envelopes);
   if (candidates.length === 0 || rows.length === 0) {
@@ -85,16 +96,23 @@ export function augmentRowsWithActions<
 
   const verdicts: Array<TDbActionDisabledVerdict[] | undefined> = candidates.map((c) => {
     if (!c.disabledFn) return undefined;
-    const out = c.disabledFn(rows as unknown[]);
-    assertVerdictLength(c.envelope.info.name, out, rows.length);
-    return out;
+    // Judged on the columns its gate loads; rows already within them go as-is.
+    const fields = gateFields?.(c.envelope);
+    const input =
+      fields && rows.some((row) => exceedsFields(row, fields))
+        ? rows.map((row) => projectRow(row, fields))
+        : rows;
+    return judgeRows(c.envelope.info.name, c.disabledFn, input);
   });
+
+  const masks = outOfScope && candidates.map((c) => outOfScope.get(c.envelope.info.name));
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const names: string[] = [];
     let reasons: Record<string, string> | undefined;
     for (let j = 0; j < candidates.length; j++) {
+      if (masks?.[j]?.[i]) continue;
       const name = candidates[j].envelope.info.name;
       const verdict = verdicts[j]?.[i];
       if (!verdict) {

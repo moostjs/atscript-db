@@ -3,9 +3,38 @@ import path from "path";
 import { expect, vi } from "vite-plus/test";
 import { prepareFixtures as prepare } from "@atscript/typescript/test-utils";
 import dbPlugin from "@atscript/db/plugin";
-import { HttpError } from "@moostjs/event-http";
+import { HttpError, MoostHttp } from "@moostjs/event-http";
+import { Moost } from "moost";
 
 import { validationErrorTransform } from "../validation-interceptor";
+
+/** A JSON request against a {@link bootHttp} app: status + parsed body (`undefined` when empty). */
+export type THttpSend = (
+  method: string,
+  path: string,
+  body?: unknown,
+) => Promise<{ status: number; body: any }>;
+
+/**
+ * Boots a real Moost HTTP app around `controllers` and returns a JSON
+ * `send(method, path, body?)` (paths are absolute, e.g. `/prefix/query`).
+ */
+export async function bootHttp(...controllers: Function[]): Promise<THttpSend> {
+  const app = new Moost();
+  const http = new MoostHttp();
+  app.adapter(http);
+  app.registerControllers(...controllers);
+  await app.init();
+  return async (method, path, body) => {
+    const res = await http.request(path, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res!.text();
+    return { status: res!.status, body: text ? JSON.parse(text) : undefined };
+  };
+}
 
 /** Compiles the `.as` fixtures of this package (js + dts, written only when changed). */
 export async function prepareFixtures(): Promise<void> {

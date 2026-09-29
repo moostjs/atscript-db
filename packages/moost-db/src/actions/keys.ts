@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
+import type { TDbRequestEndpoint } from "../as-readable.controller";
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
 /** Log-message prefix for warnings emitted from the actions subsystem. */
@@ -52,6 +53,7 @@ declare module "moost" {
     atscript_db_action_param?: TDbActionParamKind;
     atscript_db_action_row?: TDbActionRowMarker;
     atscript_db_action_rows?: TDbActionRowMarker;
+    atscript_db_endpoint?: TDbRequestEndpoint;
   }
   interface TMoostParamsMetadata {
     atscript_db_action_param?: TDbActionParamKind;

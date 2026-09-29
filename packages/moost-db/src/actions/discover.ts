@@ -25,6 +25,7 @@ type OptionalField = (typeof OPTIONAL_FIELDS)[number];
  * so the augmenter can invoke the live `disabled` reference (deliberately
  * absent from the wire `info`).
  */
+/** A discovered action: its `/meta.actions[]` entry plus the server-internal opts it was declared with. */
 export interface TDbActionEnvelope {
   info: TDbActionInfo;
   raw: DbActionOpts | TDbActionsEntry;
@@ -96,7 +97,11 @@ export function discoverActions(
   return out;
 }
 
-/** Row/rows-level subset of {@link discoverActions}; memoized per ctor. */
+/**
+ * The `'row'` / `'rows'`-level subset of {@link discoverActions} (since
+ * 0.1.145 public) — the actions `$actions` and `GET /meta/actions/:id`
+ * consider, in `/meta.actions` order. Memoized per controller class.
+ */
 export function discoverRowLevelActions(
   controllerCtor: Function,
   app: Moost,

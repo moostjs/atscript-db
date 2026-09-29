@@ -274,6 +274,21 @@ export interface TDbActionInfo {
   formUrl?: string;
 }
 
+/**
+ * `GET /meta/actions/:id` (and `/meta/actions?…`) response: the row-level
+ * actions the caller may run on that one row right now — the same answer
+ * a row's `$actions` / `$disabledReasons` give, without a read grant.
+ * Unknown and out-of-scope ids both answer `{ actions: [] }`.
+ *
+ * @since 0.1.145
+ */
+export interface TDbAvailableActions {
+  /** Action names runnable on the row, in `/meta.actions` order. */
+  actions: string[];
+  /** Action name → reason, for actions disabled on the row WITH a reason. Absent when none. */
+  disabledReasons?: Record<string, string>;
+}
+
 // ── CRUD Result Types ───────────────────────────────────────────────────────
 
 export interface TDbInsertResult {

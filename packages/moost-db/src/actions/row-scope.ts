@@ -1,17 +1,26 @@
-import type { FilterExpr } from "@atscript/db";
+import { isEmptyObject, type FilterExpr } from "@atscript/db";
 import { cached, type EventContext } from "@wooksjs/event-core";
 
+import { readCurrentActionMeta } from "./current-action";
 import { controllerOf, controllerTable, getActionTable } from "./id-cache";
 import { awaitActionPrepared } from "./prepare-request";
 
 /**
- * What the actions module applies to action ids / rows (since 0.1.143):
- * `AsDbReadableController`'s `rowOverlay()` and `fieldVisibility`, reached
+ * The key of `AsDbReadableController`'s internal action-overlay method —
+ * `rowOverlay()` AND (since 0.1.145) the action's `actionRowScope`. A
+ * registered symbol: not an overridable seam, and still found when
+ * moost-db loads in two module realms (moost-vite SSR).
+ */
+export const ACTION_OVERLAY = Symbol.for("atscript-db.actionOverlay");
+
+/**
+ * What the actions module applies to action ids / rows (since 0.1.143): the
+ * controller's {@link ACTION_OVERLAY} method and `fieldVisibility`, reached
  * duck-typed like the rest of the controller surface (see
  * `id-cache.controllerTable`).
  */
 interface TScopedController {
-  rowOverlay?: () => Promise<FilterExpr | undefined>;
+  [ACTION_OVERLAY]?: (action: string | undefined) => Promise<FilterExpr | undefined>;
   fieldVisibility?: { readonly scoped: boolean; readonly isVisible: (path: string) => boolean };
 }
 
@@ -33,18 +42,25 @@ const scopedControllerSlot = cached<TScopedController | null>((ctx) => {
 });
 
 /**
- * The controller's row overlay for action ids / rows — its `rowOverlay()`,
- * the same overlay `/one/:id` ANDs in (no hook call, no extra query when the
- * controller overrides neither `transformOne` nor `transformFilter`), `null`
- * when there is none. Evaluated once per request, after the controller's
- * `prepareRequest` (since 0.1.143).
+ * The controller's row overlay for this action's ids / rows — its
+ * `rowOverlay()` (the overlay `/one/:id` ANDs in) AND, since 0.1.145, the
+ * action's `actionRowScope`; `null` when both are empty (no hook call, no
+ * extra query when the controller overrides none of `transformOne`,
+ * `transformFilter`, `actionRowScope`). Evaluated once per request, after
+ * the controller's `prepareRequest` (since 0.1.143).
  */
 export const dbActionOverlaySlot = cached<Promise<FilterExpr | null>>(async (ctx) => {
   const ctrl = ctx.get(scopedControllerSlot);
-  if (!ctrl?.rowOverlay) return null;
+  const overlayOf = ctrl?.[ACTION_OVERLAY];
+  if (!overlayOf) return null;
   await awaitActionPrepared(ctx);
-  return (await ctrl.rowOverlay()) ?? null;
+  return (await overlayOf.call(ctrl, readCurrentActionMeta(ctx)?.name)) ?? null;
 });
+
+/** `filter` unless it is absent or `{}`. */
+export function nonEmptyFilter(filter: FilterExpr | null | undefined): FilterExpr | undefined {
+  return filter && !isEmptyObject(filter) ? filter : undefined;
+}
 
 /** `filter` AND the overlay (identity without one). */
 export function withOverlay(

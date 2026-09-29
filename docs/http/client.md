@@ -419,6 +419,17 @@ When the action also carries `formUrl` (a [class-level form served by another co
 
 Returns `null` when the action has no `inputForm`, or the action name isn't on `/meta`. Cached per resolved URL on the client instance — repeated calls for the same form make only one HTTP request. Failed fetches are evicted from the cache so retries can re-fetch.
 
+### Available actions for one row — `availableActions()` {#available-actions}
+
+Since 0.1.145. `availableActions(id)` asks the server which row-level actions the caller may run on one row right now, including rows the caller cannot read. It calls [`GET /meta/actions/:id`](./actions#available-actions); an object id uses the composite form `?k1=v1&k2=v2`. Id forms are the same as [`one()`](#one):
+
+```typescript
+const { actions, disabledReasons } = await orders.availableActions("o2");
+// actions: ["edit"]; disabledReasons: { ship: "Order already shipped" }
+```
+
+An unknown id and an id the caller may not act on both resolve to `{ actions: [] }`. Use it for a detail view opened from a link or a notification. On lists, [`$actions`](./actions#actions-augmentation) gives the same answer per row, as part of the read.
+
 ### Client-side validation
 
 The client refuses obviously-wrong shapes BEFORE the network round-trip:
@@ -673,6 +684,7 @@ See [Calendar Buckets — Filling gaps](/api/calendar-buckets#filling-gaps).
 ### Wire / shape types (from `@atscript/db`)
 
 - `TDbActionInfo`, `TDbActionLevel`, `TDbActionIntent`, `TDbActionProcessor` — `/meta.actions[]` entry shape
+- `TDbAvailableActions` — [`availableActions()`](#available-actions) response (since 0.1.145)
 - `TCrudOp`, `TCrudPermissions` — `/meta.crud` shape (see [Permissions](./permissions))
 - `TDbInsertResult`, `TDbInsertManyResult`, `TDbUpdateResult`, `TDbDeleteResult` — write-method return shapes
 

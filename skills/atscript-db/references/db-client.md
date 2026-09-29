@@ -241,6 +241,10 @@ r[0].$disabledReasons?.ship; // reason string — only rows where an action was 
 
 Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$groupBy` paths are not augmented. `'table'`-level actions never appear.
 
+## One row's available actions — `availableActions(id)` (0.1.145)
+
+`await client.availableActions(id)` → `GET /meta/actions/:id` (object id → `?k1=v1&k2=v2`) → `{ actions: string[], disabledReasons? }` (`TDbAvailableActions`). Works for rows the caller cannot read; unknown / out-of-scope id → `{ actions: [] }`. Use for a single-row view; lists use `$actions`. Server rules → [actions.md § Available actions](actions.md#get-metaactionsid--available-actions-for-one-row-01145).
+
 ## Error handling
 
 ```ts

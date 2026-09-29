@@ -11,7 +11,12 @@ export type {
   TDbActionsEntry,
   TDbActionsEntryUnpinned,
 } from "./types";
-export { discoverActions, getControllerFormType } from "./discover";
+export {
+  discoverActions,
+  discoverRowLevelActions,
+  getControllerFormType,
+  type TDbActionEnvelope,
+} from "./discover";
 export type { IdValidationSource } from "./id-validation";
 export { useDbActionId, useDbActionIds } from "./id-cache";
 export { useDbActionRow, useDbActionRows } from "./row-cache";

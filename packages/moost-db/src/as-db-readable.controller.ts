@@ -3,6 +3,7 @@ import type {
   AtscriptDbReadable,
   FilterExpr,
   TCrudPermissions,
+  TDbAvailableActions,
   TFieldMeta,
   TIdResolveOptions,
   TMetaResponse,
@@ -16,7 +17,6 @@ import {
   checkHavingKeys,
   collectQueryPaths,
   geoIndexNotFoundMessage,
-  isEmptyObject,
   normalizeComputedSelect,
   searchIndexNotFoundMessage,
   selfOrAncestor,
@@ -29,9 +29,18 @@ import { Inherit, Inject, Moost, Optional, Param } from "moost";
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
-import { augmentRowsWithActions } from "./actions/list-augmenter";
-import { withOverlay } from "./actions/row-scope";
+import { augmentRowsWithActions, getCandidate } from "./actions/list-augmenter";
+import { ACTION_OVERLAY, nonEmptyFilter, withOverlay } from "./actions/row-scope";
+import {
+  actionRowFields,
+  findRowsByIds,
+  projectRow,
+  requiredFieldsOf,
+  type TRowsByIdSource,
+} from "./actions/rows-by-id";
+import { judgeRow, verdictReason } from "./actions/verdict";
 import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
+import { DbEndpoint } from "./db-endpoint";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilities";
 import { unknownRelationError } from "./http-errors";
@@ -137,12 +146,26 @@ type TSealedControls = Record<string, unknown> & {
   $select: UniqueryControls["$select"] | undefined;
 };
 
+/**
+ * Row-level actions sharing one {@link AsDbReadableController.actionRowScope}
+ * filter object; `filter` = that scope AND the row overlay (the gate's).
+ */
+interface TActionScopeGroup {
+  filter: FilterExpr;
+  actions: string[];
+}
+
 /** What `$actions` augmentation of a read needs, prepared before the read runs. */
 interface TAugmentationPrep {
   envelopes: readonly TDbActionEnvelope[];
   resolvedProjection: string[] | null;
   widenedSelect: string[] | null;
+  /** The `actionRowScope` groups, resolving alongside the read; `null` = hook not overridden. */
+  scopeGroups: Promise<TActionScopeGroup[]> | null;
 }
+
+/** Controller classes already warned that `actionRowScope` has no row identity to match by. */
+const warnedNoIdentity = new WeakSet<Function>();
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -247,6 +270,12 @@ export class AsDbReadableController<
   private readonly _decorates: boolean;
   /** `true` when a subclass overrides {@link transformOne} or {@link transformFilter} (a row overlay may exist). */
   private readonly _hasRowOverlay: boolean;
+  /** Per-envelope gate fields, memoized while field visibility is not request-scoped. */
+  private readonly _gateFieldsMemo = new WeakMap<TDbActionEnvelope, ReadonlySet<string>>();
+  /** `true` when a subclass overrides {@link allowedActions}. */
+  private readonly _hasAllowedActions: boolean;
+  /** `true` when a subclass overrides {@link actionRowScope} (the gate, `$actions` and `/meta/actions` apply it). */
+  private readonly _hasActionRowScope: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
   /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
@@ -287,6 +316,19 @@ export class AsDbReadableController<
     const proto = AsDbReadableController.prototype;
     this._hasRowOverlay =
       this.transformOne !== proto.transformOne || this.transformFilter !== proto.transformFilter;
+    this._hasActionRowScope = this.actionRowScope !== proto.actionRowScope;
+    this._hasAllowedActions = this.allowedActions !== proto.allowedActions;
+    if (
+      this._hasActionRowScope &&
+      resolved.preferredId.length === 0 &&
+      !warnedNoIdentity.has(new.target)
+    ) {
+      warnedNoIdentity.add(new.target);
+      this.logger.warn(
+        `actionRowScope() is overridden but "${resolved.tableName}" has no primary key — ` +
+          `\`$actions\` withholds every action with a non-empty row scope`,
+      );
+    }
     const scoped = this.hasField !== proto.hasField;
     this._hasFieldOverridden = scoped;
     const isVisible = (path: string): boolean => {
@@ -896,6 +938,58 @@ export class AsDbReadableController<
   }
 
   /**
+   * The subset of the row-level action `names` the caller may run (since
+   * 0.1.145) — what `$actions` and `GET /meta/actions/:id` list from. The
+   * default keeps the names present in the per-request `/meta` envelope
+   * (`applyMetaOverlay` over the cached one), or all of them when
+   * `applyMetaOverlay` is not overridden (no call). Override it to answer
+   * from per-action permission checks without building the whole `/meta`
+   * overlay on every `$actions` read. Runs after {@link prepareRequest}.
+   * Names it returns that are not in `names` are ignored.
+   *
+   * @since 0.1.145
+   */
+  protected allowedActions(
+    names: readonly string[],
+  ): readonly string[] | Promise<readonly string[]> {
+    if (this._overlayIsNoOp) return names;
+    return (async () => {
+      const present = new Set((await this.resolveMeta()).actions.map((a) => a.name));
+      return names.filter((name) => present.has(name));
+    })();
+  }
+
+  /**
+   * The rows the row-level action `actionName` may run on (since 0.1.145),
+   * as an extra row filter; `undefined` or `{}` = no restriction (the
+   * default). Enforced by the action gate — ANDed with the {@link rowOverlay}
+   * the action's ids / rows are loaded under, so an id outside it gets the
+   * same 404 "Row not found for action identifier" as a missing one — and
+   * reflected in `$actions` and `GET /meta/actions`, which list the action
+   * only on rows inside it.
+   *
+   * Runs after {@link prepareRequest}, once per action per request. `$actions`
+   * checks the page's rows with one id-only query per distinct filter
+   * OBJECT (return the same object for several actions to share one query),
+   * straight against the bound readable: the filter may use fields
+   * {@link hasField} hides, and nothing of it reaches the response. Not
+   * overriding it costs nothing.
+   *
+   * ```ts
+   * protected actionRowScope(action: string) {
+   *   return action === "approve" ? { ownerId: currentUserId() } : undefined
+   * }
+   * ```
+   *
+   * @since 0.1.145
+   */
+  protected actionRowScope(
+    _actionName: string,
+  ): FilterExpr | undefined | Promise<FilterExpr | undefined> {
+    return undefined;
+  }
+
+  /**
    * Transform projection before querying.
    * May return a Promise for async lookups.
    */
@@ -1100,7 +1194,7 @@ export class AsDbReadableController<
     );
   }
 
-  /** WHY: filter row/rows envelopes by the per-request `applyMetaOverlay` action set; skip `meta()` when overlay is identity. */
+  /** Row/rows envelopes narrowed to {@link allowedActions}; no hook call when neither it nor `applyMetaOverlay` is overridden. */
   private async _resolveAugmentEnvelopes(): Promise<readonly TDbActionEnvelope[] | null> {
     const rowLevelEnvelopes = discoverRowLevelActions(
       this.constructor as Function,
@@ -1108,10 +1202,9 @@ export class AsDbReadableController<
       this.logger,
     );
     if (rowLevelEnvelopes.length === 0) return null;
-    if (this._overlayIsNoOp) return rowLevelEnvelopes;
-    const overlayMeta = await this.resolveMeta();
-    const allowedNames = new Set(overlayMeta.actions.map((a) => a.name));
-    const filtered = rowLevelEnvelopes.filter((e) => allowedNames.has(e.info.name));
+    if (this._overlayIsNoOp && !this._hasAllowedActions) return rowLevelEnvelopes;
+    const allowed = new Set(await this.allowedActions(rowLevelEnvelopes.map((e) => e.info.name)));
+    const filtered = rowLevelEnvelopes.filter((e) => allowed.has(e.info.name));
     return filtered.length === 0 ? null : filtered;
   }
 
@@ -1128,9 +1221,7 @@ export class AsDbReadableController<
     let resultSet: Set<string> | null = null;
     let result: string[] | null = null;
     for (const e of envelopes) {
-      const raw = e.raw as { requiredFields?: unknown };
-      if (!Array.isArray(raw.requiredFields)) continue;
-      for (const f of raw.requiredFields as string[]) {
+      for (const f of requiredFieldsOf(e.raw)) {
         const present = resultSet ? resultSet.has(f) : baseSelect.includes(f);
         if (present || !this.fieldVisibility.isVisible(f)) continue;
         if (resultSet === null) {
@@ -1151,12 +1242,119 @@ export class AsDbReadableController<
     if (!controls.$actions) return null;
     const envelopes = await this._resolveAugmentEnvelopes();
     if (envelopes === null) return null;
+    let scopeGroups: Promise<TActionScopeGroup[]> | null = null;
+    if (this._hasActionRowScope) {
+      // Resolves alongside the read — awaited in `_finishRows`.
+      scopeGroups = this._resolveActionScopeGroups(envelopes);
+      scopeGroups.catch(() => {});
+    }
     const resolvedProjection = this._resolveProjectionForAugmenter(select);
     const widenedSelect =
       resolvedProjection === null
         ? null
         : this._widenSelectForActions(envelopes, resolvedProjection);
-    return { envelopes, resolvedProjection, widenedSelect };
+    return { envelopes, resolvedProjection, widenedSelect, scopeGroups };
+  }
+
+  /**
+   * {@link actionRowScope} of every offered action (in parallel, alongside
+   * `overlay`), grouped by filter object; each group's filter is composed
+   * with the row overlay exactly as the gate composes it.
+   */
+  private async _resolveActionScopeGroups(
+    envelopes: readonly TDbActionEnvelope[],
+    overlay: Promise<FilterExpr | undefined> = this.rowOverlay(),
+  ): Promise<TActionScopeGroup[]> {
+    const [rowOverlay, scopes] = await Promise.all([
+      overlay,
+      Promise.all(envelopes.map(async (e) => this._actionScope(e.info.name))),
+    ]);
+    const groups = new Map<FilterExpr, TActionScopeGroup>();
+    for (let i = 0; i < envelopes.length; i++) {
+      const scope = scopes[i];
+      if (!scope) continue;
+      let group = groups.get(scope);
+      if (!group) {
+        group = { filter: withOverlay(scope, rowOverlay), actions: [] };
+        groups.set(scope, group);
+      }
+      group.actions.push(envelopes[i].info.name);
+    }
+    return [...groups.values()];
+  }
+
+  /** Per scoped action, a per-row mask of rows outside its scope (one id-only read per group). */
+  private async _outOfScopeMasks(
+    rows: readonly Record<string, unknown>[],
+    groups: readonly TActionScopeGroup[],
+  ): Promise<Map<string, readonly boolean[]>> {
+    const idFields = this.readable.preferredId;
+    // Row index → its id's index in `ids` (-1: the row lacks its identity — in no scope).
+    const idIndex: number[] = [];
+    const ids: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      const id: Record<string, unknown> = {};
+      let complete = idFields.length > 0;
+      for (const f of idFields) {
+        const value = row[f];
+        if (value === undefined || value === null) {
+          complete = false;
+          break;
+        }
+        id[f] = value;
+      }
+      idIndex.push(complete ? ids.push(id) - 1 : -1);
+    }
+    const source = this.readable as unknown as TRowsByIdSource;
+    const found = await Promise.all(
+      groups.map((group) => findRowsByIds(source, ids, group.filter, [])),
+    );
+    const masks = new Map<string, readonly boolean[]>();
+    for (let g = 0; g < groups.length; g++) {
+      const mask = idIndex.map((i) => i < 0 || found[g][i] === undefined);
+      for (const name of groups[g].actions) masks.set(name, mask);
+    }
+    return masks;
+  }
+
+  /**
+   * The row filter {@link actionRowScope} returns for `action` — `undefined`
+   * when empty or when the hook is not overridden (no call). THE per-action
+   * scope rule: the action gate, `$actions` and `/meta/actions` all read it here.
+   */
+  private async _actionScope(action: string): Promise<FilterExpr | undefined> {
+    if (!this._hasActionRowScope) return undefined;
+    return nonEmptyFilter(await this.actionRowScope(action));
+  }
+
+  /**
+   * The fields `envelope`'s gate loads ({@link actionRowFields} under this
+   * request's field visibility) — memoized unless visibility is request-scoped.
+   */
+  private _gateFields(envelope: TDbActionEnvelope): ReadonlySet<string> {
+    const visibility = this.fieldVisibility;
+    const required = requiredFieldsOf(envelope.raw);
+    if (visibility.scoped) return actionRowFields(this.readable, required, visibility.isVisible);
+    let fields = this._gateFieldsMemo.get(envelope);
+    if (!fields) {
+      fields = actionRowFields(this.readable, required, undefined);
+      this._gateFieldsMemo.set(envelope, fields);
+    }
+    return fields;
+  }
+
+  /**
+   * @internal The action gate's overlay (reached by the `@DbAction`
+   * interceptor through {@link ACTION_OVERLAY}): {@link rowOverlay} AND the
+   * action's {@link actionRowScope} (since 0.1.145) — `undefined` when both
+   * are empty.
+   */
+  async [ACTION_OVERLAY](action: string | undefined): Promise<FilterExpr | undefined> {
+    const [overlay, scope] = await Promise.all([
+      this.rowOverlay(),
+      action === undefined ? undefined : this._actionScope(action),
+    ]);
+    return scope ? withOverlay(scope, overlay) : overlay;
   }
 
   /**
@@ -1256,9 +1454,8 @@ export class AsDbReadableController<
     const fragment = {
       $or: fields.map((f) => ({ [f]: { $regex: rx } })),
     } as FilterExpr;
-    return filter && !isEmptyObject(filter)
-      ? ({ $and: [filter, fragment] } as FilterExpr)
-      : fragment;
+    const base = nonEmptyFilter(filter);
+    return base ? ({ $and: [base, fragment] } as FilterExpr) : fragment;
   }
 
   /**
@@ -1343,7 +1540,8 @@ export class AsDbReadableController<
 
   /**
    * Finishes a read's top-level rows in place: `$actions` augmentation (when
-   * the request asked for it — `prep`), then {@link decorateRows} when a
+   * the request asked for it — `prep`; minus actions whose
+   * {@link actionRowScope} a row misses), then {@link decorateRows} when a
    * subclass implements it. Returns the hook's result — `undefined`, with no
    * promise or microtask, when there is no hook or it is synchronous.
    */
@@ -1352,11 +1550,28 @@ export class AsDbReadableController<
     prep: TAugmentationPrep | null,
     ctx: TDbDecorateContext,
   ): void | Promise<void> {
+    const groups = prep?.scopeGroups;
+    if (!groups) return this._augmentAndDecorate(rows, prep, ctx);
+    return (async () => {
+      const masks = await this._outOfScopeMasks(rows, await groups);
+      await this._augmentAndDecorate(rows, prep, ctx, masks);
+    })();
+  }
+
+  /** `$actions` augmentation (when `prep`), then {@link decorateRows} when implemented. */
+  private _augmentAndDecorate(
+    rows: Record<string, unknown>[],
+    prep: TAugmentationPrep | null,
+    ctx: TDbDecorateContext,
+    outOfScope?: ReadonlyMap<string, readonly boolean[]>,
+  ): void | Promise<void> {
     if (prep) {
       augmentRowsWithActions({
         envelopes: prep.envelopes,
         rows,
         resolvedProjection: prep.resolvedProjection,
+        gateFields: (e) => this._gateFields(e),
+        outOfScope,
       });
     }
     return this._decorates ? this.decorateRows!(rows, ctx) : undefined;
@@ -1455,8 +1670,7 @@ export class AsDbReadableController<
    */
   protected async rowOverlay(): Promise<FilterExpr | undefined> {
     if (!this._hasRowOverlay) return undefined;
-    const overlay = await this.transformOne({} as FilterExpr);
-    return overlay && !isEmptyObject(overlay) ? overlay : undefined;
+    return nonEmptyFilter(await this.transformOne({} as FilterExpr));
   }
 
   /**
@@ -1883,6 +2097,84 @@ export class AsDbReadableController<
     });
     if (pending) await pending;
     return item;
+  }
+
+  /**
+   * **GET /meta/actions/:id** — the row-level actions the caller may run on
+   * the row `id` addresses (the `/one/:id` id forms), as
+   * `{ actions, disabledReasons? }` — no row data (since 0.1.145). Exactly
+   * what calling each action would do: the action survives
+   * {@link applyMetaOverlay}, the row resolves under its gate overlay
+   * ({@link actionOverlay}) and its `disabled` rule passes on the fields the
+   * gate loads. Needs no read grant; an unknown or out-of-scope id answers
+   * `{ actions: [] }`. {@link prepareRequest} runs first with
+   * `endpoint: "availableActions"`.
+   */
+  @Get("meta/actions/:id")
+  @DbEndpoint("availableActions")
+  async availableActionsById(@Param("id") id: string): Promise<TDbAvailableActions> {
+    await this.parseRequest("availableActions");
+    return this._availableActions(id);
+  }
+
+  /**
+   * **GET /meta/actions?field1=val1&…** — {@link availableActionsById} by
+   * composite key (composite primary key or compound unique index), the
+   * `/one?…` rules.
+   */
+  @Get("meta/actions")
+  @DbEndpoint("availableActions")
+  async availableActions(
+    @Query() query: Record<string, string>,
+  ): Promise<TDbAvailableActions | HttpError> {
+    await this.parseRequest("availableActions");
+    const idObj = this.extractIdShape(query);
+    if (idObj instanceof HttpError) return idObj;
+    return this._availableActions(idObj);
+  }
+
+  /**
+   * The row resolves ONCE, like `/one/:id` under {@link rowOverlay}; scoped
+   * actions are then checked on it exactly like `$actions` rows.
+   */
+  private async _availableActions(id: unknown): Promise<TDbAvailableActions> {
+    const envelopes = await this._resolveAugmentEnvelopes();
+    if (envelopes === null) return { actions: [] };
+    const overlay = this.rowOverlay();
+    const groups = this._hasActionRowScope
+      ? this._resolveActionScopeGroups(envelopes, overlay)
+      : undefined;
+    groups?.catch(() => {});
+    const idKeys = id !== null && typeof id === "object" ? Object.keys(id) : [];
+    const fieldsOf = envelopes.map((e) => {
+      const fields = this._gateFields(e);
+      return idKeys.every((k) => fields.has(k)) ? fields : new Set([...fields, ...idKeys]);
+    });
+    const select = new Set<string>();
+    for (const fields of fieldsOf) for (const f of fields) select.add(f);
+    const row = (await this._findRow(id, await overlay, { $select: [...select] })) as Record<
+      string,
+      unknown
+    > | null;
+    if (!row) return { actions: [] };
+    const masks = groups ? await this._outOfScopeMasks([row], await groups) : undefined;
+
+    const actions: string[] = [];
+    let disabledReasons: Record<string, string> | undefined;
+    for (let i = 0; i < envelopes.length; i++) {
+      const name = envelopes[i].info.name;
+      if (masks?.get(name)?.[0]) continue;
+      const disabled = getCandidate(envelopes[i])?.disabledFn;
+      // The predicate sees exactly the columns this action's gate loads.
+      const verdict = disabled ? judgeRow(name, disabled, projectRow(row, fieldsOf[i])) : false;
+      if (!verdict) {
+        actions.push(name);
+        continue;
+      }
+      const reason = verdictReason(verdict);
+      if (reason !== undefined) (disabledReasons ??= {})[name] = reason;
+    }
+    return disabledReasons ? { actions, disabledReasons } : { actions };
   }
 
   /**

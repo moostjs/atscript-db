@@ -116,6 +116,7 @@ export type {
   TRelationInfo,
   TFieldMeta,
   TDbActionInfo,
+  TDbAvailableActions,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,

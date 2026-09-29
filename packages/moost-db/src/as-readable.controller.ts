@@ -33,7 +33,8 @@ import { applyTerminalRefs } from "./meta/terminal-ref";
  * report `"remove"`; value-help controllers report `query` / `pages` / `one`
  * like DB readables do; every `@DbAction` handler (row, rows and table
  * level) reports `"action"` with the action's name in
- * {@link TDbRequestContext.action}.
+ * {@link TDbRequestContext.action}; `GET /meta/actions/:id` and
+ * `/meta/actions?…` report `"availableActions"` (since 0.1.145).
  *
  * @since 0.1.143
  */
@@ -48,7 +49,8 @@ export type TDbRequestEndpoint =
   | "replace"
   | "update"
   | "remove"
-  | "action";
+  | "action"
+  | "availableActions";
 
 /**
  * Context passed to {@link AsReadableController.prepareRequest}.

@@ -13,6 +13,7 @@ export type { ActionDisabledErrorBody, VersionMismatchErrorBody } from "./client
 // single import point for the action + CRUD permission wire types.
 export type {
   TDbActionInfo,
+  TDbAvailableActions,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,

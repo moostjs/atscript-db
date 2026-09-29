@@ -7,7 +7,7 @@ import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import { ACTION_GATE_PRIORITY, awaitActionPrepared } from "./prepare-request";
 import { dbActionOverlaySlot } from "./row-scope";
 import type { TDbActionDisabledVerdict, TOnDisabledRows } from "./types";
-import { assertVerdictLength, verdictReason } from "./verdict";
+import { judgeRow, judgeRows, verdictReason } from "./verdict";
 
 // Bound-table controller wins over opts.table (spec contract).
 function injectBoundTable(fallback: unknown): void {
@@ -39,11 +39,10 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
     await ctx.get(dbActionOverlaySlot);
     if (level === "row") {
       const row = await ctx.get(dbActionRowSlot);
-      const verdicts = disabled([row]);
-      assertVerdictLength(action, verdicts, 1);
-      if (verdicts[0]) {
+      const verdict = judgeRow(action, disabled, row);
+      if (verdict) {
         const id = await ctx.get(dbActionIdSlot);
-        throw new ActionDisabledError(action, id, undefined, [verdictReason(verdicts[0])]);
+        throw new ActionDisabledError(action, id, undefined, [verdictReason(verdict)]);
       }
       return;
     }
@@ -73,11 +72,7 @@ async function gateRows(
     }
   }
 
-  let verdicts: TDbActionDisabledVerdict[] | undefined;
-  if (disabled) {
-    verdicts = disabled(existingRows);
-    assertVerdictLength(action, verdicts, existingRows.length);
-  }
+  const verdicts = disabled ? judgeRows(action, disabled, existingRows) : undefined;
 
   const failingIds: Record<string, unknown>[] = [];
   const failingReasons: (string | undefined)[] = [];
@@ -130,7 +125,8 @@ export interface ThinInterceptorOpts {
  * `@DbActionRow*` handler of any other level: bound-table injection only):
  * runs the controller's `prepareRequest` (when defined, since 0.1.143),
  * injects the bound table and — only when the controller has a row overlay
- * (`transformOne` / `transformFilter` overridden, non-empty) — verifies the
+ * for the action (`transformOne` / `transformFilter` overridden, or — since
+ * 0.1.145 — an `actionRowScope` for it; non-empty) — verifies the
  * requested ids against it before the handler runs by loading the row(s)
  * the handler would get: `'row'` → the 404 of a missing row; `'rows'` →
  * out-of-scope and missing ids fail like disabled rows with no reason

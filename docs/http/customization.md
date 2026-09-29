@@ -24,6 +24,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
 | `decorateRows(rows, ctx)`              | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
+| `actionRowScope(action)`               | Both           | Action gate, `$actions` reads    | Rows an action may run on (since 0.1.145)                         |
 | `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
 | `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
 | `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
@@ -32,6 +33,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `withTransaction(fn)`                  | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
 | `meta()`                               | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
 | `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
+| `allowedActions(names)`                | Both           | `$actions`, `/meta/actions`      | Row-level actions the caller may run (0.1.145)                    |
 | `authorizeForm(name, actionNames)`     | Both           | On `GET /meta/form/:name`        | Refuse a form per request — answered as an unknown form (0.1.143) |
 | `init()`                               | Both           | On controller construction       | One-time setup                                                    |
 
@@ -67,12 +69,27 @@ It runs exactly once per request, before anything else looks at the request:
 | `POST` / `PUT` / `PATCH` / `DELETE /:id`, `DELETE /?…` | `insert`, `replace`, `update`, `remove` | At handler start, before the shape gate, `onWrite` / `onRemove`       | —                   |
 | `/meta`, `/meta/form/:name`                            | `meta`, `metaForm`                      | First                                                                 | —                   |
 | Every `@DbAction` handler (row, rows and table level)  | `action` (`ctx.action` = the name)      | After the guards, before the action's ids are validated / rows loaded | —                   |
+| `GET /meta/actions/:id`, `/meta/actions?…`             | `availableActions` (since 0.1.145)      | First                                                                 | —                   |
 
 Value-help controllers call it too (`query`, `pages`, `one`). [Actions](./actions#preparerequest-on-actions) run it before anything reads their ids, rows or row overlay, so a permission layer needs no separate action guard. Every built-in route enters through `parseRequest(endpoint, url?)`: with a URL it parses the query string, coerces boolean controls (`$actions=true`) and hands the parsed controls to `prepareRequest`; without one (writes, `meta`) it only runs the hook. Custom routes you add to a subclass should do the same — `const { parsed, controls } = await this.parseRequest("query", url)`, or `await this.parseRequest("insert")`.
 
 - **Do** throw to deny — an `HttpError` for a specific status; the request aborts with it.
 - **Do** mutate `ctx.controls` if you must rewrite a read — the rest of the pipeline validates what you leave.
 - **Don't** do per-row work here — it runs once per request; row-level policy belongs in [`transformFilter`](#transformfilter) / [`guardWrite`](#guardwrite) / [`checkWrite`](#checkwrite).
+
+#### Handlers that delegate authorization — `getDbEndpoint` {#getdbendpoint}
+
+Since 0.1.145. Some framework routes have no per-route permission of their own: `prepareRequest` authorizes them. Today that is `GET /meta/actions/:id` and `/meta/actions?…` ([available actions](./actions#available-actions)). A permission layer whose interceptor denies every handler it has no rule for should let these through without naming moost-db's methods. `getDbEndpoint(controller, method)` returns the `prepareRequest` endpoint a handler delegates to, or `undefined` for a handler authorized like any other route:
+
+```typescript
+import { getDbEndpoint } from "@atscript/moost-db";
+
+// inside your authorization interceptor
+const endpoint = getDbEndpoint(controllerInstanceOrClass, methodName);
+if (endpoint) return; // prepareRequest({ endpoint }) authorizes this call — authorize it there
+```
+
+`controller` may be the instance or the class. The tag is inherited, so it survives a subclass override of the handler. Every other built-in handler (`query`, `pages`, `one`, writes, `meta`) returns `undefined` and keeps its normal per-route authorization.
 
 ## Read Hooks
 
@@ -570,7 +587,19 @@ The argument is the cached envelope shared across all requests. Mutating it leak
 `applyMetaOverlay` controls what the UI **renders**. It does NOT stop a client from hitting the underlying route — for real per-principal route enforcement, use Moost auth guards (`@Authenticate`) and the [server-side action gate](./actions#server-side-gate). See [Permissions](./permissions) for the broader contract.
 :::
 
-May return a `Promise`. The hook is invoked even when other meta-derived endpoints (`$actions=true` augmentation) consult the meta envelope — since 0.1.143 they read the cached envelope through `applyMetaOverlay` directly (`resolveMeta()`), not through an overridden `meta()`, and without re-running [`prepareRequest`](#preparerequest).
+May return a `Promise`. By default, the [`$actions`](./actions#actions-augmentation) augmentation and [`GET /meta/actions/:id`](./actions#available-actions) take their action set from this overlay through [`allowedActions`](#allowedactions). Since 0.1.143 they read the cached envelope through `applyMetaOverlay` directly (`resolveMeta()`), not through an overridden `meta()`, and without re-running [`prepareRequest`](#preparerequest).
+
+### allowedActions {#allowedactions}
+
+Since 0.1.145. `allowedActions(names)` returns the subset of the row-level action `names` the caller may run. `$actions` and `GET /meta/actions/:id` list only those. The default keeps the names that survive `applyMetaOverlay`, and returns every name without calling anything when `applyMetaOverlay` is not overridden. Override it when your permission layer can answer per action. `$actions` reads then skip building the whole `/meta` overlay (field pruning and so on) on every request:
+
+```typescript
+protected override allowedActions(names: readonly string[]) {
+  return names.filter((action) => this.policy.mayRun(action)); // may be async
+}
+```
+
+It runs after [`prepareRequest`](#preparerequest). Names outside `names` are ignored. It controls what is **listed**. The [action gate](./actions#server-side-gate) still enforces each call on its own.
 
 ### authorizeForm {#authorizeform}
 
