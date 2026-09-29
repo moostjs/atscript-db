@@ -61,8 +61,15 @@ function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> 
  * `dbActionOverlaySlot`, since 0.1.143): an out-of-scope id loads nothing —
  * exactly like a missing one (the same 404 on `'row'` actions, so the two
  * can't be told apart).
+ *
+ * The overlay resolves BEFORE the ids — i.e. before the request body is
+ * read. Moost's HTTP adapter releases the event's DI scope when the request
+ * stream ends, so a `transformFilter` / `transformOne` that instantiates a
+ * `FOR_EVENT` dependency (an ARBAC user provider) fails with "scope isn't
+ * registered" once the body has been consumed.
  */
 async function loadRow(ctx: EventContext): Promise<unknown> {
+  const overlay = await ctx.get(dbActionOverlaySlot);
   const id = (await ctx.get(dbActionIdSlot)) as Record<string, unknown>;
   const table = asFetchTable(getActionTable(ctx));
   if (!table) throw noTableError(ctx);
@@ -71,7 +78,7 @@ async function loadRow(ctx: EventContext): Promise<unknown> {
   for (const k of Object.keys(id)) fields.add(k);
 
   const row = await table.findOne({
-    filter: withOverlay(id, await ctx.get(dbActionOverlaySlot)),
+    filter: withOverlay(id, overlay),
     controls: { $select: [...fields] },
   });
   if (row == null) {
@@ -81,6 +88,8 @@ async function loadRow(ctx: EventContext): Promise<unknown> {
 }
 
 async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown> | undefined>> {
+  // Overlay before the body — see `loadRow`.
+  const overlay = await ctx.get(dbActionOverlaySlot);
   const ids = (await ctx.get(dbActionIdsSlot)) as Record<string, unknown>[];
   const table = asFetchTable(getActionTable(ctx));
   if (!table) throw noTableError(ctx);
@@ -110,7 +119,7 @@ async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown
   }
 
   const rows = await table.findMany({
-    filter: withOverlay({ $or: dedupedIds }, await ctx.get(dbActionOverlaySlot)),
+    filter: withOverlay({ $or: dedupedIds }, overlay),
     controls: { $select: [...fields] },
   });
 
