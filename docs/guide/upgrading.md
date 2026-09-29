@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.142 {#v0-1-142}
+
+### Fixes
+
+- **`@atscript/db-client`: derived columns are server-managed in preflight.** The `/meta` type stripped the `db.column.derived` annotation, so the client validator built from it treated a [derived column](/api/storage#derived-columns) as an ordinary field: an `insert` / `replace` that left out a required derived field was rejected with a `ClientValidationError` (the server accepts it and computes the value), and `$inc` / `$dec` / `$mul` on one reached the server before failing there. `/meta.type` now keeps `db.column.derived`, and preflight follows the server's rules — see [Client-Side Validation](/http/client#validation). `/meta.fields[path].derived` is unchanged. A controller that overrides `getSerializeOptions()` must keep `db.column.derived` itself to get the fix.
+
 ## 0.1.141 {#v0-1-141}
 
 **Requires `@atscript/typescript` 0.1.95.** A nav field typed with a table declared in the _same_ `.as` file resolves its target through the reference the runtime records for it; 0.1.94 records one only for chain refs and imported types, so with it such a relation resolves to a table named after the type id (and loads nothing) instead of the physical table. Tables referencing each other across files are unaffected. Recompile (`asc`) after upgrading.

@@ -81,6 +81,8 @@ Tables with `@db.column.version` reject any direct write to the version field (p
 
 Since 0.1.128 `db.column.version` sits on the shared plugin's server-managed skip list next to `@db.default*` / `@db.rel.FK`: `insert` / `replace` accept a missing version at ANY depth (nested versioned targets included), on the server AND in `@atscript/db-client` preflight — one builder (`buildDbValidator`), no server-only branch. `undefined` values are pruned before validation, so they never change a verdict versus omission.
 
+`db.column.derived` is on the same skip list (0.1.141) and the plugin rejects `$inc/$dec/$mul` on it. db-client sees it since 0.1.142, when moost-db's `/meta` type stopped stripping the annotation — any annotation the plugin reads must be in `getSerializeOptions()`'s whitelist ([moost-db.md § Meta endpoint shape](moost-db.md#meta-endpoint-shape)) or client preflight silently diverges.
+
 ## Custom validators per adapter
 
 ```ts

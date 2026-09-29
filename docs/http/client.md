@@ -626,6 +626,14 @@ validator.navFields; // Set of navigation field names
 validator.validate(data, "insert"); // throws on failure
 ```
 
+Server-managed fields follow the server's rules, read from the annotations the [`/meta` type](./crud#get-meta) keeps: insert and replace accept a missing `@db.default*`, `@db.rel.FK` or `@db.column.version` field (since 0.1.128) and a missing [derived column](/api/storage#derived-columns) (since 0.1.142), and `$inc` / `$dec` / `$mul` on a derived column is a `ClientValidationError` before any request is sent (since 0.1.142).
+
+```typescript
+// customerId / amount are @db.column.derived (required in the type)
+await orders.insert({ id: 1, status: "open", payload: { customer: { id: "c1" }, total: 3 } }); // ok
+await orders.update({ id: 1, amount: { $inc: 1 } }); // ClientValidationError at "amount"
+```
+
 Patch preflight is **merge-aware** (since 0.1.124), mirroring the server's update validation exactly: a nested [`@db.patch.strategy 'merge'`](../api/update-patch#embedded-object-patches) block validates as a deep partial — absent required keys (e.g. server-stamped fields) pass, present keys are still type-checked — while non-merge nested objects keep full validation, since they are `$set` as a whole. Insert and replace always validate the full shape.
 
 ### Lenient writes (projected metas) {#lenient-writes}
