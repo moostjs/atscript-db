@@ -43,10 +43,11 @@ function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> 
  * can't be told apart).
  *
  * The overlay resolves BEFORE the ids — i.e. before the request body is
- * read. Moost's HTTP adapter releases the event's DI scope when the request
- * stream ends, so a `transformFilter` / `transformOne` that instantiates a
- * `FOR_EVENT` dependency (an ARBAC user provider) fails with "scope isn't
- * registered" once the body has been consumed.
+ * read. Moost ≤ 0.6.39 released the event's DI scope when the request stream
+ * ended, so a `transformFilter` / `transformOne` instantiating a `FOR_EVENT`
+ * dependency (an ARBAC user provider) failed with "scope isn't registered"
+ * after the body was consumed; since 0.6.42 the scope outlives the response
+ * and the handler, and the order is kept for fail-fast authorization.
  */
 async function loadRow(ctx: EventContext): Promise<unknown> {
   const overlay = await ctx.get(dbActionOverlaySlot);

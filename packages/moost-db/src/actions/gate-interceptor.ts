@@ -31,9 +31,8 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
     const ctx = current();
     // The controller's `prepareRequest` first (since 0.1.143) — before any
     // id is validated or row loaded — then its row overlay, before the body
-    // is read: moost-http drops the event's DI scope once the request stream
-    // ends, so an overlay resolving a `FOR_EVENT` dependency must not run
-    // after the ids are parsed.
+    // is read: authorize before parsing input (moost ≤ 0.6.39 also dropped
+    // the event's DI scope once the request stream ended).
     await awaitActionPrepared(ctx);
     injectBoundTable(table);
     await ctx.get(dbActionOverlaySlot);
