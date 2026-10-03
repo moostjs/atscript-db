@@ -188,6 +188,7 @@ export const sqliteDialect: SqlDialect = {
   // queries before this renders.
   calendarBucket: sqliteCalendarBucket,
   jsonExtract: sqliteJsonExtract,
+  castDouble: (expr: string) => `CAST(${expr} AS REAL)`,
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
 

@@ -8,13 +8,22 @@ import type {
   AtscriptRef,
   AtscriptQueryNode,
   AtscriptQueryFieldRef,
+  AtscriptExprNode,
+  AtscriptOrderItem,
 } from "@atscript/typescript/utils";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import type { NullableOptional } from "../types";
 import { AtscriptDbReadable } from "./db-readable";
-import type { TViewPlan, TViewJoin } from "../query/query-tree";
-import { SUPPORTED_AGGREGATE_FNS, type TDbAggregateFn } from "../query/aggregate-fns";
+import {
+  computeOf,
+  computedOperands,
+  viewExprNullable,
+  walkViewExpr,
+  type TViewPlan,
+  type TViewJoin,
+} from "../query/query-tree";
+import { AGG_ANNOTATIONS, type TDbAggregateFn } from "../query/aggregate-fns";
 import { resolveViewSource, sourceFieldSeals, viewSourceOf, type TViewSource } from "./view-source";
 import { isJsonLeafType } from "../shared/derived-rules";
 import { tableNameOf } from "../rel/relation-helpers";
@@ -66,10 +75,37 @@ export interface TViewColumnMapping {
    * `@db.view.filter` (entry table + joins). @since 0.1.136
    */
   aggFilter?: AtscriptQueryNode;
+  /**
+   * A computed column (`@db.compute`): the arithmetic expression, its leaves
+   * naming the view's own fields by {@link viewPath}. Such a mapping reads no
+   * source column — `sourceTable` is the entry table and `sourceColumn` is
+   * `""` (unused). Renderers evaluate it in IEEE double with division by zero
+   * → NULL; `nullable` is set when the expression may be NULL.
+   * @since 0.1.147
+   */
+  expr?: AtscriptExprNode;
+}
+
+/**
+ * The single `@meta.id` field of a first-row join target (through
+ * `@db.alias`) — the anchor of the join's correlated subquery.
+ * @throws when the target declares no or several primary-key fields.
+ */
+function firstJoinKey(view: string, target: TAtscriptAnnotatedType, scope: string): string {
+  const type = viewSourceOf(target).type;
+  const ids =
+    type.type.kind === "object"
+      ? [...type.type.props.entries()].filter(([, p]) => p.metadata.has("meta.id"))
+      : [];
+  if (ids.length !== 1) {
+    throw new Error(
+      `View "${view}": the first-row join on "${scope}" needs a target with exactly one @meta.id field (found ${ids.length})`,
+    );
+  }
+  return ids[0][0];
 }
 
 /** The `@db.agg.*` annotations, one per supported aggregate function. */
-const AGG_KEYS = SUPPORTED_AGGREGATE_FNS.map((fn) => `db.agg.${fn}` as const);
 
 /** An aggregate column's function, source field and (conditional) row predicate. */
 interface TViewAgg {
@@ -87,7 +123,7 @@ interface TViewAgg {
 function readViewAgg(
   metadata: TAtscriptAnnotatedType["metadata"] | undefined,
 ): TViewAgg | undefined {
-  for (const key of AGG_KEYS) {
+  for (const key of AGG_ANNOTATIONS) {
     const val = metadata?.get(key as any) as
       | true
       | string
@@ -177,7 +213,9 @@ function inheritViewFieldSeals(viewType: TAtscriptAnnotatedType): void {
   try {
     const forRef = viewType.metadata.get("db.view.for") as AtscriptRef | undefined;
     const entryType = forRef && refType(forRef);
-    for (const [fieldName, fieldType] of viewType.type.props.entries()) {
+    const props = viewType.type.props;
+    for (const [fieldName, fieldType] of props.entries()) {
+      if (computeOf(fieldType) !== undefined) continue; // second pass
       const { agg, sourceType, sourcePath } = viewFieldSource(fieldName, fieldType, entryType);
       // COUNT(*) reads no field; an external view's untyped field has no source.
       if (agg?.aggField === "*" || !sourceType) continue;
@@ -193,6 +231,23 @@ function inheritViewFieldSeals(viewType: TAtscriptAnnotatedType): void {
         );
       }
       fieldType.metadata.set("db.encrypted", true);
+    }
+    // Computed columns: write-only when an operand is (transitively, an
+    // intermediate computed field included); an encrypted operand is
+    // rejected — ciphertext cannot be computed.
+    for (const [fieldName, fieldType] of props.entries()) {
+      const via: string[] = [];
+      const operands = computedOperands(viewType, fieldName, via);
+      if (!operands) continue;
+      const encrypted = operands.find((p) => props.get(p)?.metadata.has("db.encrypted"));
+      if (encrypted) {
+        throw new Error(
+          `View "${tableNameOf(viewType)}": @db.compute over the @db.encrypted field "${encrypted}" — ciphertext cannot be computed`,
+        );
+      }
+      if ([...operands, ...via].some((p) => props.get(p)?.metadata.has("db.writeOnly"))) {
+        fieldType.metadata.set("db.writeOnly", true);
+      }
     }
   } catch (error) {
     // Not sealed: every later use of the view reports the same error.
@@ -284,7 +339,12 @@ export class AtscriptDbView<
 
     // Resolve joins from @db.view.joins (array of { target: AtscriptRef, condition: AtscriptQueryNode })
     const rawJoins = metadata.get("db.view.joins") as
-      | Array<{ target: AtscriptRef; condition: AtscriptQueryNode; kind?: "inner" | "left" }>
+      | Array<{
+          target: AtscriptRef;
+          condition: AtscriptQueryNode;
+          kind?: "inner" | "left";
+          order?: AtscriptOrderItem[];
+        }>
       | undefined;
 
     const joins: TViewJoin[] = [];
@@ -292,13 +352,27 @@ export class AtscriptDbView<
       for (const join of rawJoins) {
         const targetType = refType(join.target);
         const target = viewSourceOf(targetType());
-        joins.push({
+        const viewJoin: TViewJoin = {
           targetType: targetType,
           targetTable: target.table,
           scope: target.name,
           condition: join.condition,
           kind: join.kind === "left" ? "left" : "inner",
-        });
+        };
+        if (join.order?.length) {
+          // A first-row join: keys are fields of the target (qualified with
+          // it), the primary key appended as the final tie-break
+          const key = firstJoinKey(this.tableName, targetType(), target.name);
+          const order = join.order.map((item) => ({
+            ref: { type: targetType, field: item.ref.field },
+            desc: item.desc === true,
+          }));
+          if (!order.some((item) => item.ref.field === key)) {
+            order.push({ ref: { type: targetType, field: key }, desc: false });
+          }
+          viewJoin.first = { order, key };
+        }
+        joins.push(viewJoin);
       }
     }
 
@@ -421,6 +495,18 @@ export class AtscriptDbView<
       if (ignored.has(fieldName)) {
         continue;
       }
+      const expr = computeOf(fieldType);
+      if (expr !== undefined) {
+        // A computed column reads no source column (validated below)
+        mappings.push({
+          viewColumn: viewName(fieldName) ?? fieldName,
+          viewPath: fieldName,
+          sourceTable: plan.entryTable,
+          sourceColumn: "",
+          expr,
+        });
+        continue;
+      }
       // Source: the chain ref, else the aggregate's field, else the same name on the entry table
       const { agg, chained, sourceType, sourcePath } = viewFieldSource(
         fieldName,
@@ -479,7 +565,48 @@ export class AtscriptDbView<
       mappings.push(agg ? { ...mapping, ...agg } : mapping);
     }
 
+    this._checkComputed(mappings, fail);
     return mappings;
+  }
+
+  /**
+   * The runtime twin of the compile-time `@db.compute` rules the renderers
+   * rely on: every leaf names a (non-ignored) view column, computed columns
+   * form no cycle; sets each computed mapping's `nullable`.
+   */
+  private _checkComputed(
+    mappings: TViewColumnMapping[],
+    fail: (field: string, message: string) => never,
+  ): void {
+    const computed = mappings.filter((m) => m.expr !== undefined);
+    if (computed.length === 0) return;
+    const byPath = new Map(mappings.map((m) => [m.viewPath, m]));
+    const props = this._type.type.kind === "object" ? this._type.type.props : undefined;
+    const state = new Map<string, "visiting" | "done">();
+    const visit = (m: TViewColumnMapping, chain: string[]): void => {
+      if (state.get(m.viewPath) === "done") return;
+      if (state.get(m.viewPath) === "visiting") {
+        fail(m.viewPath, `@db.compute depends on itself: ${[...chain, m.viewPath].join(" → ")}`);
+      }
+      state.set(m.viewPath, "visiting");
+      walkViewExpr(m.expr!, (path) => {
+        const leaf = byPath.get(path);
+        if (!leaf) {
+          fail(m.viewPath, `@db.compute references "${path}", which is not a column of the view`);
+        }
+        if (leaf.expr !== undefined) visit(leaf, [...chain, m.viewPath]);
+      });
+      state.set(m.viewPath, "done");
+      // VC6: a computed leaf by its own expression, any other by the field's optionality
+      const nullable = viewExprNullable(m.expr!, (path) => {
+        const leaf = byPath.get(path)!;
+        return leaf.expr === undefined
+          ? props?.get(path)?.optional === true
+          : leaf.nullable === true;
+      });
+      if (nullable) m.nullable = true;
+    };
+    for (const m of computed) visit(m, []);
   }
 
   /** One view column over one physical source (a column or a JSON leaf). */

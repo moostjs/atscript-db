@@ -131,6 +131,10 @@ On SQL, each one becomes `FN(CASE WHEN <condition> THEN <field> END)`. On MongoD
 Without a condition, a group whose values are all null sums to `NULL` on SQL and to `0` on MongoDB. This is a long-standing difference between the engines and is unchanged. Use a conditional `sum` when you need `0` everywhere.
 :::
 
+## Derived Ratios
+
+There is no `sum(a) / count(*)` inside one annotation. Declare each aggregate as its own field and divide them in a [computed column](./computed-columns) (since 0.1.147): `` @db.compute `total / n` `` — division by zero is `NULL`, never an error.
+
 ## The GROUP BY Pattern
 
 When a view contains aggregation annotations, non-aggregated fields automatically become `GROUP BY` columns. This is how the database knows how to group the data before computing aggregates.

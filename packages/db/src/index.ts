@@ -64,7 +64,8 @@ export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";
 export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
-export { BaseDbAdapter, ALL_BUCKET_UNITS } from "./base-adapter";
+export { BaseDbAdapter, ALL_BUCKET_UNITS, ALL_VIEW_CAPABILITIES } from "./base-adapter";
+export type { TViewCapability } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
@@ -72,6 +73,8 @@ export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { translateQueryTree, isFieldRef } from "./query/query-tree";
+// ── Since 0.1.147 ────────────────────────────────────────────────────────────
+export { walkViewExpr } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
 export { aliasTargetOf } from "./table/view-source";
@@ -83,6 +86,8 @@ export type {
   AtscriptQueryFieldRef,
   AtscriptQueryComparison,
   AtscriptRef,
+  AtscriptExprNode,
+  AtscriptOrderItem,
 } from "./query/query-tree";
 export type {
   DbQuery,

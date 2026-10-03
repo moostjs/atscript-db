@@ -6,6 +6,7 @@ import type {
 } from "@atscript/typescript/utils";
 import {
   ALL_AGGREGATE_FNS,
+  ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
@@ -46,6 +47,7 @@ import type {
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
 import type { AggregateFn, BucketUnit } from "@uniqu/core";
+import type { TViewCapability } from "@atscript/db";
 import { dedupeProjection } from "./projection-dedupe";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
@@ -405,6 +407,11 @@ export class MongoAdapter extends BaseDbAdapter {
   /** Every aggregate function, `countDistinct` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Computed view columns and first-row joins. */
+  override viewCapabilities(): ReadonlySet<TViewCapability> {
+    return ALL_VIEW_CAPABILITIES;
   }
 
   /**

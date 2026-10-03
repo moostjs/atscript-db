@@ -61,6 +61,8 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // unlocks @db.pg.*
 | Calendar buckets                         | All units (since 0.1.132): `AT TIME ZONE '<tz>'` + date math, independent of session `TimeZone`. Zone unknown to server tzdata → `BUCKET_TZ_UNAVAILABLE` (501). → [calendar-buckets.md](calendar-buckets.md)                                                                                                                                                                                               |
 | Native defaults                          | `supportsNativeValueDefaults: true`. `nativeDefaultFns`: `now`, `uuid`, `increment` — DB emits `DEFAULT` clauses for these.                                                                                                                                                                                                                                                                                |
 
+Views (0.1.147): first-row joins → correlated subquery in `ON` (`pk = (SELECT pk … ORDER BY … LIMIT 1)`); computed columns → `CAST(x AS DOUBLE PRECISION)` (no integer division); first-row order keys render `ASC NULLS FIRST` / `DESC NULLS LAST` — index `(key, col NULLS FIRST, pk)` or keep keys required, `NULLIF(divisor, 0)`. See `tables-and-views.md § First-row joins / Computed columns`.
+
 ## `@db.pg.*` annotations
 
 | Annotation       | Target            | Args                | Effect                                                                                         |

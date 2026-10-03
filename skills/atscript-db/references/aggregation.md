@@ -52,6 +52,8 @@ await orders.aggregate({
 | 12  | A known `$fn` the adapter doesn't list in `aggregateFns()` → `DbError("AGG_FN_NOT_SUPPORTED")`, `Aggregate function "countDistinct" is not supported by this adapter`, HTTP 400, before dispatch. Every built-in adapter supports all six; `/meta.aggregateFns` lists them.                                                                                                                                                                                                            |
 | 13  | `countDistinct` distinctness follows collation: MySQL `*_ci` counts `'A'`/`'a'` once; PG / SQLite / Mongo case-sensitive. Mongo builds an in-memory `$addToSet` per group (100 MB `$group` limit on huge cardinalities).                                                                                                                                                                                                                                                               |
 
+Runtime arithmetic in `$select` / `$sort` (e.g. `sum(a) / count(*)`, a weighted rank) is NOT supported — declare it in a view: two `@db.agg.*` fields + `@db.compute` (0.1.147) → an ordinary sortable / filterable column. See [tables-and-views.md § Computed columns](tables-and-views.md#computed-columns-01147).
+
 ## `$search` on an aggregate query (since 0.1.130)
 
 Search narrows the ROWS, `$groupBy` shapes what is left — the adapter applies the search predicate BEFORE grouping, so a rollup describes exactly the rows the same `$search` returns in the leaf list. `$count` counts the groups those rows form (still after `$having`). Up to 0.1.129 every adapter with native text search silently DISCARDED the term on the aggregate path.

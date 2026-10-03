@@ -103,6 +103,7 @@ Schema sync manages the lifecycle of managed and materialized views:
 - **Creation** — managed views are created as `CREATE VIEW` statements during sync. If a **physical table** already exists under the view's name, sync refuses the run instead of skipping the view (since 0.1.128).
 - **Updates** — views are dropped and recreated when their definition changes (there is no `ALTER VIEW`). The definition is the entry table, the joins **and their `ON` conditions**, `@db.view.filter`, `@db.view.having`, the materialized flag and the field set (since 0.1.128; before, join conditions and `having` were not part of it). `@db.ignore` fields are not part of the definition and are not selected by the generated `CREATE VIEW`.
 - **Views over views** — a view is created after the views it reads and recreated with them; see [What gets synced → Views](/sync/what-gets-synced#views-that-read-views).
+- **First-row joins and computed columns** (since 0.1.147) — the ordering of a [first-row join](./#first-row-joins) (keys, directions, the appended primary key) and every [computed column](./computed-columns) expression are part of the definition: changing one recreates the view. They are recorded only when present, so views without them hash exactly as before — upgrading recreates nothing. An adapter whose `viewCapabilities()` lacks the feature makes sync refuse the view.
 - **Renames** — track view renames with `@db.view.renamed` so sync drops the view under its old name and creates it under the new one (instead of leaving the old view behind):
 
 ```atscript

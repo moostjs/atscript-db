@@ -219,3 +219,229 @@ describe("buildCreateView — view sources and join aliases", () => {
     );
   });
 });
+
+// Computed columns and first-row joins (since 0.1.147).
+describe("buildCreateView — computed columns and first-row joins", () => {
+  const dq = (n: string) => `"${n}"`;
+  const sqlite: SqlDialect = {
+    ...base,
+    quoteIdentifier: dq,
+    quoteTable: dq,
+    castDouble: (e) => `CAST(${e} AS REAL)`,
+  };
+  const mysql: SqlDialect = {
+    ...base,
+    quoteIdentifier: (n) => `\`${n}\``,
+    quoteTable: (n) => `\`${n}\``,
+    bucketAliasInHaving: true,
+    castDouble: (e) => `CAST(${e} AS DOUBLE)`,
+  };
+  const pg: SqlDialect = {
+    ...base,
+    quoteIdentifier: dq,
+    quoteTable: dq,
+    castDouble: (e) => `CAST(${e} AS DOUBLE PRECISION)`,
+    nullsSortLargest: true,
+  };
+
+  /** A type getter whose `id` is the scope name, like a compiled `@db.alias` type. */
+  const typeOf = (id: string) => () => ({ id }) as any;
+  /** `Scope.field` → quoted `scope.column` (camelCase → snake_case, entry for unqualified). */
+  const resolverFor =
+    (d: SqlDialect) =>
+    (ref: { type?: () => { id?: string }; field: string }): string =>
+      `${d.quoteIdentifier(ref.type?.().id ?? "tickets")}.${d.quoteIdentifier(
+        ref.field.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`),
+      )}`;
+
+  const col = (viewPath: string, extra: Partial<TViewColumnMapping>): TViewColumnMapping => ({
+    viewColumn: viewPath,
+    viewPath,
+    sourceTable: "tickets",
+    sourceColumn: viewPath,
+    ...extra,
+  });
+
+  const grouped: TViewColumnMapping[] = [
+    col("id", {}),
+    col("openCount", { sourceTable: "Issue", sourceColumn: "id", aggFn: "count", aggField: "id" }),
+    col("estimate", {
+      sourceTable: "Issue",
+      sourceColumn: "estimate",
+      aggFn: "sum",
+      aggField: "estimate",
+    }),
+    col("rank", {
+      sourceColumn: "",
+      expr: { op: "+", args: [{ op: "*", args: [{ field: "openCount" }, 10] }, { field: "id" }] },
+    }),
+    col("avg", {
+      sourceColumn: "",
+      expr: { op: "/", args: [{ field: "estimate" }, { field: "openCount" }] },
+    }),
+    col("score", {
+      sourceColumn: "",
+      expr: {
+        op: "coalesce",
+        args: [{ op: "neg", args: [{ op: "-", args: [{ field: "rank" }, -1] }] }, 0],
+      },
+    }),
+  ];
+  const plan = (extra: Partial<TViewPlan> = {}): TViewPlan => ({
+    entryType: typeOf("tickets"),
+    entryTable: "tickets",
+    joins: [
+      {
+        targetType: typeOf("Issue"),
+        targetTable: "issues",
+        scope: "Issue",
+        condition: {
+          left: { type: typeOf("Issue"), field: "ticketId" },
+          op: "$eq",
+          right: { field: "id" },
+        },
+        kind: "left",
+      },
+    ],
+    materialized: false,
+    ...extra,
+  });
+
+  it("renders computed columns in double with NULLIF, parens and coalesce; keeps them out of GROUP BY", () => {
+    expect(buildCreateView(sqlite, "q", plan(), grouped, resolverFor(sqlite))).toBe(
+      'CREATE VIEW "q" AS SELECT "tickets"."id" AS "id", COUNT("Issue"."id") AS "openCount", ' +
+        'SUM("Issue"."estimate") AS "estimate", ' +
+        '((CAST(COUNT("Issue"."id") AS REAL) * CAST(10 AS REAL)) + CAST("tickets"."id" AS REAL)) AS "rank", ' +
+        '(CAST(SUM("Issue"."estimate") AS REAL) / NULLIF(CAST(COUNT("Issue"."id") AS REAL), 0)) AS "avg", ' +
+        'COALESCE((-(((CAST(COUNT("Issue"."id") AS REAL) * CAST(10 AS REAL)) + CAST("tickets"."id" AS REAL)) - CAST(-1 AS REAL))), CAST(0 AS REAL)) AS "score" ' +
+        'FROM "tickets" LEFT JOIN "issues" AS "Issue" ON "Issue"."ticket_id" = "tickets"."id" ' +
+        'GROUP BY "tickets"."id"',
+    );
+  });
+
+  it("HAVING on a computed column: MySQL references the alias, PostgreSQL the expression", () => {
+    const having = { left: { field: "rank" }, op: "$gte", right: 10 };
+    expect(buildCreateView(mysql, "q", plan({ having }), grouped, resolverFor(mysql))).toContain(
+      "GROUP BY `tickets`.`id` HAVING `rank` >= 10",
+    );
+    expect(buildCreateView(pg, "q", plan({ having }), grouped, resolverFor(pg))).toContain(
+      'HAVING ((CAST(COUNT("Issue"."id") AS DOUBLE PRECISION) * CAST(10 AS DOUBLE PRECISION)) + CAST("tickets"."id" AS DOUBLE PRECISION)) >= 10',
+    );
+  });
+
+  it("a JSON-extracted dimension leaf reads MIN(<extract>) in a grouped view only", () => {
+    const json: SqlDialect = { ...sqlite, jsonExtract: (c, path) => `JX(${c},${path.join(".")})` };
+    const level = col("level", { sourceColumn: "meta", json: { path: ["level"], type: "number" } });
+    const score = col("score", {
+      sourceColumn: "",
+      expr: { op: "*", args: [{ field: "level" }, 2] },
+    });
+    const n = col("n", { sourceColumn: "*", aggFn: "count", aggField: "*" });
+    const p = plan({ joins: [] });
+    expect(buildCreateView(json, "q", p, [level, n, score], resolverFor(json))).toContain(
+      '(CAST(MIN(JX("tickets"."meta",level)) AS REAL) * CAST(2 AS REAL)) AS "score"',
+    );
+    expect(buildCreateView(json, "q", p, [level, score], resolverFor(json))).toContain(
+      '(CAST(JX("tickets"."meta",level) AS REAL) * CAST(2 AS REAL)) AS "score"',
+    );
+  });
+
+  it("throws for a computed column on a dialect without castDouble", () => {
+    expect(() =>
+      buildCreateView(
+        { ...sqlite, castDouble: undefined },
+        "q",
+        plan(),
+        grouped,
+        resolverFor(sqlite),
+      ),
+    ).toThrow('View column "rank": computed view columns are not supported by this adapter');
+  });
+
+  const firstRow = () =>
+    plan({
+      joins: [
+        {
+          targetType: typeOf("Oldest"),
+          targetTable: "issues",
+          scope: "Oldest",
+          condition: {
+            $and: [
+              {
+                left: { type: typeOf("Oldest"), field: "ticketId" },
+                op: "$eq",
+                right: { field: "id" },
+              },
+              { left: { type: typeOf("Oldest"), field: "status" }, op: "$eq", right: "open" },
+            ],
+          },
+          kind: "left",
+          first: {
+            order: [
+              { ref: { type: typeOf("Oldest"), field: "raisedAt" }, desc: false },
+              { ref: { type: typeOf("Oldest"), field: "severity" }, desc: true },
+              { ref: { type: typeOf("Oldest"), field: "id" }, desc: false },
+            ],
+            key: "id",
+          },
+        },
+        {
+          targetType: typeOf("Reporter"),
+          targetTable: "reporters",
+          scope: "Reporter",
+          condition: {
+            left: { type: typeOf("Reporter"), field: "id" },
+            op: "$eq",
+            right: { type: typeOf("Oldest"), field: "reporterId" },
+          },
+          kind: "left",
+        },
+      ],
+    });
+  const flat = [
+    col("id", {}),
+    col("oldestTitle", { sourceTable: "Oldest", sourceColumn: "title" }),
+  ];
+
+  it("renders a first-row join as a correlated scalar subquery reusing the alias (shadowing)", () => {
+    expect(buildCreateView(sqlite, "q", firstRow(), flat, resolverFor(sqlite))).toBe(
+      'CREATE VIEW "q" AS SELECT "tickets"."id" AS "id", "Oldest"."title" AS "oldestTitle" FROM "tickets" ' +
+        'LEFT JOIN "issues" AS "Oldest" ON "Oldest"."id" = (SELECT "Oldest"."id" FROM "issues" AS "Oldest" ' +
+        `WHERE "Oldest"."ticket_id" = "tickets"."id" AND "Oldest"."status" = 'open' ` +
+        'ORDER BY "Oldest"."raised_at" ASC, "Oldest"."severity" DESC, "Oldest"."id" ASC LIMIT 1) ' +
+        'LEFT JOIN "reporters" AS "Reporter" ON "Reporter"."id" = "Oldest"."reporter_id"',
+    );
+  });
+
+  it("renders NULLS FIRST / NULLS LAST on PostgreSQL only", () => {
+    expect(buildCreateView(pg, "q", firstRow(), flat, resolverFor(pg))).toContain(
+      'ORDER BY "Oldest"."raised_at" ASC NULLS FIRST, "Oldest"."severity" DESC NULLS LAST, "Oldest"."id" ASC NULLS FIRST LIMIT 1)',
+    );
+    expect(buildCreateView(mysql, "q", firstRow(), flat, resolverFor(mysql))).toContain(
+      "ORDER BY `Oldest`.`raised_at` ASC, `Oldest`.`severity` DESC, `Oldest`.`id` ASC LIMIT 1)",
+    );
+  });
+
+  it("a non-aliased first-row join repeats the plain table name in the inner FROM", () => {
+    const p = firstRow();
+    p.joins = [
+      {
+        ...p.joins[0],
+        targetType: typeOf("issues"),
+        scope: "issues",
+        first: {
+          order: [{ ref: { type: typeOf("issues"), field: "id" }, desc: false }],
+          key: "id",
+        },
+        condition: {
+          left: { type: typeOf("issues"), field: "ticketId" },
+          op: "$eq",
+          right: { field: "id" },
+        },
+      },
+    ];
+    expect(buildCreateView(sqlite, "q", p, [col("id", {})], resolverFor(sqlite))).toContain(
+      'LEFT JOIN "issues" ON "issues"."id" = (SELECT "issues"."id" FROM "issues" WHERE "issues"."ticket_id" = "tickets"."id" ORDER BY "issues"."id" ASC LIMIT 1)',
+    );
+  });
+});

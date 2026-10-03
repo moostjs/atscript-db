@@ -451,6 +451,29 @@ class MyAdapter extends BaseDbAdapter {
 }
 ```
 
+#### `viewCapabilities()` — since 0.1.147 {#view-capabilities}
+
+```typescript
+viewCapabilities(): ReadonlySet<"compute" | "firstJoin">
+```
+
+The managed-view features `ensureView()` renders: `compute` — [computed columns](/views/computed-columns) (`TViewColumnMapping.expr`); `firstJoin` — [first-row joins](/views/#first-row-joins) (`TViewJoin.first`). Schema sync refuses a view that uses a feature missing from the set (`… is not supported by this adapter (viewCapabilities())`). The default is **empty** — fail-closed, so an adapter written before these features never receives a view it would render wrong. Return `ALL_VIEW_CAPABILITIES` (from `@atscript/db`) once you render both:
+
+- **Computed column** — a mapping with `expr` reads no source column (`sourceColumn` is `""`); its leaves name other columns of the same view by `viewPath` (computed leaves included — inline them). Evaluate in IEEE double, `NULL` for a `NULL` operand, `NULL` for division by zero. Keep computed columns out of `GROUP BY`; a `@db.view.having` ref may name one. `walkViewExpr(expr, leaf)` (from `@atscript/db`) visits the leaves.
+- **First-row join** — of the target rows matching `condition`, join only the first by `first.order` (keys qualified with the target, the primary key `first.key` already appended). `NULL` is the smallest value (first in `asc`).
+
+SQL adapters on `@atscript/db-sql-tools` get both from the view builder once the dialect implements `castDouble` ([below](#calendar-buckets)).
+
+```typescript
+import { ALL_VIEW_CAPABILITIES, BaseDbAdapter } from "@atscript/db";
+
+class MyAdapter extends BaseDbAdapter {
+  override viewCapabilities() {
+    return ALL_VIEW_CAPABILITIES;
+  }
+}
+```
+
 ### Derived columns {#derived-columns}
 
 A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141, `field.derived` set on its descriptor) needs work only on SQL adapters. On an adapter whose `supportsNestedObjects()` is `true` the core maps the field to its source path and leaves it out of `columnDescriptors`, so nothing reaches the adapter.
@@ -602,6 +625,9 @@ For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlD
 - **`calendarBucket?(quotedCol: string, b: TResolvedBucket): string`** — the label expression over one column. It must be **parameter-free**: the builders render it in `SELECT`, `GROUP BY` and `HAVING`, and PostgreSQL matches `GROUP BY` expressions structurally. Inline the zone with `sqlTimeZoneLiteral(b.tz)`, which re-checks the name's charset before quoting it. Without this hook the builders throw `BUCKET_NOT_SUPPORTED`.
 - **`bucketAliasInHaving?: boolean`** — render a bucket in `HAVING` by its `SELECT` alias instead of repeating the expression. MySQL needs it (it rejects the raw column there but resolves aliases); PostgreSQL needs the default expression form.
 - **`jsonExtract?(quotedCol: string, path: readonly string[], type: "string" | "number" | "boolean"): string`** — the typed read of one primitive leaf inside a JSON column, used by [view fields that read a JSON leaf](/views/#reading-json-leaves) (since 0.1.136) and, through `derivedColumnExpr`, by [derived columns](#derived-columns) (since 0.1.141). It must be **parameter-free**, because it runs in `CREATE VIEW` and in column DDL. Return the declared type, or `NULL` when the path is missing, the value is JSON `null`, or the value has another JSON type. Never coerce: the JSON string `"5"` is `NULL` for a `number` leaf. Build the path literal from `quotedJsonPathSegments(path)` (exported from `@atscript/db-sql-tools`), which quotes each segment and rejects segments that can't be quoted portably. Without this hook, syncing a view with a JSON-leaf field fails with `JSON extraction is not supported by this adapter`, and so does syncing a table with a derived column.
+
+- **`castDouble?(expr: string): string`** — `expr` as an IEEE double (SQLite `CAST(x AS REAL)`, MySQL `CAST(x AS DOUBLE)`, PostgreSQL `CAST(x AS DOUBLE PRECISION)`), parameter-free. The view builder casts every operand of a [computed column](/views/computed-columns) with it (since 0.1.147); without it, syncing a view with a computed column fails with `computed view columns are not supported by this adapter`.
+- **`nullsSortLargest?: boolean`** — set when the database sorts `NULL` as the largest value (PostgreSQL): first-row join order keys then render `ASC NULLS FIRST` / `DESC NULLS LAST`, keeping `NULL` the smallest value everywhere (since 0.1.147).
 
 `groupKeySql(dialect, controls, key)` renders a `$groupBy` key — the bucket expression for a bucket alias, the quoted column otherwise.
 

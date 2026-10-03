@@ -107,16 +107,16 @@ Rules:
 
 ## Views
 
-| Annotation              | Target     | Args                                                     | Effect                                                                                                                                                                                                                                             |
-| ----------------------- | ---------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.view`              | Interface  | `name?: string`                                          | Mark as view (mutually exclusive with `@db.table`).                                                                                                                                                                                                |
-| `@db.view.for`          | Interface  | `entry: ref`                                             | Primary (entry) source for a managed view: a `@db.table` or a `@db.view` (0.1.141); never a `@db.alias`.                                                                                                                                           |
-| `@db.view.joins`        | Interface  | `target: ref, condition: expr, kind?: 'inner' \| 'left'` | Repeatable joins, applied in order; default inner. Target = table, view or `@db.alias`. See `tables-and-views.md § Join rules`.                                                                                                                    |
-| `@db.alias`             | Type alias | `target: ref`                                            | `@db.alias Employee` + `export type Manager = Employee`: a join scope name for a second join / self-join (0.1.141). Never a runtime entity: no `db.table` / `db.view` metadata, skipped by `syncSchema`. See `tables-and-views.md § Join aliases`. |
-| `@db.view.filter`       | Interface  | `expr`                                                   | WHERE clause.                                                                                                                                                                                                                                      |
-| `@db.view.having`       | Interface  | `expr`                                                   | HAVING clause (post-aggregation); refs = the view's own fields, unqualified (compile error otherwise, 0.1.141).                                                                                                                                    |
-| `@db.view.materialized` | Interface  | —                                                        | Materialize the view at DB level.                                                                                                                                                                                                                  |
-| `@db.view.renamed`      | Interface  | `oldName: string`                                        | Rename during sync.                                                                                                                                                                                                                                |
+| Annotation              | Target     | Args                                                                    | Effect                                                                                                                                                                                                                                             |
+| ----------------------- | ---------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.view`              | Interface  | `name?: string`                                                         | Mark as view (mutually exclusive with `@db.table`).                                                                                                                                                                                                |
+| `@db.view.for`          | Interface  | `entry: ref`                                                            | Primary (entry) source for a managed view: a `@db.table` or a `@db.view` (0.1.141); never a `@db.alias`.                                                                                                                                           |
+| `@db.view.joins`        | Interface  | `target: ref, condition: expr, kind?: 'inner' \| 'left', order?: order` | Repeatable joins, applied in order; default inner. Target = table, view or `@db.alias`. See `tables-and-views.md § Join rules`. 4th arg `` `key [asc\|desc], …` `` = first-row join (0.1.147) → `tables-and-views.md § First-row joins`.           |
+| `@db.alias`             | Type alias | `target: ref`                                                           | `@db.alias Employee` + `export type Manager = Employee`: a join scope name for a second join / self-join (0.1.141). Never a runtime entity: no `db.table` / `db.view` metadata, skipped by `syncSchema`. See `tables-and-views.md § Join aliases`. |
+| `@db.view.filter`       | Interface  | `expr`                                                                  | WHERE clause.                                                                                                                                                                                                                                      |
+| `@db.view.having`       | Interface  | `expr`                                                                  | HAVING clause (post-aggregation); refs = the view's own fields, unqualified (compile error otherwise, 0.1.141).                                                                                                                                    |
+| `@db.view.materialized` | Interface  | —                                                                       | Materialize the view at DB level.                                                                                                                                                                                                                  |
+| `@db.view.renamed`      | Interface  | `oldName: string`                                                       | Rename during sync.                                                                                                                                                                                                                                |
 
 ## Aggregation (view fields only)
 
@@ -140,6 +140,19 @@ Conditional aggregates (2nd arg, 0.1.136) — `FN(CASE WHEN cond THEN field END)
 | 5   | countDistinct: field required; result field `number`; distinctness follows collation (MySQL `*_ci`: `'A'` = `'a'`; PG / SQLite / Mongo case-sensitive). Mongo uses `$addToSet` (in-memory set per group).     |
 | 6   | Unconditional SUM over only-null values: NULL on SQL, 0 on Mongo (unchanged). Want 0 everywhere → conditional sum.                                                                                            |
 | 7   | Compiled metadata `db.agg.*` = `{ field?, condition? }`; older models carry a string / `true` — runtime reads all shapes, tooling reading the metadata must too.                                              |
+
+## Computed columns (view fields only, 0.1.147)
+
+`` @db.compute `<expr>` `` on a field of a `@db.view.for` view — arithmetic over the view's OWN fields (unqualified). Grammar: `+ - * /`, unary `-`, `( )`, numbers, `coalesce(a, b, …)`; nothing else. Details → `tables-and-views.md § Computed columns`.
+
+| #   | Rule (compile time)                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ |
+| VC1 | Field typed exactly `number`; not with `@db.agg.*` / `@db.json` / `@db.ignore`; only on a `@db.view.for` view.                 |
+| VC2 | Refs = unqualified view fields. `Issue.severity` → error: declare `severity: Issue.severity` and reference `severity`.         |
+| VC3 | Operands are `number` — not `decimal`, not `number.timestamp` / `created` / `updated`, not string / boolean, not `@db.ignore`. |
+| VC4 | No self-reference / cycle among computed fields.                                                                               |
+| VC5 | At least one field ref (no constant columns).                                                                                  |
+| VC6 | May be NULL (`/`, or an optional operand; `coalesce` only if all args may) → field must be optional (`avg?: number`).          |
 
 ## Quantity tagging (currency / unit)
 

@@ -221,6 +221,7 @@ const schemaApiSidebar = [
       { text: "View Types", link: "/views/view-types" },
       { text: "Aggregation Annotations", link: "/views/aggregations" },
       { text: "Aggregation Views", link: "/views/aggregation-views" },
+      { text: "Computed Columns", link: "/views/computed-columns" },
       { text: "Text Search", link: "/search/" },
       { text: "Vector Search", link: "/search/vector-search" },
       { text: "Geo Search", link: "/search/geo-search" },

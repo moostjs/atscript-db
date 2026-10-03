@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
-import { DbSpace, BaseDbAdapter, AtscriptDbTable, NoopLogger } from "../index";
+import {
+  DbSpace,
+  BaseDbAdapter,
+  AtscriptDbTable,
+  NoopLogger,
+  ALL_VIEW_CAPABILITIES,
+} from "../index";
 import { planSchema, SchemaSync, syncSchema, SyncEntry, type TSyncResult } from "../sync";
 import type {
   TDbInsertResult,
@@ -3109,6 +3115,34 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
       'View "vg_stats" field "buyers": aggregate "countDistinct" is not supported by this adapter (aggregateFns())',
       'View "vg_stats" field "bigBuyers": aggregate "countDistinct" is not supported by this adapter (aggregateFns())',
     ]);
+  });
+
+  it("refuses computed columns and first-row joins the adapter does not render (viewCapabilities())", async () => {
+    const ve = await import("./fixtures/view-expr.as");
+    const sync = new SchemaSync(createSpace());
+    const result = await sync.run([ve.VeTicket, ve.VeIssue, ve.VeQueue], {
+      force: true,
+      onError: "silent",
+    });
+    expect(result.status).toBe("refused");
+    expect(result.entries.find((e) => e.name === "ve_queue")!.errors).toEqual([
+      'View "ve_queue" field "rank": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())',
+      'View "ve_queue" field "avgEstimate": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())',
+      'View "ve_queue" field "priority": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())',
+      'View "ve_queue" join "VeOldest": first-row joins are not supported by this adapter (viewCapabilities())',
+    ]);
+
+    class CapableAdapter extends MockAdapter {
+      override viewCapabilities() {
+        return ALL_VIEW_CAPABILITIES;
+      }
+    }
+    const capable = new SchemaSync(createSpaceOf(() => new CapableAdapter()));
+    const ok = await capable.run([ve.VeTicket, ve.VeIssue, ve.VeQueue], {
+      force: true,
+      onError: "silent",
+    });
+    expect(ok.status).toBe("synced");
   });
 
   it("refuses when a physical table sits where a managed view is declared (and vice versa)", async () => {

@@ -12,7 +12,7 @@ import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./mongo-accumulator";
 import { buildMongoFilter } from "./mongo-filter";
 import { JOINED_PREFIX } from "./mongo-types";
-import { orNull, queryNodeToExpr } from "./mongo-view-expr";
+import { exprToMongo, orNull, queryNodeToExpr } from "./mongo-view-expr";
 
 /** Where a joined table's document lands (`$lookup.as`, then unwound). */
 function joinedAs(table: string): string {
@@ -81,6 +81,22 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
   // `$group` key it merges missing with null into ONE group.
   const colValue = (col: TViewColumnMapping): unknown =>
     col.nullable ? orNull(colSourceField(col)) : colSourceField(col);
+  // A computed column's expression, `leaf` rendering a non-computed operand
+  // column; computed operands are inlined, each rendered once (one `leaf`
+  // mode per pipeline: grouped or flat)
+  const byPath = new Map(columns.map((c) => [c.viewPath, c]));
+  const rendered = new Map<string, unknown>();
+  const computedExpr = (col: TViewColumnMapping, leaf: (c: TViewColumnMapping) => unknown) => {
+    let out = rendered.get(col.viewPath);
+    if (out === undefined) {
+      out = exprToMongo(col.expr!, (path) => {
+        const c = byPath.get(path)!;
+        return c.expr === undefined ? leaf(c) : computedExpr(c, leaf);
+      });
+      rendered.set(col.viewPath, out);
+    }
+    return out;
+  };
 
   if (columns.some((c) => c.aggFn)) {
     // $group stage — dimension columns into _id, aggregates as accumulators
@@ -88,8 +104,15 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
     const project: Record<string, unknown> = { _id: 0 };
 
     const distinctSizes: Record<string, unknown> = {};
+    const computed: Record<string, unknown> = {};
     for (const col of columns) {
-      if (col.aggFn) {
+      if (col.expr !== undefined) {
+        // After `$group`: aggregates are top-level, dimensions under `_id`
+        computed[col.viewColumn] = computedExpr(col, (c) =>
+          c.aggFn ? `$${c.viewColumn}` : `$_id.${c.viewColumn}`,
+        );
+        project[col.viewColumn] = `$${col.viewColumn}`;
+      } else if (col.aggFn) {
         const predicate = col.aggFilter
           ? queryNodeToExpr(col.aggFilter, (ref) => `$${pathOf(ref)}`)
           : undefined;
@@ -116,17 +139,22 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
     if (Object.keys(distinctSizes).length > 0) {
       pipeline.push({ $addFields: distinctSizes });
     }
+    // Computed columns over the group's values (sizes included), BEFORE HAVING
+    if (Object.keys(computed).length > 0) {
+      pipeline.push({ $addFields: computed });
+    }
 
     // HAVING → $match (post-group filter): aggregates are top-level, dimensions under _id
     if (plan.having) {
-      pipeline.push({ $match: havingMatch(plan.having, columns) });
+      pipeline.push({ $match: havingMatch(plan.having, byPath) });
     }
 
     pipeline.push({ $project: project });
   } else {
     const project: Record<string, unknown> = { _id: 0 };
     for (const col of columns) {
-      project[col.viewColumn] = colValue(col);
+      project[col.viewColumn] =
+        col.expr === undefined ? colValue(col) : computedExpr(col, colValue);
     }
     pipeline.push({ $project: project });
   }
@@ -155,7 +183,8 @@ function buildLookup(
   const scope = join.scope;
   const as = joinedAs(scope);
 
-  const simple = simpleJoinFields(view, join, outer);
+  // A first-row join always takes the pipeline form (it sorts and limits)
+  const simple = join.first ? undefined : simpleJoinFields(view, join, outer);
   if (simple) {
     return { $lookup: { from: join.targetTable, ...simple, as } };
   }
@@ -184,11 +213,21 @@ function buildLookup(
   };
 
   const expr = queryNodeToExpr(join.condition, pathOf);
+  const pipeline: Document[] = [{ $match: { $expr: expr } }];
+  if (join.first) {
+    // The first matching row by the ordering (primary key last); BSON order
+    // puts null / missing first — NULL is the smallest value, as in SQL views
+    const sort: Record<string, 1 | -1> = {};
+    for (const { ref, desc } of join.first.order) {
+      sort[view.resolveRefSource(ref).source.column] = desc ? -1 : 1;
+    }
+    pipeline.push({ $sort: sort }, { $limit: 1 });
+  }
   return {
     $lookup: {
       from: join.targetTable,
       ...(varByPath.size > 0 ? { let: letVars } : {}),
-      pipeline: [{ $match: { $expr: expr } }],
+      pipeline,
       as,
     },
   };
@@ -250,11 +289,14 @@ function viewMatch(node: AtscriptQueryNode, pathOf: (ref: AtscriptQueryFieldRef)
  * `@db.view.having` as a `$match` after `$group`: refs name view fields —
  * aggregates are top-level, dimensions under `_id`.
  */
-function havingMatch(node: AtscriptQueryNode, columns: TViewColumnMapping[]): Document {
-  const colMap = new Map(columns.map((c) => [c.viewPath, c]));
+function havingMatch(
+  node: AtscriptQueryNode,
+  colMap: ReadonlyMap<string, TViewColumnMapping>,
+): Document {
   return viewMatch(node, (ref) => {
     const col = ref.type ? undefined : colMap.get(ref.field);
     if (!col) return ref.field;
-    return col.aggFn ? col.viewColumn : `_id.${col.viewColumn}`;
+    // Aggregates and computed columns are top-level after `$group`
+    return col.aggFn || col.expr !== undefined ? col.viewColumn : `_id.${col.viewColumn}`;
   });
 }

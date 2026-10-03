@@ -686,6 +686,12 @@ Null semantics follow SQL:
 The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the join field required and the condition a single `=` when the joined collection is large.
 :::
 
+### First-row joins and computed columns
+
+Since 0.1.147 a [first-row join](/views/#first-row-joins) always uses the pipeline `$lookup` form, followed by `{ $sort: { <order keys>, <primary key>: 1 } }` and `{ $limit: 1 }` (MongoDB 3.6+). BSON order puts `null` and missing values first, so `NULL` is the smallest order key, as on the SQL adapters.
+
+[Computed columns](/views/computed-columns) render as `$add` / `$subtract` / `$multiply`; `/` is `{ $cond: [{ $eq: [divisor, 0] }, null, { $divide: [...] }] }` (a plain `$divide` by zero is an error), unary minus `$multiply` by `-1`, and `coalesce` nested two-argument `$ifNull` (the multi-argument form needs 5.0). No casts: numeric promotion keeps integers exact and `$divide` returns a double. In a grouped view they are evaluated in an `$addFields` after `$group` (before `@db.view.having`).
+
 ## Limitations
 
 - **FK constraints emulated** — referential integrity is enforced in the generic layer, not by MongoDB itself

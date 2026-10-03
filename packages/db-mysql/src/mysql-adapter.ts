@@ -1,6 +1,7 @@
 import type { TAtscriptAnnotatedType, TMetadataMap } from "@atscript/typescript/utils";
 import {
   ALL_AGGREGATE_FNS,
+  ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
@@ -30,7 +31,14 @@ import type {
   TValueFormatterPair,
   TFieldOps,
 } from "@atscript/db";
-import type { AggregateFn, BucketUnit, DbQuery, FilterExpr, TSearchIndexInfo } from "@atscript/db";
+import type {
+  AggregateFn,
+  BucketUnit,
+  DbQuery,
+  FilterExpr,
+  TSearchIndexInfo,
+  TViewCapability,
+} from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
@@ -314,6 +322,11 @@ export class MysqlAdapter extends BaseDbAdapter {
   /** Every aggregate function, `countDistinct` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Computed view columns and first-row joins. */
+  override viewCapabilities(): ReadonlySet<TViewCapability> {
+    return ALL_VIEW_CAPABILITIES;
   }
 
   // ── Annotation hooks ──────────────────────────────────────────────────────

@@ -38,6 +38,9 @@ export const NULL_WHEN_EMPTY_AGGREGATE_FNS: ReadonlySet<TDbAggregateFn> = new Se
   "max",
 ]);
 
+/** The `@db.agg.*` annotation names, one per supported aggregate function. */
+export const AGG_ANNOTATIONS = SUPPORTED_AGGREGATE_FNS.map((fn) => `db.agg.${fn}` as const);
+
 /** `BaseDbAdapter.aggregateFns()` by default: every function except `countDistinct`. */
 export const BASE_AGGREGATE_FNS: ReadonlySet<TDbAggregateFn> = new Set<TDbAggregateFn>([
   "sum",

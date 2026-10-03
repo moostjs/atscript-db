@@ -1,4 +1,9 @@
-import { isFieldRef, type AtscriptQueryFieldRef, type AtscriptQueryNode } from "@atscript/db";
+import {
+  isFieldRef,
+  type AtscriptExprNode,
+  type AtscriptQueryFieldRef,
+  type AtscriptQueryNode,
+} from "@atscript/db";
 import type { Document } from "mongodb";
 
 /**
@@ -140,4 +145,42 @@ export function queryNodeToExpr(node: AtscriptQueryNode, pathOf: TViewExprPathOf
     return { $eq: [x, value] };
   }
   return guarded([x], { [op]: [x, value] });
+}
+
+/**
+ * A computed view column (`@db.compute`) as an aggregation expression:
+ * `$add` / `$subtract` / `$multiply`; `/` → `$divide` guarded so a zero
+ * divisor yields null (`$divide` by 0 is an error in MongoDB); unary minus →
+ * `$multiply` by -1; `coalesce` → nested two-argument `$ifNull` (the
+ * multi-argument form needs MongoDB 5.0); literals `$literal`. A null or
+ * missing operand yields null, like SQL. No casts — numeric promotion keeps
+ * integers exact and `$divide` always returns a double. `operand` renders a
+ * field leaf (a view path).
+ * @since 0.1.147
+ */
+export function exprToMongo(node: AtscriptExprNode, operand: (path: string) => unknown): unknown {
+  if (typeof node === "number") return { $literal: node };
+  if ("field" in node) return operand(node.field);
+  const args = node.args.map((arg) => exprToMongo(arg, operand));
+  switch (node.op) {
+    case "+": {
+      return { $add: args };
+    }
+    case "-": {
+      return { $subtract: args };
+    }
+    case "*": {
+      return { $multiply: args };
+    }
+    case "/": {
+      return { $cond: [{ $eq: [args[1], 0] }, null, { $divide: args }] };
+    }
+    case "neg": {
+      return { $multiply: [-1, args[0]] };
+    }
+    default: {
+      // coalesce
+      return args.reduceRight((rest, arg) => ({ $ifNull: [arg, rest] }));
+    }
+  }
 }

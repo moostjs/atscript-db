@@ -152,6 +152,40 @@ GROUP BY category
 
 A `@db.view.filter` would drop the other rows for every column. A condition applies to its own column only. For the rules (NULL results, optional fields, what a condition may reference), see [Conditional Aggregates](./aggregations#conditional-aggregates).
 
+## Ranking with Computed Columns
+
+Since 0.1.147 a [computed column](./computed-columns) combines aggregates into one sortable value, and a [first-row join](./#first-row-joins) adds fields of one representative row per entry — together a global work queue:
+
+```atscript
+@db.alias Issue
+export type OldestOpenIssue = Issue
+
+@db.view 'ticket_queue'
+@db.view.for Ticket
+@db.view.joins Issue, `Issue.ticketId = Ticket.id`, 'left'
+@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt`
+export interface TicketQueue {
+    id: Ticket.id
+
+    @db.agg.count 'id', `Issue.status = 'open'`
+    openCount: Issue.id
+
+    @db.agg.count 'id', `Issue.status = 'open' and Issue.overdue = true`
+    overdueCount: Issue.id
+
+    oldestRaisedAt?: OldestOpenIssue.raisedAt
+    oldestSeverity?: OldestOpenIssue.severity
+
+    @db.compute `openCount * 10 + overdueCount`
+    rank: number
+
+    @db.compute `coalesce(oldestSeverity, 0) * 100 + rank`
+    priority: number
+}
+```
+
+`GET /ticket-queue/query?$sort=-priority,oldestRaisedAt,id&$filter=rank>=10&$limit=20` sorts and pages the whole table by the derived rank — the database evaluates it, so pages stay disjoint and stable.
+
 ## Multi-Table Aggregation Views
 
 Use `@db.view.joins` to aggregate across joined tables:

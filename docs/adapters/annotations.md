@@ -314,16 +314,16 @@ For `@db.rel.onDelete` and `@db.rel.onUpdate`:
 
 ## Views
 
-| Annotation              | Applies To | Arguments                                                           | Description                                                                     |
-| ----------------------- | ---------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `@db.view`              | Interface  | `name?` (string)                                                    | Mark as database [view](../views/) (defaults to interface name)                 |
-| `@db.view.for`          | Interface  | `entry` (ref)                                                       | Entry table — or [view](../views/#views-over-views) — of a managed view         |
-| `@db.view.joins`        | Interface  | `target` (ref), `condition` (expr), `kind?` (`'inner'` \| `'left'`) | Explicit join (repeatable, applied in order; [kinds & chains](../views/#joins)) |
-| `@db.alias`             | Type       | `target` (ref)                                                      | [Join alias](../views/#join-aliases-and-self-joins) of a table or view          |
-| `@db.view.filter`       | Interface  | `condition` (expr)                                                  | View WHERE clause                                                               |
-| `@db.view.having`       | Interface  | `condition` (expr)                                                  | Post-aggregation HAVING clause                                                  |
-| `@db.view.materialized` | Interface  | —                                                                   | Mark the view as materialized                                                   |
-| `@db.view.renamed`      | Interface  | `oldName` (string)                                                  | Previous view name for [schema sync](../sync/what-gets-synced) migration        |
+| Annotation              | Applies To | Arguments                                                                             | Description                                                                                                                                                        |
+| ----------------------- | ---------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@db.view`              | Interface  | `name?` (string)                                                                      | Mark as database [view](../views/) (defaults to interface name)                                                                                                    |
+| `@db.view.for`          | Interface  | `entry` (ref)                                                                         | Entry table — or [view](../views/#views-over-views) — of a managed view                                                                                            |
+| `@db.view.joins`        | Interface  | `target` (ref), `condition` (expr), `kind?` (`'inner'` \| `'left'`), `order?` (order) | Explicit join (repeatable, applied in order; [kinds & chains](../views/#joins)); an `order` makes it a [first-row join](../views/#first-row-joins) (since 0.1.147) |
+| `@db.alias`             | Type       | `target` (ref)                                                                        | [Join alias](../views/#join-aliases-and-self-joins) of a table or view                                                                                             |
+| `@db.view.filter`       | Interface  | `condition` (expr)                                                                    | View WHERE clause                                                                                                                                                  |
+| `@db.view.having`       | Interface  | `condition` (expr)                                                                    | Post-aggregation HAVING clause                                                                                                                                     |
+| `@db.view.materialized` | Interface  | —                                                                                     | Mark the view as materialized                                                                                                                                      |
+| `@db.view.renamed`      | Interface  | `oldName` (string)                                                                    | Previous view name for [schema sync](../sync/what-gets-synced) migration                                                                                           |
 
 ```atscript
 @db.view
@@ -339,14 +339,15 @@ interface ActiveTaskView {
 
 ## Aggregation
 
-| Annotation              | Applies To | Arguments                               | Description                                                                                    |
-| ----------------------- | ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `@db.agg.sum`           | Field      | `field` (string), `condition?` (query)  | SUM of a source column (numeric/decimal only)                                                  |
-| `@db.agg.avg`           | Field      | `field` (string), `condition?` (query)  | AVG of a source column (numeric/decimal only)                                                  |
-| `@db.agg.count`         | Field      | `field?` (string), `condition?` (query) | COUNT — omit the field (or pass `'*'`) for `COUNT(*)`, provide a field name for non-null count |
-| `@db.agg.countDistinct` | Field      | `field` (string), `condition?` (query)  | `COUNT(DISTINCT field)` — distinct non-null values                                             |
-| `@db.agg.min`           | Field      | `field` (string), `condition?` (query)  | MIN of a source column                                                                         |
-| `@db.agg.max`           | Field      | `field` (string), `condition?` (query)  | MAX of a source column                                                                         |
+| Annotation              | Applies To | Arguments                               | Description                                                                                         |
+| ----------------------- | ---------- | --------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `@db.agg.sum`           | Field      | `field` (string), `condition?` (query)  | SUM of a source column (numeric/decimal only)                                                       |
+| `@db.agg.avg`           | Field      | `field` (string), `condition?` (query)  | AVG of a source column (numeric/decimal only)                                                       |
+| `@db.agg.count`         | Field      | `field?` (string), `condition?` (query) | COUNT — omit the field (or pass `'*'`) for `COUNT(*)`, provide a field name for non-null count      |
+| `@db.agg.countDistinct` | Field      | `field` (string), `condition?` (query)  | `COUNT(DISTINCT field)` — distinct non-null values                                                  |
+| `@db.agg.min`           | Field      | `field` (string), `condition?` (query)  | MIN of a source column                                                                              |
+| `@db.agg.max`           | Field      | `field` (string), `condition?` (query)  | MAX of a source column                                                                              |
+| `@db.compute`           | Field      | `expression` (expr)                     | [Computed column](../views/computed-columns): arithmetic over the view's own fields (since 0.1.147) |
 
 The optional `condition` makes the aggregate [conditional](../views/aggregations#conditional-aggregates): it reads only the rows the query matches, e.g. ``@db.agg.sum 'amount', `status = 'paid'` ``.
 
@@ -560,6 +561,8 @@ In the Atscript VSCode extension (with `@atscript/core` 0.1.94 or later) the arg
 | `@db.view.filter` condition                        | The entry table and every join (`@db.alias` names included); an unqualified field belongs to the entry    |
 | `@db.view.joins` condition                         | The join target, the entry table and the joins declared before it (chained joins)                         |
 | `@db.view.having` condition                        | The view's own fields, unqualified                                                                        |
+| `@db.view.joins` ordering (4th argument)           | The join target's fields                                                                                  |
+| `@db.compute` expression                           | The view's own fields, unqualified                                                                        |
 | `@db.agg.*` condition                              | The same scope as the view's `@db.view.filter`                                                            |
 | `@db.agg.*` field (`'amount'`, `'settings.level'`) | A field path of the entry table (of the field's chain-ref type when it has one), completed level by level |
 | `@db.rel.filter` condition                         | The related type, plus the junction table of a `@db.rel.via`                                              |

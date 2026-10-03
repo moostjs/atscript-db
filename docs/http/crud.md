@@ -200,6 +200,8 @@ curl http://localhost:3000/todos/meta
 
 A [derived column](/api/storage#derived-columns) is marked `fields[path].derived: true` (since 0.1.141) — read-only: a value sent for it on a write is dropped. Since 0.1.142 [client preflight](./client#validation) treats it as server-managed too.
 
+A [computed view column](/views/computed-columns) (`@db.compute`) is marked `fields[path].computed: true` (since 0.1.147) — advisory: its `sortable` / `filterable` flags follow the column type like any other number column. A [`hasField`](./customization#hasfield) override that hides an operand hides the computed field from queries and read projections too.
+
 The `actions[]` entry shape is owned by [Actions](./actions) and the full `crud` whitelists by [Permissions](./permissions); from the browser, read this payload with [`client.meta()`](./client#meta).
 
 The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`.

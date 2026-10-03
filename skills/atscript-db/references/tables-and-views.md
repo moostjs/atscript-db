@@ -154,6 +154,43 @@ interface Staff {
 | 3   | SQL: `LEFT JOIN "employees" AS "Manager"`; Mongo: `$lookup.from` physical, docs under `__joined_Manager`. Non-aliased views hash as before (snapshot shape → `schema-sync.md § View sync`).                                                                                                                                                          |
 | 4   | Not an object: never synced/tracked (`dependsOn` names the physical table); `DbSpace.get/getTable/getView(Alias)` throw; an alias in a `syncSchema` inventory is skipped; its runtime metadata carries no `db.table` / `db.view` (`isDbEntityType(Alias) === false`). `/meta` chains through an alias resolve to the aliased table's terminal field. |
 
+### First-row joins (0.1.147)
+
+4th `@db.view.joins` arg = an ordering of the TARGET's fields → only the FIRST matching target row joins; every field read through the scope comes from that one row. Usually through a `@db.alias` (so the same table can also be joined normally for counts):
+
+```atscript
+@db.alias Issue
+export type OldestOpenIssue = Issue
+
+@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt, id`
+```
+
+| #   | Rule                                                                                                                                                                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Keys: `key [asc\|desc]`, comma-separated; unqualified = target field; `Target.key` allowed for the target only. Target PK appended as final `asc` key unless already present → deterministic.                                                   |
+| 2   | The kind must be written to reach position 4 (`'left'` keeps entries without a match → fields optional per VW7; `'inner'` drops them).                                                                                                          |
+| 3   | NULL is the SMALLEST value on every adapter (first in `asc`, last in `desc`; PG renders `NULLS FIRST/LAST`). Prefer required keys.                                                                                                              |
+| 4   | Compile errors: VJ6 key not a scalar target field (object / array / `@db.json` / `@db.encrypted` / `@db.ignore` / nav); VJ7 target without exactly one `@meta.id` (composite PK unsupported); VJ8 duplicate key.                                |
+| 5   | Works in grouped views (first-row fields are dimensions, never split a per-entry group); later joins may chain from the first-row scope. "First per arbitrary group" → grouping view as entry + first-row join.                                 |
+| 6   | Runtime: `TViewJoin.first = { order: [{ ref (type = target), desc }], key }`. SQL: correlated subquery in `ON` (`pk = (SELECT pk … ORDER BY … LIMIT 1)`); Mongo: pipeline `$lookup` + `$sort` + `$limit: 1`. Index `(joinKey, orderKeys…, pk)`. |
+| 7   | Adapter must list `firstJoin` in `viewCapabilities()` (all bundled adapters do; default empty → sync refusal).                                                                                                                                  |
+
+### Computed columns (0.1.147)
+
+`` @db.compute `openCount * 10 + overdueCount` `` on a view field (typed `number`) → a column the DB evaluates; sorts / filters / pages / `@db.view.having` / views-over-views like any column. Compile rules VC1–VC6 → [annotations.md § Computed columns](annotations.md#computed-columns-view-fields-only-01147).
+
+| #   | Behavior                                                                                                                                                                                                                                                                           |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | IEEE double everywhere (`7 / 2 = 3.5`); NULL operand → NULL; `/ 0` → NULL (never an error). Equality filters on fractional results are fragile — use ranges.                                                                                                                       |
+| 2   | Ratio of aggregates = two `@db.agg.*` fields + `` @db.compute `total / n` `` (no aggregate calls inside expressions; no arithmetic inside predicates — reference a computed field).                                                                                                |
+| 3   | Seals: an operand `@db.writeOnly` (transitively) → computed field write-only; an `@db.encrypted` operand → error at first use (`ciphertext cannot be computed`).                                                                                                                   |
+| 4   | Runtime: `TViewColumnMapping.expr` (leaves = view paths; `sourceColumn: ""`), `TDbFieldMeta.computed.operands` (transitive non-computed operands), `/meta` `computed: true`.                                                                                                       |
+| 5   | moost-db: a computed field is visible only while EVERY operand passes `hasField` — otherwise unknown field + sealed from reads.                                                                                                                                                    |
+| 6   | SQL: each leaf `CAST(… AS REAL / DOUBLE / DOUBLE PRECISION)`, `NULLIF(divisor, 0)`, excluded from GROUP BY; a JSON-dimension leaf in a grouped view reads `MIN(<extract>)` (MySQL ONLY_FULL_GROUP_BY). Mongo: `$add`/`$subtract`/`$multiply`, guarded `$divide`, nested `$ifNull`. |
+| 7   | Adapter must list `compute` in `viewCapabilities()`; SQL dialect needs `castDouble`.                                                                                                                                                                                               |
+
+Hash: join `order` + column `expr` are snapshot keys emitted only when set → existing views hash byte-identically (no recreate on upgrade); changing an expression / operand / order key / direction recreates the view.
+
 ### Views over views (0.1.141)
 
 `@db.view.for` / `@db.view.joins` accept a managed or external `@db.view`. The downstream view reads the upstream view's OWN physical columns (`@db.column` renames, flattened `__` leaves, JSON root + `json` leaf path, `@db.agg.*` measures as plain leaves; optional upstream fields → `nullable`). `tableNameOf(view)` = its `@db.view` name. Cycle = compile error (`View 'A' depends on itself: A → B → A`) and a sync refusal. A downstream filter cannot push past an upstream `GROUP BY`. Sync order / cascade / refusals → `schema-sync.md § View sync`.

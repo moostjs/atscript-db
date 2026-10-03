@@ -125,6 +125,20 @@ export interface LsTotals {
     @db.agg.max 'name'
     topCustomer?: LsCustomer.name
 }
+
+@db.alias LsOrder
+export type LsFirstOrder = LsOrder
+
+@db.view 'ls_ranked'
+@db.view.for LsCustomer
+@db.view.joins LsFirstOrder, \`LsFirstOrder.customerId = LsCustomer.id\`, 'left', \`amount desc, LsFirstOrder.status\`
+export interface LsRanked {
+    id: LsCustomer.id
+    firstAmount?: LsFirstOrder.amount
+
+    @db.compute \`coalesce(firstAmount, 0) * 2\`
+    score: number
+}
 `;
 
 let doc: AtscriptDoc;
@@ -189,8 +203,11 @@ describe("db plugin editor scopes", () => {
       "db.rel.filter",
       "db.agg.sum",
       "db.agg.count",
+      "db.compute",
     ]) {
-      const queryArgs = doc.resolveAnnotation(name)!.arguments.filter((a) => a.type === "query");
+      const queryArgs = doc
+        .resolveAnnotation(name)!
+        .arguments.filter((a) => a.type === "query" || a.type === "expr" || a.type === "order");
       expect(queryArgs.length, name).toBeGreaterThan(0);
       expect(
         queryArgs.every((a) => typeof a.fieldScope === "function"),
@@ -275,6 +292,48 @@ describe("db plugin editor scopes", () => {
       );
       expect(earlier?.typeName).toBe("LsCustomer");
       expect(earlier?.prop.id).toBe("parentId");
+    });
+  });
+
+  describe("@db.view.joins ordering (first-row join)", () => {
+    it("scopes the join target only; keys resolve through the alias", () => {
+      const order = argsOf("db.view.joins", 4)[3];
+      expect(order.orderNode).toBeDefined();
+      expect(getQueryScope(order, doc)).toEqual({
+        allowedTypes: ["LsFirstOrder"],
+        unqualifiedTarget: "LsFirstOrder",
+      });
+      const key = resolveFieldRefAt(tokenAt("amount desc"), doc);
+      expect(key?.typeName).toBe("LsFirstOrder");
+      expect(key?.prop.id).toBe("amount");
+      expect(key?.prop.ownerNode?.ownerNode?.id).toBe("LsOrder");
+      const qualified = resolveFieldRefAt(
+        tokenAt("LsFirstOrder.status`", "LsFirstOrder.".length),
+        doc,
+      );
+      expect(qualified?.prop.id).toBe("status");
+    });
+  });
+
+  describe("@db.compute", () => {
+    it("scopes the view's own fields, unqualified", () => {
+      const [expr] = argsOf("db.compute");
+      expect(expr.exprNode).toBeDefined();
+      expect(getQueryScope(expr, doc)).toEqual({ allowedTypes: [], unqualifiedTarget: "LsRanked" });
+      expect(
+        getQueryCompletionScope(expr, doc)!
+          .getFields("LsRanked")
+          .map((p) => p.id),
+      ).toEqual(["id", "firstAmount", "score"]);
+    });
+
+    it("resolves an expression leaf and lists it among the field's references", () => {
+      const ref = resolveFieldRefAt(tokenAt("firstAmount, 0)"), doc);
+      expect(ref?.typeName).toBe("LsRanked");
+      expect(ref?.prop.id).toBe("firstAmount");
+      const def = posOf("firstAmount?: LsFirstOrder.amount");
+      const usages = doc.getUsageListAt(def.line, def.character);
+      expect(usages?.map((u) => u.range.start)).toContainEqual(posOf("firstAmount, 0)"));
     });
   });
 

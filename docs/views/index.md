@@ -136,6 +136,46 @@ Rules (checked at compile time):
 - An alias cannot be the `@db.view.for` entry.
 - Each alias is joined at most once per view — declare another alias for another join of the same table.
 
+### First-Row Joins
+
+Since 0.1.147 a join can pick **one representative row**: pass an ordering as the 4th argument and, of the target rows matching the condition, only the first by that ordering joins. Every field read through the join comes from that same row — the classic "oldest open issue of each ticket":
+
+```atscript
+@db.alias Issue
+export type OldestOpenIssue = Issue
+
+@db.view 'ticket_queue'
+@db.view.for Ticket
+@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt, id`
+export interface TicketQueue {
+    id: Ticket.id
+    title: Ticket.title
+    // all from the same row — the oldest open issue (ties → lowest id)
+    oldestRaisedAt?: OldestOpenIssue.raisedAt
+    oldestIssueId?: OldestOpenIssue.id
+    oldestSeverity?: OldestOpenIssue.severity
+}
+```
+
+- **Ordering.** Comma-separated keys, each a field of the **join target** with an optional `asc` (default) or `desc`: `` `raisedAt` ``, `` `severity desc, raisedAt` ``. A key may be written qualified (`OldestOpenIssue.raisedAt`) — but only with the target. The target's primary key is appended as the final `asc` key unless it already is one, so the pick is deterministic on every adapter.
+- **Kind.** The kind must be written to reach the 4th position: `'left'` keeps tickets with no matching issue (fields `NULL`, so they must be optional), `'inner'` drops them.
+- **NULL ordering is uniform: NULL is the smallest value** — first in `asc`, last in `desc`, on every adapter. Prefer required order keys.
+- **Grouped views.** First-row fields work as GROUP BY dimensions; they depend only on the entry row, so they never split a per-entry group. Counts over a regular join of the same table are unaffected. For "first per arbitrary group" use a grouping view as the entry ([views over views](#views-over-views)) and first-row join onto it.
+- **Chained joins.** A later join may reference the first-row scope — e.g. the reporter of the oldest issue: ``@db.view.joins Reporter, `Reporter.id = OldestOpenIssue.reporterId`, 'left'``.
+- **Typically through an alias** — so the same table can also be joined normally (for counts) in the same view.
+
+Compile-time rules:
+
+| Rule | Check                                                                                                                        |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------- |
+| VJ6  | Order keys are scalar fields of the target — no object, array, `@db.json`, `@db.encrypted`, `@db.ignore` or navigation field |
+| VJ7  | The target (through `@db.alias`) has exactly one `@meta.id` field — composite-key targets are not supported                  |
+| VJ8  | No order key appears twice                                                                                                   |
+
+An adapter renders a first-row join only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `firstJoin` — every bundled adapter does; sync refuses the view otherwise. How each adapter renders it, and which index serves it, is on the adapter pages ([SQLite](/adapters/sqlite#views), [MySQL](/adapters/mysql#views), [PostgreSQL](/adapters/postgresql#views), [MongoDB](/adapters/mongodb#views)).
+
+To rank or combine values across fields (`openCount * 10 + overdueCount`), add [computed columns](./computed-columns).
+
 ## Views over Views
 
 Since 0.1.141 the entry (`@db.view.for`) and the join targets (`@db.view.joins`) may be **views** — managed views, or [external views](./view-types#external-views) that already exist in the database. A view over a view reads the upstream view's **own** columns: a field the upstream renamed with `@db.column`, flattened, extracted from JSON, or computed with `@db.agg.*` is a plain column of the downstream view.
@@ -341,5 +381,6 @@ Schema sync translates this into a `CREATE VIEW` statement with the appropriate 
 
 - [View Types](./view-types) — managed, materialized, and external views
 - [Aggregation Annotations](./aggregations) — computing sums, averages, and counts
+- [Computed Columns](./computed-columns) — arithmetic over a view's own fields (`@db.compute`)
 - [Querying Views](./querying-views) — read-only API for accessing view data
 - [Queries & Filters](/api/queries) — query expression syntax used in joins and filters

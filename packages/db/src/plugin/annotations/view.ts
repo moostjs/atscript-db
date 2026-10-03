@@ -1,6 +1,7 @@
 import { AnnotationSpec } from "@atscript/core";
-import type { TAnnotationsTree } from "@atscript/core";
+import type { AtscriptDoc, TAnnotationsTree, Token, TQueryScope } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
+import { getFieldsForType, isArray, isPrimitive, isProp } from "@atscript/core";
 import { getAnnotationAlias } from "../../shared/annotation-utils";
 import {
   earlierJoinTargets,
@@ -15,12 +16,79 @@ import {
 import {
   fieldScopes,
   isJoinTarget,
+  joinOrderScope,
   viewFilterScope,
   viewHavingScope,
   viewJoinScope,
 } from "../lsp-scopes";
 import { validateViewInterface } from "../../shared/view-validation";
 import { VIEW_SOURCE_ARGUMENT } from "./alias";
+
+/**
+ * VJ6–VJ8 — the ordering of a first-row join: every key is a scalar field of
+ * the join target (no object, array, `@db.json`, `@db.encrypted` or
+ * navigation field), no key repeats, and the target (through `@db.alias`)
+ * declares exactly one `@meta.id` field — the anchor of the join's
+ * correlated subquery.
+ */
+function validateJoinOrder(orderToken: Token, scope: TQueryScope, doc: AtscriptDoc): TMessages {
+  const target = scope.unqualifiedTarget!;
+  const errors = validateQueryScope(
+    orderToken,
+    scope,
+    doc,
+    `a first-row join orders by fields of its target '${target}'`,
+  );
+  const seen = new Set<string>();
+  for (const item of orderToken.orderNode!.items) {
+    const { ref } = item;
+    if (ref.typeRef && ref.typeRef.text !== target) continue; // reported above
+    const path = ref.fieldRef.text;
+    if (seen.has(path)) {
+      errors.push({
+        message: `Order key '${path}' appears more than once`,
+        severity: 1,
+        range: ref.fieldRef.range,
+      });
+      continue;
+    }
+    seen.add(path);
+    const why = orderKeyProblem(doc, target, path.split("."));
+    if (why) {
+      errors.push({
+        message: `Order key '${path}' ${why} — order by a scalar field of '${target}'`,
+        severity: 1,
+        range: ref.fieldRef.range,
+      });
+    }
+  }
+  const ids = getFieldsForType(doc, target).filter((p) => p.countAnnotations("meta.id") > 0);
+  if (ids.length !== 1) {
+    errors.push({
+      message: `A first-row join needs a target with exactly one @meta.id field — '${target}' has ${ids.length === 0 ? "none" : `${ids.length} (a composite key)`}`,
+      severity: 1,
+      range: orderToken.range,
+    });
+  }
+  return errors;
+}
+
+/** Why `path` of `target` cannot order a first-row join, or `undefined` when it can. */
+function orderKeyProblem(doc: AtscriptDoc, target: string, path: string[]): string | undefined {
+  for (let i = 1; i <= path.length; i++) {
+    const step = doc.unwindType(target, path.slice(0, i));
+    if (!step) return undefined; // unknown field — reported by the scope check
+    const node = step.node;
+    if (node && isProp(node)) {
+      if (node.countAnnotations("db.json") > 0) return "reads a @db.json field";
+      if (node.countAnnotations("db.encrypted") > 0) return "is @db.encrypted";
+      if (node.countAnnotations("db.ignore") > 0) return "is @db.ignore'd";
+    }
+    if (isArray(step.def)) return "is an array";
+    if (i === path.length && !isPrimitive(step.def)) return "is not a scalar";
+  }
+  return undefined;
+}
 
 export const dbViewAnnotations: TAnnotationsTree = {
   view: {
@@ -119,6 +187,13 @@ export const dbViewAnnotations: TAnnotationsTree = {
         "@db.view.joins Customer, `Customer.id = Order.customerId`\n" +
         "@db.view.joins Region, `Region.id = Customer.regionId`, 'left'\n" +
         "export interface OrderRegion { ... }\n" +
+        "```\n\n" +
+        "**First-row join** (since 0.1.147): a 4th argument — an ordering of the target's fields " +
+        "(`` `raisedAt, id` ``, `` `severity desc` ``) — joins only the FIRST matching target row " +
+        "by that ordering (the target's primary key is appended as the final tie-break), so every " +
+        "field read through the join comes from that one row. NULL sorts first in `asc`.\n" +
+        "```atscript\n" +
+        "@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt`\n" +
         "```\n",
       nodeType: ["interface"],
       passedWhenReferred: false,
@@ -146,6 +221,17 @@ export const dbViewAnnotations: TAnnotationsTree = {
           description:
             '`"inner"` (default) drops entry rows without a match; `"left"` keeps them with NULLs.',
           values: ["inner", "left"],
+        },
+        {
+          name: "order",
+          type: "order",
+          optional: true,
+          description:
+            "Makes this a first-row join: of the target rows matching the condition only the first " +
+            "by this ordering joins (`` `raisedAt, id` ``, `` `severity desc` ``). Keys are scalar " +
+            "fields of the join target; its primary key is appended as the final tie-break. " +
+            "NULL is the smallest value (first in `asc`, last in `desc`).",
+          fieldScope: fieldScopes.joinOrder,
         },
       ],
       validate(token, args, doc) {
@@ -226,6 +312,12 @@ export const dbViewAnnotations: TAnnotationsTree = {
               "a join may reference the entry table and joins declared before it",
             ),
           );
+        }
+
+        // VJ6–VJ8: the ordering of a first-row join
+        const order = join && args[3]?.orderNode ? joinOrderScope(join) : undefined;
+        if (order) {
+          errors.push(...validateJoinOrder(args[3], order, doc));
         }
 
         return errors;

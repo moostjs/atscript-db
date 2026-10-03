@@ -164,13 +164,14 @@ export interface TDbFieldVisibility {
   /**
    * `hasField(path)` and — when {@link scoped} — a `@db.column.derived`
    * field of the bound readable only while its source path is visible too
-   * (a derived copy must not outlive a hidden source).
+   * (a derived copy must not outlive a hidden source), a computed view
+   * column (`@db.compute`, since 0.1.147) only while every operand is.
    */
   readonly isVisible: (path: string) => boolean;
   /**
    * The paths sealed out of `readable`'s read projection for this request:
    * its `@db.writeOnly` fields plus, when {@link scoped}, its derived fields
-   * whose source `hasField` hides. `prefix` is `readable`'s path from the
+   * whose source `hasField` hides and its computed fields with a hidden operand. `prefix` is `readable`'s path from the
    * controller: `""` for the bound readable, `"rel."` for a `$with` target.
    */
   readonly sealedFor: (readable: AtscriptDbReadable<any>, prefix?: string) => ReadonlySet<string>;
@@ -319,10 +320,13 @@ export class AsDbReadableController<
   protected readonly fieldVisibility: TDbFieldVisibility;
   /** A subclass overrides {@link hasField}: visibility is request-scoped (derived rule, index gate, id options). */
   private readonly _hasFieldOverridden: boolean;
-  /** `@db.column.derived` path → its source's logical path, per readable (bound + `$with` targets). */
-  private readonly _derivedSources = new WeakMap<object, ReadonlyMap<string, string>>();
+  /**
+   * `@db.column.derived` path → its source's logical path, `@db.compute` path
+   * → its operands' paths, per readable (bound + `$with` targets).
+   */
+  private readonly _derivedSources = new WeakMap<object, ReadonlyMap<string, readonly string[]>>();
   /** The bound readable's entry of {@link _derivedSources}. */
-  private readonly _derivedSource: ReadonlyMap<string, string>;
+  private readonly _derivedSource: ReadonlyMap<string, readonly string[]>;
   /** `@db.writeOnly` paths of `$with` target readables, collected once per target. */
   private readonly _targetWriteOnly = new WeakMap<object, ReadonlySet<string>>();
   private _indexFieldPathsCache?: readonly TDbIndexFieldPaths[];
@@ -405,8 +409,8 @@ export class AsDbReadableController<
     this._hasFieldOverridden = scoped;
     const isVisible = (path: string): boolean => {
       if (!this.hasField(path)) return false;
-      const source = scoped ? this._derivedSource.get(path) : undefined;
-      return source === undefined || this.hasField(source);
+      const sources = scoped ? this._derivedSource.get(path) : undefined;
+      return sources === undefined || sources.every((source) => this.hasField(source));
     };
     this.fieldVisibility = {
       scoped,
@@ -460,13 +464,19 @@ export class AsDbReadableController<
     return out;
   }
 
-  /** `readable`'s `@db.column.derived` path → source path map, collected once per readable. */
-  private _derivedSourcesOf(readable: AtscriptDbReadable<any>): ReadonlyMap<string, string> {
+  /**
+   * `readable`'s `@db.column.derived` path → source path and `@db.compute`
+   * path → operand paths map, collected once per readable.
+   */
+  private _derivedSourcesOf(
+    readable: AtscriptDbReadable<any>,
+  ): ReadonlyMap<string, readonly string[]> {
     let map = this._derivedSources.get(readable);
     if (!map) {
-      const out = new Map<string, string>();
+      const out = new Map<string, readonly string[]>();
       for (const fd of readable.fieldDescriptors ?? []) {
-        if (fd.derived?.sourcePath) out.set(fd.path, fd.derived.sourcePath);
+        if (fd.derived?.sourcePath) out.set(fd.path, [fd.derived.sourcePath]);
+        if (fd.computed) out.set(fd.path, fd.computed.operands);
       }
       map = out;
       this._derivedSources.set(readable, map);
@@ -499,7 +509,8 @@ export class AsDbReadableController<
    * visible fields (or ignores the term when there are none). A
    * `@db.column.derived` field is visible only while its source path is,
    * and one whose source is hidden is sealed out of every read projection
-   * for the request, like a `@db.writeOnly` field.
+   * for the request, like a `@db.writeOnly` field. The same holds for a
+   * computed view column (`@db.compute`) and each of its operands.
    */
   protected hasField(path: string): boolean {
     // Guarded for the partial-mock readables in *.spec.ts that omit
@@ -769,8 +780,15 @@ export class AsDbReadableController<
     const writeOnly = readable === this.readable ? this._writeOnlySet : this._writeOnlyOf(readable);
     if (!this._hasFieldOverridden) return writeOnly;
     let out: Set<string> | undefined;
-    for (const [path, source] of this._derivedSourcesOf(readable)) {
-      if (writeOnly.has(path) || this.hasField(prefix + source)) continue;
+    // Computed fields share operands — ask `hasField` once per source path
+    const visible = new Map<string, boolean>();
+    const sourceVisible = (source: string): boolean => {
+      let v = visible.get(source);
+      if (v === undefined) visible.set(source, (v = this.hasField(prefix + source)));
+      return v;
+    };
+    for (const [path, sources] of this._derivedSourcesOf(readable)) {
+      if (writeOnly.has(path) || sources.every(sourceVisible)) continue;
       (out ??= new Set(writeOnly)).add(path);
     }
     return out ?? writeOnly;
@@ -3202,6 +3220,11 @@ export class AsDbReadableController<
         // Computed from a @db.json leaf of the row; a write payload value is
         // dropped — UIs render it read-only.
         entry.derived = true;
+      }
+      if (fd.computed) {
+        // A computed view column (@db.compute) — advisory; sort / filter
+        // follow the column's normal capability.
+        entry.computed = true;
       }
       fields[path] = entry;
     }

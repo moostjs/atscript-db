@@ -43,6 +43,8 @@ const db = createAdapter("./app.db", { vector: true });
 | Decimal precision                               | SQLite has no native DECIMAL — stored as `NUMERIC`; precision is advisory.                                                                                                                                 |
 | Column modify in place (`supportsColumnModify`) | No — use `@db.sync.method 'recreate'` for type changes.                                                                                                                                                    |
 
+Views (0.1.147): first-row joins → correlated subquery in `ON` (`pk = (SELECT pk … ORDER BY … LIMIT 1)`); computed columns → `CAST(x AS REAL)`, `NULLIF(divisor, 0)`. See `tables-and-views.md § First-row joins / Computed columns`.
+
 ## In-memory for tests
 
 ```ts

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vite-plus/test";
 
-import { isNullExpr, notNullExpr, queryNodeToExpr } from "../mongo-view-expr";
+import { exprToMongo, isNullExpr, notNullExpr, queryNodeToExpr } from "../mongo-view-expr";
 
 // View predicate → aggregation expression with SQL null semantics (since 0.1.136).
 
@@ -68,5 +68,41 @@ describe("queryNodeToExpr", () => {
     expect(() => queryNodeToExpr({ left: f("a"), op: "$regex", right: "^x" }, pathOf)).toThrow(
       "matches is not supported in view predicates",
     );
+  });
+});
+
+// Computed view columns (since 0.1.147).
+describe("exprToMongo", () => {
+  const leaf = (path: string) => `$${path}`;
+
+  it("maps arithmetic, guards division by zero and negates by multiplication", () => {
+    expect(
+      exprToMongo(
+        {
+          op: "+",
+          args: [
+            { op: "*", args: [{ field: "a" }, 10] },
+            { op: "neg", args: [{ field: "b" }] },
+          ],
+        },
+        leaf,
+      ),
+    ).toEqual({
+      $add: [{ $multiply: ["$a", { $literal: 10 }] }, { $multiply: [-1, "$b"] }],
+    });
+    expect(exprToMongo({ op: "/", args: [{ field: "a" }, { field: "b" }] }, leaf)).toEqual({
+      $cond: [{ $eq: ["$b", 0] }, null, { $divide: ["$a", "$b"] }],
+    });
+    expect(exprToMongo({ op: "-", args: [{ field: "a" }, -1] }, leaf)).toEqual({
+      $subtract: ["$a", { $literal: -1 }],
+    });
+  });
+
+  it("nests two-argument $ifNull for coalesce", () => {
+    expect(
+      exprToMongo({ op: "coalesce", args: [{ field: "a" }, { field: "b" }, 0] }, leaf),
+    ).toEqual({
+      $ifNull: ["$a", { $ifNull: ["$b", { $literal: 0 }] }],
+    });
   });
 });

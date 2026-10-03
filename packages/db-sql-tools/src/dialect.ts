@@ -82,6 +82,24 @@ export interface SqlDialect {
    * @since 0.1.136
    */
   jsonExtract?(quotedCol: string, path: readonly string[], type: TViewJsonType): string;
+  /**
+   * `expr` cast to an IEEE double — how a computed view column
+   * (`@db.compute`) evaluates every field / literal leaf, so `7 / 2 = 3.5`
+   * everywhere (no integer division, no DECIMAL rounding): SQLite
+   * `CAST(x AS REAL)`, MySQL `CAST(x AS DOUBLE)`, PostgreSQL
+   * `CAST(x AS DOUBLE PRECISION)`. Parameter-free. Dialects without it fail
+   * view sync with `computed view columns are not supported by this adapter`.
+   * @since 0.1.147
+   */
+  castDouble?(expr: string): string;
+  /**
+   * `true` when the database sorts NULL as the LARGEST value (PostgreSQL):
+   * first-row join order keys then render `ASC NULLS FIRST` /
+   * `DESC NULLS LAST`, keeping the uniform "NULL is the smallest value"
+   * ordering SQLite, MySQL and MongoDB have natively.
+   * @since 0.1.147
+   */
+  nullsSortLargest?: boolean;
   /** e.g. 'CREATE VIEW IF NOT EXISTS' or 'CREATE OR REPLACE VIEW' */
   createViewPrefix: string;
   /** Returns a parameter placeholder for the given 1-based index. When absent, '?' is used. */

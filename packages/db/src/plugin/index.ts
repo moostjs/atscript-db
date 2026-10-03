@@ -4,6 +4,7 @@ import { dbAggAnnotations } from "./annotations/agg";
 import { dbAliasAnnotations } from "./annotations/alias";
 import { dbAmountAnnotations } from "./annotations/amount";
 import { dbColumnAnnotations } from "./annotations/column";
+import { dbComputeAnnotations } from "./annotations/compute";
 import { dbIndexAnnotations } from "./annotations/index-ann";
 import { dbRelAnnotations } from "./annotations/rel";
 import { dbSearchAnnotations } from "./annotations/search";
@@ -56,6 +57,7 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
           view: dbViewAnnotations.view,
           alias: dbAliasAnnotations.alias,
           agg: dbAggAnnotations.agg,
+          compute: dbComputeAnnotations.compute,
           search: dbSearchAnnotations.search,
           amount: dbAmountAnnotations.amount,
           unit: dbUnitAnnotations.unit,

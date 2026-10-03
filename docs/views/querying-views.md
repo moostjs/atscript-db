@@ -91,7 +91,7 @@ const topCategories = await stats.findMany({
 });
 ```
 
-- **Sorting** works on any view field, including aggregated fields
+- **Sorting** works on any view field, including aggregated fields and [computed columns](./computed-columns) — a computed `rank` gives a global ranking that pages stably (`$sort: { rank: -1, id: 1 }`)
 - **Pagination** via `$skip` and `$limit` works as expected
 - **Field selection** via `$select` picks specific columns from the view output
 

@@ -375,6 +375,22 @@ MySQL cannot convert to time zone "Europe/Berlin": its time zone tables are not 
 Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
 :::
 
+## Views
+
+Managed [views](/views/) are created with `CREATE OR REPLACE VIEW`.
+
+Since 0.1.147 a [first-row join](/views/#first-row-joins) renders as a correlated scalar subquery in the join's `ON` (no window functions):
+
+```sql
+LEFT JOIN `issues` AS `OldestOpenIssue`
+  ON `OldestOpenIssue`.`id` = (SELECT `OldestOpenIssue`.`id` FROM `issues` AS `OldestOpenIssue`
+      WHERE <condition> ORDER BY `OldestOpenIssue`.`raised_at` ASC, `OldestOpenIssue`.`id` ASC LIMIT 1)
+```
+
+It runs once per entry row; an index on the condition's join key plus the order keys (`(ticket_id, raised_at, id)`) keeps each lookup an index scan.
+
+[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. `DOUBLE` (not `DECIMAL`) avoids `div_precision_increment` rounding; `CAST … AS DOUBLE` needs MySQL 8.0.17+. In a grouped view a computed column over a JSON-extracted dimension reads `MIN(<extract>)` — the value of the group — because `ONLY_FULL_GROUP_BY` rejects an expression over the raw JSON column.
+
 ## Derived Columns
 
 A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) VIRTUAL` column over `JSON_TYPE()` / `JSON_EXTRACT()` of its source (booleans compare the unquoted value to `'true'`; numbers are `+ 0`). A string leaf maps to `VARCHAR(255)` instead of `TEXT` so a plain or unique index over it needs no key prefix; `@db.column.collate` goes between the type and the generated clause. The definition never carries `NOT NULL` or `DEFAULT`, and in-place `MODIFY COLUMN` is never used on it: a changed extraction is `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first). Introspection reads `INFORMATION_SCHEMA.COLUMNS.EXTRA` (`VIRTUAL GENERATED` / `STORED GENERATED`, MariaDB included); a `recreateTable` copies every column but the generated ones.

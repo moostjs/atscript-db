@@ -81,6 +81,8 @@ r[0].posts; // typed (no `any`) — relations not in $with are stripped from the
 
 The narrowing mirrors backend `AtscriptDbReadable.findMany`: the row type omits `__navProps` by default, then re-adds the relations literally listed in `$with`. The `as const` (or a literal `$with: [...]`) is what TS needs to extract the relation names at the type level.
 
+View fields read through a first-row join or declared with `@db.compute` (0.1.147) are ordinary typed fields of the view type (`number`, `number | null` when optional) — sort / filter them like any column; `client.meta()` flags computed ones `fields[path].computed: true`.
+
 ## Constructor options
 
 ```ts

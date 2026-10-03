@@ -284,13 +284,29 @@ export function hasAnyViewAnnotation(node: SemanticNode): boolean {
 }
 
 /**
- * Validate that all field refs in a query expression are within `scope` —
- * the same {@link TQueryScope} the editor completes (`lsp-scopes`):
+ * Every field ref of a backtick argument — a predicate (`queryNode`), an
+ * arithmetic expression (`exprNode`) or an ordering (`orderNode`) — in source
+ * order. `[]` when the argument did not parse.
+ * @since 0.1.147
+ */
+export function backtickFieldRefs(token: Token): SemanticQueryFieldRefNode[] {
+  if (token.queryNode) {
+    const refs: SemanticQueryFieldRefNode[] = [];
+    forEachFieldRef(token.queryNode.expression, (ref) => refs.push(ref));
+    return refs;
+  }
+  return (token.exprNode ?? token.orderNode)?.fieldRefs() ?? [];
+}
+
+/**
+ * Validate that all field refs in a backtick argument (a query, an `expr` or
+ * an `order`) are within `scope` — the same {@link TQueryScope} the editor
+ * completes (`lsp-scopes`):
  * qualified refs must name one of `scope.allowedTypes`; an unqualified ref
  * (a dotted path included) must be a field of `scope.unqualifiedTarget`, or
  * is rejected outright when that is `null`.
  *
- * @param queryToken - The query arg token (must have .queryNode)
+ * @param queryToken - The backtick arg token (with `.queryNode`, `.exprNode` or `.orderNode`)
  * @param scope - The scope of the argument
  * @param doc - The document for type lookups
  * @param scopeHint - Replaces the default "expected 'A' or 'B'" tail of the out-of-scope message
@@ -302,13 +318,9 @@ export function validateQueryScope(
   scopeHint?: string,
 ): TMessages {
   const errors: TMessages = [];
-  const queryNode = queryToken.queryNode;
-  if (!queryNode) {
-    return errors;
-  }
   const { allowedTypes, unqualifiedTarget } = scope;
 
-  forEachFieldRef(queryNode.expression, (ref) => {
+  for (const ref of backtickFieldRefs(queryToken)) {
     if (ref.typeRef) {
       // Qualified ref: check type is in scope
       const typeName = ref.typeRef.text;
@@ -342,7 +354,7 @@ export function validateQueryScope(
         });
       }
     }
-  });
+  }
 
   return errors;
 }

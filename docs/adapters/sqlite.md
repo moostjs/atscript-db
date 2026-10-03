@@ -387,6 +387,22 @@ A waiter that exceeds `transactionWaitTimeoutMs` rejects with `DbError("TX_WAIT_
 - **Do** keep `journal_mode = WAL` + `busy_timeout` for multi-process deployments (see [WAL mode and pragma tuning](#wal-mode-and-pragma-tuning)); the gate only covers one process, and `BEGIN IMMEDIATE` blocks the event loop for up to `busy_timeout` under cross-process contention.
 - A transaction on another adapter family (MySQL, MongoDB) is **not** a SQLite transaction: SQLite statements issued inside it still queue behind SQLite's own transactions and run autocommit — see [Transactions](/api/transactions#transaction-state-is-per-adapter-family).
 
+## Views
+
+Managed [views](/views/) are created with `CREATE VIEW IF NOT EXISTS`.
+
+Since 0.1.147 a [first-row join](/views/#first-row-joins) renders as a correlated scalar subquery in the join's `ON` (no window functions):
+
+```sql
+LEFT JOIN "issues" AS "OldestOpenIssue"
+  ON "OldestOpenIssue"."id" = (SELECT "OldestOpenIssue"."id" FROM "issues" AS "OldestOpenIssue"
+      WHERE <condition> ORDER BY "OldestOpenIssue"."raised_at" ASC, "OldestOpenIssue"."id" ASC LIMIT 1)
+```
+
+It runs once per entry row; an index on the condition's join key plus the order keys (`(ticket_id, raised_at, id)`) keeps each lookup an index scan. SQLite (and MySQL) sort `NULL` first in ascending order natively.
+
+[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS REAL)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`.
+
 ## Derived Columns
 
 A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) VIRTUAL` column: `json_type()` guards the declared type and `json_extract()` reads the leaf, so a missing key, JSON `null` or a value of another type is `NULL`. Nothing is stored unless the column is indexed (SQLite materializes indexed virtual columns). Booleans are `1` / `0` in the column and read back as `true` / `false`. `@db.column.collate` applies after the generated clause. Adding one to a populated table is a plain `ADD COLUMN`; a changed extraction is a `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first) — no table recreation. Introspection uses `PRAGMA table_xinfo` (`hidden` = 2 virtual, 3 stored); a `recreateTable` copies every column but the generated ones, which the new table recomputes.

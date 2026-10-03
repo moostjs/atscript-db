@@ -10,6 +10,7 @@ import type { BaseDbAdapter } from "../base-adapter";
 import type { TRelationFilterHost } from "../query/relation-filter";
 import type { TGenericLogger } from "../logger";
 import { isJsonValueField } from "../query/buckets";
+import { computedOperands } from "../query/query-tree";
 import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
@@ -390,7 +391,7 @@ export class TableMetadata {
     // Build field descriptors unconditionally — schema sync needs them
     // even for adapters that support nested objects (e.g. MongoDB).
     // _buildFieldDescriptors() already handles skipFlattening internally.
-    this._buildFieldDescriptors(adapter);
+    this._buildFieldDescriptors(adapter, type);
 
     // Path-guard indexes are adapter-independent: every adapter has descriptors.
     this._buildGuardIndexes();
@@ -1063,7 +1064,10 @@ export class TableMetadata {
    * Called once during build() — everything it needs
    * (flatMap, indexes, columnMap, etc.) is already populated.
    */
-  private _buildFieldDescriptors(adapter: BaseDbAdapter): void {
+  private _buildFieldDescriptors(
+    adapter: BaseDbAdapter,
+    rootType: TAtscriptAnnotatedType<TAtscriptTypeObject>,
+  ): void {
     const descriptors: TDbFieldMeta[] = [];
     const skipFlattening = this.nestedObjects;
 
@@ -1161,6 +1165,7 @@ export class TableMetadata {
         encrypted: isEncrypted || underEncrypted || undefined,
         isGeoPoint: isGeoPointType(type) || undefined,
         derived: this.derivedFields.get(path),
+        computed: computedMeta(rootType, path),
       });
     }
 
@@ -1419,4 +1424,14 @@ export class TableMetadata {
 
     this.preferredId = selected ? [...selected.fields] : [...this.primaryKeys];
   }
+}
+
+/** `TDbFieldMeta.computed` of a top-level `@db.compute` view field (since 0.1.147). */
+function computedMeta(
+  rootType: TAtscriptAnnotatedType<TAtscriptTypeObject>,
+  path: string,
+): { operands: readonly string[] } | undefined {
+  if (path.includes(".")) return undefined;
+  const operands = computedOperands(rootType, path);
+  return operands ? { operands: Object.freeze(operands) } : undefined;
 }

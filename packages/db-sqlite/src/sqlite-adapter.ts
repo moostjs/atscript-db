@@ -1,6 +1,7 @@
 import type { TMetadataMap } from "@atscript/typescript/utils";
 import {
   ALL_AGGREGATE_FNS,
+  ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
@@ -28,7 +29,14 @@ import type {
   TSearchIndexInfo,
   TValueFormatterPair,
 } from "@atscript/db";
-import type { AggregateFn, BucketUnit, DbQuery, FilterExpr, UniquSelect } from "@atscript/db";
+import type {
+  AggregateFn,
+  BucketUnit,
+  DbQuery,
+  FilterExpr,
+  TViewCapability,
+  UniquSelect,
+} from "@atscript/db";
 import {
   type TGeoSearchControls,
   type TSqlFragment,
@@ -106,6 +114,11 @@ export class SqliteAdapter extends BaseDbAdapter {
   /** Every aggregate function, `countDistinct` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Computed view columns and first-row joins. */
+  override viewCapabilities(): ReadonlySet<TViewCapability> {
+    return ALL_VIEW_CAPABILITIES;
   }
 
   // ── Vector search state ─────────────────────────────────────────────────

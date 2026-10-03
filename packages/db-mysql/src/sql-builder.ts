@@ -342,6 +342,8 @@ export const mysqlDialect: SqlDialect = {
   // Why MySQL needs it: see `SqlDialect.bucketAliasInHaving`.
   bucketAliasInHaving: true,
   jsonExtract: mysqlJsonExtract,
+  // DOUBLE (not DECIMAL): no `div_precision_increment` rounding (MySQL 8.0.17+)
+  castDouble: (expr: string) => `CAST(${expr} AS DOUBLE)`,
   createViewPrefix: "CREATE OR REPLACE VIEW",
 };
 

@@ -1,6 +1,10 @@
 import type { AtscriptDbReadable } from "../table/db-readable";
 import type { AtscriptDbView } from "../table/db-view";
-import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "../query/query-tree";
+import type {
+  AtscriptExprNode,
+  AtscriptQueryNode,
+  AtscriptQueryFieldRef,
+} from "../query/query-tree";
 import { findAncestorInSet } from "../shared/object";
 import { fkColumns } from "./fk-diff";
 import type {
@@ -80,6 +84,11 @@ export interface TViewJoinSnapshot {
   condition: string;
   /** Emitted only for `"left"` — an inner join (the default) carries no key. @since 0.1.136 */
   kind?: "inner" | "left";
+  /**
+   * First-row joins only: canonical JSON `[["<scope>.<column>", 1 | -1], …]`
+   * of the ordering, the appended primary key included. @since 0.1.147
+   */
+  order?: string;
 }
 
 /**
@@ -99,6 +108,12 @@ export interface TViewColumnSnapshot {
   aggField?: string;
   /** Canonical JSON of a conditional aggregate's predicate. */
   aggFilter?: string;
+  /**
+   * Computed columns only: canonical JSON of the `@db.compute` expression —
+   * leaves `{c: "<viewColumn>"}`, literals `{n: x}`, nodes `{op, a: [...]}`.
+   * @since 0.1.147
+   */
+  expr?: string;
 }
 
 export interface TViewSnapshot {
@@ -269,8 +284,9 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
   const canonical = (node: AtscriptQueryNode): string =>
     JSON.stringify(canonicalizeQueryNode(node, qualify));
 
-  const columns = view
-    .getViewColumnMappings()
+  const mappings = view.getViewColumnMappings();
+  const columnOf = new Map(mappings.map((m) => [m.viewPath, m.viewColumn]));
+  const columns = mappings
     .map((m) => {
       const col: TViewColumnSnapshot = {
         column: m.viewColumn,
@@ -284,6 +300,11 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
       if (m.aggFn) col.aggFn = m.aggFn;
       if (m.aggField) col.aggField = m.aggField;
       if (m.aggFilter) col.aggFilter = canonical(m.aggFilter);
+      if (m.expr !== undefined) {
+        col.expr = JSON.stringify(
+          canonicalizeViewExpr(m.expr, (path) => columnOf.get(path) ?? path),
+        );
+      }
       return col;
     })
     .toSorted((a, b) => (a.column < b.column ? -1 : a.column > b.column ? 1 : 0));
@@ -302,11 +323,16 @@ export function computeViewSnapshot(view: AtscriptDbView): TViewSnapshot {
     joinTables: plan.joins.map((j) => {
       const join: TViewJoinSnapshot = {
         targetTable: j.scope,
-        // Key order: targetTable, table (aliased joins only), condition, kind
+        // Key order: targetTable, table (aliased joins only), condition, kind, order
         ...(j.scope !== j.targetTable ? { table: j.targetTable } : {}),
         condition: canonical(j.condition),
       };
       if (j.kind === "left") join.kind = "left";
+      if (j.first) {
+        join.order = JSON.stringify(
+          j.first.order.map((item) => [qualify(item.ref), item.desc ? -1 : 1]),
+        );
+      }
       return join;
     }),
     columns,
@@ -376,6 +402,27 @@ export function canonicalizeQueryNode(
         : comp.right;
   }
   return out;
+}
+
+/** Canonical form of a computed-column expression (see {@link TViewColumnSnapshot.expr}). */
+export type TCanonicalViewExpr =
+  | { c: string }
+  | { n: number }
+  | { op: string; a: TCanonicalViewExpr[] };
+
+/**
+ * Converts a `@db.compute` expression into a serializable structure whose
+ * JSON is a stable function of its meaning: leaves become the view column
+ * they read (`column(path)`), literals `{ n }`, operations `{ op, a }`.
+ * @since 0.1.147
+ */
+export function canonicalizeViewExpr(
+  expr: AtscriptExprNode,
+  column: (path: string) => string,
+): TCanonicalViewExpr {
+  if (typeof expr === "number") return { n: expr };
+  if ("field" in expr) return { c: column(expr.field) };
+  return { op: expr.op, a: expr.args.map((arg) => canonicalizeViewExpr(arg, column)) };
 }
 
 // ── Hash functions ────────────────────────────────────────────────────────

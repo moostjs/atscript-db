@@ -130,6 +130,13 @@ export interface TFieldMeta {
    * render it read-only. Since 0.1.141.
    */
   derived?: true;
+  /**
+   * Present (true) when the field is a computed view column (`@db.compute`):
+   * its value is arithmetic over other fields of the view, evaluated by the
+   * database. Advisory — sorting / filtering follow `sortable` / `filterable`.
+   * Since 0.1.147.
+   */
+  computed?: true;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
@@ -547,6 +554,14 @@ export interface TDbFieldMeta {
    * rejected.
    */
   derived?: TDerivedColumn;
+  /**
+   * A computed view column (`@db.compute`, since 0.1.147): `operands` are the
+   * logical paths of the view fields its value is computed from — transitive
+   * (a computed operand is replaced by its own operands), never computed
+   * themselves. Read-only; a computed field must not be visible when one of
+   * its operands is hidden.
+   */
+  computed?: { operands: readonly string[] };
 }
 
 // ── Value Formatters ─────────────────────────────────────────────────────

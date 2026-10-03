@@ -417,6 +417,22 @@ The `PgDriver` configures custom type parsers for consistent JavaScript value ha
 
 These parsers are applied per-pool (not globally), so they don't affect other `pg` usage in the same process. When using a pre-created `pg.Pool`, type parsing is the caller's responsibility.
 
+## Views
+
+Managed [views](/views/) are created with `CREATE OR REPLACE VIEW`.
+
+Since 0.1.147 a [first-row join](/views/#first-row-joins) renders as a correlated scalar subquery in the join's `ON` (no window functions):
+
+```sql
+LEFT JOIN "issues" AS "OldestOpenIssue"
+  ON "OldestOpenIssue"."id" = (SELECT "OldestOpenIssue"."id" FROM "issues" AS "OldestOpenIssue"
+      WHERE <condition> ORDER BY "OldestOpenIssue"."raised_at" ASC NULLS FIRST, "OldestOpenIssue"."id" ASC NULLS FIRST LIMIT 1)
+```
+
+It runs once per entry row; an index on the condition's join key plus the order keys (`(ticket_id, raised_at, id)`) keeps each lookup an index scan. PostgreSQL sorts `NULL` last by default, so order keys render `ASC NULLS FIRST` / `DESC NULLS LAST` — `NULL` is the smallest value on every adapter. A default B-tree index serves `NULLS FIRST` only when declared that way: create `(ticket_id, raised_at NULLS FIRST, id)`, or keep order keys required.
+
+[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE PRECISION)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. Without the cast, PostgreSQL would divide integers (`7 / 2 = 3`) and raise on division by zero.
+
 ## Derived Columns
 
 A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) STORED` column — PostgreSQL has no virtual generated columns, so the value is computed on every write of the row and occupies storage. The expression is `jsonb_typeof()`-guarded `#>>` extraction with a cast to `boolean` / `double precision` for those leaves; a `@db.column.collate 'nocase'` leaf is `CITEXT` like a stored one, other collations render `COLLATE "…"` before the generated clause. `ALTER COLUMN TYPE` is never used on a generated column: a changed extraction or type is `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first). Introspection reads `information_schema.columns.is_generated`; a `recreateTable` copies every column but the generated ones, which the new table recomputes from the copied JSON.

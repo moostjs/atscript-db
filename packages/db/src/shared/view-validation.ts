@@ -76,7 +76,7 @@ export function jsonChainInfo(ref: SemanticRefNode, doc: AtscriptDoc): TJsonChai
 }
 
 /** Props of a view interface (its own structure; views don't use `extends`). */
-function viewProps(owner: SemanticNode): Map<string, SemanticNode> | undefined {
+export function viewProps(owner: SemanticNode): Map<string, SemanticNode> | undefined {
   if (isInterface(owner)) {
     return owner.props as Map<string, SemanticNode>;
   }

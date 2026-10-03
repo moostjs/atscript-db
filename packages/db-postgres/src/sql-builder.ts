@@ -154,6 +154,9 @@ export const pgDialect: SqlDialect = {
   },
   calendarBucket: pgCalendarBucket,
   jsonExtract: pgJsonExtract,
+  castDouble: (expr: string) => `CAST(${expr} AS DOUBLE PRECISION)`,
+  // PostgreSQL sorts NULL as the largest value — first-row joins render NULLS FIRST / LAST
+  nullsSortLargest: true,
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {
     return `$${index}`;

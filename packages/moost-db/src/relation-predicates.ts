@@ -39,7 +39,7 @@ export interface TRelationGateHost {
   /** `hasField` is overridden — the `@db.column.derived` source rule applies. */
   readonly scoped: boolean;
   /** `@db.column.derived` path → source path of a readable. */
-  derivedSourcesOf(readable: AtscriptDbReadable<any>): ReadonlyMap<string, string>;
+  derivedSourcesOf(readable: AtscriptDbReadable<any>): ReadonlyMap<string, readonly string[]>;
   /** `@db.writeOnly` own paths of a related readable. */
   writeOnlyOf(readable: AtscriptDbReadable<any>): ReadonlySet<string>;
   /** The bound readable's capability index. */
@@ -219,15 +219,16 @@ export class RelationPredicateGate {
 
   /**
    * `p` of `target` is visible at `prefix + p` — `hasField`, and (when it is
-   * overridden) a derived field only while its source is visible too: the
+   * overridden) a derived field only while its source is visible too (a
+   * computed view column while every operand is): the
    * rule the controller applies to its own fields and `$with` targets.
    */
   private _visibleAt(target: AtscriptDbReadable<any>, prefix: string, p: string): boolean {
     const host = this.host;
     if (!host.hasField(prefix + p)) return false;
     if (!host.scoped) return true;
-    const source = host.derivedSourcesOf(target).get(p);
-    return source === undefined || host.hasField(prefix + source);
+    const sources = host.derivedSourcesOf(target).get(p);
+    return sources === undefined || sources.every((source) => host.hasField(prefix + source));
   }
 
   /** The capability index of a related readable — the bound one's own for a self relation. */

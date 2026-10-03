@@ -55,6 +55,21 @@ const EMPTY_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set();
 /** Every calendar-bucket unit — what an adapter that renders them all returns from `calendarBucketUnits()`. */
 export const ALL_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set(BUCKET_UNITS);
 
+/**
+ * A managed-view feature an adapter may render (`viewCapabilities()`):
+ * `compute` — computed columns (`@db.compute`); `firstJoin` — first-row joins.
+ * @since 0.1.147
+ */
+export type TViewCapability = "compute" | "firstJoin";
+
+const NO_VIEW_CAPABILITIES: ReadonlySet<TViewCapability> = new Set();
+
+/** Every view capability — what the bundled adapters return from `viewCapabilities()`. @since 0.1.147 */
+export const ALL_VIEW_CAPABILITIES: ReadonlySet<TViewCapability> = new Set<TViewCapability>([
+  "compute",
+  "firstJoin",
+]);
+
 // ── Transaction context ─────────────────────────────────────────────────────
 
 /**
@@ -394,6 +409,19 @@ export abstract class BaseDbAdapter {
    */
   viewRenderRevision(): string | undefined {
     return undefined;
+  }
+
+  /**
+   * The managed-view features this adapter renders: `compute` — computed
+   * columns (`@db.compute`); `firstJoin` — first-row joins (the ordered 4th
+   * argument of `@db.view.joins`). Schema sync refuses a view using a feature
+   * not listed. The default is EMPTY (fail-closed): a third-party adapter
+   * opts in once it renders them.
+   *
+   * @since 0.1.147
+   */
+  viewCapabilities(): ReadonlySet<TViewCapability> {
+    return NO_VIEW_CAPABILITIES;
   }
 
   /**

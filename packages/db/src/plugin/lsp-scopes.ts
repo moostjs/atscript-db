@@ -67,6 +67,26 @@ export function viewHavingScope(view: SemanticNode): TQueryScope | undefined {
   return view.id ? { allowedTypes: [], unqualifiedTarget: view.id } : undefined;
 }
 
+/**
+ * The ordering (4th argument) of a first-row `@db.view.joins`: the join
+ * target only — an unqualified key is a field of the target.
+ * @since 0.1.147
+ */
+export function joinOrderScope(join: TAnnotationTokens): TQueryScope | undefined {
+  const target = join.args[0]?.text;
+  return target ? { allowedTypes: [target], unqualifiedTarget: target } : undefined;
+}
+
+/**
+ * The expression of a `@db.compute` on a view field: the view's own fields,
+ * unqualified — the `@db.view.having` scope.
+ * @since 0.1.147
+ */
+export function computeScope(propToken: Token): TQueryScope | undefined {
+  const view = getDbTableOwner(propToken);
+  return view ? viewHavingScope(view) : undefined;
+}
+
 /** The condition of a `@db.agg.*` on a view field: the scope of the view's `@db.view.filter`. */
 export function aggConditionScope(propToken: Token): TQueryScope | undefined {
   const view = getDbTableOwner(propToken);
@@ -102,16 +122,26 @@ export function relFilterScope(field: SemanticNode): TQueryScope | undefined {
 
 type TFieldScopeHook = NonNullable<TAnnotationArgument["fieldScope"]>;
 
+/** The `@db.view.joins` annotation one of whose arguments is `arg`. */
+function joinOfArg(joins: TAnnotationTokens[], arg: Token): TAnnotationTokens | undefined {
+  return joins.find((a) => a.args.includes(arg));
+}
+
 /** The `fieldScope` hooks (argument token → scope) the annotation specs declare. */
 export const fieldScopes = {
   viewFilter: (arg) => (arg.parentNode ? viewFilterScope(arg.parentNode) : undefined),
   viewJoin: (arg) => {
     const view = arg.parentNode;
     const joins = view ? viewJoins(view) : [];
-    const join = joins.find((a) => a.args.includes(arg));
+    const join = joinOfArg(joins, arg);
     return view && join ? viewJoinScope(view, join, earlierJoinTargets(joins, join)) : undefined;
   },
+  joinOrder: (arg) => {
+    const join = arg.parentNode ? joinOfArg(viewJoins(arg.parentNode), arg) : undefined;
+    return join ? joinOrderScope(join) : undefined;
+  },
   viewHaving: (arg) => (arg.parentNode ? viewHavingScope(arg.parentNode) : undefined),
+  compute: computeScope,
   aggCondition: aggConditionScope,
   aggField: aggFieldScope,
   relFilter: (arg) => (arg.parentNode ? relFilterScope(arg.parentNode) : undefined),

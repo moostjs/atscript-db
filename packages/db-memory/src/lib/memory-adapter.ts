@@ -1,5 +1,6 @@
 import {
   ALL_AGGREGATE_FNS,
+  ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
@@ -27,7 +28,7 @@ import { buildMemoryPredicate, getPath, prepareRelationSets, valuesEqual } from 
 import type { MemoryRowLoader, RelationSets } from "./memory-filter";
 import { paginate, projectRow, setPath, sortRows } from "./memory-engine";
 import { aggregateRows } from "./memory-aggregate";
-import type { AggregateFn, BucketUnit, UniquSelect } from "@atscript/db";
+import type { AggregateFn, BucketUnit, TViewCapability, UniquSelect } from "@atscript/db";
 
 /**
  * Provider (read-through) backing closure. Recomputes and returns the table's
@@ -941,6 +942,11 @@ export class MemoryAdapter extends BaseDbAdapter {
   /** Every aggregate function, `countDistinct` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Managed views render nothing (non-goal) — both are accepted like `aggregateFns()`. */
+  override viewCapabilities(): ReadonlySet<TViewCapability> {
+    return ALL_VIEW_CAPABILITIES;
   }
 
   // ── Batch operations ──────────────────────────────────────────────────────

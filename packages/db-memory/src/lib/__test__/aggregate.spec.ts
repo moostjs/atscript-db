@@ -176,6 +176,13 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
     ]);
   });
 
+  // WHY: managed views hold no rows on memory, so models declaring computed
+  // columns / first-row joins must still sync — both capabilities are
+  // accepted like every aggregate function. Since 0.1.147.
+  it("accepts every view capability (computed columns, first-row joins)", () => {
+    expect([...new MemoryAdapter().viewCapabilities()]).toEqual(["compute", "firstJoin"]);
+  });
+
   // WHY: countDistinct counts distinct NON-NULL values (SQL COUNT(DISTINCT)),
   // null and missing skipped; $having / $sort see the number. Since 0.1.136.
   it("countDistinct counts distinct non-null values; $having / $sort / $count use it", async () => {

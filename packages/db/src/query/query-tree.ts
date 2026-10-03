@@ -1,5 +1,6 @@
 import type {
   TAtscriptAnnotatedType,
+  AtscriptExprNode,
   AtscriptQueryNode,
   AtscriptQueryFieldRef,
 } from "@atscript/typescript/utils";
@@ -10,6 +11,8 @@ export type {
   AtscriptQueryFieldRef,
   AtscriptQueryComparison,
   AtscriptRef,
+  AtscriptExprNode,
+  AtscriptOrderItem,
 } from "@atscript/typescript/utils";
 
 /**
@@ -40,6 +43,19 @@ export interface TViewJoin {
    * @since 0.1.136
    */
   kind: "inner" | "left";
+  /**
+   * Set for a first-row join (the `@db.view.joins` 4th argument): of the
+   * target rows matching {@link condition} only the first by `order` joins.
+   * `order` refs are qualified with the target (`ref.type`), the target's
+   * primary key appended as the final ascending key unless already a key;
+   * `key` is that primary key's logical path — the anchor of the join's
+   * correlated subquery. NULL is the smallest value (first in `asc`).
+   * @since 0.1.147
+   */
+  first?: {
+    order: Array<{ ref: AtscriptQueryFieldRef; desc: boolean }>;
+    key: string;
+  };
 }
 
 /** Resolved view query plan produced by AtscriptDbView. */
@@ -98,4 +114,82 @@ export function translateQueryTree(
   }
 
   return { [leftField]: { [comp.op]: comp.right } } as FilterExpr;
+}
+
+/**
+ * Calls `leaf` with the field path of every field-reference leaf of a
+ * computed-column expression (`@db.compute`), in source order — leaves name
+ * the view's own fields.
+ * @since 0.1.147
+ */
+export function walkViewExpr(expr: AtscriptExprNode, leaf: (path: string) => void): void {
+  if (typeof expr === "number") return;
+  if ("field" in expr) {
+    leaf(expr.field);
+    return;
+  }
+  for (const arg of expr.args) {
+    walkViewExpr(arg, leaf);
+  }
+}
+
+/**
+ * Whether a computed-column expression may yield NULL: a `/` (division by
+ * zero is NULL), a leaf for which `nullableLeaf` holds, or an operation over
+ * a nullable operand — `coalesce` only when every argument is nullable.
+ * @since 0.1.147
+ */
+export function viewExprNullable(
+  expr: AtscriptExprNode,
+  nullableLeaf: (path: string) => boolean,
+): boolean {
+  if (typeof expr === "number") return false;
+  if ("field" in expr) return nullableLeaf(expr.field);
+  if (expr.op === "/") return true;
+  if (expr.op === "coalesce") return expr.args.every((a) => viewExprNullable(a, nullableLeaf));
+  return expr.args.some((a) => viewExprNullable(a, nullableLeaf));
+}
+
+/**
+ * The `@db.compute` expression of a view field, if any.
+ * @since 0.1.147
+ */
+export function computeOf(
+  fieldType: TAtscriptAnnotatedType | undefined,
+): AtscriptExprNode | undefined {
+  return fieldType?.metadata.get("db.compute");
+}
+
+/**
+ * The transitive non-computed operands of the `@db.compute` field `field` of
+ * `viewType`: its leaves, a computed leaf replaced by its own operands (the
+ * computed fields passed through are pushed to `via` when given).
+ * `undefined` when `field` is not computed. Cycles are not followed (they
+ * are rejected where the view's columns are built).
+ * @since 0.1.147
+ */
+export function computedOperands(
+  viewType: TAtscriptAnnotatedType,
+  field: string,
+  via?: string[],
+): string[] | undefined {
+  const props = viewType.type.kind === "object" ? viewType.type.props : undefined;
+  const exprOf = (name: string) => computeOf(props?.get(name));
+  const root = exprOf(field);
+  if (root === undefined) return undefined;
+  const out = new Set<string>();
+  const seen = new Set<string>([field]);
+  const visit = (expr: AtscriptExprNode) =>
+    walkViewExpr(expr, (path) => {
+      const nested = exprOf(path);
+      if (nested === undefined) {
+        out.add(path);
+      } else if (!seen.has(path)) {
+        seen.add(path);
+        via?.push(path);
+        visit(nested);
+      }
+    });
+  visit(root);
+  return [...out];
 }

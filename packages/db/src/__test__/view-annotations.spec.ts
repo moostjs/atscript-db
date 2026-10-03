@@ -619,3 +619,272 @@ export interface VaBadHaving {
     expect(messages).toContain("Field 'nope' does not exist on 'VaBadHaving'");
   });
 });
+
+// First-row joins (VJ6–VJ8) and computed columns (VC1–VC6). Since 0.1.147.
+const TICKETS = `
+@db.table 'fx_tickets'
+export interface FxTicket {
+    @meta.id
+    id: number
+    title: string
+}
+
+@db.table 'fx_issues'
+export interface FxIssue {
+    @meta.id
+    id: number
+    ticketId: number
+    raisedAt: number.timestamp
+    severity: number
+    status: string
+    overdue: boolean
+    estimate?: number
+    price: decimal
+    tags: string[]
+    @db.json
+    payload: { level: number }
+    @db.encrypted
+    secret: string
+    address: { city: string }
+}
+
+@db.alias FxIssue
+export type FxOldest = FxIssue
+
+@db.table 'fx_pairs'
+export interface FxPair {
+    @meta.id
+    a: number
+    @meta.id
+    b: number
+    ticketId: number
+}
+
+@db.alias FxPair
+export type FxPairAlias = FxPair
+`;
+
+describe("@db.view.joins — first-row join ordering (VJ6–VJ8)", () => {
+  const view = (order: string, target = "FxOldest") =>
+    diagnosticsFor(`${TICKETS}
+@db.view 'fx_q'
+@db.view.for FxTicket
+@db.view.joins ${target}, \`${target}.ticketId = FxTicket.id\`, 'left', \`${order}\`
+export interface FxQ {
+    id: FxTicket.id
+}
+`);
+
+  it("accepts scalar keys, a qualified target key and directions", async () => {
+    expect(await view("raisedAt desc, FxOldest.severity, FxOldest.address.city asc")).toEqual([]);
+  });
+
+  it("VJ6: rejects an unknown key and a key of another type", async () => {
+    const messages = await view("nope, FxTicket.id");
+    expect(messages).toContain("Field 'nope' does not exist on 'FxOldest'");
+    expect(messages).toContain(
+      "Query references 'FxTicket' which is not in scope — a first-row join orders by fields of its target 'FxOldest'",
+    );
+  });
+
+  it("VJ6: rejects array, JSON, encrypted and object keys", async () => {
+    const messages = await view("tags, FxOldest.payload.level, secret, address");
+    expect(messages).toContain(
+      "Order key 'tags' is an array — order by a scalar field of 'FxOldest'",
+    );
+    expect(messages).toContain(
+      "Order key 'payload.level' reads a @db.json field — order by a scalar field of 'FxOldest'",
+    );
+    expect(messages).toContain(
+      "Order key 'secret' is @db.encrypted — order by a scalar field of 'FxOldest'",
+    );
+    expect(messages).toContain(
+      "Order key 'address' is not a scalar — order by a scalar field of 'FxOldest'",
+    );
+  });
+
+  it("VJ7: rejects a target without a single primary key (incl. an alias of a composite-key table)", async () => {
+    const messages = await view("ticketId", "FxPairAlias");
+    expect(messages).toContain(
+      "A first-row join needs a target with exactly one @meta.id field — 'FxPairAlias' has 2 (a composite key)",
+    );
+  });
+
+  it("VJ8: rejects a duplicate key (qualified and unqualified spellings)", async () => {
+    const messages = await view("raisedAt, FxOldest.raisedAt desc");
+    expect(messages).toContain("Order key 'raisedAt' appears more than once");
+  });
+
+  it("reports order-list syntax errors", async () => {
+    const messages = await view("raisedAt asc asc");
+    expect(messages).toContain(
+      'Unexpected token in order list: "asc" (expected "," or "asc" / "desc")',
+    );
+  });
+});
+
+describe("@db.compute — computed view columns (VC1–VC6)", () => {
+  const computed = (fields: string, extra = "") =>
+    diagnosticsFor(`${TICKETS}
+@db.view 'fx_c'
+@db.view.for FxTicket
+@db.view.joins FxIssue, \`FxIssue.ticketId = FxTicket.id\`, 'left'
+${extra}
+export interface FxC {
+    id: FxTicket.id
+
+    @db.agg.count 'id', \`FxIssue.status = 'open'\`
+    openCount: FxIssue.id
+
+    @db.agg.sum 'estimate'
+    estimateSum?: FxIssue.estimate
+
+    @db.agg.max 'raisedAt'
+    lastRaised?: FxIssue.raisedAt
+
+    @db.agg.max 'price'
+    maxPrice?: FxIssue.price
+
+    @db.ignore
+    hidden: number
+${fields}
+}
+`);
+
+  it("accepts arithmetic over aggregates, dimensions and computed fields", async () => {
+    expect(
+      await computed(`
+    @db.compute \`openCount * 10 + id\`
+    rank: number
+
+    @db.compute \`coalesce(estimateSum / openCount, 0) - -1\`
+    avg: number
+
+    @db.compute \`estimateSum / openCount\`
+    ratio?: number
+
+    @db.compute \`-(rank - 1) * 2\`
+    score: number
+`),
+    ).toEqual([]);
+  });
+
+  it("VC1: rejects a table field, an aggregate field and a non-number type", async () => {
+    const table = await diagnosticsFor(`
+@db.table 'fx_t'
+export interface FxT {
+    @meta.id
+    id: number
+    @db.compute \`id * 2\`
+    double: number
+}
+`);
+    expect(table).toContain("@db.compute is only valid on a field of a @db.view.for view");
+
+    const messages = await computed(`
+    @db.agg.count
+    @db.compute \`openCount + 1\`
+    both: number
+
+    @db.compute \`openCount + 1\`
+    chained: FxIssue.severity
+
+    @db.compute \`openCount + 1\`
+    int: number.int
+`);
+    expect(messages).toContain(
+      "@db.compute cannot coexist with @db.agg.count on the same field — pick one form, not both",
+    );
+    expect(messages).toContain('Field "chained" has a @db.compute and must be typed `number`');
+    expect(messages).toContain('Field "int" has a @db.compute and must be typed `number`');
+  });
+
+  it("VC2: rejects a qualified ref and a missing field", async () => {
+    const messages = await computed(`
+    @db.compute \`FxIssue.severity + nope\`
+    bad?: number
+`);
+    expect(messages).toContain(
+      "Query references 'FxIssue' which is not in scope — @db.compute references the view's own fields — declare it on the view first (`field: Type.field`)",
+    );
+    expect(messages).toContain("Field 'nope' does not exist on 'FxC'");
+  });
+
+  it("VC3: rejects decimal, timestamp, string and ignored operands", async () => {
+    const messages = await computed(`
+    title: FxTicket.title
+
+    @db.compute \`maxPrice + lastRaised + title + hidden\`
+    bad?: number
+`);
+    expect(messages).toContain(
+      "@db.compute operand 'maxPrice' is a decimal — operands must be number fields",
+    );
+    expect(messages).toContain(
+      "@db.compute operand 'lastRaised' is a timestamp — operands must be number fields",
+    );
+    expect(messages).toContain(
+      "@db.compute operand 'title' is a string — operands must be number fields",
+    );
+    expect(messages).toContain(
+      "@db.compute operand 'hidden' is @db.ignore'd — operands must be number fields",
+    );
+  });
+
+  it("VC4: rejects a self-reference and a 3-cycle", async () => {
+    const messages = await computed(`
+    @db.compute \`self + 1\`
+    self: number
+
+    @db.compute \`b + 1\`
+    a: number
+
+    @db.compute \`c + 1\`
+    b: number
+
+    @db.compute \`a + openCount\`
+    c: number
+`);
+    expect(messages).toContain('@db.compute of "self" depends on itself: self → self');
+    expect(messages).toContain('@db.compute of "a" depends on itself: a → b → c → a');
+    expect(messages).toContain('@db.compute of "c" depends on itself: c → a → b → c');
+  });
+
+  it("VC5: rejects a constant expression", async () => {
+    const messages = await computed(`
+    @db.compute \`1 + 2\`
+    three: number
+`);
+    expect(messages).toContain(
+      "@db.compute needs at least one view field — a constant column is not supported",
+    );
+  });
+
+  it("VC6: a nullable expression needs an optional field; coalesce makes it non-null", async () => {
+    const messages = await computed(`
+    @db.compute \`openCount / 2\`
+    half: number
+
+    @db.compute \`estimateSum + 1\`
+    plus: number
+
+    @db.compute \`coalesce(estimateSum / openCount, 0)\`
+    safe: number
+`);
+    expect(messages).toContain(
+      'Field "half" has a @db.compute that may be NULL and must be optional (half?: …) — it is NULL when an operand is NULL or a divisor is 0',
+    );
+    expect(messages).toContain(
+      'Field "plus" has a @db.compute that may be NULL and must be optional (plus?: …) — it is NULL when an operand is NULL or a divisor is 0',
+    );
+    expect(messages.filter((m) => m.includes('"safe"'))).toEqual([]);
+  });
+
+  it("reports expression syntax errors", async () => {
+    const messages = await computed(`
+    @db.compute \`openCount %\`
+    bad: number
+`);
+    expect(messages).toContain('Unexpected token in expression: "%"');
+  });
+});
