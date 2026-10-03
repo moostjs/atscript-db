@@ -21,7 +21,7 @@ import {
   type TSyncSkippedWork,
 } from "./sync-entry";
 import { computeColumnDiff } from "./column-diff";
-import { hasForeignKeyChanges, fkKey } from "./fk-diff";
+import { fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import type { TForeignKeyDiff } from "./fk-diff";
 import type { TTableSnapshot } from "./schema-hash";
 import { snapshotToExistingColumns, computeTableHash, computeViewSnapshot } from "./schema-hash";
@@ -291,7 +291,7 @@ export async function executeSyncTable(
           if (hasFkChanges && fkDiff && adapter.dropForeignKeys) {
             const keysToDrop = [
               ...fkDiff.removed.map((fk) => fkKey(fk.fields)),
-              ...fkDiff.changed.map((fk) => fkKey(fk.desired.fields)),
+              ...fkDiff.changed.map((fk) => fkKey(fkColumns(fk.desired).fields)),
             ];
             if (keysToDrop.length > 0) {
               await adapter.dropForeignKeys(keysToDrop);

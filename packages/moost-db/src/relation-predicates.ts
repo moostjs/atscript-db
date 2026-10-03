@@ -1,7 +1,7 @@
 import type { AtscriptDbReadable, FilterExpr, TFilterRef } from "@atscript/db";
 import {
-  REL_FILTER_MAX_DEPTH,
-  REL_FILTER_MAX_NODES,
+  REL_FILTER_CLIENT_MAX_DEPTH,
+  REL_FILTER_CLIENT_MAX_NODES,
   collectQueryPaths,
   containsRelationPredicate,
   hasRelationOp,
@@ -100,8 +100,9 @@ export class RelationPredicateGate {
    * In order: the navigation field is visible (`hasField(prefix + nav)`,
    * else `Unknown field` — hidden ≡ nonexistent), is a relation, is
    * `@db.rel.filterable`, its related table resolves, the depth / count caps
-   * hold (core `REL_FILTER_MAX_DEPTH` per chain, `REL_FILTER_MAX_NODES` per
-   * request), and every operand passes the related table's own gate — plain
+   * hold (`REL_FILTER_CLIENT_MAX_DEPTH` per chain, `REL_FILTER_CLIENT_MAX_NODES`
+   * per request — client predicates only; the core's higher caps leave
+   * headroom for server overlays), and every operand passes the related table's own gate — plain
    * paths through its capability index under the visibility at
    * `prefix + nav + "."`, nested predicates recursively.
    */
@@ -137,14 +138,17 @@ export class RelationPredicateGate {
         `Filtering by related "${path}" rows is not possible — the related table is not available.`,
       );
     }
-    if (depth + 1 > REL_FILTER_MAX_DEPTH) {
+    if (depth + 1 > REL_FILTER_CLIENT_MAX_DEPTH) {
       return badRequest(
         path,
-        `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep ("${path}")`,
+        `Relational predicates nest at most ${REL_FILTER_CLIENT_MAX_DEPTH} levels deep ("${path}")`,
       );
     }
-    if (++state.nodes > REL_FILTER_MAX_NODES) {
-      return badRequest(path, `At most ${REL_FILTER_MAX_NODES} relational predicates per query`);
+    if (++state.nodes > REL_FILTER_CLIENT_MAX_NODES) {
+      return badRequest(
+        path,
+        `At most ${REL_FILTER_CLIENT_MAX_NODES} relational predicates per query`,
+      );
     }
     for (const { op, filter } of ref.relation ?? []) {
       if (!isPlainObject(filter)) {
@@ -275,6 +279,70 @@ export function hiddenRelationInsight(
 type TRelationHook = (path: string, filter: FilterExpr) => FilterExpr | Promise<FilterExpr>;
 
 /**
+ * The CLIENT's `$with` tree of one request, recorded before
+ * `validateControls` (since 0.1.147) — a server hook may conjoin row scopes
+ * (which may themselves use relational predicates) into `$with` entry
+ * filters there. The gate judges {@link tree} only, and the overlay rewrites
+ * only the predicate maps in {@link predicates}, so server-added predicates
+ * are neither gated, counted, nor overlaid.
+ */
+export interface TClientWithSnapshot {
+  /** Structural copy of the client's entries (`name`, `filter`, nested `$with`). */
+  readonly tree: unknown;
+  /** The client's predicate operator maps (`{ $some: … }`) — the live objects. */
+  readonly predicates: ReadonlySet<object>;
+}
+
+/** Records the client's `$with` tree — see {@link TClientWithSnapshot}. `undefined` when there is none. */
+export function snapshotClientWith(withRels: unknown): TClientWithSnapshot | undefined {
+  if (!Array.isArray(withRels) || withRels.length === 0) return undefined;
+  const predicates = new Set<object>();
+  const copy = (rels: unknown): unknown => {
+    if (!Array.isArray(rels)) return undefined;
+    return rels.map((raw) => {
+      const rel = raw as TWithEntry;
+      if (typeof rel?.name !== "string") return raw;
+      if (rel.filter) collectPredicateMaps(rel.filter, predicates);
+      const children = copy(childrenOf(rel));
+      const out: TWithEntry = { name: rel.name };
+      if (rel.filter) out.filter = cloneFilter(rel.filter);
+      if (children !== undefined) out.controls = { $with: children };
+      return out;
+    });
+  };
+  return { tree: copy(withRels), predicates };
+}
+
+/** A detached copy of a client filter (parsed values: plain objects, RegExp, Date). */
+function cloneFilter(filter: FilterExpr): FilterExpr {
+  try {
+    return structuredClone(filter);
+  } catch {
+    return filter;
+  }
+}
+
+/** The predicate operator maps of a filter's own level (through `$and` / `$or` / `$not`). */
+function collectPredicateMaps(filter: unknown, out: Set<object>): void {
+  if (!isPlainObject(filter)) return;
+  for (const [key, value] of Object.entries(filter)) {
+    if ((key === "$and" || key === "$or") && Array.isArray(value)) {
+      for (const child of value) collectPredicateMaps(child, out);
+    } else if (key === "$not") {
+      collectPredicateMaps(value, out);
+    } else if (!key.startsWith("$") && hasRelationOp(value)) {
+      out.add(value);
+    }
+  }
+}
+
+/** Which predicate maps an overlay walk may rewrite, and which of them it met. */
+interface TOverlayScope {
+  readonly predicates: ReadonlySet<object>;
+  readonly seen: Set<object>;
+}
+
+/**
  * Rewrites every client predicate operand of `filter` through `hook`
  * (`transformRelationFilter`) with its full dotted path (`prefix + nav`).
  * Nested predicates of an operand are rewritten first, then the operand
@@ -286,6 +354,7 @@ export async function overlayRelationFilter(
   filter: FilterExpr,
   prefix: string,
   hook: TRelationHook,
+  scope?: TOverlayScope,
 ): Promise<FilterExpr> {
   if (!containsRelationPredicate(filter)) return filter;
   const out: Record<string, unknown> = {};
@@ -293,12 +362,21 @@ export async function overlayRelationFilter(
     if ((key === "$and" || key === "$or") && Array.isArray(value)) {
       const children: FilterExpr[] = [];
       for (const child of value as FilterExpr[]) {
-        children.push(await overlayRelationFilter(child, prefix, hook));
+        children.push(await overlayRelationFilter(child, prefix, hook, scope));
       }
       out[key] = children;
     } else if (key === "$not" && isPlainObject(value)) {
-      out[key] = await overlayRelationFilter(value as FilterExpr, prefix, hook);
+      out[key] = await overlayRelationFilter(value as FilterExpr, prefix, hook, scope);
+    } else if (
+      !key.startsWith("$") &&
+      hasRelationOp(value) &&
+      scope &&
+      !scope.predicates.has(value)
+    ) {
+      // A server-added predicate (e.g. a row scope conjoined in validateControls): not the client's.
+      out[key] = value;
     } else if (!key.startsWith("$") && hasRelationOp(value)) {
+      scope?.seen.add(value);
       const path = prefix + key;
       const ops: Record<string, unknown> = {};
       for (const [op, operand] of Object.entries(value)) {
@@ -318,12 +396,15 @@ export async function overlayRelationFilter(
 /**
  * {@link overlayRelationFilter} over a `$with` tree: every entry's
  * sub-filter at its path (`tickets.` for `$with=tickets(…)`), recursively.
- * Returns the same array when nothing changed.
+ * With a `scope`, only the client's predicate maps (its `predicates`,
+ * recorded by {@link snapshotClientWith}) are rewritten — each one met is
+ * added to `scope.seen`. Returns the same array when nothing changed.
  */
 export async function overlayWithFilters(
   withRels: unknown,
   prefix: string,
   hook: TRelationHook,
+  scope?: TOverlayScope,
 ): Promise<unknown> {
   if (!Array.isArray(withRels) || withRels.length === 0) return withRels;
   let out: unknown[] | undefined;
@@ -331,9 +412,11 @@ export async function overlayWithFilters(
     const rel = withRels[i] as TWithEntry;
     if (typeof rel?.name !== "string") continue;
     const path = `${prefix}${rel.name}.`;
-    const filter = rel.filter ? await overlayRelationFilter(rel.filter, path, hook) : rel.filter;
+    const filter = rel.filter
+      ? await overlayRelationFilter(rel.filter, path, hook, scope)
+      : rel.filter;
     const children = childrenOf(rel);
-    const walked = await overlayWithFilters(children, path, hook);
+    const walked = await overlayWithFilters(children, path, hook, scope);
     if (filter === rel.filter && walked === children) continue;
     const next: TWithEntry = { ...rel, filter };
     if (walked !== children) {

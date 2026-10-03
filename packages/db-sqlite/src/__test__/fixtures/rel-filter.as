@@ -130,3 +130,49 @@ export interface RfNote {
     @db.search.vector 256, "cosine"
     embedding: number[]
 }
+
+// A `@db.column`-renamed FK column (as-test case 16 shape)
+@db.table 'rf_memos'
+export interface RfMemo {
+    @meta.id
+    id: string
+
+    @db.rel.FK
+    @db.column 'ticket_ref'
+    ticketKey?: RfTicket.key
+
+    @db.rel.to
+    @db.rel.filterable
+    ticket?: RfTicket
+}
+
+// A `@db.column`-renamed primary key, referenced by a renamed FK column
+@db.table 'rf_tags'
+export interface RfTag {
+    @meta.id
+    @db.column 'tag_code'
+    code: string
+
+    label: string
+
+    @db.rel.from
+    @db.rel.filterable
+    uses?: RfTagUse[]
+}
+
+@db.table 'rf_tag_uses'
+export interface RfTagUse {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    @db.column 'tag_ref'
+    @db.rel.onDelete 'cascade'
+    tagCode?: RfTag.code
+
+    note?: string
+
+    @db.rel.to
+    @db.rel.filterable
+    tag?: RfTag
+}

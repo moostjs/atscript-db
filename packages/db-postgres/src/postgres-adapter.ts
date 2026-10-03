@@ -462,7 +462,7 @@ export class PostgresAdapter extends BaseDbAdapter {
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
     let { sql, params } = buildInsert(this.resolveTableName(), data);
     // Append RETURNING clause for PK fields
-    const pkCols = this._table.primaryKeys.map((pk) => qi(pk));
+    const pkCols = this._pkColumns().map((pk) => qi(pk));
     if (pkCols.length > 0) {
       sql += ` RETURNING ${pkCols.join(", ")}`;
     }
@@ -481,7 +481,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
     return this.withTransaction(async () => {
       const tableName = this.resolveTableName();
-      const pkCols = this._table.primaryKeys;
+      const pkCols = this._pkColumns();
       const returningSuffix =
         pkCols.length > 0 ? ` RETURNING ${pkCols.map((pk) => qi(pk)).join(", ")}` : "";
 
@@ -594,6 +594,13 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
+  /** Physical primary-key columns (`@db.column` renames applied). */
+  private _pkColumns(): string[] {
+    return this._table.primaryKeys.map(
+      (key) => this._table.pathToPhysical.get(key) ?? this._table.columnMap.get(key) ?? key,
+    );
+  }
+
   /**
    * The predicate that narrows a single-row UPDATE/DELETE to the first row
    * matching `whereSql`: `<key> <op> (SELECT <cols> … LIMIT 1)`. Single-col
@@ -603,7 +610,7 @@ export class PostgresAdapter extends BaseDbAdapter {
    * existing behavior rather than guess.
    */
   private _limitOnePredicate(quotedTable: string, whereSql: string): string {
-    const pkCols = this._table.primaryKeys;
+    const pkCols = this._pkColumns();
     const quotedKeys = pkCols.length > 0 ? pkCols.map((c) => qi(c)) : ["ctid"];
     const colList = quotedKeys.join(", ");
     const keyMatch = quotedKeys.length === 1 ? `${colList} =` : `(${colList}) IN`;
@@ -1576,7 +1583,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     // Build desired FK set (keyed by sorted local column names)
     const desiredFkKeys = new Set<string>();
     for (const fk of this._table.foreignKeys.values()) {
-      desiredFkKeys.add([...fk.fields].toSorted().join(","));
+      desiredFkKeys.add([...(fk.physicalFields ?? fk.fields)].toSorted().join(","));
     }
 
     // Drop stale FKs
@@ -1594,10 +1601,12 @@ export class PostgresAdapter extends BaseDbAdapter {
       [...existingByName.values()].map((cols) => cols.toSorted().join(",")),
     );
     for (const fk of this._table.foreignKeys.values()) {
-      const key = [...fk.fields].toSorted().join(",");
+      const key = [...(fk.physicalFields ?? fk.fields)].toSorted().join(",");
       if (!existingKeys.has(key)) {
-        const localCols = fk.fields.map((f) => qi(f)).join(", ");
-        const targetCols = fk.targetFields.map((f) => qi(f)).join(", ");
+        const localCols = (fk.physicalFields ?? fk.fields).map((f) => qi(f)).join(", ");
+        const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
+          .map((f) => qi(f))
+          .join(", ");
         let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
         if (fk.onDelete) {
           ddl += ` ON DELETE ${refActionToSql(fk.onDelete)}`;

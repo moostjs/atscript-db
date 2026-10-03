@@ -16,23 +16,6 @@ try {
   sqliteVecAvailable = false;
 }
 
-/**
- * Works around a pre-existing DDL limitation: the SQL adapters render
- * `FOREIGN KEY (...)` from the LOGICAL FK field names, so a `@db.column`-renamed
- * FK column (`teamId` → `team_ref`, `ticketKey` → `ticket_ref`) fails
- * `CREATE TABLE`. Rewrites the two constraints to their physical columns —
- * the predicates under test correlate on physical names already.
- */
-class RenamedFkDriver extends RecordingDriver {
-  override exec(sql: string): void {
-    let patched = sql.replace('FOREIGN KEY ("teamId")', 'FOREIGN KEY ("team_ref")');
-    if (sql.includes('TABLE IF NOT EXISTS "rf_issues"') || sql.includes('TABLE "rf_issues"')) {
-      patched = patched.replace('FOREIGN KEY ("ticketKey")', 'FOREIGN KEY ("ticket_ref")');
-    }
-    super.exec(patched);
-  }
-}
-
 let fx: Record<string, any>;
 let inner: BetterSqlite3Driver;
 let driver: RecordingDriver;
@@ -54,7 +37,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   inner = new BetterSqlite3Driver(":memory:", { vector: sqliteVecAvailable });
-  driver = new RenamedFkDriver(inner);
+  driver = new RecordingDriver(inner);
   space = new DbSpace(() => new SqliteAdapter(driver));
   for (const t of [
     fx.RfTeam,
@@ -441,5 +424,73 @@ describe("[sqlite] filter-builder wrappers", () => {
     expect(buildWhere(q.filter).sql).toBe(
       '"status" = ? AND EXISTS (SELECT 1 FROM "rf_issues" AS "_rf1" WHERE "_rf1"."ticket_ref" = "rf_tickets"."key" AND "_rf1"."title" = ?)',
     );
+  });
+});
+
+describe("[sqlite] @db.column-renamed FK columns — real DDL (since 0.1.147)", () => {
+  async function seedTags() {
+    for (const ty of [fx.RfMemo, fx.RfTag, fx.RfTagUse]) {
+      await t(ty).ensureTable();
+    }
+    await t(fx.RfTag).insertMany([
+      { code: "a", label: "Alpha" },
+      { code: "b", label: "Beta" },
+      { code: "c", label: "Gamma" },
+    ]);
+    await t(fx.RfTagUse).insertMany([
+      { id: 1, tagCode: "a", note: "x" },
+      { id: 2, tagCode: "a", note: "y" },
+      { id: 3, tagCode: "b", note: "y" },
+      { id: 4, note: "x" },
+    ]);
+    await t(fx.RfMemo).insertMany([
+      { id: "m1", ticketKey: "K1" },
+      { id: "m2", ticketKey: "K2" },
+      { id: "m3" },
+    ]);
+  }
+
+  it("FOREIGN KEY names the physical local and referenced columns", async () => {
+    await seedTags();
+    const ddl = (table: string) =>
+      driver.execs.find((s) => s.startsWith(`CREATE TABLE IF NOT EXISTS "${table}"`));
+    expect(ddl("rf_issues")).toContain(
+      'FOREIGN KEY ("ticket_ref") REFERENCES "rf_tickets" ("key")',
+    );
+    expect(ddl("rf_tickets")).toContain('FOREIGN KEY ("team_ref") REFERENCES "rf_teams" ("id")');
+    expect(ddl("rf_memos")).toContain('FOREIGN KEY ("ticket_ref") REFERENCES "rf_tickets" ("key")');
+    expect(ddl("rf_tag_uses")).toContain(
+      'FOREIGN KEY ("tag_ref") REFERENCES "rf_tags" ("tag_code") ON DELETE CASCADE',
+    );
+    expect(
+      inner
+        .all<{ from: string; to: string; table: string }>('PRAGMA foreign_key_list("rf_tag_uses")')
+        .map((r) => [r.from, r.table, r.to]),
+    ).toEqual([["tag_ref", "rf_tags", "tag_code"]]);
+  });
+
+  it("predicates correlate through the renamed columns", async () => {
+    await seedTags();
+    expect(await ids(fx.RfMemo, { ticket: { $some: { status: "open" } } })).toEqual(["m1"]);
+    expect(await ids(fx.RfMemo, { ticket: { $none: {} } })).toEqual(["m3"]);
+    expect(await ids(fx.RfTag, { uses: { $some: { note: "y" } } }, "code")).toEqual(["a", "b"]);
+    expect(await ids(fx.RfTag, { uses: { $none: {} } }, "code")).toEqual(["c"]);
+    expect(await ids(fx.RfTagUse, { tag: { $some: { label: "Beta" } } })).toEqual([3]);
+  });
+
+  it("deleteMany by a $some predicate cascades natively to the children", async () => {
+    await seedTags();
+    const res = await t(fx.RfTag).deleteMany({ uses: { $some: { note: "x" } } });
+    expect(res.deletedCount).toBe(1);
+    expect(await ids(fx.RfTag, {}, "code")).toEqual(["b", "c"]);
+    expect(await ids(fx.RfTagUse, {})).toEqual([3, 4]);
+  });
+
+  it("updateOne / deleteOne key on the renamed primary key", async () => {
+    await seedTags();
+    expect((await t(fx.RfTag).updateOne({ code: "c", label: "Gamma 2" })).modifiedCount).toBe(1);
+    expect((await t(fx.RfTag).findById("c")).label).toBe("Gamma 2");
+    expect((await t(fx.RfTag).deleteOne("c")).deletedCount).toBe(1);
+    expect(await ids(fx.RfTag, {}, "code")).toEqual(["a", "b"]);
   });
 });

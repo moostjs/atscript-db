@@ -9,10 +9,14 @@ import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { DbError } from "../db-error";
 import dbPlugin from "../plugin";
 import {
+  REL_FILTER_CLIENT_MAX_DEPTH,
+  REL_FILTER_CLIENT_MAX_NODES,
+  REL_FILTER_MAX_DEPTH,
   REL_FILTER_MAX_NODES,
   ResolvedRelationFilter,
   containsRelationPredicate,
   forEachResolvedRelation,
+  isResolvedRelationFilter,
   relationStaticFilter,
 } from "../query/relation-filter";
 import { computeTableSnapshot } from "../schema/schema-hash";
@@ -37,6 +41,19 @@ class RelMockAdapter extends MockAdapter {
 class ReadOnlyRelMockAdapter extends MockAdapter {
   override supportsRelationFilters(mode: "read" | "write"): boolean {
     return mode === "read";
+  }
+}
+
+/** Same class, bound to a distinct connection (its own transaction owner). */
+class ConnRelMockAdapter extends MockAdapter {
+  constructor(readonly conn: object) {
+    super();
+  }
+  override supportsRelationFilters(): boolean {
+    return true;
+  }
+  protected override _transactionOwner(): unknown {
+    return this.conn;
   }
 }
 
@@ -313,24 +330,36 @@ describe("guards", () => {
     expect(encrypted.errors[0]?.path).toBe("ticket.note");
   });
 
-  it("caps nesting depth at 3", async () => {
+  it(`caps nesting depth at ${REL_FILTER_MAX_DEPTH} (headroom above the client cap of 3)`, async () => {
+    expect(REL_FILTER_MAX_DEPTH).toBeGreaterThan(REL_FILTER_CLIENT_MAX_DEPTH);
     const issues = space().getTable(fx.RfIssue);
-    const three = { ticket: { $some: { parent: { $some: { team: { $some: { name: "x" } } } } } } };
-    await expect(issues.findMany({ filter: three as any })).resolves.toBeDefined();
     const four = {
       ticket: { $some: { parent: { $some: { parent: { $some: { team: { $some: {} } } } } } } },
     };
-    const err = await rejection(issues.findMany({ filter: four as any }));
+    await expect(issues.findMany({ filter: four as any })).resolves.toBeDefined();
+    const five = {
+      ticket: {
+        $some: {
+          parent: { $some: { parent: { $some: { parent: { $some: { team: { $some: {} } } } } } } },
+        },
+      },
+    };
+    const err = await rejection(issues.findMany({ filter: five as any }));
     expect(err.code).toBe("INVALID_QUERY");
-    expect(err.message).toContain("at most 3 levels");
-    expect(err.errors[0]?.path).toBe("ticket.parent.parent.team");
+    // the caps count server-added predicates too: no path, no chain in the message
+    expect(err.errors).toEqual([
+      { path: "", message: "Relational predicates nest at most 4 levels deep" },
+    ]);
   });
 
-  it(`caps the predicate count at ${REL_FILTER_MAX_NODES}`, async () => {
+  it(`caps the predicate count at ${REL_FILTER_MAX_NODES} (headroom above the client cap of 8)`, async () => {
+    expect(REL_FILTER_MAX_NODES).toBeGreaterThan(REL_FILTER_CLIENT_MAX_NODES);
     const issues = space().getTable(fx.RfIssue);
-    await expect(issues.findMany({ filter: manyPredicates(8) as any })).resolves.toBeDefined();
-    const err = await rejection(issues.findMany({ filter: manyPredicates(9) as any }));
-    expect(err.message).toContain("At most 8 relational predicates");
+    await expect(issues.findMany({ filter: manyPredicates(16) as any })).resolves.toBeDefined();
+    const err = await rejection(issues.findMany({ filter: manyPredicates(17) as any }));
+    expect(err.errors).toEqual([
+      { path: "", message: "At most 16 relational predicates per query" },
+    ]);
   });
 
   it("rejects predicates in $having", async () => {
@@ -372,7 +401,35 @@ describe("guards", () => {
     db.getTable(fx.RfTicket);
     const err = await rejection(issues.findMany({ filter: { ticket: { $some: {} } } }));
     expect(err.code).toBe("REL_FILTER_NOT_SUPPORTED");
-    expect(err.message).toContain("different adapter");
+    expect(err.message).toContain("different database or adapter");
+    // the client-visible message names the nav path, never a physical table
+    expect(err.message).not.toMatch(/rf_tickets/);
+  });
+
+  it("same adapter class on a DIFFERENT connection → REL_FILTER_NOT_SUPPORTED", async () => {
+    let n = 0;
+    const connA = {};
+    const db = space(() => new ConnRelMockAdapter(n++ === 0 ? connA : {}));
+    const issues = db.getTable(fx.RfIssue);
+    db.getTable(fx.RfTicket);
+    const err = await rejection(issues.findMany({ filter: { ticket: { $some: {} } } }));
+    expect(err.code).toBe("REL_FILTER_NOT_SUPPORTED");
+    expect(err.message).not.toMatch(/rf_tickets/);
+  });
+
+  it("same adapter class on the SAME connection → allowed", async () => {
+    const conn = {};
+    const db = space(() => new ConnRelMockAdapter(conn));
+    const issues = db.getTable(fx.RfIssue);
+    db.getTable(fx.RfTicket);
+    await expect(issues.findMany({ filter: { ticket: { $some: {} } } })).resolves.toEqual([]);
+  });
+
+  it("isResolvedRelationFilter is a cross-realm brand check, not instanceof", () => {
+    const foreign = { [Symbol.for("@atscript/db:ResolvedRelationFilter")]: true, kind: "to" };
+    expect(isResolvedRelationFilter(foreign)).toBe(true);
+    expect(isResolvedRelationFilter({ kind: "to" })).toBe(false);
+    expect(isResolvedRelationFilter(null)).toBe(false);
   });
 
   it("table built without a DbSpace → REL_FILTER_NOT_SUPPORTED", async () => {
@@ -438,6 +495,111 @@ export interface B {
     const messages = [...(await repo.diagnostics()).values()].flat().map((m) => m.message);
     expect(messages.filter((m) => m.includes("@db.rel.filterable"))).toEqual([
       "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, or @db.rel.via)",
+    ]);
+  });
+});
+
+describe("@db.rel.filter compile-time diagnostics mirror the runtime limits", () => {
+  const SOURCE = `@db.table 'df_tickets'
+export interface DfTicket {
+    @meta.id
+    key: string
+    status: string
+    closedStatus: string
+
+    // FL5: field-to-field comparison (any relation kind)
+    @db.rel.from
+    @db.rel.filter \`DfIssue.title = DfIssue.body\`
+    cmpIssues?: DfIssue[]
+
+    // OK: field-to-value conditions
+    @db.rel.from
+    @db.rel.filter \`DfIssue.title != '' and DfIssue.body exists\`
+    okIssues?: DfIssue[]
+
+    // FL4: one top-level condition reads the junction AND the related type
+    @db.rel.via DfTicketLabel
+    @db.rel.filter \`DfTicketLabel.pinned = true or DfLabel.name = 'bug'\`
+    mixedLabels?: DfLabel[]
+
+    // FL4 through a parenthesized and-group (the runtime splits top-level conditions only)
+    @db.rel.via DfTicketLabel
+    @db.rel.filter \`DfLabel.name != 'x' and (DfTicketLabel.pinned = true and name != 'y')\`
+    groupedLabels?: DfLabel[]
+
+    // OK: each top-level condition reads one side
+    @db.rel.via DfTicketLabel
+    @db.rel.filter \`DfTicketLabel.pinned = true and DfLabel.name != 'hidden' and name != 'x'\`
+    okLabels?: DfLabel[]
+}
+
+@db.table 'df_issues'
+export interface DfIssue {
+    @meta.id
+    id: number
+    title: string
+    body?: string
+
+    @db.rel.FK
+    ticketKey?: DfTicket.key
+}
+
+@db.table 'df_labels'
+export interface DfLabel {
+    @meta.id
+    id: number
+    name: string
+}
+
+@db.table 'df_ticket_labels'
+export interface DfTicketLabel {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    ticketKey: DfTicket.key
+
+    @db.rel.FK
+    labelId: DfLabel.id
+
+    pinned?: boolean
+}
+`;
+
+  it("reports field-to-field comparisons and junction/target-mixing conditions, nothing else", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "rel-filter-diag-"));
+    writeFileSync(join(rootDir, "fixture.as"), SOURCE);
+    const repo = await build({
+      rootDir,
+      entries: ["fixture.as"],
+      plugins: [tsPlugin(), dbPlugin()],
+    });
+    const messages = [...(await repo.diagnostics()).values()]
+      .flat()
+      .filter((m) => m.message.includes("@db.rel.filter"));
+    const lines = SOURCE.split("\n");
+    const at = (m: (typeof messages)[number]) => {
+      // the nav field the annotation belongs to (first prop line after the diagnostic)
+      const line = m.range.start.line;
+      return lines
+        .slice(line)
+        .find((l) => /^\s+\w+\??: /.test(l))!
+        .trim()
+        .split(/\??:/)[0];
+    };
+    expect(messages.map((m) => [at(m), m.message])).toEqual([
+      [
+        "cmpIssues",
+        "@db.rel.filter compares two fields — only field-to-value conditions are supported",
+      ],
+      [
+        "mixedLabels",
+        `@db.rel.filter has a condition reading both the junction 'DfTicketLabel' and the related type — split it into separate top-level "and" conditions`,
+      ],
+      [
+        "groupedLabels",
+        `@db.rel.filter has a condition reading both the junction 'DfTicketLabel' and the related type — split it into separate top-level "and" conditions`,
+      ],
     ]);
   });
 });

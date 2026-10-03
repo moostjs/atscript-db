@@ -97,7 +97,7 @@ Use `versionColumnPhysical`, not `versionColumn`: `versionColumn` is the field n
 
 ### Schema
 
-- **`ensureTable(opts?)`** — Create the table/collection if it does not exist. Use `this._table.tableName`, `this._table.fieldDescriptors`, and `this._table.foreignKeys` to build the DDL. Branch on **`this._table.isView`** (or the exported `isAtscriptDbView()` guard) to create a view — never `instanceof AtscriptDbView`: a bundle can carry two copies of `@atscript/db`, and a false `instanceof` would create an empty physical table under the view's name. If your engine emits inline `FOREIGN KEY` constraints, omit those whose target is in `opts.deferForeignKeysTo` (since 0.1.128 — schema sync creates a foreign-key cycle that way and adds the constraints through `syncForeignKeys()` once every member exists).
+- **`ensureTable(opts?)`** — Create the table/collection if it does not exist. Use `this._table.tableName`, `this._table.fieldDescriptors`, and `this._table.foreignKeys` to build the DDL — name FK columns by each FK's `physicalFields` / `physicalTargetFields` (since 0.1.147; `fields` / `targetFields` are the logical names and differ under `@db.column`). Branch on **`this._table.isView`** (or the exported `isAtscriptDbView()` guard) to create a view — never `instanceof AtscriptDbView`: a bundle can carry two copies of `@atscript/db`, and a false `instanceof` would create an empty physical table under the view's name. If your engine emits inline `FOREIGN KEY` constraints, omit those whose target is in `opts.deferForeignKeysTo` (since 0.1.128 — schema sync creates a foreign-key cycle that way and adds the constraints through `syncForeignKeys()` once every member exists).
 - **`syncIndexes()`** — Synchronize indexes between Atscript definitions and the database. Use `this._table.indexes` for the desired index state.
 
 ::: tip
@@ -304,10 +304,12 @@ Render `$some` as "a related row exists" and `$none` as "none exists". A `null` 
 
 Helpers exported from `@atscript/db`:
 
-- `isResolvedRelationFilter(value)` — the operand type guard.
+- `isResolvedRelationFilter(value)` — the operand type guard (a `Symbol.for` brand, so it holds across two loaded copies of `@atscript/db`, ESM and CJS).
 - `containsRelationPredicate(filter)` — a cheap pre-scan; keep predicate-free filters on your existing fast path.
 - `forEachResolvedRelation(filter, visit, nested?)` — visits every resolved predicate of a translated filter (operands and junction filters included), e.g. to load related data before evaluating, or to detect a predicate that reads the table being written.
-- `relationStaticFilter(relation)`, `andFilters(...parts)`, `isRelationOp`, `RELATION_OPS`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES`.
+- `relationStaticFilter(relation)`, `andFilters(...parts)`, `isRelationOp`, `RELATION_OPS`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES` (core limits, server predicates included), `REL_FILTER_CLIENT_MAX_DEPTH`, `REL_FILTER_CLIENT_MAX_NODES` (the HTTP client budget).
+
+**Same store.** The core renders a predicate only when the related (and junction) table's adapter `sharesStoreWith` the source's: by default the same adapter class and the same transaction owner (`_transactionOwner()` — see [Transaction Support](#transaction-support); the driver, pool or client) — two connections of one class are different stores. Override it when one owner serves several databases (the MongoDB adapter also compares the database name). Otherwise the predicate is a `REL_FILTER_NOT_SUPPORTED`.
 
 **SQL adapters on `@atscript/db-sql-tools`** get the rendering from `createFilterVisitor` / `buildWhere`: a correlated `EXISTS (SELECT 1 FROM <target> AS "_rf1" WHERE "_rf1"."<col>" = <outer>."<col>" …)`, `NOT EXISTS` for `$none`, a junction `JOIN` for `via`; parameters keep their textual order, so `finalizeParams` numbering is unaffected. The outer columns are qualified with the source table's name, which is right whenever the statement's FROM is the bare table. **A statement that aliases its FROM must pass the quoted alias** as `qualifier` in `TFilterVisitorOptions`; an unqualified or wrongly qualified outer column would bind to the subquery's table:
 
@@ -462,11 +464,11 @@ A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141, `fi
 
 #### `syncForeignKeys()`
 
-Synchronize foreign key constraints between Atscript definitions and the database. Uses `this._table.foreignKeys` for the full FK definitions.
+Synchronize foreign key constraints between Atscript definitions and the database. Uses `this._table.foreignKeys` for the full FK definitions; compare and create constraints on the physical columns (`physicalFields` / `physicalTargetFields`, since 0.1.147).
 
 #### `dropForeignKeys(fkFieldKeys)`
 
-Drop FK constraints identified by their canonical local column key (sorted local field names, comma-joined). Called by the sync executor before column operations to remove stale FKs that would otherwise block `ALTER COLUMN`.
+Drop FK constraints identified by their canonical local column key (sorted physical local column names, comma-joined). Called by the sync executor before column operations to remove stale FKs that would otherwise block `ALTER COLUMN`.
 
 ### Type Mapping
 

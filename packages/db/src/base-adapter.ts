@@ -493,6 +493,23 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether `other` serves a table of the SAME store as this adapter, so one
+   * statement / pipeline can correlate both (a relational predicate renders
+   * the related table inside this table's query). Default: same adapter class
+   * and same {@link _transactionOwner} (the driver / pool / client the
+   * adapter was built with). Override when the owner is shared across
+   * separate databases (e.g. one Mongo client over several databases).
+   *
+   * @since 0.1.147
+   */
+  sharesStoreWith(other: BaseDbAdapter): boolean {
+    return (
+      other.constructor === this.constructor &&
+      other._transactionOwner() === this._transactionOwner()
+    );
+  }
+
+  /**
    * Loads relations onto result rows using adapter-native operations.
    * Only called when {@link supportsNativeRelations} returns `true`.
    *

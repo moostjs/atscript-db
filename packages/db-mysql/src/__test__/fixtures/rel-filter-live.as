@@ -1,4 +1,8 @@
-// Relational filter predicates ($some / $none) — generic Issue / Ticket / Team domain.
+// Live-server variant of `rel-filter.as` (server-gated `relation-filter.live.spec.ts`):
+// the same domain without `@db.schema` (everything lives in the `relfix_*`
+// database / schema the spec creates and drops) and without search / geo /
+// vector indexes (not every container has the extensions). Adds `@db.column`
+// renames on FK columns, referenced columns and primary keys.
 
 @db.table 'rf_teams'
 export interface RfTeam {
@@ -8,13 +12,11 @@ export interface RfTeam {
     name: string
 }
 
-@db.schema 'app'
 @db.table 'rf_tickets'
 export interface RfTicket {
     @meta.id
     key: string
 
-    @db.index.fulltext 'rf_tickets_ft'
     title: string
 
     @db.rel.FK
@@ -26,19 +28,20 @@ export interface RfTicket {
     @db.rel.FK 'parent'
     parentKey?: RfTicket.key
 
-    @db.index.geo
-    location?: db.geoPoint
-
     @db.rel.to
+    @db.rel.filterable
     team?: RfTeam
 
     @db.rel.to 'parent'
+    @db.rel.filterable
     parent?: RfTicket
 
     @db.rel.from
+    @db.rel.filterable
     issues?: RfIssue[]
 
     @db.rel.via RfTicketLabel
+    @db.rel.filterable
     labels?: RfLabel[]
 }
 
@@ -54,6 +57,7 @@ export interface RfIssue {
     ticketKey?: RfTicket.key
 
     @db.rel.to
+    @db.rel.filterable
     ticket?: RfTicket
 }
 
@@ -80,9 +84,12 @@ export interface RfTicketLabel {
     pinned?: boolean
 }
 
+// Composite primary key with a renamed part; a self-referencing composite FK
+// with a renamed local part referencing it.
 @db.table 'rf_boards'
 export interface RfBoard {
     @meta.id
+    @db.column 'board_org'
     org: string
 
     @meta.id
@@ -91,28 +98,32 @@ export interface RfBoard {
     title: string
 
     @db.rel.FK 'parentBoard'
+    @db.column 'parent_org'
     parentOrg?: RfBoard.org
 
     @db.rel.FK 'parentBoard'
     parentCode?: RfBoard.code
 
     @db.rel.to 'parentBoard'
+    @db.rel.filterable
     parentBoard?: RfBoard
 }
 
-@db.table 'rf_notes'
-export interface RfNote {
+@db.table 'rf_cards'
+export interface RfCard {
     @meta.id
-    id: string
+    id: number
 
-    @db.rel.FK
-    ticketKey?: RfTicket.key
+    @db.rel.FK 'board'
+    @db.column 'card_org'
+    boardOrg?: RfBoard.org
 
-    @db.rel.to
-    ticket?: RfTicket
+    @db.rel.FK 'board'
+    boardCode?: RfBoard.code
 
-    @db.search.vector 256, "cosine"
-    embedding: number[]
+    @db.rel.to 'board'
+    @db.rel.filterable
+    board?: RfBoard
 }
 
 // A `@db.column`-renamed FK column (as-test case 16 shape)
@@ -131,6 +142,7 @@ export interface RfMemo {
 }
 
 // A `@db.column`-renamed primary key, referenced by a renamed FK column
+// with a native ON DELETE CASCADE
 @db.table 'rf_tags'
 export interface RfTag {
     @meta.id

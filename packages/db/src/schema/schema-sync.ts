@@ -27,7 +27,7 @@ import {
 } from "./schema-hash";
 import type { TTableSnapshot, TViewSnapshot } from "./schema-hash";
 import { computeColumnDiff } from "./column-diff";
-import { computeForeignKeyDiff, hasForeignKeyChanges, fkKey } from "./fk-diff";
+import { computeForeignKeyDiff, fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import { computeTableOptionDiff } from "./table-option-diff";
 import { topoOrder, reachable, stableTopo, type TDependencyEdge } from "./dependency-order";
 import { SyncStore } from "./sync-store";
@@ -1047,7 +1047,7 @@ export class SchemaSync {
       const fkDiff = facts.fkDiff;
       init.status = "alter";
       init.fkAdded = fkDiff.added.map((fk) => ({
-        fields: fk.fields,
+        fields: fkColumns(fk).fields,
         targetTable: fk.targetTable,
       }));
       init.fkRemoved = fkDiff.removed.map((fk) => ({
@@ -1055,9 +1055,12 @@ export class SchemaSync {
         targetTable: fk.targetTable,
       }));
       init.fkChanged = fkDiff.changed.map((fk) => ({
-        fields: fk.desired.fields,
+        fields: fkColumns(fk.desired).fields,
         targetTable: fk.desired.targetTable,
-        details: buildFkChangeDetails(fk.desired, fk.existing),
+        details: buildFkChangeDetails(
+          { ...fk.desired, targetFields: fkColumns(fk.desired).targetFields },
+          fk.existing,
+        ),
       }));
     }
 
@@ -1167,8 +1170,8 @@ export class SchemaSync {
               [...child.readable.foreignKeys.values()].some(
                 (desired) =>
                   desired.targetTable === t.name &&
-                  fkKey(desired.fields) === fkKey(fk.fields) &&
-                  fkKey(desired.targetFields) === fkKey(pk.to),
+                  fkKey(fkColumns(desired).fields) === fkKey(fk.fields) &&
+                  fkKey(fkColumns(desired).targetFields) === fkKey(pk.to),
               );
             if (!retargeted) {
               addRefusal(

@@ -4,8 +4,12 @@ import {
   isArray,
   isInterface,
   isPrimitive,
+  isQueryComparison,
+  isQueryLogical,
   isRef,
   isStructure,
+  type SemanticQueryComparisonNode,
+  type SemanticQueryExprNode,
   type SemanticRefNode,
   type SemanticStructureNode,
 } from "@atscript/core";
@@ -20,6 +24,7 @@ import {
 } from "../../shared/annotation-utils";
 import {
   findFKFieldsPointingTo,
+  forEachFieldRef,
   validateQueryScope,
   validateRefArgument,
 } from "../../shared/validation-utils";
@@ -660,8 +665,59 @@ export const dbRelAnnotations: TAnnotationsTree = {
           errors.push(...validateQueryScope(args[0], scope, doc));
         }
 
+        const expression = args[0].queryNode.expression;
+        // FL5: the runtime ANDs the filter into the related rows' query as
+        // field-to-VALUE conditions only (`$with` and `$some` / `$none` alike)
+        forEachComparison(expression, (cmp) => {
+          if (cmp.right && "fieldRef" in cmp.right) {
+            errors.push({
+              message:
+                "@db.rel.filter compares two fields — only field-to-value conditions are supported",
+              severity: 1,
+              range: cmp.right.fieldRef.range,
+            });
+          }
+        });
+
+        // FL4: on a @db.rel.via relation each top-level `and` condition is
+        // applied to ONE table — the junction or the related type
+        const junction = hasVia ? getAnnotationAlias(field, "db.rel.via") : undefined;
+        if (junction) {
+          const conjuncts =
+            isQueryLogical(expression) && expression.operator === "and"
+              ? expression.operands
+              : [expression];
+          for (const conjunct of conjuncts) {
+            let junctionRef: (typeof errors)[number]["range"] | undefined;
+            let targetRef = false;
+            forEachFieldRef(conjunct, (ref) => {
+              if (ref.typeRef?.text === junction) junctionRef ??= ref.typeRef.range;
+              else targetRef = true;
+            });
+            if (junctionRef && targetRef) {
+              errors.push({
+                message: `@db.rel.filter has a condition reading both the junction '${junction}' and the related type — split it into separate top-level "and" conditions`,
+                severity: 1,
+                range: junctionRef,
+              });
+            }
+          }
+        }
+
         return errors;
       },
     }),
   },
 };
+
+/** Every comparison of a query expression (through and / or / not). */
+function forEachComparison(
+  expr: SemanticQueryExprNode,
+  fn: (cmp: SemanticQueryComparisonNode) => void,
+): void {
+  if (isQueryLogical(expr)) {
+    for (const operand of expr.operands) forEachComparison(operand, fn);
+  } else if (isQueryComparison(expr)) {
+    fn(expr);
+  }
+}

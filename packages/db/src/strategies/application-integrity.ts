@@ -13,11 +13,15 @@ import type {
   TFkLookupTarget,
   TWriteTableResolver,
 } from "../types";
-import { IntegrityStrategy } from "./integrity";
+import { containsRelationPredicate } from "../query/relation-filter";
+import { IntegrityStrategy, type TCascadePin } from "./integrity";
 
 // ── Cascade context ─────────────────────────────────────────────────────
 
 const MAX_CASCADE_DEPTH = 100;
+
+/** Rows per pinned-key delete batch (keeps `IN (…)` / `$or` lists bounded). */
+const PIN_BATCH = 1000;
 
 interface CascadeContext {
   visited: Set<string>;
@@ -140,6 +144,11 @@ export class ApplicationIntegrity extends IntegrityStrategy {
    * - `restrict`: throws if any children exist
    * - `cascade`: recursively deletes child records
    * - `setNull`: sets FK fields to null
+   *
+   * Returns the matched rows PINNED by primary key (see {@link TCascadePin}):
+   * the caller deletes those rows, never re-evaluating `filter` on data the
+   * cascade just changed (a `$some` over a cascaded child relation would
+   * otherwise stop matching and leave the parent behind).
    */
   async cascadeBeforeDelete(
     filter: FilterExpr,
@@ -148,7 +157,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     cascadeResolver: TCascadeResolver,
     translateFilter: (f: FilterExpr) => FilterExpr,
     adapter: BaseDbAdapter,
-  ): Promise<void> {
+  ): Promise<TCascadePin> {
     const parentCtx = cascadeStorage.getStore();
     const visited = parentCtx?.visited ?? new Set<string>();
     const depth = (parentCtx?.depth ?? 0) + 1;
@@ -164,7 +173,19 @@ export class ApplicationIntegrity extends IntegrityStrategy {
 
     const targets = cascadeResolver(tableName);
     if (targets.length === 0) {
-      return;
+      return undefined;
+    }
+    const pkPhysical = meta.primaryKeys.map((pk) => meta.physicalPath(pk));
+    if (pkPhysical.length === 0 && containsRelationPredicate(filter)) {
+      // Without a key the rows cannot be pinned, and re-evaluating a
+      // relational predicate after the cascade is unsound.
+      throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+        {
+          path: "",
+          message:
+            "Cannot delete by a relational predicate with application-level cascades: the table has no primary key",
+        },
+      ]);
     }
 
     // Ensure PK fields are fetched (needed for record-level cycle detection)
@@ -191,8 +212,9 @@ export class ApplicationIntegrity extends IntegrityStrategy {
       controls: { $select: new UniquSelect(physicalFields) },
     });
     if (rawRecords.length === 0) {
-      return;
+      return pkPhysical.length > 0 ? [] : undefined;
     }
+    const pin = pkPhysical.length > 0 ? pinByPrimaryKey(rawRecords, pkPhysical) : undefined;
 
     // Map physical column names back to logical for FK matching
     const allRecords = rawRecords.map((r) => {
@@ -220,7 +242,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
       records.push(record);
     }
     if (records.length === 0) {
-      return;
+      return pin;
     }
 
     try {
@@ -286,6 +308,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
         visited.delete(key);
       }
     }
+    return pin;
   }
 
   needsCascade(cascadeResolver: TCascadeResolver | undefined): boolean {
@@ -350,4 +373,26 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     }
     return orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
   }
+}
+
+/**
+ * Adapter-ready filters addressing exactly `rows` by their (physical) primary
+ * key, in batches of {@link PIN_BATCH}: `{ pk: { $in } }` for a single key,
+ * `{ $or: [{ a, b }, …] }` for a composite one. Values are the raw stored
+ * values the adapter returned, so no value formatting is re-applied.
+ */
+function pinByPrimaryKey(rows: Array<Record<string, unknown>>, pk: string[]): FilterExpr[] {
+  const out: FilterExpr[] = [];
+  for (let i = 0; i < rows.length; i += PIN_BATCH) {
+    const batch = rows.slice(i, i + PIN_BATCH);
+    if (pk.length === 1) {
+      const field = pk[0];
+      out.push({ [field]: { $in: batch.map((r) => r[field]) } } as FilterExpr);
+    } else {
+      out.push({
+        $or: batch.map((r) => Object.fromEntries(pk.map((f) => [f, r[f]]))),
+      } as FilterExpr);
+    }
+  }
+  return out;
 }

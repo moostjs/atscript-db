@@ -62,7 +62,7 @@ interface Post {
 | `'setDefault'` | Set FK to its `@db.default` value.       |
 
 - Adapters with `supportsNativeForeignKeys(): true` push this to the DB.
-- Others emulate via `ApplicationIntegrity`: counts children before delete, runs cascade updates inside the same transaction.
+- Others emulate via `ApplicationIntegrity`: reads the matching parents, counts children (restrict) / cascades / nulls inside the same transaction, then deletes EXACTLY those parents by primary key (the delete filter is never re-evaluated — a `$some` over a cascaded child relation still deletes the parent; since 0.1.147).
 
 ## Loading — `controls.$with`
 
@@ -97,11 +97,11 @@ openSubtasks: Task[]
 pinnedLabels: Label[]
 ```
 
-| #   | Rule                                                                                                                                                                                                                                               |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | APPLIED at run time since 0.1.147 on every adapter — in `$with` (ANDed with the `$with` entry `filter`) and in `$some` / `$none` predicates. ≤ 0.1.146 it was validated but IGNORED (`$with` loaded everything).                                   |
-| 2   | Expression syntax uses `and` / `or` / `not` keywords. Refs: the related type (unqualified = related type) and, on `via`, the junction.                                                                                                             |
-| 3   | `via`: top-level `and` conditions split by side — related-type conditions filter targets, junction conditions filter links. One condition reading BOTH sides (an `or` across them) or a field-to-field comparison → `INVALID_QUERY` at query time. |
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                                   |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | APPLIED at run time since 0.1.147 on every adapter — in `$with` (ANDed with the `$with` entry `filter`) and in `$some` / `$none` predicates. ≤ 0.1.146 it was validated but IGNORED (`$with` loaded everything).                                                                                                                                                       |
+| 2   | Expression syntax uses `and` / `or` / `not` keywords. Refs: the related type (unqualified = related type) and, on `via`, the junction.                                                                                                                                                                                                                                 |
+| 3   | `via`: top-level `and` conditions split by side — related-type conditions filter targets, junction conditions filter links. One top-level condition reading BOTH sides (an `or` across them, or a parenthesized group) → compile error; a field-to-field comparison (any relation) → compile error (LSP-visible). Runtime still answers `INVALID_QUERY` as a backstop. |
 
 ## Filtering parents by related rows — `$some` / `$none` (0.1.147)
 

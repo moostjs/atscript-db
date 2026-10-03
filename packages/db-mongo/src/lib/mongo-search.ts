@@ -6,11 +6,17 @@ import {
   searchIndexNotFoundMessage,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
-import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/db";
+import type { DbControls, DbQuery, TDbCollation, TDbIndex, TSearchIndexInfo } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import { DEFAULT_INDEX_NAME } from "./mongo-types";
 import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
-import { buildMongoFilter, buildMongoQuery, mongoFilterStages, planStages } from "./mongo-filter";
+import {
+  buildMongoFilter,
+  buildMongoQuery,
+  mongoFilterStages,
+  planStages,
+  type TMongoFilterOptions,
+} from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { joinPath } from "./path-utils";
@@ -24,6 +30,7 @@ export interface TMongoSearchHost {
   getMongoSearchIndex(name?: string): TMongoIndex | undefined;
   getMongoSearchIndexes(): Map<string, TMongoIndex>;
   getVectorThreshold(indexKey?: string): number | undefined;
+  fieldCollation(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
 }
@@ -32,8 +39,16 @@ export interface TMongoSearchHost {
 export interface TMongoGeoHost {
   readonly collection: Collection<any>;
   readonly _table: { indexes: Map<string, TDbIndex>; tableName: string };
+  fieldCollation(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
+}
+
+/** Renders a host's filter with relational predicates — its 'nocase' fields per field. */
+function filterOptionsOf(host: {
+  fieldCollation(field: string): TDbCollation | undefined;
+}): TMongoFilterOptions {
+  return { collation: (field) => host.fieldCollation(field) };
 }
 
 // ── Exported functions ───────────────────────────────────────────────────────
@@ -267,7 +282,9 @@ function buildGeoNearStages(
   indexName?: string,
 ): Document[] {
   const controls = (query.controls || {}) as Record<string, unknown>;
-  const plan = containsRelationPredicate(query.filter) ? buildMongoQuery(query.filter) : undefined;
+  const plan = containsRelationPredicate(query.filter)
+    ? buildMongoQuery(query.filter, filterOptionsOf(host))
+    : undefined;
   const geoNear: Document = {
     near: { type: "Point", coordinates: point },
     distanceField: DISTANCE_FIELD,
@@ -619,7 +636,7 @@ async function runSearchPipeline(
   } else if (classicText) {
     pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
-  pipeline.push(...mongoFilterStages(query.filter));
+  pipeline.push(...mongoFilterStages(query.filter, filterOptionsOf(host)));
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
   } else if (classicText) {
@@ -686,7 +703,7 @@ async function runSearchWithCountPipeline(
   const pipeline: Document[] = [
     stage,
     ...preStages,
-    ...mongoFilterStages(query.filter),
+    ...mongoFilterStages(query.filter, filterOptionsOf(host)),
     {
       $facet: {
         data: dataStages,

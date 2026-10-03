@@ -158,3 +158,36 @@ describe("[mysql] relational predicates — 1093 rewrite", () => {
     expect(last().sql).toBe("DELETE FROM `rf_issues` WHERE `title` = ?");
   });
 });
+
+describe("[mysql] @db.column-renamed FK / PK columns (since 0.1.147)", () => {
+  const stmt = (prefix: string) => driver.calls.find((c) => c.sql.startsWith(prefix))?.sql;
+
+  it("FOREIGN KEY names the physical local and referenced columns", async () => {
+    await t(fx.RfIssue).ensureTable();
+    await t(fx.RfTagUse).ensureTable();
+    expect(stmt("CREATE TABLE IF NOT EXISTS `rf_issues`")).toContain(
+      "FOREIGN KEY (`ticket_ref`) REFERENCES `rf_tickets` (`key`)",
+    );
+    expect(stmt("CREATE TABLE IF NOT EXISTS `rf_tag_uses`")).toContain(
+      "FOREIGN KEY (`tag_ref`) REFERENCES `rf_tags` (`tag_code`) ON DELETE CASCADE",
+    );
+  });
+
+  it("syncForeignKeys adds the constraint on the physical columns", async () => {
+    await t(fx.RfTagUse).getAdapter().syncForeignKeys();
+    expect(stmt("ALTER TABLE `rf_tag_uses` ADD FOREIGN KEY")).toBe(
+      "ALTER TABLE `rf_tag_uses` ADD FOREIGN KEY (`tag_ref`) REFERENCES `rf_tags` (`tag_code`) ON DELETE CASCADE",
+    );
+  });
+
+  it("updateOne / deleteOne filter on the physical primary key", async () => {
+    await t(fx.RfTag).updateOne({ code: "a", label: "A" });
+    expect(stmt("UPDATE `rf_tags`")).toBe(
+      "UPDATE `rf_tags` SET `label` = ? WHERE `tag_code` = ? LIMIT 1",
+    );
+    await t(fx.RfTag).deleteOne("a");
+    expect(stmt("DELETE FROM `rf_tags`")).toBe(
+      "DELETE FROM `rf_tags` WHERE `tag_code` = ? LIMIT 1",
+    );
+  });
+});

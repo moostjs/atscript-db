@@ -200,7 +200,7 @@ describe("MongoDB relational predicates — reads", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: 3, ticket: { key: "K3", teamId: "t2" } });
-    expect(rows[0]).not.toHaveProperty("__rf0");
+    expect(rows[0]).not.toHaveProperty("__atscript_rf_0");
   });
 
   it("sort / skip / limit / $select / findOne / count / findManyWithCount", async () => {
@@ -400,7 +400,7 @@ describe("MongoDB $with — @db.rel.filter and physical names", () => {
       },
     });
     expect(teams.map((t: any) => ids(t.openTickets, "key"))).toEqual([["K1"], [], []]);
-    expect(teams[0].openTickets[0]).not.toHaveProperty("__rf0");
+    expect(teams[0].openTickets[0]).not.toHaveProperty("__atscript_rf_0");
   });
 
   it("nested $with delegates on logical rows", async () => {
@@ -492,6 +492,17 @@ describe("MongoDB relational predicates — writes", () => {
     await T("RfIssue").insertMany(extra);
     const adapter = T("RfIssue").getAdapter() as MongoAdapter;
     const spy = vi.spyOn(adapter.collection, "updateMany");
+    // The ids are streamed from the cursor batch by batch, never drained with toArray().
+    const drained: unknown[] = [];
+    const aggregatePipeline = adapter.aggregatePipeline.bind(adapter);
+    const cursors = vi.spyOn(adapter, "aggregatePipeline").mockImplementation((pipeline) => {
+      const cursor = aggregatePipeline(pipeline);
+      vi.spyOn(cursor, "toArray").mockImplementation(async () => {
+        drained.push(pipeline);
+        return [];
+      });
+      return cursor;
+    });
     try {
       const result = await T("RfIssue").updateMany(
         { title: "bulk", ticket: { $some: { status: "open" } } },
@@ -499,8 +510,11 @@ describe("MongoDB relational predicates — writes", () => {
       );
       expect(result).toEqual({ matchedCount: 1050, modifiedCount: 1050 });
       expect(spy).toHaveBeenCalledTimes(2);
+      expect(cursors).toHaveBeenCalledTimes(1);
+      expect(drained).toEqual([]);
     } finally {
       spy.mockRestore();
+      cursors.mockRestore();
     }
     expect(await T("RfIssue").count({ filter: { title: "bulk-open" } })).toBe(1050);
     expect(

@@ -75,8 +75,10 @@ export interface TDbRequestContext {
    * The parsed CLIENT filter of `query`, `pages` and `geo` (absent when the
    * URL carries none, and on every other endpoint) — e.g. for a permission
    * layer to resolve which relations the request's relational predicates
-   * (`ticket=$some(…)`) touch, alongside `controls.$with`. Read-only by
-   * convention; server-side filters (`transformFilter`, …) are not in it.
+   * (`ticket=$some(…)`) touch, alongside `controls.$with`. A deep-frozen
+   * COPY of the parsed filter — reading it is all a hook can do; the request
+   * gate judges the original. Server-side filters (`transformFilter`, …) are
+   * not in it.
    *
    * @since 0.1.147
    */
@@ -403,8 +405,10 @@ export abstract class AsReadableController<
     request: TDbParsedRequest,
   ): TDbRequestContext {
     const filter = request.parsed.filter as FilterExpr | undefined;
+    // A frozen copy: the hook reads the client filter, it can never rewrite
+    // the object the request gate judges afterwards.
     return filter && Object.keys(filter).length > 0
-      ? { endpoint, controls: request.controls, filter }
+      ? { endpoint, controls: request.controls, filter: frozenCopy(filter) }
       : { endpoint, controls: request.controls };
   }
 
@@ -700,4 +704,21 @@ export abstract class AsReadableController<
   protected applyMetaOverlay(meta: TMetaResponse): TMetaResponse | Promise<TMetaResponse> {
     return meta;
   }
+}
+
+/** A deep-frozen structural copy of a parsed filter (plain objects, arrays, RegExp, Date). */
+function frozenCopy<T>(value: T): T {
+  let copy: T;
+  try {
+    copy = structuredClone(value);
+  } catch {
+    return value;
+  }
+  const freeze = (v: unknown): void => {
+    if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
+    Object.freeze(v);
+    for (const child of Object.values(v as Record<string, unknown>)) freeze(child);
+  };
+  freeze(copy);
+  return copy;
 }

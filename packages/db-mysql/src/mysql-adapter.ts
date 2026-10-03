@@ -670,7 +670,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       throw new DbError("REL_FILTER_NOT_SUPPORTED", [
         {
           path: "",
-          message: `MySQL cannot update or delete "${tableName}" by a relational predicate that reads the table itself without a primary key`,
+          message:
+            "MySQL cannot update or delete by a relational predicate that reads the table itself when the table has no primary key",
         },
       ]);
     }
@@ -1385,7 +1386,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     // Build desired FK set (keyed by sorted local column names)
     const desiredFkKeys = new Set<string>();
     for (const fk of this._table.foreignKeys.values()) {
-      desiredFkKeys.add([...fk.fields].toSorted().join(","));
+      desiredFkKeys.add([...(fk.physicalFields ?? fk.fields)].toSorted().join(","));
     }
 
     // Drop stale FKs (managed ones that no longer match desired)
@@ -1403,10 +1404,12 @@ export class MysqlAdapter extends BaseDbAdapter {
       [...existingByName.values()].map((cols) => cols.toSorted().join(",")),
     );
     for (const fk of this._table.foreignKeys.values()) {
-      const key = [...fk.fields].toSorted().join(",");
+      const key = [...(fk.physicalFields ?? fk.fields)].toSorted().join(",");
       if (!existingKeys.has(key)) {
-        const localCols = fk.fields.map((f) => qi(f)).join(", ");
-        const targetCols = fk.targetFields.map((f) => qi(f)).join(", ");
+        const localCols = (fk.physicalFields ?? fk.fields).map((f) => qi(f)).join(", ");
+        const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
+          .map((f) => qi(f))
+          .join(", ");
         let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
         if (fk.onDelete) {
           ddl += ` ON DELETE ${refActionToSql(fk.onDelete)}`;

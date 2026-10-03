@@ -1129,7 +1129,7 @@ export class AtscriptDbTable<
         await guard(new RemoveGuardContext<DataType>(id, filter, this as AtscriptDbTable));
       }
       if (needsCascade) {
-        await this._integrity.cascadeBeforeDelete(
+        const pin = await this._integrity.cascadeBeforeDelete(
           filter,
           this.tableName,
           this._meta,
@@ -1137,6 +1137,11 @@ export class AtscriptDbTable<
           (f) => this._fieldMapper.translateFilter(f, this._meta),
           this.adapter,
         );
+        // Delete the row the cascade ran for, by key — the scope may read
+        // data the cascade just changed (a `$some` over a cascaded child).
+        if (pin) {
+          return pin.length > 0 ? this.adapter.deleteOne(pin[0]) : { deletedCount: 0 };
+        }
       }
       return this.adapter.deleteOne(translated);
     };
@@ -1230,7 +1235,7 @@ export class AtscriptDbTable<
     if (this._integrity.needsCascade(this._cascadeResolver)) {
       return remapDeleteFkViolation(this.tableName, () =>
         this.adapter.withTransaction(async () => {
-          await this._integrity.cascadeBeforeDelete(
+          const pin = await this._integrity.cascadeBeforeDelete(
             filter as FilterExpr,
             this.tableName,
             this._meta,
@@ -1238,6 +1243,16 @@ export class AtscriptDbTable<
             (f) => this._fieldMapper.translateFilter(f, this._meta),
             this.adapter,
           );
+          if (pin) {
+            // Delete exactly the rows the cascade ran for (pinned by key):
+            // re-evaluating `filter` now could miss rows whose match depended
+            // on children the cascade just deleted or nulled.
+            let deletedCount = 0;
+            for (const batch of pin) {
+              deletedCount += (await this.adapter.deleteMany(batch)).deletedCount;
+            }
+            return { deletedCount };
+          }
           return this.adapter.deleteMany(
             this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
           );

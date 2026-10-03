@@ -134,12 +134,13 @@ Fields renamed with `@db.column` are honored in `$select` and `$sort` since 0.1.
 
 - **Cost.** An operation whose filter holds predicates loads each related table (and junction) once — a provider-backed table's provider runs once per operation — and builds a key set from it; then every candidate row is a set lookup. Expect time proportional to the related tables' sizes plus the source size. There are no indexes. A filter without predicates costs nothing extra.
 - **Snapshots.** A read sees one consistent snapshot per table, shared with the outer scan when a relation points back to its own table.
-- **Writes** evaluate the predicates against the related rows as they were just before the write. The evaluation and the write are not atomic, like the adapter's other [batch writes](#limitations).
+- **Writes** evaluate the predicates against the related rows as they were just before the write. Loading those rows is asynchronous, so a write whose filter holds a predicate reads the table only after that await: concurrent writes can interleave between them, with read-committed-like results (a `$cas` / version check is still evaluated synchronously with the write itself). The evaluation and the write are not atomic, like the adapter's other [batch writes](#limitations).
+- **Key comparison** follows the adapter's equality everywhere else: a related key matches only a value of the same type (`5` ≠ `"5"`, `5n` ≠ `"5n"`, a `Date` ≠ its ISO string; `Date`s compare by instant). A `null` or missing key part relates to nothing.
 - `buildMemoryPredicate` alone cannot evaluate a predicate (it has no access to the related tables) and throws `REL_FILTER_NOT_SUPPORTED` — see [Utilities](#utilities).
 
 ### Foreign Keys
 
-There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. See [Referential Actions](/relations/referential-actions).
+There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. The rows a `deleteMany` / `deleteOne` matches are pinned by primary key first; the cascade and the delete then both act on those keys, so a filter that reads the cascaded children (`{ issues: { $some: … } }`) still deletes the parent. See [Referential Actions](/relations/referential-actions).
 
 ### Schema Sync
 

@@ -5,6 +5,18 @@ import type { TableMetadata } from "../table/table-metadata";
 import type { TCascadeResolver, TFkLookupResolver, TWriteTableResolver } from "../types";
 
 /**
+ * Result of {@link IntegrityStrategy.cascadeBeforeDelete}:
+ * - `undefined` — no cascade ran; delete with the caller's own filter;
+ * - an array — the rows the cascade ran for, pinned by primary key as
+ *   ADAPTER-READY (physical, already translated) filters, in batches. The
+ *   caller must delete exactly these rows instead of evaluating its filter
+ *   again: the cascade changed the data the filter may read (a relational
+ *   predicate on a child relation no longer matches once the children are
+ *   gone). An empty array means no row matched.
+ */
+export type TCascadePin = FilterExpr[] | undefined;
+
+/**
  * Strategy for referential integrity enforcement.
  * Two implementations: {@link NativeIntegrity} (DB handles FK constraints)
  * and `ApplicationIntegrity` (generic layer validates + cascades).
@@ -26,7 +38,7 @@ export abstract class IntegrityStrategy {
     cascadeResolver: TCascadeResolver,
     translateFilter: (f: FilterExpr) => FilterExpr,
     adapter: BaseDbAdapter,
-  ): Promise<void>;
+  ): Promise<TCascadePin>;
 
   abstract needsCascade(cascadeResolver: TCascadeResolver | undefined): boolean;
 }
@@ -40,8 +52,9 @@ export class NativeIntegrity extends IntegrityStrategy {
     // No-op: DB validates FK constraints on write
   }
 
-  async cascadeBeforeDelete(): Promise<void> {
+  async cascadeBeforeDelete(): Promise<TCascadePin> {
     // No-op: DB handles ON DELETE CASCADE/SET NULL
+    return undefined;
   }
 
   needsCascade(): boolean {

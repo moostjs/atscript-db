@@ -73,7 +73,7 @@ It runs exactly once per request, before anything else looks at the request:
 | Every `@DbAction` handler (row, rows and table level)  | `action` (`ctx.action` = the name)      | After the guards, before the action's ids are validated / rows loaded | —                   |
 | `GET /meta/actions/:id`, `/meta/actions?…`             | `availableActions` (since 0.1.145)      | First                                                                 | —                   |
 
-On `query`, `pages` and `geo`, `ctx.filter` (since 0.1.147) carries the parsed client filter when the URL has one — read it to resolve the relations its [relational predicates](./permissions#relational-predicates) touch, next to `ctx.controls.$with`. It holds only the client's part: server-side filters are not in it.
+On `query`, `pages` and `geo`, `ctx.filter` (since 0.1.147) carries the parsed client filter when the URL has one — read it to resolve the relations its [relational predicates](./permissions#relational-predicates) touch, next to `ctx.controls.$with`. It holds only the client's part: server-side filters are not in it. It is a deep-frozen copy: the request gate judges the original, so the hook can read it but not change it.
 
 Value-help controllers call it too (`query`, `pages`, `one`). [Actions](./actions#preparerequest-on-actions) run it before anything reads their ids, rows or row overlay, so a permission layer needs no separate action guard. Every built-in route enters through `parseRequest(endpoint, url?)`: with a URL it parses the query string, coerces boolean controls (`$actions=true`) and hands the parsed controls to `prepareRequest`; without one (writes, `meta`) it only runs the hook. Custom routes you add to a subclass should do the same — `const { parsed, controls } = await this.parseRequest("query", url)`, or `await this.parseRequest("insert")`.
 
@@ -170,7 +170,7 @@ export class IssuesController extends AsDbReadableController<typeof IssueTable> 
 - It runs after the request gate and before [`transformFilter`](#transformfilter), on `/query` (incl. `$count` and `$groupBy`), `/pages`, `/geo` and `$with` sub-filters of `/one`. It may be async.
 - **Post-order:** a nested operand is rewritten first, then its parent receives the already-rewritten operand. Your output is not walked again — a predicate you add is not passed back to the hook.
 - Under an overlay, `$some` matches and `$none` excludes on **visible** related rows only: `ticket=$none(status=open)` keeps an issue whose only open ticket is invisible to the caller, just as `$with=ticket` would not show it.
-- Server-side filters ([`transformFilter`](#transformfilter), [`transformOne`](#transformone), [`actionRowScope`](./actions#action-row-scope)) never pass through it.
+- Server-side filters ([`transformFilter`](#transformfilter), [`transformOne`](#transformone), [`actionRowScope`](./actions#action-row-scope)) never pass through it, nor do predicates a [`validateControls`](#validatecontrols) override conjoined into `$with` entries.
 - It costs nothing unless overridden.
 
 ### transformProjection {#transformprojection}
@@ -212,6 +212,24 @@ protected validateInsights(insights: Map<string, unknown>): string | undefined {
 ```
 
 This catches every reference to a restricted field — whether in a filter (`salary>=100000`), a projection (`$select=ssn`), or a sort order (`$sort=salary`).
+
+### validateControls {#validatecontrols}
+
+Validates the parsed controls of a read (`type`: `query`, `pages`, `geo`, `getOne`) against the endpoint's controls DTO — the hook for per-control authorization. Override it, call `super`, then add rules; return a string to reject with HTTP `400`. It may also rewrite `controls` in place, for example to conjoin a related table's row scope into each `$with` entry:
+
+```typescript
+protected validateControls(controls: Record<string, unknown>, type: TDbControlsType) {
+  const error = super.validateControls(controls, type)
+  if (error) return error
+  for (const entry of (controls.$with ?? []) as Array<{ name: string; filter?: FilterExpr }>) {
+    const scope = rowScopeOf(entry.name) // may itself use $some / $none
+    if (scope) entry.filter = entry.filter ? { $and: [scope, entry.filter] } : scope
+  }
+  return undefined
+}
+```
+
+Since 0.1.147 the [relational-predicate](./permissions#relational-predicates) gate judges the client's `$with` tree as recorded **before** this hook runs, so predicates you add here are not gated or counted as client input, and [`transformRelationFilter`](#transformrelationfilter) rewrites only the client's. Keep the client's filter object when you wrap it (as above): with `transformRelationFilter` overridden, a client `$with` predicate that was copied or dropped makes the request fail with 500 instead of running without its overlay.
 
 ### hasField {#hasfield}
 

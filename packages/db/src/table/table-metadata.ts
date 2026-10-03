@@ -1166,6 +1166,7 @@ export class TableMetadata {
 
     // Second pass: resolve fkTargetField for FK fields.
     this._resolveFkTargetFields(descriptors);
+    this._resolveFkPhysicalFields();
 
     Object.freeze(descriptors);
     this.fieldDescriptors = descriptors;
@@ -1204,6 +1205,41 @@ export class TableMetadata {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Fills `physicalFields` / `physicalTargetFields` on every FK: the local
+   * side from this table's path maps, the target side from the referenced
+   * type's own `@db.column` renames (same storage rules as this table — a
+   * dotted target path is a flattened column on relational storage, a
+   * renamed top-level key on document storage).
+   */
+  private _resolveFkPhysicalFields(): void {
+    const flatCache = new Map<TAtscriptAnnotatedType, Map<string, TAtscriptAnnotatedType>>();
+    const targetPhysical = (fk: TDbForeignKey, field: string): string => {
+      const targetType = fk.targetTypeRef?.();
+      if (!targetType) {
+        return field;
+      }
+      let flat = flatCache.get(targetType);
+      if (!flat) {
+        flat = flattenAnnotatedType(targetType as TAtscriptAnnotatedType<TAtscriptTypeObject>);
+        flatCache.set(targetType, flat);
+      }
+      const columnOf = (path: string) =>
+        flat.get(path)?.metadata?.get("db.column") as string | undefined;
+      if (this.nestedObjects) {
+        const dot = field.indexOf(".");
+        const top = dot === -1 ? field : field.slice(0, dot);
+        const renamed = columnOf(top);
+        return renamed === undefined ? field : renamed + field.slice(top.length);
+      }
+      return relationalColumnName(field, columnOf(field), field.includes("."));
+    };
+    for (const fk of this.foreignKeys.values()) {
+      fk.physicalFields = fk.fields.map((f) => this.physicalPath(f));
+      fk.physicalTargetFields = fk.targetFields.map((f) => targetPhysical(fk, f));
     }
   }
 

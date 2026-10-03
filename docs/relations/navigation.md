@@ -261,7 +261,7 @@ On a `@db.rel.via` relation the expression may read the related type and the jun
 pinnedLabels: Label[]
 ```
 
-Two shapes are rejected at query time with `INVALID_QUERY`: a single condition that reads both the junction and the related type (an `or` across them — split it into `and` conditions), and a comparison between two fields.
+Two shapes are compile errors (shown in the editor too): a comparison between two fields (`Comment.createdAt = Comment.updatedAt`) on any relation, and — on a `@db.rel.via` relation — a single top-level condition that reads both the junction and the related type (an `or` across them, or a parenthesized group mixing both: split it into separate top-level `and` conditions). The query layer still rejects them with `INVALID_QUERY` should such metadata reach it some other way.
 
 ::: tip Query expression syntax
 The backtick-delimited syntax (`\`Comment.visible = true\``) follows the same expression format used in view filters and join conditions. See [Queries & Filters](/api/queries#query-expressions) for the full syntax reference.

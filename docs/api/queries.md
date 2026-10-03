@@ -420,17 +420,19 @@ Each predicate runs a correlated lookup per candidate row. Index the foreign-key
 
 ### Limits and errors
 
-| Condition                                                                           | Error                                                                                               |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| more than 3 nested levels (`REL_FILTER_MAX_DEPTH`)                                  | `INVALID_QUERY` — `Relational predicates nest at most 3 levels deep ("…")`                          |
-| more than 8 predicates in one filter, nested ones included (`REL_FILTER_MAX_NODES`) | `INVALID_QUERY` — `At most 8 relational predicates per query`                                       |
-| `$some` / `$none` on a field that is not a navigation property                      | `INVALID_QUERY` — `"$some" / "$none" are only valid on a navigation relation — "title" is not one`  |
-| a self-referencing many-to-many (a junction with one FK to the type)                | `INVALID_QUERY` — its two junction keys cannot be told apart                                        |
-| the adapter does not support predicates (custom adapters by default)                | `REL_FILTER_NOT_SUPPORTED` — `… not supported by this adapter` (`… in mutation filters` for writes) |
-| the related table lives on a different adapter class                                | `REL_FILTER_NOT_SUPPORTED`                                                                          |
-| the table was not created through a `DbSpace`                                       | `REL_FILTER_NOT_SUPPORTED` — the related table cannot be resolved                                   |
+| Condition                                                                             | Error                                                                                               |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| more than 4 nested levels (`REL_FILTER_MAX_DEPTH`)                                    | `INVALID_QUERY` — `Relational predicates nest at most 4 levels deep` (no `path`)                    |
+| more than 16 predicates in one filter, nested ones included (`REL_FILTER_MAX_NODES`)  | `INVALID_QUERY` — `At most 16 relational predicates per query` (no `path`)                          |
+| `$some` / `$none` on a field that is not a navigation property                        | `INVALID_QUERY` — `"$some" / "$none" are only valid on a navigation relation — "title" is not one`  |
+| a self-referencing many-to-many (a junction with one FK to the type)                  | `INVALID_QUERY` — its two junction keys cannot be told apart                                        |
+| the adapter does not support predicates (custom adapters by default)                  | `REL_FILTER_NOT_SUPPORTED` — `… not supported by this adapter` (`… in mutation filters` for writes) |
+| the related table lives in another database or on another adapter (`sharesStoreWith`) | `REL_FILTER_NOT_SUPPORTED`                                                                          |
+| the table was not created through a `DbSpace`                                         | `REL_FILTER_NOT_SUPPORTED` — the related table cannot be resolved                                   |
 
-The error `path` is the dotted relation chain (`ticket.team`). Both codes answer HTTP 400 through moost-db. The limits are exported from `@atscript/db` as `REL_FILTER_MAX_DEPTH` and `REL_FILTER_MAX_NODES`.
+The error `path` is the dotted relation chain (`ticket.team`); messages name relations, never physical table names. Both codes answer HTTP 400 through moost-db. The limits are exported from `@atscript/db` as `REL_FILTER_MAX_DEPTH` and `REL_FILTER_MAX_NODES`.
+
+These core limits count every predicate of the filter, server-added ones included (row scopes, [`transformRelationFilter`](/http/customization#transformrelationfilter) overlays), so their errors name no path. HTTP clients have their own, lower budget — 3 levels and 8 predicates per request (`REL_FILTER_CLIENT_MAX_DEPTH`, `REL_FILTER_CLIENT_MAX_NODES`), counting the client's predicates only — which leaves the server headroom for its overlays. See [Permissions § Relational predicates](/http/permissions#relational-predicates).
 
 ### Typing
 
@@ -541,44 +543,41 @@ Expressions are wrapped in backticks inside `.as` files:
 
 ### Field References
 
-Reference fields using `TableName.fieldName`:
+Reference fields using `TableName.fieldName` (a nested field as `TableName.address.city`):
 
 ```atscript
 @db.view.filter `Task.priority = 'high'`
 @db.view.joins Project, `Project.id = Task.projectId`
 ```
 
+An unqualified name (`status`) reads the annotation's default type: the entry table in `@db.view.filter`, `@db.view.joins` and `@db.agg.*` conditions, the related type in `@db.rel.filter`. `@db.view.having` takes only unqualified names — the view's own fields. See [Annotations → Editor support](/adapters/annotations#editor-support) for each annotation's scope.
+
 ### Operators
 
-| Operator | Meaning               | Example                        |
-| -------- | --------------------- | ------------------------------ |
-| `=`      | equals                | `` `Task.status = 'active'` `` |
-| `!=`     | not equals            | `` `Task.status != 'done'` ``  |
-| `>`      | greater than          | `` `Task.priority > 3` ``      |
-| `>=`     | greater than or equal | `` `Task.priority >= 3` ``     |
-| `<`      | less than             | `` `Task.age < 65` ``          |
-| `<=`     | less than or equal    | `` `Task.age <= 65` ``         |
-| `~=`     | regex match           | `` `User.name ~= '^Al'` ``     |
-| `?`      | exists (non-null)     | `` `Task.assigneeId ?` ``      |
-| `!?`     | not exists (null)     | `` `Task.deletedAt !?` ``      |
+| Operator     | Meaning                 | Example                                      |
+| ------------ | ----------------------- | -------------------------------------------- |
+| `=`          | equals                  | `` `Task.status = 'active'` ``               |
+| `!=`         | not equals              | `` `Task.status != 'done'` ``                |
+| `>`          | greater than            | `` `Task.priority > 3` ``                    |
+| `>=`         | greater than or equal   | `` `Task.priority >= 3` ``                   |
+| `<`          | less than               | `` `Task.age < 65` ``                        |
+| `<=`         | less than or equal      | `` `Task.age <= 65` ``                       |
+| `in`         | in a list of values     | `` `Task.status in ('active', 'pending')` `` |
+| `not in`     | not in a list of values | `` `Task.role not in ('guest', 'bot')` ``    |
+| `exists`     | holds a value           | `` `Task.assigneeId exists` ``               |
+| `not exists` | null or missing         | `` `Task.deletedAt not exists` ``            |
+| `matches`    | regex match             | `` `User.name matches /^al/i` ``             |
 
-### Set Membership
-
-Use curly braces for IN / NOT IN:
-
-```atscript
-@db.view.filter `Task.status {active, pending}`
-@db.view.filter `Task.role !{guest, bot}`
-```
+The right side of a comparison is a literal — a string in single or double quotes, a number, `true`, `false` or `null` — or another field reference (`` `Project.id = Task.projectId` ``). `in` / `not in` take a parenthesized list of literals. `matches` takes a regex literal, `/pattern/flags`; view predicates reject it at sync on SQL adapters and in MongoDB join conditions (see [View Filters](/views/#view-filters)), and `@db.agg.*` conditions don't accept it.
 
 ### Logical Combinators
 
-Combine conditions with `&&` (and), `||` (or), and `!()` (not). Use parentheses for grouping:
+Combine conditions with the keywords `and`, `or` and `not`. `not` binds tightest, then `and`, then `or`; use parentheses for grouping. The symbolic forms `&&`, `||` and `!` are not accepted — they are a compile error.
 
 ```atscript
-@db.view.filter `Task.status != 'done' && Task.priority >= 3`
-@db.view.filter `(Task.status = 'active' || Task.status = 'pending') && Task.assigneeId ?`
-@db.view.filter `!(Task.status = 'archived')`
+@db.view.filter `Task.status != 'done' and Task.priority >= 3`
+@db.view.filter `(Task.status = 'active' or Task.status = 'pending') and Task.assigneeId exists`
+@db.view.filter `not (Task.status = 'archived')`
 ```
 
 ### Where They Are Used
@@ -588,6 +587,7 @@ Query expressions appear in these annotations:
 - **`@db.view.filter`** — row-level filter for a [view](/views/)
 - **`@db.view.joins`** — join condition between tables in a view
 - **`@db.view.having`** — having clause for aggregation views
+- **`@db.agg.*`** (second argument) — the rows a [conditional aggregate](/views/aggregations#conditional-aggregates) reads
 - **`@db.rel.filter`** — static filter on a relation, applied when it is loaded and in [relational predicates](#relational-filters) (since 0.1.147)
 
 Example in a view definition:
@@ -596,7 +596,7 @@ Example in a view definition:
 @db.view
 @db.view.for Task
 @db.view.joins Project, `Project.id = Task.projectId`
-@db.view.filter `Task.status != 'done' && Task.priority >= 3`
+@db.view.filter `Task.status != 'done' and Task.priority >= 3`
 type ActiveHighPriorityTasks {
   taskId: Task.id
   title: Task.title

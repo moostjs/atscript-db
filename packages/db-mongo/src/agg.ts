@@ -11,7 +11,7 @@ import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
-import { buildMongoFilter, mongoFilterStages } from "./lib/mongo-filter";
+import { buildMongoFilter, mongoFilterStages, type TMongoFilterOptions } from "./lib/mongo-filter";
 import { orNull } from "./lib/mongo-view-expr";
 
 /** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
@@ -125,6 +125,7 @@ export function bucketExpression(b: TResolvedBucket): Document {
 function buildPrefix(
   query: DbQuery,
   searchStage: Document | undefined,
+  filterOptions: TMongoFilterOptions | undefined,
 ): {
   pipeline: Document[];
   groupId: Document;
@@ -134,7 +135,7 @@ function buildPrefix(
   const controls = query.controls || {};
   const groupBy = (controls.$groupBy ?? []) as string[];
   // Relational predicates (since 0.1.147) add their `$lookup`s here, before `$group`.
-  const filterStages = mongoFilterStages(query.filter);
+  const filterStages = mongoFilterStages(query.filter, filterOptions);
   const pipeline: Document[] = searchStage ? [searchStage, ...filterStages] : filterStages;
 
   const groupId: Document = {};
@@ -163,12 +164,16 @@ function buildPrefix(
  */
 function buildGroupedStages(
   query: DbQuery,
-  { accumulators, searchStage }: { accumulators: boolean; searchStage?: Document },
+  {
+    accumulators,
+    searchStage,
+    filterOptions,
+  }: { accumulators: boolean; searchStage?: Document; filterOptions?: TMongoFilterOptions },
 ): {
   pipeline: Document[];
   controls: DbQuery["controls"];
 } {
-  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query, searchStage);
+  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query, searchStage, filterOptions);
 
   const groupStage: Document = { _id: groupId };
   if (!accumulators) {
@@ -207,10 +212,19 @@ function buildGroupedStages(
  *
  * `searchStage` is the resolved `$search` / `$text` stage (see
  * `buildAggregateSearchStage`); unlike the leaf runner this path adds no
- * relevance `$sort` and no default `$limit`.
+ * relevance `$sort` and no default `$limit`. `filterOptions` renders a
+ * filter with relational predicates (`mongoFilterStages`).
  */
-export function buildAggregatePipeline(query: DbQuery, searchStage?: Document): Document[] {
-  const { pipeline, controls } = buildGroupedStages(query, { accumulators: true, searchStage });
+export function buildAggregatePipeline(
+  query: DbQuery,
+  searchStage?: Document,
+  filterOptions?: TMongoFilterOptions,
+): Document[] {
+  const { pipeline, controls } = buildGroupedStages(query, {
+    accumulators: true,
+    searchStage,
+    filterOptions,
+  });
 
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
@@ -237,10 +251,15 @@ export function buildAggregatePipeline(query: DbQuery, searchStage?: Document): 
  * `searchStage` must be the SAME stage handed to `buildAggregatePipeline` for
  * the same query — the counted groups are exactly the rows the search matched.
  */
-export function buildCountPipeline(query: DbQuery, searchStage?: Document): Document[] {
+export function buildCountPipeline(
+  query: DbQuery,
+  searchStage?: Document,
+  filterOptions?: TMongoFilterOptions,
+): Document[] {
   const { pipeline } = buildGroupedStages(query, {
     accumulators: Boolean(query.controls?.$having),
     searchStage,
+    filterOptions,
   });
   pipeline.push({ $count: "count" });
   return pipeline;

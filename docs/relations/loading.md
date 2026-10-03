@@ -140,7 +140,7 @@ There is no hard limit on nesting depth for reads. Each level of nesting adds on
 
 ## Per-Relation Controls
 
-Each `$with` entry accepts its own `controls` object. You can sort, filter, paginate, and project on loaded relations independently of the parent query:
+Each `$with` entry accepts its own `filter` and `controls`, next to `name`. You can sort, filter, paginate, and project on loaded relations independently of the parent query:
 
 ```typescript
 const projects = await projectTable.findMany({
@@ -148,10 +148,10 @@ const projects = await projectTable.findMany({
     $with: [
       {
         name: "tasks",
+        filter: { done: false },
         controls: {
           $sort: { done: 1, title: 1 },
           $limit: 10,
-          $filter: { done: false },
           $with: [{ name: "tags" }],
         },
       },
@@ -159,6 +159,8 @@ const projects = await projectTable.findMany({
   },
 });
 ```
+
+The filter goes on the entry, not inside `controls` — there is no `$filter` control. Over HTTP the same entry is `$with=tasks(done=false&$sort=done,title&$limit=10&$with=tags)`.
 
 This loads each project's tasks sorted by `done` then `title`, limited to 10 incomplete tasks, each with their tags attached.
 

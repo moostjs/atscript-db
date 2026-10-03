@@ -1,9 +1,9 @@
-import { DbError } from "@atscript/db";
+import { DbError, ResolvedRelationFilter } from "@atscript/db";
 import type { AtscriptDbTable, DbSpace, FilterExpr } from "@atscript/db";
 import { describe, it, expect, beforeAll, beforeEach } from "vite-plus/test";
 
 import { MemoryAdapter, setMemoryProvider } from "../memory-adapter";
-import { buildMemoryPredicate } from "../memory-filter";
+import { buildMemoryPredicate, prepareRelationSets } from "../memory-filter";
 import { bootstrapStoredTables, createTestSpace, prepareFixtures } from "./test-utils";
 
 // Relational filter predicates ($some / $none), since 0.1.147: the memory
@@ -434,5 +434,74 @@ describe("MemoryAdapter relational predicates — provider (read-through) target
     calls = 0;
     expect(await ids(tickets, { parent: { $some: { status: "open" } } })).toEqual(["T2", "T5"]);
     expect(calls).toBe(1);
+  });
+});
+
+describe("MemoryAdapter relational predicates — failure paths", () => {
+  it("a rejecting own snapshot while related tables load is not an unhandled rejection", async () => {
+    // issues (the scanned table) reject fast; tickets (related) resolve slowly
+    setMemoryProvider(
+      space,
+      fx.RfIssue,
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error("store down")), 5)),
+    );
+    setMemoryProvider(
+      space,
+      fx.RfTicket,
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve([{ key: "T1", status: "open" }]), 40)),
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await expect(
+        issues.findMany({ filter: { ticket: { $some: { status: "open" } } }, controls: {} } as any),
+      ).rejects.toThrow("store down");
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+});
+
+describe("memory correlation keys are type-tagged", () => {
+  // A hand-built resolved predicate over a fake loader: source column `k`
+  // correlates with target column `id`.
+  const target = { tag: "target" } as any;
+  const node = new ResolvedRelationFilter({
+    kind: "to",
+    nav: "t",
+    source: { table: "s", name: "s", adapter: {} as any },
+    target: { table: "x", name: "x", adapter: target },
+    pairs: [{ source: "k", target: "id" }],
+    filter: {},
+  });
+  const matches = async (targetIds: unknown[], sourceKey: unknown) => {
+    const filter = { t: { $some: node } } as unknown as FilterExpr;
+    const sets = await prepareRelationSets(filter, async () => targetIds.map((id) => ({ id })));
+    return buildMemoryPredicate(filter, sets)({ k: sourceKey });
+  };
+
+  it("does not equate values of different types that used to share a key", async () => {
+    expect(await matches(["5n"], 5n)).toBe(false);
+    expect(await matches([5n], "5n")).toBe(false);
+    const d = new Date("2026-01-02T03:04:05.000Z");
+    expect(await matches([d.toISOString()], d)).toBe(false);
+    expect(await matches([d], d.toISOString())).toBe(false);
+    expect(await matches(["1"], 1)).toBe(false);
+    expect(await matches(["true"], true)).toBe(false);
+  });
+
+  it("still equates equal values of the same type (Dates by instant)", async () => {
+    expect(await matches([5n], 5n)).toBe(true);
+    expect(await matches(["a"], "a")).toBe(true);
+    expect(await matches([1], 1)).toBe(true);
+    expect(await matches([0], -0)).toBe(true);
+    const d = new Date("2026-01-02T03:04:05.000Z");
+    expect(await matches([new Date(d.getTime())], d)).toBe(true);
+    expect(await matches([null], null)).toBe(false);
+    expect(await matches([Number.NaN], Number.NaN)).toBe(false);
   });
 });

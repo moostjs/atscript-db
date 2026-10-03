@@ -47,3 +47,36 @@ describe("table hashes are unchanged for tables without derived columns (0.1.140
     expect(hash).toBe(expected);
   });
 });
+
+// FK columns are snapshotted by PHYSICAL name since 0.1.147 (logical before).
+// `before` = the 0.1.146 hash (computed with the 0.1.146 code, 2026-10-03),
+// `now` = the current one: only a table with a `@db.column`-renamed FK column
+// (local or referenced) changes and re-syncs once after the upgrade.
+const RENAMED_FK_PINS: Record<string, { before: string; now: string }> = {
+  "sql:RkTeam": { before: "23312fbc", now: "23312fbc" },
+  "sql:RkTag": { before: "41230dab", now: "41230dab" },
+  "sql:RkBoard": { before: "-4aa533d7", now: "-4aa533d7" },
+  "sql:RkPlain": { before: "-bfefa4b", now: "-bfefa4b" },
+  "sql:RkItem": { before: "58a3e195", now: "-55ffee29" },
+  "nested:RkPlain": { before: "4c1dbcf3", now: "4c1dbcf3" },
+  "nested:RkItem": { before: "5eb81cf6", now: "-64c5a726" },
+};
+
+describe("table hashes change only for tables with renamed FK columns (0.1.146 → 0.1.147)", () => {
+  let rk: Record<string, any>;
+  beforeAll(async () => {
+    rk = await import("./fixtures/renamed-fk.as");
+  });
+
+  it.each(Object.entries(RENAMED_FK_PINS))("%s", (key, pin) => {
+    const [family, name] = key.split(":") as [string, string];
+    const space = new DbSpace(() =>
+      family === "sql" ? new MockAdapter() : new NestedMockAdapter(),
+    );
+    const hash = computeTableHash(
+      computeTableSnapshot(space.getTable(rk[name]), (f) => f.designType.toUpperCase()),
+    );
+    expect(hash).toBe(pin.now);
+    expect(pin.before === pin.now).toBe(name !== "RkItem");
+  });
+});

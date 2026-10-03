@@ -89,6 +89,8 @@ import {
   hiddenRelationInsight,
   overlayRelationFilter,
   overlayWithFilters,
+  snapshotClientWith,
+  type TClientWithSnapshot,
 } from "./relation-predicates";
 import { badRequest } from "./validation-interceptor";
 
@@ -296,6 +298,12 @@ export class AsDbReadableController<
   private _capabilities?: FieldCapabilityIndex;
   /** The client relational-predicate gate (since 0.1.147), built on first use — see {@link _relationGate}. */
   private _relGate?: RelationPredicateGate;
+  /**
+   * The client's `$with` tree per request, keyed by its controls object —
+   * recorded in {@link validateParsed} before {@link validateControls} (see
+   * `snapshotClientWith`).
+   */
+  private readonly _clientWith = new WeakMap<object, TClientWithSnapshot | null>();
 
   /** `/meta` is a projection of {@link capabilities}: a rebuilt index rebuilds the cached envelope. */
   protected override metaCacheKey(): unknown {
@@ -549,8 +557,14 @@ export class AsDbReadableController<
       const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
       if (verdict) return badRequest(verdict.path, verdict.message);
     }
+    // `$with` sub-filters: the CLIENT's tree as recorded before
+    // `validateControls` — row scopes a server hook conjoined there are not
+    // client input (not gated, not counted). Without a record (a flow that
+    // skipped `validateParsed`), the live tree is judged.
+    const liveWith = (parsed.controls as { $with?: unknown } | undefined)?.$with;
+    const recorded = parsed.controls ? this._clientWith.get(parsed.controls) : undefined;
     const withRelError = this._relationGate().checkWith(
-      (parsed.controls as { $with?: unknown } | undefined)?.$with,
+      recorded === undefined ? liveWith : recorded?.tree,
       relState,
     );
     if (withRelError) return withRelError;
@@ -638,6 +652,11 @@ export class AsDbReadableController<
       return computedError;
     }
     const controls = parsed.controls as Record<string, unknown>;
+    // Record the client's `$with` tree before `validateControls` may conjoin
+    // server row scopes into it (since 0.1.147 — see `snapshotClientWith`).
+    if (controls && typeof controls === "object") {
+      this._clientWith.set(controls, snapshotClientWith(controls.$with) ?? null);
+    }
     const controlsError = this.validateControls(controls, type);
     if (controlsError) {
       return new HttpError(400, controlsError);
@@ -1110,7 +1129,21 @@ export class AsDbReadableController<
     const hook = (path: string, filter: FilterExpr) => this.transformRelationFilter(path, filter);
     const controls = parsed.controls as Record<string, unknown> | undefined;
     if (controls?.$with !== undefined) {
-      controls.$with = await overlayWithFilters(controls.$with, "", hook);
+      // Only the client's `$with` predicates are overlaid (server-added ones
+      // — e.g. a row scope conjoined in `validateControls` — are the policy
+      // itself). A client predicate the server hook replaced by a copy would
+      // escape the overlay: fail closed instead.
+      const recorded = this._clientWith.get(controls);
+      const scope = recorded
+        ? { predicates: recorded.predicates, seen: new Set<object>() }
+        : undefined;
+      controls.$with = await overlayWithFilters(controls.$with, "", hook, scope);
+      if (scope && scope.seen.size !== scope.predicates.size) {
+        throw new HttpError(
+          500,
+          "validateControls replaced a client $with relational predicate — wrap the client's $with filter (keep its object), do not copy or drop it",
+        );
+      }
     }
     return (
       parsed.filter ? await overlayRelationFilter(parsed.filter, "", hook) : parsed.filter

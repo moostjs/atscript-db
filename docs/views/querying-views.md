@@ -102,21 +102,23 @@ For the full query syntax, see [Queries & Filters](/api/queries).
 Use `AsDbReadableController` to expose a view as a read-only HTTP endpoint:
 
 ```typescript
-import { AsDbReadableController } from "@atscript/moost-db";
+import { AsDbReadableController, ReadableController } from "@atscript/moost-db";
 import { ActiveTask } from "./schema/active-task.as";
 
-@Controller("active-tasks")
-export class ActiveTaskController extends AsDbReadableController(ActiveTask) {}
+@ReadableController(ActiveTask, "active-tasks")
+export class ActiveTaskController extends AsDbReadableController<typeof ActiveTask> {}
 ```
 
 This provides:
 
-- `GET /active-tasks` — list with filter, sort, pagination
-- `GET /active-tasks/:id` — single record by ID
+- `GET /active-tasks/query` — list with filter, sort, pagination
+- `GET /active-tasks/pages` — paginated results with metadata
+- `GET /active-tasks/one/:id` — single record by ID
+- `GET /active-tasks/meta` — view metadata
 
 No `POST`, `PUT`, `PATCH`, or `DELETE` endpoints — views are read-only.
 
-The same URL query syntax applies (`$sort`, `$skip`, `$limit`, `$select`, `$filter`). See [HTTP — CRUD Endpoints](/http/crud) for details.
+The same [URL query syntax](/http/query-syntax) applies — field filters, `$sort`, `$skip`, `$limit`, `$select`. See [HTTP — CRUD Endpoints](/http/crud) for details.
 
 ### Value help through reference chains
 

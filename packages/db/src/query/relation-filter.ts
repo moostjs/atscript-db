@@ -26,11 +26,23 @@ import { isFieldRef, translateQueryTree } from "./query-tree";
  * @since 0.1.147
  */
 
-/** Maximum nesting of relational predicates (a predicate inside a predicate's operand counts one level). */
-export const REL_FILTER_MAX_DEPTH = 3;
+/**
+ * Maximum nesting of relational predicates in one filter, server-added ones
+ * included (a predicate inside a predicate's operand counts one level). The
+ * core backstop for every caller; higher than the per-client limit
+ * ({@link REL_FILTER_CLIENT_MAX_DEPTH}) so server overlays (row scopes,
+ * `transformRelationFilter`) have headroom above what a client may send.
+ */
+export const REL_FILTER_MAX_DEPTH = 4;
 
-/** Maximum number of relational predicates in one filter (nested ones included). */
-export const REL_FILTER_MAX_NODES = 8;
+/** Maximum number of relational predicates in one filter (nested and server-added ones included). See {@link REL_FILTER_MAX_DEPTH}. */
+export const REL_FILTER_MAX_NODES = 16;
+
+/** Per-request nesting limit of CLIENT predicates (moost-db's HTTP gate; server-added predicates are not counted). */
+export const REL_FILTER_CLIENT_MAX_DEPTH = 3;
+
+/** Per-request count limit of CLIENT predicates — root filter and `$with` sub-filters together (moost-db's HTTP gate). */
+export const REL_FILTER_CLIENT_MAX_NODES = 8;
 
 /** A table taking part in a resolved predicate. */
 export interface TRelationFilterTable {
@@ -70,7 +82,16 @@ export interface TRelationFilterJunction extends TRelationFilterTable {
  *
  * @since 0.1.147
  */
+/**
+ * Cross-realm brand of {@link ResolvedRelationFilter}: `instanceof` fails when
+ * two copies of `@atscript/db` are loaded (ESM + CJS, or nested installs) and
+ * an adapter from one sees nodes built by the other.
+ */
+const RESOLVED_BRAND = Symbol.for("@atscript/db:ResolvedRelationFilter");
+
 export class ResolvedRelationFilter {
+  /** @internal cross-realm brand (see {@link isResolvedRelationFilter}). */
+  readonly [RESOLVED_BRAND] = true as const;
   readonly kind: "to" | "from" | "via";
   /** Logical navigation field name on the source table. */
   readonly nav: string;
@@ -101,7 +122,11 @@ export class ResolvedRelationFilter {
 
 /** `true` for a {@link ResolvedRelationFilter} (the resolved operand of a predicate). */
 export function isResolvedRelationFilter(value: unknown): value is ResolvedRelationFilter {
-  return value instanceof ResolvedRelationFilter;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[RESOLVED_BRAND] === true
+  );
 }
 
 /** `true` when `value` (a filter entry's value) is an operator map with a `$some` / `$none` key. */
@@ -264,9 +289,9 @@ export function relationStaticFilter(relation: TDbRelation, name = ""): TRelatio
     }
     throw invalid(
       name,
-      `@db.rel.filter on "${name}" references "${tableNameOf(type)}" — only the related type` +
+      `@db.rel.filter on "${name}" references a type other than the related type` +
         (junctionType ? " and the junction" : "") +
-        " can be referenced",
+        " — only those can be referenced",
     );
   };
 
@@ -358,11 +383,14 @@ export function createRelationFilterHost(
 ): TRelationFilterHost {
   const plans = new Map<string, TRelationPlan>();
 
+  // Same STORE, not just the same adapter class: two drivers / connections /
+  // databases of one class cannot be joined in one statement or pipeline.
+  // Messages name the navigation path only — never a physical table name.
   const sameAdapter = (other: TRelationFilterOwner, path: string, what: string) => {
-    if (other.getAdapter().constructor !== owner.getAdapter().constructor) {
+    if (!owner.getAdapter().sharesStoreWith(other.getAdapter())) {
       throw notSupported(
         path,
-        `Relational predicate on "${path}": the ${what} table "${other.tableName}" lives on a different adapter`,
+        `Relational predicate on "${path}": the ${what} table lives in a different database or adapter`,
       );
     }
   };
@@ -452,14 +480,13 @@ export function createRelationFilterHost(
     guard(nav, op, inner, state) {
       const path = state.path ? `${state.path}.${nav}` : nav;
       const depth = state.depth + 1;
+      // The caps count server-added predicates too, so their errors name no
+      // path (a nav chain could be one the caller never sent).
       if (depth > REL_FILTER_MAX_DEPTH) {
-        throw invalid(
-          path,
-          `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep ("${path}")`,
-        );
+        throw invalid("", `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`);
       }
       if (++state.counter.nodes > REL_FILTER_MAX_NODES) {
-        throw invalid(path, `At most ${REL_FILTER_MAX_NODES} relational predicates per query`);
+        throw invalid("", `At most ${REL_FILTER_MAX_NODES} relational predicates per query`);
       }
       if (!isPlainObject(inner)) {
         throw invalid(path, `"${op}" on "${path}" expects a filter object`);
@@ -475,10 +502,7 @@ export function createRelationFilterHost(
 
     resolve(nav, _op, inner, depth) {
       if (depth > REL_FILTER_MAX_DEPTH) {
-        throw invalid(
-          nav,
-          `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`,
-        );
+        throw invalid("", `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`);
       }
       const plan = planOf(nav, nav);
       const ownerMeta = owner.getMetadata();
@@ -522,6 +546,9 @@ export function createRelationFilterHost(
 /** Re-throws a related table's guard error with its paths under the navigation chain. */
 function prefixError(error: unknown, path: string): unknown {
   if (!(error instanceof DbError)) return error;
+  // Path-less errors (the depth / count caps) stay path-less: they may be
+  // caused by server-added predicates, whose chain must not be named.
+  if (error.errors.every((e) => !e.path)) return error;
   if (error.errors.every((e) => e.path === path || e.path.startsWith(`${path}.`))) return error;
   const errors = error.errors.map((e) => ({
     path: e.path ? `${path}.${e.path}` : path,

@@ -2,6 +2,7 @@ import type { AtscriptDbReadable } from "../table/db-readable";
 import type { AtscriptDbView } from "../table/db-view";
 import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "../query/query-tree";
 import { findAncestorInSet } from "../shared/object";
+import { fkColumns } from "./fk-diff";
 import type {
   TDbDefaultValue,
   TDbFieldMeta,
@@ -216,11 +217,13 @@ export function computeTableSnapshot(
     }))
     .toSorted((a, b) => a.key.localeCompare(b.key));
 
+  // Physical column names (`@db.column` renames applied) — compared with the
+  // desired FKs by `computeForeignKeyDiff` (since 0.1.147; logical before).
   const foreignKeys: TForeignKeySnapshot[] = [...readable.foreignKeys.values()]
     .map((fk) => ({
-      fields: [...fk.fields].toSorted(),
+      fields: [...fkColumns(fk).fields].toSorted(),
       targetTable: fk.targetTable,
-      targetFields: [...fk.targetFields].toSorted(),
+      targetFields: [...fkColumns(fk).targetFields].toSorted(),
       onDelete: fk.onDelete,
       onUpdate: fk.onUpdate,
     }))

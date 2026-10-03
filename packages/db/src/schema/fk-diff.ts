@@ -3,6 +3,10 @@ import type { TForeignKeySnapshot } from "./schema-hash";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
+/**
+ * Desired FKs are keyed and compared by their PHYSICAL columns
+ * ({@link fkColumns}) — the snapshot side is physical too.
+ */
 export interface TForeignKeyDiff {
   /** FKs present in desired but not in stored snapshot (new). */
   added: TDbForeignKey[];
@@ -17,6 +21,17 @@ export interface TForeignKeyDiff {
 /** Canonical key for an FK: sorted local field names, comma-joined. */
 export function fkKey(fields: readonly string[]): string {
   return [...fields].toSorted().join(",");
+}
+
+/**
+ * Physical local / target column names of a desired FK (`@db.column` renames
+ * applied) — what DDL, constraint sync, the FK diff and the snapshot compare.
+ */
+export function fkColumns(fk: TDbForeignKey): { fields: string[]; targetFields: string[] } {
+  return {
+    fields: fk.physicalFields ?? fk.fields,
+    targetFields: fk.physicalTargetFields ?? fk.targetFields,
+  };
 }
 
 /**
@@ -41,7 +56,7 @@ export function computeForeignKeyDiff(
   // Walk desired FKs
   const desiredKeys = new Set<string>();
   for (const fk of desired.values()) {
-    const key = fkKey(fk.fields);
+    const key = fkKey(fkColumns(fk).fields);
     desiredKeys.add(key);
     const existing = existingByKey.get(key);
     if (!existing) {
@@ -72,7 +87,7 @@ function fkPropertiesDiffer(desired: TDbForeignKey, existing: TForeignKeySnapsho
   if (desired.targetTable !== existing.targetTable) {
     return true;
   }
-  if (fkKey(desired.targetFields) !== fkKey(existing.targetFields)) {
+  if (fkKey(fkColumns(desired).targetFields) !== fkKey(existing.targetFields)) {
     return true;
   }
   if ((desired.onDelete ?? undefined) !== (existing.onDelete ?? undefined)) {

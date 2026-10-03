@@ -580,8 +580,8 @@ export function buildCreateTable(
       if (options?.deferForeignKeysTo?.has(fk.targetTable)) {
         continue;
       }
-      const localCols = fk.fields.map((f) => qi(f)).join(", ");
-      const targetCols = fk.targetFields.map((f) => qi(f)).join(", ");
+      const localCols = (fk.physicalFields ?? fk.fields).map((f) => qi(f)).join(", ");
+      const targetCols = (fk.physicalTargetFields ?? fk.targetFields).map((f) => qi(f)).join(", ");
       let constraint = `FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
       if (fk.onDelete) {
         constraint += ` ON DELETE ${refActionToSql(fk.onDelete)}`;

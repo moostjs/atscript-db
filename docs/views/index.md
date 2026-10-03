@@ -185,7 +185,7 @@ The `@db.view.filter` annotation adds a `WHERE` clause using backtick [query exp
 You can reference any table in scope — both the entry table and all joined tables. View predicates (join conditions, filters, `@db.view.having`) support `=`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`, `exists` / `not exists` and `and` / `or` / `not`; `matches` is rejected at sync on SQL adapters and inside MongoDB join conditions:
 
 ```atscript
-@db.view.filter `Task.status != 'done' && Task.priority = 'high'`
+@db.view.filter `Task.status != 'done' and Task.priority = 'high'`
 ```
 
 ### Simple Views (No Joins)
@@ -323,7 +323,7 @@ import { Project } from './project'
 @db.view.for Task
 @db.view.joins User, `User.id = Task.assigneeId`
 @db.view.joins Project, `Project.id = Task.projectId`
-@db.view.filter `Task.priority = 'high' && Task.status != 'done'`
+@db.view.filter `Task.priority = 'high' and Task.status != 'done'`
 export interface HighPriorityTask {
     id: Task.id
     title: Task.title

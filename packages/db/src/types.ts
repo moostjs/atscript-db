@@ -569,6 +569,18 @@ export interface TDbForeignKey {
   targetTable: string;
   /** Target field names on the referenced table. */
   targetFields: string[];
+  /**
+   * Physical column names of {@link fields} (after `@db.column` renames and
+   * flattening), in the same order. Use these for DDL, constraint sync, the
+   * FK diff and the schema snapshot; `fields` stays logical (query / relation
+   * pairing). Absent → same as `fields`.
+   */
+  physicalFields?: string[];
+  /**
+   * Physical column names of {@link targetFields} on the referenced table
+   * (its `@db.column` renames), in the same order. Absent → same as `targetFields`.
+   */
+  physicalTargetFields?: string[];
   /** Lazy reference to the target annotated type (for on-demand table resolution). */
   targetTypeRef?: () => TAtscriptAnnotatedType;
   /** Alias grouping FK fields (if any). */

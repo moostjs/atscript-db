@@ -49,7 +49,13 @@ import { dedupeProjection } from "./projection-dedupe";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
-import { buildMongoFilter, buildMongoQuery, mongoFilterStages, planStages } from "./mongo-filter";
+import {
+  buildMongoFilter,
+  buildMongoQuery,
+  mongoFilterStages,
+  planStages,
+  type TMongoFilterOptions,
+} from "./mongo-filter";
 import {
   DEFAULT_INDEX_NAME,
   mongoIndexKey,
@@ -214,6 +220,19 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   /**
+   * Same store = same client (or database handle) AND the same database: a
+   * `$lookup` only reads collections of the pipeline's own database, and one
+   * client may serve several (since 0.1.147).
+   */
+  override sharesStoreWith(other: BaseDbAdapter): boolean {
+    return (
+      other instanceof MongoAdapter &&
+      other._transactionOwner() === this._transactionOwner() &&
+      other.db.databaseName === this.db.databaseName
+    );
+  }
+
+  /**
    * Per-client cache: whether transactions are unavailable (standalone MongoDB).
    * Shared across all adapter instances for the same client so topology is probed once.
    */
@@ -306,13 +325,13 @@ export class MongoAdapter extends BaseDbAdapter {
     const searchStage = buildAggregateSearchStage(this as any as TMongoSearchHost, query.controls);
 
     if (query.controls?.$count) {
-      const pipeline = buildCountPipeline(query, searchStage);
+      const pipeline = buildCountPipeline(query, searchStage, this._predicateFilterOpts);
       this._log("aggregate (count)", pipeline);
       const result = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
       return result.length > 0 ? result : [{ count: 0 }];
     }
 
-    const pipeline = buildAggregatePipeline(query, searchStage);
+    const pipeline = buildAggregatePipeline(query, searchStage, this._predicateFilterOpts);
     this._log("aggregate", pipeline);
     return wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
   }
@@ -481,10 +500,44 @@ export class MongoAdapter extends BaseDbAdapter {
    * in which a related document can change, so a written document may no
    * longer satisfy the predicate (or a newly matching one is missed).
    *
+   * Collation: such a pipeline runs without an operation-wide `collation`
+   * (it would govern the join keys and every related field too); each
+   * table's `'nocase'` fields are compared case-insensitively explicitly
+   * ({@link TMongoFilterOptions.collation}) — on reads and on these writes.
+   *
    * @since 0.1.147
    */
   override supportsRelationFilters(_mode: "read" | "write"): boolean {
     return true;
+  }
+
+  /**
+   * The `@db.column.collate` of a field (physical or logical path), or
+   * `undefined` for a byte-wise one — how predicate pipelines render this
+   * table's `'nocase'` comparisons ({@link TMongoFilterOptions.collation}).
+   *
+   * @since 0.1.147
+   */
+  fieldCollation(field: string): TDbCollation | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- trigger lazy init (onAfterFlatten)
+    this._table.flatMap;
+    return this._collateFields?.get(field);
+  }
+
+  /** Filter-rendering options of a pipeline with relational predicates on this table. */
+  private get _predicateFilterOpts(): TMongoFilterOptions {
+    return { collation: (field) => this.fieldCollation(field) };
+  }
+
+  /**
+   * Operation options of a read: the request collation for a predicate-free
+   * filter ({@link _getCollationOpts}); none with relational predicates —
+   * those pipelines render collation per field ({@link _predicateFilterOpts}).
+   */
+  private _readOpts(query: DbQuery): Record<string, unknown> {
+    return containsRelationPredicate(query.filter)
+      ? this._getSessionOpts()
+      : { ...this._getCollationOpts(query), ...this._getSessionOpts() };
   }
 
   // oxlint-disable-next-line max-params -- matches BaseDbAdapter.loadRelations() signature
@@ -856,15 +909,13 @@ export class MongoAdapter extends BaseDbAdapter {
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
     const pipeline: Document[] = [
-      ...mongoFilterStages(query.filter),
+      ...mongoFilterStages(query.filter, this._predicateFilterOpts),
       { $facet: { data: pageStages(query.controls), meta: [{ $count: "count" }] } },
     ];
 
     this._log("aggregate (findManyWithCount)", pipeline);
     const result = await wrapInvalidQuery(() =>
-      this.collection
-        .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
-        .toArray(),
+      this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
     );
     return {
       data: result[0]?.data || [],
@@ -917,7 +968,7 @@ export class MongoAdapter extends BaseDbAdapter {
       throw new Error(`${op}: expectedVersion requires versionColumn`);
     }
     const mongoFilter = containsRelationPredicate(filter)
-      ? (await this._predicateWriteFilters(filter, true))[0]
+      ? await this._predicateWriteFilterOne(filter)
       : buildMongoFilter(filter);
     if (!mongoFilter) {
       return undefined;
@@ -929,29 +980,67 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   /**
-   * A write filter holding relational predicates → `_id`-based filters:
-   * the matching `_id`s are resolved through the aggregation pipeline (in
-   * the active transaction's session, if any), then grouped into batches of
-   * {@link REL_WRITE_BATCH} (`one`: the first match only). Each filter also
-   * re-checks the predicate-free conjuncts, so a document that stopped
-   * matching them in between is not written. Empty when nothing matches.
+   * The id-resolving pipeline of a write filter holding relational
+   * predicates: the matching `_id`s (in the active transaction's session,
+   * if any), each table's `'nocase'` fields compared like on reads
+   * ({@link _predicateFilterOpts}). `pre` is the predicate-free part, which
+   * every `_id`-based write re-checks — so a document that stopped matching
+   * it in between is not written.
    */
-  private async _predicateWriteFilters(filter: FilterExpr, one: boolean): Promise<Filter<any>[]> {
-    const plan = buildMongoQuery(filter);
-    const pipeline = planStages(plan);
-    if (one) {
-      pipeline.push({ $limit: 1 });
-    }
-    pipeline.push({ $project: { _id: 1 } });
+  private _predicateWritePlan(filter: FilterExpr): { pipeline: Document[]; pre?: Filter<any> } {
+    const plan = buildMongoQuery(filter, this._predicateFilterOpts);
+    return { pipeline: planStages(plan), pre: plan.pre };
+  }
+
+  /** A write filter's `_id` filter (re-checking `pre`). */
+  private static _byIds(ids: unknown[], pre: Filter<any> | undefined): Filter<any> {
+    const byId: Filter<any> = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
+    return pre ? { $and: [byId, pre] } : byId;
+  }
+
+  /** Single-document write over a predicate filter: the first match's `_id` filter (`undefined`: none). */
+  private async _predicateWriteFilterOne(filter: FilterExpr): Promise<Filter<any> | undefined> {
+    const { pipeline, pre } = this._predicateWritePlan(filter);
+    pipeline.push({ $limit: 1 }, { $project: { _id: 1 } });
+    this._log("aggregate (write id)", pipeline);
+    const [doc] = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+    return doc ? MongoAdapter._byIds([doc._id], pre) : undefined;
+  }
+
+  /**
+   * Multi-document write over a predicate filter: calls `write` with one
+   * `_id`-based filter per batch of {@link REL_WRITE_BATCH} matching ids,
+   * streamed from the cursor (never all ids in memory at once).
+   *
+   * The ids come sorted by `_id`, so writes made while the cursor is open
+   * can never feed back into it (otherwise a document an update moves within
+   * the index the cursor scans could be returned — and written — twice):
+   * after the `$lookup`s that `$sort` consumes every match before the first
+   * batch returns, and an `_id` order read from the `_id` index is stable
+   * (`_id` never changes).
+   */
+  private async _forEachPredicateBatch(
+    filter: FilterExpr,
+    write: (mongoFilter: Filter<any>) => Promise<void>,
+  ): Promise<void> {
+    const { pipeline, pre } = this._predicateWritePlan(filter);
+    pipeline.push({ $project: { _id: 1 } }, { $sort: { _id: 1 } });
     this._log("aggregate (write ids)", pipeline);
-    const docs = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
-    const filters: Filter<any>[] = [];
-    for (let i = 0; i < docs.length; i += REL_WRITE_BATCH) {
-      const ids = docs.slice(i, i + REL_WRITE_BATCH).map((doc) => doc._id as unknown);
-      const byId: Filter<any> = one ? { _id: ids[0] } : { _id: { $in: ids } };
-      filters.push(plan.pre ? { $and: [byId, plan.pre] } : byId);
+    const cursor = this.aggregatePipeline(pipeline).batchSize(REL_WRITE_BATCH);
+    try {
+      let ids: unknown[] = [];
+      for (;;) {
+        const doc = await wrapInvalidQuery(() => cursor.next());
+        if (doc) ids.push(doc._id);
+        if (ids.length > 0 && (!doc || ids.length === REL_WRITE_BATCH)) {
+          await write(MongoAdapter._byIds(ids, pre));
+          ids = [];
+        }
+        if (!doc) break;
+      }
+    } finally {
+      await cursor.close();
     }
-    return filters;
   }
 
   /** Runs an update-shaped write over `filter` — batched by `_id` when it holds predicates. */
@@ -963,25 +1052,25 @@ export class MongoAdapter extends BaseDbAdapter {
       return write(buildMongoFilter(filter));
     }
     const total: TDbUpdateResult = { matchedCount: 0, modifiedCount: 0 };
-    for (const mongoFilter of await this._predicateWriteFilters(filter, false)) {
+    await this._forEachPredicateBatch(filter, async (mongoFilter) => {
       const result = await write(mongoFilter);
       total.matchedCount += result.matchedCount;
       total.modifiedCount += result.modifiedCount;
-    }
+    });
     return total;
   }
 
   /** `deleteMany` over `filter` — batched by `_id` when it holds predicates. */
   private async _deleteMatching(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const filters = containsRelationPredicate(filter)
-      ? await this._predicateWriteFilters(filter, false)
-      : [buildMongoFilter(filter)];
     let deletedCount = 0;
-    for (const mongoFilter of filters) {
+    const remove = async (mongoFilter: Filter<any>) => {
       this._log("deleteMany", mongoFilter);
       const result = await this.collection.deleteMany(mongoFilter, this._getSessionOpts());
       deletedCount += result.deletedCount;
-    }
+    };
+    await (containsRelationPredicate(filter)
+      ? this._forEachPredicateBatch(filter, remove)
+      : remove(buildMongoFilter(filter)));
     return { deletedCount };
   }
 
@@ -1107,12 +1196,13 @@ export class MongoAdapter extends BaseDbAdapter {
   async count(query: DbQuery): Promise<number> {
     if (containsRelationPredicate(query.filter)) {
       // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a filter only).
-      const pipeline = [...mongoFilterStages(query.filter), { $count: "count" }];
+      const pipeline = [
+        ...mongoFilterStages(query.filter, this._predicateFilterOpts),
+        { $count: "count" },
+      ];
       this._log("aggregate (count)", pipeline);
       const result = await wrapInvalidQuery(() =>
-        this.collection
-          .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
-          .toArray(),
+        this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
       );
       return (result[0]?.count as number | undefined) ?? 0;
     }
@@ -1175,7 +1265,7 @@ export class MongoAdapter extends BaseDbAdapter {
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
     const mongoFilter = containsRelationPredicate(filter)
-      ? (await this._predicateWriteFilters(filter, true))[0]
+      ? await this._predicateWriteFilterOne(filter)
       : buildMongoFilter(filter);
     if (!mongoFilter) {
       return { deletedCount: 0 };
@@ -1397,14 +1487,12 @@ export class MongoAdapter extends BaseDbAdapter {
     limit?: number,
   ): Promise<Array<Record<string, unknown>>> {
     const pipeline = [
-      ...mongoFilterStages(query.filter),
+      ...mongoFilterStages(query.filter, this._predicateFilterOpts),
       ...pageStages(limit ? { ...query.controls, $limit: limit } : query.controls),
     ];
     this._log(`aggregate (${label})`, pipeline);
     return wrapInvalidQuery(() =>
-      this.collection
-        .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
-        .toArray(),
+      this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
     );
   }
 
@@ -1433,6 +1521,9 @@ export class MongoAdapter extends BaseDbAdapter {
    * Returns MongoDB collation options if any filter field has a non-binary collation.
    * Uses pre-computed insights when available, falls back to computing them on demand.
    * Maps: nocase → strength 2 (case-insensitive), unicode → strength 1 (case+accent-insensitive).
+   * Predicate-free filters only — a filter with relational predicates never gets an
+   * operation-wide collation ({@link _readOpts}), so insights are never computed over
+   * resolved predicate operands.
    */
   private _getCollationOpts(query: DbQuery): { collation: CollationOptions } | undefined {
     if (!this._collateFields) {

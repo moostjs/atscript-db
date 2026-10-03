@@ -8,6 +8,7 @@ import {
   type FilterExpr,
   type TableMetadata,
   type TDbRelation,
+  type TDbCollation,
   type TDbForeignKey,
   type TReadControls,
   type TTableResolver,
@@ -314,7 +315,7 @@ function buildToLookup(
       $lookup: {
         from: collectionOf(target),
         let: join.let,
-        pipeline: [join.match, ...inner.filter, ...inner.page],
+        pipeline: [...join.stages, ...inner.filter, ...inner.page],
         as: withRel.name,
       },
     },
@@ -357,7 +358,7 @@ function buildFromLookup(
       $lookup: {
         from: collectionOf(target),
         let: join.let,
-        pipeline: [join.match, ...inner.filter, ...inner.page],
+        pipeline: [...join.stages, ...inner.filter, ...inner.page],
         as: withRel.name,
       },
     },
@@ -417,7 +418,7 @@ function buildViaLookup(
   // The junction part of `@db.rel.filter`, in the junction's physical names.
   const junctionFilter = relationStaticFilter(relation, withRel.name).junction;
   const junctionStages = junctionFilter
-    ? filterStages(junction._translateForAdapter({ filter: junctionFilter }).filter)
+    ? filterStages(junction, junction._translateForAdapter({ filter: junctionFilter }).filter)
     : [];
 
   const stages: Document[] = [
@@ -426,13 +427,13 @@ function buildViaLookup(
         from: collectionOf(junction),
         let: toSource.let,
         pipeline: [
-          toSource.match,
+          ...toSource.stages,
           ...junctionStages,
           {
             $lookup: {
               from: collectionOf(target),
               let: toTarget.let,
-              pipeline: [toTarget.match, ...inner.filter],
+              pipeline: [...toTarget.stages, ...inner.filter],
               as: "__target",
             },
           },
@@ -449,9 +450,20 @@ function buildViaLookup(
   return { stages, isArray: true, readControls: inner.readControls };
 }
 
-/** Stages applying a translated filter (none when empty). */
-function filterStages(filter: FilterExpr | undefined): Document[] {
-  return filter && Object.keys(filter).length > 0 ? mongoFilterStages(filter) : [];
+/** Stages applying a translated filter on `readable`'s collection (none when empty). */
+function filterStages(
+  readable: TMongoRelationReadable,
+  filter: FilterExpr | undefined,
+): Document[] {
+  if (!filter || Object.keys(filter).length === 0) return [];
+  // With relational predicates the filter renders 'nocase' fields per field
+  // (the pipeline has no collation); a predicate-free one is unchanged.
+  const adapter = readable.getAdapter() as {
+    fieldCollation?: (field: string) => TDbCollation | undefined;
+  };
+  return mongoFilterStages(filter, {
+    collation: (field) => adapter.fieldCollation?.(field),
+  });
 }
 
 /**
@@ -514,7 +526,7 @@ function buildLookupInnerPipeline(
   }
 
   return {
-    filter: filterStages(translated.filter),
+    filter: filterStages(target, translated.filter),
     page,
     readControls: select ? { $select: select } : {},
   };

@@ -190,6 +190,8 @@ export {
   andFilters,
   REL_FILTER_MAX_DEPTH,
   REL_FILTER_MAX_NODES,
+  REL_FILTER_CLIENT_MAX_DEPTH,
+  REL_FILTER_CLIENT_MAX_NODES,
 } from "./query/relation-filter";
 export type {
   TRelationFilterTable,

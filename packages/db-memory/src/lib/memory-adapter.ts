@@ -457,7 +457,8 @@ export class MemoryAdapter extends BaseDbAdapter {
           throw new DbError("REL_FILTER_NOT_SUPPORTED", [
             {
               path: "",
-              message: `Relational predicate: the related table "${adapter.resolveTableName()}" is not served by the memory adapter`,
+              message:
+                "Relational predicate: the related table is not served by the memory adapter",
             },
           ]);
         }
@@ -869,6 +870,10 @@ export class MemoryAdapter extends BaseDbAdapter {
     // Relational predicates: this table's snapshot is taken first and shared
     // with the predicates (a self relation reads the same rows).
     const own = Promise.resolve(this._loadRows());
+    // `own` is awaited only after the related tables load: mark it handled
+    // now so a rejection meanwhile is not an unhandled rejection (it still
+    // propagates — through the predicates that share it, or the await below).
+    own.catch(() => {});
     const sets = await this._relationSets(query.filter, own);
     return (await own).filter(buildMemoryPredicate(query.filter, sets));
   }

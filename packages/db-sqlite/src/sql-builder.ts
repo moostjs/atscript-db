@@ -450,8 +450,10 @@ export function buildCreateTable(
   // Foreign key constraints
   if (foreignKeys) {
     for (const fk of foreignKeys.values()) {
-      const localCols = fk.fields.map((f) => `"${esc(f)}"`).join(", ");
-      const targetCols = fk.targetFields.map((f) => `"${esc(f)}"`).join(", ");
+      const localCols = (fk.physicalFields ?? fk.fields).map((f) => `"${esc(f)}"`).join(", ");
+      const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
+        .map((f) => `"${esc(f)}"`)
+        .join(", ");
       let constraint = `FOREIGN KEY (${localCols}) REFERENCES "${esc(fk.targetTable)}" (${targetCols})`;
       if (fk.onDelete) {
         constraint += ` ON DELETE ${refActionToSql(fk.onDelete)}`;

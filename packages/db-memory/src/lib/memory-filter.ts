@@ -5,7 +5,8 @@ import {
   getPath,
   containsRelationPredicate,
   forEachResolvedRelation,
-  ResolvedRelationFilter,
+  isResolvedRelationFilter,
+  type ResolvedRelationFilter,
 } from "@atscript/db";
 
 /**
@@ -286,27 +287,49 @@ export type MemoryRowLoader = (adapter: BaseDbAdapter) => Promise<Record<string,
  * Identity of the key tuple `fields` of `row` (dot-paths read nested), or
  * `undefined` when a component is `null` / missing — a NULL key component
  * never correlates (SQL `=` semantics: `$some` false, `$none` true).
- * `JSON.stringify` keeps types apart (`1` ≠ `"1"`), matching the strict
- * equality the memory filter uses everywhere; `Date`s compare by instant.
+ * Every component is type-tagged (see {@link keyPart}), matching the strict
+ * equality the memory filter uses everywhere (`valuesEqual`): `1` ≠ `"1"`,
+ * `5n` ≠ `"5n"`, a `Date` ≠ its ISO string; `Date`s compare by instant.
  */
 function correlationKey(
   row: Record<string, unknown>,
   fields: readonly string[],
 ): string | undefined {
-  const values: unknown[] = [];
+  const parts: string[] = [];
   for (const field of fields) {
-    const value = getPath(row, field);
-    if (value === null || value === undefined) {
+    const part = keyPart(getPath(row, field));
+    if (part === undefined) {
       return undefined;
     }
-    values.push(value);
+    parts.push(part);
   }
-  return JSON.stringify(values, keyReplacer);
+  return JSON.stringify(parts);
 }
 
-/** `JSON.stringify` replacer for key values: a `bigint` gets a marker (it has no JSON form). */
-function keyReplacer(_key: string, value: unknown): unknown {
-  return typeof value === "bigint" ? `${value}n` : value;
+/**
+ * Type-tagged identity of one key component, or `undefined` when it never
+ * equals anything (`null` / missing, `NaN`).
+ */
+function keyPart(value: unknown): string | undefined {
+  switch (typeof value) {
+    case "string":
+      return `s:${value}`;
+    case "number":
+      return Number.isNaN(value) ? undefined : `n:${value === 0 ? 0 : value}`;
+    case "bigint":
+      return `b:${value}`;
+    case "boolean":
+      return `t:${value}`;
+    case "undefined":
+      return undefined;
+    default:
+      if (value === null) return undefined;
+      if (value instanceof Date) {
+        const time = value.getTime();
+        return Number.isNaN(time) ? undefined : `d:${time}`;
+      }
+      return `o:${JSON.stringify(value, (_k, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))}`;
+  }
 }
 
 /** Source-side correlation columns of a resolved predicate (physical names). */
@@ -327,7 +350,7 @@ function relationPredicate(
   operand: FilterExpr,
 ): Predicate {
   const node = operand as unknown;
-  const set = node instanceof ResolvedRelationFilter ? sets?.get(node) : undefined;
+  const set = isResolvedRelationFilter(node) ? sets?.get(node) : undefined;
   if (!set) {
     throw new DbError("REL_FILTER_NOT_SUPPORTED", [
       {

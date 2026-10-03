@@ -279,9 +279,11 @@ See [Patch Operations](/api/update-patch) for the full API.
 
 The adapter uses MongoDB `$lookup` aggregation stages for TO, FROM, and VIA relations instead of issuing separate queries. This means relation loading happens in a single round-trip to the database.
 
-- **TO relations** — `$lookup` with `localField` / `foreignField`
-- **FROM relations** — Reverse `$lookup` from the related collection
+- **TO relations** — `$lookup` into the target collection on its key
+- **FROM relations** — Reverse `$lookup` from the related collection on its foreign key
 - **VIA relations** — Two-stage `$lookup` through the junction collection
+
+Each lookup joins with an `$expr` `$eq` per key field, so an index on the related collection's key fields is used — see [Indexes](#relational-predicate-indexes).
 
 Relation controls (`$sort`, `$limit`, `$filter`) are applied as pipeline stages within the `$lookup`. Nested lookups (relations of relations) are supported.
 
@@ -304,15 +306,40 @@ See [Relations](/relations/) for details.
 - Text and vector search: the predicate stages follow the leading `$search` / `$text` / `$vectorSearch` stage. A vector search applies the filter after its own top-k cut, as for any filter. Geo: the predicate-free part stays in the `$geoNear` query and the predicates follow it, so the result is exact.
 - A `null` or missing foreign key (any part of a composite one) never relates — `$some` false, `$none` true — even against related documents whose key is `null` or missing.
 
-**Writes.** `updateMany`, `replaceMany`, `deleteMany` and single-row writes scoped by a predicate first resolve the matching `_id`s through the pipeline, then write by `_id` in batches of 1,000, re-checking the predicate-free conditions at write time; the counts are summed across batches.
+**Writes.** `updateMany`, `replaceMany`, `deleteMany` and single-row writes scoped by a predicate first resolve the matching `_id`s through the pipeline, then write by `_id` in batches of 1,000, re-checking the predicate-free conditions at write time; the counts are summed across batches. The ids are read from the cursor batch by batch (sorted by `_id`), never all at once, and they compare [collated fields](#relational-predicate-collation) like a read does.
 
 ::: warning Atomic only inside a transaction
 Inside [`withTransaction`](/api/transactions#adapter-behavior) (replica set or mongos) both steps share the session and the write is atomic. Without a transaction there is a window between resolving the ids and writing: a related document can change in between, so a written document may no longer satisfy the predicate, or a document that just started to match is missed. The adapter does not open a transaction by itself — wrap the call in `withTransaction` when that matters.
 :::
 
-**Indexes.** Lookups correlate with `$expr` `$eq`, which can use an index on MongoDB 5.0 and later. Index the foreign-key field of the related collection for a `@db.rel.from` predicate (`issues.ticketKey` for `tickets.issues`) and both foreign-key fields of a `@db.rel.via` junction; a `@db.rel.to` predicate reads the target's `_id` or unique key.
+### Collation {#relational-predicate-collation}
 
-**Building filters yourself.** `buildMongoFilter(filter)` throws `REL_FILTER_NOT_SUPPORTED` on a predicate, since a `$lookup` cannot live in a `find` filter. For a raw-driver aggregation over a translated filter that may hold predicates, use `mongoFilterStages(filter)` (the stages to put at the start of your pipeline), or `buildMongoQuery(filter)` → `{ pre?, lookups, match, temp }` with `planStages(plan)` for finer placement.
+A plain read on a table with `@db.column.collate` fields passes a query-level `collation` when its filter touches one of them. A pipeline with predicates can't do that: one collation would govern every `$lookup` as well, joining `'T1'` to `'t1'` and making the related table's byte-wise fields case-insensitive. So these pipelines run **without** a collation, and each table's `'nocase'` fields — the queried table's and every related table's — are compared case-insensitively on their own: `$eq`, `$ne`, `$in` and `$nin` on a string become an exact, case-insensitive regular-expression match. Join keys and the other fields compare byte-wise.
+
+- These comparisons cannot use an index the way a collated plain read can, so put selective conditions on other fields.
+- A range (`$gt`, `$gte`, `$lt`, `$lte`) on a string of a `'nocase'` field, and any string comparison on a `'unicode'` field, can't be rendered this way. They throw `REL_FILTER_NOT_SUPPORTED` (HTTP 400) when the query holds a predicate. `$regex` and `$exists` are fine — `$regex` never follows a collation.
+- `$sort` in such a query is byte-wise.
+- Writes without a predicate pass no collation at all, so their filter compares `'nocase'` fields byte-wise. A write with a predicate compares them like a read (see above).
+- A [`$with`](#native-relation-loading) sub-filter that holds a predicate follows these rules too. A `$with` sub-filter without one compares byte-wise, because native `$with` loading passes no collation.
+
+### Indexes {#relational-predicate-indexes}
+
+Each lookup (predicates and [`$with`](#native-relation-loading)) correlates with a bare `$expr` `$eq` per key field, then drops `null` keys in a separate `$match`, so MongoDB 5.0 and later run it as an index scan on the related collection's key fields — without an index, every source document scans the whole related collection. Index:
+
+- the foreign-key field of the related collection for a `@db.rel.from` relation (`issues.ticketKey` for `tickets.issues`);
+- both foreign-key fields of a `@db.rel.via` junction;
+- a composite key with one compound index over its fields.
+
+A `@db.rel.to` relation reads the target's `_id`, or a non-`_id` `@meta.id` field, which has a unique index.
+
+**Sorted pages.** `$sort`, `$skip` and `$limit` run **after** the lookups. Every document that passes the predicate-free conditions is looked up before the page is cut, so the cost grows with the number of candidates, not with the page size, and an index on the sort field does not shorten it. Narrow the candidates with predicate-free conditions where you can.
+
+### Building Filters Yourself
+
+`buildMongoFilter(filter)` throws `REL_FILTER_NOT_SUPPORTED` on a predicate, since a `$lookup` cannot live in a `find` filter. For a raw-driver aggregation over a translated filter that may hold predicates, use `mongoFilterStages(filter)` (the stages to put at the start of your pipeline), or `buildMongoQuery(filter)` → `{ pre?, lookups, match, temp }` with `planStages(plan)` for finer placement.
+
+- Run that aggregation without a `collation`. To compare the queried table's `'nocase'` fields as described in [Collation](#relational-predicate-collation), pass its per-field collation as the second argument: `mongoFilterStages(filter, { collation: (field) => adapter.fieldCollation(field) })`. Related tables use their own automatically.
+- The lookups write temporary `__atscript_rf_<n>` fields (`temp`). `mongoFilterStages` / `planStages` remove them with `$unset`.
 
 ## Text Search
 
@@ -571,7 +598,7 @@ Capped collections do not support document deletion or updates that increase doc
 
 ## Transactions
 
-MongoDB transactions require a replica set or mongos topology. On standalone instances, the adapter gracefully skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#mongodb) for usage and behavioral details.
+MongoDB transactions require a replica set or mongos topology. On standalone instances, the adapter gracefully skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#adapter-behavior) for usage and behavioral details.
 
 ## Schema Sync Notes
 

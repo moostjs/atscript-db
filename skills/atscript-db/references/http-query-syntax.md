@@ -103,7 +103,7 @@ Dot notation addresses embedded / flattened own-props. A nav-prop path is a 400 
 | 2   | `ticket!=$some(…)` → SyntaxError 400 — negate with `!( )` or use `$none`.                                                                                                              |
 | 3   | Relation must be `@db.rel.filterable`, visible, with filterable operand fields → else 400 (messages: [moost-db.md](moost-db.md#relational-predicates-over-http-01147)).                |
 | 4   | Endpoints: `/query` (incl. `$count`, `$groupBy`), `/pages`, `/geo`, `$with` bodies (incl. `/one`). Never `$having`; never an identification (`/one?…`, `DELETE /?…` → 400).            |
-| 5   | Caps per request: depth 3 per chain, 8 predicates total incl. `$with` sub-filters.                                                                                                     |
+| 5   | Caps per request (client predicates only): depth 3 per chain, 8 predicates total incl. `$with` sub-filters.                                                                            |
 | 6   | Insights record `ticket` → `$some`, inner terms prefixed (`ticket.status` → `$eq`).                                                                                                    |
 
 Semantics (NULL FK, `$every` = `$none: { $not: F }`) → [queries.md](queries.md#relational-predicates--some--none-01147).

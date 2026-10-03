@@ -527,6 +527,151 @@ describe("transformRelationFilter", () => {
   });
 });
 
+// ── Server-added predicates ($with row scopes in validateControls) ─────────
+
+describe("server predicates conjoined into $with in validateControls", () => {
+  /**
+   * The pattern of a permission layer: `validateControls` conjoins the
+   * related table's row scope into each `$with=tickets` entry — here a
+   * predicate on `plainIssues`, a relation the CLIENT may not filter by.
+   */
+  function scoped(opts: { clone?: boolean; overlay?: boolean } = {}) {
+    const hookLog: string[] = [];
+    class Scoped extends AsDbReadableController {
+      protected override validateControls(controls: Record<string, unknown>, type: any) {
+        const error = super.validateControls(controls, type);
+        if (error) return error;
+        for (const entry of (controls.$with ?? []) as Array<Record<string, any>>) {
+          if (entry?.name !== "tickets") continue;
+          const scope = { plainIssues: { $some: { title: { $in: ["a", "c"] } } } };
+          const client = opts.clone && entry.filter ? structuredClone(entry.filter) : entry.filter;
+          entry.filter = client ? { $and: [scope, client] } : scope;
+        }
+        return undefined;
+      }
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        if (!opts.overlay) return super.transformRelationFilter(path, filter);
+        hookLog.push(path);
+        return filter;
+      }
+    }
+    return { controller: bind(Scoped, "teams").controller, hookLog };
+  }
+
+  const ticketsByTeam = (rows: unknown) =>
+    Object.fromEntries(
+      (rows as Array<{ id: string; tickets: Array<{ key: string }> }>).map((t) => [
+        t.id,
+        t.tickets.map((k) => k.key),
+      ]),
+    );
+
+  it("are not gated as client input: a plain $with passes and the scope applies", async () => {
+    const { controller } = scoped();
+    expect(ticketsByTeam(await controller.query("?$with=tickets"))).toEqual({
+      t1: ["k1"],
+      t2: ["k3"],
+    });
+  });
+
+  it("a client predicate in the same entry is still gated, counted and overlaid — the server one is not", async () => {
+    const { controller, hookLog } = scoped({ overlay: true });
+    expect(ticketsByTeam(await controller.query("?$with=tickets(issues=$some(title=c))"))).toEqual({
+      t1: [],
+      t2: ["k3"],
+    });
+    expect(hookLog).toEqual(["tickets.issues"]);
+    // the client's own predicate on a non-filterable relation is still rejected
+    expect(await rejected(controller.query("?$with=tickets(plainIssues=$some(title=c))"))).toEqual({
+      path: "tickets.plainIssues",
+      message:
+        'Filtering by related "tickets.plainIssues" rows is not permitted — add @db.rel.filterable to enable.',
+    });
+  });
+
+  it("server predicates do not consume the client's predicate budget", async () => {
+    const { controller } = scoped();
+    expect(Array.isArray(await controller.query(`?${manyPredicates(8)}&$with=tickets`))).toBe(true);
+    expect(
+      await rejected(
+        controller.query(`?${manyPredicates(8)}&$with=tickets(issues=$some(title=c))`),
+      ),
+    ).toEqual({ path: "tickets.issues", message: "At most 8 relational predicates per query" });
+  });
+
+  it("fails closed when the hook replaced a client $with predicate by a copy", async () => {
+    const { controller } = scoped({ clone: true, overlay: true });
+    const err = await controller
+      .query("?$with=tickets(issues=$some(title=c))")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).body.statusCode).toBe(500);
+    // without a client predicate in $with there is nothing to overlay
+    expect(Array.isArray(await controller.query("?$with=tickets"))).toBe(true);
+  });
+});
+
+describe("core caps leave headroom above the client caps", () => {
+  it("a client at the depth cap plus an overlay nesting one more level passes", async () => {
+    class DeepOverlay extends AsDbReadableController {
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        return path === "ticket.team.tickets"
+          ? ({ $and: [{ issues: { $some: {} } }, filter] } as FilterExpr)
+          : filter;
+      }
+    }
+    const { controller } = bind(DeepOverlay);
+    expect(
+      ids(await controller.query("?ticket=$some(team=$some(tickets=$some(status=open)))")),
+    ).toEqual([1, 2, 3]);
+  });
+
+  it("8 client predicates plus a predicate per operand from the overlay pass", async () => {
+    class WideOverlay extends AsDbReadableController {
+      protected override transformRelationFilter(_path: string, filter: FilterExpr) {
+        return { $and: [{ issues: { $some: {} } }, filter] } as FilterExpr;
+      }
+    }
+    const { controller } = bind(WideOverlay, "teams");
+    expect(Array.isArray(await controller.query(`?${manyPredicates(8)}`))).toBe(true);
+  });
+
+  it("beyond the core cap the error names no path or count of the server's predicates", async () => {
+    class Wider extends AsDbReadableController {
+      protected override transformRelationFilter(_path: string, filter: FilterExpr) {
+        return { $and: [{ issues: { $some: {} } }, filter] } as FilterExpr;
+      }
+      protected override transformFilter(filter: FilterExpr) {
+        return { $and: [{ tickets: { $none: { status: "zzz" } } }, filter] } as FilterExpr;
+      }
+    }
+    const { controller } = bind(Wider, "teams");
+    const err = await controller.query(`?${manyPredicates(8)}`).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DbError);
+    expect((err as DbError).errors).toEqual([
+      { path: "", message: "At most 16 relational predicates per query" },
+    ]);
+  });
+});
+
+describe("TDbRequestContext.filter is a frozen copy", () => {
+  it("a hook mutating ctx.filter cannot change what the gate judges or the read uses", async () => {
+    let seen: unknown;
+    class Mutating extends AsDbReadableController {
+      protected async prepareRequest(ctx: TDbRequestContext): Promise<void> {
+        seen = ctx.filter;
+        expect(Object.isFrozen(ctx.filter)).toBe(true);
+        expect(() => {
+          (ctx.filter as any).ticket = { $some: {} };
+        }).toThrow();
+      }
+    }
+    const { controller } = bind(Mutating);
+    expect(ids(await controller.query("?title=a"))).toEqual([1]);
+    expect(seen).toEqual({ title: "a" });
+  });
+});
+
 // ── /meta ───────────────────────────────────────────────────────────────────
 
 describe("/meta", () => {
