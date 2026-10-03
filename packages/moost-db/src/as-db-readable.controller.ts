@@ -1263,16 +1263,18 @@ export class AsDbReadableController<
    * Default: `transformFilter({})` (the read overlay of `/query`). Throw an
    * `HttpError` to refuse query targets for the caller (e.g. no read grant).
    *
-   * Runs as a READ of this controller: for an action's own query target it
-   * is called in a child of the action event (moost `withControllerContext`,
-   * the controller's `query` handler) after
-   * `prepareRequest({ endpoint: "query", controls, filter })` — so a permission
-   * layer's per-request state is the READ request's (its read grant), never
-   * the action's, and nothing of it leaks back into the action event. The
-   * target's query (`q` filter and controls, `exclude`) is validated in that
-   * read context too ({@link validateControls}, {@link checkCapabilities},
-   * {@link hasField}), on top of the action request's own check: a query
-   * target never filters on, nor counts by, a field the caller can't read.
+   * Runs as a READ of this controller: it is called in a child of the
+   * action event — of the delegating event for a view resolving a delegated
+   * target — (moost `withControllerContext`, the controller's `query`
+   * handler) after `prepareRequest({ endpoint: "query", controls, filter })`
+   * with the target's own filter and controls — so a permission layer's
+   * per-request state is the READ request's (its read grant, the policy of
+   * the relations its predicates touch), never the action's, and nothing of
+   * it leaks back. The target's query (`q` filter and controls, `exclude`)
+   * is validated in that read context ({@link validateControls},
+   * {@link checkCapabilities}, {@link hasField}), where the client
+   * predicates' {@link transformRelationFilter} also runs: a query target
+   * never filters on, nor counts by, a field the caller can't read.
    *
    * @since 0.1.147
    */
@@ -1765,26 +1767,29 @@ export class AsDbReadableController<
         validateMultiId(exclude, source, req.maxExclude);
       }
     };
-    check();
 
-    // An own action's target: the query must ALSO pass as a read — checked,
-    // and the read hooks (`queryTargetScope`, the client predicates'
-    // `transformRelationFilter`) evaluated, in a read context (see the hook).
-    const readHooks = () =>
-      Promise.all([this._relationOverlay(parsed), this.queryTargetScope(action)]);
-    const [[clientFilter, scope], overlay] = await Promise.all([
-      req.overlay === "action"
-        ? this._asRead(controls, parsed.filter as FilterExpr | undefined, () => {
-            check();
-            return readHooks();
-          })
-        : readHooks(),
+    // The query is checked, and its read hooks run, as a READ of this
+    // controller (see `queryTargetScope`) — after `prepareRequest({ endpoint:
+    // "query", controls, filter })` with the target's own filter, so a
+    // permission layer resolves the policy of its relational predicates as
+    // on `/query`: the client predicates' `transformRelationFilter`,
+    // `queryTargetScope` and, for a view resolving a delegated target, its
+    // read overlay `transformFilter`.
+    const [[base, scope], overlay] = await Promise.all([
+      this._asRead(controls, parsed.filter as FilterExpr | undefined, async () => {
+        check();
+        const [clientFilter, readScope] = await Promise.all([
+          this._relationOverlay(parsed),
+          this.queryTargetScope(action),
+        ]);
+        const read =
+          req.overlay === "read"
+            ? await this.transformFilter(clientFilter ?? ({} as FilterExpr))
+            : clientFilter;
+        return [read, readScope] as const;
+      }),
       req.overlay === "action" ? this.rowOverlay() : undefined,
     ]);
-    const base =
-      req.overlay === "read"
-        ? await this.transformFilter(clientFilter ?? ({} as FilterExpr))
-        : clientFilter;
     const filter = andFilters(
       this.applySearchFallback(base, controls),
       overlay,

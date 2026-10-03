@@ -13,7 +13,7 @@ import {
   type ResolvedRelationFilter,
 } from "@atscript/db";
 import { HttpError, Post } from "@moostjs/event-http";
-import { getMoostInfact } from "moost";
+import { current, getMoostInfact, key } from "moost";
 
 import { AsDbController } from "../as-db.controller";
 import { AsDbReadableController } from "../as-db-readable.controller";
@@ -22,6 +22,7 @@ import { TableController } from "../decorators";
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionID } from "../actions/db-action-id.decorator";
 import { DbActionIDs } from "../actions/db-action-ids.decorator";
+import { DbActionsFrom } from "../actions/db-actions-from.decorator";
 import { REL_FILTER_CLIENT_MAX_DEPTH, REL_FILTER_CLIENT_MAX_NODES } from "../index";
 // The core test adapter has no package entry — the one relative import that stays.
 import { MockAdapter } from "../../../db/src/__test__/test-utils";
@@ -872,6 +873,96 @@ describe("query targets", () => {
       };
     return { target, hook };
   }
+
+  /**
+   * A permission layer that resolves its relation policy from the READ
+   * request's filter (`prepareRequest({ endpoint: "query", filter })`) and
+   * fails closed without one: `ticket` is visible, and its overlay known,
+   * only in a read that carries a `ticket` predicate.
+   */
+  const policyKey = key<ReadonlySet<string>>("relpred.policy");
+  const policyOf = () => (current().has(policyKey) ? current().get(policyKey) : undefined);
+  const guard = {
+    prepare(ctx: TDbRequestContext): void {
+      if (ctx.endpoint !== "query") return;
+      current().set(policyKey, new Set(ctx.filter ? Object.keys(ctx.filter) : []));
+    },
+    hides: (path: string) => path.split(".")[0] === "ticket" && !policyOf()?.has("ticket"),
+    overlay(path: string, filter: FilterExpr): FilterExpr {
+      if (!policyOf()) throw new HttpError(500, "no relation policy in this event");
+      return path === "ticket" ? ({ $and: [{ teamId: "t1" }, filter] } as FilterExpr) : filter;
+    },
+  };
+
+  it("own target: the read-side check sees the target's filter (a permission layer resolves its policy)", async () => {
+    getMoostInfact()._cleanup();
+    const { issues } = space();
+    const prefix = `relpred${++PREFIX_SEQ}`;
+    @TableController(issues, prefix)
+    class Issues extends AsDbController {
+      protected prepareRequest(ctx: TDbRequestContext): void {
+        guard.prepare(ctx);
+      }
+
+      protected override hasField(path: string): boolean {
+        return !guard.hides(path) && super.hasField(path);
+      }
+
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        return guard.overlay(path, filter);
+      }
+
+      @Post("actions/close")
+      @DbAction("close", { label: "close", queryTarget: true })
+      close(@DbActionIDs() ids: unknown) {
+        return { ids };
+      }
+    }
+    const http = await bootHttp(Issues);
+    const res = await http("POST", `/${prefix}/actions/close`, {
+      query: { q: "ticket=$some(status=open)" },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.ids).toEqual([{ id: 1 }]);
+  });
+
+  it("delegated target: the view's check and read hooks run as a read with the target's filter", async () => {
+    getMoostInfact()._cleanup();
+    const { issues } = space();
+    const n = ++PREFIX_SEQ;
+    const ran: unknown[] = [];
+    @TableController(issues, `relsrc${n}`)
+    class Source extends AsDbController {
+      @Post("actions/close")
+      @DbAction("close", { label: "close", queryTarget: true })
+      close(@DbActionIDs() ids: unknown) {
+        ran.push(ids);
+        return { ids };
+      }
+    }
+    @TableController(issues, `relview${n}`)
+    @DbActionsFrom(() => Source, { idMap: { id: "id" } })
+    class View extends AsDbReadableController {
+      protected prepareRequest(ctx: TDbRequestContext): void {
+        guard.prepare(ctx);
+      }
+
+      protected override hasField(path: string): boolean {
+        return !guard.hides(path) && super.hasField(path);
+      }
+
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        return guard.overlay(path, filter);
+      }
+    }
+    const http = await bootHttp(Source, View);
+    const res = await http("POST", `/relview${n}/delegated-actions/close`, {
+      query: { q: "ticket=$some(status=open)" },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body).toMatchObject({ matched: 1, processed: 1 });
+    expect(ran).toEqual([[{ id: 1 }]]);
+  });
 
   it("a client predicate in the target's filter takes the transformRelationFilter overlay", async () => {
     const plain = await bootTargets(false);
