@@ -65,6 +65,8 @@ interface TBoot {
   denySearch?: boolean;
   /** The streamed handler throws on this batch (0-based). */
   failOnBatch?: number;
+  /** Collects the `prepareRequest` contexts of READ (`query`) requests. */
+  readContexts?: TDbRequestContext[];
 }
 
 /** The endpoint `prepareRequest` saw in the current (child) event. */
@@ -85,6 +87,7 @@ async function boot(opts: TBoot = {}) {
     protected async prepareRequest(ctx: TDbRequestContext) {
       if (opts.deny && ctx.endpoint === "action") throw new HttpError(403, "denied");
       if (opts.actionOnly && ctx.endpoint === "query") throw new HttpError(403, "no read grant");
+      if (ctx.endpoint === "query") opts.readContexts?.push(ctx);
       current().set(endpointKey, ctx.endpoint);
     }
 
@@ -456,6 +459,13 @@ describe("query targets — validated and scoped as a READ (since 0.1.147)", () 
     expect((await query("close", "status=open")).status).toBe(403);
     expect((await send("close", { ids: [{ id: 1 }] })).status).toBe(201);
     expect(handled.map((h) => h.ids)).toEqual([[{ id: 1 }]]);
+  });
+
+  it("the read's prepareRequest sees the target's client filter in ctx.filter", async () => {
+    const readContexts: TDbRequestContext[] = [];
+    const { query } = await boot({ readContexts });
+    expect((await query("close", "status=open", { dryRun: true })).status).toBe(201);
+    expect(readContexts.map((c) => c.filter)).toEqual([{ status: "open" }]);
   });
 
   it("validateControls applies to the target's controls (per-control authorization)", async () => {

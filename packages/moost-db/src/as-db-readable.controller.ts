@@ -92,6 +92,7 @@ import { unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
   childrenOf,
+  readRequestContext,
   relTarget,
   hiddenRelationInsight,
   overlayRelationFilter,
@@ -1263,7 +1264,7 @@ export class AsDbReadableController<
    * Runs as a READ of this controller: for an action's own query target it
    * is called in a child of the action event (moost `withControllerContext`,
    * the controller's `query` handler) after
-   * `prepareRequest({ endpoint: "query", controls })` — so a permission
+   * `prepareRequest({ endpoint: "query", controls, filter })` — so a permission
    * layer's per-request state is the READ request's (its read grant), never
    * the action's, and nothing of it leaks back into the action event. The
    * target's query (`q` filter and controls, `exclude`) is validated in that
@@ -1770,7 +1771,7 @@ export class AsDbReadableController<
       Promise.all([this._relationOverlay(parsed), this.queryTargetScope(action)]);
     const [[clientFilter, scope], overlay] = await Promise.all([
       req.overlay === "action"
-        ? this._asRead(controls, () => {
+        ? this._asRead(controls, parsed.filter as FilterExpr | undefined, () => {
             check();
             return readHooks();
           })
@@ -1845,14 +1846,18 @@ export class AsDbReadableController<
   /**
    * Runs `fn` as a READ of this controller (since 0.1.147): in a child of
    * the current event whose controller context is this controller's `query`
-   * handler, after `prepareRequest({ endpoint: "query", controls })` — the
+   * handler, after `prepareRequest({ endpoint: "query", controls, filter })` — the
    * request-scoped state a permission layer builds there (read grant, field
    * visibility) is the read's and stays in the child.
    */
-  private _asRead<R>(controls: Record<string, unknown>, fn: () => R | Promise<R>): Promise<R> {
+  private _asRead<R>(
+    controls: Record<string, unknown>,
+    filter: FilterExpr | undefined,
+    fn: () => R | Promise<R>,
+  ): Promise<R> {
     return runAsController(this, "query", async () => {
       if (typeof this.prepareRequest === "function") {
-        await this.prepareRequest({ endpoint: "query", controls });
+        await this.prepareRequest(readRequestContext("query", controls, filter));
       }
       return fn();
     });

@@ -52,7 +52,7 @@ The body is `{ query, input? }` instead of `{ ids, input? }` (see [Body envelope
 The query is checked twice, and must pass both:
 
 - as the **action** request sees it: [`validateControls`](./customization#validatecontrols) (per-control authorization), the field / index gate and [`hasField`](./customization#hasfield) — a filter or `$index` on a hidden field answers exactly like `/query` does (`Unknown field`);
-- as a **read**: the same checks, plus the `exclude` identifications, run after `prepareRequest({ endpoint: "query", controls })` in a child of the action request whose controller method is `query` (see [`queryTargetScope`](#which-rows)). A field the caller can't read can't filter a target, and its `matched` count is no oracle for it.
+- as a **read**: the same checks, plus the `exclude` identifications, run after `prepareRequest({ endpoint: "query", controls, filter })` in a child of the action request whose controller method is `query` (see [`queryTargetScope`](#which-rows)). A field the caller can't read can't filter a target, and its `matched` count is no oracle for it.
 
 ## Which rows
 
@@ -62,7 +62,7 @@ The target is resolved once ("phase 1") as
 q (filter + $search) ∧ row overlay (transformOne) ∧ queryTargetScope(action) ∧ ¬exclude
 ```
 
-`queryTargetScope(action)` is a protected hook on `AsDbReadableController` that defaults to `transformFilter({})`, the read scope of `/query`. It runs **as a read**: in a child of the action request whose controller method is `query`, after `prepareRequest({ endpoint: "query", controls })` — so the overlay is the caller's READ scope even when the action request's own state (a permission layer's action grant) is wider, and a `prepareRequest` that refuses the read (403) refuses the query target. Nothing it writes leaks back into the action request. So the target is "the rows the user could list that match the query" AND "the rows the action may run on" — a caller with an action grant but no read grant can still run the action on ids, never on "all matching". Override it to refuse query targets to a caller (throw an `HttpError`) or to narrow them differently:
+`queryTargetScope(action)` is a protected hook on `AsDbReadableController` that defaults to `transformFilter({})`, the read scope of `/query`. It runs **as a read**: in a child of the action request whose controller method is `query`, after `prepareRequest({ endpoint: "query", controls, filter })` — so the overlay is the caller's READ scope even when the action request's own state (a permission layer's action grant) is wider, and a `prepareRequest` that refuses the read (403) refuses the query target. Nothing it writes leaks back into the action request. So the target is "the rows the user could list that match the query" AND "the rows the action may run on" — a caller with an action grant but no read grant can still run the action on ids, never on "all matching". Override it to refuse query targets to a caller (throw an `HttpError`) or to narrow them differently:
 
 ```typescript
 protected override queryTargetScope(action: string) {
