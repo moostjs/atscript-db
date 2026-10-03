@@ -276,6 +276,8 @@ const httpSidebar = [
       { text: "Relations & Search", link: "/http/advanced" },
       { text: "Customization", link: "/http/customization" },
       { text: "Actions", link: "/http/actions" },
+      { text: "Query Targets", link: "/http/query-targets" },
+      { text: "Actions on a View", link: "/http/view-actions" },
       { text: "Permissions", link: "/http/permissions" },
       { text: "HTTP Client", link: "/http/client" },
     ],

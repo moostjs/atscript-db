@@ -6,6 +6,10 @@ export interface ParamLevelScan {
   single: boolean;
   multi: boolean;
   hasRowParam: boolean;
+  /** A `@DbActionTarget()` param (since 0.1.147) — `'rows'` level, batch gate. */
+  hasTarget: boolean;
+  /** A `@DbActionID*` / `@DbActionRow*` param — not combinable with `@DbActionTarget()`. */
+  hasIdOrRowParam: boolean;
   hasBody: boolean;
   inputForm?: TDbActionInputFormMeta;
   /** True when more than one `@InputForm()` param was found; only the first is honored. */
@@ -18,6 +22,8 @@ export function scanParamLevel(params: ReadonlyArray<ScannableParam>): ParamLeve
   let single = false;
   let multi = false;
   let hasRowParam = false;
+  let hasTarget = false;
+  let hasIdOrRowParam = false;
   let hasBody = false;
   let inputForm: TDbActionInputFormMeta | undefined;
   let hasDuplicateInputForm = false;
@@ -32,6 +38,13 @@ export function scanParamLevel(params: ReadonlyArray<ScannableParam>): ParamLeve
       multi = true;
       hasRowParam = true;
     }
+    if (p.atscript_db_action_target) {
+      multi = true;
+      hasTarget = true;
+    }
+    if (p.atscript_db_action_param || p.atscript_db_action_row || p.atscript_db_action_rows) {
+      hasIdOrRowParam = true;
+    }
     if (p.paramSource === "BODY") hasBody = true;
     if (p.atscript_db_action_input_form) {
       if (inputForm) hasDuplicateInputForm = true;
@@ -39,5 +52,15 @@ export function scanParamLevel(params: ReadonlyArray<ScannableParam>): ParamLeve
     }
   }
   const level = single && multi ? "table" : single ? "row" : multi ? "rows" : "table";
-  return { level, single, multi, hasRowParam, hasBody, inputForm, hasDuplicateInputForm };
+  return {
+    level,
+    single,
+    multi,
+    hasRowParam,
+    hasTarget,
+    hasIdOrRowParam,
+    hasBody,
+    inputForm,
+    hasDuplicateInputForm,
+  };
 }

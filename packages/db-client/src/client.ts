@@ -15,6 +15,7 @@ import {
 } from "@atscript/typescript/utils";
 import type {
   TDbActionInfo,
+  TDbActionTargetSummary,
   TDbAvailableActions,
   TDbInsertResult,
   TDbInsertManyResult,
@@ -24,12 +25,14 @@ import type {
 
 import {
   ActionDisabledError,
+  ActionTargetError,
   VersionMismatchError,
   ActionNotFoundError,
   ActionUnsupportedError,
   ClientError,
   TransportError,
   type ActionDisabledErrorBody,
+  type ActionTargetErrorBody,
   type VersionMismatchErrorBody,
 } from "./client-error";
 import type { ClientValidator, ValidatorMode } from "./validator";
@@ -44,6 +47,7 @@ import type {
   PageResult,
   PatchOf,
   RowOf,
+  TDbQueryTarget,
 } from "./types";
 
 type Own<T> = OwnOf<T>;
@@ -323,6 +327,13 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * `{ ids?, input? }` — `ids` carries `id` (object or array per level),
    * `input` carries the form payload.
    *
+   * **Delegated actions** (since 0.1.147). An action another controller owns
+   * (`owner`, e.g. a view listing its source table's actions) may carry
+   * `idMap`: each `id` is then a row (or identifier) of THIS controller and
+   * is mapped to the owner's identification — `{ [ownerField]:
+   * row[path] }` — before it is sent to `value` (the owner's route). A
+   * missing path throws `TypeError`. See {@link actionIdentifier}.
+   *
    * @typeParam R Caller-asserted return shape from the action handler. The
    *              server returns whatever the handler emits (commonly
    *              `{ message?: string, ... }`); the client cannot validate.
@@ -344,14 +355,77 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       );
     }
 
+    const mapped = action.idMap ? mapDelegatedIds(action, id) : id;
+
     if (action.processor === "navigate") {
-      const url = this._interpolateNavigateUrl(action, id, meta.preferredId);
+      const order = action.idMap ? Object.keys(action.idMap) : meta.preferredId;
+      const url = this._interpolateNavigateUrl(action, mapped, order);
       await this._dispatchNavigate(action, url);
       return undefined as R;
     }
 
-    const body = this._buildActionBody(action, id, input);
+    const body = this._buildActionBody(action, mapped, input);
     return this._postAction(action, body) as Promise<R>;
+  }
+
+  /**
+   * Runs a `'rows'` action on every row matching a query (since 0.1.147) —
+   * the action's `/meta` entry must carry `queryTarget`. POSTs
+   * `{ query: { q, exclude?, expectCount?, maxRows? }, input? }` to
+   * `queryTarget.url` (a delegated action: the view resolves the rows and
+   * runs the owner's action in batches) or `value`. `q` is the `/query`
+   * string of `target.filter` / `search` / `index`.
+   *
+   * The server answers what the handler returns — for a delegated action
+   * (and a handler returning `target.summary()`) a
+   * {@link TDbActionTargetSummary}. Refusals arrive as
+   * {@link ActionTargetError}: `TARGET_TOO_LARGE` (`cap`), `TARGET_CHANGED`
+   * (`matched` differs from `expectCount`), `TARGET_INVALID`. Throws
+   * {@link ActionUnsupportedError} when the action takes no query target.
+   *
+   * @since 0.1.147
+   */
+  async actionOnQuery<R = TDbActionTargetSummary>(
+    name: string,
+    target: TDbQueryTarget<T>,
+    input?: unknown,
+  ): Promise<R> {
+    const action = await this._queryTargetAction(name);
+    const body: { query: unknown; input?: unknown } = { query: queryTargetBody(target) };
+    if (input !== undefined) body.input = input;
+    return this._postQueryTarget(action, body) as Promise<R>;
+  }
+
+  /**
+   * How many rows {@link actionOnQuery} would target right now (a dry run:
+   * the handler does not run) — pass the answer as `expectCount` to make the
+   * real run fail with `TARGET_CHANGED` if the set changed in between.
+   *
+   * @since 0.1.147
+   */
+  async countActionTarget(name: string, target: TDbQueryTarget<T>): Promise<{ matched: number }> {
+    const action = await this._queryTargetAction(name);
+    const query = { ...queryTargetBody(target), dryRun: true };
+    return this._postQueryTarget(action, { query }) as Promise<{ matched: number }>;
+  }
+
+  private async _queryTargetAction(name: string): Promise<TDbActionInfo> {
+    const meta = await this.meta();
+    const action = meta.actions.find((a) => a.name === name);
+    if (!action) throw new ActionNotFoundError(name);
+    if (!action.queryTarget || action.processor !== "backend") {
+      throw new ActionUnsupportedError(
+        name,
+        action.processor,
+        `Action "${name}" does not accept a query target (no \`queryTarget\` in /meta).`,
+      );
+    }
+    return action;
+  }
+
+  private _postQueryTarget(action: TDbActionInfo, body: unknown): Promise<unknown> {
+    const path = action.queryTarget?.url ?? action.value;
+    return this._requestUrl("POST", `${this._baseUrl}${path}`, body, true);
   }
 
   /**
@@ -602,6 +676,9 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
       if (errorBody.name === "ActionDisabledError") {
         throw new ActionDisabledError(res.status, errorBody as unknown as ActionDisabledErrorBody);
       }
+      if (errorBody.name === "ActionTargetError") {
+        throw new ActionTargetError(res.status, errorBody as unknown as ActionTargetErrorBody);
+      }
       if (errorBody.kind === "version_mismatch") {
         throw new VersionMismatchError(
           res.status,
@@ -637,6 +714,76 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
 function describeCause(cause: unknown): string {
   if (cause instanceof Error) return cause.message || cause.name;
   return String(cause);
+}
+
+/** The value at a dot `path` of `row`. */
+function valueAt(row: Record<string, unknown>, path: string): unknown {
+  // A flat key spelled like the path (`{ "ticket.id": 1 }`) wins over walking.
+  if (!path.includes(".") || Object.hasOwn(row, path)) return row[path];
+  let v: unknown = row;
+  for (const part of path.split(".")) v = (v as Record<string, unknown> | null | undefined)?.[part];
+  return v;
+}
+
+/**
+ * The identifier `action` takes for one row (or identifier) of the
+ * controller whose `/meta` listed it (since 0.1.147):
+ *
+ * - a delegated action with `idMap` → the owner's identification,
+ *   `{ [ownerField]: rowOrId[path] }` (dot paths allowed); a missing value
+ *   throws `TypeError` naming the action and the path;
+ * - any other action → `rowOrId`'s `preferredId` fields when it carries them
+ *   all, else `rowOrId` itself (already an identifier).
+ *
+ * UIs build `ids` from loaded rows with it; `Client.action()` applies the
+ * `idMap` mapping itself.
+ *
+ * @since 0.1.147
+ */
+export function actionIdentifier(
+  action: Pick<TDbActionInfo, "name" | "idMap">,
+  rowOrId: Record<string, unknown>,
+  preferredId: readonly string[],
+): Record<string, unknown> {
+  if (action.idMap) {
+    const out: Record<string, unknown> = {};
+    for (const [field, path] of Object.entries(action.idMap)) {
+      const value = valueAt(rowOrId, path);
+      if (value === undefined || value === null) {
+        throw new TypeError(
+          `client.action("${action.name}"): the identifier has no "${path}" — needed for the owner's "${field}".`,
+        );
+      }
+      out[field] = value;
+    }
+    return out;
+  }
+  if (preferredId.length > 0 && preferredId.every((f) => rowOrId[f] !== undefined)) {
+    return Object.fromEntries(preferredId.map((f) => [f, rowOrId[f]]));
+  }
+  return rowOrId;
+}
+
+/** `action()`'s `id` argument through a delegated action's `idMap` (shape errors are left to the body builder). */
+function mapDelegatedIds(action: TDbActionInfo, id: unknown): unknown {
+  const map = (one: unknown): unknown =>
+    one !== null && typeof one === "object" && !Array.isArray(one)
+      ? actionIdentifier(action, one as Record<string, unknown>, [])
+      : one;
+  return Array.isArray(id) ? id.map(map) : map(id);
+}
+
+/** The wire `query` of a {@link TDbQueryTarget}. */
+function queryTargetBody(target: TDbQueryTarget<any>): Record<string, unknown> {
+  const controls: Record<string, unknown> = {};
+  if (target.search !== undefined) controls.$search = target.search;
+  if (target.index !== undefined) controls.$index = target.index;
+  const q = buildUrl({ filter: target.filter ?? {}, controls } as Uniquery);
+  const out: Record<string, unknown> = { q };
+  if (target.exclude?.length) out.exclude = target.exclude;
+  if (target.expectCount !== undefined) out.expectCount = target.expectCount;
+  if (target.maxRows !== undefined) out.maxRows = target.maxRows;
+  return out;
 }
 
 /**

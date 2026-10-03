@@ -117,6 +117,7 @@ export type {
   TFieldMeta,
   TDbActionInfo,
   TDbAvailableActions,
+  TDbActionTargetSummary,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,

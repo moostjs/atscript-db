@@ -1,18 +1,30 @@
-export { Client, encodeNavigateId, formatIdentifier, formatIdentifierField } from "./client";
+export {
+  Client,
+  actionIdentifier,
+  encodeNavigateId,
+  formatIdentifier,
+  formatIdentifierField,
+} from "./client";
 export {
   ClientError,
   ActionNotFoundError,
   ActionUnsupportedError,
   ActionDisabledError,
+  ActionTargetError,
   VersionMismatchError,
   TransportError,
 } from "./client-error";
-export type { ActionDisabledErrorBody, VersionMismatchErrorBody } from "./client-error";
+export type {
+  ActionDisabledErrorBody,
+  ActionTargetErrorBody,
+  VersionMismatchErrorBody,
+} from "./client-error";
 
 // Re-exported from @atscript/db so consumers building UIs over /meta have a
 // single import point for the action + CRUD permission wire types.
 export type {
   TDbActionInfo,
+  TDbActionTargetSummary,
   TDbAvailableActions,
   TDbActionLevel,
   TDbActionIntent,
@@ -36,6 +48,7 @@ export type {
   ClientResponse,
   PatchOf,
   RowOf,
+  TDbQueryTarget,
   // Re-exported from @atscript/db
   DbPatch,
   DbRow,

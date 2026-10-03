@@ -17,8 +17,20 @@ import type { DbActionOpts } from "../actions/types";
 
 describe("DbActionOpts type derivation", () => {
   it("structural fields mirror TDbActionInfo (excluding owned framework fields)", () => {
+    // `owner` / `idMap` / `queryTarget` are server-derived wire fields (since 0.1.147).
     type Structural = Partial<
-      Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "requiredFields">
+      Omit<
+        TDbActionInfo,
+        | "name"
+        | "level"
+        | "processor"
+        | "value"
+        | "disabled"
+        | "requiredFields"
+        | "owner"
+        | "idMap"
+        | "queryTarget"
+      >
     >;
     expectTypeOf<DbActionOpts>().toMatchTypeOf<Structural>();
   });

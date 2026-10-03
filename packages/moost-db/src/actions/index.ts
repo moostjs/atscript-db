@@ -30,8 +30,19 @@ export type {
   TDbActionInputFormMeta,
   TDbActionMeta,
   TDbActionParamKind,
+  TDbActionsFromMeta,
   TDbClassActionMeta,
 } from "./keys";
 export { ActionDisabledError } from "./action-disabled-error";
+export {
+  ActionTargetError,
+  type ActionTargetErrorBody,
+  type TActionTargetErrorCode,
+} from "./action-target-error";
+export type { TDbActionScopeContext, TDbActionScopePurpose } from "./scope-context";
+export type { DbActionQueryTarget, TDbQueryTargetOpts } from "./query-target";
+export { DbActionTarget, useDbActionTarget, type TDbActionTarget } from "./target";
+export { DbActionsFrom, type TDbActionsFromOpts } from "./db-actions-from.decorator";
+export { hasActionDelegations } from "./delegation";
 export type { ActionDisabledErrorBody } from "./action-disabled-error";
 export { perRow } from "./per-row";

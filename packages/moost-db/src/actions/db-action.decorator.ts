@@ -2,7 +2,11 @@ import { Intercept } from "moost";
 
 import { getAtscriptDbMate } from "../mate";
 import { isAsValueHelpControllerSubclass, valueHelpActionError } from "./controller-registry";
-import { buildGateInterceptor, buildThinInterceptor } from "./gate-interceptor";
+import {
+  buildGateInterceptor,
+  buildTargetInterceptor,
+  buildThinInterceptor,
+} from "./gate-interceptor";
 import { WARN_PREFIX, mergeActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
 import { actionPrepareInterceptor } from "./prepare-request";
@@ -11,7 +15,8 @@ import type { DbActionOpts, FlatKey, TDbActionDisabledVerdict, TOnDisabledRows }
 /**
  * Mark a controller method as a database action surfaced via `/meta`. Writes
  * `atscript_db_action` metadata and, for every `'row'` / `'rows'` action,
- * registers a Moost interceptor: the gate when `disabled` is set, else the
+ * registers a Moost interceptor: the batch gate for a `@DbActionTarget()`
+ * handler (since 0.1.147), the gate when `disabled` is set, else the
  * bound-table injector that also verifies the ids against the controller's
  * row overlay (since 0.1.143). Either first awaits the controller's
  * `prepareRequest({ endpoint: "action", action })` when it defines one —
@@ -66,7 +71,18 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
     };
     const hasDisabled = typeof rawOpts.disabled === "function";
 
-    if (hasDisabled && (scan.level === "row" || scan.level === "rows")) {
+    if (scan.hasTarget && scan.level === "rows") {
+      // `@DbActionTarget()` (since 0.1.147): the target is gated batch by batch.
+      Intercept(
+        buildTargetInterceptor({
+          action: name,
+          disabled: hasDisabled
+            ? (rawOpts.disabled as (rows: unknown[]) => TDbActionDisabledVerdict[])
+            : undefined,
+          table: rawOpts.table,
+        }),
+      )(target, propertyKey, descriptor);
+    } else if (hasDisabled && (scan.level === "row" || scan.level === "rows")) {
       const def = buildGateInterceptor({
         action: name,
         level: scan.level,

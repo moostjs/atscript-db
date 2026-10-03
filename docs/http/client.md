@@ -430,6 +430,37 @@ const { actions, disabledReasons } = await orders.availableActions("o2");
 
 An unknown id and an id the caller may not act on both resolve to `{ actions: [] }`. Use it for a detail view opened from a link or a notification. On lists, [`$actions`](./actions#actions-augmentation) gives the same answer per row, as part of the read.
 
+### Delegated actions — `idMap` {#delegated-actions}
+
+Since 0.1.147. An action listed by a view with [`@DbActionsFrom`](./view-actions) carries `owner` (the controller that runs it) and, when the ids are renamed, `idMap`. Pass the view's rows as usual — `action()` maps each one to the owner's identification (`{ [ownerField]: row[path] }`) before POSTing to `value`, and navigate `$1` uses the mapped id in `idMap` key order. A dot path reads a nested value (`{ org: { id } }`) or a flat key spelled like the path (`{ "org.id": … }`, checked first). A row missing a mapped path throws `TypeError` naming the action and the path.
+
+```typescript
+const board = new Client<typeof IssueBoard>("/api/issue-board");
+const rows = await board.query({ controls: { $actions: true } as const });
+await board.action("close", [rows[0], rows[1]]); // POST /api/issues/actions/close { ids: [{ id: … }, …] }
+```
+
+`actionIdentifier(action, rowOrId, preferredId)` is the same mapping as a standalone export (with no `idMap` it picks the `preferredId` fields) — use it when a UI builds `ids` itself. [`availableActions(id)`](#available-actions) on the view answers delegated actions only when the source id is the view id renamed; otherwise ask the `owner`.
+
+### Query targets — `actionOnQuery()` / `countActionTarget()` {#query-targets}
+
+Since 0.1.147. Run a `'rows'` action whose `/meta` entry carries `queryTarget` on every row matching a query (see [Query targets](./query-targets)):
+
+```typescript
+const target = { filter: { teamId: "a" }, search: "login", exclude: [{ id: 7 }] };
+const { matched } = await issues.countActionTarget("close", target); // dry run
+const summary = await issues.actionOnQuery("close", { ...target, expectCount: matched });
+// → { matched, processed, skipped: [{ id, reason? }], failed: [{ id, reason }], aborted?, messages?, message? }
+```
+
+- The target is `{ filter?, search?, index?, exclude?, expectCount?, maxRows? }` (`TDbQueryTarget<T>`); the client sends `{ query: { q, … }, input? }` with `q` built from `filter` / `search` / `index`.
+- The request goes to `queryTarget.url` when present (a delegated action: the view's route), else to `value`.
+- An action without `queryTarget` throws `ActionUnsupportedError` before any request.
+- Server refusals throw `ActionTargetError` with `code` (`TARGET_INVALID`, `TARGET_TOO_LARGE`, `TARGET_CHANGED`), `cap` and `matched`. On `TARGET_CHANGED`, re-confirm with the new `matched` and retry.
+- The return type defaults to `TDbActionTargetSummary`; pass a type argument when the handler returns something else.
+- A run that stopped part-way answers normally (no throw) with `aborted: { status, message }`; the batches before it stayed applied and `failed` lists the rest. Show it as a partial result, not a success.
+- A delegated run passes on the source handler's `message`: `messages` per batch, `message` the distinct ones joined by newlines.
+
 ### Client-side validation
 
 The client refuses obviously-wrong shapes BEFORE the network round-trip:
@@ -685,6 +716,8 @@ See [Calendar Buckets — Filling gaps](/api/calendar-buckets#filling-gaps).
 
 - `TDbActionInfo`, `TDbActionLevel`, `TDbActionIntent`, `TDbActionProcessor` — `/meta.actions[]` entry shape
 - `TDbAvailableActions` — [`availableActions()`](#available-actions) response (since 0.1.145)
+- `TDbActionTargetSummary` — [`actionOnQuery()`](#query-targets) result of a summary-returning handler (since 0.1.147)
+- `TDbQueryTarget<T>` — the [`actionOnQuery()`](#query-targets) target (since 0.1.147)
 - `TCrudOp`, `TCrudPermissions` — `/meta.crud` shape (see [Permissions](./permissions))
 - `TDbInsertResult`, `TDbInsertManyResult`, `TDbUpdateResult`, `TDbDeleteResult` — write-method return shapes
 
@@ -695,6 +728,7 @@ Standalone exports of the same logic used internally for navigate `$1` substitut
 - `formatIdentifier(id, preferredId)` — raw `/`-joined identifier (no URL encoding)
 - `encodeNavigateId(id, preferredId)` — URL-encoded `/`-joined identifier
 - `formatIdentifierField(value)` — single-value coercion (`null` / `undefined` → `""`)
+- `actionIdentifier(action, rowOrId, preferredId)` — the ids an action takes for a row, through a [delegated action's `idMap`](#delegated-actions) (since 0.1.147)
 
 See [Identifier rendering helpers](#identifier-helpers) for usage.
 
@@ -704,9 +738,10 @@ All error classes — generic and action-specific — are exported as runtime va
 
 - `ClientError` — base class for every non-2xx response. `status`, `body`, `errors` accessors.
 - `ActionDisabledError extends ClientError` — HTTP 409 from the server-side action gate. Typed `action`, `id`, `ids`, `reason`, `reasons` accessors.
+- `ActionTargetError extends ClientError` — a refused [query target](#query-targets) (400 / 409). Typed `code`, `action`, `matched`, `cap` accessors (since 0.1.147).
 - `TransportError` — no server verdict: `fetch` rejected, or a 2xx body was not JSON. `method`, `url`, `cause`. Does **not** extend `ClientError`. See [TransportError](#transport-error).
 - `ActionNotFoundError` — `Client.action(name)` called with a name not present in `/meta`.
-- `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option.
+- `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option; also `actionOnQuery()` on an action without `queryTarget`.
 - `ClientValidationError` (type) — thrown by client-side validation on `insert` / `update` / `replace` before sending. Type export — the runtime class lives in `@atscript/db-client/validator`.
 
 ```typescript
@@ -739,18 +774,20 @@ import type { ClientValidationError } from "@atscript/db-client";
 
 ## Method ↔ Endpoint Reference
 
-| Method            | HTTP   | Endpoint                        | Returns                                                 |
-| ----------------- | ------ | ------------------------------- | ------------------------------------------------------- |
-| `query()`         | GET    | `/query`                        | `DataOf<T>[]`                                           |
-| `count()`         | GET    | `/query` (`$count`)             | `number`                                                |
-| `aggregate()`     | GET    | `/query` (`$groupBy`)           | `AggregateResult[]`                                     |
-| `pages()`         | GET    | `/pages`                        | `PageResult<DataOf<T>>`                                 |
-| `one()`           | GET    | `/one/:id` or `/one?k=v`        | `DataOf<T> \| null`                                     |
-| `insert()`        | POST   | `/`                             | `TDbInsertResult` or `TDbInsertManyResult`              |
-| `update()`        | PATCH  | `/`                             | `TDbUpdateResult`                                       |
-| `replace()`       | PUT    | `/`                             | `TDbUpdateResult`                                       |
-| `remove()`        | DELETE | `/:id` or `/?k=v`               | `TDbDeleteResult`                                       |
-| `meta()`          | GET    | `/meta`                         | `MetaResponse`                                          |
-| `getActionForm()` | GET    | `/meta/form/:name` or `formUrl` | `TAtscriptAnnotatedType \| null`                        |
-| `getValidator()`  | —      | _client-side; uses `/meta`_     | `ClientValidator` (lazy, cached)                        |
-| `action()`        | POST   | _resolved from `/meta`_         | `unknown` (server response, or `void` for `'navigate'`) |
+| Method                | HTTP   | Endpoint                               | Returns                                                 |
+| --------------------- | ------ | -------------------------------------- | ------------------------------------------------------- |
+| `query()`             | GET    | `/query`                               | `DataOf<T>[]`                                           |
+| `count()`             | GET    | `/query` (`$count`)                    | `number`                                                |
+| `aggregate()`         | GET    | `/query` (`$groupBy`)                  | `AggregateResult[]`                                     |
+| `pages()`             | GET    | `/pages`                               | `PageResult<DataOf<T>>`                                 |
+| `one()`               | GET    | `/one/:id` or `/one?k=v`               | `DataOf<T> \| null`                                     |
+| `insert()`            | POST   | `/`                                    | `TDbInsertResult` or `TDbInsertManyResult`              |
+| `update()`            | PATCH  | `/`                                    | `TDbUpdateResult`                                       |
+| `replace()`           | PUT    | `/`                                    | `TDbUpdateResult`                                       |
+| `remove()`            | DELETE | `/:id` or `/?k=v`                      | `TDbDeleteResult`                                       |
+| `meta()`              | GET    | `/meta`                                | `MetaResponse`                                          |
+| `getActionForm()`     | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                        |
+| `getValidator()`      | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                        |
+| `action()`            | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`) |
+| `actionOnQuery()`     | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)    |
+| `countActionTarget()` | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                   |

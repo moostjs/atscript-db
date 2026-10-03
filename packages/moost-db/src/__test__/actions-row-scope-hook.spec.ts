@@ -280,10 +280,19 @@ describe("actionRowScope — reflected in $actions (/query, /pages)", () => {
     });
   });
 
-  it("distinct filter objects run one query each", async () => {
+  it("equal-but-distinct filter objects share one query (since 0.1.147)", async () => {
     const { get, findMany } = await boot({
       scope: (a) =>
         a === "approve" ? { owner: "u1" } : a === "archive" ? { owner: "u1" } : undefined,
+    });
+    await get("query?$actions=true&$sort=id");
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("structurally different filters run one query each", async () => {
+    const { get, findMany } = await boot({
+      scope: (a) =>
+        a === "approve" ? { owner: "u1" } : a === "archive" ? { owner: "u2" } : undefined,
     });
     await get("query?$actions=true&$sort=id");
     expect(findMany).toHaveBeenCalledTimes(3);
@@ -407,5 +416,25 @@ describe("actionRowScope — composite primary key", () => {
     expect((await get("one?orderId=2&lineNo=1&$actions=true")).$actions).not.toContain("approve");
     expect((await post("approve", { orderId: 2, lineNo: 1 })).status).toBe(404);
     expect((await post("approve", { orderId: 2, lineNo: 2 })).status).toBe(201);
+  });
+});
+
+describe("actionRowScope — source compatibility (since 0.1.147)", () => {
+  it("a one-parameter override may still call super.actionRowScope(name) (compiles, no ctx)", async () => {
+    class Legacy extends AsDbReadableController {
+      protected override async actionRowScope(name: string) {
+        const base = await super.actionRowScope(name);
+        return base ?? ({ owner: name } as FilterExpr);
+      }
+
+      probe(name: string) {
+        return this.actionRowScope(name);
+      }
+    }
+    const scope = await Legacy.prototype.probe.call(
+      Object.create(Legacy.prototype) as Legacy,
+      "approve",
+    );
+    expect(scope).toEqual({ owner: "approve" });
   });
 });

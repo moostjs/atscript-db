@@ -6,6 +6,34 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.147 {#v0-1-147}
+
+**Requires `moost` / `@moostjs/event-http` 0.6.43 and `@wooksjs/event-http` / `@wooksjs/http-body` 0.7.26** (`withControllerContext`, `MoostHttp.invoke`, `seedBody`).
+
+### New features
+
+- **Candidate-aware `actionRowScope(action, ctx)`** — the hook receives the candidate rows; see [Scopes that depend on the candidate rows](/http/actions#action-row-scope-candidates).
+- **Query targets** — run a `'rows'` action on every row matching a query: [Query Targets](/http/query-targets), [`actionOnQuery`](/http/client#query-targets).
+- **Actions on a view** — `@DbActionsFrom` lists a table controller's row actions on a view controller: [Actions on a View](/http/view-actions).
+
+### Behavior changes {#v0-1-147-behavior}
+
+- **`'rows'` actions validate `ids` in their gate interceptor.** Every `'rows'` action now reads and validates the body's `ids` in the action's interceptor, even without a row overlay or `disabled` — the same 400, but earlier: ahead of interceptors of a lower priority and before the handler's arguments resolve.
+- **A `query` key in a `'rows'` action body is a 400** `TARGET_INVALID` unless the action declares `queryTarget` (it used to be ignored).
+- **`actionRowScope` runs after the body is read** on the action route (it needs the candidate ids); `prepareRequest` and the row overlay still run before it.
+- **`@DbActionsFrom` views always return the `idMap` columns** on reads, even when `$select` omits them (the client needs them to address the source) — unless the view's `transformProjection` drops them, which drops the delegation.
+- **A hidden default text index is refused** (under an overridden [`hasField`](/http/customization#hasfield)): `$search` without `$index` answers `400 No search index available` when the default text index reads a field the request can't see — it used to fall back to the substring search over visible fields — and `/meta` now prunes `searchIndexes` and turns `searchable` / `vectorSearchable` / `geoSearchable` off by the same rule. Tables without native search keep the fallback. A permission layer that pruned `/meta` itself through `indexFieldPaths()` can keep doing so (same result) or drop it.
+- **The "no primary key" warning** for an overridden `actionRowScope` is logged only when the controller has row actions of its own.
+
+### API
+
+- `TDbRequestEndpoint` gains `"delegatedAction"` (`prepareRequest` of a view's `POST /delegated-actions/:name`). An exhaustive `switch` over it with a `never` check needs the new case.
+- `actionRowScope(action, ctx?)` — `ctx` is optional in the signature, so `super.actionRowScope(name)` keeps compiling; moost-db always passes it.
+- `TDbActionInfo` gains `owner`, `idMap`, `queryTarget` (`{ maxRows, url? }`); `TDbActionTargetSummary` (`@atscript/db`) is new, with optional `aborted`, `messages`, `message`.
+- New protected hook `queryTargetScope(action)` — runs as a read; see [Which rows](/http/query-targets#which-rows).
+- `POST {prefix}/delegated-actions/:name` exists only on controllers declaring `@DbActionsFrom`.
+- moost-db recognizes its controller classes by a registered-symbol brand, so a controller class from a second loaded copy of `@atscript/moost-db` (an SSR bundle next to the installed package) is recognized too.
+
 ## 0.1.142 {#v0-1-142}
 
 ### Fixes

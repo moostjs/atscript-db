@@ -272,6 +272,65 @@ export interface TDbActionInfo {
    * @since 0.1.136
    */
   formUrl?: string;
+  /**
+   * Present on an action another controller owns and runs (a view
+   * delegating its source table's row actions): that controller's
+   * server-absolute base path. `value`, `formUrl` and the per-row
+   * `GET {owner}/meta/actions/:id` live there; `disabled` is not sent (the
+   * row's `$actions` verdict is authoritative).
+   *
+   * @since 0.1.147
+   */
+  owner?: string;
+  /**
+   * Delegated action only: the {@link owner}'s identification field → the
+   * path in THIS controller's rows that carries its value. Clients build the
+   * action's `ids` from a row through it. Absent when every pair is
+   * identical and is exactly this controller's `preferredId`.
+   *
+   * @since 0.1.147
+   */
+  idMap?: Record<string, string>;
+  /**
+   * `'rows'` level only: the action also accepts a query target — "every row
+   * matching this filter / search" instead of a list of identifiers — of at
+   * most `maxRows` rows. `url` (server-absolute) is where such a request is
+   * POSTed when it is not `value` (a delegated action: this controller
+   * resolves the query and runs the owner's action in batches).
+   *
+   * @since 0.1.147
+   */
+  queryTarget?: { maxRows: number; url?: string };
+}
+
+/**
+ * Outcome of an action run over a target (a query target, or the
+ * `@DbActionTarget` handler surface): how many rows the target matched, how
+ * many the handler processed, and the rows left out — `skipped` by the gate
+ * (disabled, out of scope, or `"stale"`: the row no longer matches the query
+ * it was selected by) and `failed` as reported by the handler.
+ *
+ * @since 0.1.147
+ */
+export interface TDbActionTargetSummary {
+  matched: number;
+  processed: number;
+  skipped: { id: Record<string, unknown>; reason?: string }[];
+  failed: { id: Record<string, unknown>; reason: string }[];
+  /**
+   * The run stopped early: a batch failed after an earlier batch had run
+   * (those stay applied). Its ids, and every id not reached, are in
+   * `failed`. Absent when the run completed.
+   */
+  aborted?: { status: number; message: string };
+  /**
+   * A delegated run (a view's query target onto its source's action): the
+   * `message` each batch's source handler returned, in batch order. Absent
+   * when none returned one.
+   */
+  messages?: string[];
+  /** {@link messages}, the distinct ones joined by newlines — for a toast. */
+  message?: string;
 }
 
 /**

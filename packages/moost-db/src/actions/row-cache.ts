@@ -1,19 +1,27 @@
 import { cached, defineWook, type EventContext } from "@wooksjs/event-core";
 import { HttpError } from "@moostjs/event-http";
 
+import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
-import { dbActionIdSlot, dbActionIdsSlot, getActionTable, noTableError } from "./id-cache";
-import { actionFieldVisibility, dbActionOverlaySlot, withOverlay } from "./row-scope";
+import { dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
+import { dbActionQueryTargetSlot, dbActionStaleKey } from "./query-target";
+import {
+  actionFieldVisibility,
+  applyActionScope,
+  dbActionOverlaySlot,
+  withOverlay,
+} from "./row-scope";
 import { actionRowFields, findRowsByIds, requiredFieldsOf } from "./rows-by-id";
 
-interface RowFetchTable {
+/** The table surface the action row loaders read through. */
+export interface RowFetchTable {
   primaryKeys: readonly string[];
   preferredId?: readonly string[];
   findOne(query: { filter: unknown; controls?: unknown }): Promise<Record<string, unknown> | null>;
   findMany(query: { filter: unknown; controls?: unknown }): Promise<Record<string, unknown>[]>;
 }
 
-function asFetchTable(value: unknown): RowFetchTable | null {
+export function asFetchTable(value: unknown): RowFetchTable | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Partial<RowFetchTable>;
   if (
@@ -31,23 +39,21 @@ function asFetchTable(value: unknown): RowFetchTable | null {
  * `requiredFields` (none outside a controller context, e.g. direct wook
  * usage in tests) under the controller's field visibility.
  */
-function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> {
+export function seedActionFields(ctx: EventContext, table: RowFetchTable): Set<string> {
   const required = requiredFieldsOf(readCurrentActionMeta(ctx)?.opts);
   return actionRowFields(table, required, actionFieldVisibility(ctx));
 }
 
 /**
  * Loaded row / rows are ANDed with the controller's row overlay (see
- * `dbActionOverlaySlot`, since 0.1.143): an out-of-scope id loads nothing —
- * exactly like a missing one (the same 404 on `'row'` actions, so the two
- * can't be told apart).
+ * `dbActionOverlaySlot`, since 0.1.143) and, since 0.1.147, checked against
+ * the action's `actionRowScope` for the loaded candidates: an out-of-scope id
+ * loads nothing — exactly like a missing one (the same 404 on `'row'`
+ * actions, so the two can't be told apart).
  *
- * The overlay resolves BEFORE the ids — i.e. before the request body is
- * read. Moost ≤ 0.6.39 released the event's DI scope when the request stream
- * ended, so a `transformFilter` / `transformOne` instantiating a `FOR_EVENT`
- * dependency (an ARBAC user provider) failed with "scope isn't registered"
- * after the body was consumed; since 0.6.42 the scope outlives the response
- * and the handler, and the order is kept for fail-fast authorization.
+ * Order: `prepareRequest` → the row overlay (BEFORE the request body is
+ * read: fail-fast authorization) → the ids (body) → the row load →
+ * `actionRowScope` (it needs the candidates).
  */
 async function loadRow(ctx: EventContext): Promise<unknown> {
   const overlay = await ctx.get(dbActionOverlaySlot);
@@ -58,11 +64,12 @@ async function loadRow(ctx: EventContext): Promise<unknown> {
   const fields = seedActionFields(ctx, table);
   for (const k of Object.keys(id)) fields.add(k);
 
-  const row = await table.findOne({
+  const loaded = await table.findOne({
     filter: withOverlay(id, overlay),
     controls: { $select: [...fields] },
   });
-  if (row == null) {
+  const [row] = loaded == null ? [undefined] : await applyActionScope(ctx, table, [loaded]);
+  if (row === undefined) {
     throw new HttpError(404, "Row not found for action identifier");
   }
   return row;
@@ -74,7 +81,19 @@ async function loadRows(ctx: EventContext): Promise<Array<Record<string, unknown
   const ids = (await ctx.get(dbActionIdsSlot)) as Record<string, unknown>[];
   const table = asFetchTable(getActionTable(ctx));
   if (!table) throw noTableError(ctx);
-  return findRowsByIds(table, ids, overlay, seedActionFields(ctx, table));
+  const fields = seedActionFields(ctx, table);
+  const target = await ctx.get(dbActionQueryTargetSlot);
+  if (!target) {
+    return applyActionScope(ctx, table, await findRowsByIds(table, ids, overlay, fields));
+  }
+  // A query target re-checks its rows against the query it matched them by
+  // (filter, search, overlay, `queryTargetScope`, `exclude`): a row that
+  // changed out of it is "stale".
+  const rows = await target.load(ids, fields);
+  const stale = new Set<number>();
+  for (let i = 0; i < rows.length; i++) if (rows[i] === undefined) stale.add(i);
+  if (stale.size > 0) ctx.set(dbActionStaleKey, stale);
+  return applyActionScope(ctx, table, rows);
 }
 
 export const dbActionRowSlot = cached<Promise<unknown>>((ctx) => loadRow(ctx));

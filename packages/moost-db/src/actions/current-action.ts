@@ -19,3 +19,17 @@ export function readCurrentActionMeta(ctx: EventContext): TDbActionMeta | undefi
   const meta = getAtscriptDbMate().read(ctrl.constructor, methodName);
   return meta?.atscript_db_action;
 }
+
+/** Default cap on the identifiers one `'rows'`-level request may carry — see `DbActionOpts.maxIds`. */
+export const DEFAULT_MAX_ACTION_IDS = 1000;
+
+/** `opts.maxIds` of `opts` (`@DbAction` options), else {@link DEFAULT_MAX_ACTION_IDS}. */
+export function maxIdsOfOpts(opts: unknown): number {
+  const max = (opts as { maxIds?: unknown } | undefined)?.maxIds;
+  return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_ACTION_IDS;
+}
+
+/** The current action's `maxIds` (see {@link maxIdsOfOpts}). */
+export function actionMaxIds(ctx: EventContext): number {
+  return maxIdsOfOpts(readCurrentActionMeta(ctx)?.opts);
+}

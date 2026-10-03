@@ -10,10 +10,15 @@ import { ValidatorError } from "@atscript/typescript/utils";
  *   absent (`'table'`-level).
  * - `input` — present only when the action declares an `@InputForm()`
  *   parameter; carries the form payload the user filled out.
+ * - `query` — a query target instead of `ids` (since 0.1.147): "every row
+ *   matching this query", for `'rows'` actions declaring `queryTarget` — see
+ *   {@link DbActionQueryTarget}. Never together with `ids`.
  */
 export interface DbActionEnvelope {
   ids?: unknown;
   input?: unknown;
+  /** @since 0.1.147 — validated by the action's gate (`DbActionQueryTarget`). */
+  query?: unknown;
 }
 
 /**
@@ -29,7 +34,7 @@ export const dbActionBodySlot = cached<Promise<DbActionEnvelope>>(async (ctx) =>
     throw new ValidatorError([
       {
         path: "",
-        message: "Action body must be an object of shape { ids?, input? }",
+        message: "Action body must be an object of shape { ids?, input?, query? }",
       },
     ]);
   }

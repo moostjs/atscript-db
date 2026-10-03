@@ -7,6 +7,7 @@ import type {
   TDbActionInputFormMeta,
   TDbActionMeta,
   TDbActionParamKind,
+  TDbActionsFromMeta,
   TDbClassActionMeta,
 } from "./actions/keys";
 
@@ -58,6 +59,8 @@ export interface AtscriptDbMeta {
    * {@link getDbEndpoint}.
    */
   atscript_db_endpoint?: TDbRequestEndpoint;
+  /** Class-level — written by `@DbActionsFrom(...)` (since 0.1.147). Decorators accumulate. */
+  atscript_db_actions_from?: TDbActionsFromMeta[];
 }
 
 /**
@@ -72,6 +75,8 @@ export interface AtscriptDbParamsMeta {
   atscript_db_action_row?: true;
   /** Param-level marker — written by `@DbActionRows()`. */
   atscript_db_action_rows?: true;
+  /** Param-level marker — written by `@DbActionTarget()` (since 0.1.147). */
+  atscript_db_action_target?: true;
   /**
    * Param-level — written by `@InputForm(FormType)`. Carries the
    * compiled `.as` class plus its `.name` so `discoverActions` can both

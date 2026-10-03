@@ -24,6 +24,8 @@ export { DB_CRUD_HANDLERS, VALUE_HELP_CRUD_HANDLERS } from "./permissions/crud-h
 // import them from `@atscript/moost-db` in a single line.
 export type {
   TDbActionInfo,
+  TDbActionTargetSummary,
+  TDbAvailableActions,
   TDbActionLevel,
   TDbActionIntent,
   TDbActionProcessor,

@@ -98,6 +98,8 @@ Every action POST body is a JSON object envelope. `ids` carries the identifier(s
 
 Array or scalar root → HTTP 400 `ValidatorError` (envelope is strict; this is the breaking change vs the pre-`InputForm` shape that placed identifiers at the root).
 
+Since 0.1.147 a third field `query` (never with `ids`) targets every row matching a query on `'rows'` actions declaring `queryTarget` → [query-targets.md](query-targets.md). Actions listed on a view via `@DbActionsFrom` → [view-actions.md](view-actions.md).
+
 ### Identifier shape (`ids` field)
 
 `ids` is **always an object** (single) or **array of objects** (multi) — never a scalar. Each object's field set must EXACTLY match one **legitimate identification** on the table:
@@ -404,14 +406,26 @@ Action ids and rows obey the controller's row overlay — `transformOne({})` (de
 
 ### `actionRowScope` — per-action row scope (0.1.145)
 
-`protected actionRowScope(actionName): FilterExpr | undefined | Promise<…>` on the `AsDbReadableController` / `AsDbController` subclass — the rows that action may run on. Default `undefined` (no restriction, zero cost).
+`protected actionRowScope(actionName, ctx): FilterExpr | undefined | Promise<…>` on the `AsDbReadableController` / `AsDbController` subclass — the rows that action may run on. Default `undefined` (no restriction, zero cost). Since 0.1.147 `ctx: TDbActionScopeContext` (`import type { TDbActionScopeContext } from "@atscript/moost-db"`) carries the candidates: `purpose` (`"execute"` gate / `"rows"` `$actions` + view delegated verdicts / `"available"` `GET /meta/actions/:id`), `ids` (preferredId-shaped, deduped, non-empty), `loadRows(fields)` (unscoped read of the candidates, memoized). One-arg overrides keep working; `ctx` is optional in the base signature so `super.actionRowScope(name)` compiles (moost-db always passes it).
 
-| #   | Rule                                                                                                                                                                               |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | ENFORCED by the action gate: ANDed with `transformOne({})` for that action's ids/rows → out-of-scope = the table above (404 / missing-id slot). No `transformOne` override needed. |
-| 2   | Reflected in `$actions` and `GET /meta/actions/:id` through the SAME rule — never a UI-only hint.                                                                                  |
-| 3   | Runs after `prepareRequest`, once per action per request. `undefined` / `{}` = unrestricted. Return the SAME object for several actions to share one `$actions` query.             |
-| 4   | Filter may reference `hasField`-hidden fields; never exposed. Own table only (a plain controller's `opts.table` action is never scoped).                                           |
+```ts
+protected override async actionRowScope(action: string, ctx: TDbActionScopeContext) {
+  if (action !== "resolve") return undefined;
+  const issues = await ctx.loadRows(["ticketKey"]);
+  const own = await ticketTable.findMany({ filter: { key: { $in: issues.map((i) => i.ticketKey) }, teamId: team() }, controls: { $select: ["key"] } });
+  return { ticketKey: { $in: own.map((t) => t.key) } }; // bounded by the candidates
+}
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                               |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | ENFORCED by the action gate: rows load under `transformOne({})`, then must match the scope → out-of-scope = the table above (404 / missing-id slot). No `transformOne` override needed.                                                                                                                                            |
+| 2   | Reflected in `$actions` and `GET /meta/actions/:id` through the SAME rule — never a UI-only hint.                                                                                                                                                                                                                                  |
+| 3   | Called only with ≥1 candidate, at most once per action per evaluation; `ctx.ids` is ONE array per evaluation (memoize with `WeakMap`). Candidates already passed the row overlay — missing / out-of-overlay ids never reach it.                                                                                                    |
+| 4   | Bounded: `rows` ≤ the page; `execute` ≤ `maxIds` (or one query-target batch); `available` = 1.                                                                                                                                                                                                                                     |
+| 5   | Result only restricts; a throw fails the request (never "allow"). `undefined` / `{}` = unrestricted. Equal filters (same object OR structurally equal, 0.1.147) share one query.                                                                                                                                                   |
+| 6   | ORDER on the action route (0.1.147): `prepareRequest` → overlay (before body) → body ids → row load → `actionRowScope`. Don't rely on it running before the body. Every `'rows'` action validates `ids` IN ITS GATE INTERCEPTOR (0.1.147) — same 400, earlier; a `query` key on a non-`queryTarget` action → 400 `TARGET_INVALID`. |
+| 7   | Filter / `loadRows` may reference `hasField`-hidden fields; never exposed. Own table only (a plain controller's `opts.table` action is never scoped).                                                                                                                                                                              |
 
 ## prepareRequest on actions (0.1.143)
 
@@ -608,16 +622,16 @@ GET /users/query?status=active&$actions=true
 Pipeline (per request, on `AsDbReadableController`):
 
 1. Discover row/rows-level envelopes (memoized per controller ctor).
-2. Filter through `allowedActions(names)` (0.1.145; default = the per-request `applyMetaOverlay()` set) — actions stripped by overlay are absent. Skipped when overlay is the default no-op. Then `actionRowScope(name)` per surviving action (only when overridden, 0.1.145).
+2. Filter through `allowedActions(names)` (0.1.145; default = the per-request `applyMetaOverlay()` set) — actions stripped by overlay are absent. Skipped when overlay is the default no-op. Then (only when overridden) `actionRowScope(name, ctx)` per surviving action AFTER the read, with the page's rows as candidates (0.1.147).
 3. Pre-widen `$select` to union all `requiredFields` (only when caller restricted projection).
 4. Run the read.
-5. One id-only query per distinct non-empty `actionRowScope` filter OBJECT (parallel); run each `disabled` once on the full result — narrowed to that action's gate columns (id cols + visible `requiredFields`, 0.1.145; = the gate's verdict), fan verdicts into per-row `$actions` (+ `$disabledReasons` on rows where a verdict was a reason string). Actions without `disabled` are unconditionally included.
+5. One id-only query per distinct non-empty `actionRowScope` filter (identity, else structural — 0.1.147) (parallel); run each `disabled` once on the full result — narrowed to that action's gate columns (id cols + visible `requiredFields`, 0.1.145; = the gate's verdict), fan verdicts into per-row `$actions` (+ `$disabledReasons` on rows where a verdict was a reason string). Actions without `disabled` are unconditionally included.
 6. Strip `requiredFields`-only fields the caller didn't ask for (so the response shape matches the original `$select`).
 
 Notes:
 
 - `'table'`-level actions never appear in `$actions`.
-- [`actionRowScope`](#actionrowscope--per-action-row-scope-01145) (0.1.145): a row lists an action only inside its scope; out-of-scope → absent from `$actions` AND `$disabledReasons`. Check = `findMany({ filter: { $and: [{ $or: <page ids> }, scope AND transformOne({})] }, $select: id cols })` per distinct scope OBJECT (the gate's composition), straight on the bound readable — NOT subject to `hasField`, response shape unchanged. Rows matched by `preferredId` (= PK unless re-pointed); no PK → every scoped action withheld (+ warn once per class).
+- [`actionRowScope`](#actionrowscope--per-action-row-scope-01145) (0.1.145): a row lists an action only inside its scope; out-of-scope → absent from `$actions` AND `$disabledReasons`. Check = `findMany({ filter: { $and: [{ $or: <page ids> }, scope AND transformOne({})] }, $select: id cols })` per distinct scope OBJECT (the gate's composition), straight on the bound readable — NOT subject to `hasField`, response shape unchanged. Rows matched by `preferredId` (= PK unless re-pointed); no PK → every scoped action withheld (+ warn once per class — only when the class has OWN row actions, 0.1.147).
 - One row, no read grant: `GET /meta/actions/:id` → [§ Available actions](#get-metaactionsid--available-actions-for-one-row-01145).
 - `$count` / `$groupBy` paths are NOT augmented (no row shape).
 - A `disabled` length mismatch on the result-set still throws HTTP 500 — same contract as the gate.

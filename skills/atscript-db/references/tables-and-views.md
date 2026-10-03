@@ -171,6 +171,8 @@ A view column inherits the read seals of the source field it reads — no annota
 
 `@db.writeOnly` stays an HTTP-layer contract — server code reading the view still sees the value.
 
+Row actions on a view (0.1.147): `@DbActionsFrom(() => SourceController)` on the view controller lists the source table's actions; the id map derives from the view's plain column over the source's `preferredId` → [view-actions.md](view-actions.md).
+
 ## Aggregate views
 
 Plain (non-aggregated) fields become `GROUP BY` keys automatically; `@db.agg.*` fields are the measures. Do NOT add `@db.column.dimension` here — that annotation marks table fields for runtime `aggregate()`/`$groupBy`, not view definitions:

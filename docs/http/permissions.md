@@ -138,3 +138,9 @@ paths:
 - `actions[]` → `Client.action(name, pk?)`. POST-locked, single-PK-per-call.
 
 See [Actions](./actions) for the actions wire shape.
+
+## Action authorization at a glance (since 0.1.147)
+
+- **Per-row action scope.** [`actionRowScope(action, ctx)`](./actions#action-row-scope-candidates) receives the candidate rows, so a scope may be derived from them. On the action route it now runs after the request body is read (it needs the ids); `prepareRequest` and the row overlay still run before it.
+- **Query targets.** "Every row matching the query" resolves under the row overlay AND [`queryTargetScope(action)`](./query-targets#which-rows) — by default the read scope (`transformFilter({})`) — so a caller can target only rows they could list and may act on. `queryTargetScope` and the query's validation run **as a read** (`prepareRequest({ endpoint: "query" })` in a child of the action request): your `prepareRequest` sees a read there, and its per-request state (a read grant, field visibility) applies to the target without touching the action request's. Refuse the read (throw 403) and the caller can still act on ids, never on "all matching". Throw from `queryTargetScope` to refuse query targets otherwise.
+- **Actions listed on a view.** [`@DbActionsFrom`](./view-actions) actions are authorized by their source controller, evaluated as itself: its `prepareRequest`, `allowedActions`, row overlay and `actionRowScope` decide `/meta`, `$actions` and execution. The view's `applyMetaOverlay` never sees them. A view's query target for such an action runs the source's route per batch inside the same request (the source's guards see each batch's own body), so the source re-checks every batch; source hooks share the request's `FOR_EVENT` instances.

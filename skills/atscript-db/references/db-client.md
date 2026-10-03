@@ -241,6 +241,17 @@ r[0].$disabledReasons?.ship; // reason string — only rows where an action was 
 
 Available on `query()` / `pages()` / `one()` / `count()` is N/A. `$count` and `$groupBy` paths are not augmented. `'table'`-level actions never appear.
 
+## Delegated actions + query targets (0.1.147)
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | An action with `idMap` (listed by a view via `@DbActionsFrom`, `owner` = the runner): pass THIS controller's rows/ids to `action()` — it maps each to `{ [ownerField]: row[path] }` (dot paths: nested value or a flat `"a.b"` key — flat first) and POSTs to `value`. Missing path → `TypeError`. Navigate `$1` uses the mapped id in `idMap` key order. `actionIdentifier(action, rowOrId, preferredId)` = same mapping for UIs.                   |
+| 2   | `actionOnQuery<R = TDbActionTargetSummary>(name, { filter?, search?, index?, exclude?, expectCount?, maxRows? }, input?)` → POST `{ query: { q, … }, input }` to `queryTarget.url ?? value`. `countActionTarget(name, target)` = dry run → `{ matched }`. A run stopped part-way RESOLVES (no throw) with `aborted: { status, message }` + the rest in `failed` — render as partial. Delegated runs add `messages[]` / `message` (source handler's). |
+| 3   | No `queryTarget` on the action (or not `'backend'`) → `ActionUnsupportedError` before any request.                                                                                                                                                                                                                                                                                                                                                   |
+| 4   | Refusals → `ActionTargetError` (`code`: `TARGET_INVALID` / `TARGET_TOO_LARGE` + `cap` / `TARGET_CHANGED` + `matched`). Pattern: count → confirm with user → run with `expectCount: matched` → on `TARGET_CHANGED` re-confirm with `e.matched`.                                                                                                                                                                                                       |
+
+Server semantics → [query-targets.md](query-targets.md), [view-actions.md](view-actions.md).
+
 ## One row's available actions — `availableActions(id)` (0.1.145)
 
 `await client.availableActions(id)` → `GET /meta/actions/:id` (object id → `?k1=v1&k2=v2`) → `{ actions: string[], disabledReasons? }` (`TDbAvailableActions`). Works for rows the caller cannot read; unknown / out-of-scope id → `{ actions: [] }`. Use for a single-row view; lists use `$actions`. Server rules → [actions.md § Available actions](actions.md#get-metaactionsid--available-actions-for-one-row-01145).

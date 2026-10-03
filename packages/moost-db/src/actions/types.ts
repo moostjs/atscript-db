@@ -102,7 +102,18 @@ export type GateOpts<TRow, R extends readonly FlatKey<TRow>[]> = unknown extends
 // ── Method-decorator opts (`@DbAction`) ────────────────────────────────────
 
 interface BaseActionOpts extends Partial<
-  Omit<TDbActionInfo, "name" | "level" | "processor" | "value" | "disabled" | "formUrl">
+  Omit<
+    TDbActionInfo,
+    | "name"
+    | "level"
+    | "processor"
+    | "value"
+    | "disabled"
+    | "formUrl"
+    | "owner"
+    | "idMap"
+    | "queryTarget"
+  >
 > {
   /**
    * Bound table reference. REQUIRED on non-`AsDbReadableController` classes
@@ -120,6 +131,20 @@ interface BaseActionOpts extends Partial<
    * @since 0.1.143
    */
   maxIds?: number;
+  /**
+   * `'rows'` level only: the action also accepts a query target — a body
+   * `{ query: { q, exclude?, expectCount?, maxRows?, dryRun? }, input? }`
+   * meaning "every row matching `q`" (the `GET /query` filter plus
+   * `$search` / `$index`) under the caller's read scope (`queryTargetScope`)
+   * and the action's own gate. `true` = `{ maxRows: 10_000, batchSize:
+   * 500 }`. `maxRows` (on the wire as `queryTarget.maxRows`) caps the
+   * matched rows; a `@DbActionTarget()` handler gets them in `batchSize`
+   * batches, a `@DbActionIDs` / `@DbActionRows` handler at once (then also
+   * capped by `maxIds`).
+   *
+   * @since 0.1.147
+   */
+  queryTarget?: boolean | { maxRows?: number; batchSize?: number };
 }
 
 /**

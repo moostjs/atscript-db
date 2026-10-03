@@ -4,8 +4,10 @@ import type { Moost, TConsoleBase } from "moost";
 
 import { getAtscriptDbMate } from "../mate";
 import { isAsDbReadableControllerSubclass } from "./controller-registry";
+import { maxIdsOfOpts } from "./current-action";
 import { WARN_PREFIX, type TDbActionInputFormMeta, type TDbActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
+import { queryTargetLimitsOf } from "./query-target";
 import type { DbActionOpts, TDbActionsEntry } from "./types";
 
 /** Structural-copy fields; `disabled` is handled separately in {@link emitInfo} (function-to-string transform). */
@@ -187,7 +189,29 @@ function collectMethodActions(
       continue;
     }
 
-    const isGated = action.opts.disabled !== undefined || levelInfer.hasRowParam;
+    if (levelInfer.hasTarget && levelInfer.hasIdOrRowParam) {
+      logger.warn(
+        `${WARN_PREFIX} action "${action.name}" cannot mix @DbActionTarget() with @DbActionID*/@DbActionRow* — dropping`,
+      );
+      continue;
+    }
+    const queryTarget = queryTargetLimitsOf(action.opts);
+    if (queryTarget && levelInfer.level !== "rows") {
+      logger.warn(
+        `${WARN_PREFIX} action "${action.name}" — \`queryTarget\` needs a 'rows' level action ` +
+          `(@DbActionIDs / @DbActionRows / @DbActionTarget) — dropping`,
+      );
+      continue;
+    }
+    if (levelInfer.hasTarget && action.opts.onDisabledRows === "reject") {
+      logger.warn(
+        `${WARN_PREFIX} action "${action.name}" — a @DbActionTarget() handler always skips rows ` +
+          `failing the gate; \`onDisabledRows: "reject"\` is ignored`,
+      );
+    }
+
+    const isGated =
+      action.opts.disabled !== undefined || levelInfer.hasRowParam || levelInfer.hasTarget;
     if (isGated) {
       const extendsReadable = isAsDbReadableControllerSubclass(ctor);
       const hasOptsTable = action.opts.table != null;
@@ -244,6 +268,15 @@ function collectMethodActions(
       if (!registerFormType(ctor, levelInfer.inputForm, action.name, logger)) continue;
       info.inputForm = levelInfer.inputForm.name;
     }
+    if (queryTarget) {
+      // A materialized handler (`@DbActionIDs` / `@DbActionRows`) takes the
+      // whole target as one id list: its cap is also `maxIds`.
+      info.queryTarget = {
+        maxRows: levelInfer.hasTarget
+          ? queryTarget.maxRows
+          : Math.min(queryTarget.maxRows, maxIdsOfOpts(action.opts)),
+      };
+    }
     emitInfo(info, action.opts);
     seen.add(action.name);
     out.push({ info, raw: action.opts });
@@ -254,6 +287,8 @@ interface LevelInferResult {
   level: TDbActionLevel;
   bodyConflict: boolean;
   hasRowParam: boolean;
+  hasTarget: boolean;
+  hasIdOrRowParam: boolean;
   inputForm?: TDbActionInputFormMeta;
 }
 
@@ -280,6 +315,8 @@ function inferMethodLevel(
     level: scan.level as TDbActionLevel,
     bodyConflict: scan.hasBody && scan.level !== "table",
     hasRowParam: scan.hasRowParam,
+    hasTarget: scan.hasTarget,
+    hasIdOrRowParam: scan.hasIdOrRowParam,
     inputForm: scan.inputForm,
   };
 }

@@ -21,7 +21,7 @@ interface TPreparingController {
  * of those awaits it first). `undefined` when the controller defines no
  * `prepareRequest` (nothing to await) or outside an action handler.
  */
-const dbActionPreparedSlot = cached<Promise<void> | undefined>((ctx) => {
+export const dbActionPreparedSlot = cached<Promise<void> | undefined>((ctx) => {
   let ctrl: TPreparingController | null | undefined;
   try {
     ctrl = useControllerContext(ctx).getController() as TPreparingController | null | undefined;

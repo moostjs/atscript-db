@@ -90,6 +90,48 @@ export class ActionDisabledError extends ClientError {
 }
 
 /**
+ * Wire-body shape for `ActionTargetError` responses (since 0.1.147): a
+ * query target the server refused — `code` says why.
+ */
+export interface ActionTargetErrorBody extends ServerError {
+  name: "ActionTargetError";
+  code: "TARGET_INVALID" | "TARGET_TOO_LARGE" | "TARGET_CHANGED";
+  action: string;
+  /** `TARGET_CHANGED`: the current match count. */
+  matched?: number;
+  /** `TARGET_TOO_LARGE`: the most rows one request may target. */
+  cap?: number;
+}
+
+/**
+ * Typed marker thrown by `Client` when a query-targeted action request is
+ * refused (body `name === 'ActionTargetError'`): `TARGET_INVALID` (400),
+ * `TARGET_TOO_LARGE` (400, `cap`) or `TARGET_CHANGED` (409, `matched` — the
+ * rows the query matches now; re-confirm and retry with that count).
+ *
+ * @since 0.1.147
+ */
+export class ActionTargetError extends ClientError {
+  override name = "ActionTargetError";
+
+  get code(): ActionTargetErrorBody["code"] {
+    return (this.body as ActionTargetErrorBody).code;
+  }
+
+  get action(): string {
+    return (this.body as ActionTargetErrorBody).action;
+  }
+
+  get matched(): number | undefined {
+    return (this.body as ActionTargetErrorBody).matched;
+  }
+
+  get cap(): number | undefined {
+    return (this.body as ActionTargetErrorBody).cap;
+  }
+}
+
+/**
  * Wire-body shape for 409 OCC `version_mismatch` responses. Extends the base
  * `ServerError` envelope with a `kind` discriminator and the row's current
  * server-side version. The bridge between `@atscript/moost-db`'s server-side

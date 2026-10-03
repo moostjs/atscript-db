@@ -24,7 +24,8 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
 | `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
 | `decorateRows(rows, ctx)`              | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
-| `actionRowScope(action)`               | Both           | Action gate, `$actions` reads    | Rows an action may run on (since 0.1.145)                         |
+| `actionRowScope(action, ctx)`          | Both           | Action gate, `$actions` reads    | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
+| `queryTargetScope(action)`             | Both           | Resolving a query target         | Read scope "all matching rows" resolve under (since 0.1.147)      |
 | `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
 | `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
 | `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
@@ -218,16 +219,16 @@ It only rejects references. Pair it with:
 
 Since 0.1.143 an overridden `hasField` also gates the database's **indexes**, which search inside the engine and would otherwise rank or match on a hidden column:
 
-| Request                                             | An index reading a hidden field is answered…                                                                                                            |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$search` + `$index=<name>` (native text search)    | like a nonexistent index: `400 Search index "<name>" not found`                                                                                         |
-| `$search` without `$index` (the default text index) | falls back to the [`@db.column.searchable`](./advanced#search-fallback) substring search over visible fields — or ignores the term when none is visible |
-| `$search` + `$vector[=<name>]`                      | like a nonexistent vector index: `400 Vector index "<name>" not found` (`No vector index available` without a name), before `computeEmbedding` runs     |
-| `GET /geo` (default geo index, or `$index=<name>`)  | like a missing geo index — the same 400 the core answers for an unknown one                                                                             |
+| Request                                             | An index reading a hidden field is answered…                                                                                                                     |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$search` + `$index=<name>` (native text search)    | like a nonexistent index: `400 Search index "<name>" not found`                                                                                                  |
+| `$search` without `$index` (the default text index) | like no index at all: `400 No search index available` (since 0.1.147 — it used to fall back to the substring search, see [Upgrading](/guide/upgrading#v0-1-147)) |
+| `$search` + `$vector[=<name>]`                      | like a nonexistent vector index: `400 Vector index "<name>" not found` (`No vector index available` without a name), before `computeEmbedding` runs              |
+| `GET /geo` (default geo index, or `$index=<name>`)  | like a missing geo index — the same 400 the core answers for an unknown one                                                                                      |
 
 Unknown index names get the same answers on a controller that overrides `hasField`, so the reply reveals nothing. A **`@db.column.derived`** field follows its source: it is visible only while its source path is (a derived copy of `settings.apiKey` disappears with `settings`), and one whose source is hidden is sealed out of every read projection for that request, exactly like a `@db.writeOnly` field — in joined `$with` rows too (the source is checked as `rel.<source>`) — and is never loaded for an action's `requiredFields`.
 
-To prune `/meta` consistently (`searchIndexes`, `searchable`, `vectorSearchable`, `geoSearchable`), read the protected `indexFieldPaths()` from `applyMetaOverlay`: it lists every text / vector / geo index with the logical field paths it reads and which one is the default. Text and vector entries come from the adapter's `getSearchIndexes()` (`fields`, `isDefault`); an index whose coverage the adapter cannot tell (a dynamic document-search mapping) lists every field.
+`/meta` follows the same rule on its own (since 0.1.147): under an overridden `hasField` it leaves out of `searchIndexes` every index reading a hidden field, and turns `searchable` / `vectorSearchable` / `geoSearchable` off when the index a request naming none would use reads one (`searchable` stays on for the [`@db.column.searchable` fallback](./advanced#search-fallback) of a table without native search, while any of its fields is visible). Tables without native search keep the substring fallback over visible fields. The protected `indexFieldPaths()` lists every text / vector / geo index with the logical field paths it reads and which one is the default — read it to describe an index differently. Text and vector entries come from the adapter's `getSearchIndexes()` (`fields`, `isDefault`); an index whose coverage the adapter cannot tell (a dynamic document-search mapping) lists every field.
 
 ### computeEmbedding {#computeembedding}
 

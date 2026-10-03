@@ -34,7 +34,10 @@ import { applyTerminalRefs } from "./meta/terminal-ref";
  * like DB readables do; every `@DbAction` handler (row, rows and table
  * level) reports `"action"` with the action's name in
  * {@link TDbRequestContext.action}; `GET /meta/actions/:id` and
- * `/meta/actions?…` report `"availableActions"` (since 0.1.145).
+ * `/meta/actions?…` report `"availableActions"` (since 0.1.145); a view's
+ * `POST /delegated-actions/:name` (a query target for a `@DbActionsFrom`
+ * action — a read of THIS controller's rows) reports `"delegatedAction"` with
+ * the action's name in {@link TDbRequestContext.action} (since 0.1.147).
  *
  * @since 0.1.143
  */
@@ -50,7 +53,8 @@ export type TDbRequestEndpoint =
   | "update"
   | "remove"
   | "action"
-  | "availableActions";
+  | "availableActions"
+  | "delegatedAction";
 
 /**
  * Context passed to {@link AsReadableController.prepareRequest}.
@@ -67,7 +71,7 @@ export interface TDbRequestContext {
    * `metaForm`, writes and actions.
    */
   readonly controls?: Record<string, unknown>;
-  /** `"action"` endpoint only: the `@DbAction` name being run. */
+  /** `"action"` / `"delegatedAction"` endpoints only: the `@DbAction` name being run. */
   readonly action?: string;
 }
 

@@ -342,29 +342,44 @@ describe("text / vector / geo index gating through hasField", () => {
     expect(search).toHaveBeenCalledTimes(1);
   });
 
-  it("a hidden DEFAULT text index falls back to @db.column.searchable over visible fields", async () => {
+  it("SECURITY: a hidden DEFAULT text index answers like no index — never a native search over it", async () => {
     HIDDEN = new Set(["secretNote"]);
-    const { c, search, findMany } = await accounts();
-    const rows = (await c.query("?$search=alp&$select=id")) as Row[];
+    const { c, search, findMany, aggregate } = await accounts();
+    for (const pending of [
+      c.query("?$search=alp&$select=id"),
+      c.pages("?$search=alp"),
+      c.query("?$search=zebra&$select=note,count(*):n&$groupBy=note"),
+    ]) {
+      expect(errorsOf(await pending)).toEqual([
+        { path: "$search", message: "No search index available" },
+      ]);
+    }
     expect(search).not.toHaveBeenCalled();
-    expect(rows).toEqual([{ id: 1 }]);
-    expect(JSON.stringify((findMany.mock.calls[0]![0] as Row).filter)).toContain("title");
+    expect(findMany).not.toHaveBeenCalled();
+    expect(aggregate).not.toHaveBeenCalled();
+    // a visible index stays usable by name
+    await c.query("?$search=n1&$index=note_idx");
+    expect(search).toHaveBeenCalledTimes(1);
   });
 
-  it("…and ignores the term when no searchable field is visible", async () => {
-    HIDDEN = new Set(["secretNote", "title"]);
-    const { c, search } = await accounts();
-    const rows = (await c.query("?$search=zebra&$select=id")) as Row[];
-    expect(search).not.toHaveBeenCalled();
-    expect(rows.map((r) => r.id)).toEqual([1, 2]);
-  });
+  it("/meta hides what the gate refuses: hidden indexes, and search when the default is hidden", async () => {
+    HIDDEN = new Set(["secretNote", "embedding"]);
+    const { c, table } = await accounts();
+    vi.spyOn(table, "isVectorSearchable").mockReturnValue(true);
+    const meta = (await c.meta()) as any;
+    expect(meta.searchIndexes.map((i: any) => i.name)).toEqual(["note_idx"]);
+    expect(meta.searchable).toBe(false);
+    expect(meta.vectorSearchable).toBe(false);
 
-  it("a grouped query drops the native term when the default index is hidden", async () => {
-    HIDDEN = new Set(["secretNote"]);
-    const { c, aggregate } = await accounts();
-    await c.query("?$search=zebra&$select=note,count(*):n&$groupBy=note");
-    const controls = (aggregate.mock.calls[0]![0] as Row).controls as Row;
-    expect(controls.$search).toBeUndefined();
+    HIDDEN = new Set();
+    const open = (await c.meta()) as any;
+    expect(open.searchIndexes.map((i: any) => i.name)).toEqual([
+      "txt_idx",
+      "note_idx",
+      "embedding",
+    ]);
+    expect(open.searchable).toBe(true);
+    expect(open.vectorSearchable).toBe(true);
   });
 
   it("a hidden vector index answers like a nonexistent one, before any embedding", async () => {

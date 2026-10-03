@@ -26,6 +26,19 @@ export interface TDbClassActionMeta {
   entry: TDbActionsEntry;
 }
 
+/**
+ * Class-level entry written by `@DbActionsFrom(source, opts)` (since
+ * 0.1.147): a controller whose row-level actions this controller delegates.
+ */
+export interface TDbActionsFromMeta {
+  /** Lazy reference to the source controller class. */
+  source: () => Function;
+  /** Source identification field → path in this controller's rows. */
+  idMap?: Record<string, string>;
+  /** Subset of the source's row / rows-level action names (default: all). */
+  actions?: readonly string[];
+}
+
 /** Param marker kind — informs level inference and ID-resolution shape. */
 export type TDbActionParamKind = "id" | "ids";
 
@@ -54,12 +67,14 @@ declare module "moost" {
     atscript_db_action_row?: TDbActionRowMarker;
     atscript_db_action_rows?: TDbActionRowMarker;
     atscript_db_endpoint?: TDbRequestEndpoint;
+    atscript_db_actions_from?: TDbActionsFromMeta[];
   }
   interface TMoostParamsMetadata {
     atscript_db_action_param?: TDbActionParamKind;
     atscript_db_action_row?: TDbActionRowMarker;
     atscript_db_action_rows?: TDbActionRowMarker;
     atscript_db_action_input_form?: TDbActionInputFormMeta;
+    atscript_db_action_target?: true;
     atscript_type?: TAtscriptAnnotatedType;
   }
 }

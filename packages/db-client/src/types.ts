@@ -201,3 +201,28 @@ export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q> & {
    */
   $disabledReasons?: Record<string, string>;
 };
+
+// ── Query targets (since 0.1.147) ───────────────────────────────────────────
+
+/**
+ * "Every row matching this query" — the target of
+ * `Client.actionOnQuery()` / `countActionTarget()`, for a `'rows'` action
+ * whose `/meta` entry carries `queryTarget`. The same filter / search /
+ * index the user's `/query` used; the server resolves it under the caller's
+ * read scope and the action's own gate.
+ *
+ * @since 0.1.147
+ */
+export interface TDbQueryTarget<T = AtscriptClientShape> {
+  filter?: Uniquery<OwnOf<T>, NavOf<T>>["filter"];
+  /** `$search` term. */
+  search?: string;
+  /** `$index` — the search index `search` uses. */
+  index?: string;
+  /** Identifiers to leave out (any identification of the controller the request goes to). */
+  exclude?: Record<string, unknown>[];
+  /** Fail with 409 `TARGET_CHANGED` when the target no longer matches exactly this many rows. */
+  expectCount?: number;
+  /** Client-side cap (never above the action's `queryTarget.maxRows`). */
+  maxRows?: number;
+}

@@ -1,11 +1,10 @@
-import { cached, defineWook, key, type EventContext } from "@wooksjs/event-core";
-import { HttpError } from "@moostjs/event-http";
-import { useControllerContext } from "moost";
+import { cached, defineWook, type EventContext } from "@wooksjs/event-core";
 
-import { readCurrentActionMeta } from "./current-action";
+import { boundTableKey, controllerOf, noTableError } from "./controller-access";
+import { actionMaxIds } from "./current-action";
 import { dbActionBodySlot } from "./input-form-cache";
-import { WARN_PREFIX } from "./keys";
 import { awaitActionPrepared } from "./prepare-request";
+import { dbActionQueryTargetSlot } from "./query-target";
 import {
   isIdValidationSource,
   validateMultiId,
@@ -13,51 +12,14 @@ import {
   type IdValidationSource,
 } from "./id-validation";
 
-export const boundTableKey = key<unknown>("atscript_db_action_bound_table");
-
-/** What the actions module reads off a controller (duck-typed — see `controller-registry`). */
-interface TActionController {
-  readable?: unknown;
-  table?: unknown;
-  /** `AsDbReadableController.idSource`: identifications narrowed by `hasField` (since 0.1.134). */
-  idSource?: IdValidationSource;
-}
-
-export function controllerOf(ctx: EventContext): TActionController | null | undefined {
-  return useControllerContext(ctx).getController() as TActionController | null | undefined;
-}
-
-export function controllerTable(ctx: EventContext): unknown {
-  const ctrl = controllerOf(ctx);
-  return ctrl?.readable ?? ctrl?.table ?? null;
-}
-
-export function getActionTable(ctx: EventContext): unknown {
-  const fromSlot = ctx.has(boundTableKey) ? ctx.get(boundTableKey) : undefined;
-  return fromSlot ?? controllerTable(ctx);
-}
-
-const warnedTags = new Set<string>();
-
-export function noTableError(ctx: EventContext): HttpError {
-  const actionName = readCurrentActionMeta(ctx)?.name;
-  const tag = actionName ? `"${actionName}"` : "<unknown>";
-  // Log details server-side once per action; client gets a generic 500.
-  if (!warnedTags.has(tag)) {
-    warnedTags.add(tag);
-    // eslint-disable-next-line no-console
-    console.warn(
-      `${WARN_PREFIX} ${tag}: controller has no readable/table property and the action declares no opts.table. ` +
-        `Either expose readable/table on the controller, extend AsDbReadableController, or pass opts.table on @DbAction.`,
-    );
-  }
-  return new HttpError(500, {
-    statusCode: 500,
-    error: "Internal Server Error",
-    message: "Internal server error",
-    code: "ACTION_TABLE_NOT_BOUND",
-  });
-}
+export {
+  boundTableKey,
+  controllerOf,
+  controllerTable,
+  getActionTable,
+  noTableError,
+} from "./controller-access";
+export { DEFAULT_MAX_ACTION_IDS } from "./current-action";
 
 /**
  * Validates the body's `ids` against the action table's identifications. For
@@ -90,17 +52,17 @@ export const dbActionIdSlot = cached<Promise<Record<string, unknown>>>(
   (ctx) => resolveValidatedId(ctx, validateSingleId) as Promise<Record<string, unknown>>,
 );
 
-/** Default cap on the identifiers one `'rows'`-level request may carry — see `DbActionOpts.maxIds`. */
-export const DEFAULT_MAX_ACTION_IDS = 1000;
-
-function maxIdsOf(ctx: EventContext): number {
-  const max = (readCurrentActionMeta(ctx)?.opts as { maxIds?: unknown } | undefined)?.maxIds;
-  return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_ACTION_IDS;
-}
-
+/**
+ * The `'rows'` action's identifiers: the body's validated `ids`, or — for a
+ * query target (`query`, since 0.1.147) — the identities of the rows it
+ * matched (phase 1).
+ */
 export const dbActionIdsSlot = cached<Promise<Record<string, unknown>[]>>(async (ctx) => {
+  await awaitActionPrepared(ctx);
+  const target = await ctx.get(dbActionQueryTargetSlot);
+  if (target) return target.ids;
   const result = await resolveValidatedId(ctx, (body, src) =>
-    validateMultiId(body, src, maxIdsOf(ctx)),
+    validateMultiId(body, src, actionMaxIds(ctx)),
   );
   return result as Record<string, unknown>[];
 });

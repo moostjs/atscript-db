@@ -1,7 +1,5 @@
 import type { FilterExpr } from "@atscript/db";
 
-import { withOverlay } from "./row-scope";
-
 /** The one read {@link findRowsByIds} needs from a table / view. */
 export interface TRowsByIdSource {
   findMany(query: { filter: unknown; controls?: unknown }): Promise<Record<string, unknown>[]>;
@@ -18,7 +16,7 @@ function stringifyScalar(value: unknown): string {
  * keys across driver representations (a number vs its string, an ObjectId
  * vs its hex). `undefined` when `row` lacks one of the fields.
  */
-function idKey(row: Record<string, unknown>, fields: readonly string[]): string | undefined {
+export function idKey(row: Record<string, unknown>, fields: readonly string[]): string | undefined {
   let key = "";
   for (const f of fields) {
     const v = row[f];
@@ -62,7 +60,7 @@ export async function findRowsByIds(
   }
 
   const rows = await source.findMany({
-    filter: withOverlay({ $or: dedupedIds } as FilterExpr, scope),
+    filter: scope ? { $and: [{ $or: dedupedIds }, scope] } : { $or: dedupedIds },
     controls: { $select: [...fields] },
   });
 

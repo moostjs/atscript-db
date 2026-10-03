@@ -2,26 +2,43 @@ import { isEmptyObject, type FilterExpr } from "@atscript/db";
 import { cached, type EventContext } from "@wooksjs/event-core";
 
 import { readCurrentActionMeta } from "./current-action";
-import { controllerOf, controllerTable, getActionTable } from "./id-cache";
+import { controllerOf, controllerTable, getActionTable } from "./controller-access";
 import { awaitActionPrepared } from "./prepare-request";
+import { findRowsByIds, type TRowsByIdSource } from "./rows-by-id";
+import { candidateIds, createScopeContext, type TDbActionScopeContext } from "./scope-context";
 
 /**
  * The key of `AsDbReadableController`'s internal action-overlay method —
- * `rowOverlay()` AND (since 0.1.145) the action's `actionRowScope`. A
- * registered symbol: not an overridable seam, and still found when
- * moost-db loads in two module realms (moost-vite SSR).
+ * its `rowOverlay()` (since 0.1.147 without the action's `actionRowScope`,
+ * which needs the candidate rows — see {@link ACTION_SCOPE}). A registered
+ * symbol: not an overridable seam, and still found when moost-db loads in
+ * two module realms (moost-vite SSR).
  */
 export const ACTION_OVERLAY = Symbol.for("atscript-db.actionOverlay");
 
+/** The controller's internal `actionRowScope` call for candidate rows (since 0.1.147). */
+export const ACTION_SCOPE = Symbol.for("atscript-db.actionScope");
+
+/** `true` when the controller overrides `actionRowScope` (since 0.1.147). */
+export const ACTION_SCOPED = Symbol.for("atscript-db.actionScoped");
+
 /**
  * What the actions module applies to action ids / rows (since 0.1.143): the
- * controller's {@link ACTION_OVERLAY} method and `fieldVisibility`, reached
- * duck-typed like the rest of the controller surface (see
- * `id-cache.controllerTable`).
+ * controller's {@link ACTION_OVERLAY} / {@link ACTION_SCOPE} methods and
+ * `fieldVisibility`, reached duck-typed like the rest of the controller
+ * surface (see `id-cache.controllerTable`).
  */
-interface TScopedController {
+export interface TScopedController {
   [ACTION_OVERLAY]?: (action: string | undefined) => Promise<FilterExpr | undefined>;
+  [ACTION_SCOPE]?: (action: string, ctx: TDbActionScopeContext) => Promise<FilterExpr | undefined>;
+  readonly [ACTION_SCOPED]?: boolean;
   fieldVisibility?: { readonly scoped: boolean; readonly isVisible: (path: string) => boolean };
+}
+
+/** A table the scope check reads candidates from (`preferredId` / `primaryKeys` name them). */
+export interface TScopeTable extends TRowsByIdSource {
+  primaryKeys: readonly string[];
+  preferredId?: readonly string[];
 }
 
 /**
@@ -29,7 +46,7 @@ interface TScopedController {
  * runs against the controller's OWN readable — an `opts.table` binding on a
  * plain controller has no row overlay or visibility hook. Once per event.
  */
-const scopedControllerSlot = cached<TScopedController | null>((ctx) => {
+export const scopedControllerSlot = cached<TScopedController | null>((ctx) => {
   let ctrl: TScopedController | null | undefined;
   try {
     ctrl = controllerOf(ctx) as TScopedController | null | undefined;
@@ -43,11 +60,12 @@ const scopedControllerSlot = cached<TScopedController | null>((ctx) => {
 
 /**
  * The controller's row overlay for this action's ids / rows — its
- * `rowOverlay()` (the overlay `/one/:id` ANDs in) AND, since 0.1.145, the
- * action's `actionRowScope`; `null` when both are empty (no hook call, no
- * extra query when the controller overrides none of `transformOne`,
- * `transformFilter`, `actionRowScope`). Evaluated once per request, after
- * the controller's `prepareRequest` (since 0.1.143).
+ * `rowOverlay()`, the overlay `/one/:id` ANDs in; `null` when empty (no hook
+ * call, no extra query when the controller overrides neither `transformOne`
+ * nor `transformFilter`). Evaluated once per request, after the controller's
+ * `prepareRequest` (since 0.1.143) and before the request body is read. The
+ * action's `actionRowScope` is applied to the loaded rows afterwards (see
+ * {@link applyActionScope}, since 0.1.147).
  */
 export const dbActionOverlaySlot = cached<Promise<FilterExpr | null>>(async (ctx) => {
   const ctrl = ctx.get(scopedControllerSlot);
@@ -56,6 +74,48 @@ export const dbActionOverlaySlot = cached<Promise<FilterExpr | null>>(async (ctx
   await awaitActionPrepared(ctx);
   return (await overlayOf.call(ctrl, readCurrentActionMeta(ctx)?.name)) ?? null;
 });
+
+/** `true` when this action's controller overrides `actionRowScope`. */
+export function isActionScoped(ctx: EventContext): boolean {
+  return ctx.get(scopedControllerSlot)?.[ACTION_SCOPED] === true;
+}
+
+/**
+ * The loaded `rows` (already inside the row overlay) with every row outside
+ * the action's `actionRowScope` replaced by `undefined` (since 0.1.147). The
+ * hook sees the rows' identities (`purpose: "execute"`); a non-empty scope
+ * costs ONE id-only query. No-op when the controller does not override the
+ * hook.
+ */
+export async function applyActionScope(
+  ctx: EventContext,
+  table: TScopeTable,
+  rows: Array<Record<string, unknown> | undefined>,
+): Promise<Array<Record<string, unknown> | undefined>> {
+  const ctrl = ctx.get(scopedControllerSlot);
+  const name = readCurrentActionMeta(ctx)?.name;
+  if (!ctrl?.[ACTION_SCOPED] || name === undefined) return rows;
+  return maskOutOfScope(ctrl, name, table, rows);
+}
+
+/** {@link applyActionScope} for an explicit controller and action. */
+async function maskOutOfScope(
+  ctrl: TScopedController,
+  action: string,
+  table: TScopeTable,
+  rows: Array<Record<string, unknown> | undefined>,
+): Promise<Array<Record<string, unknown> | undefined>> {
+  const scopeOf = ctrl[ACTION_SCOPE];
+  if (!scopeOf || rows.every((row) => row === undefined)) return rows;
+  const idFields = table.preferredId?.length ? table.preferredId : table.primaryKeys;
+  const { ids, index } = candidateIds(rows, idFields);
+  // No candidate: no hook call — a row without its identity is in no scope.
+  if (ids.length === 0) return rows.map(() => undefined);
+  const scope = await scopeOf.call(ctrl, action, createScopeContext("execute", ids, table));
+  if (!scope) return rows;
+  const found = await findRowsByIds(table, ids, scope, []);
+  return rows.map((row, i) => (row && index[i] >= 0 && found[index[i]] ? row : undefined));
+}
 
 /** `filter` unless it is absent or `{}`. */
 export function nonEmptyFilter(filter: FilterExpr | null | undefined): FilterExpr | undefined {
@@ -68,6 +128,13 @@ export function withOverlay(
   overlay: FilterExpr | null | undefined,
 ): FilterExpr {
   return overlay ? ({ $and: [filter, overlay] } as FilterExpr) : filter;
+}
+
+/** The non-empty `filters` ANDed (`{}` when none). */
+export function conjoin(...filters: Array<FilterExpr | null | undefined>): FilterExpr {
+  const parts = filters.filter((f): f is FilterExpr => nonEmptyFilter(f) !== undefined);
+  if (parts.length === 0) return {} as FilterExpr;
+  return parts.length === 1 ? parts[0] : ({ $and: parts } as FilterExpr);
 }
 
 /**

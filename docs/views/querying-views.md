@@ -122,6 +122,10 @@ The same URL query syntax applies (`$sort`, `$skip`, `$limit`, `$select`, `$filt
 
 A view field is declared through its source column (`projectId: Task.projectId`), and the DB layer keeps that first hop — it is the column the view reads. Since 0.1.128 the `/meta` endpoint resolves the chain to its **terminal** field instead: when `Task.projectId: Project.id` carries `@db.rel.FK`, the view's `projectId` is serialized with `ref → Project.id` (shallow, `refDepth` stays `0.5`) and `db.rel.FK: true`, so the client value-help picker opens the projects endpoint rather than the tasks endpoint. Fields over plain columns keep their direct ref and gain no marker.
 
+### Row actions on a view
+
+Since 0.1.147 a view controller can list its source table's row actions with `@DbActionsFrom(() => SourceController)` — the actions stay the source's, the view maps its rows to source ids. See [Actions on a View](/http/view-actions).
+
 ## Refreshing Materialized Views
 
 Materialized views store precomputed results that need periodic refreshing. Refresh behavior is adapter-specific:

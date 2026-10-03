@@ -3,6 +3,8 @@ import type {
   AtscriptDbReadable,
   FilterExpr,
   TCrudPermissions,
+  TDbActionInfo,
+  TDbActionTargetSummary,
   TDbAvailableActions,
   TFieldMeta,
   TIdResolveOptions,
@@ -23,22 +25,60 @@ import {
   unsupportedOperatorMessage,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
-import { Get, HttpError, Query, Url } from "@moostjs/event-http";
-import { Inherit, Inject, Moost, Optional, Param } from "moost";
+import { Get, HttpError, MoostHttp, Query, Url } from "@moostjs/event-http";
+import { current, useRouteParams } from "@wooksjs/event-core";
+import { useBody } from "@wooksjs/http-body";
+import { Inherit, Inject, Moost, Optional, Param, useControllerContext } from "moost";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions, getCandidate } from "./actions/list-augmenter";
-import { ACTION_OVERLAY, nonEmptyFilter, withOverlay } from "./actions/row-scope";
+import { targetInvalid, ActionTargetError } from "./actions/action-target-error";
+import {
+  ACTION_VERDICTS,
+  ALLOWED_ACTIONS,
+  AVAILABLE_ACTIONS,
+  discoverDelegations,
+  hasActionDelegations,
+  isAuthRefusal,
+  mapToSourceIds,
+  runAsController,
+  runSourceActionBatch,
+  type TDelegateSource,
+  type TDelegation,
+} from "./actions/delegation";
+import { validateMultiId } from "./actions/id-validation";
+import {
+  parseQueryTargetBody,
+  RESOLVE_TARGET,
+  type TResolvedTarget,
+  type TTargetRequest,
+} from "./actions/query-target";
+import {
+  ACTION_OVERLAY,
+  ACTION_SCOPE,
+  ACTION_SCOPED,
+  conjoin,
+  nonEmptyFilter,
+  withOverlay,
+} from "./actions/row-scope";
+import {
+  candidateIds,
+  createScopeContext,
+  filterKey,
+  type TDbActionScopeContext,
+  type TDbActionScopePurpose,
+} from "./actions/scope-context";
 import {
   actionRowFields,
   findRowsByIds,
+  idKey,
   projectRow,
   requiredFieldsOf,
   type TRowsByIdSource,
 } from "./actions/rows-by-id";
-import { judgeRow, verdictReason } from "./actions/verdict";
+import { judgeRows, verdictReason } from "./actions/verdict";
 import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
 import { DbEndpoint } from "./db-endpoint";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
@@ -148,7 +188,8 @@ type TSealedControls = Record<string, unknown> & {
 
 /**
  * Row-level actions sharing one {@link AsDbReadableController.actionRowScope}
- * filter object; `filter` = that scope AND the row overlay (the gate's).
+ * filter (by object identity, else structurally — `filterKey`); `filter` =
+ * that scope AND the row overlay (the gate's).
  */
 interface TActionScopeGroup {
   filter: FilterExpr;
@@ -160,12 +201,29 @@ interface TAugmentationPrep {
   envelopes: readonly TDbActionEnvelope[];
   resolvedProjection: string[] | null;
   widenedSelect: string[] | null;
-  /** The `actionRowScope` groups, resolving alongside the read; `null` = hook not overridden. */
-  scopeGroups: Promise<TActionScopeGroup[]> | null;
+  /**
+   * The row overlay (resolving alongside the read) when `actionRowScope` is
+   * overridden — its groups need the read's rows (since 0.1.147); `null` =
+   * hook not overridden.
+   */
+  scopeOverlay: Promise<FilterExpr | undefined> | null;
+  /** `@DbActionsFrom` delegations whose verdicts join `$actions` (since 0.1.147). */
+  delegations: readonly TDelegation[];
 }
 
 /** Controller classes already warned that `actionRowScope` has no row identity to match by. */
 const warnedNoIdentity = new WeakSet<Function>();
+
+/** The message of an error a delegated batch failed with. */
+function errorMessage(error: unknown): string {
+  if (error instanceof HttpError) return String(error.body.message ?? error.message);
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The HTTP status of an error a delegated batch failed with (500 for a non-HTTP error). */
+function errorStatus(error: unknown): number {
+  return error instanceof HttpError ? Number(error.body.statusCode) || 500 : 500;
+}
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -276,6 +334,10 @@ export class AsDbReadableController<
   private readonly _hasAllowedActions: boolean;
   /** `true` when a subclass overrides {@link actionRowScope} (the gate, `$actions` and `/meta/actions` apply it). */
   private readonly _hasActionRowScope: boolean;
+  /** `true` when the class declares `@DbActionsFrom` (since 0.1.147). */
+  private readonly _hasDelegations: boolean;
+  /** `transformProjection` is overridden (a delegation's id paths are checked against it). */
+  private readonly _hasProjectionHook: boolean;
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   private readonly _quantityRefByPath: ReadonlyMap<string, string>;
   /** `@db.column.searchable` paths — the `$search` fallback when the adapter has no native search. */
@@ -317,18 +379,9 @@ export class AsDbReadableController<
     this._hasRowOverlay =
       this.transformOne !== proto.transformOne || this.transformFilter !== proto.transformFilter;
     this._hasActionRowScope = this.actionRowScope !== proto.actionRowScope;
+    this._hasProjectionHook = this.transformProjection !== proto.transformProjection;
     this._hasAllowedActions = this.allowedActions !== proto.allowedActions;
-    if (
-      this._hasActionRowScope &&
-      resolved.preferredId.length === 0 &&
-      !warnedNoIdentity.has(new.target)
-    ) {
-      warnedNoIdentity.add(new.target);
-      this.logger.warn(
-        `actionRowScope() is overridden but "${resolved.tableName}" has no primary key — ` +
-          `\`$actions\` withholds every action with a non-empty row scope`,
-      );
-    }
+    this._hasDelegations = hasActionDelegations(new.target);
     const scoped = this.hasField !== proto.hasField;
     this._hasFieldOverridden = scoped;
     const isVisible = (path: string): boolean => {
@@ -899,13 +952,52 @@ export class AsDbReadableController<
       if (entry && this._indexVisible(entry)) return undefined;
       return badRequest("$vector", vectorIndexNotFoundMessage(vectorName || undefined));
     }
-    if (name && this.readable.isSearchable()) {
+    if (!this.readable.isSearchable()) return undefined; // the searchable-column fallback
+    if (name) {
       const entry = this.indexFieldPaths().find((e) => e.type === "text" && e.name === name);
       if (!entry || !this._indexVisible(entry)) {
         return badRequest("$index", searchIndexNotFoundMessage(name));
       }
+      return undefined;
+    }
+    // No `$index`: the default text index answers — refused like a missing
+    // index when it reads a field this request can't see (a native search
+    // over it would be a value oracle). `/meta` hides it by the same rule.
+    const def = this.indexFieldPaths().find((e) => e.type === "text" && e.isDefault);
+    if (def && !this._indexVisible(def)) {
+      return badRequest("$search", searchIndexNotFoundMessage());
     }
     return undefined;
+  }
+
+  /**
+   * `/meta`'s search surface as THIS request may use it (only when
+   * {@link hasField} is overridden — the rule of the index gate): indexes
+   * reading a hidden field are left out of `searchIndexes`; `searchable` /
+   * `vectorSearchable` / `geoSearchable` turn off when the index a request
+   * naming none would use reads one (`searchable` stays on for the
+   * `@db.column.searchable` fallback when any of its fields is visible).
+   */
+  private _applyIndexVisibility(meta: TMetaResponse): TMetaResponse {
+    if (!this._hasFieldOverridden) return meta;
+    const entries = this.indexFieldPaths();
+    const visibleDefault = (type: "text" | "vector" | "geo") => {
+      const def = entries.find((e) => e.type === type && e.isDefault);
+      return def !== undefined && this._indexVisible(def);
+    };
+    const hidden = new Set(
+      entries.filter((e) => e.type !== "geo" && !this._indexVisible(e)).map((e) => e.name),
+    );
+    const searchable = this.readable.isSearchable()
+      ? visibleDefault("text")
+      : this._searchFallbackFields.some((f) => this.fieldVisibility.isVisible(f));
+    return {
+      ...meta,
+      searchIndexes: (meta.searchIndexes ?? []).filter((i) => !hidden.has(i.name)),
+      searchable: meta.searchable && searchable,
+      vectorSearchable: meta.vectorSearchable && visibleDefault("vector"),
+      geoSearchable: meta.geoSearchable && visibleDefault("geo"),
+    };
   }
 
   // ── Hooks (overridable) ────────────────────────────────────────────────
@@ -954,7 +1046,9 @@ export class AsDbReadableController<
   ): readonly string[] | Promise<readonly string[]> {
     if (this._overlayIsNoOp) return names;
     return (async () => {
-      const present = new Set((await this.resolveMeta()).actions.map((a) => a.name));
+      // This controller's own envelope (`@DbActionsFrom` entries are judged by their source).
+      const meta = await (this._hasDelegations ? super.resolveMeta() : this.resolveMeta());
+      const present = new Set(meta.actions.map((a) => a.name));
       return names.filter((name) => present.has(name));
     })();
   }
@@ -962,22 +1056,49 @@ export class AsDbReadableController<
   /**
    * The rows the row-level action `actionName` may run on (since 0.1.145),
    * as an extra row filter; `undefined` or `{}` = no restriction (the
-   * default). Enforced by the action gate — ANDed with the {@link rowOverlay}
-   * the action's ids / rows are loaded under, so an id outside it gets the
-   * same 404 "Row not found for action identifier" as a missing one — and
-   * reflected in `$actions` and `GET /meta/actions`, which list the action
-   * only on rows inside it.
+   * default). Enforced by the action gate — the action's ids / rows are
+   * loaded under {@link rowOverlay}, then checked against this filter, so an
+   * id outside it gets the same 404 "Row not found for action identifier"
+   * as a missing one — and reflected in `$actions` and
+   * `GET /meta/actions`, which list the action only on rows inside it.
    *
-   * Runs after {@link prepareRequest}, once per action per request. `$actions`
-   * checks the page's rows with one id-only query per distinct filter
-   * OBJECT (return the same object for several actions to share one query),
-   * straight against the bound readable: the filter may use fields
-   * {@link hasField} hides, and nothing of it reaches the response. Not
-   * overriding it costs nothing.
+   * Since 0.1.147 the hook receives the candidate rows (`ctx`), so a scope
+   * can depend on them — e.g. derive `{ ticketKey: { $in: … } }` from a
+   * related table read for exactly these rows:
+   *
+   * | `ctx.purpose` | asked by | `ctx.ids` |
+   * | --- | --- | --- |
+   * | `"execute"` | the action gate | the loaded ids / rows (≤ `maxIds`; one batch of a query target) |
+   * | `"rows"` | `$actions` on a read (and a view's delegated verdicts) | the read's rows |
+   * | `"available"` | `GET /meta/actions/:id` | the one row |
+   *
+   * - Called only with at least one candidate, at most once per action per
+   *   evaluation; `ctx.ids` is the same array object for every action of
+   *   one evaluation (memoize on it with a `WeakMap`).
+   * - Candidates are already inside the row overlay — ids that do not exist
+   *   or fall outside it never reach the hook.
+   * - The result only restricts (`ids ∧ rowOverlay ∧ scope`); a throw fails
+   *   the request — never a silent "allow".
+   * - The filter runs straight against the bound readable: it may use
+   *   fields {@link hasField} hides, and nothing of it (nor of
+   *   `ctx.loadRows`) reaches the response. Equal filters — the same object,
+   *   or structurally equal ones — share one id-only query.
+   * - Runs after {@link prepareRequest} and, on the action route, after the
+   *   request body is read (it needs the ids).
+   *
+   * Not overriding it costs nothing; a one-parameter override keeps working.
+   * moost-db always passes `ctx` — it is optional in the signature only so
+   * `super.actionRowScope(name)` calls in existing overrides keep compiling.
    *
    * ```ts
-   * protected actionRowScope(action: string) {
-   *   return action === "approve" ? { ownerId: currentUserId() } : undefined
+   * protected async actionRowScope(action: string, ctx: TDbActionScopeContext) {
+   *   if (action !== "resolve") return undefined
+   *   const issues = await ctx.loadRows(["ticketKey"])
+   *   const tickets = await ticketTable.findMany({
+   *     filter: { key: { $in: issues.map((i) => i.ticketKey) }, teamId: currentTeamId() },
+   *     controls: { $select: ["key"] },
+   *   })
+   *   return { ticketKey: { $in: tickets.map((t) => t.key) } }
    * }
    * ```
    *
@@ -985,8 +1106,36 @@ export class AsDbReadableController<
    */
   protected actionRowScope(
     _actionName: string,
+    _ctx?: TDbActionScopeContext,
   ): FilterExpr | undefined | Promise<FilterExpr | undefined> {
     return undefined;
+  }
+
+  /**
+   * The read scope a query target (an action request `{ query }`, since
+   * 0.1.147) resolves under, on top of the action's row overlay — so "every
+   * row matching the query" never reaches rows the caller cannot list. A
+   * view resolving a delegated action's query target applies it too.
+   * Default: `transformFilter({})` (the read overlay of `/query`). Throw an
+   * `HttpError` to refuse query targets for the caller (e.g. no read grant).
+   *
+   * Runs as a READ of this controller: for an action's own query target it
+   * is called in a child of the action event (moost `withControllerContext`,
+   * the controller's `query` handler) after
+   * `prepareRequest({ endpoint: "query", controls })` — so a permission
+   * layer's per-request state is the READ request's (its read grant), never
+   * the action's, and nothing of it leaks back into the action event. The
+   * target's query (`q` filter and controls, `exclude`) is validated in that
+   * read context too ({@link validateControls}, {@link checkCapabilities},
+   * {@link hasField}), on top of the action request's own check: a query
+   * target never filters on, nor counts by, a field the caller can't read.
+   *
+   * @since 0.1.147
+   */
+  protected queryTargetScope(
+    _action: string,
+  ): FilterExpr | undefined | Promise<FilterExpr | undefined> {
+    return this.transformFilter({} as FilterExpr);
   }
 
   /**
@@ -1202,10 +1351,33 @@ export class AsDbReadableController<
       this.logger,
     );
     if (rowLevelEnvelopes.length === 0) return null;
+    this._warnScopeWithoutIdentity();
     if (this._overlayIsNoOp && !this._hasAllowedActions) return rowLevelEnvelopes;
     const allowed = new Set(await this.allowedActions(rowLevelEnvelopes.map((e) => e.info.name)));
     const filtered = rowLevelEnvelopes.filter((e) => allowed.has(e.info.name));
     return filtered.length === 0 ? null : filtered;
+  }
+
+  /**
+   * Once per class: `actionRowScope` is overridden (a permission layer always
+   * does) while the controller's OWN row-level actions can't be scoped — the
+   * readable has no identity, so `$actions` withholds every action with a
+   * non-empty row scope. Silent for controllers without own row actions.
+   */
+  private _warnScopeWithoutIdentity(): void {
+    const ctor = this.constructor as Function;
+    if (
+      !this._hasActionRowScope ||
+      this.readable.preferredId.length > 0 ||
+      warnedNoIdentity.has(ctor)
+    ) {
+      return;
+    }
+    warnedNoIdentity.add(ctor);
+    this.logger.warn(
+      `actionRowScope() is overridden but "${this.readable.tableName}" has no primary key — ` +
+        `\`$actions\` withholds every action with a non-empty row scope`,
+    );
   }
 
   /**
@@ -1240,91 +1412,126 @@ export class AsDbReadableController<
     select: UniqueryControls["$select"] | undefined,
   ): Promise<TAugmentationPrep | null> {
     if (!controls.$actions) return null;
-    const envelopes = await this._resolveAugmentEnvelopes();
-    if (envelopes === null) return null;
-    let scopeGroups: Promise<TActionScopeGroup[]> | null = null;
-    if (this._hasActionRowScope) {
-      // Resolves alongside the read — awaited in `_finishRows`.
-      scopeGroups = this._resolveActionScopeGroups(envelopes);
-      scopeGroups.catch(() => {});
+    const [own, delegations] = await Promise.all([
+      this._resolveAugmentEnvelopes(),
+      this._activeDelegations(),
+    ]);
+    if (own === null && delegations.length === 0) return null;
+    const envelopes = own ?? [];
+    let scopeOverlay: Promise<FilterExpr | undefined> | null = null;
+    if (this._hasActionRowScope && envelopes.length > 0) {
+      // Candidate-free, so it overlaps the read; the scope groups need the
+      // read's rows (awaited in `_finishRows`).
+      scopeOverlay = this.rowOverlay();
+      scopeOverlay.catch(() => {});
     }
-    const resolvedProjection = this._resolveProjectionForAugmenter(select);
-    const widenedSelect =
+    let resolvedProjection = this._resolveProjectionForAugmenter(select);
+    let widenedSelect =
       resolvedProjection === null
         ? null
         : this._widenSelectForActions(envelopes, resolvedProjection);
-    return { envelopes, resolvedProjection, widenedSelect, scopeGroups };
+    if (resolvedProjection !== null && delegations.length > 0) {
+      // A delegation's id paths are selected and KEPT: the client addresses
+      // the source through them.
+      const base = widenedSelect ?? resolvedProjection;
+      const present = new Set(base);
+      const extra = [...new Set(delegations.flatMap((d) => d.paths))].filter(
+        (p) => !present.has(p),
+      );
+      if (extra.length > 0) {
+        widenedSelect = [...base, ...extra];
+        resolvedProjection = [...resolvedProjection, ...extra];
+      }
+    }
+    return { envelopes, resolvedProjection, widenedSelect, scopeOverlay, delegations };
   }
 
   /**
-   * {@link actionRowScope} of every offered action (in parallel, alongside
-   * `overlay`), grouped by filter object; each group's filter is composed
-   * with the row overlay exactly as the gate composes it.
+   * {@link actionRowScope} of every action in `names` for one evaluation
+   * (`ctx`, in parallel, alongside `overlay`), grouped by filter — object
+   * identity first, then structural equality (`filterKey`), so equal filters
+   * share one query; each group's filter is composed with the row overlay
+   * exactly as the gate composes it.
    */
   private async _resolveActionScopeGroups(
-    envelopes: readonly TDbActionEnvelope[],
-    overlay: Promise<FilterExpr | undefined> = this.rowOverlay(),
+    names: readonly string[],
+    ctx: TDbActionScopeContext,
+    overlay: Promise<FilterExpr | undefined>,
   ): Promise<TActionScopeGroup[]> {
     const [rowOverlay, scopes] = await Promise.all([
       overlay,
-      Promise.all(envelopes.map(async (e) => this._actionScope(e.info.name))),
+      Promise.all(names.map(async (name) => this._actionScope(name, ctx))),
     ]);
-    const groups = new Map<FilterExpr, TActionScopeGroup>();
-    for (let i = 0; i < envelopes.length; i++) {
+    const byObject = new Map<FilterExpr, TActionScopeGroup>();
+    const byKey = new Map<string, TActionScopeGroup>();
+    for (let i = 0; i < names.length; i++) {
       const scope = scopes[i];
       if (!scope) continue;
-      let group = groups.get(scope);
+      let group = byObject.get(scope);
       if (!group) {
-        group = { filter: withOverlay(scope, rowOverlay), actions: [] };
-        groups.set(scope, group);
+        const structural = filterKey(scope);
+        group = structural === undefined ? undefined : byKey.get(structural);
+        if (!group) {
+          group = { filter: withOverlay(scope, rowOverlay), actions: [] };
+          if (structural !== undefined) byKey.set(structural, group);
+        }
+        byObject.set(scope, group);
       }
-      group.actions.push(envelopes[i].info.name);
+      group.actions.push(names[i]);
     }
-    return [...groups.values()];
+    return [...new Set(byObject.values())];
   }
 
-  /** Per scoped action, a per-row mask of rows outside its scope (one id-only read per group). */
-  private async _outOfScopeMasks(
-    rows: readonly Record<string, unknown>[],
-    groups: readonly TActionScopeGroup[],
-  ): Promise<Map<string, readonly boolean[]>> {
-    const idFields = this.readable.preferredId;
-    // Row index → its id's index in `ids` (-1: the row lacks its identity — in no scope).
-    const idIndex: number[] = [];
-    const ids: Record<string, unknown>[] = [];
-    for (const row of rows) {
-      const id: Record<string, unknown> = {};
-      let complete = idFields.length > 0;
-      for (const f of idFields) {
-        const value = row[f];
-        if (value === undefined || value === null) {
-          complete = false;
-          break;
-        }
-        id[f] = value;
-      }
-      idIndex.push(complete ? ids.push(id) - 1 : -1);
+  /**
+   * Per action of `names`, a per-row mask (parallel to `rows`) of rows
+   * outside its {@link actionRowScope} — one id-only read per distinct
+   * filter. The hook sees the rows' identities (`purpose`); a row lacking
+   * its identity is in no scope. No candidate → no hook call, every row
+   * masked for every action (fail closed). `undefined` when the hook is not
+   * overridden or `rows` is empty.
+   */
+  private async _scopeMasks(
+    rows: readonly (Record<string, unknown> | undefined)[],
+    names: readonly string[],
+    purpose: TDbActionScopePurpose,
+    overlay: Promise<FilterExpr | undefined>,
+  ): Promise<Map<string, readonly boolean[]> | undefined> {
+    if (!this._hasActionRowScope || rows.length === 0 || names.length === 0) return undefined;
+    const { ids, index } = candidateIds(rows, this.readable.preferredId);
+    const masks = new Map<string, readonly boolean[]>();
+    if (ids.length === 0) {
+      const all = rows.map(() => true);
+      for (const name of names) masks.set(name, all);
+      return masks;
     }
     const source = this.readable as unknown as TRowsByIdSource;
+    const groups = await this._resolveActionScopeGroups(
+      names,
+      createScopeContext(purpose, ids, source),
+      overlay,
+    );
     const found = await Promise.all(
       groups.map((group) => findRowsByIds(source, ids, group.filter, [])),
     );
-    const masks = new Map<string, readonly boolean[]>();
     for (let g = 0; g < groups.length; g++) {
-      const mask = idIndex.map((i) => i < 0 || found[g][i] === undefined);
+      const mask = index.map((i) => i < 0 || found[g][i] === undefined);
       for (const name of groups[g].actions) masks.set(name, mask);
     }
     return masks;
   }
 
   /**
-   * The row filter {@link actionRowScope} returns for `action` — `undefined`
-   * when empty or when the hook is not overridden (no call). THE per-action
-   * scope rule: the action gate, `$actions` and `/meta/actions` all read it here.
+   * The row filter {@link actionRowScope} returns for `action` and the
+   * candidates of `ctx` — `undefined` when empty or when the hook is not
+   * overridden (no call). THE per-action scope rule: the action gate,
+   * `$actions` and `/meta/actions` all read it here.
    */
-  private async _actionScope(action: string): Promise<FilterExpr | undefined> {
+  private async _actionScope(
+    action: string,
+    ctx: TDbActionScopeContext,
+  ): Promise<FilterExpr | undefined> {
     if (!this._hasActionRowScope) return undefined;
-    return nonEmptyFilter(await this.actionRowScope(action));
+    return nonEmptyFilter(await this.actionRowScope(action, ctx));
   }
 
   /**
@@ -1344,17 +1551,170 @@ export class AsDbReadableController<
   }
 
   /**
-   * @internal The action gate's overlay (reached by the `@DbAction`
-   * interceptor through {@link ACTION_OVERLAY}): {@link rowOverlay} AND the
-   * action's {@link actionRowScope} (since 0.1.145) — `undefined` when both
-   * are empty.
+   * @internal The action gate's row overlay (reached by the `@DbAction`
+   * interceptor through {@link ACTION_OVERLAY}): {@link rowOverlay}. Since
+   * 0.1.147 the action's {@link actionRowScope} is applied separately to the
+   * loaded candidates ({@link ACTION_SCOPE}).
    */
-  async [ACTION_OVERLAY](action: string | undefined): Promise<FilterExpr | undefined> {
-    const [overlay, scope] = await Promise.all([
-      this.rowOverlay(),
-      action === undefined ? undefined : this._actionScope(action),
+  [ACTION_OVERLAY](_action: string | undefined): Promise<FilterExpr | undefined> {
+    return this.rowOverlay();
+  }
+
+  /** @internal {@link actionRowScope} for the gate's loaded candidates (since 0.1.147). */
+  [ACTION_SCOPE](action: string, ctx: TDbActionScopeContext): Promise<FilterExpr | undefined> {
+    return this._actionScope(action, ctx);
+  }
+
+  /** @internal `true` when {@link actionRowScope} is overridden (since 0.1.147). */
+  get [ACTION_SCOPED](): boolean {
+    return this._hasActionRowScope;
+  }
+
+  /**
+   * @internal Resolves a query target (phase 1, since 0.1.147): the `query`
+   * body validated (shape, `$search` / `$index` only, the read's capability
+   * and index gate), then ONE read of `select` ordered by identity —
+   * `filter (+ $search) ∧ overlay ∧ queryTargetScope ∧ ¬exclude`, at most
+   * `cap + 1` rows. More than the cap → 400 `TARGET_TOO_LARGE`; a count
+   * other than `expectCount` → 409 `TARGET_CHANGED`. `load` re-reads rows
+   * of the snapshot that still match the same target (phase 2).
+   */
+  async [RESOLVE_TARGET](req: TTargetRequest): Promise<TResolvedTarget> {
+    const { action } = req;
+    const body = parseQueryTargetBody(action, req.query);
+    const parsed = this.parseUrlOr400(body.q.startsWith("?") ? body.q.slice(1) : body.q);
+    const controls: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries((parsed.controls ?? {}) as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      if (k !== "$search" && k !== "$index") {
+        throw targetInvalid(
+          action,
+          `A query target takes a filter, $search and $index only — "${k}" is not accepted`,
+        );
+      }
+      if (k === "$search" && typeof v !== "string" && typeof v !== "number") {
+        throw targetInvalid(action, "$search must be a search term");
+      }
+      controls[k] = k === "$search" ? `${v as string | number}` : v;
+    }
+    if (controls.$index !== undefined && typeof controls.$index !== "string") {
+      throw targetInvalid(action, "$index must be an index name");
+    }
+    const exclude = body.exclude ?? [];
+    const shapes = req.excludeShapes ?? [];
+    // The query (filter, controls, exclusions) as THIS request may run it:
+    // `validateControls` (per-control authorization), the capability / index
+    // gate and the identifications under `hasField`.
+    const check = (): void => {
+      const controlsError = this.validateControls(controls, "query");
+      if (controlsError) throw new HttpError(400, controlsError);
+      const gateError = this.checkCapabilities({ filter: parsed.filter, controls });
+      if (gateError) throw gateError;
+      if (exclude.length > 0) {
+        const source =
+          shapes.length === 0
+            ? this.idSource
+            : {
+                identifications: [
+                  ...this.idSource.identifications,
+                  ...shapes.map((fields) => ({ fields, source: "target" })),
+                ],
+                fieldDescriptors: this.readable.fieldDescriptors,
+              };
+        validateMultiId(exclude, source, req.maxExclude);
+      }
+    };
+    check();
+
+    // An own action's target: the query must ALSO pass as a read — checked,
+    // and `queryTargetScope` evaluated, in a read context (see the hook).
+    const [base, overlay, scope] = await Promise.all([
+      req.overlay === "read"
+        ? this.transformFilter(parsed.filter ?? ({} as FilterExpr))
+        : parsed.filter,
+      req.overlay === "action" ? this.rowOverlay() : undefined,
+      req.overlay === "action"
+        ? this._asRead(controls, () => {
+            check();
+            return this.queryTargetScope(action);
+          })
+        : this.queryTargetScope(action),
     ]);
-    return scope ? withOverlay(scope, overlay) : overlay;
+    const filter = conjoin(
+      this.applySearchFallback(base, controls),
+      overlay,
+      scope,
+      exclude.length > 0 ? ({ $not: { $or: exclude } } as FilterExpr) : undefined,
+    );
+    const strategy = await this._resolveReadStrategy(controls);
+    const findMany = (q: unknown): Promise<Record<string, unknown>[]> =>
+      (strategy.kind === "search"
+        ? this.readable.search(strategy.term, q as Uniquery<any, any>, strategy.index)
+        : this.readable.findMany(q as Uniquery<any, any>)) as Promise<Record<string, unknown>[]>;
+
+    const cap = Math.min(req.cap, body.maxRows ?? Infinity);
+    const sort: Record<string, 1> = {};
+    for (const f of req.select) sort[f] = 1;
+    const rows = await findMany({
+      filter,
+      controls: { $select: [...new Set(req.select)], $sort: sort, $limit: cap + 1 },
+    });
+    if (rows.length > cap) {
+      throw new ActionTargetError(
+        "TARGET_TOO_LARGE",
+        action,
+        `The query matches more than ${cap} rows`,
+        { cap },
+      );
+    }
+    if (body.expectCount !== undefined && body.expectCount !== rows.length) {
+      throw new ActionTargetError(
+        "TARGET_CHANGED",
+        action,
+        `The query now matches ${rows.length} rows (expected ${body.expectCount})`,
+        { matched: rows.length },
+      );
+    }
+    return {
+      matched: rows.length,
+      rows,
+      dryRun: body.dryRun === true,
+      exclude,
+      // A `$limit` of its own: a search pipeline defaults to 1000 rows, which
+      // would turn every later row of a large batch "stale".
+      load: (ids, select) =>
+        findRowsByIds(
+          {
+            findMany: (q) =>
+              findMany({
+                ...q,
+                controls: {
+                  ...(q.controls as object),
+                  $limit: Math.max(ids.length, cap + 1),
+                },
+              }),
+          },
+          ids,
+          filter,
+          select,
+        ),
+    };
+  }
+
+  /**
+   * Runs `fn` as a READ of this controller (since 0.1.147): in a child of
+   * the current event whose controller context is this controller's `query`
+   * handler, after `prepareRequest({ endpoint: "query", controls })` — the
+   * request-scoped state a permission layer builds there (read grant, field
+   * visibility) is the read's and stays in the child.
+   */
+  private _asRead<R>(controls: Record<string, unknown>, fn: () => R | Promise<R>): Promise<R> {
+    return runAsController(this, "query", async () => {
+      if (typeof this.prepareRequest === "function") {
+        await this.prepareRequest({ endpoint: "query", controls });
+      }
+      return fn();
+    });
   }
 
   /**
@@ -1550,20 +1910,31 @@ export class AsDbReadableController<
     prep: TAugmentationPrep | null,
     ctx: TDbDecorateContext,
   ): void | Promise<void> {
-    const groups = prep?.scopeGroups;
-    if (!groups) return this._augmentAndDecorate(rows, prep, ctx);
+    const overlay = prep?.scopeOverlay;
+    if (!prep || (!overlay && prep.delegations.length === 0)) {
+      return this._augmentAndDecorate(rows, prep, ctx);
+    }
     return (async () => {
-      const masks = await this._outOfScopeMasks(rows, await groups);
-      await this._augmentAndDecorate(rows, prep, ctx, masks);
+      const names = prep.envelopes.map((e) => e.info.name);
+      const [masks, delegated] = await Promise.all([
+        overlay ? this._scopeMasks(rows, names, "rows", overlay) : undefined,
+        Promise.all(prep.delegations.map((d) => this._delegatedRowVerdicts(rows, d))),
+      ]);
+      await this._augmentAndDecorate(rows, prep, ctx, masks, delegated);
     })();
   }
 
-  /** `$actions` augmentation (when `prep`), then {@link decorateRows} when implemented. */
+  /**
+   * `$actions` augmentation (when `prep`) — own actions, then the delegated
+   * ones (`delegated`: per delegation, per row) — then {@link decorateRows}
+   * when implemented.
+   */
   private _augmentAndDecorate(
     rows: Record<string, unknown>[],
     prep: TAugmentationPrep | null,
     ctx: TDbDecorateContext,
     outOfScope?: ReadonlyMap<string, readonly boolean[]>,
+    delegated?: ReadonlyArray<ReadonlyArray<TDbAvailableActions | undefined>>,
   ): void | Promise<void> {
     if (prep) {
       augmentRowsWithActions({
@@ -1573,8 +1944,202 @@ export class AsDbReadableController<
         gateFields: (e) => this._gateFields(e),
         outOfScope,
       });
+      if (prep.delegations.length > 0) mergeDelegatedActions(rows, delegated ?? []);
     }
     return this._decorates ? this.decorateRows!(rows, ctx) : undefined;
+  }
+
+  // ── @DbActionsFrom (since 0.1.147) ─────────────────────────────────────
+
+  /**
+   * The app of the current event, through DI — never the one this
+   * (singleton) instance was constructed in, which may be gone (a re-booted
+   * app, a hot reload).
+   */
+  private _currentApp(): Promise<Moost> {
+    return useControllerContext().instantiate(Moost) as Promise<Moost>;
+  }
+
+  /** The class's `@DbActionsFrom` delegations, validated on first use (per app). */
+  private async _delegations(): Promise<readonly TDelegation[]> {
+    if (!this._hasDelegations) return [];
+    return discoverDelegations({
+      ctor: this.constructor as Function,
+      readable: this.readable,
+      app: await this._currentApp(),
+      logger: this.logger,
+      instantiate: (ctor) => useControllerContext().instantiate(ctor as never),
+    });
+  }
+
+  /**
+   * The delegations this request may use: every id path visible
+   * ({@link hasField}) and kept by {@link transformProjection} — a
+   * delegation whose ids the request can't read is dropped.
+   */
+  private async _activeDelegations(): Promise<readonly TDelegation[]> {
+    if (!this._hasDelegations) return [];
+    const all = await this._delegations();
+    const visible = all.filter((d) => d.paths.every((p) => this.fieldVisibility.isVisible(p)));
+    if (visible.length === 0 || !this._hasProjectionHook) return visible;
+    const paths = [...new Set(visible.flatMap((d) => d.paths))];
+    const kept = this._resolveProjectionForAugmenter(await this.transformProjection(paths));
+    if (kept === null) return visible;
+    const keptSet = new Set(kept);
+    return visible.filter((d) => d.paths.every((p) => keptSet.has(p)));
+  }
+
+  /**
+   * Runs `fn` on the delegation's source controller (this event's instance)
+   * evaluated as itself ({@link runAsController}); a 401 / 403 from its
+   * `prepareRequest` (the caller holds no grant there) yields `refused`.
+   */
+  private async _onSource<R>(
+    d: TDelegation,
+    fn: (source: TDelegateSource) => Promise<R>,
+    refused: R,
+  ): Promise<R> {
+    const source = (await useControllerContext().instantiate(d.source as never)) as TDelegateSource;
+    try {
+      return await runAsController(source, "availableActionsById", () => fn(source));
+    } catch (error) {
+      if (!isAuthRefusal(error)) throw error;
+      this.logger.debug?.(`delegated actions of ${d.source.name} refused for this caller`);
+      return refused;
+    }
+  }
+
+  /** Per row, the source's verdict for the row it maps to (`undefined`: no source id). */
+  private async _delegatedRowVerdicts(
+    rows: readonly Record<string, unknown>[],
+    d: TDelegation,
+  ): Promise<Array<TDbAvailableActions | undefined>> {
+    const { ids, index } = mapToSourceIds(rows, d.idMap);
+    if (ids.length === 0) return rows.map(() => undefined);
+    const verdicts = await this._onSource(
+      d,
+      (source) => source[ACTION_VERDICTS](ids, d.names),
+      [] as Array<TDbAvailableActions | undefined>,
+    );
+    return index.map((i) => (i < 0 ? undefined : verdicts[i]));
+  }
+
+  /** The `/meta.actions` entries of the delegations the caller may run (per its source). */
+  private async _delegatedInfos(): Promise<TDbActionInfo[]> {
+    const delegations = await this._activeDelegations();
+    const lists = await Promise.all(
+      delegations.map(async (d) => {
+        const allowed = new Set(
+          await this._onSource(d, (source) => source[ALLOWED_ACTIONS](d.names), []),
+        );
+        return d.infos.filter((info) => allowed.has(info.name));
+      }),
+    );
+    return lists.flat();
+  }
+
+  /**
+   * The cached `/meta` envelope through {@link applyMetaOverlay}, plus —
+   * since 0.1.147 — the `@DbActionsFrom` actions the caller may run as their
+   * source decides (`allowedActions` of the source, evaluated as itself) and,
+   * under an overridden {@link hasField}, the search surface narrowed to the
+   * indexes the request may use (the index gate's rule). Delegated entries
+   * never pass this controller's own `applyMetaOverlay`.
+   */
+  protected override resolveMeta(): TMetaResponse | Promise<TMetaResponse> {
+    const own = super.resolveMeta();
+    if (!this._hasDelegations && !this._hasFieldOverridden) return own;
+    return (async () => {
+      const [meta, delegated] = await Promise.all([
+        own,
+        this._hasDelegations ? this._delegatedInfos() : [],
+      ]);
+      const visible = this._applyIndexVisibility(meta);
+      return delegated.length > 0
+        ? { ...visible, actions: [...visible.actions, ...delegated] }
+        : visible;
+    })();
+  }
+
+  /**
+   * The delegated part of `GET /meta/actions…` for the source ids `sourceIdOf`
+   * derives from the request (`undefined`: not derivable by key renaming —
+   * the delegation is left out).
+   */
+  private async _delegatedAvailable(
+    own: TDbAvailableActions,
+    sourceIdOf: (d: TDelegation) => Record<string, unknown> | undefined,
+  ): Promise<TDbAvailableActions> {
+    const delegations = await this._activeDelegations();
+    const parts = await Promise.all(
+      delegations.map(async (d) => {
+        const id = sourceIdOf(d);
+        if (id === undefined) return undefined;
+        return this._onSource(d, (source) => source[AVAILABLE_ACTIONS](id, d.names), undefined);
+      }),
+    );
+    let out = own;
+    for (const part of parts) {
+      if (!part || part.actions.length + Object.keys(part.disabledReasons ?? {}).length === 0) {
+        continue;
+      }
+      const reasons = { ...out.disabledReasons, ...part.disabledReasons };
+      out = { actions: [...out.actions, ...part.actions] };
+      if (Object.keys(reasons).length > 0) out.disabledReasons = reasons;
+    }
+    return out;
+  }
+
+  /**
+   * @internal Source side of a delegation: the `$actions` verdicts of `names`
+   * for `ids` (aligned; `undefined` = not found under the row overlay), as
+   * this controller's own `$actions` / `GET /meta/actions` compute them —
+   * its `prepareRequest("availableActions")`, `allowedActions`, row overlay,
+   * `actionRowScope` (`purpose: "rows"`) and `disabled`.
+   */
+  async [ACTION_VERDICTS](
+    ids: Record<string, unknown>[],
+    names: readonly string[],
+  ): Promise<Array<TDbAvailableActions | undefined>> {
+    await this.parseRequest("availableActions");
+    const envelopes = await this._envelopesNamed(names);
+    if (envelopes.length === 0) return ids.map(() => ({ actions: [] }));
+    const overlay = await this.rowOverlay();
+    const fieldsOf = envelopes.map((e) => this._gateFields(e));
+    const select = new Set<string>(this.readable.preferredId);
+    for (const fields of fieldsOf) for (const f of fields) select.add(f);
+    const source = this.readable as unknown as TRowsByIdSource;
+    const rows = await findRowsByIds(source, ids, overlay, select);
+    const masks = await this._scopeMasks(
+      rows,
+      envelopes.map((e) => e.info.name),
+      "rows",
+      Promise.resolve(overlay),
+    );
+    return this._verdicts(envelopes, rows, masks, fieldsOf);
+  }
+
+  /** @internal Source side of a delegation: `GET /meta/actions` for one id, `names` only. */
+  async [AVAILABLE_ACTIONS](
+    id: Record<string, unknown>,
+    names: readonly string[],
+  ): Promise<TDbAvailableActions> {
+    await this.parseRequest("availableActions");
+    return this._availableActions(id, names);
+  }
+
+  /** @internal Source side of a delegation: the `names` the caller may run (`allowedActions`). */
+  async [ALLOWED_ACTIONS](names: readonly string[]): Promise<readonly string[]> {
+    await this.parseRequest("availableActions");
+    const envelopes = await this._envelopesNamed(names);
+    return envelopes.map((e) => e.info.name);
+  }
+
+  /** {@link _resolveAugmentEnvelopes} restricted to `names`. */
+  private async _envelopesNamed(names: readonly string[]): Promise<TDbActionEnvelope[]> {
+    const wanted = new Set(names);
+    const all = await this._resolveAugmentEnvelopes();
+    return (all ?? []).filter((e) => wanted.has(e.info.name));
   }
 
   /**
@@ -2114,7 +2679,16 @@ export class AsDbReadableController<
   @DbEndpoint("availableActions")
   async availableActionsById(@Param("id") id: string): Promise<TDbAvailableActions> {
     await this.parseRequest("availableActions");
-    return this._availableActions(id);
+    const own = await this._availableActions(id);
+    if (!this._hasDelegations) return own;
+    // `@DbActionsFrom`: the source id is this id renamed — only when the
+    // delegation maps every source field from the single-field preferredId.
+    const preferred = this.readable.preferredId;
+    return this._delegatedAvailable(own, (d) =>
+      preferred.length === 1 && d.paths.every((p) => p === preferred[0])
+        ? Object.fromEntries(Object.keys(d.idMap).map((f) => [f, id]))
+        : undefined,
+    );
   }
 
   /**
@@ -2129,52 +2703,298 @@ export class AsDbReadableController<
   ): Promise<TDbAvailableActions | HttpError> {
     await this.parseRequest("availableActions");
     const idObj = this.extractIdShape(query);
-    if (idObj instanceof HttpError) return idObj;
-    return this._availableActions(idObj);
+    const sourceIdOf = (d: TDelegation): Record<string, unknown> | undefined =>
+      d.paths.every((p) => query[p] !== undefined)
+        ? Object.fromEntries(Object.entries(d.idMap).map(([f, p]) => [f, query[p]]))
+        : undefined;
+    if (idObj instanceof HttpError) {
+      // `@DbActionsFrom`: the query may still name a source id by renaming.
+      const delegations = await this._activeDelegations();
+      if (!delegations.some((d) => sourceIdOf(d) !== undefined)) return idObj;
+      return this._delegatedAvailable({ actions: [] }, sourceIdOf);
+    }
+    const own = await this._availableActions(idObj);
+    return this._hasDelegations ? this._delegatedAvailable(own, sourceIdOf) : own;
+  }
+
+  /**
+   * **POST /delegated-actions/:name** — a query target for a `@DbActionsFrom`
+   * action whose source action declares `queryTarget` (since 0.1.147); the
+   * action's `/meta` entry points here (`queryTarget.url`). Body
+   * `{ query: { q, exclude?, expectCount?, maxRows?, dryRun? }, input? }`.
+   *
+   * The source must list the action for the caller (its `allowedActions`,
+   * as `$actions` does) — else 403, dry runs included. This controller then
+   * resolves the rows matching `q` under its own read scope (`transformFilter`
+   * ∧ {@link queryTargetScope} ∧ ¬`exclude` — `exclude` entries use this
+   * controller's identifications or the delegation's id paths, and the
+   * source rows they map to are left out even when other view rows map to
+   * them too), maps them to source ids (a row without one is skipped as
+   * `"unmapped"`), then runs the SOURCE's action route on them in batches
+   * inside this request (`MoostHttp.invoke`) — its guards, `prepareRequest`,
+   * row overlay, `actionRowScope` and `disabled` re-check every batch, and
+   * every body reader of the source sees the batch's `{ ids, input }`. Before
+   * each batch the view rows are re-checked against the target: a source id
+   * none of whose view rows still matches is skipped as `"stale"`; ids the
+   * source's gate refuses are skipped with their reasons. A batch failing
+   * after an earlier batch ran stops the run: the answer is the partial
+   * summary with `aborted` and every id not run listed in `failed`. The
+   * `message` (string) each batch's handler returned is passed on:
+   * `messages` per batch, `message` the distinct ones joined by newlines. A
+   * dry run answers `{ matched }`; otherwise the answer is the run's
+   * {@link TDbActionTargetSummary}. An action of the delegation that takes no
+   * query target answers 400 `TARGET_INVALID`. `prepareRequest` runs first
+   * with `endpoint: "delegatedAction"`. Registered only on controllers
+   * declaring `@DbActionsFrom`.
+   */
+  async runDelegatedOnQuery(): Promise<TDbActionTargetSummary | { matched: number }> {
+    const name = useRouteParams<{ name: string }>().get("name");
+    if (!this._hasDelegations) throw new HttpError(404, `Unknown action "${name}"`);
+    if (typeof this.prepareRequest === "function") {
+      await this.prepareRequest({ endpoint: "delegatedAction", action: name });
+    }
+    const active = await this._activeDelegations();
+    const delegation = active.find((d) => d.queryTargets.has(name));
+    if (!delegation) {
+      if (active.some((d) => d.names.includes(name))) {
+        throw targetInvalid(name, `Action "${name}" does not accept a query target`);
+      }
+      throw new HttpError(404, `Unknown action "${name}"`);
+    }
+    const limits = delegation.queryTargets.get(name)!;
+    const raw = await useBody(current()).parseBody<unknown>();
+    const env = (raw ?? {}) as { ids?: unknown; input?: unknown; query?: unknown };
+    if (typeof env !== "object" || Array.isArray(env)) {
+      throw targetInvalid(name, "Action body must be an object of shape { query, input? }");
+    }
+    if (env.ids !== undefined) {
+      throw targetInvalid(
+        name,
+        "This route takes a `query` — post `ids` to the action's own route",
+      );
+    }
+    if (env.query === undefined) throw targetInvalid(name, "`query` is required");
+
+    // The source decides first whether the caller may run the action at all.
+    const allowed = await this._onSource(
+      delegation,
+      (source) => source[ALLOWED_ACTIONS]([name]),
+      [] as readonly string[],
+    );
+    if (!allowed.includes(name)) {
+      throw new HttpError(403, `Action "${name}" is not allowed`);
+    }
+
+    const viewIds = this.readable.preferredId;
+    const identity = viewIds.length > 0 ? viewIds : delegation.paths;
+    const resolved = await this[RESOLVE_TARGET]({
+      action: name,
+      query: env.query,
+      cap: limits.maxRows,
+      maxExclude: limits.maxIds,
+      overlay: "read",
+      select: [...new Set([...identity, ...delegation.paths])],
+      excludeShapes: [delegation.paths],
+    });
+    if (resolved.dryRun) return { matched: resolved.matched };
+
+    const summary: TDbActionTargetSummary = {
+      matched: resolved.matched,
+      processed: 0,
+      skipped: [],
+      failed: [],
+    };
+    const { ids, index } = mapToSourceIds(resolved.rows, delegation.idMap);
+    const visibleIdentity = identity.filter((f) => this.fieldVisibility.isVisible(f));
+    for (let i = 0; i < index.length; i++) {
+      if (index[i] >= 0) continue;
+      const row = resolved.rows[i];
+      summary.skipped.push({
+        id: Object.fromEntries(visibleIdentity.map((f) => [f, row[f]])),
+        reason: "unmapped",
+      });
+    }
+    const excluded = await this._excludedSourceKeys(resolved.exclude, delegation);
+    const fields = Object.keys(delegation.idMap).toSorted();
+    const queue = ids.filter((id) => !excluded.has(idKey(id, fields)!));
+
+    const http = (await useControllerContext().instantiate(MoostHttp)) as MoostHttp;
+    const batchSize = Math.max(1, Math.min(limits.batchSize, limits.maxIds));
+    let ran = false;
+    const messages: string[] = [];
+    for (let start = 0; start < queue.length; start += batchSize) {
+      const batch = await this._stillTargeted(
+        resolved,
+        delegation,
+        queue.slice(start, start + batchSize),
+        summary,
+      );
+      if (batch.length === 0) continue;
+      const outcome = await runSourceActionBatch(http, limits.route, batch, env.input);
+      if (outcome.message !== undefined) messages.push(outcome.message);
+      summary.processed += outcome.processed;
+      summary.skipped.push(...outcome.skipped);
+      summary.failed.push(...outcome.failed);
+      if (outcome.error === undefined) {
+        ran ||= outcome.ran;
+        continue;
+      }
+      // Nothing ran yet: the request fails as the source failed it.
+      if (!ran && !outcome.ran) throw outcome.error;
+      const reason = errorMessage(outcome.error);
+      for (const id of outcome.pending ?? []) summary.failed.push({ id, reason });
+      for (const id of queue.slice(start + batchSize)) {
+        summary.failed.push({ id, reason: "not run" });
+      }
+      summary.aborted = { status: errorStatus(outcome.error), message: reason };
+      break;
+    }
+    if (messages.length > 0) {
+      summary.messages = messages;
+      summary.message = [...new Set(messages)].join("\n");
+    }
+    return summary;
+  }
+
+  /**
+   * The id keys (`idMap` fields) of the source rows `exclude` leaves out of a
+   * delegated target — an entry by the id paths names its source row
+   * directly; one by a view identification names the source row of that view
+   * row (read without overlay: excluding can only narrow the run).
+   */
+  private async _excludedSourceKeys(
+    exclude: readonly Record<string, unknown>[],
+    d: TDelegation,
+  ): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (exclude.length === 0) return out;
+    const fields = Object.keys(d.idMap).toSorted();
+    const paths = new Set(d.paths);
+    const byView: Record<string, unknown>[] = [];
+    const add = (rows: readonly Record<string, unknown>[]) => {
+      for (const id of mapToSourceIds(rows, d.idMap).ids) out.add(idKey(id, fields)!);
+    };
+    const direct: Record<string, unknown>[] = [];
+    for (const entry of exclude) {
+      const keys = Object.keys(entry);
+      if (keys.length === paths.size && keys.every((k) => paths.has(k))) direct.push(entry);
+      else byView.push(entry);
+    }
+    add(direct);
+    if (byView.length > 0) {
+      const rows = await findRowsByIds(
+        this.readable as unknown as TRowsByIdSource,
+        byView,
+        undefined,
+        d.paths,
+      );
+      add(rows.filter((r): r is Record<string, unknown> => r !== undefined));
+    }
+    return out;
+  }
+
+  /**
+   * The source ids of `batch` that some view row still maps to under the
+   * target's query (phase-2 re-check); the others are recorded in
+   * `summary.skipped` as `"stale"`.
+   */
+  private async _stillTargeted(
+    resolved: TResolvedTarget,
+    d: TDelegation,
+    batch: Record<string, unknown>[],
+    summary: TDbActionTargetSummary,
+  ): Promise<Record<string, unknown>[]> {
+    const keys = batch.map((id) =>
+      Object.fromEntries(Object.entries(d.idMap).map(([field, path]) => [path, id[field]])),
+    );
+    const still = await resolved.load(keys, d.paths);
+    const out: Record<string, unknown>[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      if (still[i]) out.push(batch[i]);
+      else summary.skipped.push({ id: batch[i], reason: "stale" });
+    }
+    return out;
   }
 
   /**
    * The row resolves ONCE, like `/one/:id` under {@link rowOverlay}; scoped
-   * actions are then checked on it exactly like `$actions` rows.
+   * actions are then checked on it (`purpose: "available"`) exactly like
+   * `$actions` rows.
    */
-  private async _availableActions(id: unknown): Promise<TDbAvailableActions> {
-    const envelopes = await this._resolveAugmentEnvelopes();
-    if (envelopes === null) return { actions: [] };
-    const overlay = this.rowOverlay();
-    const groups = this._hasActionRowScope
-      ? this._resolveActionScopeGroups(envelopes, overlay)
-      : undefined;
-    groups?.catch(() => {});
+  private async _availableActions(
+    id: unknown,
+    names?: readonly string[],
+  ): Promise<TDbAvailableActions> {
+    const envelopes = names
+      ? await this._envelopesNamed(names)
+      : await this._resolveAugmentEnvelopes();
+    if (!envelopes?.length) return { actions: [] };
+    const overlay = await this.rowOverlay();
     const idKeys = id !== null && typeof id === "object" ? Object.keys(id) : [];
     const fieldsOf = envelopes.map((e) => {
       const fields = this._gateFields(e);
       return idKeys.every((k) => fields.has(k)) ? fields : new Set([...fields, ...idKeys]);
     });
-    const select = new Set<string>();
+    const select = new Set<string>(this.readable.preferredId);
     for (const fields of fieldsOf) for (const f of fields) select.add(f);
-    const row = (await this._findRow(id, await overlay, { $select: [...select] })) as Record<
+    const row = (await this._findRow(id, overlay, { $select: [...select] })) as Record<
       string,
       unknown
     > | null;
     if (!row) return { actions: [] };
-    const masks = groups ? await this._outOfScopeMasks([row], await groups) : undefined;
+    const masks = await this._scopeMasks(
+      [row],
+      envelopes.map((e) => e.info.name),
+      "available",
+      Promise.resolve(overlay),
+    );
+    return this._verdicts(envelopes, [row], masks, fieldsOf)[0]!;
+  }
 
-    const actions: string[] = [];
-    let disabledReasons: Record<string, string> | undefined;
-    for (let i = 0; i < envelopes.length; i++) {
-      const name = envelopes[i].info.name;
-      if (masks?.get(name)?.[0]) continue;
-      const disabled = getCandidate(envelopes[i])?.disabledFn;
-      // The predicate sees exactly the columns this action's gate loads.
-      const verdict = disabled ? judgeRow(name, disabled, projectRow(row, fieldsOf[i])) : false;
-      if (!verdict) {
-        actions.push(name);
-        continue;
+  /**
+   * Per row (`undefined` = not found → no verdict): the actions of
+   * `envelopes` it lists — minus those `masks` put it outside of, and those
+   * whose `disabled` rule refuses it on the fields its gate loads
+   * (`fieldsOf`, parallel to `envelopes`) — with the refusal reasons.
+   */
+  private _verdicts(
+    envelopes: readonly TDbActionEnvelope[],
+    rows: readonly (Record<string, unknown> | undefined)[],
+    masks: ReadonlyMap<string, readonly boolean[]> | undefined,
+    fieldsOf: readonly ReadonlySet<string>[],
+  ): Array<TDbAvailableActions | undefined> {
+    const present: Record<string, unknown>[] = [];
+    for (const row of rows) if (row) present.push(row);
+    // One predicate call per action over every present row (batch shape).
+    const verdicts = envelopes.map((e, i) => {
+      const disabled = getCandidate(e)?.disabledFn;
+      return disabled && present.length > 0
+        ? judgeRows(
+            e.info.name,
+            disabled,
+            present.map((row) => projectRow(row, fieldsOf[i])),
+          )
+        : undefined;
+    });
+    let p = 0;
+    return rows.map((row, r) => {
+      if (!row) return undefined;
+      const at = p++;
+      const actions: string[] = [];
+      let disabledReasons: Record<string, string> | undefined;
+      for (let i = 0; i < envelopes.length; i++) {
+        const name = envelopes[i].info.name;
+        if (masks?.get(name)?.[r]) continue;
+        const verdict = verdicts[i]?.[at];
+        if (!verdict) {
+          actions.push(name);
+          continue;
+        }
+        const reason = verdictReason(verdict);
+        if (reason !== undefined) (disabledReasons ??= {})[name] = reason;
       }
-      const reason = verdictReason(verdict);
-      if (reason !== undefined) (disabledReasons ??= {})[name] = reason;
-    }
-    return disabledReasons ? { actions, disabledReasons } : { actions };
+      return disabledReasons ? { actions, disabledReasons } : { actions };
+    });
   }
 
   /**
@@ -2291,6 +3111,29 @@ export class AsDbReadableController<
       if (index.type === "geo") return true;
     }
     return false;
+  }
+}
+
+/**
+ * Appends each row's delegated verdicts (`delegated`: per delegation, per
+ * row) to its `$actions` / `$disabledReasons`; every row gets `$actions`.
+ */
+function mergeDelegatedActions(
+  rows: Record<string, unknown>[],
+  delegated: ReadonlyArray<ReadonlyArray<TDbAvailableActions | undefined>>,
+): void {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const actions = [...((row.$actions as string[] | undefined) ?? [])];
+    let reasons = row.$disabledReasons as Record<string, string> | undefined;
+    for (const verdicts of delegated) {
+      const verdict = verdicts[i];
+      if (!verdict) continue;
+      actions.push(...verdict.actions);
+      if (verdict.disabledReasons) reasons = Object.assign(reasons ?? {}, verdict.disabledReasons);
+    }
+    row.$actions = actions;
+    if (reasons) row.$disabledReasons = reasons;
   }
 }
 

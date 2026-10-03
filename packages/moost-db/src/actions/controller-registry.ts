@@ -1,30 +1,40 @@
 import { getAtscriptDbMate } from "../mate";
 import { WARN_PREFIX } from "./keys";
 
-// Late binding avoids an import cycle with the controller classes.
-// Decoration-time only: prototype-chain check. Runtime table lookup is
-// duck-typed (see `id-cache.controllerTable`) — `instanceof` breaks when
-// moost-db loads in two module realms (moost-vite SSR).
+// Class brands (registered symbols, set once on the base classes and
+// inherited by every subclass through the constructor chain) instead of
+// prototype identity: moost-db may load in two module realms (moost-vite SSR,
+// a linked package next to an installed one) and each realm's base class is a
+// different object — a brand from either realm is the same symbol. Late
+// binding avoids an import cycle with the controller classes.
 
-let asDbReadableCtor: Function | null = null;
-let asValueHelpCtor: Function | null = null;
+const READABLE_BRAND = Symbol.for("atscript-db.AsDbReadableController");
+const VALUE_HELP_BRAND = Symbol.for("atscript-db.AsValueHelpController");
+
+function brand(ctor: Function, key: symbol): void {
+  Object.defineProperty(ctor, key, { value: true, enumerable: false, configurable: true });
+}
+
+function hasBrand(ctor: Function, key: symbol): boolean {
+  return typeof ctor === "function" && (ctor as unknown as Record<symbol, unknown>)[key] === true;
+}
 
 export function registerAsDbReadableController(ctor: Function): void {
-  asDbReadableCtor = ctor;
+  brand(ctor, READABLE_BRAND);
 }
 
 export function registerAsValueHelpController(ctor: Function): void {
-  asValueHelpCtor = ctor;
+  brand(ctor, VALUE_HELP_BRAND);
 }
 
+/** `ctor` is (or extends) `AsDbReadableController` — of any loaded copy of moost-db. */
 export function isAsDbReadableControllerSubclass(ctor: Function): boolean {
-  if (!asDbReadableCtor) return false;
-  return asDbReadableCtor.prototype.isPrototypeOf(ctor.prototype);
+  return hasBrand(ctor, READABLE_BRAND);
 }
 
+/** `ctor` is (or extends) `AsValueHelpController` — of any loaded copy of moost-db. */
 export function isAsValueHelpControllerSubclass(ctor: Function): boolean {
-  if (!asValueHelpCtor) return false;
-  return asValueHelpCtor.prototype.isPrototypeOf(ctor.prototype);
+  return hasBrand(ctor, VALUE_HELP_BRAND);
 }
 
 /** The error every `@DbAction*` on a value-help controller fails with (since 0.1.143). */
