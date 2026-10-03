@@ -650,10 +650,10 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     // @meta.id on non-_id fields:
     // - Always add a unique index so findById can resolve by this field
+    //   (registered in onAfterFlatten, on the stored path)
     // - Only remove from primaryKeys if the schema explicitly defines _id
     //   (via @db.mongo.collection). Otherwise keep it as PK for replace/update.
     if (field !== "_id" && metadata.has("meta.id")) {
-      this._addMongoIndexField("unique", "__pk", field);
       this._pendingUniqueFields.push(field);
     }
     // @db.index.fulltext is registered ONLY by core (`_addIndexField("fulltext", …)`),
@@ -768,6 +768,14 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   override onAfterFlatten(): void {
+    // The `__pk` unique index of each non-_id `@meta.id` field — on the
+    // STORED key: a `@db.column` rename is the document's key, so an index on
+    // the logical name would see `null` in every document.
+    const meta = this._table.getMetadata();
+    for (const field of this._pendingUniqueFields) {
+      this._addMongoIndexField("unique", "__pk", meta.documentPath(field));
+    }
+
     // Apply deferred search-field mappings now that flatMap is complete and
     // safe to read (build is marked done before this hook runs). Nested fields
     // are resolved into `document` / `embeddedDocuments` container nodes here.
