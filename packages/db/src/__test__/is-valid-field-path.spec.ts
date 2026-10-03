@@ -119,6 +119,16 @@ describe("AtscriptDbReadable.isValidFieldPath", () => {
   });
 
   // ── Cycle guard ────────────────────────────────────────────────────────────
+  it("a path may cross the same (self) relation more than once", async () => {
+    const { RfTicket } = await import("./fixtures/rel-filter.as");
+    const encryption = { defaultKeyId: "k", keys: { k: Buffer.alloc(32, 1) } };
+    const db = new DbSpace(() => new MockAdapter(), { encryption } as never);
+    const tickets = db.getTable(RfTicket);
+    expect(tickets.isValidFieldPath("parent.parent.status")).toBe(true);
+    expect(tickets.isValidFieldPath("parent.parent.parent.team.name")).toBe(true);
+    expect(tickets.isValidFieldPath("issues.ticket.issues.ticket.status")).toBe(true);
+    expect(tickets.isValidFieldPath("parent.parent.nope")).toBe(false);
+  });
 
   it("does not infinite-loop on cyclic relations (Post.author → Author.posts → Post...)", () => {
     const db = new DbSpace(() => new MockAdapter());

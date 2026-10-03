@@ -373,6 +373,24 @@ describe("the gate", () => {
     });
   });
 
+  it("a chain may cross the same relation twice (default hasField); the cap still names the depth", async () => {
+    const { controller } = bind();
+    expect(
+      ids(await controller.query("?ticket=$some(issues=$some(ticket=$some(status=open)))")),
+    ).toEqual([1, 3]);
+    expect(
+      await rejected(controller.query("?ticket=$some(issues=$some(ticket=$some(issues=$some())))")),
+    ).toEqual({
+      path: "ticket.issues.ticket.issues",
+      message: 'Relational predicates nest at most 3 levels deep ("ticket.issues.ticket.issues")',
+    });
+    const rows = (await controller.query(
+      "?$with=ticket($with=issues($with=ticket($select=status)))&$sort=id",
+    )) as Array<{ id: number; ticket?: { issues: Array<{ ticket?: { status: string } }> } }>;
+    expect(rows).toBeInstanceOf(Array);
+    expect(rows[0].ticket?.issues[0].ticket?.status).toBe("open");
+  });
+
   it("at most REL_FILTER_CLIENT_MAX_NODES (8) predicates per request, $with sub-filters included", async () => {
     const { controller } = bind(AsDbReadableController, "teams");
     expect(await controller.query(`?${manyPredicates(8)}`)).toEqual([]);

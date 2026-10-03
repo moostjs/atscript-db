@@ -807,7 +807,7 @@ export interface AtscriptDbTableLike {
   relations: ReadonlyMap<string, TDbRelation>;
   foreignKeys: ReadonlyMap<string, TDbForeignKey>;
   getMetadata(): TableMetadata;
-  isValidFieldPath(path: string, visited?: Set<string>): boolean;
+  isValidFieldPath(path: string): boolean;
 }
 
 // ── Write Table Resolver ─────────────────────────────────────────────────

@@ -927,11 +927,12 @@ export class AtscriptDbReadable<
    * table. Defense-in-depth for query-path validation: `flattenAnnotatedType`
    * still truncates real self-referential cycles, so paths like
    * `parent.parent.name` on a self-ref schema would miss `flatMap.has` but
-   * remain valid field references on the target.
+   * remain valid field references on the target — a path may cross the same
+   * relation any number of times (callers cap the depth).
    *
-   * Cycle-safe via a visited set keyed on `<tableName>:<navField>`.
+   * Terminates on cyclic schemas: every hop consumes one path segment.
    */
-  public isValidFieldPath(path: string, _visited?: Set<string>): boolean {
+  public isValidFieldPath(path: string): boolean {
     if (this.flatMap.has(path)) {
       return true;
     }
@@ -945,13 +946,7 @@ export class AtscriptDbReadable<
     if (!targetTable || typeof targetTable.isValidFieldPath !== "function") {
       return false;
     }
-    const visited = _visited ?? new Set<string>();
-    const cycleKey = `${this.tableName}:${head}`;
-    if (visited.has(cycleKey)) {
-      return false;
-    }
-    visited.add(cycleKey);
-    return targetTable.isValidFieldPath(tail, visited);
+    return targetTable.isValidFieldPath(tail);
   }
 
   // ── Validation ────────────────────────────────────────────────────────────
