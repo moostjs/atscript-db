@@ -1774,13 +1774,17 @@ export class AsDbReadableController<
     // permission layer resolves the policy of its relational predicates as
     // on `/query`: the client predicates' `transformRelationFilter`,
     // `queryTargetScope` and, for a view resolving a delegated target, its
-    // read overlay `transformFilter`.
+    // read overlay `transformFilter` — which the default `queryTargetScope`
+    // (`transformFilter({})`) would only conjoin a second time.
+    const ownScope =
+      req.overlay === "action" ||
+      this.queryTargetScope !== AsDbReadableController.prototype.queryTargetScope;
     const [[base, scope], overlay] = await Promise.all([
       this._asRead(controls, parsed.filter as FilterExpr | undefined, async () => {
         check();
         const [clientFilter, readScope] = await Promise.all([
           this._relationOverlay(parsed),
-          this.queryTargetScope(action),
+          ownScope ? this.queryTargetScope(action) : undefined,
         ]);
         const read =
           req.overlay === "read"

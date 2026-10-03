@@ -1185,6 +1185,30 @@ describe("query targets — a batch counts as run only once its handler started 
   });
 });
 
+describe("@DbActionsFrom — the view's read overlay", () => {
+  it("is conjoined once: the default queryTargetScope adds nothing over transformFilter(q)", async () => {
+    getMoostInfact()._cleanup();
+    const { issues, board } = await space();
+    const n = ++SEQ;
+    const { IssueCtrl } = defineSource(issues, `tissues${n}`, {}, []);
+    const seen: FilterExpr[] = [];
+    @TableController(board as never, `tboard${n}`)
+    @DbActionsFrom(() => IssueCtrl, { idMap: { id: "issueId" } })
+    class Scoped extends AsDbReadableController {
+      protected override transformFilter(filter: FilterExpr): FilterExpr {
+        seen.push(filter);
+        return { $and: [filter, { teamId: "a" }] } as FilterExpr;
+      }
+    }
+    const { send } = await bootApp(IssueCtrl, Scoped);
+    const res = await send("POST", `/tboard${n}/delegated-actions/close`, {
+      query: { q: "title!=two", dryRun: true },
+    });
+    expect(res.body).toEqual({ matched: 4 });
+    expect(seen).toEqual([{ title: { $ne: "two" } }]);
+  });
+});
+
 describe("@DbActionsFrom — several sources", () => {
   it("lists the delegations in declaration order (the top decorator first)", async () => {
     getMoostInfact()._cleanup();
