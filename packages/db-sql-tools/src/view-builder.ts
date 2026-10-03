@@ -242,6 +242,12 @@ export function buildCreateView(
 
     // HAVING — post-aggregation filter over logical view field names
     if (plan.having) {
+      // Lower-cased: MySQL column names are case-insensitive.
+      let grouped: Set<string> | undefined;
+      const groupedColumns = (): Set<string> =>
+        (grouped ??= new Set(
+          dimensionCols.filter((c) => !c.json).map((c) => c.sourceColumn.toLowerCase()),
+        ));
       const havingResolver = (ref: AtscriptQueryFieldRef): string => {
         const col = ref.type ? undefined : columnByPath.get(ref.field);
         if (!col) {
@@ -257,9 +263,17 @@ export function buildCreateView(
           return viewAggExpr(dialect, col, resolveFieldRef);
         }
         const expr = viewSourceExpr(dialect, col);
+        if (!col.json) {
+          return expr;
+        }
         // A JSON-extracted dimension reads its raw JSON column, which is not
-        // itself in GROUP BY — see `havingGroupRef`.
-        return col.json ? havingGroupRef(dialect, expr, col.viewColumn) : expr;
+        // itself in GROUP BY — see `havingGroupRef`. MySQL binds a bare HAVING
+        // name that matches a GROUP BY column to that column, not the SELECT
+        // alias, so an alias named like a grouped source column reads
+        // `MIN(<extract>)` instead (one value per group).
+        return dialect.bucketAliasInHaving && groupedColumns().has(col.viewColumn.toLowerCase())
+          ? `MIN(${expr})`
+          : havingGroupRef(dialect, expr, col.viewColumn);
       };
 
       const havingClause = queryNodeToSql(plan.having, havingResolver);

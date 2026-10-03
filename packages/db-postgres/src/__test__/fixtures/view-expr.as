@@ -170,3 +170,17 @@ export interface VxCollide {
     @db.compute `n * 2`
     severity: number
 }
+
+// HAVING on a JSON-extracted dimension whose name equals a grouped source
+// column (`severity`): MySQL would bind the bare alias to the GROUP BY column.
+@db.view 'vx_json_collide'
+@db.view.for VxIssue
+@db.view.having `severity = 2`
+export interface VxJsonCollide {
+    sev: VxIssue.severity
+
+    severity?: VxIssue.meta.level
+
+    @db.agg.count
+    n: number
+}

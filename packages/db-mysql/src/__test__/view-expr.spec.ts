@@ -52,6 +52,10 @@ describe("MysqlAdapter — first-row joins and computed columns (DDL)", () => {
     const collide = await createViewSql(fx.VxCollide);
     expect(collide).toContain("HAVING (CAST(COUNT(*) AS DOUBLE) * CAST(2 AS DOUBLE)) = 2");
     expect(collide).not.toContain("HAVING `severity`");
+    // a JSON-extracted dimension aliased like a grouped column reads MIN(<extract>)
+    const jsonCollide = await createViewSql(fx.VxJsonCollide);
+    expect(jsonCollide).toContain("HAVING MIN(CASE WHEN JSON_TYPE(");
+    expect(jsonCollide).not.toContain("HAVING `severity`");
   });
 });
 
@@ -70,11 +74,13 @@ describe.skipIf(!URI)("MysqlAdapter — first-row joins and computed columns (My
     fx.VxRanked,
     fx.VxLevels,
     fx.VxCollide,
+    fx.VxJsonCollide,
   ];
 
   beforeAll(async () => {
     driver = new Mysql2Driver(URI!);
     for (const view of [
+      "vx_json_collide",
       "vx_collide",
       "vx_levels",
       "vx_ranked",
@@ -275,6 +281,14 @@ describe.skipIf(!URI)("MysqlAdapter — first-row joins and computed columns (My
       { sev: 3, n: 1, severity: 2 },
       { sev: 5, n: 1, severity: 2 },
       { sev: 7, n: 1, severity: 2 },
+    ]);
+  });
+
+  it("HAVING on a JSON-extracted dimension named like a grouped source column binds to the extracted value", async () => {
+    // `severity` (meta.level) collides with the grouped `vx_issues.severity`; levels are 2, 2, 5, null, null
+    expect(await rows(fx.VxJsonCollide, { $sort: { sev: 1 } })).toEqual([
+      { sev: 3, severity: 2, n: 1 },
+      { sev: 5, severity: 2, n: 1 },
     ]);
   });
 

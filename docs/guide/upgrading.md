@@ -40,6 +40,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **PostgreSQL / MySQL: foreign keys into another schema.** `REFERENCES` named the target table without its `@db.schema`, so a foreign key into a table of another schema (PostgreSQL) or database (MySQL) could not be created. It is qualified now (`TDbForeignKey.targetSchema`).
 - **PostgreSQL: tables without `@db.schema` follow the connection's current schema.** Introspection (existing columns, constraints, indexes, foreign keys) assumed `public`; with a `search_path` pointing elsewhere every such table looked missing to schema sync. It now uses `current_schema()`.
 - **PostgreSQL: a `@db.column`-renamed primary key.** `updateOne` / `deleteOne` and the `RETURNING` clause of `insertOne` / `insertMany` used the field name instead of the column name and failed.
+- **MySQL: `@db.view.having` on a JSON-extracted view field named like a grouped column.** HAVING referenced the field by its SELECT alias, which MySQL binds to the same-named GROUP BY column, so the view returned the wrong groups. Such a field now reads `MIN(<extraction>)` in HAVING; other views render the same SQL as before.
 
 ### API
 

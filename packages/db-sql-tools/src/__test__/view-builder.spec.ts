@@ -347,6 +347,33 @@ describe("buildCreateView — computed columns and first-row joins", () => {
     );
   });
 
+  it("HAVING on a JSON-extracted dimension: alias on MySQL, MIN(<extract>) when the alias names a grouped column", () => {
+    const jx = (c: string, path: readonly string[]) => `JX(${c},${path.join(".")})`;
+    const my: SqlDialect = { ...mysql, jsonExtract: jx };
+    const p = plan({ joins: [], having: { left: { field: "level" }, op: "$eq", right: 2 } });
+    const n = col("n", { sourceColumn: "*", aggFn: "count", aggField: "*" });
+    const sev = col("sev", { sourceColumn: "severity" });
+    const level = col("level", { sourceColumn: "meta", json: { path: ["level"], type: "number" } });
+    // No collision: unchanged SQL (the SELECT alias)
+    expect(buildCreateView(my, "q", p, [sev, level, n], resolverFor(my))).toContain(
+      "HAVING `level` = 2",
+    );
+    // `Severity` collides with the grouped `tickets`.`severity` (case-insensitively)
+    const named = col("Severity", {
+      sourceColumn: "meta",
+      json: { path: ["level"], type: "number" },
+    });
+    const hp = plan({ joins: [], having: { left: { field: "Severity" }, op: "$eq", right: 2 } });
+    expect(buildCreateView(my, "q", hp, [sev, named, n], resolverFor(my))).toContain(
+      "GROUP BY `tickets`.`severity`, JX(`tickets`.`meta`,level) HAVING MIN(JX(`tickets`.`meta`,level)) = 2",
+    );
+    // PostgreSQL always renders the expression
+    const pgJson: SqlDialect = { ...pg, jsonExtract: jx };
+    expect(buildCreateView(pgJson, "q", hp, [sev, named, n], resolverFor(pgJson))).toContain(
+      'HAVING JX("tickets"."meta",level) = 2',
+    );
+  });
+
   it("throws for a computed column on a dialect without castDouble", () => {
     expect(() =>
       buildCreateView(

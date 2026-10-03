@@ -65,11 +65,13 @@ describe.skipIf(!URI)(
       fx.VxRanked,
       fx.VxLevels,
       fx.VxCollide,
+      fx.VxJsonCollide,
     ];
 
     beforeAll(async () => {
       driver = new PgDriver(URI!);
       for (const view of [
+        "vx_json_collide",
         "vx_collide",
         "vx_levels",
         "vx_ranked",
@@ -273,6 +275,14 @@ describe.skipIf(!URI)(
         { sev: 3, n: 1, severity: 2 },
         { sev: 5, n: 1, severity: 2 },
         { sev: 7, n: 1, severity: 2 },
+      ]);
+    });
+
+    it("HAVING on a JSON-extracted dimension named like a grouped source column binds to the extracted value", async () => {
+      // `severity` (meta.level) collides with the grouped `vx_issues.severity`; levels are 2, 2, 5, null, null
+      expect(await rows(fx.VxJsonCollide, { $sort: { sev: 1 } })).toEqual([
+        { sev: 3, severity: 2, n: 1 },
+        { sev: 5, severity: 2, n: 1 },
       ]);
     });
 
