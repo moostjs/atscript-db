@@ -285,7 +285,7 @@ The adapter uses MongoDB `$lookup` aggregation stages for TO, FROM, and VIA rela
 
 Each lookup joins with an `$expr` `$eq` per key field, so an index on the related collection's key fields is used — see [Indexes](#relational-predicate-indexes).
 
-Relation controls (`$sort`, `$limit`, `$filter`) are applied as pipeline stages within the `$lookup`. Nested lookups (relations of relations) are supported.
+A `$with` entry's `filter` and its controls (`$sort`, `$skip`, `$limit` — per parent row) are applied as pipeline stages within the `$lookup`. Nested lookups (relations of relations) are supported.
 
 Since 0.1.147 native loading matches the other adapters:
 

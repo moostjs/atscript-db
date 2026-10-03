@@ -184,7 +184,7 @@ export interface TicketQueue {
 }
 ```
 
-`GET /ticket-queue/query?$sort=-priority,oldestRaisedAt,id&$filter=rank>=10&$limit=20` sorts and pages the whole table by the derived rank — the database evaluates it, so pages stay disjoint and stable.
+`GET /ticket-queue/query?$sort=-priority,oldestRaisedAt,id&rank>=10&$limit=20` sorts and pages the whole table by the derived rank — the database evaluates it, so pages stay disjoint and stable.
 
 ## Multi-Table Aggregation Views
 

@@ -40,7 +40,7 @@ export interface TicketQueue {
 ```
 
 ```
-GET /ticket-queue/query?$sort=-priority,id&$filter=rank>=10&$limit=20
+GET /ticket-queue/query?$sort=-priority,id&rank>=10&$limit=20
 ```
 
 ## Grammar
@@ -93,7 +93,7 @@ Over HTTP a computed field is visible only while **every** operand is, including
 
 ## Querying
 
-A computed column is an ordinary column: `$sort`, `$filter`, `$select`, pagination, views over the view and `@db.view.having` all accept it. `/meta` lists it with `computed: true` and the normal `sortable` / `filterable` flags (both `true` for a number column) — see [Querying Views](./querying-views#filtering-and-sorting).
+A computed column is an ordinary column: sorting (`$sort`), filtering (`rank>=10`), `$select`, pagination, views over the view and `@db.view.having` all accept it. `/meta` lists it with `computed: true` and the normal `sortable` / `filterable` flags (both `true` for a number column) — see [Querying Views](./querying-views#filtering-and-sorting).
 
 ## Adapters
 
