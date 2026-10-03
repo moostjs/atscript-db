@@ -19,6 +19,7 @@ import type { TDbRequestContext } from "../as-readable.controller";
 import { TableController } from "../decorators";
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionID } from "../actions/db-action-id.decorator";
+import { DbActionIDs } from "../actions/db-action-ids.decorator";
 // The core test adapter has no package entry — the one relative import that stays.
 import { MockAdapter } from "../../../db/src/__test__/test-utils";
 import {
@@ -766,5 +767,45 @@ describe("actionRowScope may return a predicate (server-side, no opt-in needed)"
     const byOp = await send("POST", "actions/tag", { ids: { id: { $some: {} } } });
     expect(byOp.status).toBe(400);
     expect(JSON.stringify(byOp.body)).toContain("Expected identifier value to be");
+  });
+});
+
+describe("query targets", () => {
+  async function bootTargets(overlay: boolean) {
+    getMoostInfact()._cleanup();
+    const { issues } = space();
+    const prefix = `relpred${++PREFIX_SEQ}`;
+    const hook: string[] = [];
+
+    @TableController(issues, prefix)
+    class Issues extends AsDbController {
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        hook.push(path);
+        return overlay && path === "ticket"
+          ? ({ $and: [{ teamId: "t1" }, filter] } as FilterExpr)
+          : filter;
+      }
+
+      @Post("actions/close")
+      @DbAction("close", { label: "close", queryTarget: true })
+      close(@DbActionIDs() ids: unknown) {
+        return { ids };
+      }
+    }
+    const http = await bootHttp(Issues);
+    const target = async (q: string) =>
+      (await http("POST", `/${prefix}/actions/close`, { query: { q } })).body as {
+        ids: Array<{ id: number }>;
+      };
+    return { target, hook };
+  }
+
+  it("a client predicate in the target's filter takes the transformRelationFilter overlay", async () => {
+    const plain = await bootTargets(false);
+    const all = (await plain.target("ticket=$some(status=open)")).ids.map((i) => i.id);
+    expect(all.length).toBeGreaterThan(1);
+    const { target, hook } = await bootTargets(true);
+    expect((await target("ticket=$some(status=open)")).ids).toEqual([{ id: 1 }]);
+    expect(hook).toContain("ticket");
   });
 });

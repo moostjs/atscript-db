@@ -1100,7 +1100,7 @@ export class AsDbReadableController<
    *
    * Applied to client predicates only (the URL filter and `$with`
    * sub-filters, on `/query` incl. `$groupBy` and `$count`, `/pages`, `/geo`
-   * and `/one`), after the request gate and before {@link transformFilter};
+   * and `/one`, and a query target's filter), after the request gate and before {@link transformFilter};
    * a nested predicate's operand is rewritten before the operand holding it,
    * and the hook's output is not walked again. Server-side filters
    * ({@link transformFilter}, {@link transformOne}, {@link actionRowScope})
@@ -1782,19 +1782,23 @@ export class AsDbReadableController<
     check();
 
     // An own action's target: the query must ALSO pass as a read — checked,
-    // and `queryTargetScope` evaluated, in a read context (see the hook).
-    const [base, overlay, scope] = await Promise.all([
-      req.overlay === "read"
-        ? this.transformFilter(parsed.filter ?? ({} as FilterExpr))
-        : parsed.filter,
-      req.overlay === "action" ? this.rowOverlay() : undefined,
+    // and the read hooks (`queryTargetScope`, the client predicates'
+    // `transformRelationFilter`) evaluated, in a read context (see the hook).
+    const readHooks = () =>
+      Promise.all([this._relationOverlay(parsed), this.queryTargetScope(action)]);
+    const [[clientFilter, scope], overlay] = await Promise.all([
       req.overlay === "action"
         ? this._asRead(controls, () => {
             check();
-            return this.queryTargetScope(action);
+            return readHooks();
           })
-        : this.queryTargetScope(action),
+        : readHooks(),
+      req.overlay === "action" ? this.rowOverlay() : undefined,
     ]);
+    const base =
+      req.overlay === "read"
+        ? await this.transformFilter(clientFilter ?? ({} as FilterExpr))
+        : clientFilter;
     const filter = conjoin(
       this.applySearchFallback(base, controls),
       overlay,

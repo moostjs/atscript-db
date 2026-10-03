@@ -167,7 +167,7 @@ export class IssuesController extends AsDbReadableController<typeof IssueTable> 
 ```
 
 - `path` is the dotted navigation chain from this controller's table: `"ticket"` for `ticket=$some(…)`, `"ticket.team"` for a predicate nested in its operand, `"tickets.issues"` for `$with=tickets(issues=$some(…))`.
-- It runs after the request gate and before [`transformFilter`](#transformfilter), on `/query` (incl. `$count` and `$groupBy`), `/pages`, `/geo` and `$with` sub-filters of `/one`. It may be async.
+- It runs after the request gate and before [`transformFilter`](#transformfilter), on `/query` (incl. `$count` and `$groupBy`), `/pages`, `/geo`, `$with` sub-filters of `/one` and the filter of a [query target](./query-targets). It may be async.
 - **Post-order:** a nested operand is rewritten first, then its parent receives the already-rewritten operand. Your output is not walked again — a predicate you add is not passed back to the hook.
 - Under an overlay, `$some` matches and `$none` excludes on **visible** related rows only: `ticket=$none(status=open)` keeps an issue whose only open ticket is invisible to the caller, just as `$with=ticket` would not show it.
 - Server-side filters ([`transformFilter`](#transformfilter), [`transformOne`](#transformone), [`actionRowScope`](./actions#action-row-scope)) never pass through it, nor do predicates a [`validateControls`](#validatecontrols) override conjoined into `$with` entries.
