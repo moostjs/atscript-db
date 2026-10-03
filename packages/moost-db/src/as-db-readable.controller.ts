@@ -1032,14 +1032,37 @@ export class AsDbReadableController<
       const def = entries.find((e) => e.type === type && e.isDefault);
       return def !== undefined && this._indexVisible(def);
     };
+    const has = (type: "text" | "vector" | "geo") => entries.some((e) => e.type === type);
+    const anyVisible = (type: "text" | "vector" | "geo") =>
+      entries.some((e) => e.type === type && this._indexVisible(e));
     const hidden = new Set(
       entries.filter((e) => e.type !== "geo" && !this._indexVisible(e)).map((e) => e.name),
     );
     const searchable = this.readable.isSearchable()
       ? visibleDefault("text")
       : this._searchFallbackFields.some((f) => this.fieldVisibility.isVisible(f));
+    // The read controls the index gate would refuse, left out of `crud`:
+    // `$index` / `$fuzzy` with no visible text index (nor the fallback),
+    // `$vector` / `$threshold` with no visible vector index, `$search` with
+    // neither; `/geo` with no visible geo index.
+    const textUsable = searchable || (this.readable.isSearchable() && anyVisible("text"));
+    const vectorUsable = anyVisible("vector");
+    const unusable = new Set<string>();
+    if (has("text") && !anyVisible("text")) unusable.add("index");
+    if (meta.searchable && !textUsable) unusable.add("fuzzy");
+    if (has("vector") && !vectorUsable) unusable.add("vector").add("threshold");
+    if ((meta.searchable || has("vector")) && !textUsable && !vectorUsable) unusable.add("search");
+    const crud: TCrudPermissions = { ...meta.crud };
+    if (unusable.size > 0) {
+      for (const op of ["query", "pages"] as const) {
+        const controls = crud[op];
+        if (controls) crud[op] = controls.filter((c) => !unusable.has(c));
+      }
+    }
+    if (has("geo") && !anyVisible("geo")) delete crud.geo;
     return {
       ...meta,
+      crud,
       searchIndexes: (meta.searchIndexes ?? []).filter((i) => !hidden.has(i.name)),
       searchable: meta.searchable && searchable,
       vectorSearchable: meta.vectorSearchable && visibleDefault("vector"),

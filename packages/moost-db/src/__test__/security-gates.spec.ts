@@ -13,7 +13,7 @@ import {
 } from "./actions-test-utils";
 import { DbRowActions } from "../actions/db-actions.decorator";
 import { unknownRelationError } from "../http-errors";
-import { GEO_CONTROLS } from "../permissions/crud-controls";
+import { GEO_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "../permissions/crud-controls";
 import {
   createMockApp as makeApp,
   createMockReadable,
@@ -380,6 +380,36 @@ describe("text / vector / geo index gating through hasField", () => {
     ]);
     expect(open.searchable).toBe(true);
     expect(open.vectorSearchable).toBe(true);
+  });
+
+  it("/meta crud leaves out the controls the gate would refuse", async () => {
+    const without = (list: readonly string[], drop: string[]) =>
+      list.filter((c) => !drop.includes(c));
+    // The default text index, the vector index and the geo point hidden:
+    // `note_idx` stays usable by name, so the text controls stay.
+    HIDDEN = new Set(["secretNote", "embedding", "home"]);
+    const { c } = await accounts();
+    const meta = (await c.meta()) as any;
+    expect(meta.crud.query).toEqual(without(QUERY_CONTROLS, ["vector", "threshold"]));
+    expect(meta.crud.pages).toEqual(without(PAGES_CONTROLS, ["vector", "threshold"]));
+    expect(meta.crud.geo).toBeUndefined();
+    expect(meta.geoSearchable).toBe(false);
+
+    // No text index visible either: nothing to search with.
+    HIDDEN = new Set(["secretNote", "note", "embedding"]);
+    const none = (await c.meta()) as any;
+    const searchControls = ["search", "index", "fuzzy", "vector", "threshold"];
+    expect(none.crud.query).toEqual(without(QUERY_CONTROLS, searchControls));
+    expect(none.crud.pages).toEqual(without(PAGES_CONTROLS, searchControls));
+    expect(none.crud.geo).toEqual([...GEO_CONTROLS]);
+    for (const q of ["?$search=x", "?$search=x&$index=note_idx", "?$search=x&$vector=embedding"]) {
+      expect(await status(c.query(q))).toBe(400);
+    }
+
+    HIDDEN = new Set();
+    const open = (await c.meta()) as any;
+    expect(open.crud.query).toEqual([...QUERY_CONTROLS]);
+    expect(open.crud.geo).toEqual([...GEO_CONTROLS]);
   });
 
   it("a hidden vector index answers like a nonexistent one, before any embedding", async () => {
