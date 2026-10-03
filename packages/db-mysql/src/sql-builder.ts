@@ -296,6 +296,11 @@ export function qi(name: string): string {
  * Backtick-quotes a table name, handling `schema.table` format.
  * Input is a raw name like `mydb.users` or just `users`.
  */
+/** `REFERENCES` target of a foreign key — database-qualified when the target declares `@db.schema`. */
+export function fkTargetTableSql(fk: { targetTable: string; targetSchema?: string }): string {
+  return fk.targetSchema ? `${qi(fk.targetSchema)}.${qi(fk.targetTable)}` : qi(fk.targetTable);
+}
+
 export function quoteTableName(name: string): string {
   const dot = name.indexOf(".");
   if (dot >= 0) {
@@ -804,7 +809,7 @@ export function buildCreateTable(
       }
       const localCols = (fk.physicalFields ?? fk.fields).map((f) => qi(f)).join(", ");
       const targetCols = (fk.physicalTargetFields ?? fk.targetFields).map((f) => qi(f)).join(", ");
-      let constraint = `FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
+      let constraint = `FOREIGN KEY (${localCols}) REFERENCES ${fkTargetTableSql(fk)} (${targetCols})`;
       if (fk.onDelete) {
         constraint += ` ON DELETE ${refActionToSql(fk.onDelete)}`;
       }

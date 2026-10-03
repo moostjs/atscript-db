@@ -63,11 +63,11 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // unlocks @db.pg.*
 
 ## `@db.pg.*` annotations
 
-| Annotation       | Target            | Args                | Effect                                                                     |
-| ---------------- | ----------------- | ------------------- | -------------------------------------------------------------------------- |
-| `@db.pg.type`    | Field             | `type: string`      | Native column type override: `CITEXT`, `INET`, `MACADDR`, `TSVECTOR`, etc. |
-| `@db.pg.schema`  | Interface         | `schema: string`    | PG schema (default `public`).                                              |
-| `@db.pg.collate` | Interface / Field | `collation: string` | Native collation (e.g. `tr-x-icu`). Overrides `@db.column.collate`.        |
+| Annotation       | Target            | Args                | Effect                                                                                         |
+| ---------------- | ----------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
+| `@db.pg.type`    | Field             | `type: string`      | Native column type override: `CITEXT`, `INET`, `MACADDR`, `TSVECTOR`, etc.                     |
+| `@db.pg.schema`  | Interface         | `schema: string`    | PG schema (default: connection `current_schema()`, 0.1.147). FK `REFERENCES` schema-qualified. |
+| `@db.pg.collate` | Interface / Field | `collation: string` | Native collation (e.g. `tr-x-icu`). Overrides `@db.column.collate`.                            |
 
 ## pgvector
 

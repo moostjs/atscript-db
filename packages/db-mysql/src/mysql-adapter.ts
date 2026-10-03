@@ -74,6 +74,7 @@ import {
   mysqlTypeFromField,
   qi,
   quoteTableName,
+  fkTargetTableSql,
   refActionToSql,
   mysqlDialect,
   type TMysqlColumnContext,
@@ -1410,7 +1411,7 @@ export class MysqlAdapter extends BaseDbAdapter {
         const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
           .map((f) => qi(f))
           .join(", ");
-        let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
+        let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${fkTargetTableSql(fk)} (${targetCols})`;
         if (fk.onDelete) {
           ddl += ` ON DELETE ${refActionToSql(fk.onDelete)}`;
         }

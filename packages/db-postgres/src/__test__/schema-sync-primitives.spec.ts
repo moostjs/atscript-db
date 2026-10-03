@@ -219,16 +219,16 @@ describe("PostgresAdapter — schema sync primitives", () => {
 
 // `DbSpace` runs the name-taking primitives (drop by name, inbound FKs) on a
 // factory-fresh adapter that never had a readable registered. Everything —
-// the schema included — must come from the connection (COALESCE(NULL, 'public'),
+// the schema included — must come from the connection (COALESCE(NULL, current_schema()),
 // the same default the bound path uses), never from `this._table`.
 describe("PostgresAdapter — administrative adapter (no registered readable)", () => {
-  it("hasRows / getObjectKind by name without a readable (schema → 'public')", async () => {
+  it("hasRows / getObjectKind by name without a readable (schema → current_schema())", async () => {
     const driver = createMockDriver({ getResult: { present: true, relkind: "v" } });
     const adapter = new PostgresAdapter(driver);
     expect(await adapter.hasRows("old_tokens")).toBe(true);
     expect(await adapter.getObjectKind("v")).toBe("view");
     expect(driver.calls[0].sql).toBe('SELECT EXISTS (SELECT 1 FROM "old_tokens") AS "present"');
-    expect(driver.calls[1].sql).toContain("n.nspname = COALESCE($2, 'public')");
+    expect(driver.calls[1].sql).toContain("n.nspname = COALESCE($2, current_schema())");
     expect(driver.calls[1].params).toEqual(["v", null]);
   });
 
@@ -246,7 +246,7 @@ describe("PostgresAdapter — administrative adapter (no registered readable)", 
     expect(await new PostgresAdapter(fkDriver).getReferencingForeignKeys("parents")).toEqual([
       { table: "children", fields: ["parentId"], targetFields: ["id"] },
     ]);
-    expect(fkDriver.calls[0].sql).toContain("rn.nspname = COALESCE($2, 'public')");
+    expect(fkDriver.calls[0].sql).toContain("rn.nspname = COALESCE($2, current_schema())");
     expect(fkDriver.calls[0].params).toEqual(["parents", null]);
 
     const colDriver = createMockDriver({

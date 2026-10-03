@@ -495,14 +495,16 @@ describe("MongoDB relational predicates — writes", () => {
     // The ids are streamed from the cursor batch by batch, never drained with toArray().
     const drained: unknown[] = [];
     const aggregatePipeline = adapter.aggregatePipeline.bind(adapter);
-    const cursors = vi.spyOn(adapter, "aggregatePipeline").mockImplementation((pipeline) => {
-      const cursor = aggregatePipeline(pipeline);
-      vi.spyOn(cursor, "toArray").mockImplementation(async () => {
-        drained.push(pipeline);
-        return [];
+    const cursors = vi
+      .spyOn(adapter, "aggregatePipeline")
+      .mockImplementation((pipeline, options) => {
+        const cursor = aggregatePipeline(pipeline, options);
+        vi.spyOn(cursor, "toArray").mockImplementation(async () => {
+          drained.push(pipeline);
+          return [];
+        });
+        return cursor;
       });
-      return cursor;
-    });
     try {
       const result = await T("RfIssue").updateMany(
         { title: "bulk", ticket: { $some: { status: "open" } } },
@@ -511,6 +513,8 @@ describe("MongoDB relational predicates — writes", () => {
       expect(result).toEqual({ matchedCount: 1050, modifiedCount: 1050 });
       expect(spy).toHaveBeenCalledTimes(2);
       expect(cursors).toHaveBeenCalledTimes(1);
+      // the blocking `_id` sort may spill to disk (pre-6.0 servers need the flag)
+      expect(cursors.mock.calls[0]![1]).toEqual({ allowDiskUse: true });
       expect(drained).toEqual([]);
     } finally {
       spy.mockRestore();

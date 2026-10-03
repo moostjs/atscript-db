@@ -581,6 +581,12 @@ export interface TDbForeignKey {
    * (its `@db.column` renames), in the same order. Absent → same as `targetFields`.
    */
   physicalTargetFields?: string[];
+  /**
+   * `@db.schema` of the referenced table, when it declares one — SQL DDL
+   * qualifies `REFERENCES` with it (a table in another schema). Not part of
+   * the schema snapshot.
+   */
+  targetSchema?: string;
   /** Lazy reference to the target annotated type (for on-demand table resolution). */
   targetTypeRef?: () => TAtscriptAnnotatedType;
   /** Alias grouping FK fields (if any). */

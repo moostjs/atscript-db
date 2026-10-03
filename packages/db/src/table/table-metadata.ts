@@ -1240,6 +1240,10 @@ export class TableMetadata {
     for (const fk of this.foreignKeys.values()) {
       fk.physicalFields = fk.fields.map((f) => this.physicalPath(f));
       fk.physicalTargetFields = fk.targetFields.map((f) => targetPhysical(fk, f));
+      const targetSchema = fk.targetTypeRef?.()?.metadata?.get("db.schema") as string | undefined;
+      if (targetSchema) {
+        fk.targetSchema = targetSchema;
+      }
     }
   }
 

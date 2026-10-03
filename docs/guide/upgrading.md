@@ -35,6 +35,8 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 ### Fixes
 
 - **moost-db: `$count` with a write-only field on a related table.** The write-only `$select` seal also listed related tables' `@db.writeOnly` paths, so `$count` failed with `Cannot select "ticket.code" — navigation path`.
+- **PostgreSQL / MySQL: foreign keys into another schema.** `REFERENCES` named the target table without its `@db.schema`, so a foreign key into a table of another schema (PostgreSQL) or database (MySQL) could not be created. It is qualified now (`TDbForeignKey.targetSchema`).
+- **PostgreSQL: tables without `@db.schema` follow the connection's current schema.** Introspection (existing columns, constraints, indexes, foreign keys) assumed `public`; with a `search_path` pointing elsewhere every such table looked missing to schema sync. It now uses `current_schema()`.
 - **PostgreSQL: a `@db.column`-renamed primary key.** `updateOne` / `deleteOne` and the `RETURNING` clause of `insertOne` / `insertMany` used the field name instead of the column name and failed.
 
 ### API

@@ -166,7 +166,7 @@ describe("[mysql] @db.column-renamed FK / PK columns (since 0.1.147)", () => {
     await t(fx.RfIssue).ensureTable();
     await t(fx.RfTagUse).ensureTable();
     expect(stmt("CREATE TABLE IF NOT EXISTS `rf_issues`")).toContain(
-      "FOREIGN KEY (`ticket_ref`) REFERENCES `rf_tickets` (`key`)",
+      "FOREIGN KEY (`ticket_ref`) REFERENCES `app`.`rf_tickets` (`key`)",
     );
     expect(stmt("CREATE TABLE IF NOT EXISTS `rf_tag_uses`")).toContain(
       "FOREIGN KEY (`tag_ref`) REFERENCES `rf_tags` (`tag_code`) ON DELETE CASCADE",

@@ -34,6 +34,7 @@ import {
   containsRelationPredicate,
 } from "@atscript/db";
 import type {
+  AggregateOptions,
   AggregationCursor,
   ClientSession,
   CollationOptions,
@@ -312,8 +313,8 @@ export class MongoAdapter extends BaseDbAdapter {
     return this._collection;
   }
 
-  aggregatePipeline(pipeline: Document[]): AggregationCursor {
-    return this.collection.aggregate(pipeline, this._getSessionOpts());
+  aggregatePipeline(pipeline: Document[], options?: AggregateOptions): AggregationCursor {
+    return this.collection.aggregate(pipeline, { ...options, ...this._getSessionOpts() });
   }
 
   override async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
@@ -1026,7 +1027,11 @@ export class MongoAdapter extends BaseDbAdapter {
     const { pipeline, pre } = this._predicateWritePlan(filter);
     pipeline.push({ $project: { _id: 1 } }, { $sort: { _id: 1 } });
     this._log("aggregate (write ids)", pipeline);
-    const cursor = this.aggregatePipeline(pipeline).batchSize(REL_WRITE_BATCH);
+    // The blocking `$sort` may exceed the in-memory sort limit on large
+    // matches; servers before 6.0 spill to disk only with `allowDiskUse`.
+    const cursor = this.aggregatePipeline(pipeline, { allowDiskUse: true }).batchSize(
+      REL_WRITE_BATCH,
+    );
     try {
       let ids: unknown[] = [];
       for (;;) {

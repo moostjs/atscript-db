@@ -68,6 +68,7 @@ import {
   pgTypeFromField,
   qi,
   quoteTableName,
+  fkTargetTableSql,
   refActionToSql,
   pgDialect,
   finalizeParams,
@@ -183,7 +184,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   /**
    * Schema name for catalog queries and qualification — `@db.schema` of the
-   * bound table, or `null` (→ `'public'`, the same default the bound path
+   * bound table, or `null` (→ the connection's `current_schema()`, the same default the bound path
    * uses) when the table declares none or the adapter is an administrative
    * one with no readable (the name-taking schema-sync primitives run on such
    * an adapter).
@@ -823,7 +824,7 @@ export class PostgresAdapter extends BaseDbAdapter {
        JOIN pg_class cl ON cl.oid = c.conrelid
        JOIN pg_class rcl ON rcl.oid = c.confrelid
        JOIN pg_namespace rn ON rn.oid = rcl.relnamespace
-       WHERE c.contype = 'f' AND rcl.relname = $1 AND rn.nspname = COALESCE($2, 'public')
+       WHERE c.contype = 'f' AND rcl.relname = $1 AND rn.nspname = COALESCE($2, current_schema())
        ORDER BY cl.relname, c.conname`,
       [tableName, this._schema],
     );
@@ -838,7 +839,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const row = await this._exec().get<{ relkind: string }>(
       `SELECT c.relkind FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE c.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       WHERE c.relname = $1 AND n.nspname = COALESCE($2, current_schema())
          AND c.relkind IN ('r', 'p', 'v', 'm')`,
       [name, this._schema],
     );
@@ -882,7 +883,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         `SELECT c.conname FROM pg_constraint c
          JOIN pg_class cl ON cl.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = cl.relnamespace
-         WHERE c.contype = 'p' AND cl.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
+         WHERE c.contype = 'p' AND cl.relname = $1 AND n.nspname = COALESCE($2, current_schema())`,
         [this._table.tableName, this._schema],
       );
       if (row?.conname) {
@@ -948,8 +949,8 @@ export class PostgresAdapter extends BaseDbAdapter {
               ) AS is_pk
        FROM information_schema.columns c
        JOIN pg_attribute a ON a.attname = c.column_name
-         AND a.attrelid = (SELECT oid FROM pg_class WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = COALESCE($2, 'public')))
-       WHERE c.table_name = $1 AND c.table_schema = COALESCE($2, 'public')
+         AND a.attrelid = (SELECT oid FROM pg_class WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = COALESCE($2, current_schema())))
+       WHERE c.table_name = $1 AND c.table_schema = COALESCE($2, current_schema())
        ORDER BY c.ordinal_position`,
       [tableName, schema],
     );
@@ -1154,7 +1155,7 @@ export class PostgresAdapter extends BaseDbAdapter {
          CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(attnum, refattnum, ord)
          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
          JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = k.refattnum
-         WHERE c.contype = 'f' AND rcl.relname = $2 AND rn.nspname = COALESCE($1, 'public')
+         WHERE c.contype = 'f' AND rcl.relname = $2 AND rn.nspname = COALESCE($1, current_schema())
          ORDER BY n.nspname, cl.relname, c.conname, k.ord`,
         [schema, this._table.tableName],
       );
@@ -1172,7 +1173,8 @@ export class PostgresAdapter extends BaseDbAdapter {
           onUpdate: string;
         }
       >();
-      const ownSchema = schema ?? "public";
+      const ownSchema =
+        schema ?? (await conn.get<{ s: string }>("SELECT current_schema() AS s"))?.s ?? "public";
       for (const fk of fkRefs) {
         if (fk.table_schema === ownSchema && fk.table_name === this._table.tableName) {
           continue;
@@ -1338,7 +1340,7 @@ export class PostgresAdapter extends BaseDbAdapter {
        FROM pg_constraint c
        JOIN pg_class cl ON cl.oid = c.conrelid
        JOIN pg_namespace n ON n.oid = cl.relnamespace
-       WHERE cl.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       WHERE cl.relname = $1 AND n.nspname = COALESCE($2, current_schema())
        ORDER BY c.conname`,
       [table, this._schema],
     );
@@ -1377,7 +1379,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const row = await conn.get<{ present: boolean }>(
       `SELECT true AS present FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE c.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
+       WHERE c.relname = $1 AND n.nspname = COALESCE($2, current_schema())`,
       [name, this._schema],
     );
     return row?.present ?? false;
@@ -1414,7 +1416,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   async tableExists(): Promise<boolean> {
     const row = await this._exec().get<{ exists: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1 AND table_schema = COALESCE($2, 'public')) AS "exists"`,
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema())) AS "exists"`,
       [this._table.tableName, this._schema],
     );
     return row?.exists ?? false;
@@ -1450,7 +1452,7 @@ export class PostgresAdapter extends BaseDbAdapter {
        JOIN pg_class i ON i.oid = x.indexrelid
        JOIN pg_namespace n ON n.oid = t.relnamespace
        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(x.indkey)
-       WHERE t.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       WHERE t.relname = $1 AND n.nspname = COALESCE($2, current_schema())
          AND i.relname LIKE 'atscript__%' AND a.attname = ANY($3)`,
       [tableName, schema, columns],
     );
@@ -1520,7 +1522,7 @@ export class PostgresAdapter extends BaseDbAdapter {
            JOIN pg_class t ON t.oid = x.indrelid
            JOIN pg_class i ON i.oid = x.indexrelid
            JOIN pg_namespace n ON n.oid = t.relnamespace
-           WHERE t.relname = $1 AND n.nspname = COALESCE($2, 'public')`,
+           WHERE t.relname = $1 AND n.nspname = COALESCE($2, current_schema())`,
           [tableName, schema],
         );
         return rows.map((r) => ({ name: r.name, columns: r.columns ?? undefined }));
@@ -1607,7 +1609,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
           .map((f) => qi(f))
           .join(", ");
-        let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${qi(fk.targetTable)} (${targetCols})`;
+        let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${fkTargetTableSql(fk)} (${targetCols})`;
         if (fk.onDelete) {
           ddl += ` ON DELETE ${refActionToSql(fk.onDelete)}`;
         }
@@ -1649,7 +1651,7 @@ export class PostgresAdapter extends BaseDbAdapter {
        JOIN pg_namespace n ON n.oid = cl.relnamespace
        CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
-       WHERE c.contype = 'f' AND cl.relname = $1 AND n.nspname = COALESCE($2, 'public')
+       WHERE c.contype = 'f' AND cl.relname = $1 AND n.nspname = COALESCE($2, current_schema())
        ORDER BY c.conname, k.ord`,
       [this._table.tableName, this._schema],
     );

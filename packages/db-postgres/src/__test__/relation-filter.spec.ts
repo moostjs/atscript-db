@@ -155,7 +155,7 @@ describe("[postgres] @db.column-renamed FK / PK columns (since 0.1.147)", () => 
     await t(fx.RfIssue).ensureTable();
     await t(fx.RfTagUse).ensureTable();
     expect(createOf("rf_issues")).toContain(
-      'FOREIGN KEY ("ticket_ref") REFERENCES "rf_tickets" ("key")',
+      'FOREIGN KEY ("ticket_ref") REFERENCES "app"."rf_tickets" ("key")',
     );
     expect(createOf("rf_tag_uses")).toContain(
       'FOREIGN KEY ("tag_ref") REFERENCES "rf_tags" ("tag_code") ON DELETE CASCADE',

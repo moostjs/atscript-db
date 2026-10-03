@@ -86,11 +86,11 @@ export default {
 
 These annotations opt into PostgreSQL-specific behavior. Files using only portable `@db.*` annotations remain adapter-agnostic.
 
-| Annotation                   | Level             | Purpose                                                                   |
-| ---------------------------- | ----------------- | ------------------------------------------------------------------------- |
-| `@db.pg.type "TYPE"`         | Field             | Override the native column type (e.g., `"CITEXT"`, `"INET"`, `"MACADDR"`) |
-| `@db.pg.schema "name"`       | Interface         | Set the database schema (default: `"public"`)                             |
-| `@db.pg.collate "collation"` | Interface / Field | Native PostgreSQL collation override (e.g., `"tr-x-icu"`, `"C"`)          |
+| Annotation                   | Level             | Purpose                                                                                                           |
+| ---------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `@db.pg.type "TYPE"`         | Field             | Override the native column type (e.g., `"CITEXT"`, `"INET"`, `"MACADDR"`)                                         |
+| `@db.pg.schema "name"`       | Interface         | Set the database schema (default: the connection's current schema — `public` unless `search_path` says otherwise) |
+| `@db.pg.collate "collation"` | Interface / Field | Native PostgreSQL collation override (e.g., `"tr-x-icu"`, `"C"`)                                                  |
 
 Example:
 
