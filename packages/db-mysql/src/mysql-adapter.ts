@@ -43,6 +43,8 @@ import type {
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
+  buildPartitionedSelect,
+  stripPartitionRowNumber,
   buildGeoSearchSelect,
   buildVectorSearchCount,
   buildVectorSearchSelect,
@@ -583,6 +585,26 @@ export class MysqlAdapter extends BaseDbAdapter {
     const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
     this._log(sql, params);
     return this._exec().all(sql, params);
+  }
+
+  /**
+   * `$skip` / `$limit` per partition in one statement: a `ROW_NUMBER()`
+   * window over `partitionBy` (the generic `$with` loader's per-parent page).
+   */
+  override async findManyPerPartition(
+    query: DbQuery,
+    partitionBy: readonly string[],
+  ): Promise<Array<Record<string, unknown>>> {
+    const where = buildWhere(query.filter);
+    const { sql, params } = buildPartitionedSelect(
+      mysqlDialect,
+      this.resolveTableName(),
+      where,
+      query.controls,
+      partitionBy,
+    );
+    this._log(sql, params);
+    return stripPartitionRowNumber(await this._exec().all(sql, params));
   }
 
   async count(query: DbQuery): Promise<number> {

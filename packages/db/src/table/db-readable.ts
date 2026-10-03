@@ -783,13 +783,18 @@ export class AtscriptDbReadable<
     };
   }
 
-  /** Reconstructs + decrypts a read's rows, loads its `$with` relations and strips widened keys. */
+  /**
+   * Reconstructs + decrypts a read's rows, keeps the ones `pick` selects (all
+   * by default), loads their `$with` relations and strips widened keys.
+   */
   private async _finishRead(
     results: Record<string, unknown>[],
     read: TReadPlan,
+    pick?: (rows: Record<string, unknown>[]) => Record<string, unknown>[],
   ): Promise<Record<string, unknown>[]> {
-    const rows = this._fromRead(results, read.controls);
-    await this._decryptRows(rows);
+    const all = this._fromRead(results, read.controls);
+    await this._decryptRows(all);
+    const rows = pick ? pick(all) : all;
     if (read.withRelations?.length) {
       await this.loadRelations(rows, read.withRelations);
       for (const key of read.widened) {
@@ -992,6 +997,34 @@ export class AtscriptDbReadable<
     const read = this._translateRead(query as Uniquery);
     const rows = await this._finishRead(await this.adapter.findMany(read.translated), read);
     return rows as Array<DbResponse<DataType, NavType, Q>>;
+  }
+
+  /**
+   * `findMany` for the generic `$with` loader. With `partitionBy` (logical
+   * fields), `$skip` / `$limit` apply per group of rows sharing those fields'
+   * values (`BaseDbAdapter.findManyPerPartition`); `pick` chooses which of the
+   * read rows to keep before their own `$with` relations load.
+   *
+   * @internal Relation-loader surface; not part of the consumer API.
+   * @since 0.1.147
+   */
+  public async _findManyForRelation(
+    query: Uniquery,
+    opts: {
+      partitionBy?: readonly string[];
+      pick?: (rows: Record<string, unknown>[]) => Record<string, unknown>[];
+    },
+  ): Promise<Record<string, unknown>[]> {
+    this._ensureBuilt();
+    this._guardQuery(query);
+    const read = this._translateRead(query);
+    const results = opts.partitionBy
+      ? await this.adapter.findManyPerPartition(
+          read.translated,
+          opts.partitionBy.map((field) => this._meta.physicalPath(field)),
+        )
+      : await this.adapter.findMany(read.translated);
+    return this._finishRead(results, read, opts.pick);
   }
 
   /**

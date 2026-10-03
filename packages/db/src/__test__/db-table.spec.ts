@@ -1185,7 +1185,9 @@ describe("AtscriptDbTable — embedded objects", () => {
       expect(call.filter.$and).toBeDefined();
       expect(call.filter.$and[1]).toEqual({ active: true });
       expect(call.controls.$sort).toEqual({ name: 1 });
-      expect(call.controls.$limit).toBe(5);
+      // `$limit` pages each parent row's related rows (since 0.1.147): a table
+      // without the relation-read surface is read unpaged, then paged per parent.
+      expect(call.controls.$limit).toBeUndefined();
     });
 
     it("should throw for unknown relations in $with", async () => {

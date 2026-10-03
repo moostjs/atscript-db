@@ -41,6 +41,8 @@ import {
   type TGeoSearchControls,
   type TSqlFragment,
   EMPTY_AND,
+  buildPartitionedSelect,
+  stripPartitionRowNumber,
   buildGeoSearchCount,
   buildGeoSearchSelect,
   buildVectorSearchCount,
@@ -450,6 +452,26 @@ export class SqliteAdapter extends BaseDbAdapter {
     const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
     this._log(sql, params);
     return this._stmt(() => this.driver.all(sql, params));
+  }
+
+  /**
+   * `$skip` / `$limit` per partition in one statement: a `ROW_NUMBER()`
+   * window over `partitionBy` (the generic `$with` loader's per-parent page).
+   */
+  override async findManyPerPartition(
+    query: DbQuery,
+    partitionBy: readonly string[],
+  ): Promise<Array<Record<string, unknown>>> {
+    const where = buildWhere(query.filter);
+    const { sql, params } = buildPartitionedSelect(
+      sqliteDialect,
+      this.resolveTableName(),
+      where,
+      query.controls,
+      partitionBy,
+    );
+    this._log(sql, params);
+    return stripPartitionRowNumber(await this._stmt(() => this.driver.all(sql, params)));
   }
 
   async count(query: DbQuery): Promise<number> {

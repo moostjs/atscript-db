@@ -81,6 +81,8 @@ await tasks.findMany({
 
 Adapters with `supportsNativeRelations(): true` can implement JOIN/`$lookup`-based loading; the default is an application-level batch-loader that fires one query per relation, independent of result-set size.
 
+Controls are PER PARENT ROW (0.1.147, every adapter): `{ name: "comments", controls: { $sort: { createdAt: -1 }, $limit: 5 } }` = the 5 newest comments of EACH post. FROM / VIA: sort, then `$skip` / `$limit` per parent; VIA `$sort` orders the targets (no `$sort` → junction order); TO: `$skip ≥ 1` / `$limit: 0` → `null`. SQL reads a paged TO / FROM relation with a `ROW_NUMBER()` window → needs SQLite ≥ 3.25, MySQL ≥ 8.0 (MariaDB ≥ 10.2). ≤ 0.1.146 on SQL / memory: `$skip` / `$limit` paged ALL parents' rows together (`$limit: 1` → one parent got a row) and VIA ignored `$sort` (Mongo was already per parent for VIA).
+
 Projections (0.1.143): a relation's sub-`$select` accepts array, inclusion-map and exclusion-map forms on every adapter (≤ 0.1.142 Mongo `$lookup` 500'd on the map forms); join keys are never dropped. A parent `$select` that omits the join key (TO: the FK; FROM / VIA: the PK) still loads the relation — the key is read for the join and stripped from the rows (≤ 0.1.142: `project: null`).
 
 ### Per-relation filter

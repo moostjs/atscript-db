@@ -80,14 +80,9 @@ export function buildSelect(
   let sql = `SELECT ${cols} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
   const params = [...where.params];
 
-  if (controls?.$sort) {
-    const orderParts: string[] = [];
-    for (const [col, dir] of Object.entries(controls.$sort)) {
-      orderParts.push(`${dialect.quoteIdentifier(col)} ${dir === -1 ? "DESC" : "ASC"}`);
-    }
-    if (orderParts.length > 0) {
-      sql += ` ORDER BY ${orderParts.join(", ")}`;
-    }
+  const orderBy = orderByList(dialect, controls?.$sort);
+  if (orderBy) {
+    sql += ` ORDER BY ${orderBy}`;
   }
 
   if (controls?.$limit !== undefined) {
@@ -104,6 +99,70 @@ export function buildSelect(
   }
 
   return finalizeParams(dialect, { sql, params });
+}
+
+/** `"col" ASC, "other" DESC` of a physical `$sort` — `""` when it orders nothing. */
+function orderByList(dialect: SqlDialect, sort: DbControls["$sort"]): string {
+  if (!sort) {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const [col, dir] of Object.entries(sort)) {
+    parts.push(`${dialect.quoteIdentifier(col)} ${dir === -1 ? "DESC" : "ASC"}`);
+  }
+  return parts.join(", ");
+}
+
+/**
+ * The row-number column {@link buildPartitionedSelect} adds to every row;
+ * {@link stripPartitionRowNumber} removes it from the result rows.
+ * @since 0.1.147
+ */
+export const PARTITION_ROW_NUMBER_ALIAS = "__atscript_rn";
+
+/**
+ * Builds a SELECT whose `$skip` / `$limit` apply to each partition — the rows
+ * sharing the values of the `partitionBy` columns (physical names) — instead
+ * of to the whole result: a `ROW_NUMBER() OVER (PARTITION BY … ORDER BY
+ * <$sort>)` window in a derived table, filtered on the row number. The rows
+ * of each partition come out in `$sort` order (partitions interleave); every
+ * row carries {@link PARTITION_ROW_NUMBER_ALIAS}. Window functions need
+ * SQLite ≥ 3.25, MySQL ≥ 8.0 or MariaDB ≥ 10.2.
+ * @since 0.1.147
+ */
+export function buildPartitionedSelect(
+  dialect: SqlDialect,
+  table: string,
+  where: TSqlFragment,
+  controls: DbControls,
+  partitionBy: readonly string[],
+): TSqlFragment {
+  const rn = dialect.quoteIdentifier(PARTITION_ROW_NUMBER_ALIAS);
+  const orderBy = orderByList(dialect, controls.$sort);
+  const window =
+    `PARTITION BY ${partitionBy.map((col) => dialect.quoteIdentifier(col)).join(", ")}` +
+    (orderBy ? ` ORDER BY ${orderBy}` : "");
+  const inner =
+    `SELECT ${buildProjection(dialect, controls.$select)}, ROW_NUMBER() OVER (${window}) AS ${rn}` +
+    ` FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+  const skip = (controls.$skip as number | undefined) ?? 0;
+  const limit = controls.$limit as number | undefined;
+  const params = [...where.params, skip];
+  let sql = `SELECT * FROM (${inner}) AS ${dialect.quoteIdentifier("__atscript_p")} WHERE ${rn} > ?`;
+  if (limit !== undefined && limit !== null) {
+    sql += ` AND ${rn} <= ?`;
+    params.push(skip + limit);
+  }
+  sql += ` ORDER BY ${rn}`;
+  return finalizeParams(dialect, { sql, params });
+}
+
+/** Removes {@link PARTITION_ROW_NUMBER_ALIAS} from rows read by {@link buildPartitionedSelect}. */
+export function stripPartitionRowNumber<R extends Record<string, unknown>>(rows: R[]): R[] {
+  for (const row of rows) {
+    delete row[PARTITION_ROW_NUMBER_ALIAS];
+  }
+  return rows;
 }
 
 // ── Full replace (since 0.1.128) ────────────────────────────────────────────

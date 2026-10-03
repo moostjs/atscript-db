@@ -293,7 +293,7 @@ Since 0.1.147 native loading matches the other adapters:
 - **[`@db.rel.filter`](/relations/navigation#db-rel-filter) is applied.**
 - **Sub-queries are validated** like on the other adapters — an unknown field in a `$with` filter is a `DbError`, not an empty result — and may contain [relational predicates](#relational-predicates).
 - **A `null` or missing foreign key loads nothing** (`null` / `[]`), also against related documents whose key is `null` or missing.
-- **VIA:** `$sort`, `$skip`, `$limit` and `$select` apply per parent row (they applied per junction row), and composite junction keys work.
+- **VIA:** `$sort`, `$skip`, `$limit` and `$select` apply per parent row (they applied per junction row), and composite junction keys work. Every adapter pages `$with` per parent row — see [Per-Relation Controls](/relations/loading#per-relation-controls).
 
 See [Relations](/relations/) for details.
 

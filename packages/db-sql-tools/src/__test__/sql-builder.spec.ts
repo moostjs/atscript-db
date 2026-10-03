@@ -5,6 +5,8 @@ import {
   SQL_DEFAULT,
   buildInsert,
   buildSelect,
+  buildPartitionedSelect,
+  stripPartitionRowNumber,
   buildUpdate,
   buildDelete,
   buildProjection,
@@ -108,6 +110,47 @@ describe("buildSelect", () => {
     const result = buildSelect(mockDialect, "users", where, { $limit: 5 });
     expect(result.sql).toBe("SELECT * FROM [users] WHERE [active] = ? LIMIT ?");
     expect(result.params).toEqual([1, 5]);
+  });
+});
+
+describe("buildPartitionedSelect", () => {
+  const where: TSqlFragment = { sql: "[fk] IN (?, ?)", params: [1, 2] };
+
+  it("pages each partition with a ROW_NUMBER() window", () => {
+    const result = buildPartitionedSelect(
+      mockDialect,
+      "items",
+      where,
+      { $sort: { rank: -1, id: 1 }, $skip: 1, $limit: 2 },
+      ["fk"],
+    );
+    expect(result.sql).toBe(
+      "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY [fk] ORDER BY [rank] DESC, [id] ASC) AS [__atscript_rn]" +
+        " FROM [items] WHERE [fk] IN (?, ?)) AS [__atscript_p]" +
+        " WHERE [__atscript_rn] > ? AND [__atscript_rn] <= ? ORDER BY [__atscript_rn]",
+    );
+    expect(result.params).toEqual([1, 2, 1, 3]);
+  });
+
+  it("composite partition, projection, no $sort, no $limit", () => {
+    const select = { asArray: ["a", "b"] } as UniquSelect;
+    const result = buildPartitionedSelect(
+      mockDialect,
+      "items",
+      where,
+      { $select: select, $skip: 2 },
+      ["o", "c"],
+    );
+    expect(result.sql).toBe(
+      "SELECT * FROM (SELECT [a], [b], ROW_NUMBER() OVER (PARTITION BY [o], [c]) AS [__atscript_rn]" +
+        " FROM [items] WHERE [fk] IN (?, ?)) AS [__atscript_p]" +
+        " WHERE [__atscript_rn] > ? ORDER BY [__atscript_rn]",
+    );
+    expect(result.params).toEqual([1, 2, 2]);
+  });
+
+  it("stripPartitionRowNumber drops the row-number column", () => {
+    expect(stripPartitionRowNumber([{ id: 1, __atscript_rn: 1 }])).toEqual([{ id: 1 }]);
   });
 });
 

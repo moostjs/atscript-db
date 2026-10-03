@@ -242,7 +242,7 @@ export class MemoryAdapter extends BaseDbAdapter {
   /**
    * Physical names of the primary-key field(s). Single `@meta.id` resolves via
    * {@link AtscriptDbReadable.metaIdPhysical}; a composite key maps each logical
-   * PK path through `pathToPhysical` (falling back to the name itself). Memoized
+   * PK path through `physicalPath` (`@db.column` renames included). Memoized
    * because it is stable per adapter (1:1 with a fixed table) yet read on every
    * `pkKey`/projection — recomputing would re-read `this._table.*` and re-allocate.
    */
@@ -253,7 +253,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     const metaIdPhysical = this._table.metaIdPhysical;
     const fields = metaIdPhysical
       ? [metaIdPhysical]
-      : this._table.primaryKeys.map((pk) => this._table.pathToPhysical.get(pk) ?? pk);
+      : this._table.primaryKeys.map((pk) => this._table.physicalPath(pk));
     this._pkFieldsCache = fields;
     return fields;
   }

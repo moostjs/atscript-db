@@ -164,8 +164,16 @@ The filter goes on the entry, not inside `controls` — there is no `$filter` co
 
 This loads each project's tasks sorted by `done` then `title`, limited to 10 incomplete tasks, each with their tags attached.
 
+`$sort`, `$skip` and `$limit` apply to the related rows of **each parent row** (since 0.1.147 on every adapter): above, every project gets up to 10 of its own tasks, not 10 tasks shared among all projects.
+
+- **FROM / VIA** — each parent row's related rows are sorted, then paged. On a VIA relation `$sort` orders the related rows themselves; without `$sort` they come in junction order.
+- **TO** — a parent row has at most one related row, so `$limit: 0` or a `$skip` of 1 or more loads `null`.
+- **Engines** — on SQLite, PostgreSQL and MySQL a paged TO / FROM relation is read with a `ROW_NUMBER()` window in one statement, which needs **SQLite ≥ 3.25** and **MySQL ≥ 8.0** (MariaDB ≥ 10.2). A paged VIA relation reads the related rows of the parent rows' junction entries and pages them in memory.
+
+Before 0.1.147, on every adapter but MongoDB, `$skip` / `$limit` paged the related rows of all parent rows together (`$limit: 1` gave one parent a row and the others none), and a VIA relation ignored `$sort`.
+
 ::: tip
-Per-relation controls are especially useful for FROM and VIA relations where you want to limit the number of loaded children. For example, loading only the 5 most recent comments on a post, or only active tags on a task.
+Per-relation controls are especially useful for FROM and VIA relations where you want to limit the number of loaded children. For example, loading only the 5 most recent comments on each post, or only active tags on a task.
 :::
 
 ## Field Selection on Relations

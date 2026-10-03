@@ -73,3 +73,55 @@ export function tableNameOf(type: TAtscriptAnnotatedType | undefined): string {
 export function resolveRelationTargetTable(relation: TDbRelation): string {
   return tableNameOf(relation.targetType());
 }
+
+/**
+ * A string key of `fields`' values on `obj` — equal for rows that agree on
+ * every field (`null` / `undefined` key distinctly from any string). `read`
+ * reads one field (default: a top-level property).
+ */
+export function compositeKey(
+  fields: readonly string[],
+  obj: Record<string, unknown>,
+  read: (obj: Record<string, unknown>, field: string) => unknown = (o, f) => o[f],
+): string {
+  let key = "";
+  for (let i = 0; i < fields.length; i++) {
+    if (i > 0) {
+      key += "\0\0";
+    }
+    const v = read(obj, fields[i]!);
+    key += v === null || v === undefined ? "\0" : String(v as string | number | boolean);
+  }
+  return key;
+}
+
+/** `$skip` / `$limit` of a read, applied per group of rows by {@link slicePerGroup}. */
+export interface TGroupPage {
+  skip?: number;
+  limit?: number;
+}
+
+/**
+ * Keeps, of each group of `rows` sharing `keyOf(row)`, the rows `page`
+ * selects — `$skip` / `$limit` applied per group, in the order of `rows`.
+ * The order of the kept rows is preserved.
+ */
+export function slicePerGroup<R>(
+  rows: readonly R[],
+  keyOf: (row: R) => string,
+  page: TGroupPage,
+): R[] {
+  const skip = page.skip ?? 0;
+  const end = page.limit === undefined ? Infinity : skip + page.limit;
+  const seen = new Map<string, number>();
+  const kept: R[] = [];
+  for (const row of rows) {
+    const key = keyOf(row);
+    const index = seen.get(key) ?? 0;
+    seen.set(key, index + 1);
+    if (index >= skip && index < end) {
+      kept.push(row);
+    }
+  }
+  return kept;
+}

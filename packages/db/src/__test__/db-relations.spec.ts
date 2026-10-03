@@ -4,7 +4,7 @@ import type { FilterExpr } from "@uniqu/core";
 import { AtscriptDbTable } from "../table/db-table";
 import { DbSpace } from "../table/db-space";
 import { BaseDbAdapter } from "../base-adapter";
-import { ensureSelectIncludesFields } from "../rel/relation-loader";
+import { ensureSelectIncludesFields, loadRelationsImpl } from "../rel/relation-loader";
 import { prepareFixtures } from "./test-utils";
 import type {
   DbQuery,
@@ -560,6 +560,42 @@ describe("AtscriptDbTable — Relations", () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].posts).toHaveLength(1);
+    });
+
+    it("applies $limit / $skip per parent row (since 0.1.147)", async () => {
+      const authorTable = db.getTable(Author);
+      const posts = async (controls: Record<string, unknown>) =>
+        (
+          (await authorTable.findMany({
+            filter: {},
+            controls: { $with: [withRel("posts", { controls })] },
+          })) as any[]
+        ).map((a) => a.posts.map((p: any) => p.id));
+
+      expect(await posts({ $limit: 1 })).toEqual([[1], [3]]);
+      expect(await posts({ $skip: 1 })).toEqual([[2], []]);
+    });
+
+    it("pages per parent row through a resolver without the relation-read surface", async () => {
+      const authors = db.getTable(Author) as any;
+      const postTable = db.getTable(Post) as any;
+      const plain: any = {
+        findMany: (q: unknown) => postTable.findMany(q),
+        primaryKeys: postTable.primaryKeys,
+        relations: postTable.relations,
+        foreignKeys: postTable.foreignKeys,
+      };
+      authors.getMetadata();
+      const host = {
+        tableName: authors.tableName,
+        _meta: authors._meta,
+        _tableResolver: () => plain,
+        adapter: authors.adapter,
+        logger: authors.logger,
+      };
+      const rows: any[] = [{ id: 1 }, { id: 2 }];
+      await loadRelationsImpl(rows, [withRel("posts", { controls: { $limit: 1 } })], host);
+      expect(rows.map((a) => a.posts.map((p: any) => p.id))).toEqual([[1], [3]]);
     });
 
     it("should apply filter on nested relation", async () => {

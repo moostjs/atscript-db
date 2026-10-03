@@ -1,10 +1,17 @@
-import type { FilterExpr, WithRelation } from "@uniqu/core";
+import type { FilterExpr, Uniquery, WithRelation } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TGenericLogger } from "../logger";
 import type { TDbForeignKey, TDbRelation, TTableResolver } from "../types";
 import { andFilters, relationStaticFilter } from "../query/relation-filter";
-import { findFKForRelation, findRemoteFK, resolveRelationTargetTable } from "./relation-helpers";
+import {
+  type TGroupPage,
+  compositeKey,
+  findFKForRelation,
+  findRemoteFK,
+  resolveRelationTargetTable,
+  slicePerGroup,
+} from "./relation-helpers";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +30,14 @@ export interface TRelationLoaderHost {
 /** Minimal interface for a resolved related table. */
 interface TResolvedTable {
   findMany(query: unknown): Promise<Array<Record<string, unknown>>>;
+  /** `AtscriptDbReadable._findManyForRelation` — absent on a custom resolver's tables. */
+  _findManyForRelation?(
+    query: Uniquery,
+    opts: {
+      partitionBy?: readonly string[];
+      pick?: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
+    },
+  ): Promise<Array<Record<string, unknown>>>;
   primaryKeys: readonly string[];
   relations: ReadonlyMap<string, TDbRelation>;
   foreignKeys: ReadonlyMap<string, TDbForeignKey>;
@@ -32,17 +47,12 @@ interface TResolvedTable {
 interface TRelationQuery {
   /** The `$with` sub-filter AND the target part of the relation's `@db.rel.filter`. */
   filter: FilterExpr | undefined;
+  /** The relation's controls without `$skip` / `$limit` (see `page`). */
   controls: Record<string, unknown>;
+  /** The relation's `$skip` / `$limit` — they page the related rows of EACH parent row. */
+  page?: TGroupPage;
   /** `@db.rel.via`: the junction part of the relation's `@db.rel.filter`. */
   junctionFilter?: FilterExpr;
-}
-
-interface TAssignOpts {
-  rows: Array<Record<string, unknown>>;
-  related: Array<Record<string, unknown>>;
-  localField: string;
-  remoteField: string;
-  relName: string;
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
@@ -134,7 +144,15 @@ export async function loadRelationsImpl(
     if (flatRel.$with && !controls.$with) {
       controls.$with = flatRel.$with;
     }
-    const relQuery: TRelationQuery = { filter, controls, junctionFilter: statics.junction };
+    const { $skip, $limit, ...pageless } = controls;
+    const skip = asCount($skip) || undefined;
+    const limit = asCount($limit);
+    const relQuery: TRelationQuery = {
+      filter,
+      controls: pageless,
+      page: skip === undefined && limit === undefined ? undefined : { skip, limit },
+      junctionFilter: statics.junction,
+    };
 
     if (relation.direction === "to") {
       tasks.push(loadToRelation(rows, { relName, relation, targetTable, relQuery }, host));
@@ -150,17 +168,20 @@ export async function loadRelationsImpl(
 
 // ── Direction-specific loaders (module-private) ──────────────────────────────
 
+interface TLoadOpts {
+  relName: string;
+  relation: TDbRelation;
+  targetTable: TResolvedTable;
+  relQuery: TRelationQuery;
+}
+
 /**
- * Loads a `@db.rel.to` relation (FK is on this table).
+ * Loads a `@db.rel.to` relation (FK is on this table). Single-valued: the
+ * relation's `$skip` / `$limit` page each row's (at most one) target row.
  */
 async function loadToRelation(
   rows: Array<Record<string, unknown>>,
-  opts: {
-    relName: string;
-    relation: TDbRelation;
-    targetTable: TResolvedTable;
-    relQuery: TRelationQuery;
-  },
+  opts: TLoadOpts,
   host: TRelationLoaderHost,
 ): Promise<void> {
   const { relName, relation, targetTable, relQuery } = opts;
@@ -168,58 +189,26 @@ async function loadToRelation(
   if (!fkEntry) {
     return;
   }
-
   const { localFields, targetFields } = fkEntry;
-
-  if (localFields.length === 1) {
-    const localField = localFields[0];
-    const targetField = targetFields[0];
-
-    const fkValues = collectUniqueValues(rows, localField);
-    if (fkValues.length === 0) {
-      for (const row of rows) {
-        row[relName] = null;
-      }
-      return;
-    }
-
-    const inFilter = { [targetField]: { $in: fkValues } };
-    const targetFilter = relQuery.filter ? { $and: [inFilter, relQuery.filter] } : inFilter;
-
-    const controls = ensureSelectIncludesFields(relQuery.controls, targetFields);
-    const related = await targetTable.findMany({ filter: targetFilter, controls });
-
-    assignSingle({ rows, related, localField, remoteField: targetField, relName });
-  } else {
-    const related = await queryCompositeFK(rows, {
-      localFields,
-      targetFields,
-      targetTable,
-      relQuery,
-    });
-
-    const index = new Map<string, Record<string, unknown>>();
-    for (const item of related) {
-      index.set(compositeKey(targetFields, item), item);
-    }
-
-    for (const row of rows) {
-      row[relName] = index.get(compositeKey(localFields, row)) ?? null;
-    }
+  const related = await readRelatedByKeys(rows, {
+    localFields,
+    targetFields,
+    targetTable,
+    relQuery,
+  });
+  const index = indexFirst(related, targetFields);
+  for (const row of rows) {
+    row[relName] = index.get(compositeKey(localFields, row)) ?? null;
   }
 }
 
 /**
- * Loads a `@db.rel.from` relation (FK is on the target table).
+ * Loads a `@db.rel.from` relation (FK is on the target table). `$sort`,
+ * `$skip` and `$limit` apply to the related rows of each row.
  */
 async function loadFromRelation(
   rows: Array<Record<string, unknown>>,
-  opts: {
-    relName: string;
-    relation: TDbRelation;
-    targetTable: TResolvedTable;
-    relQuery: TRelationQuery;
-  },
+  opts: TLoadOpts,
   host: TRelationLoaderHost,
 ): Promise<void> {
   const { relName, relation, targetTable, relQuery } = opts;
@@ -231,75 +220,34 @@ async function loadFromRelation(
 
   const localFields = remoteFK.targetFields;
   const remoteFields = remoteFK.fields;
+  const related = await readRelatedByKeys(rows, {
+    localFields,
+    targetFields: remoteFields,
+    targetTable,
+    relQuery,
+  });
 
-  if (localFields.length === 1) {
-    const localField = localFields[0];
-    const remoteField = remoteFields[0];
-
-    const pkValues = collectUniqueValues(rows, localField);
-    if (pkValues.length === 0) {
-      return;
-    }
-
-    const inFilter = { [remoteField]: { $in: pkValues } };
-    const targetFilter = relQuery.filter ? { $and: [inFilter, relQuery.filter] } : inFilter;
-
-    const controls = ensureSelectIncludesFields(relQuery.controls, remoteFields);
-    const related = await targetTable.findMany({ filter: targetFilter, controls });
-
-    if (relation.isArray) {
-      assignGrouped({ rows, related, localField, remoteField, relName });
-    } else {
-      assignSingle({ rows, related, localField, remoteField, relName });
+  if (relation.isArray) {
+    const groups = groupBy(related, (item) => compositeKey(remoteFields, item));
+    for (const row of rows) {
+      row[relName] = groups.get(compositeKey(localFields, row)) ?? [];
     }
   } else {
-    const related = await queryCompositeFK(rows, {
-      localFields,
-      targetFields: remoteFields,
-      targetTable,
-      relQuery,
-    });
-
-    if (relation.isArray) {
-      const groups = new Map<string, Array<Record<string, unknown>>>();
-      for (const item of related) {
-        const key = compositeKey(remoteFields, item);
-        let group = groups.get(key);
-        if (!group) {
-          group = [];
-          groups.set(key, group);
-        }
-        group.push(item);
-      }
-      for (const row of rows) {
-        row[relName] = groups.get(compositeKey(localFields, row)) ?? [];
-      }
-    } else {
-      const index = new Map<string, Record<string, unknown>>();
-      for (const item of related) {
-        const key = compositeKey(remoteFields, item);
-        if (!index.has(key)) {
-          index.set(key, item);
-        }
-      }
-      for (const row of rows) {
-        row[relName] = index.get(compositeKey(localFields, row)) ?? null;
-      }
+    const index = indexFirst(related, remoteFields);
+    for (const row of rows) {
+      row[relName] = index.get(compositeKey(localFields, row)) ?? null;
     }
   }
 }
 
 /**
- * Loads a `@db.rel.via` relation (M:N through a junction table).
+ * Loads a `@db.rel.via` relation (M:N through a junction table). The target
+ * rows are read once for all rows; `$sort` orders, and `$skip` / `$limit`
+ * page, the target rows of each row.
  */
 async function loadViaRelation(
   rows: Array<Record<string, unknown>>,
-  opts: {
-    relName: string;
-    relation: TDbRelation;
-    targetTable: TResolvedTable;
-    relQuery: TRelationQuery;
-  },
+  opts: TLoadOpts,
   host: TRelationLoaderHost,
 ): Promise<void> {
   const { relName, relation, targetTable, relQuery } = opts;
@@ -339,251 +287,264 @@ async function loadViaRelation(
   }
 
   const localPKFields = fkToThis.targetFields;
-  const junctionLocalFields = fkToThis.fields;
-  const targetPKFields = fkToTarget.targetFields;
-  const junctionTargetFields = fkToTarget.fields;
+  const fields: TViaFields = {
+    junctionLocalFields: fkToThis.fields,
+    junctionTargetFields: fkToTarget.fields,
+    targetPKFields: fkToTarget.targetFields,
+  };
 
-  if (localPKFields.length === 1) {
-    await loadViaSingleKey(rows, {
-      relName,
-      relation,
-      targetTable,
-      relQuery,
-      localPKFields,
-      junctionLocalFields,
-      targetPKFields,
-      junctionTargetFields,
-      junctionTable,
-    });
-  } else {
-    await loadViaCompositeKey(rows, {
-      relName,
-      relation,
-      targetTable,
-      relQuery,
-      localPKFields,
-      junctionLocalFields,
-      targetPKFields,
-      junctionTargetFields,
-      junctionTable,
-    });
+  const parentFilter = matchAnyFilter(rows, localPKFields, fields.junctionLocalFields);
+  const junctionRows = parentFilter
+    ? await junctionTable.findMany({
+        filter: andFilters(parentFilter, relQuery.junctionFilter),
+        controls: { $select: [...fields.junctionLocalFields, ...fields.junctionTargetFields] },
+      })
+    : [];
+  const targetFilter = matchAnyFilter(
+    junctionRows,
+    fields.junctionTargetFields,
+    fields.targetPKFields,
+  );
+  if (!targetFilter) {
+    for (const row of rows) {
+      row[relName] = relation.isArray ? [] : null;
+    }
+    return;
+  }
+
+  // One target read for all rows; each row's targets are grouped (and paged)
+  // before the targets' own `$with` relations load on the ones kept.
+  const sorted = hasSort(relQuery.controls);
+  let groups = new Map<string, Array<Record<string, unknown>>>();
+  const pick = (targets: Array<Record<string, unknown>>) => {
+    groups = groupViaTargets(targets, junctionRows, fields, sorted);
+    const page = relQuery.page;
+    if (!page) {
+      return targets;
+    }
+    const start = page.skip ?? 0;
+    const end = page.limit === undefined ? undefined : start + page.limit;
+    const kept = new Set<Record<string, unknown>>();
+    for (const [key, group] of groups) {
+      const slice = group.slice(start, end);
+      groups.set(key, slice);
+      for (const target of slice) kept.add(target);
+    }
+    return targets.filter((target) => kept.has(target));
+  };
+
+  const filter = relQuery.filter ? { $and: [targetFilter, relQuery.filter] } : targetFilter;
+  const controls = ensureSelectIncludesFields(relQuery.controls, fields.targetPKFields);
+  await readRelated(targetTable, { filter, controls }, { pick });
+
+  for (const row of rows) {
+    const group = groups.get(compositeKey(localPKFields, row));
+    row[relName] = relation.isArray ? (group ?? []) : (group?.[0] ?? null);
   }
 }
 
-// ── VIA sub-paths ────────────────────────────────────────────────────────────
-
-interface TViaOpts {
-  relName: string;
-  relation: TDbRelation;
-  targetTable: TResolvedTable;
-  relQuery: TRelationQuery;
-  localPKFields: string[];
+interface TViaFields {
   junctionLocalFields: string[];
-  targetPKFields: string[];
   junctionTargetFields: string[];
-  junctionTable: TResolvedTable;
+  targetPKFields: string[];
 }
 
-async function loadViaSingleKey(
-  rows: Array<Record<string, unknown>>,
-  opts: TViaOpts,
-): Promise<void> {
-  const {
-    relName,
-    relation,
-    targetTable,
-    relQuery,
-    localPKFields,
-    junctionLocalFields,
-    targetPKFields,
-    junctionTargetFields,
-    junctionTable,
-  } = opts;
-  const localField = localPKFields[0];
-  const junctionLocalField = junctionLocalFields[0];
-  const junctionTargetField = junctionTargetFields[0];
-  const targetPKField = targetPKFields[0];
-
-  const pkValues = collectUniqueValues(rows, localField);
-  if (pkValues.length === 0) {
-    for (const row of rows) {
-      row[relName] = [];
-    }
-    return;
-  }
-
-  // Query junction table
-  const junctionFilter = andFilters(
-    { [junctionLocalField]: { $in: pkValues } },
-    relQuery.junctionFilter,
-  );
-  const junctionRows = await junctionTable.findMany({
-    filter: junctionFilter,
-    controls: { $select: [junctionLocalField, junctionTargetField] },
-  });
-
-  if (junctionRows.length === 0) {
-    for (const row of rows) {
-      row[relName] = relation.isArray ? [] : null;
-    }
-    return;
-  }
-
-  // Collect unique target FK values from junction
-  const targetFKValues = collectUniqueValues(junctionRows, junctionTargetField);
-
-  // Query target table
-  const inFilter = { [targetPKField]: { $in: targetFKValues } };
-  const targetFilter = relQuery.filter ? { $and: [inFilter, relQuery.filter] } : inFilter;
-  const controls = ensureSelectIncludesFields(relQuery.controls, targetPKFields);
-  const targetRows = await targetTable.findMany({ filter: targetFilter, controls });
-
-  // Index target rows by PK
-  const targetIndex = new Map<string, Record<string, unknown>>();
-  for (const item of targetRows) {
-    targetIndex.set(String(item[targetPKField]), item);
-  }
-
-  // Group junction rows by local FK, resolve to target records
+/**
+ * Each row's targets (keyed by the junction's local key), once per junction
+ * row. The junction rows only map rows to targets: with a `$sort` the targets
+ * keep the order the target read returned them in, else junction order.
+ */
+function groupViaTargets(
+  targets: Array<Record<string, unknown>>,
+  junctionRows: Array<Record<string, unknown>>,
+  fields: TViaFields,
+  sorted: boolean,
+): Map<string, Array<Record<string, unknown>>> {
   const groups = new Map<string, Array<Record<string, unknown>>>();
-  for (const jRow of junctionRows) {
-    const localKey = String(jRow[junctionLocalField]);
-    const targetKey = String(jRow[junctionTargetField]);
-    const target = targetIndex.get(targetKey);
-    if (!target) {
-      continue;
-    }
-
-    let group = groups.get(localKey);
-    if (!group) {
-      group = [];
-      groups.set(localKey, group);
-    }
-    group.push(target);
-  }
-
-  // Assign to rows
-  for (const row of rows) {
-    const key = String(row[localField]);
-    row[relName] = relation.isArray ? (groups.get(key) ?? []) : (groups.get(key)?.[0] ?? null);
-  }
-}
-
-async function loadViaCompositeKey(
-  rows: Array<Record<string, unknown>>,
-  opts: TViaOpts,
-): Promise<void> {
-  const {
-    relName,
-    relation,
-    targetTable,
-    relQuery,
-    localPKFields,
-    junctionLocalFields,
-    targetPKFields,
-    junctionTargetFields,
-    junctionTable,
-  } = opts;
-
-  // Build OR filter for junction
-  const orFilters: Array<Record<string, unknown>> = [];
-  for (const row of rows) {
-    const condition: Record<string, unknown> = {};
-    let valid = true;
-    for (let i = 0; i < localPKFields.length; i++) {
-      const val = row[localPKFields[i]];
-      if (val === null || val === undefined) {
-        valid = false;
-        break;
+  if (sorted) {
+    const linksByTarget = groupBy(junctionRows, (jRow) =>
+      compositeKey(fields.junctionTargetFields, jRow),
+    );
+    for (const target of targets) {
+      for (const jRow of linksByTarget.get(compositeKey(fields.targetPKFields, target)) ?? []) {
+        appendTo(groups, compositeKey(fields.junctionLocalFields, jRow), target);
       }
-      condition[junctionLocalFields[i]] = val;
     }
-    if (valid) {
-      orFilters.push(condition);
+  } else {
+    const index = indexFirst(targets, fields.targetPKFields);
+    for (const jRow of junctionRows) {
+      const target = index.get(compositeKey(fields.junctionTargetFields, jRow));
+      if (target) {
+        appendTo(groups, compositeKey(fields.junctionLocalFields, jRow), target);
+      }
     }
   }
-
-  if (orFilters.length === 0) {
-    for (const row of rows) {
-      row[relName] = relation.isArray ? [] : null;
-    }
-    return;
-  }
-
-  const junctionFilter = andFilters(
-    (orFilters.length === 1 ? orFilters[0] : { $or: orFilters }) as FilterExpr,
-    relQuery.junctionFilter,
-  );
-  const junctionRows = await junctionTable.findMany({
-    filter: junctionFilter,
-    controls: { $select: [...junctionLocalFields, ...junctionTargetFields] },
-  });
-
-  if (junctionRows.length === 0) {
-    for (const row of rows) {
-      row[relName] = relation.isArray ? [] : null;
-    }
-    return;
-  }
-
-  // Query targets
-  const targetOrFilters: Array<Record<string, unknown>> = [];
-  const seenTargets = new Set<string>();
-  for (const jRow of junctionRows) {
-    const key = compositeKey(junctionTargetFields, jRow);
-    if (seenTargets.has(key)) {
-      continue;
-    }
-    seenTargets.add(key);
-    const condition: Record<string, unknown> = {};
-    for (let i = 0; i < junctionTargetFields.length; i++) {
-      condition[targetPKFields[i]] = jRow[junctionTargetFields[i]];
-    }
-    targetOrFilters.push(condition);
-  }
-
-  const targetBaseFilter =
-    targetOrFilters.length === 1 ? targetOrFilters[0] : { $or: targetOrFilters };
-  const finalFilter = relQuery.filter
-    ? { $and: [targetBaseFilter, relQuery.filter] }
-    : targetBaseFilter;
-  const controls = ensureSelectIncludesFields(relQuery.controls, targetPKFields);
-  const targetRows = await targetTable.findMany({
-    filter: finalFilter,
-    controls,
-  });
-
-  // Index targets
-  const targetIndex = new Map<string, Record<string, unknown>>();
-  for (const item of targetRows) {
-    targetIndex.set(compositeKey(targetPKFields, item), item);
-  }
-
-  // Group and assign
-  const groups = new Map<string, Array<Record<string, unknown>>>();
-  for (const jRow of junctionRows) {
-    const localKey = compositeKey(junctionLocalFields, jRow);
-    const targetKey = compositeKey(junctionTargetFields, jRow);
-    const target = targetIndex.get(targetKey);
-    if (!target) {
-      continue;
-    }
-
-    let group = groups.get(localKey);
-    if (!group) {
-      group = [];
-      groups.set(localKey, group);
-    }
-    group.push(target);
-  }
-
-  for (const row of rows) {
-    const key = compositeKey(localPKFields, row);
-    row[relName] = relation.isArray ? (groups.get(key) ?? []) : (groups.get(key)?.[0] ?? null);
-  }
+  return groups;
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Reads the target rows whose `targetFields` match `localFields` of any of
+ * `rows`, the relation's `$skip` / `$limit` applied per such row.
+ */
+async function readRelatedByKeys(
+  rows: Array<Record<string, unknown>>,
+  opts: {
+    localFields: string[];
+    targetFields: string[];
+    targetTable: TResolvedTable;
+    relQuery: TRelationQuery;
+  },
+): Promise<Array<Record<string, unknown>>> {
+  const { localFields, targetFields, targetTable, relQuery } = opts;
+  const keyFilter = matchAnyFilter(rows, localFields, targetFields);
+  if (!keyFilter) {
+    return [];
+  }
+  const filter = relQuery.filter ? { $and: [keyFilter, relQuery.filter] } : keyFilter;
+  const controls = ensureSelectIncludesFields(relQuery.controls, targetFields);
+  return readRelated(
+    targetTable,
+    { filter, controls },
+    { partitionBy: targetFields, page: relQuery.page },
+  );
+}
+
+/**
+ * Reads related rows. With `partitionBy` and a `page`, the page applies per
+ * group of rows sharing the `partitionBy` values; `pick` keeps a subset of
+ * the rows before their own (nested) `$with` relations load.
+ */
+async function readRelated(
+  table: TResolvedTable,
+  query: { filter: FilterExpr; controls: Record<string, unknown> | undefined },
+  opts: {
+    partitionBy?: string[];
+    page?: TGroupPage;
+    pick?: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
+  },
+): Promise<Array<Record<string, unknown>>> {
+  const { partitionBy, page, pick } = opts;
+  const partitioned = partitionBy && page;
+  if (table._findManyForRelation) {
+    const controls = partitioned ? { ...query.controls, ...pageControls(page) } : query.controls;
+    return table._findManyForRelation(
+      { filter: query.filter, controls },
+      { partitionBy: partitioned ? partitionBy : undefined, pick },
+    );
+  }
+  // A resolver without the relation-read surface: page and pick in memory.
+  let rows = await table.findMany(query);
+  if (partitioned) {
+    rows = slicePerGroup(rows, (row) => compositeKey(partitionBy, row), page);
+  }
+  return pick ? pick(rows) : rows;
+}
+
+/** A `$skip` / `$limit` value as a number (`undefined` when unset or not a number). */
+function asCount(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** `$skip` / `$limit` controls of a page (only the ones set). */
+function pageControls(page: TGroupPage): Record<string, number> {
+  const controls: Record<string, number> = {};
+  if (page.skip !== undefined) controls.$skip = page.skip;
+  if (page.limit !== undefined) controls.$limit = page.limit;
+  return controls;
+}
+
+/** Whether `controls` carry a non-empty `$sort`. */
+function hasSort(controls: Record<string, unknown>): boolean {
+  const sort = controls.$sort;
+  return !!sort && typeof sort === "object" && Object.keys(sort).length > 0;
+}
+
+/**
+ * A filter matching the rows whose `toFields` equal `fromFields` of any of
+ * `rows` — `$in` for a single field, `$or` of conditions for a composite key.
+ * `undefined` when no row has every `fromFields` value.
+ */
+function matchAnyFilter(
+  rows: Array<Record<string, unknown>>,
+  fromFields: string[],
+  toFields: string[],
+): FilterExpr | undefined {
+  if (fromFields.length === 1) {
+    const values = new Set<unknown>();
+    for (const row of rows) {
+      const v = row[fromFields[0]];
+      if (v !== null && v !== undefined) {
+        values.add(v);
+      }
+    }
+    return values.size > 0 ? ({ [toFields[0]]: { $in: [...values] } } as FilterExpr) : undefined;
+  }
+  const seen = new Set<string>();
+  const conditions: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const key = compositeKey(fromFields, row);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    const condition: Record<string, unknown> = {};
+    let valid = true;
+    for (let i = 0; i < fromFields.length; i++) {
+      const v = row[fromFields[i]];
+      if (v === null || v === undefined) {
+        valid = false;
+        break;
+      }
+      condition[toFields[i]] = v;
+    }
+    if (valid) {
+      conditions.push(condition);
+    }
+  }
+  if (conditions.length === 0) {
+    return undefined;
+  }
+  return (conditions.length === 1 ? conditions[0] : { $or: conditions }) as FilterExpr;
+}
+
+/** The first of `items` per `fields` key. */
+function indexFirst(
+  items: Array<Record<string, unknown>>,
+  fields: string[],
+): Map<string, Record<string, unknown>> {
+  const index = new Map<string, Record<string, unknown>>();
+  for (const item of items) {
+    const key = compositeKey(fields, item);
+    if (!index.has(key)) {
+      index.set(key, item);
+    }
+  }
+  return index;
+}
+
+/** `items` grouped by `keyOf`, each group in the order of `items`. */
+function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    appendTo(groups, keyOf(item), item);
+  }
+  return groups;
+}
+
+function appendTo<T>(groups: Map<string, T[]>, key: string, item: T): void {
+  const group = groups.get(key);
+  if (group) {
+    group.push(item);
+  } else {
+    groups.set(key, [item]);
+  }
+}
 
 /**
  * Ensure the given join fields survive the user's $select on a $with relation
@@ -635,108 +596,4 @@ export function ensureSelectIncludesFields(
     return mutated ? { ...controls, $select: augmented } : controls;
   }
   return controls;
-}
-
-function compositeKey(fields: string[], obj: Record<string, unknown>): string {
-  let key = "";
-  for (let i = 0; i < fields.length; i++) {
-    if (i > 0) {
-      key += "\0\0";
-    }
-    const v: unknown = obj[fields[i]];
-    key += v === null || v === undefined ? "\0" : String(v as string | number | boolean); // null or undefined becomes empty string, distinct from literal '\0' value.
-  }
-  return key;
-}
-
-/** Collects unique non-null values for a field across rows. */
-function collectUniqueValues(rows: Array<Record<string, unknown>>, field: string): unknown[] {
-  const set = new Set<unknown>();
-  for (const row of rows) {
-    const v = row[field];
-    if (v !== null && v !== undefined) {
-      set.add(v);
-    }
-  }
-  return [...set];
-}
-
-/** Assigns related items grouped by FK value (one-to-many). */
-function assignGrouped(opts: TAssignOpts): void {
-  const { rows, related, localField, remoteField, relName } = opts;
-  const groups = new Map<unknown, Array<Record<string, unknown>>>();
-  for (const item of related) {
-    const key = item[remoteField];
-    let group = groups.get(key);
-    if (!group) {
-      group = [];
-      groups.set(key, group);
-    }
-    group.push(item);
-  }
-  for (const row of rows) {
-    row[relName] = groups.get(row[localField]) ?? [];
-  }
-}
-
-/** Assigns related items by FK value (many-to-one / one-to-one). */
-function assignSingle(opts: TAssignOpts): void {
-  const { rows, related, localField, remoteField, relName } = opts;
-  const index = new Map<unknown, Record<string, unknown>>();
-  for (const item of related) {
-    const key = item[remoteField];
-    if (!index.has(key)) {
-      index.set(key, item);
-    }
-  }
-  for (const row of rows) {
-    row[relName] = index.get(row[localField]) ?? null;
-  }
-}
-
-/** Batch query for composite FK. */
-function queryCompositeFK(
-  rows: Array<Record<string, unknown>>,
-  opts: {
-    localFields: string[];
-    targetFields: string[];
-    targetTable: TResolvedTable;
-    relQuery: TRelationQuery;
-  },
-): Promise<Array<Record<string, unknown>>> {
-  const { localFields, targetFields, targetTable, relQuery } = opts;
-  const seen = new Set<string>();
-  const orFilters: Array<Record<string, unknown>> = [];
-
-  for (const row of rows) {
-    const key = compositeKey(localFields, row);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    const condition: Record<string, unknown> = {};
-    let valid = true;
-    for (let i = 0; i < localFields.length; i++) {
-      const val = row[localFields[i]];
-      if (val === null || val === undefined) {
-        valid = false;
-        break;
-      }
-      condition[targetFields[i]] = val;
-    }
-    if (valid) {
-      orFilters.push(condition);
-    }
-  }
-
-  if (orFilters.length === 0) {
-    return Promise.resolve([]);
-  }
-
-  const baseFilter = orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
-  const targetFilter = relQuery.filter ? { $and: [baseFilter, relQuery.filter] } : baseFilter;
-
-  const controls = ensureSelectIncludesFields(relQuery.controls, targetFields);
-  return targetTable.findMany({ filter: targetFilter, controls });
 }

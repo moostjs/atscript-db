@@ -10,8 +10,10 @@ import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from
 
 import { DbError } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
+import { compositeKey, slicePerGroup } from "./rel/relation-helpers";
 import { createFailureCollector } from "./shared/failure-collector";
 import { geoIndexNotFoundMessage } from "./shared/index-messages";
+import { getPath } from "./shared/object";
 
 import type {
   DbQuery,
@@ -993,6 +995,33 @@ export abstract class BaseDbAdapter {
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
     const [data, count] = await Promise.all([this.findMany(query), this.count(query)]);
     return { data, count };
+  }
+
+  /**
+   * Reads like {@link findMany}, except that `$skip` / `$limit` apply to each
+   * partition — the rows sharing the values of the `partitionBy` columns
+   * (physical names) — instead of to the whole result. The generic `$with`
+   * loader reads the related rows of many parent rows at once this way, so a
+   * relation's `$skip` / `$limit` page each parent row's related rows.
+   * `$sort` orders the rows within a partition; how partitions interleave is
+   * unspecified.
+   *
+   * Default: one {@link findMany} without `$skip` / `$limit`, paged per
+   * partition in memory. The SQL adapters override it with a `ROW_NUMBER()`
+   * window, so only the kept rows are read.
+   *
+   * @since 0.1.147
+   */
+  async findManyPerPartition(
+    query: DbQuery,
+    partitionBy: readonly string[],
+  ): Promise<Array<Record<string, unknown>>> {
+    const { $skip, $limit, ...controls } = query.controls;
+    const rows = await this.findMany({ ...query, controls });
+    return slicePerGroup(rows, (row) => compositeKey(partitionBy, row, getPath), {
+      skip: ($skip ?? undefined) as number | undefined,
+      limit: ($limit ?? undefined) as number | undefined,
+    });
   }
 
   /**

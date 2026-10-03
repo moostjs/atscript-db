@@ -283,6 +283,8 @@ If `supportsNativePatch()` returns `true`, implement `nativePatch(filter, patch)
 
 If `supportsNativeRelations()` returns `true`, implement `loadRelations(rows, withRelations, relations, foreignKeys, tableResolver?)`. Enrich the provided rows in place with related data using your database's native features (e.g., MongoDB `$lookup`, SQL JOINs). When `supportsNativeRelations()` returns `false` (the default), the table layer handles relation loading by issuing separate queries per relation.
 
+The relation's `$sort`, `$skip` and `$limit` apply to the related rows of each parent row. The generic loader reads a paged `to` / `from` relation for all parent rows at once with `findManyPerPartition(query, partitionBy)` (since 0.1.147): `findMany`, except that `$skip` / `$limit` apply to each group of rows sharing the values of the `partitionBy` columns (physical names), the rows of a group in `$sort` order. The default reads `findMany` without `$skip` / `$limit` and pages each group in memory; override it to page in the database (the SQL adapters use `buildPartitionedSelect` from `@atscript/db-sql-tools`, a `ROW_NUMBER()` window). A native loader applies the controls per parent row too.
+
 A native loader must apply the relation's [`@db.rel.filter`](/relations/navigation#db-rel-filter) (since 0.1.147 the generic loader does): `relationStaticFilter(relation)` from `@atscript/db` returns it as logical filters split by side, `{ target?, junction? }` — AND `target` into the related rows and, on a `via` relation, `junction` into the junction rows. A `null` foreign key loads nothing (`null` / `[]`), even where the engine considers `null` equal to `null`.
 
 ## Relational Predicates {#relational-predicates}
