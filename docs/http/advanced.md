@@ -322,7 +322,7 @@ The standard SQL aggregate functions are available: `count(*)`, `count(field)`, 
 
 ### Calendar Buckets
 
-Group a timestamp field by day, week, month, quarter or year in a time zone with `bucket(field,unit[,tz][,weekStart]):alias` in `$select`, and list the alias in `$groupBy` (since 0.1.132):
+Group a timestamp field by hour, day, week, month, quarter or year in a time zone with `bucket(field,unit[,tz][,weekStart]):alias` in `$select`, and list the alias in `$groupBy` (since 0.1.132):
 
 ```bash
 curl "http://localhost:3000/tickets/query?\$select=bucket(openedAt,week,'Europe/Berlin',sun):week,count(*):n&\$groupBy=week&\$sort=week"
@@ -335,7 +335,7 @@ curl "http://localhost:3000/tickets/query?\$select=bucket(openedAt,week,'Europe/
 ]
 ```
 
-Each label is the `YYYY-MM-DD` local date the period starts on. `/meta` advertises the supported units (`bucketUnits`) and the fields that accept a bucket (`fields[path].bucketable`). See [Calendar Buckets](/api/calendar-buckets) for labels, time zones, eligible fields, gap filling and the `400` / `501` errors.
+Each label is the `YYYY-MM-DD` local date the period starts on — for `hour` (since 0.1.147) the local date and hour, `YYYY-MM-DDTHH` (quote it in `$having`: `$having=h>='2026-03-29T05'`). `/meta` advertises the supported units (`bucketUnits`) and the fields that accept a bucket (`fields[path].bucketable`). See [Calendar Buckets](/api/calendar-buckets) for labels, time zones, eligible fields, gap filling and the `400` / `501` errors.
 
 ### Limitations
 

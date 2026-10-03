@@ -25,10 +25,13 @@ const DAY_MS = 86_400_000;
 const ISO_DATE = "%Y-%m-%d";
 
 /**
- * Units whose first day `$dateToString` renders straight from the instant in
- * the zone: the local day, then the literal `01` for day-of-month / month.
+ * Units whose label `$dateToString` renders straight from the instant in the
+ * zone: the local wall-clock hour (`YYYY-MM-DDTHH` — a DST fall-back's
+ * repeated hour is one label), the local day, then the literal `01` for
+ * day-of-month / month.
  */
 const LOCAL_DATE_FORMATS: Partial<Record<BucketUnit, string>> = {
+  hour: "%Y-%m-%dT%H",
   day: ISO_DATE,
   month: "%Y-%m-01",
   year: "%Y-01-01",
@@ -61,7 +64,8 @@ function naiveFirstDay(b: TResolvedBucket): Document {
 
 /**
  * The `$group._id` expression of a calendar bucket: the ISO local date
- * `YYYY-MM-DD` of the bucket's first day in `b.tz`, or `null`.
+ * `YYYY-MM-DD` of the bucket's first day in `b.tz` (for `hour`, the local
+ * `YYYY-MM-DDTHH`), or `null`.
  *
  * The only zone-aware step is instant → local date (`timezone` on
  * `$dateToString` / `$dateToParts`, never ambiguous). `$dateTrunc` is

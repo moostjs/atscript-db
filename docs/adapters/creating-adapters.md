@@ -608,16 +608,16 @@ class MyAdapter extends BaseDbAdapter {
 ### Calendar buckets {#calendar-buckets}
 
 ```typescript
-calendarBucketUnits(): ReadonlySet<BucketUnit> // 'day' | 'week' | 'month' | 'quarter' | 'year'
+calendarBucketUnits(): ReadonlySet<BucketUnit> // 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year'
 ```
 
-The [calendar-bucket](/api/calendar-buckets) units your adapter can group by (since 0.1.132). Return `ALL_BUCKET_UNITS` (exported from `@atscript/db`) when you implement all five. The default is an empty set: the core then rejects every bucket source with `BUCKET_NOT_SUPPORTED` ([errors](/api/calendar-buckets#errors)) before calling `aggregate()`, and moost-db's `/meta` advertises no `bucketUnits` and no `bucketable` field. moost-db re-reads this method (and `isGeoSearchable()`) when building its capability index, so the answer may change after construction or schema sync.
+The [calendar-bucket](/api/calendar-buckets) units your adapter can group by (since 0.1.132). Return `ALL_BUCKET_UNITS` (exported from `@atscript/db`) when you implement all six. Changed in 0.1.147: `ALL_BUCKET_UNITS` now includes `hour` — an adapter that returns it must render hour labels, or return an explicit set without `hour` (`new Set(BUCKET_UNITS.filter((u) => u !== "hour"))`, `BUCKET_UNITS` from `@uniqu/core`) until it does. The default is an empty set: the core then rejects every bucket source with `BUCKET_NOT_SUPPORTED` ([errors](/api/calendar-buckets#errors)) before calling `aggregate()`, and moost-db's `/meta` advertises no `bucketUnits` and no `bucketable` field. moost-db re-reads this method (and `isGeoSearchable()`) when building its capability index, so the answer may change after construction or schema sync.
 
 Returning a unit commits `aggregate()` to handle it:
 
 - **Read the buckets from `controls.$select.buckets`** — `TResolvedBucket` entries (exported from `@atscript/db`) carrying `alias`, `field` (the physical column or document path), `unit`, `tz` (a canonical IANA name, already validated), `weekStart` / `weekStartIso` (1 = Monday … 7 = Sunday), and `fd`, the source field's descriptor.
 - **Resolve keys by alias.** A `$groupBy`, `$sort` or `$having` key that equals a bucket's alias means that bucket: `controls.$select.bucketByAlias(key)` returns it. Aliases never collide with column names.
-- **Produce the label contract.** The value is the `YYYY-MM-DD` local date of the bucket's first day in `tz`; `null` for a `null`, missing or non-numeric source and for instants outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)` (exported by `@uniqu/core`). For an in-process implementation, `bucketer(unit, tz, weekStart)` from `@uniqu/core` returns a labelling function — the memory adapter and the SQLite function use it.
+- **Produce the label contract.** The value is the `YYYY-MM-DD` local date of the bucket's first day in `tz` — for `hour`, the local wall-clock hour `YYYY-MM-DDTHH`, read from the zone's local time (truncating the UTC instant to the hour is wrong for +05:30 or +05:45 zones); `null` for a `null`, missing or non-numeric source and for instants outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)` (exported by `@uniqu/core`). For an in-process implementation, `bucketer(unit, tz, weekStart)` from `@uniqu/core` returns a labelling function — the memory adapter and the SQLite function use it.
 - **Never fall back silently.** When the engine cannot resolve a zone, throw `bucketTimeZoneUnavailable(message)` from `@atscript/db` — a `DbError("BUCKET_TZ_UNAVAILABLE")` on path `$select`, HTTP 501 — rather than returning `null` or UTC labels.
 
 For SQL adapters built on `@atscript/db-sql-tools`, implement two optional `SqlDialect` members instead:

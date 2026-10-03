@@ -191,24 +191,32 @@ function pgJsonExtract(quotedCol: string, path: readonly string[], type: TViewJs
 /**
  * Calendar-bucket label over an epoch-ms column (BIGINT for
  * `@db.default.now`, DOUBLE PRECISION otherwise): TEXT `'YYYY-MM-DD'` — the
- * local date of the bucket's first day in `b.tz` — or NULL for a NULL source
+ * local date of the bucket's first day in `b.tz` — or, for `hour`,
+ * `'YYYY-MM-DDTHH'` — the local wall-clock hour — or NULL for a NULL source
  * or one outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
  *
- * The local date is `(to_timestamp(col / 1000) AT TIME ZONE '<tz>')::date`:
- * `timestamptz AT TIME ZONE` yields the wall time in that zone, independent
- * of the session `TimeZone`. Truncation is calendar arithmetic on that date —
- * the week uses the generic `(isodow - weekStart + 7) % 7` formula
- * (`date_trunc('week')` is Monday-only). `date_trunc` and `to_char` get an
- * explicit `::timestamp`: a bare `date` resolves to their `timestamptz`
- * overloads, which would route through the session zone.
+ * The wall time is `to_timestamp(col / 1000) AT TIME ZONE '<tz>'`:
+ * `timestamptz AT TIME ZONE` yields the (zone-less) wall time in that zone,
+ * independent of the session `TimeZone` — so a `+05:30` zone's hour starts at
+ * :30 UTC and a DST fall-back's repeated hour is one label. The hour label is
+ * formatted straight from it; the other units truncate its `::date` with
+ * calendar arithmetic — the week uses the generic
+ * `(isodow - weekStart + 7) % 7` formula (`date_trunc('week')` is
+ * Monday-only). `date_trunc` and `to_char` get an explicit `::timestamp`: a
+ * bare `date` resolves to their `timestamptz` overloads, which would route
+ * through the session zone.
  *
  * Parameter-free (the zone is an inlined, charset-checked literal), so the
  * SELECT and GROUP BY renderings match structurally.
  */
 export function pgCalendarBucket(quotedCol: string, b: TResolvedBucket): string {
-  const local = `(to_timestamp(${quotedCol}::double precision / 1000) AT TIME ZONE ${sqlTimeZoneLiteral(b.tz)})::date`;
+  const wall = `(to_timestamp(${quotedCol}::double precision / 1000) AT TIME ZONE ${sqlTimeZoneLiteral(b.tz)})`;
+  const local = `${wall}::date`;
   let first: string;
   switch (b.unit) {
+    case "hour": {
+      return bucketInRange(quotedCol, `to_char(${wall}, 'YYYY-MM-DD"T"HH24')`);
+    }
     case "day": {
       first = local;
       break;
@@ -222,8 +230,12 @@ export function pgCalendarBucket(quotedCol: string, b: TResolvedBucket): string 
       first = `date_trunc('${b.unit}', ${local}::timestamp)`;
     }
   }
-  const text = `to_char(${first}::timestamp, 'YYYY-MM-DD')`;
-  return `CASE WHEN ${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT} THEN ${text} END`;
+  return bucketInRange(quotedCol, `to_char(${first}::timestamp, 'YYYY-MM-DD')`);
+}
+
+/** `label` for a source in `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`, NULL otherwise. */
+function bucketInRange(quotedCol: string, label: string): string {
+  return `CASE WHEN ${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT} THEN ${label} END`;
 }
 
 // ── Geo helpers (PostGIS) ────────────────────────────────────────────────────

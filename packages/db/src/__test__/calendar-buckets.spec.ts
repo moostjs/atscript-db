@@ -154,7 +154,7 @@ describe("aggregate() — calendar-bucket validation (every metadata-free rule, 
       { $select: [{ $bucket: "fortnight", $field: "openedAt", $as: "d" }], $groupBy: ["d"] },
       {
         path: "$select",
-        message: 'Unknown bucket unit "fortnight" — use day, week, month, quarter or year',
+        message: 'Unknown bucket unit "fortnight" — use hour, day, week, month, quarter or year',
       },
     ],
     [
@@ -335,6 +335,21 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
     expect(week.errors).toEqual([
       { path: "$select", message: 'Calendar bucket "week" is not supported by this adapter' },
     ]);
+
+    // An adapter that has not adopted 'hour' (since 0.1.147) keeps its other units.
+    const daily = sql();
+    daily.adapter.units = new Set(BUCKET_UNITS.filter((u) => u !== "hour"));
+    const hour = await rejection(
+      daily.table.aggregate({
+        filter: {},
+        controls: { $select: [{ $bucket: "hour", $field: "openedAt", $as: "h" }], $groupBy: ["h"] },
+      } as any),
+    );
+    expect(hour.code).toBe("BUCKET_NOT_SUPPORTED");
+    expect(hour.errors).toEqual([
+      { path: "$select", message: 'Calendar bucket "hour" is not supported by this adapter' },
+    ]);
+    expect(daily.adapter.calls.some((c) => c.method === "aggregate")).toBe(false);
   });
 });
 

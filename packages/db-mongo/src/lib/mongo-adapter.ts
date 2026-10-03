@@ -399,7 +399,7 @@ export class MongoAdapter extends BaseDbAdapter {
     return true;
   }
 
-  /** All five units, over MongoDB's bundled time zone database (see `agg.ts` `bucketExpression`). */
+  /** Every unit, over MongoDB's bundled time zone database (see `agg.ts` `bucketExpression`). */
   override calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return ALL_BUCKET_UNITS;
   }

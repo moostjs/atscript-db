@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, expectTypeOf, vi } from "vite-plus/test";
 
-import { Client, bucketStartInstant, nextBucketLabel } from "../index";
+import { Client, bucketStartInstant, nextBucketLabel, type NextBucketOptions } from "../index";
 
 declare class Ticket {
   id: number;
@@ -103,6 +103,29 @@ describe("aggregate() with calendar buckets", () => {
     expect(nextBucketLabel("2026-02-28", "day")).toBe("2026-03-01");
     expect(nextBucketLabel("2026-12-01", "month")).toBe("2027-01-01");
     expect(bucketStartInstant("2026-03-29", "UTC")).toBe(Date.UTC(2026, 2, 29));
+  });
+
+  it("hour buckets (since 0.1.147): typed as a label, serialized, gap-filled per zone", async () => {
+    const fetchFn = mockFetch([{ h: "2026-03-29T01", n: 2 }]);
+    const client = new Client<typeof Ticket>("/api/tickets", { fetch: fetchFn });
+    const rows = await client.aggregate({
+      controls: {
+        $select: [
+          { $bucket: "hour", $field: "openedAt", $tz: "Europe/Berlin", $as: "h" },
+          { $fn: "count", $field: "*", $as: "n" },
+        ],
+        $groupBy: ["h"],
+      },
+    });
+    expectTypeOf(rows[0]!.h).toEqualTypeOf<string>();
+    expectTypeOf(rows[0]!.n).toEqualTypeOf<number>();
+    const url = decodeURIComponent(fetchFn.mock.calls[0]![0] as string);
+    expect(url).toContain("$select=bucket(openedAt,hour,'Europe/Berlin'):h,count(*):n");
+    // the Berlin spring-forward skips 02:00–03:00 local: with the zone, gap-fill skips it too
+    const options: NextBucketOptions = { tz: "Europe/Berlin" };
+    expect(nextBucketLabel(rows[0]!.h, "hour", options)).toBe("2026-03-29T03");
+    expect(nextBucketLabel(rows[0]!.h, "hour")).toBe("2026-03-29T02");
+    expect(bucketStartInstant("2026-03-29T03", "Europe/Berlin")).toBe(Date.UTC(2026, 2, 29, 1));
   });
 });
 

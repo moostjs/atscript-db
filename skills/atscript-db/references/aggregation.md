@@ -1,6 +1,6 @@
 # aggregation (grouped queries — `table.aggregate()`, `$groupBy`)
 
-`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery` (`filter?`, **required** `controls`). Only `aggregate()` interprets `$groupBy`; route every grouped read through it. HTTP: `GET /query?$groupBy=…` (URL form in [http-query-syntax.md](http-query-syntax.md)). Group by day/week/month → [calendar-buckets.md](calendar-buckets.md).
+`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery` (`filter?`, **required** `controls`). Only `aggregate()` interprets `$groupBy`; route every grouped read through it. HTTP: `GET /query?$groupBy=…` (URL form in [http-query-syntax.md](http-query-syntax.md)). Group by hour/day/week/month → [calendar-buckets.md](calendar-buckets.md).
 
 ## Quick start
 

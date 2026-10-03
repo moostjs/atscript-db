@@ -62,6 +62,16 @@ describe("pgCalendarBucket", () => {
     },
   );
 
+  // WHY: the hour is read off the zone's WALL time (never a UTC truncation),
+  // so +05:30 / +05:45 zones turn hours at :30 / :15 UTC and a DST fall-back's
+  // repeated hour is one label.
+  it("hour: to_char of the zone's wall time, not of a truncated instant", () => {
+    expect(pgCalendarBucket(`"openedAt"`, bucket("hour", { tz: "Asia/Kathmandu" }))).toBe(
+      `CASE WHEN "openedAt" >= 86400000 AND "openedAt" < 32503680000000 THEN ` +
+        `to_char((to_timestamp("openedAt"::double precision / 1000) AT TIME ZONE 'Asia/Kathmandu'), 'YYYY-MM-DD"T"HH24') END`,
+    );
+  });
+
   it("UTC renders like any other zone", () => {
     expect(pgCalendarBucket(`"openedAt"`, bucket("day", { tz: "UTC" }))).toBe(
       wrap(`(to_timestamp("openedAt"::double precision / 1000) AT TIME ZONE 'UTC')::date`),
@@ -109,7 +119,7 @@ function throwingDriver(error: () => unknown) {
 }
 
 describe("PostgresAdapter calendar buckets", () => {
-  it("advertises all five units", () => {
+  it("advertises every unit", () => {
     const adapter = new PostgresAdapter(createMockDriver());
     expect([...adapter.calendarBucketUnits()]).toEqual([...BUCKET_UNITS]);
   });

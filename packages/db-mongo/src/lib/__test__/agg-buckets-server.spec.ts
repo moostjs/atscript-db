@@ -148,6 +148,132 @@ describe("§11.3 literal DST fixtures", () => {
   });
 });
 
+/**
+ * Hour buckets (since 0.1.147), the scenarios every adapter's suite runs: the
+ * label is the local wall-clock hour — a fall-back's repeated hour merges its
+ * two UTC hours, a spring-forward's skipped hour never appears, and in
+ * +05:30 / +05:45 / −03:30 zones the hour turns at :30 / :15 / :30 UTC.
+ */
+const HOUR_SCENARIOS: Array<[tz: string, rows: string[], groups: Array<[string, number]>]> = [
+  [
+    "UTC",
+    ["2026-06-14T00:30:00Z", "2026-06-14T01:00:00Z", "2026-06-14T01:59:59.999Z"],
+    [
+      ["2026-06-14T00", 1],
+      ["2026-06-14T01", 2],
+    ],
+  ],
+  // Berlin fall-back 2026-10-25 (01:00Z): 00:30Z = 02:30 CEST, 01:30Z = 02:30 CET
+  [
+    "Europe/Berlin",
+    [
+      "2026-10-24T23:30:00Z",
+      "2026-10-25T00:30:00Z",
+      "2026-10-25T01:30:00Z",
+      "2026-10-25T02:30:00Z",
+    ],
+    [
+      ["2026-10-25T01", 1],
+      ["2026-10-25T02", 2],
+      ["2026-10-25T03", 1],
+    ],
+  ],
+  // Berlin spring-forward 2026-03-29 (01:00Z): 02:00–03:00 local never happens
+  [
+    "Europe/Berlin",
+    ["2026-03-29T00:30:00Z", "2026-03-29T01:30:00Z"],
+    [
+      ["2026-03-29T01", 1],
+      ["2026-03-29T03", 1],
+    ],
+  ],
+  [
+    "America/New_York",
+    ["2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z", "2026-11-01T07:30:00Z"],
+    [
+      ["2026-11-01T01", 2],
+      ["2026-11-01T02", 1],
+    ],
+  ],
+  [
+    "America/New_York",
+    ["2026-03-08T06:30:00Z", "2026-03-08T07:30:00Z"],
+    [
+      ["2026-03-08T01", 1],
+      ["2026-03-08T03", 1],
+    ],
+  ],
+  [
+    "Asia/Kolkata",
+    ["2026-06-14T04:29:59Z", "2026-06-14T04:30:00Z", "2026-06-14T05:29:59Z"],
+    [
+      ["2026-06-14T09", 1],
+      ["2026-06-14T10", 2],
+    ],
+  ],
+  [
+    "Asia/Kathmandu",
+    ["2026-06-14T04:14:59Z", "2026-06-14T04:15:00Z"],
+    [
+      ["2026-06-14T09", 1],
+      ["2026-06-14T10", 1],
+    ],
+  ],
+  // St. John's −02:30 → −03:30 at 04:30Z on 2026-11-01; −03:30 → −02:30 at 05:30Z on 2026-03-08
+  [
+    "America/St_Johns",
+    ["2026-11-01T03:45:00Z", "2026-11-01T04:45:00Z", "2026-11-01T05:45:00Z"],
+    [
+      ["2026-11-01T01", 2],
+      ["2026-11-01T02", 1],
+    ],
+  ],
+  [
+    "America/St_Johns",
+    ["2026-03-08T05:15:00Z", "2026-03-08T05:45:00Z"],
+    [
+      ["2026-03-08T01", 1],
+      ["2026-03-08T03", 1],
+    ],
+  ],
+];
+
+describe("hour buckets", () => {
+  it.each(HOUR_SCENARIOS)("%s %o → local wall-clock hours", async (tz, rows, groups) => {
+    await seed(rows.map((iso) => ({ openedAt: Z(iso) })));
+    expect(await counts({ unit: "hour", tz })).toEqual(groups.map(([b, n]) => ({ b, n })));
+  });
+
+  it("every minute around the transitions labels like the kernel", async () => {
+    const windows: Array<[string, string]> = [
+      ["Europe/Berlin", "2026-10-24T23:00:00Z"],
+      ["Europe/Berlin", "2026-03-28T23:00:00Z"],
+      ["America/New_York", "2026-11-01T04:00:00Z"],
+      ["America/St_Johns", "2026-11-01T02:30:00Z"],
+      ["America/St_Johns", "2026-03-08T04:30:00Z"],
+      ["Australia/Lord_Howe", "2026-10-03T14:30:00Z"],
+      ["Asia/Kathmandu", "2026-06-14T03:00:00Z"],
+    ];
+    const instants = windows.flatMap(([, start]) =>
+      Array.from({ length: 4 * 60 }, (_, m) => Z(start) + m * 60_000 - 1),
+    );
+    await seed(instants.map((openedAt) => ({ openedAt })));
+    const mismatches: string[] = [];
+    for (const [tz] of windows) {
+      const got = await labelsById({ unit: "hour", tz });
+      instants.forEach((t, i) => {
+        const want = bucketLabel(t, "hour", tz);
+        if (got.get(i + 1) !== want) {
+          mismatches.push(
+            `${new Date(t).toISOString()} ${tz}: mongo ${got.get(i + 1)} kernel ${want}`,
+          );
+        }
+      });
+    }
+    expect(mismatches).toEqual([]);
+  });
+});
+
 // Deterministic instants across the supported range, dense around 2026, for
 // zones with DST, half/quarter-hour and 13–14 h offsets and a midnight gap.
 describe("per-row sweep against uniqu's kernel", () => {
@@ -165,6 +291,7 @@ describe("per-row sweep against uniqu's kernel", () => {
     "Pacific/Kiritimati",
   ];
   const SPECS: Array<{ unit: BucketUnit; weekStart?: WeekStart }> = [
+    { unit: "hour" },
     { unit: "day" },
     { unit: "month" },
     { unit: "quarter" },

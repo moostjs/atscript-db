@@ -121,7 +121,7 @@ Grouped queries run on every adapter, with the semantics above.
 
 ## See also
 
-- [Calendar Buckets](./calendar-buckets) — group by day, week, month, quarter or year
+- [Calendar Buckets](./calendar-buckets) — group by hour, day, week, month, quarter or year
 - [Aggregation in URLs](/http/advanced#groupby) — `$groupBy`, `$having` and `fn(field):alias` over HTTP
 - [HTTP Client — aggregate](/http/client#aggregate) — typed grouped queries from the browser
 - [Aggregation Views](/views/aggregation-views) — aggregations declared in the schema

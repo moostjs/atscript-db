@@ -136,7 +136,7 @@ r[0].content; // still there — only nav props are stripped/added
 
 ## Aggregation
 
-Grouped reads go through `table.aggregate()` — controls, SQL semantics, `count_star`, strict mode, `$search` before grouping → [aggregation.md](aggregation.md). Calendar buckets (day/week/month in a time zone) → [calendar-buckets.md](calendar-buckets.md).
+Grouped reads go through `table.aggregate()` — controls, SQL semantics, `count_star`, strict mode, `$search` before grouping → [aggregation.md](aggregation.md). Calendar buckets (hour/day/week/month in a time zone) → [calendar-buckets.md](calendar-buckets.md).
 
 ## Insights
 

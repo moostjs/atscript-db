@@ -9,7 +9,13 @@ import { HttpError } from "@moostjs/event-http";
 import { AsDbController } from "../as-db.controller";
 // The core test adapter has no package entry — the one relative import that stays.
 import { MockAdapter } from "../../../db/src/__test__/test-utils";
-import { createMockApp as makeApp, errorsOf, httpReplyFor, prepareFixtures } from "./test-utils";
+import {
+  createMockApp as makeApp,
+  errorsOf,
+  httpReplyFor,
+  prepareFixtures,
+  transformed,
+} from "./test-utils";
 
 /**
  * Calendar buckets over HTTP (since 0.1.132): the gate runs the core's shared
@@ -116,7 +122,7 @@ describe("/meta ⇔ gate parity for calendar buckets", () => {
     async (_name, make) => {
       const { controller, adapter, table } = make();
       const meta = await controller.meta();
-      expect(meta.bucketUnits).toEqual(["day", "week", "month", "quarter", "year"]);
+      expect(meta.bucketUnits).toEqual(["hour", "day", "week", "month", "quarter", "year"]);
       let compared = 0;
       for (const [path, f] of Object.entries(meta.fields)) {
         const res = await controller.query(bucketUrl(path));
@@ -200,7 +206,7 @@ describe("gate wording", () => {
         bucketUrl("openedAt", "fortnight"),
         {
           path: "$select",
-          message: 'Unknown bucket unit "fortnight" — use day, week, month, quarter or year',
+          message: 'Unknown bucket unit "fortnight" — use hour, day, week, month, quarter or year',
         },
       ],
       [
@@ -250,6 +256,30 @@ describe("gate wording", () => {
       { alias: "wk", field: "openedAt", unit: "week", tz: "Europe/Berlin", weekStartIso: 7 },
     ]);
     expect(sent.controls.$groupBy).toEqual(["status", "wk"]);
+  });
+
+  it("hour buckets (since 0.1.147): accepted when advertised, BUCKET_NOT_SUPPORTED and absent from /meta when not", async () => {
+    const { controller, adapter } = bind(BucketTicket);
+    adapter.aggregateResult = [{ h: "2026-03-29T10", n: 2 }];
+    const url =
+      "?$select=bucket(openedAt,hour,'Asia/Kolkata'):h,count(*):n&$groupBy=h&$sort=h&$having=h>='2026-03-29T05'";
+    expect(await controller.query(url)).toEqual([{ h: "2026-03-29T10", n: 2 }]);
+    const sent = adapter.calls.find((c) => c.method === "aggregate")!.args[0];
+    expect(sent.controls.$select.buckets).toMatchObject([
+      { alias: "h", field: "openedAt", unit: "hour", tz: "Asia/Kolkata" },
+    ]);
+    expect(sent.controls.$having).toEqual({ h: { $gte: "2026-03-29T05" } });
+
+    adapter.units = new Set(BUCKET_UNITS.filter((u) => u !== "hour"));
+    const meta = await controller.meta();
+    expect(meta.bucketUnits).toEqual(["day", "week", "month", "quarter", "year"]);
+    expect(meta.fields.openedAt.bucketable).toBe(true);
+    // The unit is the core's check (guardAggregate), mapped to 400 by the error transform.
+    const res = await transformed(controller.query(url) as Promise<unknown>);
+    expect(res.body.statusCode).toBe(400);
+    expect(errorsOf(res)).toEqual([
+      { path: "$select", message: 'Calendar bucket "hour" is not supported by this adapter' },
+    ]);
   });
 });
 

@@ -33,8 +33,10 @@ export interface SqlDialect {
   geoWithin?(quotedCol: string, circle: TGeoCircle): TSqlFragment;
   /**
    * Calendar-bucket label expression over one column: TEXT `'YYYY-MM-DD'`
-   * (the local calendar date of the bucket's first day in `b.tz`), or NULL for
-   * a NULL source or one outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
+   * (the local calendar date of the bucket's first day in `b.tz`; for unit
+   * `hour`, `'YYYY-MM-DDTHH'`, the local wall-clock hour — truncate the
+   * zone's wall time, never the UTC instant), or NULL for a NULL source or
+   * one outside `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
    * `quotedCol` is already quoted; `b.fd` identifies the storage kind.
    *
    * The expression must be PARAMETER-FREE — inline the zone with

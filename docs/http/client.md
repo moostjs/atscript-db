@@ -203,7 +203,7 @@ const weekly = await tickets.aggregate({
 weekly[0].week; // string — "YYYY-MM-DD" (string | null when openedAt is optional)
 ```
 
-`nextBucketLabel(label, unit, weekStart?)` and `bucketStartInstant(label, tz)` are re-exported for filling empty buckets and placing labels on a time axis — see [Filling gaps](/api/calendar-buckets#filling-gaps). Check `meta.bucketUnits` and `meta.fields[path].bucketable` before offering time grouping in a UI.
+`nextBucketLabel(label, unit, weekStart?)` and `bucketStartInstant(label, tz)` are re-exported for filling empty buckets and placing labels on a time axis (for `hour` buckets pass the zone: `nextBucketLabel(label, "hour", { tz })`, type `NextBucketOptions`) — see [Filling gaps](/api/calendar-buckets#filling-gaps). Check `meta.bucketUnits` and `meta.fields[path].bucketable` before offering time grouping in a UI.
 
 ### pages {#pages}
 

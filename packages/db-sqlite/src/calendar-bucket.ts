@@ -6,7 +6,8 @@ import type { TSqliteDriver } from "./types";
 
 /**
  * Name of the scalar SQL function the adapter registers on its driver:
- * `atscript_bucket(value, unit, tz, weekStart)` → TEXT `'YYYY-MM-DD'` or NULL.
+ * `atscript_bucket(value, unit, tz, weekStart)` → TEXT `'YYYY-MM-DD'`
+ * (`'YYYY-MM-DDTHH'` for unit `hour`) or NULL.
  */
 export const SQLITE_BUCKET_FN = "atscript_bucket";
 

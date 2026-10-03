@@ -71,8 +71,10 @@ export type {
 } from "./types";
 
 // Calendar-bucket label helpers (from @uniqu/core): step between `YYYY-MM-DD`
-// labels to fill empty buckets, or turn a label into its first instant for a time axis.
+// (hour: `YYYY-MM-DDTHH`) labels to fill empty buckets, or turn a label into
+// its first instant for a time axis.
 export { nextBucketLabel, bucketStartInstant } from "@uniqu/core";
+export type { NextBucketOptions } from "@uniqu/core";
 
 // Re-exported from @atscript/typescript for convenience
 export type { TSerializedAnnotatedType } from "@atscript/typescript/utils";

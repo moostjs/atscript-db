@@ -398,7 +398,8 @@ const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
 
 /**
  * Calendar-bucket label: TEXT `'YYYY-MM-DD'` — the local date of the
- * bucket's first day in `b.tz` — or NULL for a NULL source or one outside
+ * bucket's first day in `b.tz` — or, for `hour`, `'YYYY-MM-DDTHH'` — the
+ * local wall-clock hour — or NULL for a NULL source or one outside
  * `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
  *
  * The source's UTC wall time `U` (a DATETIME) depends on storage:
@@ -410,9 +411,12 @@ const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
  *   return whatever the server's session zone is (`UNIX_TIMESTAMP(col)` would
  *   agree only under a UTC session zone).
  *
- * The local date is `DATE(CONVERT_TZ(U, '+00:00', '<tz>'))`, or `DATE(U)` for
- * `UTC` (no time zone tables needed). Truncation is calendar arithmetic on
- * that date. `CONVERT_TZ` returns NULL when the zone is unknown to the
+ * The local wall time is `CONVERT_TZ(U, '+00:00', '<tz>')`, or `U` for `UTC`
+ * (no time zone tables needed) — UTC → local is never ambiguous, so a
+ * `+05:30` zone's hour starts at :30 UTC and a DST fall-back's repeated hour
+ * is one label. The hour label is formatted straight from it; the other
+ * units truncate its `DATE()` with calendar arithmetic. `CONVERT_TZ`
+ * returns NULL when the zone is unknown to the
  * server and its input unchanged outside its range — `MysqlAdapter` probes
  * each zone before running the query (`BUCKET_TZ_UNAVAILABLE`).
  *
@@ -430,12 +434,13 @@ export function mysqlCalendarBucket(quotedCol: string, b: TResolvedBucket): stri
     utc = `(${MYSQL_EPOCH} + INTERVAL FLOOR(${quotedCol} / 1000) SECOND)`;
     inRange = `${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT}`;
   }
-  const local =
-    b.tz === "UTC"
-      ? `DATE(${utc})`
-      : `DATE(CONVERT_TZ(${utc}, '+00:00', ${sqlTimeZoneLiteral(b.tz)}))`;
+  const wall = b.tz === "UTC" ? utc : `CONVERT_TZ(${utc}, '+00:00', ${sqlTimeZoneLiteral(b.tz)})`;
+  const local = `DATE(${wall})`;
   let first: string;
   switch (b.unit) {
+    case "hour": {
+      return `CASE WHEN ${inRange} THEN DATE_FORMAT(${wall}, '%Y-%m-%dT%H') END`;
+    }
     case "day": {
       first = local;
       break;

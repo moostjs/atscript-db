@@ -52,7 +52,10 @@ import { NoopLogger } from "./logger";
 
 const EMPTY_DEFAULT_FNS: ReadonlySet<TDbDefaultFn> = new Set();
 const EMPTY_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set();
-/** Every calendar-bucket unit — what an adapter that renders them all returns from `calendarBucketUnits()`. */
+/**
+ * Every calendar-bucket unit — what an adapter that renders them all returns
+ * from `calendarBucketUnits()`. Includes `'hour'` since 0.1.147.
+ */
 export const ALL_BUCKET_UNITS: ReadonlySet<BucketUnit> = new Set(BUCKET_UNITS);
 
 /**
@@ -398,8 +401,10 @@ export abstract class BaseDbAdapter {
    * be adopted adapter by adapter. An adapter that returns a unit must group
    * by the bucket alias in `$groupBy` — see `controls.$select.buckets`
    * (`TResolvedBucket`: physical `field`, source `fd`) — and return the
-   * `YYYY-MM-DD` label of the bucket's first local day (null for a null or
-   * out-of-range source, uniqu's `bucketLabel` semantics). Since 0.1.132.
+   * `YYYY-MM-DD` label of the bucket's first local day, or for `'hour'` the
+   * local wall-clock hour `YYYY-MM-DDTHH` (null for a null or out-of-range
+   * source, uniqu's `bucketLabel` semantics). Since 0.1.132; `'hour'` since
+   * 0.1.147 — an adapter returning {@link ALL_BUCKET_UNITS} must render it.
    */
   calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return EMPTY_BUCKET_UNITS;

@@ -372,7 +372,7 @@ MySQL cannot convert to time zone "Europe/Berlin": its time zone tables are not 
 ```
 
 ::: warning Zone tables built from "slim" zoneinfo
-Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
+Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight (for `hour` buckets, near any DST change) after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
 :::
 
 ## Views

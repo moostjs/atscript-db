@@ -97,11 +97,28 @@ describe("mysqlCalendarBucket", () => {
     expect(mysqlCalendarBucket(`"openedAt"`, bucket("year"))).toBe(wrap(`MAKEDATE(YEAR(${L}), 1)`));
   });
 
+  // WHY: the hour is formatted from the zone's WALL time (never a UTC
+  // truncation), so +05:30 / +05:45 zones turn hours at :30 / :15 UTC.
+  it("hour: DATE_FORMAT of the converted wall time", () => {
+    expect(mysqlCalendarBucket(`"openedAt"`, bucket("hour", { tz: "Asia/Kolkata" }))).toBe(
+      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(CONVERT_TZ(${U_DOUBLE}, '+00:00', 'Asia/Kolkata'), '%Y-%m-%dT%H') END`,
+    );
+    expect(mysqlCalendarBucket(`"openedAt"`, bucket("hour", { tz: "UTC" }))).toBe(
+      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(${U_DOUBLE}, '%Y-%m-%dT%H') END`,
+    );
+    const U = `CAST("createdAt" AS DATETIME)`;
+    expect(
+      mysqlCalendarBucket(`"createdAt"`, bucket("hour", { field: "createdAt", fd: timestampFd })),
+    ).toBe(
+      `CASE WHEN ${U} >= '1970-01-02 00:00:00' THEN DATE_FORMAT(CONVERT_TZ(${U}, '+00:00', 'Europe/Berlin'), '%Y-%m-%dT%H') END`,
+    );
+  });
+
   it("UTC skips CONVERT_TZ", () => {
     for (const unit of BUCKET_UNITS) {
       const sql = mysqlCalendarBucket(`"openedAt"`, bucket(unit, { tz: "UTC" }));
       expect(sql).not.toContain("CONVERT_TZ");
-      expect(sql).toContain(`DATE(${U_DOUBLE})`);
+      expect(sql).toContain(unit === "hour" ? `DATE_FORMAT(${U_DOUBLE},` : `DATE(${U_DOUBLE})`);
     }
     expect(mysqlCalendarBucket(`"openedAt"`, bucket("day", { tz: "UTC" }))).toBe(
       wrap(`DATE(${U_DOUBLE})`),
@@ -155,7 +172,7 @@ function selectBucket(tz: string, field = "openedAt") {
 }
 
 describe("MysqlAdapter calendar buckets", () => {
-  it("advertises all five units", () => {
+  it("advertises every unit", () => {
     expect([...new MysqlAdapter(createMockDriver()).calendarBucketUnits()]).toEqual([
       ...BUCKET_UNITS,
     ]);

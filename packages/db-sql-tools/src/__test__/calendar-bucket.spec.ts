@@ -181,7 +181,7 @@ describe("bucketAliasInHaving (MySQL-style HAVING)", () => {
 describe("inlined bucket literals (defense in depth)", () => {
   it("rejects a unit / week start / zone outside its closed set before the dialect renders", () => {
     for (const bad of [
-      bucket("hour" as BucketUnit),
+      bucket("minute" as BucketUnit),
       bucket("day", { weekStart: "x'" as never }),
       bucket("week", { weekStartIso: 8 as never }),
       bucket("day", { tz: "UTC'; DROP TABLE x;--" }),

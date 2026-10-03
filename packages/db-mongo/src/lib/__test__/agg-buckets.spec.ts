@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vite-plus/test";
 import { type DbQuery, type TResolvedBucket, UniquSelect } from "@atscript/db";
 import type { BucketUnit, WeekStart } from "@atscript/db/agg";
-import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
+import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT, BUCKET_UNITS } from "@uniqu/core";
 import { MongoClient, MongoServerError } from "mongodb";
 
 import { buildAggregatePipeline, buildCountPipeline, bucketExpression } from "../../agg";
@@ -103,6 +103,14 @@ describe("bucketExpression — one literal expression per unit", () => {
     );
   });
 
+  it("hour — the local wall-clock hour (YYYY-MM-DDTHH) of the instant in the zone", () => {
+    expect(bucketExpression(bucket("hour", { tz: "Asia/Kathmandu" }))).toEqual(
+      guarded("$openedAt", {
+        $dateToString: { date: DATE, format: "%Y-%m-%dT%H", timezone: "Asia/Kathmandu" },
+      }),
+    );
+  });
+
   it("month — local year-month with a literal day 01", () => {
     expect(bucketExpression(bucket("month", { tz: "America/New_York" }))).toEqual(
       guarded("$openedAt", {
@@ -191,7 +199,7 @@ describe("bucketExpression — one literal expression per unit", () => {
   );
 
   it("never uses $dateTrunc and only converts instant → local (a zone only on the instant)", () => {
-    for (const unit of ["day", "week", "month", "quarter", "year"] as const) {
+    for (const unit of BUCKET_UNITS) {
       const json = JSON.stringify(bucketExpression(bucket(unit, { tz: "America/Santiago" })));
       expect(json).not.toContain("$dateTrunc");
       // exactly one zone-aware conversion, and it reads the source instant
@@ -401,10 +409,11 @@ describe("MongoAdapter — calendar bucket capability and time zone errors", () 
     vi.restoreAllMocks();
   });
 
-  it("declares all five units", () => {
+  it("declares every unit", () => {
     const adapter = new MongoAdapter(db);
     expect([...adapter.calendarBucketUnits()].toSorted()).toEqual([
       "day",
+      "hour",
       "month",
       "quarter",
       "week",
