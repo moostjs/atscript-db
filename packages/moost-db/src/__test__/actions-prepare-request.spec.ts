@@ -253,7 +253,10 @@ describe("prepareRequest on @DbAction handlers", () => {
     });
     expect(res!.status).toBe(201);
     await http.request(`/${prefix}/query`);
-    expect(seen).toEqual([prepared("approve"), { endpoint: "query", controls: {} }]);
+    expect(seen).toEqual([
+      prepared("approve"),
+      { endpoint: "query", controls: {}, hasRelationFilters: false },
+    ]);
   });
 });
 

@@ -85,6 +85,16 @@ export interface TDbRequestContext {
    * @since 0.1.147
    */
   readonly filter?: FilterExpr;
+  /**
+   * Read endpoints (`query`, `pages`, `geo`, `one`): whether {@link filter} holds a relational
+   * predicate (`ticket=$some(…)`) — `false` without a filter. Reading
+   * `filter` copies the whole filter on first access; check this first when
+   * only the predicates matter. `$with` sub-filters are not counted (they are
+   * in `controls.$with`).
+   *
+   * @since 0.1.147
+   */
+  readonly hasRelationFilters?: boolean;
   /** `"action"` / `"delegatedAction"` endpoints only: the `@DbAction` name being run. */
   readonly action?: string;
 }

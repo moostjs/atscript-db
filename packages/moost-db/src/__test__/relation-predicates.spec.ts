@@ -575,6 +575,7 @@ describe("transformRelationFilter", () => {
       endpoint: "query",
       controls: {},
       filter: { ticket: { $some: { status: "open" } }, title: "a" },
+      hasRelationFilters: true,
     });
     await controller.pages("?$page=1");
     expect(contexts[1]!.filter).toBeUndefined();
@@ -745,6 +746,25 @@ describe("TDbRequestContext.filter is a frozen copy", () => {
     expect(ids(await controller.query("?title=a"))).toEqual([1]);
     expect(seen).toEqual({ title: "a" });
   });
+
+  it("hasRelationFilters tells whether the client filter holds a predicate — without copying it", async () => {
+    const flags: Array<boolean | undefined> = [];
+    let copied = 0;
+    class Probe extends AsDbReadableController {
+      protected async prepareRequest(ctx: TDbRequestContext): Promise<void> {
+        flags.push(ctx.hasRelationFilters);
+        if (ctx.hasRelationFilters) copied += ctx.filter ? 1 : 0;
+      }
+    }
+    const { controller } = bind(Probe);
+    await controller.query("");
+    await controller.query("?title=a");
+    await controller.query("?ticket=$some(status=open)");
+    await controller.query("?title=a^ticket=$none()");
+    await controller.query("?$with=ticket(team=$some(name=Core))");
+    expect(flags).toEqual([false, false, true, true, false]);
+    expect(copied).toBe(2);
+  });
 });
 
 // ── /meta ───────────────────────────────────────────────────────────────────
@@ -885,7 +905,7 @@ describe("query targets", () => {
   const guard = {
     prepare(ctx: TDbRequestContext): void {
       if (ctx.endpoint !== "query") return;
-      current().set(policyKey, new Set(ctx.filter ? Object.keys(ctx.filter) : []));
+      current().set(policyKey, new Set(ctx.hasRelationFilters ? Object.keys(ctx.filter!) : []));
     },
     hides: (path: string) => path.split(".")[0] === "ticket" && !policyOf()?.has("ticket"),
     overlay(path: string, filter: FilterExpr): FilterExpr {

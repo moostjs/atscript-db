@@ -520,21 +520,41 @@ async function overlayWithEntry(
   return next;
 }
 
+/** `true` when `filter` holds a relational predicate (nested ones live inside a top-level one). */
+function hasClientPredicate(filter: unknown): boolean {
+  if (!isPlainObject(filter)) return false;
+  for (const [key, value] of Object.entries(filter)) {
+    if (key === "$and" || key === "$or") {
+      if (Array.isArray(value) && value.some(hasClientPredicate)) return true;
+    } else if (key === "$not") {
+      if (hasClientPredicate(value)) return true;
+    } else if (!key.startsWith("$") && hasRelationOp(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * A read's {@link TDbRequestContext}: controls, plus the client filter when
  * present (since 0.1.147) — a frozen copy, made on first read, so the hook
- * can never rewrite the object the request gate judges afterwards.
+ * can never rewrite the object the request gate judges afterwards — and
+ * whether it holds relational predicates (`hasRelationFilters`, computed
+ * without copying).
  */
 export function readRequestContext(
   endpoint: TDbRequestEndpoint,
   controls: Record<string, unknown>,
   filter: FilterExpr | undefined,
 ): TDbRequestContext {
-  if (!filter || Object.keys(filter).length === 0) return { endpoint, controls };
+  if (!filter || Object.keys(filter).length === 0) {
+    return { endpoint, controls, hasRelationFilters: false };
+  }
   let copy: FilterExpr | undefined;
   return {
     endpoint,
     controls,
+    hasRelationFilters: hasClientPredicate(filter),
     get filter() {
       return (copy ??= copyClientFilter(filter, true));
     },
