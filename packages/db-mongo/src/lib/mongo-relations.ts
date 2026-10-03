@@ -8,7 +8,6 @@ import {
   type FilterExpr,
   type TableMetadata,
   type TDbRelation,
-  type TDbCollation,
   type TDbForeignKey,
   type TReadControls,
   type TTableResolver,
@@ -17,7 +16,7 @@ import {
   type WithRelation,
 } from "@atscript/db";
 import { correlate } from "./lookup-join";
-import { buildMongoFilter, mongoFilterStages } from "./mongo-filter";
+import { buildMongoFilter, collationOfAdapter, mongoFilterStages } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
 
 // ── Host interface ───────────────────────────────────────────────────────────
@@ -458,12 +457,7 @@ function filterStages(
   if (!filter || Object.keys(filter).length === 0) return [];
   // With relational predicates the filter renders 'nocase' fields per field
   // (the pipeline has no collation); a predicate-free one is unchanged.
-  const adapter = readable.getAdapter() as {
-    fieldCollation?: (field: string) => TDbCollation | undefined;
-  };
-  return mongoFilterStages(filter, {
-    collation: (field) => adapter.fieldCollation?.(field),
-  });
+  return mongoFilterStages(filter, { collation: collationOfAdapter(readable.getAdapter()) });
 }
 
 /**

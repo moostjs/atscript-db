@@ -6,6 +6,7 @@ import type {
   TViewJsonType,
   TViewPlan,
 } from "@atscript/db";
+import { fkColumns } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 
 import { sqliteCalendarBucket } from "./calendar-bucket";
@@ -451,10 +452,9 @@ export function buildCreateTable(
   // Foreign key constraints
   if (foreignKeys) {
     for (const fk of foreignKeys.values()) {
-      const localCols = (fk.physicalFields ?? fk.fields).map((f) => `"${esc(f)}"`).join(", ");
-      const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
-        .map((f) => `"${esc(f)}"`)
-        .join(", ");
+      const { fields, targetFields } = fkColumns(fk);
+      const localCols = fields.map((f) => `"${esc(f)}"`).join(", ");
+      const targetCols = targetFields.map((f) => `"${esc(f)}"`).join(", ");
       let constraint = `FOREIGN KEY (${localCols}) REFERENCES "${esc(fk.targetTable)}" (${targetCols})`;
       if (fk.onDelete) {
         constraint += ` ON DELETE ${refActionToSql(fk.onDelete)}`;

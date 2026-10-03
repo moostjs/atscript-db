@@ -236,8 +236,12 @@ function collatedVisitor(collation: TMongoFieldCollation): FilterVisitor<Filter<
   };
 }
 
-/** The per-field collation of a related table, read from its (Mongo) adapter. */
-function collationOfAdapter(adapter: unknown): TMongoFieldCollation | undefined {
+/**
+ * The per-field collation of a table, read from its (Mongo) adapter's
+ * `fieldCollation` — what a relational-predicate pipeline renders `'nocase'`
+ * fields with ({@link TMongoFilterOptions.collation}).
+ */
+export function collationOfAdapter(adapter: unknown): TMongoFieldCollation | undefined {
   const source = adapter as { fieldCollation?: (field: string) => TDbCollation | undefined };
   return typeof source?.fieldCollation === "function"
     ? (field) => source.fieldCollation!(field)

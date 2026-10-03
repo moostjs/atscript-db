@@ -162,22 +162,22 @@ export function computeOf(
 
 /**
  * The transitive non-computed operands of the `@db.compute` field `field` of
- * `viewType`: its leaves, a computed leaf replaced by its own operands (the
- * computed fields passed through are pushed to `via` when given).
- * `undefined` when `field` is not computed. Cycles are not followed (they
- * are rejected where the view's columns are built).
+ * `viewType`: its leaves, a computed leaf replaced by its own operands, and
+ * (`via`) the computed fields passed through. `undefined` when `field` is not
+ * computed. Cycles are not followed (they are rejected where the view's
+ * columns are built).
  * @since 0.1.147
  */
 export function computedOperands(
   viewType: TAtscriptAnnotatedType,
   field: string,
-  via?: string[],
-): string[] | undefined {
+): { operands: string[]; via: string[] } | undefined {
   const props = viewType.type.kind === "object" ? viewType.type.props : undefined;
   const exprOf = (name: string) => computeOf(props?.get(name));
   const root = exprOf(field);
   if (root === undefined) return undefined;
   const out = new Set<string>();
+  const via: string[] = [];
   const seen = new Set<string>([field]);
   const visit = (expr: AtscriptExprNode) =>
     walkViewExpr(expr, (path) => {
@@ -186,10 +186,10 @@ export function computedOperands(
         out.add(path);
       } else if (!seen.has(path)) {
         seen.add(path);
-        via?.push(path);
+        via.push(path);
         visit(nested);
       }
     });
   visit(root);
-  return [...out];
+  return { operands: [...out], via };
 }

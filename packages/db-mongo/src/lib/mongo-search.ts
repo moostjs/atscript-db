@@ -13,6 +13,7 @@ import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-typ
 import {
   buildMongoFilter,
   buildMongoQuery,
+  collationOfAdapter,
   mongoFilterStages,
   planStages,
   type TMongoFilterOptions,
@@ -45,10 +46,8 @@ export interface TMongoGeoHost {
 }
 
 /** Renders a host's filter with relational predicates — its 'nocase' fields per field. */
-function filterOptionsOf(host: {
-  fieldCollation(field: string): TDbCollation | undefined;
-}): TMongoFilterOptions {
-  return { collation: (field) => host.fieldCollation(field) };
+function filterOptionsOf(host: TMongoSearchHost | TMongoGeoHost): TMongoFilterOptions {
+  return { collation: collationOfAdapter(host) };
 }
 
 // ── Exported functions ───────────────────────────────────────────────────────

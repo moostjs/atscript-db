@@ -718,6 +718,16 @@ export class AtscriptDbReadable<
     return this._meta.pathToPhysical;
   }
 
+  /**
+   * Physical column (or document path) of a logical field path —
+   * `@db.column` renames and flattening applied.
+   * @since 0.1.147
+   */
+  public physicalPath(logical: string): string {
+    this._ensureBuilt();
+    return this._meta.physicalPath(logical);
+  }
+
   /** Precomputed physical column name → logical dot-path map (inverse). */
   public get physicalToPath(): ReadonlyMap<string, string> {
     this._ensureBuilt();

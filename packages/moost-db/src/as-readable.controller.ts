@@ -25,6 +25,7 @@ import {
   QueryControlsDto,
 } from "./dto/controls.dto.as";
 import { discoverActions, getControllerFormType } from "./actions/discover";
+import { copyClientFilter } from "./relation-predicates";
 import { applyTerminalRefs } from "./meta/terminal-ref";
 
 /**
@@ -405,11 +406,19 @@ export abstract class AsReadableController<
     request: TDbParsedRequest,
   ): TDbRequestContext {
     const filter = request.parsed.filter as FilterExpr | undefined;
-    // A frozen copy: the hook reads the client filter, it can never rewrite
-    // the object the request gate judges afterwards.
-    return filter && Object.keys(filter).length > 0
-      ? { endpoint, controls: request.controls, filter: frozenCopy(filter) }
-      : { endpoint, controls: request.controls };
+    if (!filter || Object.keys(filter).length === 0) {
+      return { endpoint, controls: request.controls };
+    }
+    // A frozen copy, made on first read: the hook reads the client filter, it
+    // can never rewrite the object the request gate judges afterwards.
+    let copy: FilterExpr | undefined;
+    return {
+      endpoint,
+      controls: request.controls,
+      get filter() {
+        return (copy ??= copyClientFilter(filter, true));
+      },
+    };
   }
 
   // ── Validation ─────────────────────────────────────────────────────────
@@ -704,21 +713,4 @@ export abstract class AsReadableController<
   protected applyMetaOverlay(meta: TMetaResponse): TMetaResponse | Promise<TMetaResponse> {
     return meta;
   }
-}
-
-/** A deep-frozen structural copy of a parsed filter (plain objects, arrays, RegExp, Date). */
-function frozenCopy<T>(value: T): T {
-  let copy: T;
-  try {
-    copy = structuredClone(value);
-  } catch {
-    return value;
-  }
-  const freeze = (v: unknown): void => {
-    if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
-    Object.freeze(v);
-    for (const child of Object.values(v as Record<string, unknown>)) freeze(child);
-  };
-  freeze(copy);
-  return copy;
 }

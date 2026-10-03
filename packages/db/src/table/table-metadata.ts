@@ -120,6 +120,9 @@ export function isGeoIndexableType(fieldType: TAtscriptAnnotatedType): boolean {
   return false;
 }
 
+/** A referenced type's flattened field map, memoized per metadata build. */
+type TFlatOf = (type: TAtscriptAnnotatedType) => Map<string, TAtscriptAnnotatedType>;
+
 /**
  * Computed metadata for a database table or view.
  *
@@ -1169,9 +1172,19 @@ export class TableMetadata {
       });
     }
 
-    // Second pass: resolve fkTargetField for FK fields.
-    this._resolveFkTargetFields(descriptors);
-    this._resolveFkPhysicalFields();
+    // Second pass: resolve fkTargetField / physical FK columns — one
+    // flattening per referenced type (several FKs may reference it).
+    const flatCache = new Map<TAtscriptAnnotatedType, Map<string, TAtscriptAnnotatedType>>();
+    const flatOf = (type: TAtscriptAnnotatedType): Map<string, TAtscriptAnnotatedType> => {
+      let flat = flatCache.get(type);
+      if (!flat) {
+        flat = flattenAnnotatedType(type as TAtscriptAnnotatedType<TAtscriptTypeObject>);
+        flatCache.set(type, flat);
+      }
+      return flat;
+    };
+    this._resolveFkTargetFields(descriptors, flatOf);
+    this._resolveFkPhysicalFields(flatOf);
 
     Object.freeze(descriptors);
     this.fieldDescriptors = descriptors;
@@ -1220,18 +1233,13 @@ export class TableMetadata {
    * dotted target path is a flattened column on relational storage, a
    * renamed top-level key on document storage).
    */
-  private _resolveFkPhysicalFields(): void {
-    const flatCache = new Map<TAtscriptAnnotatedType, Map<string, TAtscriptAnnotatedType>>();
+  private _resolveFkPhysicalFields(flatOf: TFlatOf): void {
     const targetPhysical = (fk: TDbForeignKey, field: string): string => {
       const targetType = fk.targetTypeRef?.();
       if (!targetType) {
         return field;
       }
-      let flat = flatCache.get(targetType);
-      if (!flat) {
-        flat = flattenAnnotatedType(targetType as TAtscriptAnnotatedType<TAtscriptTypeObject>);
-        flatCache.set(targetType, flat);
-      }
+      const flat = flatOf(targetType);
       const columnOf = (path: string) =>
         flat.get(path)?.metadata?.get("db.column") as string | undefined;
       if (this.nestedObjects) {
@@ -1255,7 +1263,7 @@ export class TableMetadata {
   /**
    * Resolves `fkTargetField` for FK fields in field descriptors.
    */
-  private _resolveFkTargetFields(descriptors: TDbFieldMeta[]): void {
+  private _resolveFkTargetFields(descriptors: TDbFieldMeta[], flatOf: TFlatOf): void {
     if (this.foreignKeys.size === 0) {
       return;
     }
@@ -1281,9 +1289,6 @@ export class TableMetadata {
       return;
     }
 
-    // Cache flattened target types — multiple FKs may reference the same table
-    const flatCache = new Map<TAtscriptAnnotatedType, Map<string, TAtscriptAnnotatedType>>();
-
     for (const descriptor of descriptors) {
       const target = fkFieldToTarget.get(descriptor.path);
       if (!target) {
@@ -1295,14 +1300,7 @@ export class TableMetadata {
         continue;
       }
 
-      let targetFlatMap = flatCache.get(targetType);
-      if (!targetFlatMap) {
-        targetFlatMap = flattenAnnotatedType(
-          targetType as TAtscriptAnnotatedType<TAtscriptTypeObject>,
-        );
-        flatCache.set(targetType, targetFlatMap);
-      }
-      const targetFieldType = targetFlatMap.get(target.targetField);
+      const targetFieldType = flatOf(targetType).get(target.targetField);
       if (!targetFieldType) {
         continue;
       }
@@ -1432,7 +1430,8 @@ function computedMeta(
   path: string,
 ): { operands: readonly string[]; via: readonly string[] } | undefined {
   if (path.includes(".")) return undefined;
-  const via: string[] = [];
-  const operands = computedOperands(rootType, path, via);
-  return operands ? { operands: Object.freeze(operands), via: Object.freeze(via) } : undefined;
+  const computed = computedOperands(rootType, path);
+  return computed
+    ? { operands: Object.freeze(computed.operands), via: Object.freeze(computed.via) }
+    : undefined;
 }

@@ -55,6 +55,7 @@ import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-
 import {
   buildMongoFilter,
   buildMongoQuery,
+  collationOfAdapter,
   mongoFilterStages,
   planStages,
   type TMongoFilterOptions,
@@ -534,7 +535,7 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Filter-rendering options of a pipeline with relational predicates on this table. */
   private get _predicateFilterOpts(): TMongoFilterOptions {
-    return { collation: (field) => this.fieldCollation(field) };
+    return { collation: collationOfAdapter(this) };
   }
 
   /**
@@ -1040,15 +1041,17 @@ export class MongoAdapter extends BaseDbAdapter {
       REL_WRITE_BATCH,
     );
     try {
+      const next = () => wrapInvalidQuery(() => cursor.next());
       let ids: unknown[] = [];
-      for (;;) {
-        const doc = await wrapInvalidQuery(() => cursor.next());
-        if (doc) ids.push(doc._id);
-        if (ids.length > 0 && (!doc || ids.length === REL_WRITE_BATCH)) {
+      for (let doc = await next(); doc; doc = await next()) {
+        ids.push(doc._id);
+        if (ids.length === REL_WRITE_BATCH) {
           await write(MongoAdapter._byIds(ids, pre));
           ids = [];
         }
-        if (!doc) break;
+      }
+      if (ids.length > 0) {
+        await write(MongoAdapter._byIds(ids, pre));
       }
     } finally {
       await cursor.close();

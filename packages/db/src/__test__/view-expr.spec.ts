@@ -88,7 +88,7 @@ describe("computed columns — TViewColumnMapping.expr", () => {
   });
 
   it("lists transitive operands in TDbFieldMeta.computed", () => {
-    expect(computedOperands(fx.VeQueue, "priority")).toEqual([
+    expect(computedOperands(fx.VeQueue, "priority")?.operands).toEqual([
       "oldestSeverity",
       "openCount",
       "overdueCount",

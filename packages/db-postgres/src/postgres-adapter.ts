@@ -8,6 +8,7 @@ import {
   bucketTimeZoneUnavailable,
   isColumnTypeChanged,
   vectorIndexNotFoundMessage,
+  fkColumns,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -53,6 +54,7 @@ import {
   normalizeGeoPointValue,
   renameGeoDistance,
   replaceColumnsFor,
+  foreignKeySql,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -76,8 +78,6 @@ import {
   pgTypeFromField,
   qi,
   quoteTableName,
-  fkTargetTableSql,
-  refActionToSql,
   pgDialect,
   finalizeParams,
 } from "./sql-builder";
@@ -610,9 +610,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   /** Physical primary-key columns (`@db.column` renames applied). */
   private _pkColumns(): string[] {
-    return this._table.primaryKeys.map(
-      (key) => this._table.pathToPhysical.get(key) ?? this._table.columnMap.get(key) ?? key,
-    );
+    return this._table.primaryKeys.map((key) => this._table.physicalPath(key));
   }
 
   /**
@@ -1598,7 +1596,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     // Build desired FK set (keyed by sorted local column names)
     const desiredFkKeys = new Set<string>();
     for (const fk of this._table.foreignKeys.values()) {
-      desiredFkKeys.add([...(fk.physicalFields ?? fk.fields)].toSorted().join(","));
+      desiredFkKeys.add([...fkColumns(fk).fields].toSorted().join(","));
     }
 
     // Drop stale FKs
@@ -1616,19 +1614,9 @@ export class PostgresAdapter extends BaseDbAdapter {
       [...existingByName.values()].map((cols) => cols.toSorted().join(",")),
     );
     for (const fk of this._table.foreignKeys.values()) {
-      const key = [...(fk.physicalFields ?? fk.fields)].toSorted().join(",");
+      const key = [...fkColumns(fk).fields].toSorted().join(",");
       if (!existingKeys.has(key)) {
-        const localCols = (fk.physicalFields ?? fk.fields).map((f) => qi(f)).join(", ");
-        const targetCols = (fk.physicalTargetFields ?? fk.targetFields)
-          .map((f) => qi(f))
-          .join(", ");
-        let ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD FOREIGN KEY (${localCols}) REFERENCES ${fkTargetTableSql(fk)} (${targetCols})`;
-        if (fk.onDelete) {
-          ddl += ` ON DELETE ${refActionToSql(fk.onDelete)}`;
-        }
-        if (fk.onUpdate) {
-          ddl += ` ON UPDATE ${refActionToSql(fk.onUpdate)}`;
-        }
+        const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
       }

@@ -288,7 +288,7 @@ type TRelationHook = (path: string, filter: FilterExpr) => FilterExpr | Promise<
  * are neither gated, counted, nor overlaid.
  */
 export interface TClientWithSnapshot {
-  /** Structural copy of the client's entries (`name`, `filter`, nested `$with`). */
+  /** Structural copy of the client's entries (`name`, `filter`, nested `$with`); `undefined` without client predicates. */
   readonly tree: unknown;
   /** The client's predicate operator maps (`{ $some: … }`) — the live objects. */
   readonly predicates: ReadonlySet<object>;
@@ -298,15 +298,25 @@ export interface TClientWithSnapshot {
 export function snapshotClientWith(withRels: unknown): TClientWithSnapshot | undefined {
   if (!Array.isArray(withRels) || withRels.length === 0) return undefined;
   const predicates = new Set<object>();
+  const collect = (rels: unknown): void => {
+    if (!Array.isArray(rels)) return;
+    for (const rel of rels as TWithEntry[]) {
+      if (typeof rel?.name !== "string") continue;
+      if (rel.filter) collectPredicateMaps(rel.filter, predicates);
+      collect(childrenOf(rel));
+    }
+  };
+  collect(withRels);
+  // No client predicate: nothing to gate or overlay — skip the copy.
+  if (predicates.size === 0) return { tree: undefined, predicates };
   const copy = (rels: unknown): unknown => {
     if (!Array.isArray(rels)) return undefined;
     return rels.map((raw) => {
       const rel = raw as TWithEntry;
       if (typeof rel?.name !== "string") return raw;
-      if (rel.filter) collectPredicateMaps(rel.filter, predicates);
       const children = copy(childrenOf(rel));
       const out: TWithEntry = { name: rel.name };
-      if (rel.filter) out.filter = cloneFilter(rel.filter);
+      if (rel.filter) out.filter = copyClientFilter(rel.filter);
       if (children !== undefined) out.controls = { $with: children };
       return out;
     });
@@ -314,13 +324,26 @@ export function snapshotClientWith(withRels: unknown): TClientWithSnapshot | und
   return { tree: copy(withRels), predicates };
 }
 
-/** A detached copy of a client filter (parsed values: plain objects, RegExp, Date). */
-function cloneFilter(filter: FilterExpr): FilterExpr {
+/**
+ * A detached deep copy of a parsed client filter (plain objects, arrays,
+ * RegExp, Date), deep-frozen with `freeze`. Fails closed: a value that can't
+ * be copied is a 400, never the live object a later hook may rewrite.
+ */
+export function copyClientFilter<T>(filter: T, freeze = false): T {
+  let copy: T;
   try {
-    return structuredClone(filter);
+    copy = structuredClone(filter);
   } catch {
-    return filter;
+    throw badRequest("", "Malformed query: the filter cannot be copied");
   }
+  if (freeze) deepFreeze(copy);
+  return copy;
+}
+
+function deepFreeze(v: unknown): void {
+  if (v === null || typeof v !== "object" || Object.isFrozen(v)) return;
+  Object.freeze(v);
+  for (const child of Object.values(v as Record<string, unknown>)) deepFreeze(child);
 }
 
 /** The predicate operator maps of a filter's own level (through `$and` / `$or` / `$not`). */
@@ -368,15 +391,12 @@ export async function overlayRelationFilter(
       out[key] = children;
     } else if (key === "$not" && isPlainObject(value)) {
       out[key] = await overlayRelationFilter(value as FilterExpr, prefix, hook, scope);
-    } else if (
-      !key.startsWith("$") &&
-      hasRelationOp(value) &&
-      scope &&
-      !scope.predicates.has(value)
-    ) {
-      // A server-added predicate (e.g. a row scope conjoined in validateControls): not the client's.
-      out[key] = value;
     } else if (!key.startsWith("$") && hasRelationOp(value)) {
+      if (scope && !scope.predicates.has(value)) {
+        // A server-added predicate (e.g. a row scope conjoined in validateControls): not the client's.
+        out[key] = value;
+        continue;
+      }
       scope?.seen.add(value);
       const path = prefix + key;
       const ops: Record<string, unknown> = {};

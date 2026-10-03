@@ -43,6 +43,7 @@ export {
   sqlTimeZoneLiteral,
   toSqlValue,
   refActionToSql,
+  foreignKeySql,
   defaultValueForType,
   defaultValueToSqlLiteral,
   queryOpToSql,

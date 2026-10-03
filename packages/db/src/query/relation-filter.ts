@@ -65,6 +65,13 @@ export interface TRelationFilterJunction extends TRelationFilterTable {
 }
 
 /**
+ * Cross-realm brand of {@link ResolvedRelationFilter}: `instanceof` fails when
+ * two copies of `@atscript/db` are loaded (ESM + CJS, or nested installs) and
+ * an adapter from one sees nodes built by the other.
+ */
+const RESOLVED_BRAND = Symbol.for("@atscript/db:ResolvedRelationFilter");
+
+/**
  * A relational predicate as adapters receive it — the operand of
  * `FilterVisitor.relation(field, op, operand)` once the core translated the
  * filter. Every name is physical:
@@ -82,13 +89,6 @@ export interface TRelationFilterJunction extends TRelationFilterTable {
  *
  * @since 0.1.147
  */
-/**
- * Cross-realm brand of {@link ResolvedRelationFilter}: `instanceof` fails when
- * two copies of `@atscript/db` are loaded (ESM + CJS, or nested installs) and
- * an adapter from one sees nodes built by the other.
- */
-const RESOLVED_BRAND = Symbol.for("@atscript/db:ResolvedRelationFilter");
-
 export class ResolvedRelationFilter {
   /** @internal cross-realm brand (see {@link isResolvedRelationFilter}). */
   readonly [RESOLVED_BRAND] = true as const;

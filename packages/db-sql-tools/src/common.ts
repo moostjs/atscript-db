@@ -1,5 +1,5 @@
-import type { TDbReferentialAction } from "@atscript/db";
-import { DbError, isFieldRef } from "@atscript/db";
+import type { TDbForeignKey, TDbReferentialAction } from "@atscript/db";
+import { DbError, fkColumns, isFieldRef } from "@atscript/db";
 import { TIME_ZONE_NAME_RE } from "@uniqu/core";
 import type { AtscriptQueryNode, AtscriptQueryFieldRef } from "@atscript/db";
 
@@ -59,6 +59,27 @@ export function toSqlValue(value: unknown): unknown {
     return value ? 1 : 0;
   }
   return value;
+}
+
+/**
+ * `FOREIGN KEY (…) REFERENCES <target> (…)[ ON DELETE …][ ON UPDATE …]` of a
+ * foreign key over its physical columns ({@link fkColumns}); the target is
+ * schema-qualified when it declares `@db.schema`. `quote` quotes one
+ * identifier.
+ */
+export function foreignKeySql(quote: (name: string) => string, fk: TDbForeignKey): string {
+  const { fields, targetFields } = fkColumns(fk);
+  const target = fk.targetSchema
+    ? `${quote(fk.targetSchema)}.${quote(fk.targetTable)}`
+    : quote(fk.targetTable);
+  let sql = `FOREIGN KEY (${fields.map(quote).join(", ")}) REFERENCES ${target} (${targetFields.map(quote).join(", ")})`;
+  if (fk.onDelete) {
+    sql += ` ON DELETE ${refActionToSql(fk.onDelete)}`;
+  }
+  if (fk.onUpdate) {
+    sql += ` ON UPDATE ${refActionToSql(fk.onUpdate)}`;
+  }
+  return sql;
 }
 
 export function refActionToSql(action: TDbReferentialAction): string {

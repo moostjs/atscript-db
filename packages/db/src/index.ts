@@ -67,6 +67,7 @@ export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 export { BaseDbAdapter, ALL_BUCKET_UNITS, ALL_VIEW_CAPABILITIES } from "./base-adapter";
 export type { TViewCapability } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
+export { fkColumns } from "./schema/fk-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";

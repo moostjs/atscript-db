@@ -87,12 +87,11 @@ export interface TViewColumnMapping {
 }
 
 /**
- * The single `@meta.id` field of a first-row join target (through
- * `@db.alias`) — the anchor of the join's correlated subquery.
+ * The single `@meta.id` field of a first-row join target (its source type,
+ * past `@db.alias`) — the anchor of the join's correlated subquery.
  * @throws when the target declares no or several primary-key fields.
  */
-function firstJoinKey(view: string, target: TAtscriptAnnotatedType, scope: string): string {
-  const type = viewSourceOf(target).type;
+function firstJoinKey(view: string, type: TAtscriptAnnotatedType, scope: string): string {
   const ids =
     type.type.kind === "object"
       ? [...type.type.props.entries()].filter(([, p]) => p.metadata.has("meta.id"))
@@ -104,8 +103,6 @@ function firstJoinKey(view: string, target: TAtscriptAnnotatedType, scope: strin
   }
   return ids[0][0];
 }
-
-/** The `@db.agg.*` annotations, one per supported aggregate function. */
 
 /** An aggregate column's function, source field and (conditional) row predicate. */
 interface TViewAgg {
@@ -236,9 +233,9 @@ function inheritViewFieldSeals(viewType: TAtscriptAnnotatedType): void {
     // intermediate computed field included); an encrypted operand is
     // rejected — ciphertext cannot be computed.
     for (const [fieldName, fieldType] of props.entries()) {
-      const via: string[] = [];
-      const operands = computedOperands(viewType, fieldName, via);
-      if (!operands) continue;
+      const computed = computedOperands(viewType, fieldName);
+      if (!computed) continue;
+      const { operands, via } = computed;
       const encrypted = operands.find((p) => props.get(p)?.metadata.has("db.encrypted"));
       if (encrypted) {
         throw new Error(
@@ -362,12 +359,11 @@ export class AtscriptDbView<
         if (join.order?.length) {
           // A first-row join: keys are fields of the target (qualified with
           // it), the primary key appended as the final tie-break
-          const key = firstJoinKey(this.tableName, targetType(), target.name);
-          const targetSource = viewSourceOf(targetType()).type;
+          const key = firstJoinKey(this.tableName, target.type, target.name);
           const order = join.order.map((item) => {
             // Runtime twin of VJ6: the chosen row would expose the ordering
             // of a ciphertext / write-only value
-            const seals = sourceFieldSeals(targetSource, item.ref.field);
+            const seals = sourceFieldSeals(target.type, item.ref.field);
             if (seals.encrypted || seals.writeOnly) {
               throw new Error(
                 `View "${this.tableName}": the first-row join on "${target.name}" cannot order by the ${seals.encrypted ? "@db.encrypted" : "@db.writeOnly"} field "${item.ref.field}"`,
