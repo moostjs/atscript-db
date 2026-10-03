@@ -421,6 +421,24 @@ These parsers are applied per-pool (not globally), so they don't affect other `p
 
 A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is a `GENERATED ALWAYS AS (…) STORED` column — PostgreSQL has no virtual generated columns, so the value is computed on every write of the row and occupies storage. The expression is `jsonb_typeof()`-guarded `#>>` extraction with a cast to `boolean` / `double precision` for those leaves; a `@db.column.collate 'nocase'` leaf is `CITEXT` like a stored one, other collations render `COLLATE "…"` before the generated clause. `ALTER COLUMN TYPE` is never used on a generated column: a changed extraction or type is `DROP COLUMN` + `ADD COLUMN` (managed indexes dropped first). Introspection reads `information_schema.columns.is_generated`; a `recreateTable` copies every column but the generated ones, which the new table recomputes from the copied JSON.
 
+## Relational Predicates {#relational-predicates}
+
+[`$some` / `$none` filters](/api/queries#relational-filters) (since 0.1.147) render as correlated `EXISTS (SELECT 1 FROM … WHERE …)` / `NOT EXISTS` subqueries, in reads and in mutation filters; a `@db.schema`-qualified table is addressed with its schema.
+
+**Indexes.** PostgreSQL does **not** index foreign-key columns by itself — a `REFERENCES` constraint indexes only the referenced key. Declare an index on the foreign-key column of the `@db.rel.from` side and on both foreign-key columns of a `@db.rel.via` junction, or each predicate scans the related table per candidate row:
+
+```atscript
+@db.table 'issues'
+export interface Issue {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    @db.index.plain 'issues_ticket_idx'
+    ticketKey?: Ticket.key
+}
+```
+
 ## Limitations
 
 - **No unsigned integer types** — unsigned types are promoted to the next-larger signed type (see [Unsigned Integer Promotion](#unsigned-integer-promotion))

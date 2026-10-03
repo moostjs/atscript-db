@@ -13,6 +13,7 @@ import type { BaseDbAdapter } from "../base-adapter";
 import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
+import { containsRelationPredicate, resolveRelationFilterTree } from "../query/relation-filter";
 import {
   deletePath,
   findAncestorInSet,
@@ -319,14 +320,40 @@ export abstract class FieldMappingStrategy {
   }
 
   /**
-   * Recursively walks a filter expression, applying `@db.column` key renames
-   * (document paths — {@link TableMetadata.documentPath}) and adapter-specific
-   * value formatting via `formatFilterValue`.
+   * Translates a logical filter for the adapter: relational predicates are
+   * resolved first ({@link resolveRelationFilters}), then every key and value
+   * goes through {@link translateResolvedFilter}. `depth` is the predicate
+   * level of `filter` itself (0 for a query's own filter; the related tables
+   * translate predicate operands at deeper levels).
+   */
+  translateFilter(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
+    return this.translateResolvedFilter(this.resolveRelationFilters(filter, meta, depth), meta);
+  }
+
+  /**
+   * Replaces each relational predicate operand (`{ nav: { $some: inner } }`)
+   * with its `ResolvedRelationFilter` — the related table translates `inner`
+   * with its own mapper (since 0.1.147). Predicate-free filters are returned
+   * as-is; already-resolved operands pass through.
+   */
+  protected resolveRelationFilters(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
+    if (!filter || typeof filter !== "object" || !containsRelationPredicate(filter)) {
+      return filter;
+    }
+    return resolveRelationFilterTree(filter, meta, depth);
+  }
+
+  /**
+   * Recursively walks a filter expression (predicates already resolved),
+   * applying `@db.column` key renames (document paths —
+   * {@link TableMetadata.documentPath}) and adapter-specific value formatting
+   * via `formatFilterValue`. A resolved predicate passes through under its
+   * navigation-field key.
    *
    * The relational mapper overrides this to use `leafByLogical` for deeper
    * key resolution (flattened nested paths).
    */
-  translateFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
+  protected translateResolvedFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
     if (!filter || typeof filter !== "object") {
       return filter;
     }
@@ -337,9 +364,12 @@ export abstract class FieldMappingStrategy {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(filter as Record<string, unknown>)) {
       if (key === "$and" || key === "$or") {
-        result[key] = (value as FilterExpr[]).map((f) => this.translateFilter(f, meta));
+        result[key] = (value as FilterExpr[]).map((f) => this.translateResolvedFilter(f, meta));
       } else if (key === "$not") {
-        result[key] = this.translateFilter(value as FilterExpr, meta);
+        result[key] = this.translateResolvedFilter(value as FilterExpr, meta);
+      } else if (meta.navFields.has(key)) {
+        // A relational predicate on a navigation field — already resolved.
+        result[key] = value;
       } else if (key.startsWith("$")) {
         result[key] = value;
       } else {

@@ -274,7 +274,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 - physical column names (`contact__email`, `@db.column`-renamed names) are no longer accepted — use logical paths;
 - descendants of a `@db.json` / array column (`prefs.theme`) are rejected on SQL adapters (MongoDB and memory address them natively);
 - a `@db.json` / array column itself accepts only an [`$exists`](#existence) entry on SQL adapters (since 0.1.132; before, every filter on it was rejected);
-- navigation paths (`assignee.name`) are rejected — load relations with `$with`;
+- navigation paths (`assignee.name`) are rejected — load relations with `$with`, or filter by them with a [relational predicate](#relational-filters) (`{ assignee: { $some: { name: … } } }`, since 0.1.147);
 - a flattened object parent (`contact`) can be selected but not filtered or sorted — use a leaf;
 - `$sort` on a JSON / array column is rejected on every adapter (`canSortField`);
 - filter nodes may only carry `$and`, `$or`, `$not` — `$nor` is rejected.
@@ -282,6 +282,159 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 
 This includes `updateMany` / `deleteMany` filters and `transformFilter` overlays in moost-db.
 :::
+
+## Relational Filters (`$some` / `$none`) {#relational-filters}
+
+Since 0.1.147. Select rows by their **related** rows — "issues whose ticket is open", "tickets without issues" — by putting an operator map on a [navigation property](/relations/navigation). The examples in this section use this schema:
+
+```atscript
+@db.table 'teams'
+export interface Team {
+    @meta.id
+    id: string
+    name: string
+}
+
+@db.table 'tickets'
+export interface Ticket {
+    @meta.id
+    key: string
+    status: string
+
+    @db.rel.FK
+    teamId?: Team.id
+
+    @db.rel.to
+    team?: Team
+
+    @db.rel.from
+    issues: Issue[]
+
+    @db.rel.via TicketLabel
+    labels: Label[]
+}
+
+@db.table 'issues'
+export interface Issue {
+    @meta.id
+    id: number
+    title: string
+    status?: string
+
+    @db.rel.FK
+    ticketKey?: Ticket.key
+
+    @db.rel.to
+    ticket?: Ticket
+}
+```
+
+(`Label` and the `TicketLabel` junction follow the [many-to-many pattern](/relations/navigation#db-rel-via-many-to-many).)
+
+```typescript
+// Issues whose ticket is open and belongs to team t1 or t2
+await issues.findMany({
+  filter: { ticket: { $some: { status: "open", teamId: { $in: ["t1", "t2"] } } } },
+});
+
+// Tickets without any issue
+await tickets.findMany({ filter: { issues: { $none: {} } } });
+
+// Tickets labelled "bug" but not "wontfix"
+await tickets.findMany({
+  filter: { labels: { $some: { name: "bug" }, $none: { name: "wontfix" } } },
+});
+```
+
+| Operator   | A row matches when                   | With `{}`              |
+| ---------- | ------------------------------------ | ---------------------- |
+| `$some: F` | at least one related row matches `F` | it has any related row |
+| `$none: F` | no related row matches `F`           | it has no related row  |
+
+Several operators on one key are ANDed. Predicates combine with other conditions and with `$and` / `$or` / `$not` like any field condition.
+
+### Which rows are related
+
+The related rows of a row are **exactly the rows [`$with`](/relations/loading) loads** for it — the same foreign-key pairing (aliases included) and the relation's [`@db.rel.filter`](/relations/navigation#db-rel-filter). The meaning is the same for to-one and to-many relations:
+
+| Relation       | Related rows of a row `r`                                    |
+| -------------- | ------------------------------------------------------------ |
+| `@db.rel.to`   | the target row whose key equals `r`'s foreign key            |
+| `@db.rel.from` | the target rows whose foreign key references `r`             |
+| `@db.rel.via`  | the target rows linked to `r` by a row of the junction table |
+
+Composite keys must match on every part.
+
+**`NULL` foreign keys.** A row whose foreign key is `null` (any part of a composite one) has **no** related row: `$some` never matches it and `$none` always does. `{ ticket: { $none: { status: "open" } } }` therefore also returns issues without a ticket — add `ticketKey: { $ne: null }` when you mean "has a ticket, and it is not open". Both operators are plain true / false tests on every engine, so the SQL adapters, MongoDB and the memory adapter return the same rows.
+
+### Writing the operand
+
+- Keys are **the related table's** logical field paths (`status`, `contact.email`), not prefixed with the relation name. Every [filter operator](#filter-syntax) works.
+- The related table's own rules apply inside: unknown fields, `@db.encrypted` fields (`ENC_FIELD_FILTER`), JSON descendants on SQL adapters and the other [path rules](#nested-field-filters) are rejected, with the path prefixed by the relation (`ticket.note`).
+- To cross another relation, nest a predicate — one relation per level:
+
+  ```typescript
+  // Issues whose ticket belongs to the team named "Core"
+  {
+    ticket: {
+      $some: {
+        team: {
+          $some: {
+            name: "Core";
+          }
+        }
+      }
+    }
+  }
+  ```
+
+- A dotted navigation path is still rejected, with a hint: `Cannot filter on "ticket.status" — navigation path; use { ticket: { $some: { status: … } } }`.
+- `$some` / `$none` cannot share a key with a comparison operator (`Cannot mix "$some" / "$none" with "$eq" on "ticket"`), and each takes an object (`"$some" on "ticket" expects a filter object`).
+
+### "Every related row" — no `$every`
+
+There is no `$every` operator. "Every related row matches `F`" is "no related row fails `F`": `{ nav: { $none: { $not: F } } }`. It is also true when there are no related rows; add `$some: {}` on the same key to require at least one.
+
+When `F` reads an optional field, write the negation yourself. A `null` inside `$not` is not handled the same way everywhere: SQL treats `NOT (status = 'closed')` on a `NULL` status as unknown (the row does not fail `F`), while MongoDB and the memory adapter treat it as a mismatch (the row fails `F`). Spell the failing case out so every adapter agrees:
+
+```typescript
+// Tickets whose issues are all closed (a null status counts as not closed)
+await tickets.findMany({
+  filter: { issues: { $none: { $or: [{ status: { $ne: "closed" } }, { status: null }] } } },
+});
+```
+
+### Where predicates are accepted
+
+- The `filter` of `findOne`, `findMany`, `count`, `findManyWithCount`, the text / vector / geo search methods, and `aggregate()` (the row filter — never `$having`).
+- `$with` sub-filters, for the related table's own relations — see [Loading Relations](/relations/loading#filtering-parents-by-related-rows).
+- Mutation filters: `updateMany`, `replaceMany`, `deleteMany`, and a row `scope`.
+
+Server-side code needs no opt-in. HTTP clients do, per relation — see [Permissions § Relational predicates](/http/permissions#relational-predicates).
+
+All five bundled adapters run predicates in reads and writes. How each one executes them is on its page: [PostgreSQL](/adapters/postgresql#relational-predicates), [MySQL](/adapters/mysql#relational-predicates), [SQLite](/adapters/sqlite#relational-predicates), [MongoDB](/adapters/mongodb#relational-predicates), [memory](/adapters/memory#relational-predicates).
+
+::: tip Index the join columns
+Each predicate runs a correlated lookup per candidate row. Index the foreign-key column on the `@db.rel.from` side (`issues.ticketKey` for `tickets.issues`) and both foreign-key columns of a `@db.rel.via` junction. A `@db.rel.to` predicate looks up the target's primary or unique key, which is indexed already.
+:::
+
+### Limits and errors
+
+| Condition                                                                           | Error                                                                                               |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| more than 3 nested levels (`REL_FILTER_MAX_DEPTH`)                                  | `INVALID_QUERY` — `Relational predicates nest at most 3 levels deep ("…")`                          |
+| more than 8 predicates in one filter, nested ones included (`REL_FILTER_MAX_NODES`) | `INVALID_QUERY` — `At most 8 relational predicates per query`                                       |
+| `$some` / `$none` on a field that is not a navigation property                      | `INVALID_QUERY` — `"$some" / "$none" are only valid on a navigation relation — "title" is not one`  |
+| a self-referencing many-to-many (a junction with one FK to the type)                | `INVALID_QUERY` — its two junction keys cannot be told apart                                        |
+| the adapter does not support predicates (custom adapters by default)                | `REL_FILTER_NOT_SUPPORTED` — `… not supported by this adapter` (`… in mutation filters` for writes) |
+| the related table lives on a different adapter class                                | `REL_FILTER_NOT_SUPPORTED`                                                                          |
+| the table was not created through a `DbSpace`                                       | `REL_FILTER_NOT_SUPPORTED` — the related table cannot be resolved                                   |
+
+The error `path` is the dotted relation chain (`ticket.team`). Both codes answer HTTP 400 through moost-db. The limits are exported from `@atscript/db` as `REL_FILTER_MAX_DEPTH` and `REL_FILTER_MAX_NODES`.
+
+### Typing
+
+Typed filters accept a predicate on navigation keys only: `{ ticket: { $some: … } }` type-checks, `{ title: { $some: {} } }` and unknown keys do not. The operand of a relation to an `.as` type is not typed field by field (`Record<string, unknown>`) — it is validated at run time.
 
 ## Query Controls
 
@@ -363,7 +516,7 @@ Use `findManyWithCount()` to get both data and total count in one call — see [
 
 ## Type-Safe Generics
 
-Queries are fully typed. `findOne` and `findMany` accept a `Uniquery<OwnProps, NavType>` that constrains filter fields to own (non-navigation) properties. The return type `DbResponse` automatically strips navigation properties from the result unless you request them via `$with`.
+Queries are fully typed. `findOne` and `findMany` accept a `Uniquery<OwnProps, NavType>` that constrains filter fields to own (non-navigation) properties — plus, since 0.1.147, [relational predicates](#relational-filters) on navigation properties. The return type `DbResponse` automatically strips navigation properties from the result unless you request them via `$with`.
 
 When the query type is a literal (not widened), TypeScript infers exactly which navigation properties are returned:
 
@@ -435,7 +588,7 @@ Query expressions appear in these annotations:
 - **`@db.view.filter`** — row-level filter for a [view](/views/)
 - **`@db.view.joins`** — join condition between tables in a view
 - **`@db.view.having`** — having clause for aggregation views
-- **`@db.rel.filter`** — static filter applied when loading a relation
+- **`@db.rel.filter`** — static filter on a relation, applied when it is loaded and in [relational predicates](#relational-filters) (since 0.1.147)
 
 Example in a view definition:
 
@@ -460,7 +613,7 @@ const tasks = await taskTable.findMany({
   filter: {
     status: { $ne: "done" },
     priority: { $in: ["high", "critical"] },
-    "project.active": true,
+    project: { $some: { active: true } },
   },
   controls: {
     $sort: { priority: -1, createdAt: 1 },

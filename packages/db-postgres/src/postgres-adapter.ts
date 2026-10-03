@@ -250,6 +250,16 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── Capability flags ──────────────────────────────────────────────────────
 
+  /**
+   * Relational predicates (`$some` / `$none`) render as correlated
+   * `[NOT] EXISTS` subqueries — in reads and in mutation filters alike.
+   *
+   * @since 0.1.147
+   */
+  override supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return true;
+  }
+
   /** PostgreSQL enforces FK constraints natively. */
   override supportsNativeForeignKeys(): boolean {
     return true;
@@ -1845,7 +1855,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       vec = first.value[1];
     }
     const distanceOp = similarityToPgOp(vec.similarity);
-    const where = buildWhere(query.filter);
+    const where = buildWhere(query.filter, {
+      // vectorDistanceSource aliases the table `t` — relational predicates correlate to it.
+      qualifier: pgDialect.quoteTable("t"),
+    });
     const controls = query.controls || {};
     const threshold = this._resolveVectorThreshold(
       controls as Record<string, unknown>,
@@ -1999,7 +2012,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     const controls = (query.controls ?? {}) as Record<string, unknown>;
     return {
       tableName: this.resolveTableName(),
-      where: buildWhere(query.filter),
+      // The geo builders alias the table `t` — relational predicates correlate to it.
+      where: buildWhere(query.filter, { qualifier: pgDialect.quoteTable("t") }),
       dist: pgGeoDistanceExpr(qi(column), point),
       window: geoWindowFromControls(controls),
       controls,

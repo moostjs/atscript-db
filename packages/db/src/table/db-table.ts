@@ -72,6 +72,7 @@ import { pkTupleKey, rowMatchesKey, sameKey } from "../shared/keys";
 import { isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
+import { relGuardState } from "../query/relation-filter";
 
 import { resolveDesignType } from "./db-readable";
 
@@ -1273,7 +1274,8 @@ export class AtscriptDbTable<
     // Encrypted / geo checks first so `ENC_FIELD_*` codes keep firing, then the
     // path guard: a JSON-descendant or unknown path must never reach the driver.
     guardFilter(this._meta, this.adapter, filter);
-    guardPaths(this._meta, this.adapter, { filter });
+    // Relational predicates in a mutation filter need the adapter's write mode.
+    guardPaths(this._meta, this.adapter, { filter }, false, relGuardState(true));
   }
 
   /**

@@ -115,6 +115,19 @@ describe("Client<T> — generic typing (compile-only assertions)", () => {
       void c.action("foo", { id: 1 });
     }
   });
+  it("filters accept relational predicates on nav keys only (since 0.1.147)", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Post>("/api/posts");
+      void c.query({ filter: { author: { $some: { name: "x" } }, tags: { $none: {} } } });
+      void c.count({ filter: { $or: [{ title: "a" }, { author: { $none: {} } }] } });
+      void c.pages({ filter: { tags: { $some: { label: "bug" } } } });
+      // @ts-expect-error — `title` is not a navigation relation
+      void c.query({ filter: { title: { $some: {} } } });
+      // @ts-expect-error — unknown key
+      void c.query({ filter: { nope: { $some: {} } } });
+    }
+  });
+
   it("rows carry optional $actions / $disabledReasons", () => {
     if (!shouldRun()) {
       const c = new Client<typeof Post>("/api/posts");

@@ -70,6 +70,7 @@ declare global {
     "db.rel.onDelete": string
     "db.rel.onUpdate": string
     "db.rel.via": import("@atscript/typescript/utils").AtscriptRef
+    "db.rel.filterable": boolean
     "db.rel.filter": import("@atscript/typescript/utils").AtscriptQueryNode
     "db.view": string | true
     "db.view.for": import("@atscript/typescript/utils").AtscriptRef

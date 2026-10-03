@@ -217,7 +217,44 @@ const projects = await projectTable.findMany({
 // projects[0].tasks → only incomplete tasks
 ```
 
-This is a query-time filter applied when loading the relation. It is different from `@db.rel.filter`, which is a permanent filter baked into the schema definition. Both can be active at the same time — the schema filter and the query-time filter are combined with `$and`.
+This is a query-time filter applied when loading the relation. It is different from [`@db.rel.filter`](./navigation#db-rel-filter), which is a permanent filter baked into the schema definition. Both can be active at the same time — the schema filter and the query-time filter are combined with `$and` (the schema filter is applied on every adapter since 0.1.147).
+
+## Filtering Parents by Related Rows {#filtering-parents-by-related-rows}
+
+A `$with` filter narrows the **loaded children** — every project above is still returned. To narrow the **parents** by their related rows, use a [relational predicate](/api/queries#relational-filters) (since 0.1.147) in the parent's own filter:
+
+```typescript
+// Only projects that have an unfinished task — tasks are not loaded
+const busy = await projectTable.findMany({
+  filter: { tasks: { $some: { done: false } } },
+});
+```
+
+The two are independent, so combine them to get the matching parents together with the matching children:
+
+```typescript
+const busy = await projectTable.findMany({
+  filter: { tasks: { $some: { done: false } } }, // which projects
+  controls: { $with: [{ name: "tasks", filter: { done: false } }] }, // which tasks come back
+});
+// every project has at least one task in busy[i].tasks
+```
+
+| You want                                   | Use                                               |
+| ------------------------------------------ | ------------------------------------------------- |
+| fewer related rows on each returned row    | `$with` entry `filter`                            |
+| fewer returned rows, by their related rows | `{ nav: { $some: … } }` / `{ nav: { $none: … } }` |
+| both                                       | both — they do not affect each other              |
+
+A `$with` filter may contain predicates too, on the related table's own relations — "load each project's tasks that have a `bug` tag":
+
+```typescript
+controls: {
+  $with: [{ name: "tasks", filter: { tags: { $some: { label: "bug" } } } }];
+}
+```
+
+Nesting limits and errors are on the [Queries](/api/queries#limits-and-errors) page.
 
 ## Behavior by Relation Type
 
@@ -319,7 +356,7 @@ curl "http://localhost:3000/tasks/query?\$with=project"
 curl "http://localhost:3000/tasks/query?\$with=project,assignee,tags"
 ```
 
-For nested loading and per-relation controls in URLs, see [CRUD Endpoints](/http/crud). The controller rejects an unknown or hidden relation at any nesting level with `400 Unknown relation "<name>"` — see [Advanced Queries § Validation](/http/advanced#validation).
+For nested loading and per-relation controls in URLs, see [CRUD Endpoints](/http/crud). Relational predicates in URLs (`tasks=$some(done=false)`) are on [URL Query Syntax](/http/query-syntax#relational-predicates). The controller rejects an unknown or hidden relation at any nesting level with `400 Unknown relation "<name>"` — see [Advanced Queries § Validation](/http/advanced#validation).
 
 ## Next Steps
 

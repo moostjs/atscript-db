@@ -349,6 +349,16 @@ export class SqliteAdapter extends BaseDbAdapter {
     return super.resolveTableName(false);
   }
 
+  /**
+   * Relational predicates (`$some` / `$none`) render as correlated
+   * `[NOT] EXISTS` subqueries — in reads and in mutation filters alike.
+   *
+   * @since 0.1.147
+   */
+  override supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return true;
+  }
+
   /** SQLite enforces FK constraints natively via PRAGMA foreign_keys. */
   override supportsNativeForeignKeys(): boolean {
     return true;
@@ -1571,7 +1581,8 @@ export class SqliteAdapter extends BaseDbAdapter {
     const controls = (query.controls ?? {}) as Record<string, unknown>;
     return {
       tableName: this.resolveTableName(),
-      where: buildWhere(query.filter),
+      // The geo builders alias the table `"t"` — relational predicates correlate to it.
+      where: buildWhere(query.filter, { qualifier: sqliteDialect.quoteTable("t") }),
       dist: haversineDistanceExpr(`"${esc(column)}"`, point),
       window: geoWindowFromControls(controls),
       controls,

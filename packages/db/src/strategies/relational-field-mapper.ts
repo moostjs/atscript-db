@@ -73,12 +73,11 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
+    const filter = this.resolveRelationFilters(query.filter as FilterExpr, meta);
     if (!meta.requiresMappings) {
       const controls = query.controls;
       return {
-        filter: meta.toStorageFormatters
-          ? this.translateFilter(query.filter as FilterExpr, meta)
-          : (query.filter as FilterExpr),
+        filter: meta.toStorageFormatters ? this.translateResolvedFilter(filter, meta) : filter,
         controls: {
           ...controls,
           $with: undefined,
@@ -91,7 +90,7 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     }
 
     return {
-      filter: this.translateFilterWithRename(query.filter as FilterExpr, meta),
+      filter: this.translateFilterWithRename(filter, meta),
       controls: query.controls ? this.translateControls(query.controls, meta) : {},
       insights: query.insights,
     };
@@ -103,10 +102,10 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   /**
-   * Overrides the base `translateFilter` to use `leafByLogical` for key resolution
+   * Overrides the base `translateResolvedFilter` to use `leafByLogical` for key resolution
    * (handles flattened nested paths like `contact.email` → `contact__email`).
    */
-  override translateFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
+  protected override translateResolvedFilter(filter: FilterExpr, meta: TableMetadata): FilterExpr {
     if (!filter || typeof filter !== "object") {
       return filter;
     }
@@ -119,7 +118,9 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   /**
    * Translates filter with key renaming from logical to physical names.
    * Used by the relational query path where field paths must be mapped
-   * to `__`-separated column names.
+   * to `__`-separated column names. Relational predicates must already be
+   * resolved (`translateFilter` / `translateQuery` do it); a resolved
+   * predicate passes through under its navigation-field key.
    */
   translateFilterWithRename(filter: FilterExpr, meta: TableMetadata): FilterExpr {
     if (!filter || typeof filter !== "object") {
@@ -132,6 +133,8 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
         result[key] = (value as FilterExpr[]).map((f) => this.translateFilterWithRename(f, meta));
       } else if (key === "$not") {
         result[key] = this.translateFilterWithRename(value as FilterExpr, meta);
+      } else if (meta.navFields.has(key)) {
+        result[key] = value;
       } else if (key.startsWith("$")) {
         result[key] = value;
       } else {

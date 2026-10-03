@@ -124,6 +124,10 @@ Return `true` if your database enforces FK constraints at the engine level (e.g.
 
 Return `true` to handle `$with` relation loading natively via database features like SQL JOINs or MongoDB `$lookup`. When `false`, the table layer uses application-level batch loading — issuing separate queries per relation and stitching results together.
 
+### `supportsRelationFilters(mode)` — since 0.1.147 {#supports-relation-filters}
+
+Return `true` to receive [relational predicates](/api/queries#relational-filters) (`$some` / `$none`) in `mode`: `'read'` for the filters of find, count, search and `aggregate()`, `'write'` for mutation filters (`updateMany`, `replaceMany`, `deleteMany`, row scopes). Default `false`: the core rejects such a filter with `REL_FILTER_NOT_SUPPORTED` (`… in mutation filters` for writes) before your adapter sees it. All bundled adapters return `true` for both modes. What you receive is described in [Relational Predicates](#relational-predicates).
+
 ### `supportsNativeValueDefaults()` (deprecated)
 
 Deprecated since 0.1.128 and no longer consulted by the generic layer: static `@db.default "value"` values are filled SDK-side on every adapter before validation (so validators and write guards see the full row), and the SQL adapters emit their DDL `DEFAULT` clauses regardless of this flag. The built-in SQL adapters still return `true` as a capability hint for tooling; a new adapter can leave the default `false`.
@@ -278,6 +282,44 @@ If `supportsNativePatch()` returns `true`, implement `nativePatch(filter, patch)
 ### Native Relation Loading
 
 If `supportsNativeRelations()` returns `true`, implement `loadRelations(rows, withRelations, relations, foreignKeys, tableResolver?)`. Enrich the provided rows in place with related data using your database's native features (e.g., MongoDB `$lookup`, SQL JOINs). When `supportsNativeRelations()` returns `false` (the default), the table layer handles relation loading by issuing separate queries per relation.
+
+A native loader must apply the relation's [`@db.rel.filter`](/relations/navigation#db-rel-filter) (since 0.1.147 the generic loader does): `relationStaticFilter(relation)` from `@atscript/db` returns it as logical filters split by side, `{ target?, junction? }` — AND `target` into the related rows and, on a `via` relation, `junction` into the junction rows. A `null` foreign key loads nothing (`null` / `[]`), even where the engine considers `null` equal to `null`.
+
+## Relational Predicates {#relational-predicates}
+
+Since 0.1.147. When [`supportsRelationFilters(mode)`](#supports-relation-filters) returns `true`, a filter reaching your adapter may hold `{ <nav>: { $some | $none: <operand> } }`. The core has already guarded it (limits, the related table's field rules) and resolved it: the operand is a `ResolvedRelationFilter` with physical names on every side. Your adapter only renders it.
+
+`walkFilter` from `@uniqu/core` hands such an entry to the visitor's `relation(field, op, operand)` callback and does not recurse into the operand. A visitor without `relation` throws when it meets one, so **every `walkFilter` visitor that can see a translated filter must implement it** — the WHERE renderer, but also any visitor you use for counts, deletes or search filters.
+
+| `ResolvedRelationFilter` member | Content                                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kind`                          | `'to'`, `'from'` or `'via'`                                                                                                                                                                |
+| `nav`                           | The logical navigation field (for error paths)                                                                                                                                             |
+| `source`, `target`              | `{ table, name, adapter }` — `table` is the adapter's `resolveTableName()` (schema-qualified), `name` the bare table / collection name                                                     |
+| `pairs`                         | `to` / `from`: `[{ source, target }]` physical columns, one per key part — a related row has `target.<pair.target> = source.<pair.source>`. Empty for `via`                                |
+| `junction`                      | `via` only: `{ table, name, adapter, toSource: [{ junction, source }], toTarget: [{ junction, target }], filter? }` — `filter` is the junction part of `@db.rel.filter`                    |
+| `filter`                        | The operand on the target: physical names, value formatters applied, nested predicates resolved the same way, the target part of `@db.rel.filter` ANDed in. `{}` matches every related row |
+
+Render `$some` as "a related row exists" and `$none` as "none exists". A `null` component of the source key relates to nothing — `$some` false, `$none` true — even where the engine compares `null` equal to `null` (MongoDB's aggregation `$eq` does). Render nested predicates inside the operand against the related row, not the outer one.
+
+Helpers exported from `@atscript/db`:
+
+- `isResolvedRelationFilter(value)` — the operand type guard.
+- `containsRelationPredicate(filter)` — a cheap pre-scan; keep predicate-free filters on your existing fast path.
+- `forEachResolvedRelation(filter, visit, nested?)` — visits every resolved predicate of a translated filter (operands and junction filters included), e.g. to load related data before evaluating, or to detect a predicate that reads the table being written.
+- `relationStaticFilter(relation)`, `andFilters(...parts)`, `isRelationOp`, `RELATION_OPS`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES`.
+
+**SQL adapters on `@atscript/db-sql-tools`** get the rendering from `createFilterVisitor` / `buildWhere`: a correlated `EXISTS (SELECT 1 FROM <target> AS "_rf1" WHERE "_rf1"."<col>" = <outer>."<col>" …)`, `NOT EXISTS` for `$none`, a junction `JOIN` for `via`; parameters keep their textual order, so `finalizeParams` numbering is unaffected. The outer columns are qualified with the source table's name, which is right whenever the statement's FROM is the bare table. **A statement that aliases its FROM must pass the quoted alias** as `qualifier` in `TFilterVisitorOptions`; an unqualified or wrongly qualified outer column would bind to the subquery's table:
+
+```typescript
+// SELECT … FROM "items" AS "t" WHERE …
+const where = buildWhere(dialect, filter, {
+  columnRef: (column) => `"t".${dialect.quoteIdentifier(column)}`,
+  qualifier: '"t"',
+});
+```
+
+A write whose predicate reads the table being written may need engine-specific handling (MySQL rejects it with error 1093 — see [MySQL § Relational predicates](./mysql#relational-predicates)). A document store without correlated subqueries can resolve the matching ids first and write by id, as the [MongoDB adapter](./mongodb#relational-predicates) does.
 
 ## Schema Sync Methods
 

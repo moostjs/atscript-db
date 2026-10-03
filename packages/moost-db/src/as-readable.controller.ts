@@ -71,6 +71,16 @@ export interface TDbRequestContext {
    * `metaForm`, writes and actions.
    */
   readonly controls?: Record<string, unknown>;
+  /**
+   * The parsed CLIENT filter of `query`, `pages` and `geo` (absent when the
+   * URL carries none, and on every other endpoint) — e.g. for a permission
+   * layer to resolve which relations the request's relational predicates
+   * (`ticket=$some(…)`) touch, alongside `controls.$with`. Read-only by
+   * convention; server-side filters (`transformFilter`, …) are not in it.
+   *
+   * @since 0.1.147
+   */
+  readonly filter?: FilterExpr;
   /** `"action"` / `"delegatedAction"` endpoints only: the `@DbAction` name being run. */
   readonly action?: string;
 }
@@ -382,9 +392,20 @@ export abstract class AsReadableController<
       request = { parsed, controls, hasNonControl };
     }
     if (typeof this.prepareRequest === "function") {
-      await this.prepareRequest(request ? { endpoint, controls: request.controls } : { endpoint });
+      await this.prepareRequest(request ? this._requestContext(endpoint, request) : { endpoint });
     }
     return request;
+  }
+
+  /** The read endpoints' {@link TDbRequestContext}: controls, plus the client filter when present (since 0.1.147). */
+  private _requestContext(
+    endpoint: TDbRequestEndpoint,
+    request: TDbParsedRequest,
+  ): TDbRequestContext {
+    const filter = request.parsed.filter as FilterExpr | undefined;
+    return filter && Object.keys(filter).length > 0
+      ? { endpoint, controls: request.controls, filter }
+      : { endpoint, controls: request.controls };
   }
 
   // ── Validation ─────────────────────────────────────────────────────────

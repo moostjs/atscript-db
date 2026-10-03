@@ -1,6 +1,6 @@
 # relations
 
-`@db.rel.FK` declares the foreign key. `@db.rel.to/.from/.via` declare navigation — loaded only when requested via `controls.$with`.
+`@db.rel.FK` declares the foreign key. `@db.rel.to/.from/.via` declare navigation — loaded only when requested via `controls.$with`, filterable with `$some` / `$none` (0.1.147).
 
 ## Declaring an FK
 
@@ -91,6 +91,28 @@ Projections (0.1.143): a relation's sub-`$select` accepts array, inclusion-map a
 @db.rel.from
 @db.rel.filter `status = 'open'`
 openSubtasks: Task[]
+
+@db.rel.via TicketLabel
+@db.rel.filter `TicketLabel.pinned = true and Label.name != 'hidden'`
+pinnedLabels: Label[]
+```
+
+| #   | Rule                                                                                                                                                                                                                                               |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | APPLIED at run time since 0.1.147 on every adapter — in `$with` (ANDed with the `$with` entry `filter`) and in `$some` / `$none` predicates. ≤ 0.1.146 it was validated but IGNORED (`$with` loaded everything).                                   |
+| 2   | Expression syntax uses `and` / `or` / `not` keywords. Refs: the related type (unqualified = related type) and, on `via`, the junction.                                                                                                             |
+| 3   | `via`: top-level `and` conditions split by side — related-type conditions filter targets, junction conditions filter links. One condition reading BOTH sides (an `or` across them) or a field-to-field comparison → `INVALID_QUERY` at query time. |
+
+## Filtering parents by related rows — `$some` / `$none` (0.1.147)
+
+`{ ticket: { $some: { status: "open" } } }` / `{ issues: { $none: {} } }` — semantics, NULL-FK rule, limits, `$every` equivalent → [queries.md § Relational predicates](queries.md#relational-predicates--some--none-01147). A `$with` filter narrows the loaded children; a predicate narrows the parents.
+
+`@db.rel.filterable` (flag, nav fields only; else diagnostic) = HTTP opt-in for CLIENT predicates on that relation (`ticket=$some(…)`). Server-side code (direct table calls, `transformFilter`, `actionRowScope`) never needs it. Not in the schema hash. `/meta.relations[].filterable: true`. Gate + overlay → [moost-db.md](moost-db.md#relational-predicates-over-http-01147).
+
+```atscript
+@db.rel.to
+@db.rel.filterable
+ticket?: Ticket
 ```
 
 ## Nested writes (depth-gated)

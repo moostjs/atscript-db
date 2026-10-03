@@ -5,6 +5,8 @@ import {
   BaseDbAdapter,
   DbError,
   bucketTimeZoneUnavailable,
+  containsRelationPredicate,
+  forEachResolvedRelation,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import type {
@@ -268,6 +270,18 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   // ── Capability flags ──────────────────────────────────────────────────────
+
+  /**
+   * Relational predicates (`$some` / `$none`) render as correlated
+   * `[NOT] EXISTS` subqueries — in reads and in mutation filters alike.
+   * An UPDATE / DELETE whose predicate reads the mutated table itself is
+   * rewritten through a materialized derived table (MySQL error 1093).
+   *
+   * @since 0.1.147
+   */
+  override supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return true;
+  }
 
   /** MySQL InnoDB enforces FK constraints natively. */
   override supportsNativeForeignKeys(): boolean {
@@ -626,6 +640,63 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
+  /**
+   * The WHERE of an UPDATE / DELETE on this table. MySQL rejects a statement
+   * whose WHERE reads the mutated table in a subquery (error 1093,
+   * `ER_UPDATE_TABLE_USED`) — what a relational predicate (`$some` / `$none`)
+   * does when its target or junction table, at any nesting level, is this
+   * table (a self relation such as `parent`). Such a filter is re-keyed on the
+   * primary key through a materialized derived table:
+   *
+   * ```sql
+   * WHERE (<pk…>) IN (SELECT * FROM (SELECT DISTINCT <pk…> FROM t WHERE <where>) AS `_rfm`)
+   * ```
+   *
+   * `DISTINCT` keeps the optimizer from merging the derived table back into
+   * the statement. Every other filter renders as-is.
+   *
+   * @since 0.1.147
+   */
+  private _mutationWhere(filter: FilterExpr): TSqlFragment {
+    const where = buildWhere(filter);
+    if (!this._filterReadsOwnTable(filter)) {
+      return where;
+    }
+    const tableName = this.resolveTableName();
+    const keys = this._table.primaryKeys.map(
+      (key) => this._table.pathToPhysical.get(key) ?? this._table.columnMap.get(key) ?? key,
+    );
+    if (keys.length === 0) {
+      throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+        {
+          path: "",
+          message: `MySQL cannot update or delete "${tableName}" by a relational predicate that reads the table itself without a primary key`,
+        },
+      ]);
+    }
+    const cols = keys.map((key) => qi(key)).join(", ");
+    const keyExpr = keys.length === 1 ? cols : `(${cols})`;
+    return {
+      sql: `${keyExpr} IN (SELECT * FROM (SELECT DISTINCT ${cols} FROM ${quoteTableName(tableName)} WHERE ${where.sql}) AS ${qi("_rfm")})`,
+      params: where.params,
+    };
+  }
+
+  /** `true` when a relational predicate of `filter` (nested ones included) reads this table. */
+  private _filterReadsOwnTable(filter: FilterExpr): boolean {
+    if (!containsRelationPredicate(filter)) {
+      return false;
+    }
+    const own = this.resolveTableName();
+    let hit = false;
+    forEachResolvedRelation(filter, (node) => {
+      if (node.target.table === own || node.junction?.table === own) {
+        hit = true;
+      }
+    });
+    return hit;
+  }
+
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
@@ -633,7 +704,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     // MySQL supports native UPDATE ... LIMIT 1
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
@@ -654,7 +725,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
@@ -681,7 +752,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     // become NULL, native function defaults (`now` / `increment`) re-apply
     // their DDL DEFAULT — matching the document adapters' whole-row replace
     // instead of silently merging with the old row.
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
     const full = fillReplacePayload(
       data,
@@ -703,7 +774,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
@@ -722,7 +793,7 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
     // MySQL supports native DELETE ... LIMIT 1
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const { sql, params } = buildDelete(this.resolveTableName(), where, 1);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -730,7 +801,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const where = buildWhere(filter);
+    const where = this._mutationWhere(filter);
     const { sql, params } = buildDelete(this.resolveTableName(), where);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -1581,7 +1652,10 @@ export class MysqlAdapter extends BaseDbAdapter {
       vec = first.value[1];
     }
     const distanceFn = similarityToMysqlFn(vec!.similarity);
-    const where = buildWhere(query.filter);
+    const where = buildWhere(query.filter, {
+      // vectorDistanceSource aliases the table `t` — relational predicates correlate to it.
+      qualifier: mysqlDialect.quoteTable("t"),
+    });
     const controls = query.controls || {};
     const threshold = this._resolveVectorThreshold(
       controls as Record<string, unknown>,
@@ -1711,7 +1785,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     const controls = (query.controls ?? {}) as Record<string, unknown>;
     return {
       tableName: this.resolveTableName(),
-      where: buildWhere(query.filter),
+      // The geo builders alias the table `t` — relational predicates correlate to it.
+      where: buildWhere(query.filter, { qualifier: mysqlDialect.quoteTable("t") }),
       dist: mysqlGeoDistanceExpr(qi(column), point),
       window: geoWindowFromControls(controls),
       controls,

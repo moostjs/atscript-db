@@ -15,6 +15,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **Candidate-aware `actionRowScope(action, ctx)`** — the hook receives the candidate rows; see [Scopes that depend on the candidate rows](/http/actions#action-row-scope-candidates).
 - **Query targets** — run a `'rows'` action on every row matching a query: [Query Targets](/http/query-targets), [`actionOnQuery`](/http/client#query-targets).
 - **Actions on a view** — `@DbActionsFrom` lists a table controller's row actions on a view controller: [Actions on a View](/http/view-actions).
+- **Relational filters: `$some` / `$none`.** Select rows by their related rows — `{ ticket: { $some: { status: "open" } } }`, `{ issues: { $none: {} } }` — in reads, `aggregate()`, `$with` sub-filters and mutation filters, on every bundled adapter. See [Queries § Relational filters](/api/queries#relational-filters). Over HTTP the form is `ticket=$some(status=open)` ([URL syntax](/http/query-syntax#relational-predicates)); a client may use it only on relations marked with the new [`@db.rel.filterable`](/relations/navigation#db-rel-filterable). Permission layers get [`transformRelationFilter`](/http/customization#transformrelationfilter) and `ctx.filter` in [`prepareRequest`](/http/customization#preparerequest); `/meta.relations[]` gains `filterable: true`.
 
 ### Behavior changes {#v0-1-147-behavior}
 
@@ -24,6 +25,13 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **`@DbActionsFrom` views always return the `idMap` columns** on reads, even when `$select` omits them (the client needs them to address the source) — unless the view's `transformProjection` drops them, which drops the delegation.
 - **A hidden default text index is refused** (under an overridden [`hasField`](/http/customization#hasfield)): `$search` without `$index` answers `400 No search index available` when the default text index reads a field the request can't see — it used to fall back to the substring search over visible fields — and `/meta` now prunes `searchIndexes` and turns `searchable` / `vectorSearchable` / `geoSearchable` off by the same rule. Tables without native search keep the fallback. A permission layer that pruned `/meta` itself through `indexFieldPaths()` can keep doing so (same result) or drop it.
 - **The "no primary key" warning** for an overridden `actionRowScope` is logged only when the controller has row actions of its own.
+- **`@db.rel.filter` is applied.** It was validated and documented but ignored at run time, so `$with` loaded every related row. It now filters `$with` on every adapter and counts in predicates — a relation carrying it returns fewer rows. On a `@db.rel.via` relation, a condition that reads both the junction and the related type, or compares two fields, is now an `INVALID_QUERY` at query time. See [`@db.rel.filter`](/relations/navigation#db-rel-filter).
+- **MongoDB `$with` follows the other adapters** — see [Native Relation Loading](/adapters/mongodb#native-relation-loading): renamed (`@db.column`) foreign keys and related fields load, sub-query filters are validated (an unknown field is an error, not an empty relation), a `null` foreign key loads nothing, and on `via` relations `$sort` / `$skip` / `$limit` / `$select` apply per parent row instead of per junction row.
+- **The 400 for a dotted navigation path** (`ticket.status=open`) now also suggests `ticket=$some(status=…)`.
+
+### Fixes
+
+- **moost-db: `$count` with a write-only field on a related table.** The write-only `$select` seal also listed related tables' `@db.writeOnly` paths, so `$count` failed with `Cannot select "ticket.code" — navigation path`.
 
 ### API
 
@@ -33,6 +41,14 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - New protected hook `queryTargetScope(action)` — runs as a read; see [Which rows](/http/query-targets#which-rows).
 - `POST {prefix}/delegated-actions/:name` exists only on controllers declaring `@DbActionsFrom`.
 - moost-db recognizes its controller classes by a registered-symbol brand, so a controller class from a second loaded copy of `@atscript/moost-db` (an SSR bundle next to the installed package) is recognized too.
+
+For custom adapters and filter tooling:
+
+- `BaseDbAdapter.supportsRelationFilters(mode)` — default `false`, so a custom adapter rejects predicates with `REL_FILTER_NOT_SUPPORTED` until it renders them. See [Creating Adapters § Relational Predicates](/adapters/creating-adapters#relational-predicates).
+- `walkFilter` dispatches a predicate to the visitor's new `relation(field, op, operand)` callback and throws when the visitor has none. Visitors you wrote only meet one once a filter contains a predicate — add `relation` to those that can.
+- `@atscript/db-sql-tools`: `TFilterVisitorOptions.qualifier` — required on statements that alias their FROM.
+- `@atscript/db-mongo`: `buildMongoFilter` throws on a predicate; `mongoFilterStages`, `buildMongoQuery` and `planStages` build the pipeline form.
+- New exports in `@atscript/db`: `ResolvedRelationFilter`, `isResolvedRelationFilter`, `containsRelationPredicate`, `forEachResolvedRelation`, `relationStaticFilter`, `andFilters`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES`, and from `@uniqu/core`: `RELATION_OPS`, `isRelationOp`, `isRelationPredicate`, `RelationOp`, `RelationPredicate`. `TRelationInfo.filterable`, `TDbRequestContext.filter` (`@atscript/moost-db`).
 
 ## 0.1.142 {#v0-1-142}
 

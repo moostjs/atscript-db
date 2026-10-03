@@ -229,6 +229,12 @@ await users.findMany({
 // -> WHERE name LIKE 'Ali%'
 ```
 
+### Relational predicates {#relational-predicates}
+
+[`$some` / `$none` filters](/api/queries#relational-filters) (since 0.1.147) render as correlated `EXISTS (SELECT 1 FROM … WHERE …)` / `NOT EXISTS` subqueries, in reads (FTS and vector search included) and in mutation filters.
+
+SQLite does not index foreign-key columns by itself. Add a `@db.index.plain` on the foreign-key column of the `@db.rel.from` side and on both foreign-key columns of a `@db.rel.via` junction — the same advice as for [PostgreSQL](./postgresql#relational-predicates) — or each predicate scans the related table per candidate row.
+
 ### Table Recreation
 
 SQLite does not support `ALTER COLUMN` for type changes. When schema sync detects a column type change, the adapter performs a safe table recreation:

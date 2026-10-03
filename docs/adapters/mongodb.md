@@ -285,7 +285,34 @@ The adapter uses MongoDB `$lookup` aggregation stages for TO, FROM, and VIA rela
 
 Relation controls (`$sort`, `$limit`, `$filter`) are applied as pipeline stages within the `$lookup`. Nested lookups (relations of relations) are supported.
 
+Since 0.1.147 native loading matches the other adapters:
+
+- **Renamed fields work.** Lookups join on the stored names of `@db.column`-renamed foreign keys and related fields, and the sub-query's filter, `$sort` and `$select` use logical names like any other query. Loaded rows come back with logical names, decrypted, with ObjectIds as hex strings. Before, a renamed key loaded nothing.
+- **[`@db.rel.filter`](/relations/navigation#db-rel-filter) is applied.**
+- **Sub-queries are validated** like on the other adapters — an unknown field in a `$with` filter is a `DbError`, not an empty result — and may contain [relational predicates](#relational-predicates).
+- **A `null` or missing foreign key loads nothing** (`null` / `[]`), also against related documents whose key is `null` or missing.
+- **VIA:** `$sort`, `$skip`, `$limit` and `$select` apply per parent row (they applied per junction row), and composite junction keys work.
+
 See [Relations](/relations/) for details.
+
+## Relational Predicates {#relational-predicates}
+
+[`$some` / `$none` filters](/api/queries#relational-filters) (since 0.1.147) run as correlated `$lookup` stages, so a read whose filter holds one switches to an **aggregation pipeline** — `find`, `findOne`, `count`, `findManyWithCount`, grouped `aggregate()`, text, vector and geo search. Reads without a predicate keep their plain `find` / `countDocuments` path.
+
+- The predicate-free top-level conditions are `$match`ed **before** the lookups, so lookups run only for rows that survive them. Each lookup stops at the first related document.
+- `count` with a predicate is an aggregation with `$count` — slower than `countDocuments`.
+- Text and vector search: the predicate stages follow the leading `$search` / `$text` / `$vectorSearch` stage. A vector search applies the filter after its own top-k cut, as for any filter. Geo: the predicate-free part stays in the `$geoNear` query and the predicates follow it, so the result is exact.
+- A `null` or missing foreign key (any part of a composite one) never relates — `$some` false, `$none` true — even against related documents whose key is `null` or missing.
+
+**Writes.** `updateMany`, `replaceMany`, `deleteMany` and single-row writes scoped by a predicate first resolve the matching `_id`s through the pipeline, then write by `_id` in batches of 1,000, re-checking the predicate-free conditions at write time; the counts are summed across batches.
+
+::: warning Atomic only inside a transaction
+Inside [`withTransaction`](/api/transactions#adapter-behavior) (replica set or mongos) both steps share the session and the write is atomic. Without a transaction there is a window between resolving the ids and writing: a related document can change in between, so a written document may no longer satisfy the predicate, or a document that just started to match is missed. The adapter does not open a transaction by itself — wrap the call in `withTransaction` when that matters.
+:::
+
+**Indexes.** Lookups correlate with `$expr` `$eq`, which can use an index on MongoDB 5.0 and later. Index the foreign-key field of the related collection for a `@db.rel.from` predicate (`issues.ticketKey` for `tickets.issues`) and both foreign-key fields of a `@db.rel.via` junction; a `@db.rel.to` predicate reads the target's `_id` or unique key.
+
+**Building filters yourself.** `buildMongoFilter(filter)` throws `REL_FILTER_NOT_SUPPORTED` on a predicate, since a `$lookup` cannot live in a `find` filter. For a raw-driver aggregation over a translated filter that may hold predicates, use `mongoFilterStages(filter)` (the stages to put at the start of your pipeline), or `buildMongoQuery(filter)` → `{ pre?, lookups, match, temp }` with `planStages(plan)` for finer placement.
 
 ## Text Search
 
@@ -638,7 +665,7 @@ The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the j
 - **Atlas Search requires Atlas** — not available on self-hosted MongoDB
 - **Vector search requires Atlas M10+** — minimum tier for vector search indexes
 - **No materialized views** — `@db.view.materialized` creates a plain (on-demand) view; see [Views](#views)
-- **Transactions require replica set** — standalone MongoDB instances cannot use transactions
+- **Transactions require replica set** — standalone MongoDB instances cannot use transactions, so a write filtered by a [relational predicate](#relational-predicates) is not atomic there
 - **Embeddings are external** — pass pre-computed vectors to `vectorSearch()`, the adapter does not generate them
 - **Atlas Search indexes build asynchronously** — they may take a few seconds to become available after creation
 

@@ -64,34 +64,63 @@ await tasks.updateOne({ id: 1, note: null }); // clears (omit the key to keep)
 
 Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key (minus aggregate aliases) and aggregate `$field` must resolve to physical storage on the adapter in use — checked in `guardPaths` before translation, for reads, `aggregate()`, `updateMany()` and `deleteMany()`. Otherwise `DbError("INVALID_QUERY", [{ path, message }])`:
 
-| Path                                       | Result                                                                          |
-| ------------------------------------------ | ------------------------------------------------------------------------------- |
-| physical column name (`contact__email`)    | `Unknown field` — logical paths only (breaking for overlays that used them)     |
-| JSON / array descendant (`prefs.theme`)    | SQL adapters: rejected (`… inside JSON-stored column "prefs"`); Mongo/memory ok |
-| filter on JSON / array column (`prefs`)    | SQL: only a sole-`$exists` entry; else `… (accepted operators: $exists)`        |
-| navigation path (`assignee.name`)          | rejected — load with `$with`                                                    |
-| flattened parent (`contact`)               | `$select` ok (expands); filter / sort rejected — use a leaf                     |
-| `$sort` on JSON / array column             | rejected on every adapter (`canSortField`)                                      |
-| encrypted descendant in `$select`          | rejected — select the encrypted parent                                          |
-| filter node key other than `$and/$or/$not` | `Unsupported filter operator "$nor" — use $and, $or or $not`                    |
+| Path                                       | Result                                                                             |
+| ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| physical column name (`contact__email`)    | `Unknown field` — logical paths only (breaking for overlays that used them)        |
+| JSON / array descendant (`prefs.theme`)    | SQL adapters: rejected (`… inside JSON-stored column "prefs"`); Mongo/memory ok    |
+| filter on JSON / array column (`prefs`)    | SQL: only a sole-`$exists` entry; else `… (accepted operators: $exists)`           |
+| navigation path (`assignee.name`)          | rejected — filter with `{ assignee: { $some: … } }` (§ below) or load with `$with` |
+| flattened parent (`contact`)               | `$select` ok (expands); filter / sort rejected — use a leaf                        |
+| `$sort` on JSON / array column             | rejected on every adapter (`canSortField`)                                         |
+| encrypted descendant in `$select`          | rejected — select the encrypted parent                                             |
+| filter node key other than `$and/$or/$not` | `Unsupported filter operator "$nor" — use $and, $or or $not`                       |
 
 `ENC_FIELD_*` / geo guards still fire first for encrypted subtrees and `$geoWithin`.
 
+## Relational predicates — `$some` / `$none` (0.1.147)
+
+Filter rows by their RELATED rows: operator map on a nav field (`@db.rel.to/.from/.via`).
+
+```ts
+await issues.findMany({
+  filter: { ticket: { $some: { status: "open", teamId: { $in: teams } } } },
+});
+await tickets.findMany({ filter: { issues: { $none: {} } } }); // has no issues
+await issues.findMany({ filter: { ticket: { $some: { team: { $some: { name: "Core" } } } } } }); // 2 hops
+await tickets.updateMany({ labels: { $some: { name: "stale" } } }, { status: "closed" }); // mutation filter
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Related rows = EXACTLY what `$with=nav` loads (same FK pairing/alias, `@db.rel.filter` included). Same meaning for to/from/via. `$some: {}` = has any; `$none: {}` = has none. Several ops on one key ANDed.                                                                                        |
+| 2   | NULL FK (any composite part) ⇒ no related row: `$some` false, `$none` TRUE — `{ ticket: { $none: F } }` includes ticket-less rows; add `ticketKey: { $ne: null }` to exclude. Identical on every adapter.                                                                                           |
+| 3   | Operand keys = the RELATED table's logical paths (`status`, never `ticket.status`); its field rules apply (unknown, `ENC_FIELD_FILTER`, SQL JSON descendants), error paths prefixed (`ticket.note`).                                                                                                |
+| 4   | One relation per level — nest predicates. Dotted nav keys stay `INVALID_QUERY` (`… use { ticket: { $some: { status: … } } }`). Mixing with comparison ops on one key → `INVALID_QUERY`; operand must be an object.                                                                                  |
+| 5   | No `$every`: write `{ nav: { $none: { $not: F } } }` (vacuously true; add `$some: {}` to require one). NULLs inside `$not` differ (SQL unknown vs Mongo/memory mismatch) — spell the failing case out: `$none: { $or: [{ s: { $ne: "x" } }, { s: null }] }`.                                        |
+| 6   | Accepted in: filters of find/findOne/count/findManyWithCount/search/vector/geo/`aggregate()` (row filter, NEVER `$having`), `$with` sub-filters, `updateMany`/`replaceMany`/`deleteMany`, row `scope`s. Server-side code needs no opt-in (HTTP: `@db.rel.filterable` → [moost-db.md](moost-db.md)). |
+| 7   | Limits: depth 3 (`REL_FILTER_MAX_DEPTH`), 8 predicates per filter incl. nested (`REL_FILTER_MAX_NODES`) → `INVALID_QUERY`. Self-referencing M:N junction → `INVALID_QUERY`.                                                                                                                         |
+| 8   | `REL_FILTER_NOT_SUPPORTED` (HTTP 400): adapter's `supportsRelationFilters(mode)` false (custom adapters by default), related table on another adapter class, table not built through a `DbSpace`.                                                                                                   |
+| 9   | `$with` filter narrows CHILDREN; a predicate narrows PARENTS — independent, combine both for "matching parents with matching children".                                                                                                                                                             |
+| 10  | Cost: one correlated lookup per candidate row. Index the FK column on the `from` side and both junction FK columns (PG/SQLite/Mongo don't do it for you; MySQL InnoDB does).                                                                                                                        |
+| 11  | Typing: nav keys accept `{ $some?, $none? }`, own fields reject `$some`; operand of an `.as` nav target is untyped (`Record<string, unknown>`).                                                                                                                                                     |
+
+Per-adapter execution: SQL `EXISTS` (MySQL 1093 rewrite → [adapters-mysql.md](adapters-mysql.md)), Mongo aggregate + `$lookup` ([adapters-mongo.md](adapters-mongo.md)), memory key sets ([adapters-memory.md](adapters-memory.md)). URL form → [http-query-syntax.md](http-query-syntax.md).
+
 ## Controls
 
-| Control               | Value                                     | Effect                                                                                                                                                                                                                                                            |
-| --------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$select`             | `string[] \| { [path]: 0 \| 1 }`          | Projection. Array form = include-list; map form = explicit. Computed entries (aggregates, buckets) only with `$groupBy`; any other non-string entry → `INVALID_QUERY` `Unsupported $select entry at index i` (since 0.1.132; was silently dropped).               |
-| `$sort`               | `{ [path]: 1 \| -1 }`                     | Ordered keys.                                                                                                                                                                                                                                                     |
-| `$skip`               | `number`                                  | Offset.                                                                                                                                                                                                                                                           |
-| `$limit`              | `number`                                  | Row cap.                                                                                                                                                                                                                                                          |
-| `$page` / `$size`     | `number`                                  | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                                                                                                                                                                                                      |
-| `$count`              | `true`                                    | Return a count instead of rows. With `$groupBy` it is the number of groups surviving `$having` (since 0.1.129; earlier SQL ignored `$having` here and Mongo returned `0` for alias-based `$having`).                                                              |
-| `$with`               | `Array<{ name: string; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation.                                                                                                                                                                                                         |
-| `$groupBy`            | `string[]`                                | `aggregate()` only → [aggregation.md](aggregation.md).                                                                                                                                                                                                            |
-| `$having`             | `FilterExpr`                              | Post-aggregation filter on aliases and `$groupBy` fields ONLY → [aggregation.md](aggregation.md).                                                                                                                                                                 |
-| `$search` / `$vector` | `string` / `number[]`                     | Full-text / vector search (adapter must support).                                                                                                                                                                                                                 |
-| `$actions`            | `boolean`                                 | `moost-db` HTTP only. When `true`, server attaches `$actions: string[]` to each returned row — `'row'`/`'rows'`-level action names NOT disabled. NOT widened on `$count`/`$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
+| Control               | Value                                              | Effect                                                                                                                                                                                                                                                            |
+| --------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$select`             | `string[] \| { [path]: 0 \| 1 }`                   | Projection. Array form = include-list; map form = explicit. Computed entries (aggregates, buckets) only with `$groupBy`; any other non-string entry → `INVALID_QUERY` `Unsupported $select entry at index i` (since 0.1.132; was silently dropped).               |
+| `$sort`               | `{ [path]: 1 \| -1 }`                              | Ordered keys.                                                                                                                                                                                                                                                     |
+| `$skip`               | `number`                                           | Offset.                                                                                                                                                                                                                                                           |
+| `$limit`              | `number`                                           | Row cap.                                                                                                                                                                                                                                                          |
+| `$page` / `$size`     | `number`                                           | Used by `/pages` endpoint — alternative to `$skip`/`$limit`.                                                                                                                                                                                                      |
+| `$count`              | `true`                                             | Return a count instead of rows. With `$groupBy` it is the number of groups surviving `$having` (since 0.1.129; earlier SQL ignored `$having` here and Mongo returned `0` for alias-based `$having`).                                                              |
+| `$with`               | `Array<{ name: string; filter?; controls?: ... }>` | Load nav relations. Nested `controls` apply per-relation; `filter` narrows the loaded rows (may hold `$some`/`$none` on the related table's relations).                                                                                                           |
+| `$groupBy`            | `string[]`                                         | `aggregate()` only → [aggregation.md](aggregation.md).                                                                                                                                                                                                            |
+| `$having`             | `FilterExpr`                                       | Post-aggregation filter on aliases and `$groupBy` fields ONLY → [aggregation.md](aggregation.md).                                                                                                                                                                 |
+| `$search` / `$vector` | `string` / `number[]`                              | Full-text / vector search (adapter must support).                                                                                                                                                                                                                 |
+| `$actions`            | `boolean`                                          | `moost-db` HTTP only. When `true`, server attaches `$actions: string[]` to each returned row — `'row'`/`'rows'`-level action names NOT disabled. NOT widened on `$count`/`$groupBy`. See [actions.md](actions.md#actionstrue--server-evaluated-row-availability). |
 
 ## Projection with $with
 

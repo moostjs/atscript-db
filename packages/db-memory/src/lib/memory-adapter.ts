@@ -4,6 +4,7 @@ import {
   BaseDbAdapter,
   DbError,
   DbSpace,
+  containsRelationPredicate,
   isAtscriptDbView,
 } from "@atscript/db";
 import type {
@@ -22,7 +23,8 @@ import type {
 // atscript compiler's utils entry (same import `db-space.ts` uses).
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
-import { buildMemoryPredicate, getPath, valuesEqual } from "./memory-filter";
+import { buildMemoryPredicate, getPath, prepareRelationSets, valuesEqual } from "./memory-filter";
+import type { MemoryRowLoader, RelationSets } from "./memory-filter";
 import { paginate, projectRow, setPath, sortRows } from "./memory-engine";
 import { aggregateRows } from "./memory-aggregate";
 import type { AggregateFn, BucketUnit, UniquSelect } from "@atscript/db";
@@ -151,6 +153,20 @@ export class MemoryAdapter extends BaseDbAdapter {
    */
   override canFilterField(fd: TDbFieldMeta): boolean {
     return !fd.encrypted;
+  }
+
+  /**
+   * Relational predicates (`{ nav: { $some | $none: … } }`) are evaluated in
+   * reads AND mutation filters. Before a filter holding them is compiled, every
+   * related table (and junction) is loaded ONCE for that operation — through
+   * its own adapter's snapshot seam, so a provider-backed related table works
+   * too — and each predicate becomes a set of matching correlation keys
+   * (see {@link _relationSets}). Predicate-free filters take the plain path.
+   *
+   * @since 0.1.147
+   */
+  override supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return true;
   }
 
   // ── ID handling ────────────────────────────────────────────────────────────
@@ -422,6 +438,50 @@ export class MemoryAdapter extends BaseDbAdapter {
     return [...(this._peekState()?.rows.values() ?? [])];
   }
 
+  /**
+   * A per-operation row loader for relational predicates: each related table
+   * is snapshotted at most once per operation (the first predicate that needs
+   * it loads it; later ones — and nested ones — reuse that snapshot), so a
+   * provider-backed related table is invoked once per read. `own` seeds this
+   * table's snapshot so a self relation reads the same rows as the outer scan.
+   */
+  private _snapshotLoader(own?: Promise<Record<string, unknown>[]>): MemoryRowLoader {
+    const snapshots = new Map<BaseDbAdapter, Promise<Record<string, unknown>[]>>();
+    if (own) {
+      snapshots.set(this, own);
+    }
+    return (adapter) => {
+      let rows = snapshots.get(adapter);
+      if (!rows) {
+        if (!(adapter instanceof MemoryAdapter)) {
+          throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+            {
+              path: "",
+              message: `Relational predicate: the related table "${adapter.resolveTableName()}" is not served by the memory adapter`,
+            },
+          ]);
+        }
+        rows = Promise.resolve(adapter._loadRows());
+        snapshots.set(adapter, rows);
+      }
+      return rows;
+    };
+  }
+
+  /**
+   * The prepared correlation sets for `filter`'s relational predicates.
+   * Callers only await it when `containsRelationPredicate(filter)` — a
+   * predicate-free filter keeps its fully synchronous path. Write methods call
+   * it BEFORE reading the table state, so the related tables (a self relation
+   * included) are snapshotted before any row changes, like SQL.
+   */
+  private async _relationSets(
+    filter: FilterExpr,
+    own?: Promise<Record<string, unknown>[]>,
+  ): Promise<RelationSets | undefined> {
+    return prepareRelationSets(filter, this._snapshotLoader(own));
+  }
+
   // ── CRUD ────────────────────────────────────────────────────────────────
 
   /**
@@ -547,18 +607,22 @@ export class MemoryAdapter extends BaseDbAdapter {
    *
    * When `many` is `false` at most the first match is returned. A table that
    * does not exist (`state` undefined) matches nothing and is not created.
+   *
+   * A filter with relational predicates needs `relationSets`, prepared by the
+   * caller BEFORE it reads `state` (see {@link _relationSets}).
    */
   private _selectForWrite(
     state: MemoryTableState | undefined,
     filter: FilterExpr,
     expectedVersion: number | undefined,
     many: boolean,
+    relationSets?: RelationSets,
   ): Array<{ key: string; row: Record<string, unknown> }> {
     const versionColumn = this._table.versionColumnPhysical;
     if (expectedVersion !== undefined && versionColumn === undefined) {
       throw new Error("expectedVersion requires a versioned table");
     }
-    const match = buildMemoryPredicate(filter);
+    const match = buildMemoryPredicate(filter, relationSets);
     const matched: Array<{ key: string; row: Record<string, unknown> }> = [];
     for (const [key, row] of state?.rows ?? []) {
       if (!match(row)) {
@@ -683,8 +747,9 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
-    const matched = this._selectForWrite(state, filter, expectedVersion, false);
+    const matched = this._selectForWrite(state, filter, expectedVersion, false, sets);
     if (!state || matched.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
@@ -708,8 +773,9 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
-    const matched = this._selectForWrite(state, filter, expectedVersion, false);
+    const matched = this._selectForWrite(state, filter, expectedVersion, false, sets);
     if (!state || matched.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
@@ -720,8 +786,9 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
-    const matched = this._selectForWrite(state, filter, undefined, false);
+    const matched = this._selectForWrite(state, filter, undefined, false, sets);
     if (!state || matched.length === 0) {
       return { deletedCount: 0 };
     }
@@ -795,8 +862,15 @@ export class MemoryAdapter extends BaseDbAdapter {
    * working set — one provider invocation per logical read.
    */
   private async _filteredRows(query: DbQuery): Promise<Record<string, unknown>[]> {
-    const match = buildMemoryPredicate(query.filter);
-    return (await this._loadRows()).filter(match);
+    if (!containsRelationPredicate(query.filter)) {
+      const match = buildMemoryPredicate(query.filter);
+      return (await this._loadRows()).filter(match);
+    }
+    // Relational predicates: this table's snapshot is taken first and shared
+    // with the predicates (a self relation reads the same rows).
+    const own = Promise.resolve(this._loadRows());
+    const sets = await this._relationSets(query.filter, own);
+    return (await own).filter(buildMemoryPredicate(query.filter, sets));
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
@@ -872,6 +946,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     // updateMany never CAS-checks (locked decision row 2) — `expectedVersion` is
     // never passed. Each matched row still auto-bumps its own version. Applied
     // sequentially and NON-atomically (a mid-loop unique/PK conflict leaves the
@@ -880,7 +955,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     if (!state) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const matched = this._selectForWrite(state, filter, undefined, true);
+    const matched = this._selectForWrite(state, filter, undefined, true, sets);
     for (const { key, row } of matched) {
       this._commitUpdate(state, key, row, data, ops);
     }
@@ -889,6 +964,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     // Mirrors Mongo: there is no native `replaceMany`, so this is a `$set` MERGE
     // + version bump on every match (via `_applyUpdate`), NOT a full-document
     // replace like `replaceOne`. Fields absent from `data` are RETAINED on each
@@ -897,7 +973,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     if (!state) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const matched = this._selectForWrite(state, filter, undefined, true);
+    const matched = this._selectForWrite(state, filter, undefined, true, sets);
     for (const { key, row } of matched) {
       this._commitUpdate(state, key, row, data);
     }
@@ -906,11 +982,12 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
+    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
     if (!state) {
       return { deletedCount: 0 };
     }
-    const matched = this._selectForWrite(state, filter, undefined, true);
+    const matched = this._selectForWrite(state, filter, undefined, true, sets);
     for (const { key } of matched) {
       state.rows.delete(key);
     }

@@ -1,5 +1,6 @@
 import type { Collection, Document } from "mongodb";
 import {
+  containsRelationPredicate,
   DbError,
   geoIndexNotFoundMessage,
   searchIndexNotFoundMessage,
@@ -9,7 +10,7 @@ import type { DbControls, DbQuery, TDbIndex, TSearchIndexInfo } from "@atscript/
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import { DEFAULT_INDEX_NAME } from "./mongo-types";
 import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
-import { buildMongoFilter } from "./mongo-filter";
+import { buildMongoFilter, buildMongoQuery, mongoFilterStages, planStages } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { joinPath } from "./path-utils";
@@ -204,8 +205,8 @@ export async function geoSearchImpl(
 ): Promise<Array<Record<string, unknown>>> {
   const controls = (query.controls || {}) as Record<string, unknown>;
   // $geoNear MUST be the first pipeline stage (hard MongoDB requirement) —
-  // it absorbs the filter via its `query` option.
-  const pipeline: Document[] = [buildGeoNearStage(host, point, query, indexName)];
+  // it absorbs the filter via its `query` option (predicates follow it).
+  const pipeline: Document[] = buildGeoNearStages(host, point, query, indexName);
   if (controls.$skip) {
     pipeline.push({ $skip: controls.$skip });
   }
@@ -237,7 +238,7 @@ export async function geoSearchWithCountImpl(
   pushGeoProjection(dataStages, query.controls);
 
   const pipeline: Document[] = [
-    buildGeoNearStage(host, point, query, indexName),
+    ...buildGeoNearStages(host, point, query, indexName),
     { $facet: { data: dataStages, meta: [{ $count: "count" }] } },
   ];
 
@@ -253,21 +254,27 @@ export async function geoSearchWithCountImpl(
   };
 }
 
-/** Builds the leading `$geoNear` stage; the filter rides in its `query` option. */
-function buildGeoNearStage(
+/**
+ * Builds the leading `$geoNear` stage; the filter rides in its `query`
+ * option. A filter with relational predicates keeps its predicate-free
+ * conjuncts there and applies the rest (predicate `$lookup`s + `$match`)
+ * right after — exact, since `$geoNear` has no result cut-off of its own.
+ */
+function buildGeoNearStages(
   host: TMongoGeoHost,
   point: [number, number],
   query: DbQuery,
   indexName?: string,
-): Document {
+): Document[] {
   const controls = (query.controls || {}) as Record<string, unknown>;
+  const plan = containsRelationPredicate(query.filter) ? buildMongoQuery(query.filter) : undefined;
   const geoNear: Document = {
     near: { type: "Point", coordinates: point },
     distanceField: DISTANCE_FIELD,
     spherical: true,
     // `key` pins the 2dsphere index — required when several geo indexes exist.
     key: resolveGeoKeyPath(host, indexName),
-    query: buildMongoFilter(query.filter),
+    query: plan ? (plan.pre ?? {}) : buildMongoFilter(query.filter),
   };
   if (typeof controls.$maxDistance === "number") {
     geoNear.maxDistance = controls.$maxDistance;
@@ -275,7 +282,9 @@ function buildGeoNearStage(
   if (typeof controls.$minDistance === "number") {
     geoNear.minDistance = controls.$minDistance;
   }
-  return { $geoNear: geoNear };
+  return plan
+    ? [{ $geoNear: geoNear }, ...planStages({ ...plan, pre: undefined })]
+    : [{ $geoNear: geoNear }];
 }
 
 /** Resolves the physical field path of the targeted geo index. */
@@ -602,7 +611,6 @@ async function runSearchPipeline(
   threshold?: number,
   classicText = false,
 ): Promise<Array<Record<string, unknown>>> {
-  const filter = buildMongoFilter(query.filter);
   const controls = query.controls || {};
   const pipeline: Document[] = [stage];
   if (threshold !== undefined) {
@@ -611,7 +619,7 @@ async function runSearchPipeline(
   } else if (classicText) {
     pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
-  pipeline.push({ $match: filter });
+  pipeline.push(...mongoFilterStages(query.filter));
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
   } else if (classicText) {
@@ -646,7 +654,6 @@ async function runSearchWithCountPipeline(
   threshold?: number,
   classicText = false,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-  const filter = buildMongoFilter(query.filter);
   const controls = query.controls || {};
 
   const preStages: Document[] = [];
@@ -679,7 +686,7 @@ async function runSearchWithCountPipeline(
   const pipeline: Document[] = [
     stage,
     ...preStages,
-    { $match: filter },
+    ...mongoFilterStages(query.filter),
     {
       $facet: {
         data: dataStages,

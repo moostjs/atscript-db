@@ -146,6 +146,17 @@ const similar = await posts.query({
 });
 ```
 
+Filters may select rows by their related rows with [`$some` / `$none`](/api/queries#relational-filters) (since 0.1.147). The client sends them as [URL predicates](./query-syntax#relational-predicates); the relation must be [`@db.rel.filterable`](/relations/navigation#db-rel-filterable) on the server:
+
+```typescript
+const open = await issues.query({
+  filter: { ticket: { $some: { status: "open" } } },
+});
+const orphans = await issues.count({ filter: { ticket: { $none: {} } } });
+```
+
+The filter type accepts a predicate on navigation keys only — `{ title: { $some: {} } }` and unknown keys are compile errors; the operand itself is not typed field by field. `query`, `count`, `pages` and the geo methods all take it. `meta().relations[i].filterable` is `true` on the relations that accept one.
+
 ### count {#count}
 
 `GET /query` with `$count: true` — returns the number of matching records.

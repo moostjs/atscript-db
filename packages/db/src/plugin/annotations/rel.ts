@@ -575,9 +575,46 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
     }),
 
+    filterable: new AnnotationSpec({
+      description:
+        "Lets HTTP clients filter the parent rows by this relation's related rows — " +
+        "`ticket=$some(status=open)` / `ticket=$none(...)` in a moost-db query " +
+        "(`{ ticket: { $some: { status: 'open' } } }`). Off by default: a client " +
+        "predicate filters the PARENT set and runs a correlated subquery. Server-side " +
+        "code (`transformFilter`, `actionRowScope`, direct table calls) never needs it. " +
+        "The related table's own field rules (visibility, encryption, write-only) apply " +
+        "inside the predicate.\n\n" +
+        "**Example:**\n" +
+        "```atscript\n" +
+        "@db.rel.to\n" +
+        "@db.rel.filterable\n" +
+        "ticket?: Ticket\n" +
+        "```\n",
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      validate(token) {
+        const errors = [] as TMessages;
+        const field = token.parentNode!;
+        const isNav =
+          field.countAnnotations("db.rel.to") > 0 ||
+          field.countAnnotations("db.rel.from") > 0 ||
+          field.countAnnotations("db.rel.via") > 0;
+        if (!isNav) {
+          errors.push({
+            message:
+              "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, or @db.rel.via)",
+            severity: 1,
+            range: token.range,
+          });
+        }
+        return errors;
+      },
+    }),
+
     filter: new AnnotationSpec({
       description:
-        "Applies a filter to a navigational property, restricting which related records are loaded.\n\n" +
+        "Applies a filter to a navigational property, restricting which related records are loaded " +
+        "(`$with`) and which count in relational predicates (`$some` / `$none`).\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         "@db.rel.from\n" +

@@ -1,11 +1,13 @@
 import {
   flattenAnnotatedType,
+  type AtscriptQueryNode,
   type TAtscriptAnnotatedType,
   type TAtscriptTypeObject,
   type TMetadataMap,
 } from "@atscript/typescript/utils";
 
 import type { BaseDbAdapter } from "../base-adapter";
+import type { TRelationFilterHost } from "../query/relation-filter";
 import type { TGenericLogger } from "../logger";
 import { isJsonValueField } from "../query/buckets";
 import { tableNameOf } from "../rel/relation-helpers";
@@ -234,6 +236,15 @@ export class TableMetadata {
   jsonValueParents: ReadonlySet<string> = new Set<string>();
   /** Every field descriptor's `physicalName` — reserved names a bucket alias may not take. */
   physicalNames: ReadonlySet<string> = new Set<string>();
+
+  /**
+   * Resolves / guards relational filter predicates (`{ nav: { $some: … } }`)
+   * against the related tables — installed by the owning readable when the
+   * table has navigation fields and a table resolver (a `DbSpace`). The field
+   * mappers and the path guard reach the related tables through it.
+   * @since 0.1.147
+   */
+  relationFilters?: TRelationFilterHost;
 
   // ── Build state ──────────────────────────────────────────────────────────
 
@@ -529,12 +540,15 @@ export class TableMetadata {
         ? (fieldType.type as unknown as { of: TAtscriptAnnotatedType }).of
         : fieldType;
       const resolveTarget = () => elementType?.ref?.type() ?? elementType;
+      const relFilter = metadata.get("db.rel.filter") as AtscriptQueryNode | undefined;
       this.relations.set(fieldName, {
         direction,
         alias,
         targetType: resolveTarget,
         isArray: isArr,
         ...(direction === "via" ? { viaType: raw as () => TAtscriptAnnotatedType } : {}),
+        ...(metadata.has("db.rel.filterable") ? { filterable: true } : {}),
+        ...(relFilter ? { filter: relFilter } : {}),
       });
     }
 

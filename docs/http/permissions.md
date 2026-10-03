@@ -129,6 +129,36 @@ of the upcoming **ARBAC** package, which wires the same permission set into
 the dispatchers and keeps `/meta` in sync automatically.
 :::
 
+## Relational predicates {#relational-predicates}
+
+Since 0.1.147. A client [relational predicate](./query-syntax#relational-predicates) (`ticket=$some(status=open)`) filters the **parent** rows by their related rows — so the count of returned issues tells the client something about tickets. moost-db accepts one only under this rule:
+
+> A predicate on relation `n` reveals nothing that `$with=n(<same filter>)` would not reveal under the same controller policy — same visibility, same field rules on the related table, same row overlay — **and** the relation opted in with [`@db.rel.filterable`](/relations/navigation#db-rel-filterable).
+
+Every predicate in the URL filter and in `$with` sub-filters is checked before anything runs. Each failure is a 400 with the validation envelope:
+
+| Check                                                                                                                                            | Rejection message                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The relation is visible — [`hasField`](./customization#hasfield) at its path                                                                     | `Unknown field "ticket"` (a hidden relation answers like a nonexistent one)                                                                                                                                                                                               |
+| It is a navigation property                                                                                                                      | `"$some" / "$none" are only valid on a navigation relation — "title" is not one`                                                                                                                                                                                          |
+| It opted in                                                                                                                                      | `Filtering by related "ticket" rows is not permitted — add @db.rel.filterable to enable.`                                                                                                                                                                                 |
+| Its table is available                                                                                                                           | `Filtering by related "ticket" rows is not possible — the related table is not available.`                                                                                                                                                                                |
+| Each operand field is visible at its full path (`hasField("ticket.code")`) and filterable under the **related table's** rules                    | the related table's own message, with the full path: `Unknown field "ticket.secret"`, `Filtering on field "ticket.code" is not permitted — field is @db.writeOnly.`, encrypted and JSON-storage rejections, `… — add @db.column.filterable to enable.` in `'manual'` mode |
+| Nested predicates pass the same checks at their full path (`ticket.team`)                                                                        | as above                                                                                                                                                                                                                                                                  |
+| One relation per level                                                                                                                           | `"ticket.team" is a navigation path — nest the predicates, one relation per level: ticket=$some(team=$some(…))`                                                                                                                                                           |
+| At most 3 nested levels per chain, at most 8 predicates in the whole request (`$with` sub-filters included; `$with` hops do not count as levels) | the [core messages](/api/queries#limits-and-errors)                                                                                                                                                                                                                       |
+| Not in `$having`                                                                                                                                 | 400                                                                                                                                                                                                                                                                       |
+
+A `@db.column.derived` operand field whose source is hidden answers `Unknown field`, as at the root. An adapter without predicate support answers `REL_FILTER_NOT_SUPPORTED` as a 400.
+
+**Row overlay.** Filtering on visible fields is not enough when the caller may see only some related rows — a ticket of another team must neither make `$some` true nor `$none` false. Override [`transformRelationFilter`](./customization#transformrelationfilter) to AND the related table's row scope into each operand; `$none` then means "no **visible** related row matches", exactly what `$with` would show.
+
+**Identification.** A predicate never identifies a row: `/one?…`, `DELETE /?…` and action ids accept identifications only.
+
+**Server-side filters are not gated.** [`transformFilter`](./customization#transformfilter), [`transformOne`](./customization#transformone) and [`actionRowScope`](./actions#action-row-scope) may use predicates on any relation, without the opt-in or the overlay — they are the authorization rule.
+
+**Permission layers.** [`prepareRequest`](./customization#preparerequest) receives the parsed client filter as `ctx.filter`, so a policy can resolve the relations its predicates touch alongside `ctx.controls.$with`. With `@aooth/arbac-moost`, a client predicate on relation `R` is allowed exactly when the request's `$with` relation policy allows `R`, and the related table's row scope is conjoined into the operand through `transformRelationFilter` — see the [Aooth docs](https://aooth.moost.org).
+
 ## Relationship to `actions[]`
 
 `crud` and `actions[]` are sibling fields on `/meta` with distinct dispatch

@@ -112,7 +112,7 @@ Combine filters, controls, and nesting inside parentheses:
 curl "http://localhost:3000/todos/query?\$with=comments(status=approved&\$sort=-createdAt&\$limit=3&\$with=author(\$select=name))"
 ```
 
-All [filter operators](./query-syntax) and control parameters work inside relation sub-queries.
+All [filter operators](./query-syntax) and control parameters work inside relation sub-queries — including [relational predicates](./query-syntax#relational-predicates) on the related table's own relations (`$with=comments(author=$some(role=staff))`, since 0.1.147). A sub-filter narrows the loaded rows; to narrow the parent rows by them, put the predicate in the parent filter instead (`comments=$some(status=approved)`).
 
 ### Validation
 

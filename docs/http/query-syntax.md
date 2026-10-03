@@ -123,7 +123,7 @@ The path uses the `.as` interface's logical property names, never physical colum
 | Flattened object (default for nested objects)         | Real columns on every adapter — filter, `$sort`, `$select`, `$groupBy` all work; grouped keys are returned nested, e.g. `{ stats: { views } }` (since 0.1.128). The parent itself is only selectable. |
 | `@db.json` object / array of objects                  | MongoDB and memory: native dotted paths, listed in `/meta.fields`. SQL adapters: **HTTP 400** — select the parent instead.                                                                            |
 | `@db.encrypted` object                                | 400 on every adapter (ciphertext) — select the encrypted parent.                                                                                                                                      |
-| Navigation property (`@db.rel.to` / `.from` / `.via`) | 400 at the root — use `$with=assignee(...)` (`$with=assignee($select=name)`, `$with=assignee(name=x)`).                                                                                               |
+| Navigation property (`@db.rel.to` / `.from` / `.via`) | 400 at the root — filter by it with [`assignee=$some(name=x)`](#relational-predicates), or load it with `$with=assignee(...)` (`$with=assignee($select=name)`, `$with=assignee(name=x)`).             |
 
 Rejections carry the envelope `{ "statusCode": 400, "message": "...", "errors": [{ "path": "<the path>", "message": "..." }] }`.
 
@@ -174,6 +174,38 @@ status=done  OR  (priority=high AND role=admin)
 ```
 
 Use parentheses to override default precedence.
+
+## Relational Predicates ($some / $none) {#relational-predicates}
+
+Since 0.1.147. Filter rows by their related rows — the URL form of [`$some` / `$none`](/api/queries#relational-filters). The relation must opt in with [`@db.rel.filterable`](/relations/navigation#db-rel-filterable):
+
+```bash
+# Issues whose ticket is open and belongs to team t1 or t2
+curl "http://localhost:3000/issues/query?ticket=\$some(teamId{t1,t2}&status=open)"
+
+# Issues without a ticket / with any ticket
+curl "http://localhost:3000/issues/query?ticket=\$none()"
+curl "http://localhost:3000/issues/query?ticket=\$some()"
+
+# Two hops: the ticket's team is named Core
+curl "http://localhost:3000/issues/query?ticket=\$some(team=\$some(name=Core))"
+```
+
+| Form                          | Meaning                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `rel=$some(<filter>)`         | at least one related row matches `<filter>`                                    |
+| `rel=$none(<filter>)`         | no related row matches                                                         |
+| `rel=$some()` / `rel=$none()` | has any / has no related row                                                   |
+| `!(rel=$some(…))`             | negation — same as `$none`; `rel!=$some(…)` is a syntax error (400)            |
+| `rel=$some(a=1^b=2)`          | the body is a full filter: `&`, `^`, `!( )`, groups and nested predicates work |
+
+- Inside the body, field names are the **related table's** paths (`status`, not `ticket.status`); `&` inside the parentheses does not split the query string.
+- Predicates combine with other conditions like any term: `status=new&ticket=$some(status=open)`, `(ticket=$none()^priority>3)`.
+- They also work inside `$with` bodies, on the related table's relations: `$with=tickets(issues=$some(title~=/crash/i))` loads, for each team, only the tickets with a crash issue.
+- A dotted navigation path (`ticket.status=open`) stays a 400 whose message suggests `ticket=$some(status=…)` (requires `@db.rel.filterable`) or `$with=ticket(...)`.
+- Valid on `/query` (incl. `$count` and `$groupBy`), `/pages`, `/geo`, and in `$with` bodies of `/one`. A predicate never identifies a row: `/one?…` and `DELETE /?…` with one answer `400 Query params do not match any primary key or unique index`. `$having` never accepts one.
+
+What the server checks — opt-in, visibility, the related table's field rules, limits — and the exact 400 messages are on [Permissions § Relational predicates](./permissions#relational-predicates).
 
 ## Control Parameters
 
@@ -325,6 +357,12 @@ curl "http://localhost:3000/todos/query?status!=done&priority>=3&\$select=id,tit
 
 ```bash
 curl "http://localhost:3000/todos/query?\$with=project(\$select=id,title),comments(\$sort=-createdAt&\$limit=5&\$with=author(\$select=name))"
+```
+
+**Filter by related rows** — open issues whose ticket belongs to team `t1`, with the ticket loaded:
+
+```bash
+curl "http://localhost:3000/issues/query?status=open&ticket=\$some(teamId=t1)&\$with=ticket(\$select=key,status)"
 ```
 
 **Count with filter:**

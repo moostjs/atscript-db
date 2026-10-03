@@ -203,9 +203,24 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 - The filter may use fields [`hasField`](./customization#hasfield) hides. It is never exposed in a response.
 - It applies only to the controller's own table, like the overlay. Nothing extra runs when it is not overridden.
 
+The scope may depend on **related** rows through a [relational predicate](/api/queries#relational-filters) (since 0.1.147). It is a server-side filter, so the relation needs no `@db.rel.filterable` and no [`transformRelationFilter`](./customization#transformrelationfilter) applies. On an issue controller, `resolve` runs only on issues whose ticket is open and belongs to one of the caller's teams:
+
+```typescript
+@TableController(IssueTable)
+export class IssuesController extends AsDbController<typeof IssueTable> {
+  protected override actionRowScope(action: string) {
+    return action === "resolve"
+      ? { ticket: { $some: { teamId: { $in: currentTeams() }, status: "open" } } }
+      : undefined;
+  }
+}
+```
+
+The same filter drives the action gate, [`$actions`](#actions-row-scope) and [`GET /meta/actions/:id`](#available-actions).
+
 #### Scopes that depend on the candidate rows {#action-row-scope-candidates}
 
-Since 0.1.147 the hook receives the candidate rows as its second argument, a `TDbActionScopeContext`. Use it when the rule lives in another table, for example "resolve an issue only when its ticket belongs to the caller's team":
+Since 0.1.147 the hook receives the candidate rows as its second argument, a `TDbActionScopeContext`. Use it when the rule can't be written as a relational predicate — for example the rule's table has no declared relation to this one, or the check is not a filter at all. Here the issue table carries a `ticketKey` but declares no `ticket` relation:
 
 ```typescript
 import type { TDbActionScopeContext } from "@atscript/moost-db";

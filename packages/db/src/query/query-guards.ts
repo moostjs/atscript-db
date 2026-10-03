@@ -1,5 +1,5 @@
-import type { AggregateQuery, FilterExpr, ResolvedBucket } from "@uniqu/core";
-import { isAggregateExpr, isBucketExpr, isPrimitive } from "@uniqu/core";
+import type { AggregateQuery, FilterExpr, RelationOp, ResolvedBucket } from "@uniqu/core";
+import { isAggregateExpr, isBucketExpr, isPrimitive, isRelationOp } from "@uniqu/core";
 
 import { DbError } from "../db-error";
 import type { BaseDbAdapter } from "../base-adapter";
@@ -7,6 +7,8 @@ import { resolveAlias } from "../agg";
 import { isBucketableField, jsonValueAncestor, normalizeComputedSelect } from "./buckets";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
+import { isPlainObject } from "../shared/object";
+import { hasRelationOp, relGuardState, type TRelGuardState } from "./relation-filter";
 
 /**
  * Engine-agnostic query-time guards, applied in the core layer BEFORE filter
@@ -132,6 +134,12 @@ export function guardFilter(
     if (key.startsWith("$")) {
       continue;
     }
+    if (hasRelationOp(value)) {
+      // A relational predicate: the key is a navigation field (no column, no
+      // encryption); the operands are guarded by the related table.
+      guardRelationOperands(key, value);
+      continue;
+    }
     if (hasEncrypted && isEncryptedRef(meta, key)) {
       throw encryptedRefError(encCode, key, "filter on");
     }
@@ -145,6 +153,26 @@ export function guardFilter(
           ]);
         }
       }
+    }
+  }
+}
+
+/**
+ * Shape rules of a relational predicate's operator map: only `$some` /
+ * `$none` (never mixed with comparison operators), each operand a filter
+ * object.
+ */
+function guardRelationOperands(key: string, ops: Record<string, unknown>): void {
+  for (const [op, operand] of Object.entries(ops)) {
+    if (!isRelationOp(op)) {
+      throw new DbError("INVALID_QUERY", [
+        { path: key, message: `Cannot mix "$some" / "$none" with "${op}" on "${key}"` },
+      ]);
+    }
+    if (!isPlainObject(operand)) {
+      throw new DbError("INVALID_QUERY", [
+        { path: key, message: `"${op}" on "${key}" expects a filter object` },
+      ]);
     }
   }
 }
@@ -250,14 +278,21 @@ export function sortFieldNames(sort: unknown): string[] {
  * The operator class a filter entry needs from its field (since 0.1.132):
  * - `compare` — value comparison (bare values, `$eq`, `$gt`, `$in`, `$regex`, any mix);
  * - `geo` — a `$geoWithin` entry;
- * - `exists` — an entry whose sole operator is `$exists`.
+ * - `exists` — an entry whose sole operator is `$exists`;
+ * - `relation` — a relational predicate (`$some` / `$none` only) on a
+ *   navigation field (since 0.1.147).
  */
-export type TFilterPredicate = "compare" | "geo" | "exists";
+export type TFilterPredicate = "compare" | "geo" | "exists" | "relation";
 
 /** One filter entry, collected per occurrence: its key and the predicate class its operators need. */
 export interface TFilterRef {
   path: string;
   predicate: TFilterPredicate;
+  /**
+   * `relation` entries: each operator with its operand (a filter on the
+   * related table, not walked here). @since 0.1.147
+   */
+  relation?: Array<{ op: RelationOp; filter: FilterExpr }>;
 }
 
 /**
@@ -284,7 +319,17 @@ export function filterPredicateOf(value: unknown): TFilterPredicate {
   const ops = value as Record<string, unknown>;
   if ("$geoWithin" in ops) return "geo";
   const keys = Object.keys(ops);
+  if (keys.length > 0 && keys.every(isRelationOp)) return "relation";
   return keys.length === 1 && keys[0] === "$exists" ? "exists" : "compare";
+}
+
+/** The `{ op, filter }` list of a `relation` entry's operator map. */
+function relationOpsOf(value: unknown): Array<{ op: RelationOp; filter: FilterExpr }> {
+  const out: Array<{ op: RelationOp; filter: FilterExpr }> = [];
+  for (const [op, filter] of Object.entries(value as Record<string, unknown>)) {
+    if (isRelationOp(op)) out.push({ op, filter: filter as FilterExpr });
+  }
+  return out;
 }
 
 /**
@@ -307,6 +352,9 @@ export function canFilterLeaf(
 ): boolean {
   if (fd.encrypted) return false;
   switch (predicate) {
+    case "relation":
+      // A stored leaf is never a navigation relation.
+      return false;
     case "exists":
       return true;
     case "geo":
@@ -515,7 +563,14 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
   };
   collectFilterKeys(
     query.filter,
-    (path, value) => refs.filter.push({ path, predicate: filterPredicateOf(value) }),
+    (path, value) => {
+      const predicate = filterPredicateOf(value);
+      refs.filter.push(
+        predicate === "relation"
+          ? { path, predicate, relation: relationOpsOf(value) }
+          : { path, predicate },
+      );
+    },
     undefined,
     refs,
   );
@@ -670,9 +725,17 @@ export function guardPath(
 ): void {
   const verb = OP_VERB[op];
   const { kind, parent } = classifyQueryPath(pathSourceOf(meta), path);
+  if (predicate === "relation" && kind !== "nav" && kind !== "unknown") {
+    throw pathError(
+      path,
+      `"$some" / "$none" are only valid on a navigation relation — "${path}" is not one`,
+    );
+  }
   switch (kind) {
     case "nav":
-      throw pathError(path, `Cannot ${verb} "${path}" — navigation path`);
+      // A relational predicate sits on the navigation field itself (one hop per level).
+      if (op === "filter" && predicate === "relation" && parent === undefined) return;
+      throw pathError(path, navPathMessage(path, verb, op, parent));
     case "leaf": {
       if (op === "select") return;
       const fd = meta.descriptorByPath.get(path)!;
@@ -722,6 +785,59 @@ export function guardPath(
 }
 
 /**
+ * The rejection of a navigation path in a non-predicate position. A filter
+ * names the predicate that expresses it: `ticket.status` →
+ * `{ ticket: { $some: { status: … } } }`.
+ */
+function navPathMessage(
+  path: string,
+  verb: string,
+  op: TQueryPathOp,
+  parent: string | undefined,
+): string {
+  const base = `Cannot ${verb} "${path}" — navigation path`;
+  if (op !== "filter") return base;
+  const nav = parent ?? path;
+  const inner = parent === undefined ? "…" : `{ ${path.slice(parent.length + 1)}: … }`;
+  return `${base}; use { ${nav}: { $some: ${inner} } }`;
+}
+
+/**
+ * A `relation` filter entry: the adapter must render predicates in this
+ * mode, the table must be wired to its related tables (a `DbSpace`), and
+ * each operand is guarded by the related table (depth / count caps, the
+ * related table's own path rules) — see `TRelationFilterHost.guard`.
+ */
+function guardRelationRef(
+  meta: TableMetadata,
+  adapter: BaseDbAdapter,
+  ref: TFilterRef,
+  state: TRelGuardState,
+): void {
+  const path = state.path ? `${state.path}.${ref.path}` : ref.path;
+  const mode = state.write ? "write" : "read";
+  if (!adapter.supportsRelationFilters(mode)) {
+    throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+      {
+        path,
+        message: `Relational predicates ($some / $none) are not supported by this adapter${state.write ? " in mutation filters" : ""}`,
+      },
+    ]);
+  }
+  if (!meta.relationFilters) {
+    throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+      {
+        path,
+        message: `Relational predicate on "${path}" needs the table to come from a DbSpace (no table resolver)`,
+      },
+    ]);
+  }
+  for (const { op, filter } of ref.relation ?? []) {
+    meta.relationFilters.guard(ref.path, op, filter, state);
+  }
+}
+
+/**
  * Core backstop for every read / aggregate / mutation-filter entry point:
  * each referenced path (see {@link collectQueryPaths}) must exist on THIS
  * adapter with the physical capability the position needs (see
@@ -744,6 +860,7 @@ export function guardPaths(
   adapter: BaseDbAdapter,
   query: TGuardedQuery | undefined,
   aggregate = false,
+  state?: TRelGuardState,
 ): TQueryPathRefs | undefined {
   if (!query) {
     return undefined;
@@ -752,7 +869,13 @@ export function guardPaths(
   if (refs.unsupportedOperator !== undefined) {
     throw pathError(refs.unsupportedOperator, unsupportedOperatorMessage(refs.unsupportedOperator));
   }
-  for (const ref of refs.filter) guardPath(meta, adapter, ref.path, "filter", ref.predicate);
+  let relState = state;
+  for (const ref of refs.filter) {
+    guardPath(meta, adapter, ref.path, "filter", ref.predicate);
+    if (ref.predicate === "relation") {
+      guardRelationRef(meta, adapter, ref, (relState ??= relGuardState()));
+    }
+  }
   for (const path of refs.sort) guardPath(meta, adapter, path, "sort");
   for (const path of refs.select) guardPath(meta, adapter, path, "select");
   for (const path of refs.aggregate) guardPath(meta, adapter, path, "aggregate");
@@ -771,6 +894,7 @@ export function guardQuery(
   meta: TableMetadata,
   adapter: BaseDbAdapter,
   query: TGuardedQuery | undefined,
+  state?: TRelGuardState,
 ): void {
   if (!query) {
     return;
@@ -778,7 +902,7 @@ export function guardQuery(
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);
   normalizeComputedSelect(query.controls, meta, false);
-  guardPaths(meta, adapter, query);
+  guardPaths(meta, adapter, query, false, state);
 }
 
 /**

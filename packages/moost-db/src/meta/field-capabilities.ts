@@ -107,6 +107,10 @@ const REASON_WRITE_ONLY = "field is @db.writeOnly.";
 const REASON_ENCRYPTED = `${ENCRYPTED_REASON}.`;
 const REASON_ANNOTATION_FILTER = "add @db.column.filterable to enable.";
 const REASON_ANNOTATION_SORT = "add @db.column.sortable to enable.";
+/** A stored leaf never takes `$some` / `$none` (the HTTP gate answers relation refs before reaching it). */
+const REASON_NOT_RELATION = "$some / $none apply to navigation relations only.";
+/** The predicate alternative named by a filter on a navigation path (since 0.1.147). */
+const PREDICATE_HINT = "to filter by related rows (requires @db.rel.filterable)";
 
 /** Sentence subject per op ("Filtering on field …"). */
 const OP_SUBJECT: Record<TQueryPathOp, string> = {
@@ -145,6 +149,37 @@ export function writeOnlyVerdict(path: string, op: "filter" | "sort"): TCapabili
 /** The one "nonexistent path" verdict — hidden paths answer with it byte for byte. */
 function unknownField(path: string): TCapabilityVerdict {
   return { path, message: `Unknown field "${path}"` };
+}
+
+/**
+ * The rejection of a navigation path. A filter names the relational
+ * predicate that expresses it (since 0.1.147) — `ticket=$some(status=…)` —
+ * and, at the controller's own level (`inOperand` false), the `$with`
+ * alternative; other positions keep the `$with` hint alone.
+ */
+function navMessage(
+  path: string,
+  op: TQueryPathOp,
+  parent: string | undefined,
+  local: string,
+  inOperand: boolean,
+): string {
+  if (parent === undefined) {
+    if (op !== "filter") return `"${path}" is a navigation property — use $with=${path} to load it`;
+    const predicate = `use ${local}=$some(…) ${PREDICATE_HINT}`;
+    return inOperand
+      ? `"${path}" is a navigation property — ${predicate}`
+      : `"${path}" is a navigation property — ${predicate}, or $with=${path} to load it`;
+  }
+  const tail = local.slice(parent.length + 1);
+  const withHint =
+    `$with=${parent}(...) to filter or select fields of the related rows ` +
+    `(e.g. $with=${parent}($select=${tail}))`;
+  if (op !== "filter") return `"${path}" is a navigation path — use ${withHint}`;
+  const predicate = `use ${parent}=$some(${tail}=…) ${PREDICATE_HINT}`;
+  return inOperand
+    ? `"${path}" is a navigation path — ${predicate}`
+    : `"${path}" is a navigation path — ${predicate}, or ${withHint}`;
 }
 
 function leafHint(leaves: readonly string[]): string {
@@ -325,6 +360,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       compare: verdict("compare", true),
       exists: verdict("exists", true),
       geo: verdict("geo", true),
+      relation: REASON_NOT_RELATION,
     };
     // writeOnly / encrypted / policy veto every predicate alike, so narrower
     // predicates remain only when the adapter's storage veto alone blocks compare.
@@ -404,34 +440,32 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    *
    * `predicate` is a filter entry's class (`collectQueryPaths` records it per
    * occurrence); it only matters for `op === "filter"` on a listed leaf.
+   *
+   * `prefix` (since 0.1.147) is this index's readable's dotted path from the
+   * controller when it judges a relational predicate's operand (`"ticket."`):
+   * `exists` still receives the LOCAL path, the verdict's `path` and message
+   * name the prefixed one. A filter on a navigation path names the predicate
+   * alternative (`ticket=$some(status=…)`).
    */
   check(
-    path: string,
+    local: string,
     op: TQueryPathOp,
     exists: (path: string) => boolean,
     predicate: TFilterPredicate = "compare",
+    prefix = "",
   ): TCapabilityVerdict | undefined {
-    if (!exists(path)) {
+    // Messages name the prefixed path; `exists` / classification use the local one.
+    const path = prefix + local;
+    if (!exists(local)) {
       return unknownField(path);
     }
-    const { kind, parent } = classifyQueryPath(this, path);
+    const { kind, parent: localParent } = classifyQueryPath(this, local);
+    const parent = localParent === undefined ? undefined : prefix + localParent;
     if (kind === "nav") {
-      if (parent === undefined) {
-        return {
-          path,
-          message: `"${path}" is a navigation property — use $with=${path} to load it`,
-        };
-      }
-      const tail = path.slice(parent.length + 1);
-      return {
-        path,
-        message:
-          `"${path}" is a navigation path — use $with=${parent}(...) to filter or select fields ` +
-          `of the related rows (e.g. $with=${parent}($select=${tail}))`,
-      };
+      return { path, message: navMessage(path, op, localParent, local, prefix !== "") };
     }
     if (kind === "leaf") {
-      const entry = this._entries.get(path)!;
+      const entry = this._entries.get(local)!;
       switch (op) {
         case "select":
           return entry.cap.selectable
@@ -472,8 +506,8 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         // The hint names visible leaves only — a hidden sibling must not leak
         // through it (since 0.1.134). A parent whose every leaf is hidden
         // answers like a nonexistent path.
-        const all = this._objectParents.get(path)!;
-        const leaves = all.filter(exists);
+        const all = this._objectParents.get(local)!;
+        const leaves = all.filter(exists).map((leaf) => prefix + leaf);
         if (leaves.length === 0 && all.length > 0) {
           return unknownField(path);
         }

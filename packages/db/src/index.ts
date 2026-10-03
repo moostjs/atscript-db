@@ -176,6 +176,29 @@ export { createFailureCollector } from "./shared/failure-collector";
 export { walkFilter, isPrimitive, computeInsights } from "@uniqu/core";
 export type { FilterVisitor } from "@uniqu/core";
 
+// ── Relational filter predicates ($some / $none, since 0.1.147) ─────────────
+export { isRelationOp, isRelationPredicate, RELATION_OPS } from "@uniqu/core";
+export type { RelationOp, RelationPredicate } from "@uniqu/core";
+export {
+  ResolvedRelationFilter,
+  isResolvedRelationFilter,
+  containsRelationPredicate,
+  forEachResolvedRelation,
+  hasRelationOp,
+  relationStaticFilter,
+  relGuardState,
+  andFilters,
+  REL_FILTER_MAX_DEPTH,
+  REL_FILTER_MAX_NODES,
+} from "./query/relation-filter";
+export type {
+  TRelationFilterTable,
+  TRelationFilterJunction,
+  TRelationFilterHost,
+  TRelationStaticFilter,
+  TRelGuardState,
+} from "./query/relation-filter";
+
 // ── Query path guard + nullable typing (since 0.1.128) ──────────────────────
 export {
   guardPath,

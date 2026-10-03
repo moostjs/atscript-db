@@ -3,6 +3,7 @@ import type { FilterExpr, WithRelation } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TGenericLogger } from "../logger";
 import type { TDbForeignKey, TDbRelation, TTableResolver } from "../types";
+import { andFilters, relationStaticFilter } from "../query/relation-filter";
 import { findFKForRelation, findRemoteFK, resolveRelationTargetTable } from "./relation-helpers";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -29,8 +30,11 @@ interface TResolvedTable {
 
 /** Per-relation filter + controls bundle. */
 interface TRelationQuery {
+  /** The `$with` sub-filter AND the target part of the relation's `@db.rel.filter`. */
   filter: FilterExpr | undefined;
   controls: Record<string, unknown>;
+  /** `@db.rel.via`: the junction part of the relation's `@db.rel.filter`. */
+  junctionFilter?: FilterExpr;
 }
 
 interface TAssignOpts {
@@ -95,8 +99,11 @@ export async function loadRelationsImpl(
       continue;
     }
 
-    const filter =
-      withRel.filter && Object.keys(withRel.filter).length > 0 ? withRel.filter : undefined;
+    // `@db.rel.filter` is part of the relation: its target conditions AND the
+    // `$with` sub-filter; its junction conditions filter the junction rows.
+    const statics = relationStaticFilter(relation, relName);
+    const merged = andFilters(statics.target, withRel.filter);
+    const filter = Object.keys(merged).length > 0 ? merged : undefined;
 
     // @uniqu/url parseWithSegment places $sort/$limit/$skip/$select as flat
     // keys on the relation object rather than nesting under .controls.
@@ -127,7 +134,7 @@ export async function loadRelationsImpl(
     if (flatRel.$with && !controls.$with) {
       controls.$with = flatRel.$with;
     }
-    const relQuery: TRelationQuery = { filter, controls };
+    const relQuery: TRelationQuery = { filter, controls, junctionFilter: statics.junction };
 
     if (relation.direction === "to") {
       tasks.push(loadToRelation(rows, { relName, relation, targetTable, relQuery }, host));
@@ -406,7 +413,10 @@ async function loadViaSingleKey(
   }
 
   // Query junction table
-  const junctionFilter = { [junctionLocalField]: { $in: pkValues } };
+  const junctionFilter = andFilters(
+    { [junctionLocalField]: { $in: pkValues } },
+    relQuery.junctionFilter,
+  );
   const junctionRows = await junctionTable.findMany({
     filter: junctionFilter,
     controls: { $select: [junctionLocalField, junctionTargetField] },
@@ -500,7 +510,10 @@ async function loadViaCompositeKey(
     return;
   }
 
-  const junctionFilter = orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
+  const junctionFilter = andFilters(
+    (orFilters.length === 1 ? orFilters[0] : { $or: orFilters }) as FilterExpr,
+    relQuery.junctionFilter,
+  );
   const junctionRows = await junctionTable.findMany({
     filter: junctionFilter,
     controls: { $select: [...junctionLocalFields, ...junctionTargetFields] },

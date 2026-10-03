@@ -31,6 +31,7 @@ import {
   type TDbFieldMeta,
   type TFieldOps,
   computeInsights,
+  containsRelationPredicate,
 } from "@atscript/db";
 import type {
   AggregationCursor,
@@ -39,6 +40,7 @@ import type {
   Collection,
   Db,
   Document,
+  Filter,
   MongoClient,
 } from "mongodb";
 import { MongoServerError, ObjectId } from "mongodb";
@@ -47,7 +49,7 @@ import { dedupeProjection } from "./projection-dedupe";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
-import { buildMongoFilter } from "./mongo-filter";
+import { buildMongoFilter, buildMongoQuery, mongoFilterStages, planStages } from "./mongo-filter";
 import {
   DEFAULT_INDEX_NAME,
   mongoIndexKey,
@@ -141,6 +143,12 @@ function objectIdFromStorage(value: unknown): unknown {
   }
   return value;
 }
+
+/**
+ * Documents per `_id $in` write when a mutation filter holds relational
+ * predicates (see {@link MongoAdapter.supportsRelationFilters}).
+ */
+const REL_WRITE_BATCH = 1000;
 
 // ── Adapter ──────────────────────────────────────────────────────────────────
 
@@ -457,6 +465,28 @@ export class MongoAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /**
+   * Relational predicates (`{ nav: { $some | $none: … } }`) render as
+   * correlated `$lookup` stages, so a read whose filter holds one runs as an
+   * aggregation pipeline (find / count / findManyWithCount / grouped
+   * aggregate / search / geo); predicate-free reads keep their plain
+   * `find` / `countDocuments` path.
+   *
+   * Writes (`updateMany` / `replaceMany` / `deleteMany` and the single-row
+   * variants, whose scope may carry a predicate) first resolve the matching
+   * `_id`s through that pipeline, then write by `_id` in batches of
+   * {@link REL_WRITE_BATCH} — re-checking the predicate-free part of the
+   * filter. Inside an active transaction both steps share its session and
+   * are atomic; without one there is a window between resolving and writing
+   * in which a related document can change, so a written document may no
+   * longer satisfy the predicate (or a newly matching one is missed).
+   *
+   * @since 0.1.147
+   */
+  override supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return true;
+  }
+
   // oxlint-disable-next-line max-params -- matches BaseDbAdapter.loadRelations() signature
   override async loadRelations(
     rows: Array<Record<string, unknown>>,
@@ -493,7 +523,10 @@ export class MongoAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "nativePatch");
+    const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "nativePatch");
+    if (!mongoFilter) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
     const versionColumn = this._table.versionColumnPhysical;
     // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
     // aggregation expression alongside any user-supplied $inc / $mul ops.
@@ -822,27 +855,9 @@ export class MongoAdapter extends BaseDbAdapter {
   override async findManyWithCount(
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-    const filter = buildMongoFilter(query.filter);
-    const controls = query.controls || {};
-
-    const dataStages: Document[] = [];
-    if (controls.$sort) {
-      dataStages.push({ $sort: controls.$sort });
-    }
-    if (controls.$skip) {
-      dataStages.push({ $skip: controls.$skip });
-    }
-    if (controls.$limit) {
-      dataStages.push({ $limit: controls.$limit });
-    }
-    if (controls.$select) {
-      const projection = controls.$select.asProjection;
-      if (projection) dataStages.push({ $project: dedupeProjection(projection) });
-    }
-
     const pipeline: Document[] = [
-      { $match: filter },
-      { $facet: { data: dataStages, meta: [{ $count: "count" }] } },
+      ...mongoFilterStages(query.filter),
+      { $facet: { data: pageStages(query.controls), meta: [{ $count: "count" }] } },
     ];
 
     this._log("aggregate (findManyWithCount)", pipeline);
@@ -892,20 +907,82 @@ export class MongoAdapter extends BaseDbAdapter {
    * is supplied for a non-versioned table — fail loud at the adapter boundary
    * rather than silently dropping the CAS predicate.
    */
-  private _buildCasFilter(
+  private async _buildCasFilter(
     filter: FilterExpr,
     expectedVersion: number | undefined,
     op: string,
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown> | undefined> {
     const versionColumn = this._table.versionColumnPhysical;
     if (expectedVersion !== undefined && versionColumn === undefined) {
       throw new Error(`${op}: expectedVersion requires versionColumn`);
     }
-    const mongoFilter = buildMongoFilter(filter) as Record<string, unknown>;
-    if (expectedVersion !== undefined && versionColumn !== undefined) {
-      mongoFilter[versionColumn] = expectedVersion;
+    const mongoFilter = containsRelationPredicate(filter)
+      ? (await this._predicateWriteFilters(filter, true))[0]
+      : buildMongoFilter(filter);
+    if (!mongoFilter) {
+      return undefined;
     }
-    return mongoFilter;
+    if (expectedVersion !== undefined && versionColumn !== undefined) {
+      (mongoFilter as Record<string, unknown>)[versionColumn] = expectedVersion;
+    }
+    return mongoFilter as Record<string, unknown>;
+  }
+
+  /**
+   * A write filter holding relational predicates → `_id`-based filters:
+   * the matching `_id`s are resolved through the aggregation pipeline (in
+   * the active transaction's session, if any), then grouped into batches of
+   * {@link REL_WRITE_BATCH} (`one`: the first match only). Each filter also
+   * re-checks the predicate-free conjuncts, so a document that stopped
+   * matching them in between is not written. Empty when nothing matches.
+   */
+  private async _predicateWriteFilters(filter: FilterExpr, one: boolean): Promise<Filter<any>[]> {
+    const plan = buildMongoQuery(filter);
+    const pipeline = planStages(plan);
+    if (one) {
+      pipeline.push({ $limit: 1 });
+    }
+    pipeline.push({ $project: { _id: 1 } });
+    this._log("aggregate (write ids)", pipeline);
+    const docs = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+    const filters: Filter<any>[] = [];
+    for (let i = 0; i < docs.length; i += REL_WRITE_BATCH) {
+      const ids = docs.slice(i, i + REL_WRITE_BATCH).map((doc) => doc._id as unknown);
+      const byId: Filter<any> = one ? { _id: ids[0] } : { _id: { $in: ids } };
+      filters.push(plan.pre ? { $and: [byId, plan.pre] } : byId);
+    }
+    return filters;
+  }
+
+  /** Runs an update-shaped write over `filter` — batched by `_id` when it holds predicates. */
+  private async _updateMatching(
+    filter: FilterExpr,
+    write: (mongoFilter: Filter<any>) => Promise<TDbUpdateResult>,
+  ): Promise<TDbUpdateResult> {
+    if (!containsRelationPredicate(filter)) {
+      return write(buildMongoFilter(filter));
+    }
+    const total: TDbUpdateResult = { matchedCount: 0, modifiedCount: 0 };
+    for (const mongoFilter of await this._predicateWriteFilters(filter, false)) {
+      const result = await write(mongoFilter);
+      total.matchedCount += result.matchedCount;
+      total.modifiedCount += result.modifiedCount;
+    }
+    return total;
+  }
+
+  /** `deleteMany` over `filter` — batched by `_id` when it holds predicates. */
+  private async _deleteMatching(filter: FilterExpr): Promise<TDbDeleteResult> {
+    const filters = containsRelationPredicate(filter)
+      ? await this._predicateWriteFilters(filter, false)
+      : [buildMongoFilter(filter)];
+    let deletedCount = 0;
+    for (const mongoFilter of filters) {
+      this._log("deleteMany", mongoFilter);
+      const result = await this.collection.deleteMany(mongoFilter, this._getSessionOpts());
+      deletedCount += result.deletedCount;
+    }
+    return { deletedCount };
   }
 
   /**
@@ -996,6 +1073,10 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
+    if (containsRelationPredicate(query.filter)) {
+      const [row] = await this._aggregateFind(query, "findOne", 1);
+      return row ?? null;
+    }
     const filter = buildMongoFilter(query.filter);
     const opts = this._buildFindOptions(query.controls);
     this._log("findOne", filter, opts);
@@ -1009,6 +1090,9 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
+    if (containsRelationPredicate(query.filter)) {
+      return this._aggregateFind(query, "findMany");
+    }
     const filter = buildMongoFilter(query.filter);
     const opts = this._buildFindOptions(query.controls);
     this._log("findMany", filter, opts);
@@ -1021,6 +1105,17 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async count(query: DbQuery): Promise<number> {
+    if (containsRelationPredicate(query.filter)) {
+      // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a filter only).
+      const pipeline = [...mongoFilterStages(query.filter), { $count: "count" }];
+      this._log("aggregate (count)", pipeline);
+      const result = await wrapInvalidQuery(() =>
+        this.collection
+          .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
+          .toArray(),
+      );
+      return (result[0]?.count as number | undefined) ?? 0;
+    }
     const filter = buildMongoFilter(query.filter);
     this._log("countDocuments", filter);
     return this.collection.countDocuments(filter, {
@@ -1035,7 +1130,10 @@ export class MongoAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "updateOne");
+    const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "updateOne");
+    if (!mongoFilter) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
     const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumnPhysical);
     this._log("updateOne", mongoFilter, updateDoc);
     return this._wrapUpdate(() =>
@@ -1048,7 +1146,10 @@ export class MongoAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
-    const mongoFilter = this._buildCasFilter(filter, expectedVersion, "replaceOne");
+    const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "replaceOne");
+    if (!mongoFilter) {
+      return { matchedCount: 0, modifiedCount: 0 };
+    }
     const versionColumn = this._table.versionColumnPhysical;
     this._log("replaceOne", mongoFilter, data);
     if (versionColumn !== undefined) {
@@ -1073,7 +1174,12 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const mongoFilter = buildMongoFilter(filter);
+    const mongoFilter = containsRelationPredicate(filter)
+      ? (await this._predicateWriteFilters(filter, true))[0]
+      : buildMongoFilter(filter);
+    if (!mongoFilter) {
+      return { deletedCount: 0 };
+    }
     this._log("deleteOne", mongoFilter);
     const result = await this.collection.deleteOne(mongoFilter, this._getSessionOpts());
     return { deletedCount: result.deletedCount };
@@ -1086,30 +1192,29 @@ export class MongoAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps.
     const versionColumn = this._table.versionColumnPhysical;
-    const mongoFilter = buildMongoFilter(filter);
     const updateDoc = buildMongoUpdateDoc(data, ops, versionColumn);
-    this._log("updateMany", mongoFilter, updateDoc);
-    return this._wrapUpdate(() =>
-      this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
-    );
+    return this._updateMatching(filter, (mongoFilter) => {
+      this._log("updateMany", mongoFilter, updateDoc);
+      return this._wrapUpdate(() =>
+        this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
+      );
+    });
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     // MongoDB has no native replaceMany; use updateMany with $set (+ auto-bump
     // version when this table is versioned — sibling of updateMany, no CAS).
-    const mongoFilter = buildMongoFilter(filter);
     const updateDoc = buildMongoUpdateDoc(data, undefined, this._table.versionColumnPhysical);
-    this._log("replaceMany", mongoFilter, updateDoc);
-    return this._wrapUpdate(() =>
-      this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
-    );
+    return this._updateMatching(filter, (mongoFilter) => {
+      this._log("replaceMany", mongoFilter, updateDoc);
+      return this._wrapUpdate(() =>
+        this.collection.updateMany(mongoFilter, updateDoc, this._getSessionOpts()),
+      );
+    });
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const mongoFilter = buildMongoFilter(filter);
-    this._log("deleteMany", mongoFilter);
-    const result = await this.collection.deleteMany(mongoFilter, this._getSessionOpts());
-    return { deletedCount: result.deletedCount };
+    return this._deleteMatching(filter);
   }
 
   // ── Schema / Index sync ──────────────────────────────────────────────────
@@ -1284,6 +1389,24 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   // ── Internal helpers ─────────────────────────────────────────────────────
+
+  /** A find whose filter holds relational predicates, as an aggregation pipeline. */
+  private async _aggregateFind(
+    query: DbQuery,
+    label: string,
+    limit?: number,
+  ): Promise<Array<Record<string, unknown>>> {
+    const pipeline = [
+      ...mongoFilterStages(query.filter),
+      ...pageStages(limit ? { ...query.controls, $limit: limit } : query.controls),
+    ];
+    this._log(`aggregate (${label})`, pipeline);
+    return wrapInvalidQuery(() =>
+      this.collection
+        .aggregate(pipeline, { ...this._getCollationOpts(query), ...this._getSessionOpts() })
+        .toArray(),
+    );
+  }
 
   private _buildFindOptions(controls?: DbQuery["controls"]) {
     const opts: Record<string, any> = {};
@@ -1465,6 +1588,28 @@ export class MongoAdapter extends BaseDbAdapter {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** `$sort` → `$skip` → `$limit` → `$project` stages of a read's controls. */
+function pageStages(controls: DbQuery["controls"]): Document[] {
+  const stages: Document[] = [];
+  if (!controls) {
+    return stages;
+  }
+  if (controls.$sort) {
+    stages.push({ $sort: controls.$sort });
+  }
+  if (controls.$skip) {
+    stages.push({ $skip: controls.$skip });
+  }
+  if (controls.$limit) {
+    stages.push({ $limit: controls.$limit });
+  }
+  if (controls.$select) {
+    const projection = controls.$select.asProjection;
+    if (projection) stages.push({ $project: dedupeProjection(projection) });
+  }
+  return stages;
+}
 
 /**
  * Normalizes a declared `fuzzy` arg (`0-2`) into the query-time metadata Atlas

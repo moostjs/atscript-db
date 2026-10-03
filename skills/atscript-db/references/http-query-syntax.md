@@ -78,12 +78,35 @@ Semantics (null ≡ absent on every adapter, boolean-only, sole-operator rule on
 
 ## Nested field paths
 
-Dot notation works for both nav-prop access and embedded / flattened own-props — the URL parser doesn't distinguish. Use the same `parent.child` form everywhere.
+Dot notation addresses embedded / flattened own-props. A nav-prop path is a 400 (since 0.1.128) — filter by a relation with a predicate (below), load it with `$with`.
 
 ```
-?author.name=Alice         # nav-prop / relation
-?contact.email=a@e.com     # embedded / flattened own-prop
+?contact.email=a@e.com             # embedded / flattened own-prop
+?author.name=Alice                 # 400 — navigation path
+?author=$some(name=Alice)          # rows whose author is named Alice (needs @db.rel.filterable)
 ```
+
+## Relational predicates — `$some` / `$none` (0.1.147)
+
+```
+?ticket=$some(teamId{t1,t2}&status=open)     # some related row matches
+?ticket=$none(status=open)                   # no related row matches (NULL FK rows included)
+?ticket=$some()  /  ?ticket=$none()          # has any / has none
+?ticket=$some(team=$some(name=Core))         # nested, one relation per level
+?!(ticket=$some(status=open))                # negation (same as $none)
+?$with=tickets(issues=$some(title~=/crash/i)) # inside $with bodies
+```
+
+| #   | Rule                                                                                                                                                                                   |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Body = full filter grammar of the RELATED table (`&`, `^`, `!( )`, groups, nested predicates); field names unprefixed (`status`, not `ticket.status`). `&` inside `( )` doesn't split. |
+| 2   | `ticket!=$some(…)` → SyntaxError 400 — negate with `!( )` or use `$none`.                                                                                                              |
+| 3   | Relation must be `@db.rel.filterable`, visible, with filterable operand fields → else 400 (messages: [moost-db.md](moost-db.md#relational-predicates-over-http-01147)).                |
+| 4   | Endpoints: `/query` (incl. `$count`, `$groupBy`), `/pages`, `/geo`, `$with` bodies (incl. `/one`). Never `$having`; never an identification (`/one?…`, `DELETE /?…` → 400).            |
+| 5   | Caps per request: depth 3 per chain, 8 predicates total incl. `$with` sub-filters.                                                                                                     |
+| 6   | Insights record `ticket` → `$some`, inner terms prefixed (`ticket.status` → `$eq`).                                                                                                    |
+
+Semantics (NULL FK, `$every` = `$none: { $not: F }`) → [queries.md](queries.md#relational-predicates--some--none-01147).
 
 ## Controls
 
@@ -165,7 +188,7 @@ HTTP/1.1 400 Bad Request
 | flattened object parent (`contact`)           | 400 `"contact" is a nested object — … leaves (contact.email, …)`  | ok (expands)                                                     |
 | JSON parent (`prefs`, arrays)                 | filter: SQL `$exists` only, else 400; `$sort`: 400 everywhere     | ok (whole value)                                                 |
 | JSON descendant (`prefs.theme`)               | SQL: 400 `… inside JSON-stored column "prefs" …`; Mongo/memory ok | same                                                             |
-| navigation path (`assignee`, `assignee.name`) | 400 `… use $with=assignee(...)`                                   | 400 — use `$with=assignee($select=name)`                         |
+| navigation path (`assignee`, `assignee.name`) | 400 `… use assignee=$some(…) … or $with=assignee(...)`            | 400 — use `$with=assignee($select=name)`                         |
 | `@db.writeOnly` / `@db.encrypted`             | 400                                                               | writeOnly: stripped; encrypted leaf ok; encrypted descendant 400 |
 | unknown                                       | 400 `Unknown field "x"`                                           | 400                                                              |
 

@@ -472,6 +472,27 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter renders relational filter predicates
+   * (`{ nav: { $some | $none: … } }`) in `mode` — `read` for find / count /
+   * search / aggregate filters, `write` for mutation filters
+   * (`updateMany`, `deleteMany`, …). Default `false`: the core rejects such
+   * filters with `REL_FILTER_NOT_SUPPORTED` before they reach the adapter.
+   *
+   * An adapter returning `true` receives each predicate already resolved by
+   * the core: the filter visitor's `relation(field, op, operand)` callback
+   * gets a `ResolvedRelationFilter` operand (`kind`, physical
+   * correlation `pairs`, `target` / `junction` tables with their adapters,
+   * and the inner `filter` already translated to the target's physical
+   * names, nested predicates resolved too). Keep `relation` on every
+   * `walkFilter` visitor that may meet such a filter.
+   *
+   * @since 0.1.147
+   */
+  supportsRelationFilters(_mode: "read" | "write"): boolean {
+    return false;
+  }
+
+  /**
    * Loads relations onto result rows using adapter-native operations.
    * Only called when {@link supportsNativeRelations} returns `true`.
    *

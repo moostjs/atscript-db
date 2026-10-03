@@ -426,6 +426,7 @@ protected override async actionRowScope(action: string, ctx: TDbActionScopeConte
 | 5   | Result only restricts; a throw fails the request (never "allow"). `undefined` / `{}` = unrestricted. Equal filters (same object OR structurally equal, 0.1.147) share one query.                                                                                                                                                   |
 | 6   | ORDER on the action route (0.1.147): `prepareRequest` → overlay (before body) → body ids → row load → `actionRowScope`. Don't rely on it running before the body. Every `'rows'` action validates `ids` IN ITS GATE INTERCEPTOR (0.1.147) — same 400, earlier; a `query` key on a non-`queryTarget` action → 400 `TARGET_INVALID`. |
 | 7   | Filter / `loadRows` may reference `hasField`-hidden fields; never exposed. Own table only (a plain controller's `opts.table` action is never scoped).                                                                                                                                                                              |
+| 8   | May scope by RELATED rows with `$some` / `$none` (0.1.147) — e.g. `{ ticket: { $some: { teamId: { $in: currentTeams() }, status: "open" } } }`. Server-side filter: no `@db.rel.filterable`, no `transformRelationFilter`. Prefer it over `ctx.loadRows` when a relation is declared.                                              |
 
 ## prepareRequest on actions (0.1.143)
 

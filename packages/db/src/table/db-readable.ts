@@ -59,7 +59,19 @@ import {
   tableNameOf,
 } from "../rel/relation-helpers";
 import type { DbEncryption } from "../encryption";
-import { assertGeoPoint, guardAggregate, guardQuery, isStrictTable } from "../query/query-guards";
+import {
+  assertGeoPoint,
+  guardAggregate,
+  guardFilter,
+  guardPaths,
+  guardQuery,
+  isStrictTable,
+} from "../query/query-guards";
+import {
+  createRelationFilterHost,
+  type TRelationFilterOwner,
+  type TRelGuardState,
+} from "../query/relation-filter";
 import { normalizeComputedSelect } from "../query/buckets";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
 import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
@@ -285,6 +297,13 @@ export class AtscriptDbReadable<
   protected _ensureBuilt(): void {
     if (!this._meta.isBuilt) {
       this._meta.build(this.type, this.adapter, this.logger);
+      if (this._meta.navFields.size > 0 && this._tableResolver) {
+        const resolver = this._tableResolver;
+        this._meta.relationFilters = createRelationFilterHost(
+          this,
+          (type) => resolver(type) as unknown as TRelationFilterOwner | undefined,
+        );
+      }
     }
     if (this._meta.encryptedFields.size > 0 && !this._encryption) {
       // Never silently store/read plaintext on a model that declares
@@ -331,6 +350,63 @@ export class AtscriptDbReadable<
   /** Engine-agnostic query-time guards (encrypted-field refs, $geoWithin shape). */
   protected _guardQuery(query: Uniquery | undefined): void {
     guardQuery(this._meta, this.adapter, query as Parameters<typeof guardQuery>[2]);
+  }
+
+  /**
+   * Guards a relational predicate operand against THIS table — the filter
+   * guard and the path guard with the predicate's shared `state` (depth,
+   * count, read/write mode). Called by the source table's relation host.
+   *
+   * @internal Core wiring for relational predicates; not consumer API.
+   */
+  public _guardRelationOperand(filter: FilterExpr, state: TRelGuardState): void {
+    this._ensureBuilt();
+    guardFilter(this._meta, this.adapter, filter);
+    guardPaths(this._meta, this.adapter, { filter }, false, state);
+  }
+
+  /**
+   * Translates a relational predicate operand for THIS table's adapter (its
+   * own field mapper; nested predicates resolved at `depth + 1`).
+   *
+   * @internal Core wiring for relational predicates; not consumer API.
+   */
+  public _resolveRelationOperand(filter: FilterExpr, depth: number): FilterExpr {
+    this._ensureBuilt();
+    return this._fieldMapper.translateFilter(filter, this._meta, depth);
+  }
+
+  /**
+   * Translates a logical query (filter + controls) for THIS table's adapter
+   * after the read guards — exactly what `findMany` hands the adapter.
+   * For adapters that load `$with` relations natively and must address the
+   * related table's physical names.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   * @since 0.1.147
+   */
+  public _translateForAdapter(query: Uniquery): ReturnType<FieldMappingStrategy["translateQuery"]> {
+    this._ensureBuilt();
+    this._guardQuery(query);
+    return this._fieldMapper.translateQuery(query, this._meta);
+  }
+
+  /**
+   * Physical rows of THIS table → logical rows (field mapping, value
+   * formatters, decryption) — what every read does before `$with` loading.
+   * `controls` are the logical read controls the rows were read with.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   * @since 0.1.147
+   */
+  public async _rowsFromAdapter(
+    rows: Record<string, unknown>[],
+    controls?: TReadControls,
+  ): Promise<Record<string, unknown>[]> {
+    this._ensureBuilt();
+    const out = this._fromRead(rows, controls);
+    await this._decryptRows(out);
+    return out;
   }
 
   private _encryptedPathsCache?: Array<{ path: string; segments: string[]; leaf: string }>;

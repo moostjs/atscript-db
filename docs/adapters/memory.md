@@ -128,6 +128,15 @@ There is no index-backed grouping: every grouped query scans the matching rows, 
 
 Fields renamed with `@db.column` are honored in `$select` and `$sort` since 0.1.132; earlier versions dropped them from selected rows and ignored them in `$sort`.
 
+### Relational predicates {#relational-predicates}
+
+[`$some` / `$none` filters](/api/queries#relational-filters) (since 0.1.147) work in reads — stored and provider-backed tables alike — and in every mutation filter.
+
+- **Cost.** An operation whose filter holds predicates loads each related table (and junction) once — a provider-backed table's provider runs once per operation — and builds a key set from it; then every candidate row is a set lookup. Expect time proportional to the related tables' sizes plus the source size. There are no indexes. A filter without predicates costs nothing extra.
+- **Snapshots.** A read sees one consistent snapshot per table, shared with the outer scan when a relation points back to its own table.
+- **Writes** evaluate the predicates against the related rows as they were just before the write. The evaluation and the write are not atomic, like the adapter's other [batch writes](#limitations).
+- `buildMemoryPredicate` alone cannot evaluate a predicate (it has no access to the related tables) and throws `REL_FILTER_NOT_SUPPORTED` — see [Utilities](#utilities).
+
 ### Foreign Keys
 
 There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. See [Referential Actions](/relations/referential-actions).
@@ -171,7 +180,7 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 
 The package exports its query engine as three pure functions — the same engine the adapter runs internally, so a raw-driver or custom controller can apply identical filter/sort/projection semantics outside the standard CRUD flow:
 
-- `buildMemoryPredicate(filter)` — compiles a `FilterExpr` into a JS-native `(row) => boolean` predicate.
+- `buildMemoryPredicate(filter)` — compiles a `FilterExpr` into a JS-native `(row) => boolean` predicate. A filter with [relational predicates](#relational-predicates) needs the adapter (it reads the related tables) — the function throws `REL_FILTER_NOT_SUPPORTED` on one.
 - `sortRows(rows, $sort, tieBreak?)` — stable multi-key `$sort` with the adapter's leaf ordering (null-low, `Date`-by-instant, no collation); an optional `tieBreak` yields a deterministic total order.
 - `projectRow(row, projection, opts?)` — dot-path `$select` inclusion/exclusion projection over one row, with an optional deep-clone. `opts.pkFields` adds the named fields to an inclusion projection. The adapter itself does not pass it: since 0.1.145 an inclusion `$select` returns exactly the selected fields, as on the SQL adapters. Earlier versions also returned the primary key.
 

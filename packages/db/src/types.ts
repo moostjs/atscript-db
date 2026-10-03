@@ -1,4 +1,8 @@
-import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
+import type {
+  AtscriptQueryNode,
+  TAtscriptAnnotatedType,
+  TSerializedAnnotatedType,
+} from "@atscript/typescript/utils";
 import type {
   AggregateFn,
   BucketUnit,
@@ -77,6 +81,11 @@ export interface TRelationInfo {
   name: string;
   direction: "to" | "from" | "via";
   isArray: boolean;
+  /**
+   * Present (true) when the relation is `@db.rel.filterable`: clients may
+   * filter by related rows (`nav=$some(…)` / `nav=$none(…)`). @since 0.1.147
+   */
+  filterable?: true;
 }
 
 /** Per-field capability flags in a meta response. */
@@ -879,6 +888,18 @@ export interface TDbRelation {
   isArray: boolean;
   /** Junction type reference for 'via' (M:N) relations. */
   viaType?: () => TAtscriptAnnotatedType;
+  /**
+   * `@db.rel.filterable` — HTTP clients may filter the parent rows by this
+   * relation (`{ nav: { $some | $none: … } }`). Server-side code may always.
+   * @since 0.1.147
+   */
+  filterable?: boolean;
+  /**
+   * `@db.rel.filter` condition: part of the relation's meaning — applied when
+   * the relation is loaded (`$with`) and inside relational predicates.
+   * @since 0.1.147
+   */
+  filter?: AtscriptQueryNode;
 }
 
 // ── Write semantics (Group B: payload aliases + validated-stage guard contexts) ──

@@ -224,6 +224,16 @@ Throws:
 
 Autocomplete works on every filter path, sort key, and `$select` element. The query/one/pages return-type narrowing is automatic when `$with` is a literal (use `as const` if TS doesn't infer it as literal).
 
+Relational predicates (0.1.147) type-check on NAV keys only — `query` / `count` / `pages` / geo methods:
+
+```ts
+await issues.query({ filter: { ticket: { $some: { status: "open" } } } }); // → ?ticket=$some(status=open)
+await issues.count({ filter: { $or: [{ title: "x" }, { ticket: { $none: {} } }] } });
+// @ts-expect-error — own field: { title: { $some: {} } }; unknown keys rejected too
+```
+
+Operand is untyped (`Record<string, unknown>`). Server needs `@db.rel.filterable` on the relation (else 400) → `meta().relations[i].filterable === true`. Semantics → [queries.md](queries.md#relational-predicates--some--none-01147).
+
 ## Per-row action availability — `$actions=true`
 
 Opt-in URL control on read methods. When set, every returned row carries `$actions: string[]` — names of `'row'`/`'rows'`-level actions NOT disabled for that row. See [actions.md § `$actions=true`](actions.md#actionstrue--server-evaluated-row-availability) for the server-side pipeline.

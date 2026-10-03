@@ -255,15 +255,16 @@ interface Document {
 
 ## Relations
 
-| Annotation         | Applies To | Arguments          | Description                                                                             |
-| ------------------ | ---------- | ------------------ | --------------------------------------------------------------------------------------- |
-| `@db.rel.FK`       | Field      | `alias?` (string)  | [Foreign key](../relations/) (field must use chain ref). **Dual role** — see note below |
-| `@db.rel.to`       | Field      | `alias?` (string)  | Forward [navigation](../relations/navigation) (N:1, FK on this table)                   |
-| `@db.rel.from`     | Field      | `alias?` (string)  | Reverse [navigation](../relations/navigation) (1:N, FK on other table)                  |
-| `@db.rel.via`      | Field      | `junction` (ref)   | Many-to-many [navigation](../relations/navigation) through a junction table             |
-| `@db.rel.onDelete` | Field      | `action` (string)  | Referential action on parent delete                                                     |
-| `@db.rel.onUpdate` | Field      | `action` (string)  | Referential action on parent update                                                     |
-| `@db.rel.filter`   | Field      | `condition` (expr) | Static filter condition on navigation property                                          |
+| Annotation           | Applies To | Arguments          | Description                                                                                                                                                                                  |
+| -------------------- | ---------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.rel.FK`         | Field      | `alias?` (string)  | [Foreign key](../relations/) (field must use chain ref). **Dual role** — see note below                                                                                                      |
+| `@db.rel.to`         | Field      | `alias?` (string)  | Forward [navigation](../relations/navigation) (N:1, FK on this table)                                                                                                                        |
+| `@db.rel.from`       | Field      | `alias?` (string)  | Reverse [navigation](../relations/navigation) (1:N, FK on other table)                                                                                                                       |
+| `@db.rel.via`        | Field      | `junction` (ref)   | Many-to-many [navigation](../relations/navigation) through a junction table                                                                                                                  |
+| `@db.rel.onDelete`   | Field      | `action` (string)  | Referential action on parent delete                                                                                                                                                          |
+| `@db.rel.onUpdate`   | Field      | `action` (string)  | Referential action on parent update                                                                                                                                                          |
+| `@db.rel.filter`     | Field      | `condition` (expr) | [Static filter](../relations/navigation#db-rel-filter) on a navigation property — applied in `$with` and in `$some` / `$none` (since 0.1.147; ignored before)                                |
+| `@db.rel.filterable` | Field      | —                  | Lets HTTP clients filter parents by this relation with `$some` / `$none` ([details](../relations/navigation#db-rel-filterable), since 0.1.147). Nav fields only; not part of the schema hash |
 
 ```atscript
 @db.table
@@ -279,6 +280,7 @@ interface Task {
   comments: Comment[]
 
   @db.rel.via TaskTag
+  @db.rel.filterable
   tags: Tag[]
 
   @db.rel.from

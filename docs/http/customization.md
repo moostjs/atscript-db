@@ -14,29 +14,30 @@ This page is about **intercepting existing CRUD**. For exposing **new domain ope
 
 All hooks are protected methods with sensible defaults (pass-through or no-op). Override only the ones you need.
 
-| Hook                                   | Available On   | Called When                      | Purpose                                                           |
-| -------------------------------------- | -------------- | -------------------------------- | ----------------------------------------------------------------- |
-| `prepareRequest(ctx)`                  | Both           | First, on every endpoint         | Resolve per-request policy asynchronously (since 0.1.143)         |
-| `transformFilter(filter)`              | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
-| `transformOne(filter)`                 | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
-| `transformProjection(projection)`      | Both           | Before every read                | Restrict visible fields                                           |
-| `hasField(path)`                       | Both           | Every field a request references | Hide fields per request — answered as `Unknown field`             |
-| `validateInsights(insights)`           | Both           | After query parsing              | Field-level access control                                        |
-| `computeEmbedding(search, fieldName?)` | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
-| `decorateRows(rows, ctx)`              | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
-| `actionRowScope(action, ctx)`          | Both           | Action gate, `$actions` reads    | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
-| `queryTargetScope(action)`             | Both           | Resolving a query target         | Read scope "all matching rows" resolve under (since 0.1.147)      |
-| `onWrite(action, data)`                | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
-| `onRemove(id)`                         | AsDbController | Before delete                    | Allow or prevent deletion                                         |
-| `guardWrite(ctx)`                      | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
-| `guardRemove(ctx)`                     | AsDbController | Inside the table's tx, id known  | Validated-stage delete checks (since 0.1.128)                     |
-| `checkWrite(ctx)`                      | AsDbController | Inside the table's tx, after it  | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
-| `withTransaction(fn)`                  | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
-| `meta()`                               | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
-| `applyMetaOverlay(meta)`               | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
-| `allowedActions(names)`                | Both           | `$actions`, `/meta/actions`      | Row-level actions the caller may run (0.1.145)                    |
-| `authorizeForm(name, actionNames)`     | Both           | On `GET /meta/form/:name`        | Refuse a form per request — answered as an unknown form (0.1.143) |
-| `init()`                               | Both           | On controller construction       | One-time setup                                                    |
+| Hook                                    | Available On   | Called When                      | Purpose                                                           |
+| --------------------------------------- | -------------- | -------------------------------- | ----------------------------------------------------------------- |
+| `prepareRequest(ctx)`                   | Both           | First, on every endpoint         | Resolve per-request policy asynchronously (since 0.1.143)         |
+| `transformFilter(filter)`               | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
+| `transformOne(filter)`                  | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
+| `transformRelationFilter(path, filter)` | Both           | Each client `$some` / `$none`    | Row overlay of the related table (since 0.1.147)                  |
+| `transformProjection(projection)`       | Both           | Before every read                | Restrict visible fields                                           |
+| `hasField(path)`                        | Both           | Every field a request references | Hide fields per request — answered as `Unknown field`             |
+| `validateInsights(insights)`            | Both           | After query parsing              | Field-level access control                                        |
+| `computeEmbedding(search, fieldName?)`  | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
+| `decorateRows(rows, ctx)`               | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
+| `actionRowScope(action, ctx)`           | Both           | Action gate, `$actions` reads    | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
+| `queryTargetScope(action)`              | Both           | Resolving a query target         | Read scope "all matching rows" resolve under (since 0.1.147)      |
+| `onWrite(action, data)`                 | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
+| `onRemove(id)`                          | AsDbController | Before delete                    | Allow or prevent deletion                                         |
+| `guardWrite(ctx)`                       | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
+| `guardRemove(ctx)`                      | AsDbController | Inside the table's tx, id known  | Validated-stage delete checks (since 0.1.128)                     |
+| `checkWrite(ctx)`                       | AsDbController | Inside the table's tx, after it  | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
+| `withTransaction(fn)`                   | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
+| `meta()`                                | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
+| `applyMetaOverlay(meta)`                | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
+| `allowedActions(names)`                 | Both           | `$actions`, `/meta/actions`      | Row-level actions the caller may run (0.1.145)                    |
+| `authorizeForm(name, actionNames)`      | Both           | On `GET /meta/form/:name`        | Refuse a form per request — answered as an unknown form (0.1.143) |
+| `init()`                                | Both           | On controller construction       | One-time setup                                                    |
 
 ::: info Deprecated hook
 `checkGates(parsed)` still runs after the field capability gate but is deprecated since 0.1.128: the gate derived from `/meta.fields` already rejects every unlisted or non-sortable / non-filterable path before it. Override the read hooks above, or the table-level `guard` options, instead.
@@ -71,6 +72,8 @@ It runs exactly once per request, before anything else looks at the request:
 | `/meta`, `/meta/form/:name`                            | `meta`, `metaForm`                      | First                                                                 | —                   |
 | Every `@DbAction` handler (row, rows and table level)  | `action` (`ctx.action` = the name)      | After the guards, before the action's ids are validated / rows loaded | —                   |
 | `GET /meta/actions/:id`, `/meta/actions?…`             | `availableActions` (since 0.1.145)      | First                                                                 | —                   |
+
+On `query`, `pages` and `geo`, `ctx.filter` (since 0.1.147) carries the parsed client filter when the URL has one — read it to resolve the relations its [relational predicates](./permissions#relational-predicates) touch, next to `ctx.controls.$with`. It holds only the client's part: server-side filters are not in it.
 
 Value-help controllers call it too (`query`, `pages`, `one`). [Actions](./actions#preparerequest-on-actions) run it before anything reads their ids, rows or row overlay, so a permission layer needs no separate action guard. Every built-in route enters through `parseRequest(endpoint, url?)`: with a URL it parses the query string, coerces boolean controls (`$actions=true`) and hands the parsed controls to `prepareRequest`; without one (writes, `meta`) it only runs the hook. Custom routes you add to a subclass should do the same — `const { parsed, controls } = await this.parseRequest("query", url)`, or `await this.parseRequest("insert")`.
 
@@ -147,6 +150,29 @@ Since 0.1.143 the overlay also scopes id resolution and deletes: `/one/:id`, `/o
 
 Since 0.1.143, `transformOne({})` also scopes the ids and rows of `@DbAction` handlers. An id outside it gets the same answer as a missing one. See [Actions § Row scoping](./actions#row-scoping).
 
+`transformFilter` and `transformOne` may return [relational predicates](/api/queries#relational-filters) on any relation (`{ ticket: { $some: { teamId: currentTeam() } } }`) — server-side filters need no `@db.rel.filterable` and are not passed to `transformRelationFilter`.
+
+### transformRelationFilter {#transformrelationfilter}
+
+Since 0.1.147. The row overlay of a related table inside a **client** [relational predicate](./permissions#relational-predicates). It receives the operand of each `$some` / `$none` the client sent and returns the operand to run. Default: identity.
+
+```typescript
+@TableController(IssueTable)
+export class IssuesController extends AsDbReadableController<typeof IssueTable> {
+  protected transformRelationFilter(path: string, filter: FilterExpr): FilterExpr {
+    // A client sees only its team's tickets — through $with and through predicates alike
+    return path === "ticket" ? { $and: [{ teamId: { $in: currentTeams() } }, filter] } : filter;
+  }
+}
+```
+
+- `path` is the dotted navigation chain from this controller's table: `"ticket"` for `ticket=$some(…)`, `"ticket.team"` for a predicate nested in its operand, `"tickets.issues"` for `$with=tickets(issues=$some(…))`.
+- It runs after the request gate and before [`transformFilter`](#transformfilter), on `/query` (incl. `$count` and `$groupBy`), `/pages`, `/geo` and `$with` sub-filters of `/one`. It may be async.
+- **Post-order:** a nested operand is rewritten first, then its parent receives the already-rewritten operand. Your output is not walked again — a predicate you add is not passed back to the hook.
+- Under an overlay, `$some` matches and `$none` excludes on **visible** related rows only: `ticket=$none(status=open)` keeps an issue whose only open ticket is invisible to the caller, just as `$with=ticket` would not show it.
+- Server-side filters ([`transformFilter`](#transformfilter), [`transformOne`](#transformone), [`actionRowScope`](./actions#action-row-scope)) never pass through it.
+- It costs nothing unless overridden.
+
 ### transformProjection {#transformprojection}
 
 Intercepts the projection before every read. If the client sends `$select`, `projection` contains it; otherwise it is `undefined`. Use this to enforce field exclusions:
@@ -198,7 +224,7 @@ protected hasField(path: string): boolean {
 }
 ```
 
-Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. Since 0.1.143 nested `$with` relation names are checked too, at their full path (`hasField("author.org")` for `$with=author($with=org)`), with the same `Unknown relation` answer. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way.
+Since 0.1.133 every field reference is checked against it before any capability rule: filter keys (inside `^` / `!( )` groups and `$exists` included), `$sort`, `$select`, `$groupBy`, `$having`, aggregate and calendar-bucket fields, `$with` relation names and sub-query fields, and the `$search` fallback fields. Since 0.1.143 nested `$with` relation names are checked too, at their full path (`hasField("author.org")` for `$with=author($with=org)`), with the same `Unknown relation` answer. From 0.1.128 to 0.1.132 a hidden **stored column** skipped it, so a filter or sort on it still ran — a value oracle. Upgrade if you hide fields this way. Since 0.1.147 [relational predicates](./permissions#relational-predicates) are checked the same way: the relation at its path (`ticket`) and every operand field at its full path (`ticket.status`).
 
 Since 0.1.134 it also governs **row identification**: a unique index over a hidden field is not an identification, so it cannot be used to probe whether a row with a given value exists. It behaves as if the index did not exist:
 

@@ -84,6 +84,12 @@ import { DbEndpoint } from "./db-endpoint";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilities";
 import { unknownRelationError } from "./http-errors";
+import {
+  RelationPredicateGate,
+  hiddenRelationInsight,
+  overlayRelationFilter,
+  overlayWithFilters,
+} from "./relation-predicates";
 import { badRequest } from "./validation-interceptor";
 
 /** Gate positions checked after the filter entries, in order; `refs[op]` are their paths. */
@@ -288,6 +294,8 @@ export class AsDbReadableController<
     return index;
   }
   private _capabilities?: FieldCapabilityIndex;
+  /** The client relational-predicate gate (since 0.1.147), built on first use — see {@link _relationGate}. */
+  private _relGate?: RelationPredicateGate;
 
   /** `/meta` is a projection of {@link capabilities}: a rebuilt index rebuilds the cached envelope. */
   protected override metaCacheKey(): unknown {
@@ -364,7 +372,10 @@ export class AsDbReadableController<
     const resolved = readable ?? (resolveBoundReadable(new.target) as AtscriptDbReadable<T>);
     super(resolved.type as T, resolved.tableName, app, resolved.isView ? "view" : "table");
     this.readable = resolved;
-    this._writeOnlySet = this._collectAnnotated("db.writeOnly");
+    // Own fields only: a related table's `@db.writeOnly` paths (`rel.secret`)
+    // are sealed per `$with` level — listing them here put navigation paths
+    // into the root `$select` seal, which the core rejects (since 0.1.147).
+    this._writeOnlySet = this._writeOnlyOf(resolved);
     this._derivedSource = this._derivedSourcesOf(resolved);
     this._invertibleFields = this._collectInvertibleFields();
     this._searchFallbackFields = this._collectSearchFallbackFields();
@@ -455,14 +466,6 @@ export class AsDbReadableController<
     return map;
   }
 
-  private _collectAnnotated(annotation: string): Set<string> {
-    const out = new Set<string>();
-    for (const [path, entry] of this.readable.flatMap) {
-      if (entry?.metadata?.has?.(annotation)) out.add(path);
-    }
-    return out;
-  }
-
   /**
    * THE field-visibility hook: every gated path consults it before any
    * capability check (since 0.1.133) — filter keys (inside `$and` / `$or` /
@@ -534,10 +537,23 @@ export class AsDbReadableController<
     // Each filter entry is judged on its own predicate class — the same
     // classification the core guard applies — so an existence-only
     // `{ metrics: { $exists: true } }` never exempts `{ metrics: … }` elsewhere.
-    for (const { path, predicate } of refs.filter) {
-      const verdict = capabilities.check(path, "filter", isVisible, predicate);
+    // A relational predicate (since 0.1.147) goes through the predicate gate,
+    // root filter and `$with` sub-filters sharing one request-wide count.
+    const relState = { nodes: 0 };
+    for (const ref of refs.filter) {
+      if (ref.predicate === "relation") {
+        const relError = this._relationGate().checkRef(ref, relState);
+        if (relError) return relError;
+        continue;
+      }
+      const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
       if (verdict) return badRequest(verdict.path, verdict.message);
     }
+    const withRelError = this._relationGate().checkWith(
+      (parsed.controls as { $with?: unknown } | undefined)?.$with,
+      relState,
+    );
+    if (withRelError) return withRelError;
     for (const op of PATH_OPS) {
       for (const path of refs[op]) {
         const verdict = capabilities.check(path, op, isVisible);
@@ -588,6 +604,10 @@ export class AsDbReadableController<
    * resolved against the target table through `isValidFieldPath`.
    */
   protected override validateInsights(insights: Map<string, unknown>): string | undefined {
+    // A relational predicate's navigation key first (since 0.1.147): a hidden
+    // relation answers like a nonexistent one, before its operand paths.
+    const hiddenRel = hiddenRelationInsight(insights, (path) => this.hasField(path));
+    if (hiddenRel !== undefined) return `Unknown field "${hiddenRel}"`;
     const nav = this.capabilities.navFields;
     for (const [key] of insights) {
       if (key === "*") continue;
@@ -1030,6 +1050,74 @@ export class AsDbReadableController<
   }
 
   /**
+   * Rewrites the sub-filter of a CLIENT relational predicate before it runs
+   * — the row overlay of the related table (since 0.1.147). `path` is the
+   * dotted navigation chain from this controller's table: `"ticket"` for
+   * `ticket=$some(…)`, `"ticket.team"` for a predicate nested in its
+   * operand, `"tickets.issues"` for `$with=tickets(issues=$some(…))`.
+   * Default identity.
+   *
+   * Applied to client predicates only (the URL filter and `$with`
+   * sub-filters, on `/query` incl. `$groupBy` and `$count`, `/pages`, `/geo`
+   * and `/one`), after the request gate and before {@link transformFilter};
+   * a nested predicate's operand is rewritten before the operand holding it,
+   * and the hook's output is not walked again. Server-side filters
+   * ({@link transformFilter}, {@link transformOne}, {@link actionRowScope})
+   * never pass through it. Return the operand conjoined with the related
+   * rows the caller may see — `$some` then only matches, and `$none` only
+   * excludes, on VISIBLE related rows, exactly as `$with` shows them:
+   *
+   * ```ts
+   * protected transformRelationFilter(path: string, filter: FilterExpr) {
+   *   return path === "ticket" ? { $and: [{ teamId: { $in: currentTeams() } }, filter] } : filter
+   * }
+   * ```
+   *
+   * @since 0.1.147
+   */
+  protected transformRelationFilter(
+    _path: string,
+    filter: FilterExpr,
+  ): FilterExpr | Promise<FilterExpr> {
+    return filter;
+  }
+
+  /** The client relational-predicate gate (since 0.1.147) — one per controller. */
+  private _relationGate(): RelationPredicateGate {
+    return (this._relGate ??= new RelationPredicateGate({
+      readable: this.readable,
+      hasField: (path) => this.hasField(path),
+      scoped: this._hasFieldOverridden,
+      derivedSourcesOf: (readable) => this._derivedSourcesOf(readable),
+      writeOnlyOf: (readable) => this._writeOnlyOf(readable),
+      capabilities: () => this.capabilities,
+    }));
+  }
+
+  /**
+   * The client filter with every relational predicate operand rewritten by
+   * {@link transformRelationFilter} — and `parsed.controls.$with` replaced by
+   * its rewritten tree (since 0.1.147). Costs nothing unless the hook is
+   * overridden.
+   */
+  private async _relationOverlay<F extends FilterExpr | undefined>(parsed: {
+    filter?: F;
+    controls?: object;
+  }): Promise<F> {
+    if (this.transformRelationFilter === AsDbReadableController.prototype.transformRelationFilter) {
+      return parsed.filter as F;
+    }
+    const hook = (path: string, filter: FilterExpr) => this.transformRelationFilter(path, filter);
+    const controls = parsed.controls as Record<string, unknown> | undefined;
+    if (controls?.$with !== undefined) {
+      controls.$with = await overlayWithFilters(controls.$with, "", hook);
+    }
+    return (
+      parsed.filter ? await overlayRelationFilter(parsed.filter, "", hook) : parsed.filter
+    ) as F;
+  }
+
+  /**
    * The subset of the row-level action `names` the caller may run (since
    * 0.1.145) — what `$actions` and `GET /meta/actions/:id` list from. The
    * default keeps the names present in the per-request `/meta` envelope
@@ -1099,6 +1187,18 @@ export class AsDbReadableController<
    *     controls: { $select: ["key"] },
    *   })
    *   return { ticketKey: { $in: tickets.map((t) => t.key) } }
+   * }
+   * ```
+   *
+   * The scope may use relational predicates (since 0.1.147) — a server-side
+   * filter, so no `@db.rel.filterable` opt-in and no
+   * {@link transformRelationFilter} apply. On an Issue controller:
+   *
+   * ```ts
+   * protected actionRowScope(action: string) {
+   *   return action === "resolve"
+   *     ? { ticket: { $some: { teamId: { $in: currentTeams() }, status: "open" } } }
+   *     : undefined
    * }
    * ```
    *
@@ -2301,10 +2401,11 @@ export class AsDbReadableController<
     if (gateError) {
       return gateError;
     }
+    const clientFilter = await this._relationOverlay(parsed);
 
     // ── Aggregate path ──────────────────────────────────────────────
     if (groupBy?.length) {
-      const filter = this.applySearchFallback(await this.transformFilter(parsed.filter), controls);
+      const filter = this.applySearchFallback(await this.transformFilter(clientFilter), controls);
       return this.readable.aggregate({
         filter,
         controls: this._aggregateControls(controls) as any,
@@ -2315,7 +2416,7 @@ export class AsDbReadableController<
     // ── Regular query path ──────────────────────────────────────────
 
     const [transformedFilter, transformedSelect] = await Promise.all([
-      this.transformFilter(parsed.filter),
+      this.transformFilter(clientFilter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
     const filter = this.applySearchFallback(transformedFilter, controls);
@@ -2395,12 +2496,13 @@ export class AsDbReadableController<
     if (gateError) {
       return gateError;
     }
+    const clientFilter = await this._relationOverlay(parsed);
     const page = Math.max(Number(controls.$page || 1), 1);
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
     const [transformedFilter, transformedSelect] = await Promise.all([
-      this.transformFilter(parsed.filter),
+      this.transformFilter(clientFilter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
     const filter = this.applySearchFallback(transformedFilter, controls);
@@ -2506,9 +2608,10 @@ export class AsDbReadableController<
     if (gateError) {
       return gateError;
     }
+    const clientFilter = await this._relationOverlay(parsed);
 
     const [filter, transformedSelect] = await Promise.all([
-      this.transformFilter(parsed.filter),
+      this.transformFilter(clientFilter),
       this.transformProjection(controls.$select as UniqueryControls["$select"]),
     ]);
     const sealed = this._sealControls(controls, transformedSelect);
@@ -2638,6 +2741,8 @@ export class AsDbReadableController<
     if (error) {
       return error;
     }
+    // `/one` takes no filter; its `$with` sub-filters may carry predicates.
+    await this._relationOverlay(parsed);
     const sealed = this._sealControls(
       controls,
       await this.transformProjection(controls.$select as UniqueryControls["$select"]),
@@ -3007,7 +3112,13 @@ export class AsDbReadableController<
   protected override buildMetaResponse(): TMetaResponse {
     const relations: TMetaResponse["relations"] = [];
     for (const [name, rel] of this.readable.relations) {
-      relations.push({ name, direction: rel.direction, isArray: rel.isArray });
+      relations.push({
+        name,
+        direction: rel.direction,
+        isArray: rel.isArray,
+        // Clients may filter by related rows (`nav=$some(…)`) — since 0.1.147.
+        ...(rel.filterable === true && { filterable: true as const }),
+      });
     }
 
     // Physical column names carrying a @db.index.geo index → `geo: true` flag.

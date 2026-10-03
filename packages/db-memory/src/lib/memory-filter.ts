@@ -1,5 +1,12 @@
-import type { FilterExpr, FilterVisitor } from "@atscript/db";
-import { walkFilter, DbError, getPath } from "@atscript/db";
+import type { BaseDbAdapter, FilterExpr, FilterVisitor, RelationOp } from "@atscript/db";
+import {
+  walkFilter,
+  DbError,
+  getPath,
+  containsRelationPredicate,
+  forEachResolvedRelation,
+  ResolvedRelationFilter,
+} from "@atscript/db";
 
 /**
  * In-memory row predicate: given a document, decide whether it matches a
@@ -253,7 +260,187 @@ const memoryVisitor: FilterVisitor<Predicate> = {
       }
     }
   },
+
+  // A relational predicate reaching the unprepared (static) visitor — the
+  // caller skipped `prepareRelationSets`; fail loud instead of mismatching.
+  relation(field, op, operand): Predicate {
+    return relationPredicate(undefined, field, op, operand);
+  },
 };
+
+// ── Relational predicates ($some / $none, since 0.1.147) ───────────────────
+
+/**
+ * Per-predicate correlation sets: for every {@link ResolvedRelationFilter} of
+ * a filter, the SOURCE correlation tuples (see {@link correlationKey}) that
+ * have at least one related row matching the predicate's inner filter.
+ * Built asynchronously by {@link prepareRelationSets}; consumed synchronously
+ * by {@link buildMemoryPredicate}.
+ */
+export type RelationSets = ReadonlyMap<ResolvedRelationFilter, ReadonlySet<string>>;
+
+/** Loads the rows of the table an adapter serves (one snapshot per call site's choosing). */
+export type MemoryRowLoader = (adapter: BaseDbAdapter) => Promise<Record<string, unknown>[]>;
+
+/**
+ * Identity of the key tuple `fields` of `row` (dot-paths read nested), or
+ * `undefined` when a component is `null` / missing — a NULL key component
+ * never correlates (SQL `=` semantics: `$some` false, `$none` true).
+ * `JSON.stringify` keeps types apart (`1` ≠ `"1"`), matching the strict
+ * equality the memory filter uses everywhere; `Date`s compare by instant.
+ */
+function correlationKey(
+  row: Record<string, unknown>,
+  fields: readonly string[],
+): string | undefined {
+  const values: unknown[] = [];
+  for (const field of fields) {
+    const value = getPath(row, field);
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+    values.push(value);
+  }
+  return JSON.stringify(values, keyReplacer);
+}
+
+/** `JSON.stringify` replacer for key values: a `bigint` gets a marker (it has no JSON form). */
+function keyReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? `${value}n` : value;
+}
+
+/** Source-side correlation columns of a resolved predicate (physical names). */
+function sourceColumns(node: ResolvedRelationFilter): string[] {
+  return node.junction
+    ? node.junction.toSource.map((p) => p.source)
+    : node.pairs.map((p) => p.source);
+}
+
+/**
+ * The visitor's `relation` callback: a row satisfies `$some` when its source
+ * correlation tuple is in the predicate's prepared set, `$none` otherwise.
+ */
+function relationPredicate(
+  sets: RelationSets | undefined,
+  field: string,
+  op: RelationOp,
+  operand: FilterExpr,
+): Predicate {
+  const node = operand as unknown;
+  const set = node instanceof ResolvedRelationFilter ? sets?.get(node) : undefined;
+  if (!set) {
+    throw new DbError("REL_FILTER_NOT_SUPPORTED", [
+      {
+        path: field,
+        message: `Relational predicate "${op}" on "${field}" was not prepared — call prepareRelationSets() before buildMemoryPredicate()`,
+      },
+    ]);
+  }
+  const columns = sourceColumns(node as ResolvedRelationFilter);
+  const some = op === "$some";
+  return (row) => {
+    const key = correlationKey(row, columns);
+    return (key !== undefined && set.has(key)) === some;
+  };
+}
+
+/**
+ * Resolves every relational predicate of a TRANSLATED filter (nested ones
+ * included) into a correlation set, loading each related table through
+ * `load`:
+ *
+ * - `to` / `from`: the related rows matching the inner filter contribute their
+ *   `pairs[].target` tuples — equal to the source tuple (`pairs[].source`) of
+ *   every row that has such a related row.
+ * - `via`: the matching related rows' `junction.toTarget[].target` tuples
+ *   select junction rows (also filtered by the junction part of
+ *   `@db.rel.filter`), which contribute their `junction.toSource[].junction`
+ *   tuples.
+ *
+ * Nested predicates are prepared against the related table's rows first
+ * (their source is this predicate's target). Returns `undefined` when the
+ * filter holds no predicate — callers then stay on the plain synchronous path.
+ *
+ * @since 0.1.147
+ */
+export async function prepareRelationSets(
+  filter: FilterExpr | undefined,
+  load: MemoryRowLoader,
+): Promise<RelationSets | undefined> {
+  if (!containsRelationPredicate(filter)) {
+    return undefined;
+  }
+  const sets = new Map<ResolvedRelationFilter, Set<string>>();
+  await prepareLevel(filter, load, sets);
+  return sets;
+}
+
+/** Prepares the predicates at one level of `filter` (and, recursively, their operands). */
+async function prepareLevel(
+  filter: unknown,
+  load: MemoryRowLoader,
+  sets: Map<ResolvedRelationFilter, Set<string>>,
+): Promise<void> {
+  const nodes: ResolvedRelationFilter[] = [];
+  forEachResolvedRelation(filter, (node) => nodes.push(node), false);
+  for (const node of nodes) {
+    if (!sets.has(node)) {
+      sets.set(node, await correlationSet(node, load, sets));
+    }
+  }
+}
+
+/** Matching rows of `adapter`'s table for `filter` (its own predicates prepared first). */
+async function matchingRows(
+  adapter: BaseDbAdapter,
+  filter: FilterExpr | undefined,
+  load: MemoryRowLoader,
+  sets: Map<ResolvedRelationFilter, Set<string>>,
+): Promise<Record<string, unknown>[]> {
+  const rows = await load(adapter);
+  if (!filter || Object.keys(filter).length === 0) {
+    return rows;
+  }
+  await prepareLevel(filter, load, sets);
+  return rows.filter(buildMemoryPredicate(filter, sets));
+}
+
+/** The source correlation tuples that have a related row matching `node`. */
+async function correlationSet(
+  node: ResolvedRelationFilter,
+  load: MemoryRowLoader,
+  sets: Map<ResolvedRelationFilter, Set<string>>,
+): Promise<Set<string>> {
+  const targets = await matchingRows(node.target.adapter, node.filter, load, sets);
+  const result = new Set<string>();
+  if (!node.junction) {
+    const columns = node.pairs.map((p) => p.target);
+    for (const row of targets) {
+      const key = correlationKey(row, columns);
+      if (key !== undefined) result.add(key);
+    }
+    return result;
+  }
+  const { junction } = node;
+  const targetKeys = new Set<string>();
+  const targetColumns = junction.toTarget.map((p) => p.target);
+  for (const row of targets) {
+    const key = correlationKey(row, targetColumns);
+    if (key !== undefined) targetKeys.add(key);
+  }
+  if (targetKeys.size === 0) {
+    return result;
+  }
+  const toTarget = junction.toTarget.map((p) => p.junction);
+  const toSource = junction.toSource.map((p) => p.junction);
+  for (const row of await matchingRows(junction.adapter, junction.filter, load, sets)) {
+    const targetKey = correlationKey(row, toTarget);
+    if (targetKey === undefined || !targetKeys.has(targetKey)) continue;
+    const sourceKey = correlationKey(row, toSource);
+    if (sourceKey !== undefined) result.add(sourceKey);
+  }
+  return result;
+}
 
 /**
  * Compiles a {@link FilterExpr} into an in-memory row predicate
@@ -262,8 +449,19 @@ const memoryVisitor: FilterVisitor<Predicate> = {
  *
  * An empty/absent filter (for which `walkFilter` returns `undefined`) compiles
  * to a match-everything predicate.
+ *
+ * A filter holding relational predicates (`ResolvedRelationFilter` operands,
+ * since 0.1.147) needs `relationSets` — prepared internally by
+ * `MemoryAdapter` from the related tables; a standalone call on such a
+ * filter throws `REL_FILTER_NOT_SUPPORTED`.
  */
-export function buildMemoryPredicate(filter: FilterExpr): Predicate {
-  const predicate = walkFilter(filter, memoryVisitor);
+export function buildMemoryPredicate(filter: FilterExpr, relationSets?: RelationSets): Predicate {
+  const visitor: FilterVisitor<Predicate> = relationSets
+    ? {
+        ...memoryVisitor,
+        relation: (field, op, operand) => relationPredicate(relationSets, field, op, operand),
+      }
+    : memoryVisitor;
+  const predicate = walkFilter(filter, visitor);
   return predicate ?? (() => true);
 }

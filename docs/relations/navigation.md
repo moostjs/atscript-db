@@ -41,8 +41,13 @@ assigneeId?: User.id
 assignee?: User
 ```
 
-::: tip Navigation paths are loaded, not queried
-`assignee.name` is not a column of `tasks`: filtering, sorting or selecting it at the root of a query is rejected (HTTP 400 / `INVALID_QUERY` since 0.1.128). Use `$with=assignee(...)` — `$with=assignee($select=name)` to project, `$with=assignee(name=x)` to filter the related rows. In `/meta`, `@db.rel.FK` also follows reference chains to their terminal field (see [annotations — dual role](../adapters/annotations#db-rel-fk-dual-role)).
+::: tip Navigation paths are not columns
+`assignee.name` is not a column of `tasks`: filtering, sorting or selecting it at the root of a query is rejected (HTTP 400 / `INVALID_QUERY` since 0.1.128). Pick the tool by what you want to narrow:
+
+- **the tasks** by their assignee — a [relational predicate](/api/queries#relational-filters) on the relation: `{ assignee: { $some: { name: "x" } } }` (since 0.1.147; over HTTP `assignee=$some(name=x)`, which needs [`@db.rel.filterable`](#db-rel-filterable));
+- **the loaded assignee** — `$with`: `$with=assignee($select=name)` to project, `$with=assignee(name=x)` to filter the related rows.
+
+In `/meta`, `@db.rel.FK` also follows reference chains to their terminal field (see [annotations — dual role](../adapters/annotations#db-rel-fk-dual-role)).
 :::
 
 ### Alias Matching for TO
@@ -162,7 +167,7 @@ export interface UserProfile {
 
 When no matching record exists, loading a singular `@db.rel.from` returns `null` (instead of an empty array as you'd get with an array type).
 
-## `@db.rel.via` — Many-to-Many
+## `@db.rel.via` — Many-to-Many {#db-rel-via-many-to-many}
 
 A `@db.rel.via` property traverses a **junction table** to reach records on the other side of a many-to-many relationship. The junction type is required as an argument, and the field type is always an array.
 
@@ -220,9 +225,9 @@ Atscript resolves the path automatically: `Task.tags` follows `TaskTag.taskId` �
 The junction table must have at least two `@db.rel.FK` fields — one pointing to each side of the relationship. It can also contain additional data fields (e.g., `sortOrder`, `createdAt`) that describe the relationship itself.
 :::
 
-## `@db.rel.filter` — Filtering Navigation Properties
+## `@db.rel.filter` — Filtering Navigation Properties {#db-rel-filter}
 
-The `@db.rel.filter` annotation restricts which related records are loaded. It accepts a backtick-delimited query expression that is applied as a `WHERE` condition when loading the relation.
+The `@db.rel.filter` annotation restricts which records count as related. It accepts a backtick-delimited query expression that is applied as a `WHERE` condition whenever the relation is loaded with `$with` and inside [relational predicates](/api/queries#relational-filters) on it (`$some` / `$none`).
 
 ```atscript
 @db.table 'posts'
@@ -242,11 +247,51 @@ export interface Post {
 
 Loading `comments` returns all comments for a post. Loading `visibleComments` only returns comments where `visible` is `true`. The filter is applied at the database level, so filtered-out records are never fetched.
 
-`@db.rel.filter` works with all navigation types — `@db.rel.to`, `@db.rel.from`, and `@db.rel.via`.
+`@db.rel.filter` works with all navigation types — `@db.rel.to`, `@db.rel.from`, and `@db.rel.via`. A query-time `$with` filter is ANDed with it, and `{ visibleComments: { $some: {} } }` means "has a visible comment".
+
+::: warning Applied at run time since 0.1.147
+Before 0.1.147 the annotation was validated but **ignored** when loading: `$with=visibleComments` returned every comment. It is now applied on every adapter, so such a relation returns fewer rows after the upgrade — the rows its declaration always described.
+:::
+
+On a `@db.rel.via` relation the expression may read the related type and the junction. Its top-level `and` conditions are split by the table they read: unqualified fields and the related type's fields filter the related rows, the junction's fields filter the links:
+
+```atscript
+@db.rel.via TicketLabel
+@db.rel.filter `TicketLabel.pinned = true and Label.name != 'hidden'`
+pinnedLabels: Label[]
+```
+
+Two shapes are rejected at query time with `INVALID_QUERY`: a single condition that reads both the junction and the related type (an `or` across them — split it into `and` conditions), and a comparison between two fields.
 
 ::: tip Query expression syntax
-The backtick-delimited syntax (`\`Comment.visible = true\``) follows the same expression format used in view filters and join conditions. See [Queries & Filters](/api/queries) for the full syntax reference.
+The backtick-delimited syntax (`\`Comment.visible = true\``) follows the same expression format used in view filters and join conditions. See [Queries & Filters](/api/queries#query-expressions) for the full syntax reference.
 :::
+
+## `@db.rel.filterable` — Client Filters on a Relation {#db-rel-filterable}
+
+Since 0.1.147. Lets HTTP clients filter the parent rows by this relation with a [relational predicate](/api/queries#relational-filters) — `ticket=$some(status=open)` on `/query`, `/pages` and `/geo`. A flag, valid on `@db.rel.to` / `.from` / `.via` fields only:
+
+```atscript
+@db.table 'issues'
+export interface Issue {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    ticketKey?: Ticket.key
+
+    @db.rel.to
+    @db.rel.filterable
+    ticket?: Ticket
+}
+```
+
+- **HTTP opt-in only.** Without it, a client predicate on the relation answers `400 Filtering by related "ticket" rows is not permitted — add @db.rel.filterable to enable.` Loading it with `$with` needs no flag.
+- **Server-side code never needs it**: `transformFilter`, `actionRowScope` and direct table calls use predicates on any relation.
+- The related table's own rules still apply to the operand (visibility, encrypted and write-only fields, manual filter mode) — see [Permissions § Relational predicates](/http/permissions#relational-predicates).
+- `/meta.relations[]` marks opted-in relations with `filterable: true`. The flag is not part of the schema, so adding or removing it never triggers a sync.
+
+Opt in only where clients need it: a predicate filters the parent set and runs a correlated lookup per candidate row (index advice in [Queries § Relational filters](/api/queries#relational-filters)).
 
 ## Complete Example
 

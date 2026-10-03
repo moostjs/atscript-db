@@ -11,7 +11,7 @@ import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
-import { buildMongoFilter } from "./lib/mongo-filter";
+import { buildMongoFilter, mongoFilterStages } from "./lib/mongo-filter";
 import { orNull } from "./lib/mongo-view-expr";
 
 /** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
@@ -133,9 +133,9 @@ function buildPrefix(
 } {
   const controls = query.controls || {};
   const groupBy = (controls.$groupBy ?? []) as string[];
-  const pipeline: Document[] = searchStage
-    ? [searchStage, { $match: buildMongoFilter(query.filter) }]
-    : [{ $match: buildMongoFilter(query.filter) }];
+  // Relational predicates (since 0.1.147) add their `$lookup`s here, before `$group`.
+  const filterStages = mongoFilterStages(query.filter);
+  const pipeline: Document[] = searchStage ? [searchStage, ...filterStages] : filterStages;
 
   const groupId: Document = {};
   const groupKeys: Array<[string, string]> = [];

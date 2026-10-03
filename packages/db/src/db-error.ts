@@ -30,6 +30,14 @@ export type DbErrorCode =
   // ── Aggregate functions ($select `{ $fn, $field }`) ──
   /** A known aggregate function the adapter's `aggregateFns()` lacks (moost-db: 400). @since 0.1.136 */
   | "AGG_FN_NOT_SUPPORTED"
+  // ── Relational filter predicates ($some / $none) ──
+  /**
+   * The adapter (or the table's wiring) cannot run a relational predicate:
+   * `supportsRelationFilters()` is false for the read/write mode, the related
+   * table lives on a different adapter, or the table was built without a
+   * `DbSpace` (moost-db: 400). @since 0.1.147
+   */
+  | "REL_FILTER_NOT_SUPPORTED"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
   | "TX_WAIT_TIMEOUT";
 
