@@ -289,7 +289,7 @@ export function hasAnyViewAnnotation(node: SemanticNode): boolean {
  * order. `[]` when the argument did not parse.
  * @since 0.1.147
  */
-export function backtickFieldRefs(token: Token): SemanticQueryFieldRefNode[] {
+function backtickFieldRefs(token: Token): SemanticQueryFieldRefNode[] {
   if (token.queryNode) {
     const refs: SemanticQueryFieldRefNode[] = [];
     forEachFieldRef(token.queryNode.expression, (ref) => refs.push(ref));

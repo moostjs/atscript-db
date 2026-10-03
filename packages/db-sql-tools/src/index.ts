@@ -1,11 +1,6 @@
 export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
 export { EMPTY_AND, EMPTY_OR, finalizeParams, quotedJsonPathSegments } from "./dialect";
-export {
-  createFilterVisitor,
-  buildWhere,
-  type TFilterVisitorOptions,
-  type TRelationAliasSeq,
-} from "./filter-builder";
+export { createFilterVisitor, buildWhere, type TFilterVisitorOptions } from "./filter-builder";
 export type { TGeoWindow } from "./geo";
 export {
   GEO_DISTANCE_ALIAS,

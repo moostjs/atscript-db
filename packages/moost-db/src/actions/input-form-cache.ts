@@ -12,12 +12,12 @@ import { ValidatorError } from "@atscript/typescript/utils";
  *   parameter; carries the form payload the user filled out.
  * - `query` — a query target instead of `ids` (since 0.1.147): "every row
  *   matching this query", for `'rows'` actions declaring `queryTarget` — see
- *   {@link DbActionQueryTarget}. Never together with `ids`.
+ *   {@link TDbActionQueryTarget}. Never together with `ids`.
  */
 export interface DbActionEnvelope {
   ids?: unknown;
   input?: unknown;
-  /** @since 0.1.147 — validated by the action's gate (`DbActionQueryTarget`). */
+  /** @since 0.1.147 — validated by the action's gate (`TDbActionQueryTarget`). */
   query?: unknown;
 }
 

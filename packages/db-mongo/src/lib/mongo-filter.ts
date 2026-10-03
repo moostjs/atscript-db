@@ -7,7 +7,7 @@ import type {
 } from "@atscript/db";
 import {
   andFilters,
-  containsRelationPredicate,
+  containsRelationFilter,
   DbError,
   isResolvedRelationFilter,
   walkFilter,
@@ -286,7 +286,7 @@ function splitConjuncts(filter: FilterExpr, pre: FilterExpr[], post: FilterExpr[
       continue;
     }
     const part = { [key]: value } as FilterExpr;
-    (containsRelationPredicate(part) ? post : pre).push(part);
+    (containsRelationFilter(part) ? post : pre).push(part);
   }
 }
 
@@ -470,7 +470,7 @@ export function mongoFilterStages(
   filter: FilterExpr | undefined,
   options: TMongoFilterOptions = {},
 ): Document[] {
-  if (!containsRelationPredicate(filter)) {
+  if (!containsRelationFilter(filter)) {
     return [{ $match: buildMongoFilter(filter as FilterExpr) }];
   }
   return planStages(buildMongoQuery(filter, options));

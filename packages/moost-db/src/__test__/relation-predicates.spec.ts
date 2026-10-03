@@ -6,6 +6,8 @@ import {
   DbError,
   DbSpace,
   isResolvedRelationFilter,
+  REL_FILTER_MAX_DEPTH,
+  REL_FILTER_MAX_NODES,
   type DbQuery,
   type FilterExpr,
   type ResolvedRelationFilter,
@@ -20,6 +22,7 @@ import { TableController } from "../decorators";
 import { DbAction } from "../actions/db-action.decorator";
 import { DbActionID } from "../actions/db-action-id.decorator";
 import { DbActionIDs } from "../actions/db-action-ids.decorator";
+import { REL_FILTER_CLIENT_MAX_DEPTH, REL_FILTER_CLIENT_MAX_NODES } from "../index";
 // The core test adapter has no package entry — the one relative import that stays.
 import { MockAdapter } from "../../../db/src/__test__/test-utils";
 import {
@@ -350,7 +353,12 @@ describe("the gate", () => {
     });
   });
 
-  it("nesting is capped at REL_FILTER_MAX_DEPTH (3) per chain", async () => {
+  it("the client caps leave the core caps headroom for server overlays", () => {
+    expect(REL_FILTER_MAX_DEPTH).toBeGreaterThan(REL_FILTER_CLIENT_MAX_DEPTH);
+    expect(REL_FILTER_MAX_NODES).toBeGreaterThan(REL_FILTER_CLIENT_MAX_NODES);
+  });
+
+  it("nesting is capped at REL_FILTER_CLIENT_MAX_DEPTH (3) per chain", async () => {
     const { controller } = bind();
     expect(
       ids(await controller.query("?ticket=$some(team=$some(tickets=$some(status=open)))")),
@@ -365,7 +373,7 @@ describe("the gate", () => {
     });
   });
 
-  it("at most REL_FILTER_MAX_NODES (8) predicates per request, $with sub-filters included", async () => {
+  it("at most REL_FILTER_CLIENT_MAX_NODES (8) predicates per request, $with sub-filters included", async () => {
     const { controller } = bind(AsDbReadableController, "teams");
     expect(await controller.query(`?${manyPredicates(8)}`)).toEqual([]);
     expect(await rejected(controller.query(`?${manyPredicates(9)}`))).toEqual({

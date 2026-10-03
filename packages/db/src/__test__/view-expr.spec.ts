@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 
-import { DbSpace, walkViewExpr } from "../index";
-import { computedOperands } from "../query/query-tree";
+import { DbSpace } from "../index";
+import { computedOperands, walkViewExpr } from "../query/query-tree";
 import { computeTableHash, computeViewSnapshot } from "../schema/schema-hash";
 import { MockAdapter, prepareFixtures } from "./test-utils";
 

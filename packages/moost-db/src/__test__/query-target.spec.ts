@@ -554,3 +554,33 @@ describe("query targets — phase-2 loads carry their own $limit", () => {
     spy.mockRestore();
   });
 });
+
+describe("query targets — the first batch follows the snapshot without a re-check", () => {
+  /** `findMany` calls after phase 1 (the phase-1 read is the one sorting by identity). */
+  const loadsOf = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls
+      .map((c) => c[0] as { filter?: Record<string, unknown>; controls?: { $sort?: unknown } })
+      .filter((q) => q.controls?.$sort === undefined);
+
+  it("materialized, the snapshot covers the fields: no read after phase 1", async () => {
+    const { query, issues, handled } = await boot();
+    const spy = vi.spyOn(issues, "findMany");
+    const res = await query("close", "status=open");
+    expect(res.status).toBe(201);
+    expect(handled[0]?.ids).toEqual([{ id: 1 }, { id: 2 }, { id: 4 }, { id: 5 }]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("streamed: batch 1 is read by identity alone, later batches re-check the query", async () => {
+    const { query, issues } = await boot();
+    const spy = vi.spyOn(issues, "findMany");
+    await query("stream", "status=open");
+    const loads = loadsOf(spy);
+    expect(loads).toHaveLength(2);
+    expect(loads[0]?.filter).toEqual({ $or: [{ id: 1 }, { id: 2 }] });
+    expect(loads[1]?.filter).toHaveProperty("$and");
+    expect(JSON.stringify(loads[1]?.filter)).toContain('"status":"open"');
+    spy.mockRestore();
+  });
+});

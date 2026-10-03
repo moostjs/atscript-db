@@ -9,12 +9,10 @@ import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { DbError } from "../db-error";
 import dbPlugin from "../plugin";
 import {
-  REL_FILTER_CLIENT_MAX_DEPTH,
-  REL_FILTER_CLIENT_MAX_NODES,
   REL_FILTER_MAX_DEPTH,
   REL_FILTER_MAX_NODES,
   ResolvedRelationFilter,
-  containsRelationPredicate,
+  containsRelationFilter,
   forEachResolvedRelation,
   isResolvedRelationFilter,
   relationStaticFilter,
@@ -208,8 +206,21 @@ describe("resolution (ResolvedRelationFilter)", () => {
     await issues.deleteMany({ ticket: { $some: { status: "closed" } } });
     const f = lastFilter(issues, "deleteMany");
     expect(f.ticket.$some).toBeInstanceOf(ResolvedRelationFilter);
-    expect(containsRelationPredicate(f)).toBe(true);
-    expect(containsRelationPredicate({ a: 1, $or: [{ b: { $ne: 2 } }] })).toBe(false);
+    expect(containsRelationFilter(f)).toBe(true);
+    expect(containsRelationFilter({ a: 1, $or: [{ b: { $ne: 2 } }] })).toBe(false);
+  });
+
+  it("the pre-scan is cached for the translated filter, never for the caller's own", async () => {
+    const issues = space().getTable(fx.RfIssue);
+    const filter: Record<string, unknown> = { title: "a" };
+    await issues.findMany({ filter: filter as any });
+    expect(containsRelationFilter(lastFilter(issues))).toBe(false);
+    // the caller mutates its filter between two queries: re-scanned, resolved
+    filter.ticket = { $some: { status: "open" } };
+    await issues.findMany({ filter: filter as any });
+    const translated = lastFilter(issues);
+    expect(translated.ticket.$some).toBeInstanceOf(ResolvedRelationFilter);
+    expect(containsRelationFilter(translated)).toBe(true);
   });
 
   it("predicate-free filters reach the adapter unchanged", async () => {
@@ -331,7 +342,6 @@ describe("guards", () => {
   });
 
   it(`caps nesting depth at ${REL_FILTER_MAX_DEPTH} (headroom above the client cap of 3)`, async () => {
-    expect(REL_FILTER_MAX_DEPTH).toBeGreaterThan(REL_FILTER_CLIENT_MAX_DEPTH);
     const issues = space().getTable(fx.RfIssue);
     const four = {
       ticket: { $some: { parent: { $some: { parent: { $some: { team: { $some: {} } } } } } } },
@@ -353,7 +363,6 @@ describe("guards", () => {
   });
 
   it(`caps the predicate count at ${REL_FILTER_MAX_NODES} (headroom above the client cap of 8)`, async () => {
-    expect(REL_FILTER_MAX_NODES).toBeGreaterThan(REL_FILTER_CLIENT_MAX_NODES);
     const issues = space().getTable(fx.RfIssue);
     await expect(issues.findMany({ filter: manyPredicates(16) as any })).resolves.toBeDefined();
     const err = await rejection(issues.findMany({ filter: manyPredicates(17) as any }));

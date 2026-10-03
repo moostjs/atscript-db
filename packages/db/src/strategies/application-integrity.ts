@@ -13,7 +13,7 @@ import type {
   TFkLookupTarget,
   TWriteTableResolver,
 } from "../types";
-import { containsRelationPredicate } from "../query/relation-filter";
+import { containsRelationFilter } from "../query/relation-filter";
 import { IntegrityStrategy, type TCascadePin } from "./integrity";
 
 // ── Cascade context ─────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     // Only a filter holding a relational predicate can stop matching once
     // the cascade changes the children, so only it is pinned; any other
     // filter is evaluated again by the caller's own delete.
-    const pkPhysical = containsRelationPredicate(filter)
+    const pkPhysical = containsRelationFilter(filter)
       ? meta.primaryKeys.map((pk) => meta.physicalPath(pk))
       : undefined;
     if (pkPhysical?.length === 0) {

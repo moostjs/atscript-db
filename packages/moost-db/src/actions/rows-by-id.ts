@@ -91,18 +91,13 @@ export async function findRowsByIds(
 ): Promise<Array<Record<string, unknown> | undefined>> {
   if (ids.length === 0) return [];
   const fields = new Set(select);
-  const shapes = new Map<string, readonly string[]>();
-  const idKeys: Array<string | undefined> = [];
   const dedupedIds: Record<string, unknown>[] = [];
   const seenKeys = new Set<string>();
 
   for (const id of ids) {
     const sortedFields = Object.keys(id).toSorted();
     for (const f of sortedFields) fields.add(f);
-    const sig = sortedFields.join("\x1f");
-    if (!shapes.has(sig)) shapes.set(sig, sortedFields);
     const key = idKey(id, sortedFields);
-    idKeys.push(key);
     if (key !== undefined && !seenKeys.has(key)) {
       seenKeys.add(key);
       dedupedIds.push(id);
@@ -113,7 +108,26 @@ export async function findRowsByIds(
     filter: scope ? { $and: [{ $or: dedupedIds }, scope] } : { $or: dedupedIds },
     controls: { $select: [...fields] },
   });
+  return alignRowsToIds(rows, ids);
+}
 
+/**
+ * `rows` aligned with `ids` — per id, the first row with its key values
+ * ({@link idKey}), `undefined` when none has them. Ids of different
+ * identification shapes may be mixed.
+ */
+export function alignRowsToIds(
+  rows: readonly Record<string, unknown>[],
+  ids: readonly Record<string, unknown>[],
+): Array<Record<string, unknown> | undefined> {
+  const shapes = new Map<string, readonly string[]>();
+  const idKeys: Array<string | undefined> = [];
+  for (const id of ids) {
+    const sortedFields = Object.keys(id).toSorted();
+    const sig = sortedFields.join("\x1f");
+    if (!shapes.has(sig)) shapes.set(sig, sortedFields);
+    idKeys.push(idKey(id, sortedFields));
+  }
   const rowByKey = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
     for (const sortedFields of shapes.values()) {

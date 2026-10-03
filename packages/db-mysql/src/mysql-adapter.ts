@@ -6,7 +6,7 @@ import {
   BaseDbAdapter,
   DbError,
   bucketTimeZoneUnavailable,
-  containsRelationPredicate,
+  containsRelationFilter,
   forEachResolvedRelation,
   vectorIndexNotFoundMessage,
   fkColumns,
@@ -698,7 +698,7 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   /** `true` when a relational predicate of `filter` (nested ones included) reads this table. */
   private _filterReadsOwnTable(filter: FilterExpr): boolean {
-    if (!containsRelationPredicate(filter)) {
+    if (!containsRelationFilter(filter)) {
       return false;
     }
     const own = this.resolveTableName();

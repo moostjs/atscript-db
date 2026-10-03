@@ -13,7 +13,11 @@ import type { BaseDbAdapter } from "../base-adapter";
 import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
-import { containsRelationPredicate, resolveRelationFilterTree } from "../query/relation-filter";
+import {
+  containsRelationFilter,
+  noteRelationFilter,
+  resolveRelationFilterTree,
+} from "../query/relation-filter";
 import {
   deletePath,
   findAncestorInSet,
@@ -321,26 +325,25 @@ export abstract class FieldMappingStrategy {
 
   /**
    * Translates a logical filter for the adapter: relational predicates are
-   * resolved first ({@link resolveRelationFilters}), then every key and value
+   * resolved first (`resolveRelationFilterTree`), then every key and value
    * goes through {@link translateResolvedFilter}. `depth` is the predicate
    * level of `filter` itself (0 for a query's own filter; the related tables
    * translate predicate operands at deeper levels).
    */
   translateFilter(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
-    return this.translateResolvedFilter(this.resolveRelationFilters(filter, meta, depth), meta);
+    const has = containsRelationFilter(filter);
+    const resolved = has ? resolveRelationFilterTree(filter, meta, depth) : filter;
+    return this.noteTranslated(filter, this.translateResolvedFilter(resolved, meta), has);
   }
 
   /**
-   * Replaces each relational predicate operand (`{ nav: { $some: inner } }`)
-   * with its `ResolvedRelationFilter` — the related table translates `inner`
-   * with its own mapper (since 0.1.147). Predicate-free filters are returned
-   * as-is; already-resolved operands pass through.
+   * `out` — the translation of the caller's `filter` — with its pre-scan
+   * result (`has`) cached for the adapter's repeated `containsRelationFilter`
+   * checks; only when the core built it (never the caller's own object).
    */
-  protected resolveRelationFilters(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
-    if (!filter || typeof filter !== "object" || !containsRelationPredicate(filter)) {
-      return filter;
-    }
-    return resolveRelationFilterTree(filter, meta, depth);
+  protected noteTranslated(filter: unknown, out: FilterExpr, has: boolean): FilterExpr {
+    if (out !== filter) noteRelationFilter(out, has);
+    return out;
   }
 
   /**

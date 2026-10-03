@@ -5,7 +5,7 @@ import {
   BaseDbAdapter,
   DbError,
   DbSpace,
-  containsRelationPredicate,
+  containsRelationFilter,
   isAtscriptDbView,
 } from "@atscript/db";
 import type {
@@ -472,7 +472,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   /**
    * The prepared correlation sets for `filter`'s relational predicates.
-   * Callers only await it when `containsRelationPredicate(filter)` — a
+   * Callers only await it when `containsRelationFilter(filter)` — a
    * predicate-free filter keeps its fully synchronous path. Write methods call
    * it BEFORE reading the table state, so the related tables (a self relation
    * included) are snapshotted before any row changes, like SQL.
@@ -749,7 +749,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
     const matched = this._selectForWrite(state, filter, expectedVersion, false, sets);
     if (!state || matched.length === 0) {
@@ -775,7 +775,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     expectedVersion?: number,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
     const matched = this._selectForWrite(state, filter, expectedVersion, false, sets);
     if (!state || matched.length === 0) {
@@ -788,7 +788,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
     const matched = this._selectForWrite(state, filter, undefined, false, sets);
     if (!state || matched.length === 0) {
@@ -864,7 +864,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    * working set — one provider invocation per logical read.
    */
   private async _filteredRows(query: DbQuery): Promise<Record<string, unknown>[]> {
-    if (!containsRelationPredicate(query.filter)) {
+    if (!containsRelationFilter(query.filter)) {
       const match = buildMemoryPredicate(query.filter);
       return (await this._loadRows()).filter(match);
     }
@@ -957,7 +957,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     // updateMany never CAS-checks (locked decision row 2) — `expectedVersion` is
     // never passed. Each matched row still auto-bumps its own version. Applied
     // sequentially and NON-atomically (a mid-loop unique/PK conflict leaves the
@@ -975,7 +975,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     // Mirrors Mongo: there is no native `replaceMany`, so this is a `$set` MERGE
     // + version bump on every match (via `_applyUpdate`), NOT a full-document
     // replace like `replaceOne`. Fields absent from `data` are RETAINED on each
@@ -993,7 +993,7 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
     this._assertWritable();
-    const sets = containsRelationPredicate(filter) ? await this._relationSets(filter) : undefined;
+    const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
     if (!state) {
       return { deletedCount: 0 };

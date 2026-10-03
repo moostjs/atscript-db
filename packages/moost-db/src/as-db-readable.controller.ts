@@ -77,6 +77,7 @@ import {
 } from "./actions/scope-context";
 import {
   actionRowFields,
+  alignRowsToIds,
   findRowsByIds,
   idKey,
   projectRow,
@@ -1715,7 +1716,8 @@ export class AsDbReadableController<
    * `filter (+ $search) ∧ overlay ∧ queryTargetScope ∧ ¬exclude`, at most
    * `cap + 1` rows. More than the cap → 400 `TARGET_TOO_LARGE`; a count
    * other than `expectCount` → 409 `TARGET_CHANGED`. `load` re-reads rows
-   * of the snapshot that still match the same target (phase 2).
+   * of the snapshot that still match the same target (phase 2) — except for
+   * the first batch, which directly follows the snapshot.
    */
   async [RESOLVE_TARGET](req: TTargetRequest): Promise<TResolvedTarget> {
     const { action } = req;
@@ -1817,29 +1819,52 @@ export class AsDbReadableController<
         { matched: rows.length },
       );
     }
+    // A `$limit` of its own: a search pipeline defaults to 1000 rows, which
+    // would turn every later row of a large batch "stale".
+    const byIds = (
+      read: (q: unknown) => Promise<Record<string, unknown>[]>,
+      ids: readonly Record<string, unknown>[],
+      scope: FilterExpr | undefined,
+      select: Iterable<string>,
+    ) =>
+      findRowsByIds(
+        {
+          findMany: (q) =>
+            read({
+              ...q,
+              controls: { ...(q.controls as object), $limit: Math.max(ids.length, cap + 1) },
+            }),
+        },
+        ids,
+        scope,
+        select,
+      );
+    const snapshotFields = new Set(req.select);
+    let first = true;
     return {
       matched: rows.length,
       rows,
       dryRun: body.dryRun === true,
       exclude,
-      // A `$limit` of its own: a search pipeline defaults to 1000 rows, which
-      // would turn every later row of a large batch "stale".
-      load: (ids, select) =>
-        findRowsByIds(
-          {
-            findMany: (q) =>
-              findMany({
-                ...q,
-                controls: {
-                  ...(q.controls as object),
-                  $limit: Math.max(ids.length, cap + 1),
-                },
-              }),
-          },
-          ids,
-          filter,
-          select,
-        ),
+      load: (ids, select) => {
+        if (!first) return byIds(findMany, ids, filter, select);
+        // The first batch directly follows the snapshot in this request —
+        // its rows matched moments ago, so it is not re-checked: served from
+        // the snapshot, or (needing more fields) read by identity alone.
+        // Later batches run after the handler worked on earlier ones.
+        first = false;
+        const fields = [...select];
+        if (!fields.every((f) => snapshotFields.has(f))) {
+          const plain = (q: unknown) =>
+            this.readable.findMany(q as Uniquery<any, any>) as Promise<Record<string, unknown>[]>;
+          return byIds(plain, ids, undefined, fields);
+        }
+        return Promise.resolve(
+          alignRowsToIds(rows, ids).map((row, i) =>
+            row ? projectRow(row, new Set([...fields, ...Object.keys(ids[i]!)])) : undefined,
+          ),
+        );
+      },
     };
   }
 

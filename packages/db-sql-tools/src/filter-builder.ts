@@ -1,7 +1,7 @@
 import { walkFilter, type FilterExpr, type FilterVisitor, type RelationOp } from "@uniqu/core";
 import {
   DbError,
-  containsRelationPredicate,
+  containsRelationFilter,
   isResolvedRelationFilter,
   type ResolvedRelationFilter,
 } from "@atscript/db";
@@ -283,7 +283,7 @@ export function buildWhere(
     return EMPTY_AND;
   }
   const visitor =
-    opts || containsRelationPredicate(filter)
+    opts || containsRelationFilter(filter)
       ? createFilterVisitor(dialect, { ...opts, aliasSeq: opts?.aliasSeq ?? { n: 0 } })
       : getVisitor(dialect);
   return walkFilter(filter, visitor) ?? EMPTY_AND;

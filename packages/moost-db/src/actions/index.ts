@@ -40,7 +40,7 @@ export {
   type TActionTargetErrorCode,
 } from "./action-target-error";
 export type { TDbActionScopeContext, TDbActionScopePurpose } from "./scope-context";
-export type { DbActionQueryTarget, TDbQueryTargetOpts } from "./query-target";
+export type { TDbActionQueryTarget, TDbQueryTargetOpts } from "./query-target";
 export { DbActionTarget, useDbActionTarget, type TDbActionTarget } from "./target";
 export { DbActionsFrom, type TDbActionsFromOpts } from "./db-actions-from.decorator";
 export { hasActionDelegations } from "./delegation";

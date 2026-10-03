@@ -1,6 +1,7 @@
 import type { FilterExpr, Uniquery, UniqueryControls } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
+import { containsRelationFilter, resolveRelationFilterTree } from "../query/relation-filter";
 import { UniquSelect } from "../query/uniqu-select";
 import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
@@ -73,11 +74,15 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
-    const filter = this.resolveRelationFilters(query.filter as FilterExpr, meta);
+    const logical = query.filter as FilterExpr;
+    const has = containsRelationFilter(logical);
+    const filter = has ? resolveRelationFilterTree(logical, meta, 0) : logical;
     if (!meta.requiresMappings) {
       const controls = query.controls;
       return {
-        filter: meta.toStorageFormatters ? this.translateResolvedFilter(filter, meta) : filter,
+        filter: meta.toStorageFormatters
+          ? this.noteTranslated(logical, this.translateResolvedFilter(filter, meta), has)
+          : filter,
         controls: {
           ...controls,
           $with: undefined,
@@ -90,7 +95,7 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     }
 
     return {
-      filter: this.translateFilterWithRename(filter, meta),
+      filter: this.noteTranslated(logical, this.translateFilterWithRename(filter, meta), has),
       controls: query.controls ? this.translateControls(query.controls, meta) : {},
       insights: query.insights,
     };

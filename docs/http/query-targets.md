@@ -75,9 +75,9 @@ More matching rows than the cap (`min(queryTarget.maxRows, query.maxRows)`, and 
 
 ## Consistency
 
-The target is a **snapshot** of the ids matching at phase 1. Each row is checked again when it is processed: against the query (filter, search, overlay, `queryTargetScope`, `exclude`), the action's [`actionRowScope`](./actions#action-row-scope-candidates) (called per batch with `purpose: "execute"`) and `disabled`.
+The target is a **snapshot** of the ids matching at phase 1. Each row is checked again when it is processed: against the query (filter, search, overlay, `queryTargetScope`, `exclude`), the action's [`actionRowScope`](./actions#action-row-scope-candidates) (called per batch with `purpose: "execute"`) and `disabled`. The query check is skipped for the first batch (all rows of a `@DbActionIDs()` / `@DbActionRows()` handler), which runs right after the snapshot in the same request.
 
-- A row that no longer matches the query is skipped as `"stale"`.
+- A row that no longer matches the query is skipped as `"stale"` (from the second batch on).
 - Rows created after phase 1 are not included.
 - A query matching no row never runs the handler: the answer is the empty summary `{ matched: 0, processed: 0, skipped: [], failed: [] }`.
 - There is no transaction across batches. Open one per batch in the handler if you need it.

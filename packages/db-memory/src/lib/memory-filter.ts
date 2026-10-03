@@ -3,7 +3,7 @@ import {
   walkFilter,
   DbError,
   getPath,
-  containsRelationPredicate,
+  containsRelationFilter,
   forEachResolvedRelation,
   isResolvedRelationFilter,
   type ResolvedRelationFilter,
@@ -390,7 +390,7 @@ export async function prepareRelationSets(
   filter: FilterExpr | undefined,
   load: MemoryRowLoader,
 ): Promise<RelationSets | undefined> {
-  if (!containsRelationPredicate(filter)) {
+  if (!containsRelationFilter(filter)) {
     return undefined;
   }
   const sets = new Map<ResolvedRelationFilter, Set<string>>();

@@ -305,9 +305,9 @@ Render `$some` as "a related row exists" and `$none` as "none exists". A `null` 
 Helpers exported from `@atscript/db`:
 
 - `isResolvedRelationFilter(value)` — the operand type guard (a `Symbol.for` brand, so it holds across two loaded copies of `@atscript/db`, ESM and CJS).
-- `containsRelationPredicate(filter)` — a cheap pre-scan; keep predicate-free filters on your existing fast path.
+- `containsRelationFilter(filter)` — a cheap pre-scan; keep predicate-free filters on your existing fast path.
 - `forEachResolvedRelation(filter, visit, nested?)` — visits every resolved predicate of a translated filter (operands and junction filters included), e.g. to load related data before evaluating, or to detect a predicate that reads the table being written.
-- `relationStaticFilter(relation)`, `andFilters(...parts)`, `isRelationOp`, `RELATION_OPS`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES` (core limits, server predicates included), `REL_FILTER_CLIENT_MAX_DEPTH`, `REL_FILTER_CLIENT_MAX_NODES` (the HTTP client budget).
+- `relationStaticFilter(relation)`, `andFilters(...parts)`, `isRelationOp`, `RELATION_OPS`, `REL_FILTER_MAX_DEPTH`, `REL_FILTER_MAX_NODES` (core limits, server predicates included).
 
 **Same store.** The core renders a predicate only when the related (and junction) table's adapter `sharesStoreWith` the source's: by default the same adapter class and the same transaction owner (`_transactionOwner()` — see [Transaction Support](#transaction-support); the driver, pool or client) — two connections of one class are different stores. Override it when one owner serves several databases (the MongoDB adapter also compares the database name). Otherwise the predicate is a `REL_FILTER_NOT_SUPPORTED`.
 
@@ -459,7 +459,7 @@ viewCapabilities(): ReadonlySet<"compute" | "firstJoin">
 
 The managed-view features `ensureView()` renders: `compute` — [computed columns](/views/computed-columns) (`TViewColumnMapping.expr`); `firstJoin` — [first-row joins](/views/#first-row-joins) (`TViewJoin.first`). Schema sync refuses a view that uses a feature missing from the set (`… is not supported by this adapter (viewCapabilities())`). A direct `ensureTable()` call for such a view throws the same message before your `ensureTable()` runs: `BaseDbAdapter` wraps it when it is bound to a managed view, so you do not need your own check. The default is **empty** — fail-closed, so an adapter written before these features never receives a view it would render wrong (a renderer that ignored `TViewJoin.first` would produce a plain, row-multiplying join). Return `ALL_VIEW_CAPABILITIES` (from `@atscript/db`) once you render both:
 
-- **Computed column** — a mapping with `expr` reads no source column (`sourceColumn` is `""`); its leaves name other columns of the same view by `viewPath` (computed leaves included — inline them). Evaluate in IEEE double, `NULL` for a `NULL` operand, `NULL` for division by zero. Keep computed columns out of `GROUP BY`. A `@db.view.having` ref may name one: render its expression there, not the SELECT alias, because MySQL binds a bare HAVING name that matches a `GROUP BY` column to that column. `walkViewExpr(expr, leaf)` (from `@atscript/db`) visits the leaves.
+- **Computed column** — a mapping with `expr` reads no source column (`sourceColumn` is `""`); its leaves name other columns of the same view by `viewPath` (computed leaves included — inline them). Evaluate in IEEE double, `NULL` for a `NULL` operand, `NULL` for division by zero. Keep computed columns out of `GROUP BY`. A `@db.view.having` ref may name one: render its expression there, not the SELECT alias, because MySQL binds a bare HAVING name that matches a `GROUP BY` column to that column.
 - **First-row join** — of the target rows matching `condition`, join only the first by `first.order` (keys qualified with the target, the primary key `first.key` already appended). `NULL` is the smallest value (first in `asc`).
 
 SQL adapters on `@atscript/db-sql-tools` get both from the view builder once the dialect implements `castDouble` ([below](#calendar-buckets)).

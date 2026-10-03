@@ -432,7 +432,7 @@ Each predicate runs a correlated lookup per candidate row. Index the foreign-key
 
 The error `path` is the dotted relation chain (`ticket.team`); messages name relations, never physical table names. Both codes answer HTTP 400 through moost-db. The limits are exported from `@atscript/db` as `REL_FILTER_MAX_DEPTH` and `REL_FILTER_MAX_NODES`.
 
-These core limits count every predicate of the filter, server-added ones included (row scopes, [`transformRelationFilter`](/http/customization#transformrelationfilter) overlays), so their errors name no path. HTTP clients have their own, lower budget — 3 levels and 8 predicates per request (`REL_FILTER_CLIENT_MAX_DEPTH`, `REL_FILTER_CLIENT_MAX_NODES`), counting the client's predicates only — which leaves the server headroom for its overlays. See [Permissions § Relational predicates](/http/permissions#relational-predicates).
+These core limits count every predicate of the filter, server-added ones included (row scopes, [`transformRelationFilter`](/http/customization#transformrelationfilter) overlays), so their errors name no path. HTTP clients have their own, lower budget — 3 levels and 8 predicates per request (`REL_FILTER_CLIENT_MAX_DEPTH`, `REL_FILTER_CLIENT_MAX_NODES`, exported from `@atscript/moost-db`), counting the client's predicates only — which leaves the server headroom for its overlays. See [Permissions § Relational predicates](/http/permissions#relational-predicates).
 
 ### Typing
 

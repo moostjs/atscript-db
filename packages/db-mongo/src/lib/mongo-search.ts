@@ -1,6 +1,6 @@
 import type { Collection, Document } from "mongodb";
 import {
-  containsRelationPredicate,
+  containsRelationFilter,
   DbError,
   geoIndexNotFoundMessage,
   searchIndexNotFoundMessage,
@@ -281,7 +281,7 @@ function buildGeoNearStages(
   indexName?: string,
 ): Document[] {
   const controls = (query.controls || {}) as Record<string, unknown>;
-  const plan = containsRelationPredicate(query.filter)
+  const plan = containsRelationFilter(query.filter)
     ? buildMongoQuery(query.filter, filterOptionsOf(host))
     : undefined;
   const geoNear: Document = {

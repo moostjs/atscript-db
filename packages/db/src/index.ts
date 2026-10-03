@@ -74,8 +74,6 @@ export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { translateQueryTree, isFieldRef } from "./query/query-tree";
-// ── Since 0.1.147 ────────────────────────────────────────────────────────────
-export { walkViewExpr } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
 export { aliasTargetOf } from "./table/view-source";
@@ -183,28 +181,23 @@ export { walkFilter, isPrimitive, computeInsights } from "@uniqu/core";
 export type { FilterVisitor } from "@uniqu/core";
 
 // ── Relational filter predicates ($some / $none, since 0.1.147) ─────────────
-export { isRelationOp, isRelationPredicate, RELATION_OPS } from "@uniqu/core";
-export type { RelationOp, RelationPredicate } from "@uniqu/core";
+export { isRelationOp, RELATION_OPS } from "@uniqu/core";
+export type { RelationOp } from "@uniqu/core";
 export {
   ResolvedRelationFilter,
   isResolvedRelationFilter,
-  containsRelationPredicate,
+  containsRelationFilter,
   forEachResolvedRelation,
   hasRelationOp,
   relationStaticFilter,
-  relGuardState,
   andFilters,
   REL_FILTER_MAX_DEPTH,
   REL_FILTER_MAX_NODES,
-  REL_FILTER_CLIENT_MAX_DEPTH,
-  REL_FILTER_CLIENT_MAX_NODES,
 } from "./query/relation-filter";
 export type {
   TRelationFilterTable,
   TRelationFilterJunction,
-  TRelationFilterHost,
   TRelationStaticFilter,
-  TRelGuardState,
 } from "./query/relation-filter";
 
 // ── Query path guard + nullable typing (since 0.1.128) ──────────────────────

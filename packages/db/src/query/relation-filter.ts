@@ -29,20 +29,14 @@ import { isFieldRef, translateQueryTree } from "./query-tree";
 /**
  * Maximum nesting of relational predicates in one filter, server-added ones
  * included (a predicate inside a predicate's operand counts one level). The
- * core backstop for every caller; higher than the per-client limit
- * ({@link REL_FILTER_CLIENT_MAX_DEPTH}) so server overlays (row scopes,
+ * core backstop for every caller; higher than moost-db's per-client limit
+ * (`REL_FILTER_CLIENT_MAX_DEPTH`) so server overlays (row scopes,
  * `transformRelationFilter`) have headroom above what a client may send.
  */
 export const REL_FILTER_MAX_DEPTH = 4;
 
 /** Maximum number of relational predicates in one filter (nested and server-added ones included). See {@link REL_FILTER_MAX_DEPTH}. */
 export const REL_FILTER_MAX_NODES = 16;
-
-/** Per-request nesting limit of CLIENT predicates (moost-db's HTTP gate; server-added predicates are not counted). */
-export const REL_FILTER_CLIENT_MAX_DEPTH = 3;
-
-/** Per-request count limit of CLIENT predicates — root filter and `$with` sub-filters together (moost-db's HTTP gate). */
-export const REL_FILTER_CLIENT_MAX_NODES = 8;
 
 /** A table taking part in a resolved predicate. */
 export interface TRelationFilterTable {
@@ -139,20 +133,35 @@ export function hasRelationOp(value: unknown): value is Record<string, unknown> 
 }
 
 /**
+ * Pre-scan results of filters the core BUILT (translated / resolved
+ * filters, never mutated after) — adapters scan the same translated filter
+ * several times per operation. Caller-owned filters are never cached: they
+ * may be mutated between two queries.
+ */
+const relationFilterCache = new WeakMap<object, boolean>();
+
+/** @internal Records the pre-scan result of a filter the core built. */
+export function noteRelationFilter(filter: unknown, has: boolean): void {
+  if (filter && typeof filter === "object") relationFilterCache.set(filter, has);
+}
+
+/**
  * `true` when `filter` holds a relational predicate anywhere outside
  * predicate operands (through `$and` / `$or` / `$not`) — the cheap pre-scan
  * the field mappers and renderers use to keep predicate-free filters on
- * their fast paths.
+ * their fast paths. Results for filters the core translated are cached.
  */
-export function containsRelationPredicate(filter: unknown): boolean {
+export function containsRelationFilter(filter: unknown): boolean {
   if (!filter || typeof filter !== "object") return false;
+  const cached = relationFilterCache.get(filter);
+  if (cached !== undefined) return cached;
   for (const [key, value] of Object.entries(filter as Record<string, unknown>)) {
     if (key === "$and" || key === "$or") {
-      if (Array.isArray(value) && value.some((child) => containsRelationPredicate(child))) {
+      if (Array.isArray(value) && value.some((child) => containsRelationFilter(child))) {
         return true;
       }
     } else if (key === "$not") {
-      if (containsRelationPredicate(value)) return true;
+      if (containsRelationFilter(value)) return true;
     } else if (!key.startsWith("$") && hasRelationOp(value)) {
       return true;
     }
@@ -562,53 +571,74 @@ function prefixError(error: unknown, path: string): unknown {
  * `meta.relationFilters` — the step every field-mapper entry point runs
  * first. Predicates at the top of `filter` are at level `depth + 1`.
  * Already-resolved operands pass through, so translating twice is safe.
+ * One pass: unchanged subtrees (and `filter` itself, when nothing needed
+ * resolving) are returned as they are.
  */
 export function resolveRelationFilterTree(
   filter: FilterExpr,
   meta: TableMetadata,
   depth: number,
 ): FilterExpr {
-  const out: Record<string, unknown> = {};
+  let out: Record<string, unknown> | undefined;
   for (const [key, value] of Object.entries(filter as Record<string, unknown>)) {
+    let next = value;
     if (key === "$and" || key === "$or") {
-      out[key] = Array.isArray(value)
-        ? value.map((child: FilterExpr) =>
-            containsRelationPredicate(child)
-              ? resolveRelationFilterTree(child, meta, depth)
-              : child,
-          )
-        : value;
+      if (Array.isArray(value)) {
+        let children: unknown[] | undefined;
+        for (let i = 0; i < value.length; i++) {
+          const child = value[i] as FilterExpr;
+          if (!child || typeof child !== "object") continue;
+          const resolved = resolveRelationFilterTree(child, meta, depth);
+          if (resolved === child) continue;
+          children ??= [...value];
+          children[i] = resolved;
+        }
+        if (children) next = children;
+      }
     } else if (key === "$not") {
-      out[key] = containsRelationPredicate(value)
-        ? resolveRelationFilterTree(value as FilterExpr, meta, depth)
-        : value;
+      if (value && typeof value === "object") {
+        next = resolveRelationFilterTree(value as FilterExpr, meta, depth);
+      }
     } else if (!key.startsWith("$") && hasRelationOp(value)) {
-      const host = meta.relationFilters;
-      if (!host) {
-        if (!meta.navFields.has(key)) {
-          throw invalid(
-            key,
-            `"$some" / "$none" are only valid on a navigation relation — "${key}" is not one`,
-          );
-        }
-        throw notSupported(
-          key,
-          `Relational predicate on "${key}" needs the table to come from a DbSpace (no table resolver)`,
-        );
-      }
-      const ops: Record<string, unknown> = {};
-      for (const [op, operand] of Object.entries(value)) {
-        if (!isRelationOp(op)) {
-          throw invalid(key, `Cannot mix "$some" / "$none" with "${op}" on "${key}"`);
-        }
-        ops[op] = isResolvedRelationFilter(operand)
-          ? operand
-          : host.resolve(key, op, operand as FilterExpr, depth + 1);
-      }
-      out[key] = ops;
-    } else {
-      out[key] = value;
+      next = resolvePredicateMap(key, value, meta, depth);
     }
+    if (next === value) continue;
+    out ??= { ...(filter as Record<string, unknown>) };
+    out[key] = next;
   }
+  if (!out) return filter;
+  noteRelationFilter(out, true);
   return out as FilterExpr;
+}
+
+/** One `{ $some | $none: … }` map of `key` resolved (operands already resolved pass through). */
+function resolvePredicateMap(
+  key: string,
+  value: Record<string, unknown>,
+  meta: TableMetadata,
+  depth: number,
+): Record<string, unknown> {
+  const host = meta.relationFilters;
+  if (!host) {
+    if (!meta.navFields.has(key)) {
+      throw invalid(
+        key,
+        `"$some" / "$none" are only valid on a navigation relation — "${key}" is not one`,
+      );
+    }
+    throw notSupported(
+      key,
+      `Relational predicate on "${key}" needs the table to come from a DbSpace (no table resolver)`,
+    );
+  }
+  const ops: Record<string, unknown> = {};
+  for (const [op, operand] of Object.entries(value)) {
+    if (!isRelationOp(op)) {
+      throw invalid(key, `Cannot mix "$some" / "$none" with "${op}" on "${key}"`);
+    }
+    ops[op] = isResolvedRelationFilter(operand)
+      ? operand
+      : host.resolve(key, op, operand as FilterExpr, depth + 1);
+  }
+  return ops;
 }

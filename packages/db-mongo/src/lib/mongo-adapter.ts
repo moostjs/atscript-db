@@ -32,7 +32,7 @@ import {
   type TDbFieldMeta,
   type TFieldOps,
   computeInsights,
-  containsRelationPredicate,
+  containsRelationFilter,
 } from "@atscript/db";
 import type {
   AggregateOptions,
@@ -544,7 +544,7 @@ export class MongoAdapter extends BaseDbAdapter {
    * those pipelines render collation per field ({@link _predicateFilterOpts}).
    */
   private _readOpts(query: DbQuery): Record<string, unknown> {
-    return containsRelationPredicate(query.filter)
+    return containsRelationFilter(query.filter)
       ? this._getSessionOpts()
       : { ...this._getCollationOpts(query), ...this._getSessionOpts() };
   }
@@ -1031,7 +1031,7 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     write: (mongoFilter: Filter<any>) => Promise<void>,
   ): Promise<void> {
-    if (!containsRelationPredicate(filter)) {
+    if (!containsRelationFilter(filter)) {
       return write(buildMongoFilter(filter));
     }
     const { pipeline, pre } = this._predicateWritePlan(filter);
@@ -1076,7 +1076,7 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** The filter of a single-document write — its predicates resolved to one `_id`. */
   private _writeFilterOne(filter: FilterExpr) {
-    return containsRelationPredicate(filter)
+    return containsRelationFilter(filter)
       ? this._predicateWriteFilterOne(filter)
       : buildMongoFilter(filter);
   }
@@ -1169,7 +1169,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
-    if (containsRelationPredicate(query.filter)) {
+    if (containsRelationFilter(query.filter)) {
       const [row] = await this._aggregateFind(query, "findOne", 1);
       return row ?? null;
     }
@@ -1186,7 +1186,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    if (containsRelationPredicate(query.filter)) {
+    if (containsRelationFilter(query.filter)) {
       return this._aggregateFind(query, "findMany");
     }
     const filter = buildMongoFilter(query.filter);
@@ -1201,7 +1201,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async count(query: DbQuery): Promise<number> {
-    if (containsRelationPredicate(query.filter)) {
+    if (containsRelationFilter(query.filter)) {
       // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a filter only).
       const pipeline = [
         ...mongoFilterStages(query.filter, this._predicateFilterOpts),

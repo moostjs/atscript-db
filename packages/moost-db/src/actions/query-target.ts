@@ -12,7 +12,7 @@ import { scopedControllerSlot } from "./row-scope";
  *
  * @since 0.1.147
  */
-export interface DbActionQueryTarget {
+export interface TDbActionQueryTarget {
   /** The query string `GET /query` accepts — filter plus `$search` / `$index` ONLY. */
   q: string;
   /** Identifiers to leave out (any identification; at most the action's `maxIds`). */
@@ -93,7 +93,9 @@ export interface TResolvedTarget {
   /**
    * The rows `ids` address that STILL match the target (filter, search,
    * overlay, `queryTargetScope`, `exclude`), aligned with `ids`; `select`
-   * plus the id fields.
+   * plus the id fields. The FIRST call directly follows the snapshot and is
+   * not re-checked (served from {@link rows}, or read by identity alone
+   * when `select` needs more fields); every later call re-checks.
    */
   load(
     ids: readonly Record<string, unknown>[],
@@ -114,7 +116,7 @@ export interface TActionQueryTarget extends TResolvedTarget {
 const QUERY_KEYS = new Set(["q", "exclude", "expectCount", "maxRows", "dryRun"]);
 
 /** Validates the shape of a request body's `query` (400 `TARGET_INVALID` on any mismatch). */
-export function parseQueryTargetBody(action: string, raw: unknown): DbActionQueryTarget {
+export function parseQueryTargetBody(action: string, raw: unknown): TDbActionQueryTarget {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw targetInvalid(action, "`query` must be an object { q, exclude?, expectCount?, … }");
   }
@@ -139,7 +141,7 @@ export function parseQueryTargetBody(action: string, raw: unknown): DbActionQuer
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
     throw targetInvalid(action, "`query.dryRun` must be a boolean");
   }
-  return body as unknown as DbActionQueryTarget;
+  return body as unknown as TDbActionQueryTarget;
 }
 
 /**
