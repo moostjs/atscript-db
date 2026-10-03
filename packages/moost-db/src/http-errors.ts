@@ -49,3 +49,28 @@ export function unknownRelationError(name: string, visible: readonly string[]): 
     `Unknown relation "${name}" in $with. Available relations: ${visible.join(", ") || "(none)"}`,
   );
 }
+
+/** The path behind each `Unknown field` message a controller's `validateInsights` returned. */
+const insightPaths = new WeakMap<Map<string, unknown>, THttpErrorEntry>();
+
+/**
+ * `validateInsights`' refusal of `path` (its string contract): the
+ * `Unknown field "<path>"` message, remembered with its path so
+ * {@link insightError} can render the envelope.
+ */
+export function unknownInsight(insights: Map<string, unknown>, path: string): string {
+  const message = `Unknown field "${path}"`;
+  insightPaths.set(insights, { path, message });
+  return message;
+}
+
+/**
+ * The 400 for the message `validateInsights` returned: the validation
+ * envelope when it is the controller's own {@link unknownInsight} refusal
+ * (an override passing `super`'s answer through included), else the bare
+ * message an override chose.
+ */
+export function insightError(insights: Map<string, unknown>, message: string): HttpError {
+  const entry = insightPaths.get(insights);
+  return entry?.message === message ? badRequest(entry.path, message) : new HttpError(400, message);
+}

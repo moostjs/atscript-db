@@ -260,12 +260,38 @@ describe("the gate", () => {
     const { controller } = bind(hiding(["ticket"]));
     const hidden = await rejected(controller.query("?ticket=$some(status=open)"));
     const missing = await rejected(controller.query("?nope=$some(status=open)"));
-    expect(hidden).toEqual({ message: 'Unknown field "ticket"' });
-    expect(missing).toEqual({ message: 'Unknown field "nope"' });
+    // The validation envelope, like every other predicate rejection.
+    expect(hidden).toEqual({ path: "ticket", message: 'Unknown field "ticket"' });
+    expect(missing).toEqual({ path: "nope", message: 'Unknown field "nope"' });
     // Nested: the hidden hop is named, not its operand path.
     const nested = bind(hiding(["ticket.team"])).controller;
     expect(await rejected(nested.query("?ticket=$some(team=$some(name=Core))"))).toEqual({
+      path: "ticket.team",
       message: 'Unknown field "ticket.team"',
+    });
+    // A nonexistent operand field too.
+    expect(await rejected(bind().controller.query("?ticket=$some(nope=1)"))).toEqual({
+      path: "ticket.nope",
+      message: 'Unknown field "ticket.nope"',
+    });
+  });
+
+  it("a validateInsights override passing super's refusal through keeps the envelope", async () => {
+    class Own extends AsDbReadableController {
+      protected override validateInsights(insights: Map<string, unknown>): string | undefined {
+        return insights.has("title") ? "no title filters" : super.validateInsights(insights);
+      }
+    }
+    const { controller } = bind(Own);
+    expect(await rejected(controller.query("?ticket=$some(nope=1)"))).toEqual({
+      path: "ticket.nope",
+      message: 'Unknown field "ticket.nope"',
+    });
+    const own = (await controller.query("?title=a")) as HttpError;
+    expect(own.body).toEqual({
+      statusCode: 400,
+      message: "no title filters",
+      error: "Bad Request",
     });
   });
 
@@ -284,6 +310,7 @@ describe("the gate", () => {
   it("a hidden operand path is an unknown field", async () => {
     const { controller } = bind(hiding(["ticket.status"]));
     expect(await rejected(controller.query("?ticket=$some(status=open)"))).toEqual({
+      path: "ticket.status",
       message: 'Unknown field "ticket.status"',
     });
   });
@@ -447,6 +474,7 @@ describe("predicates inside $with sub-filters", () => {
     });
     const hidden = bind(hiding(["tickets.issues"]), "teams").controller;
     expect(await rejected(hidden.query("?$with=tickets(issues=$some(title=c))"))).toEqual({
+      path: "tickets.issues",
       message: 'Unknown field "tickets.issues"',
     });
     expect(

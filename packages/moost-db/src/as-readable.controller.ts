@@ -18,6 +18,7 @@ import { Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
+import { insightError, unknownInsight } from "./http-errors";
 import {
   GeoControlsDto,
   GetOneControlsDto,
@@ -449,7 +450,7 @@ export abstract class AsReadableController<
         continue;
       }
       if (!this.hasField(key)) {
-        return `Unknown field "${key}"`;
+        return unknownInsight(insights, key);
       }
     }
     return undefined;
@@ -464,9 +465,10 @@ export abstract class AsReadableController<
       return new HttpError(400, controlsError);
     }
     if (parsed.insights) {
-      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
+      const insights = parsed.insights as Map<string, unknown>;
+      const insightsError = this.validateInsights(insights);
       if (insightsError) {
-        return new HttpError(400, insightsError);
+        return insightError(insights, insightsError);
       }
     }
     return undefined;

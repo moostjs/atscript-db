@@ -189,7 +189,7 @@ When `projection` is `undefined` (no `$select` from the client), the hook suppli
 
 ### validateInsights {#validateinsights}
 
-Runs after the URL query string is parsed. The `insights` map contains every field referenced in the query — whether in a filter, projection, or sort order. Return a string to reject with HTTP `400`, or `undefined` to allow.
+Runs after the URL query string is parsed. The `insights` map contains every field referenced in the query — whether in a filter, projection, or sort order. Return a string to reject with HTTP `400`, or `undefined` to allow. The default refusal (`Unknown field "<path>"`) — also when your override returns `super`'s answer — is the validation envelope with `errors: [{ path, message }]`; a string of your own is the response's `message` alone.
 
 ```typescript
 const RESTRICTED_FIELDS = new Set(['salary', 'ssn', 'internalNotes'])

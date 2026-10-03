@@ -89,7 +89,7 @@ import { AsReadableController, type TDbControlsType } from "./as-readable.contro
 import { DbEndpoint } from "./db-endpoint";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilities";
-import { unknownRelationError } from "./http-errors";
+import { insightError, unknownInsight, unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
   childrenOf,
@@ -634,7 +634,7 @@ export class AsDbReadableController<
     // A relational predicate's navigation key first (since 0.1.147): a hidden
     // relation answers like a nonexistent one, before its operand paths.
     const hiddenRel = hiddenRelationInsight(insights, (path) => this.hasField(path));
-    if (hiddenRel !== undefined) return `Unknown field "${hiddenRel}"`;
+    if (hiddenRel !== undefined) return unknownInsight(insights, hiddenRel);
     const nav = this.capabilities.navFields;
     for (const [key] of insights) {
       if (key === "*") continue;
@@ -642,7 +642,7 @@ export class AsDbReadableController<
       if (dot === -1) continue;
       if (!nav.has(key.slice(0, dot))) continue;
       if (!this.hasField(key)) {
-        return `Unknown field "${key}"`;
+        return unknownInsight(insights, key);
       }
     }
     return undefined;
@@ -682,9 +682,10 @@ export class AsDbReadableController<
       return unknown;
     }
     if (parsed.insights) {
-      const insightsError = this.validateInsights(parsed.insights as Map<string, unknown>);
+      const insights = parsed.insights as Map<string, unknown>;
+      const insightsError = this.validateInsights(insights);
       if (insightsError) {
-        return new HttpError(400, insightsError);
+        return insightError(insights, insightsError);
       }
     }
     if (withRelations?.length) {
