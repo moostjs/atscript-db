@@ -7,6 +7,8 @@ import type {
   TDbActionLevel,
 } from "@atscript/db";
 
+import type { TDbQueryTargetOpts } from "./query-target";
+
 /**
  * One entry of a `disabled` predicate's result. Truthy = the action is
  * disabled for that row; falsy (`false`, `""`) = enabled. A non-empty string
@@ -144,7 +146,7 @@ interface BaseActionOpts extends Partial<
    *
    * @since 0.1.147
    */
-  queryTarget?: boolean | { maxRows?: number; batchSize?: number };
+  queryTarget?: TDbQueryTargetOpts;
 }
 
 /**

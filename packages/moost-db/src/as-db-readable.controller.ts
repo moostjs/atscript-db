@@ -16,6 +16,7 @@ import type {
 import type { AtscriptDbTable } from "@atscript/db";
 import {
   DbError,
+  andFilters,
   checkHavingKeys,
   collectQueryPaths,
   geoIndexNotFoundMessage,
@@ -34,7 +35,12 @@ import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
 import { discoverRowLevelActions, type TDbActionEnvelope } from "./actions/discover";
 import { augmentRowsWithActions, getCandidate } from "./actions/list-augmenter";
-import { targetInvalid, ActionTargetError } from "./actions/action-target-error";
+import {
+  targetInvalid,
+  ActionTargetError,
+  errorMessage,
+  errorStatus,
+} from "./actions/action-target-error";
 import {
   ACTION_VERDICTS,
   ALLOWED_ACTIONS,
@@ -59,7 +65,6 @@ import {
   ACTION_OVERLAY,
   ACTION_SCOPE,
   ACTION_SCOPED,
-  conjoin,
   nonEmptyFilter,
   withOverlay,
 } from "./actions/row-scope";
@@ -86,6 +91,8 @@ import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilitie
 import { unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
+  childrenOf,
+  relTarget,
   hiddenRelationInsight,
   overlayRelationFilter,
   overlayWithFilters,
@@ -223,17 +230,6 @@ interface TAugmentationPrep {
 
 /** Controller classes already warned that `actionRowScope` has no row identity to match by. */
 const warnedNoIdentity = new WeakSet<Function>();
-
-/** The message of an error a delegated batch failed with. */
-function errorMessage(error: unknown): string {
-  if (error instanceof HttpError) return String(error.body.message ?? error.message);
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** The HTTP status of an error a delegated batch failed with (500 for a non-HTTP error). */
-function errorStatus(error: unknown): number {
-  return error instanceof HttpError ? Number(error.body.statusCode) || 500 : 500;
-}
 
 /**
  * Read-only database controller for Moost that works with any `AtscriptDbReadable`
@@ -753,7 +749,7 @@ export class AsDbReadableController<
             : undefined;
       }
       if (!level) continue;
-      const nested = this._checkWithRelations(rel.controls?.$with ?? rel.$with, level, path);
+      const nested = this._checkWithRelations(childrenOf(rel), level, path);
       if (nested) return nested;
     }
     return undefined;
@@ -798,19 +794,6 @@ export class AsDbReadableController<
     return out ?? writeOnly;
   }
 
-  /** The readable a `$with` entry name (`rel` or dotted `rel.sub`) loads from, if resolvable. */
-  private _relTarget(
-    readable: AtscriptDbReadable<any>,
-    name: string,
-  ): AtscriptDbReadable<any> | undefined {
-    let current: AtscriptDbReadable<any> | undefined = readable;
-    for (const segment of name.split(".")) {
-      if (typeof current?.relatedTable !== "function") return undefined;
-      current = current.relatedTable(segment) as AtscriptDbReadable<any> | undefined;
-    }
-    return current;
-  }
-
   /**
    * Walks a `$with` tree pre-order: `visit(rel, target, path, controls)` for
    * every entry whose target readable resolves (`path` = the entry's dotted
@@ -834,7 +817,7 @@ export class AsDbReadableController<
     let out: unknown[] | undefined;
     for (let i = 0; i < withRels.length; i++) {
       const rel = withRels[i] as TWithEntry;
-      const target = this._relTarget(readable, rel.name);
+      const target = relTarget(readable, rel.name);
       if (!target) continue;
       const path = `${prefix}${rel.name}`;
       const nested = rel.controls ?? {};
@@ -1614,30 +1597,26 @@ export class AsDbReadableController<
   private async _resolveActionScopeGroups(
     names: readonly string[],
     ctx: TDbActionScopeContext,
-    overlay: Promise<FilterExpr | undefined>,
+    overlay: FilterExpr | undefined | Promise<FilterExpr | undefined>,
   ): Promise<TActionScopeGroup[]> {
     const [rowOverlay, scopes] = await Promise.all([
       overlay,
       Promise.all(names.map(async (name) => this._actionScope(name, ctx))),
     ]);
-    const byObject = new Map<FilterExpr, TActionScopeGroup>();
-    const byKey = new Map<string, TActionScopeGroup>();
+    // Keyed structurally; a filter `filterKey` can't key groups by identity
+    const groups = new Map<unknown, TActionScopeGroup>();
     for (let i = 0; i < names.length; i++) {
       const scope = scopes[i];
       if (!scope) continue;
-      let group = byObject.get(scope);
+      const key = filterKey(scope) ?? scope;
+      let group = groups.get(key);
       if (!group) {
-        const structural = filterKey(scope);
-        group = structural === undefined ? undefined : byKey.get(structural);
-        if (!group) {
-          group = { filter: withOverlay(scope, rowOverlay), actions: [] };
-          if (structural !== undefined) byKey.set(structural, group);
-        }
-        byObject.set(scope, group);
+        group = { filter: withOverlay(scope, rowOverlay), actions: [] };
+        groups.set(key, group);
       }
       group.actions.push(names[i]);
     }
-    return [...new Set(byObject.values())];
+    return [...groups.values()];
   }
 
   /**
@@ -1652,7 +1631,7 @@ export class AsDbReadableController<
     rows: readonly (Record<string, unknown> | undefined)[],
     names: readonly string[],
     purpose: TDbActionScopePurpose,
-    overlay: Promise<FilterExpr | undefined>,
+    overlay: FilterExpr | undefined | Promise<FilterExpr | undefined>,
   ): Promise<Map<string, readonly boolean[]> | undefined> {
     if (!this._hasActionRowScope || rows.length === 0 || names.length === 0) return undefined;
     const { ids, index } = candidateIds(rows, this.readable.preferredId);
@@ -1714,7 +1693,7 @@ export class AsDbReadableController<
    * 0.1.147 the action's {@link actionRowScope} is applied separately to the
    * loaded candidates ({@link ACTION_SCOPE}).
    */
-  [ACTION_OVERLAY](_action: string | undefined): Promise<FilterExpr | undefined> {
+  [ACTION_OVERLAY](): Promise<FilterExpr | undefined> {
     return this.rowOverlay();
   }
 
@@ -1802,7 +1781,7 @@ export class AsDbReadableController<
       req.overlay === "read"
         ? await this.transformFilter(clientFilter ?? ({} as FilterExpr))
         : clientFilter;
-    const filter = conjoin(
+    const filter = andFilters(
       this.applySearchFallback(base, controls),
       overlay,
       scope,
@@ -2264,9 +2243,11 @@ export class AsDbReadableController<
     names: readonly string[],
   ): Promise<Array<TDbAvailableActions | undefined>> {
     await this.parseRequest("availableActions");
-    const envelopes = await this._envelopesNamed(names);
+    const [envelopes, overlay] = await Promise.all([
+      this._envelopesNamed(names),
+      this.rowOverlay(),
+    ]);
     if (envelopes.length === 0) return ids.map(() => ({ actions: [] }));
-    const overlay = await this.rowOverlay();
     const fieldsOf = envelopes.map((e) => this._gateFields(e));
     const select = new Set<string>(this.readable.preferredId);
     for (const fields of fieldsOf) for (const f of fields) select.add(f);
@@ -2276,7 +2257,7 @@ export class AsDbReadableController<
       rows,
       envelopes.map((e) => e.info.name),
       "rows",
-      Promise.resolve(overlay),
+      overlay,
     );
     return this._verdicts(envelopes, rows, masks, fieldsOf);
   }
@@ -3092,11 +3073,11 @@ export class AsDbReadableController<
     id: unknown,
     names?: readonly string[],
   ): Promise<TDbAvailableActions> {
-    const envelopes = names
-      ? await this._envelopesNamed(names)
-      : await this._resolveAugmentEnvelopes();
+    const [envelopes, overlay] = await Promise.all([
+      names ? this._envelopesNamed(names) : this._resolveAugmentEnvelopes(),
+      this.rowOverlay(),
+    ]);
     if (!envelopes?.length) return { actions: [] };
-    const overlay = await this.rowOverlay();
     const idKeys = id !== null && typeof id === "object" ? Object.keys(id) : [];
     const fieldsOf = envelopes.map((e) => {
       const fields = this._gateFields(e);
@@ -3113,7 +3094,7 @@ export class AsDbReadableController<
       [row],
       envelopes.map((e) => e.info.name),
       "available",
-      Promise.resolve(overlay),
+      overlay,
     );
     return this._verdicts(envelopes, [row], masks, fieldsOf)[0]!;
   }

@@ -2,6 +2,7 @@ import type { UniquSelect } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
+import { SEARCH_SOURCE_ALIAS } from "./geo";
 import { buildProjection } from "./sql-builder";
 
 /** Column every vector search row carries: the engine's distance to the query vector. */
@@ -28,7 +29,7 @@ export function vectorDistanceSource(
   distExpr: TSqlFragment,
   withRows = true,
 ): TSqlFragment {
-  const t = dialect.quoteTable("t");
+  const t = dialect.quoteTable(SEARCH_SOURCE_ALIAS);
   const rows = withRows ? `${t}.*, ` : "";
   return {
     sql: `SELECT ${rows}${distExpr.sql} AS ${dialect.quoteIdentifier(VECTOR_DISTANCE_ALIAS)} FROM ${dialect.quoteTable(table)} AS ${t} WHERE ${where.sql}`,

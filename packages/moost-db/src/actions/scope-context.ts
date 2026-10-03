@@ -1,6 +1,6 @@
 import type { FilterExpr } from "@atscript/db";
 
-import { findRowsByIds, idKey, type TRowsByIdSource } from "./rows-by-id";
+import { dedupeIdentities, findRowsByIds, type TRowsByIdSource } from "./rows-by-id";
 
 /**
  * Which surface asks {@link TDbActionScopeContext} — see
@@ -73,38 +73,7 @@ export function candidateIds(
   rows: readonly (Record<string, unknown> | undefined)[],
   idFields: readonly string[],
 ): { ids: Record<string, unknown>[]; index: number[] } {
-  const ids: Record<string, unknown>[] = [];
-  const index: number[] = [];
-  const byKey = new Map<string, number>();
-  const sorted = idFields.toSorted();
-  for (const row of rows) {
-    if (!row || idFields.length === 0) {
-      index.push(-1);
-      continue;
-    }
-    const id: Record<string, unknown> = {};
-    let complete = true;
-    for (const f of idFields) {
-      const value = row[f];
-      if (value === undefined || value === null) {
-        complete = false;
-        break;
-      }
-      id[f] = value;
-    }
-    const k = complete ? idKey(id, sorted) : undefined;
-    if (k === undefined) {
-      index.push(-1);
-      continue;
-    }
-    let at = byKey.get(k);
-    if (at === undefined) {
-      at = ids.push(id) - 1;
-      byKey.set(k, at);
-    }
-    index.push(at);
-  }
-  return { ids, index };
+  return dedupeIdentities(rows, idFields);
 }
 
 const IDENTITY_ONLY = Symbol("identity-only");

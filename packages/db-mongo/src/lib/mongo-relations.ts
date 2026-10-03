@@ -291,39 +291,9 @@ function buildToLookup(
   foreignKeys: ReadonlyMap<string, TDbForeignKey>,
 ): { stages: Document[]; isArray: boolean; readControls: TReadControls } | undefined {
   const fk = findFKForRelation(relation, foreignKeys);
-  if (!fk) {
-    return undefined;
-  }
-
-  const pairs = joinPairs(
-    source.getMetadata(),
-    fk.localFields,
-    target.getMetadata(),
-    fk.targetFields,
-  );
-  const inner = buildLookupInnerPipeline(
-    target,
-    withRel,
-    relation,
-    pairs.map((p) => p.inner),
-  );
-  const join = correlate("fk_", pairs);
-
-  const stages: Document[] = [
-    {
-      $lookup: {
-        from: collectionOf(target),
-        let: join.let,
-        pipeline: [...join.stages, ...inner.filter, ...inner.page],
-        as: withRel.name,
-      },
-    },
-    {
-      $unwind: { path: `$${withRel.name}`, preserveNullAndEmptyArrays: true },
-    },
-  ];
-
-  return { stages, isArray: false, readControls: inner.readControls };
+  return fk
+    ? directLookup(source, target, withRel, relation, fk.localFields, fk.targetFields, "fk_", false)
+    : undefined;
 }
 
 /** $lookup for FROM relations (FK is on target → this table). */
@@ -334,24 +304,42 @@ function buildFromLookup(
   relation: TDbRelation,
 ): { stages: Document[]; isArray: boolean; readControls: TReadControls } | undefined {
   const remoteFK = findRemoteFK(target, source.tableName, relation.alias);
-  if (!remoteFK) {
-    return undefined;
-  }
+  return remoteFK
+    ? directLookup(
+        source,
+        target,
+        withRel,
+        relation,
+        remoteFK.targetFields,
+        remoteFK.fields,
+        "pk_",
+        relation.isArray,
+      )
+    : undefined;
+}
 
-  const pairs = joinPairs(
-    source.getMetadata(),
-    remoteFK.targetFields,
-    target.getMetadata(),
-    remoteFK.fields,
-  );
+/**
+ * The correlated `$lookup` of a TO / FROM relation: `sourceFields` of this
+ * table paired with `targetFields` of the target, unwound when single-valued.
+ */
+function directLookup(
+  source: TMongoRelationReadable,
+  target: TMongoRelationReadable,
+  withRel: WithRelation,
+  relation: TDbRelation,
+  sourceFields: readonly string[],
+  targetFields: readonly string[],
+  prefix: string,
+  isArray: boolean,
+): { stages: Document[]; isArray: boolean; readControls: TReadControls } {
+  const pairs = joinPairs(source.getMetadata(), sourceFields, target.getMetadata(), targetFields);
   const inner = buildLookupInnerPipeline(
     target,
     withRel,
     relation,
     pairs.map((p) => p.inner),
   );
-  const join = correlate("pk_", pairs);
-
+  const join = correlate(prefix, pairs);
   const stages: Document[] = [
     {
       $lookup: {
@@ -362,12 +350,10 @@ function buildFromLookup(
       },
     },
   ];
-
-  if (!relation.isArray) {
+  if (!isArray) {
     stages.push({ $unwind: { path: `$${withRel.name}`, preserveNullAndEmptyArrays: true } });
   }
-
-  return { stages, isArray: relation.isArray, readControls: inner.readControls };
+  return { stages, isArray, readControls: inner.readControls };
 }
 
 /** $lookup for VIA relations (M:N through junction table). Always array. */

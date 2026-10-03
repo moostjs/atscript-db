@@ -55,3 +55,16 @@ export class ActionTargetError extends HttpError<ActionTargetErrorBody> {
 export function targetInvalid(action: string, message: string): ActionTargetError {
   return new ActionTargetError("TARGET_INVALID", action, message);
 }
+
+/** The message of an error a target batch failed with — an HTTP error's body message first. */
+export function errorMessage(error: unknown): string {
+  const message = (error as { body?: { message?: unknown } } | null)?.body?.message;
+  if (typeof message === "string") return message;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The HTTP status of an error a target batch failed with (500 when it carries none). */
+export function errorStatus(error: unknown): number {
+  const status = (error as { body?: { statusCode?: unknown } } | null)?.body?.statusCode;
+  return typeof status === "number" ? status : 500;
+}

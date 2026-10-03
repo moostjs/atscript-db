@@ -12,6 +12,14 @@ import { buildProjection } from "./sql-builder";
  */
 export const GEO_DISTANCE_ALIAS = "__atscript_distance";
 
+/**
+ * Alias of the searched table inside the geo and vector search statements —
+ * a filter rendered into them correlates its relational predicates to it
+ * (`buildWhere(filter, { qualifier: dialect.quoteTable(SEARCH_SOURCE_ALIAS) })`).
+ * @since 0.1.147
+ */
+export const SEARCH_SOURCE_ALIAS = "t";
+
 /** The query controls a geo search page reads — an adapter passes its `query.controls` as-is. */
 export interface TGeoSearchControls {
   $limit?: number;
@@ -52,8 +60,8 @@ export function buildGeoSearchSelect(
   controls: TGeoSearchControls,
 ): TSqlFragment {
   const alias = dialect.quoteIdentifier(GEO_DISTANCE_ALIAS);
-  const cols = buildProjection(dialect, controls.$select, "t");
-  const inner = `SELECT ${cols}, ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable("t")} WHERE ${where.sql}`;
+  const cols = buildProjection(dialect, controls.$select, SEARCH_SOURCE_ALIAS);
+  const inner = `SELECT ${cols}, ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable(SEARCH_SOURCE_ALIAS)} WHERE ${where.sql}`;
   let sql = `SELECT * FROM (${inner}) AS ${dialect.quoteTable("_g")} WHERE ${alias} IS NOT NULL`;
   const params: unknown[] = [...distExpr.params, ...where.params];
 
@@ -94,7 +102,7 @@ export function buildGeoSearchCount(
   window: TGeoWindow,
 ): TSqlFragment {
   const alias = dialect.quoteIdentifier(GEO_DISTANCE_ALIAS);
-  const inner = `SELECT ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable("t")} WHERE ${where.sql}`;
+  const inner = `SELECT ${distExpr.sql} AS ${alias} FROM ${dialect.quoteTable(table)} AS ${dialect.quoteTable(SEARCH_SOURCE_ALIAS)} WHERE ${where.sql}`;
   let sql = `SELECT COUNT(*) AS cnt FROM (${inner}) AS ${dialect.quoteTable("_g")} WHERE ${alias} IS NOT NULL`;
   const params: unknown[] = [...distExpr.params, ...where.params];
 

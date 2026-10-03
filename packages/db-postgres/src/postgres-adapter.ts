@@ -55,6 +55,7 @@ import {
   renameGeoDistance,
   replaceColumnsFor,
   foreignKeySql,
+  SEARCH_SOURCE_ALIAS,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -1869,7 +1870,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const distanceOp = similarityToPgOp(vec.similarity);
     const where = buildWhere(query.filter, {
       // vectorDistanceSource aliases the table `t` — relational predicates correlate to it.
-      qualifier: pgDialect.quoteTable("t"),
+      qualifier: pgDialect.quoteTable(SEARCH_SOURCE_ALIAS),
     });
     const controls = query.controls || {};
     const threshold = this._resolveVectorThreshold(
@@ -2025,7 +2026,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     return {
       tableName: this.resolveTableName(),
       // The geo builders alias the table `t` — relational predicates correlate to it.
-      where: buildWhere(query.filter, { qualifier: pgDialect.quoteTable("t") }),
+      where: buildWhere(query.filter, { qualifier: pgDialect.quoteTable(SEARCH_SOURCE_ALIAS) }),
       dist: pgGeoDistanceExpr(qi(column), point),
       window: geoWindowFromControls(controls),
       controls,

@@ -11,6 +11,8 @@ import {
 } from "@atscript/db";
 import type { HttpError } from "@moostjs/event-http";
 
+import type { TDbRequestContext, TDbRequestEndpoint } from "./as-readable.controller";
+
 import { badRequest } from "./http-errors";
 import { FieldCapabilityIndex, type TCapabilityVerdict } from "./meta/field-capabilities";
 
@@ -64,7 +66,7 @@ function verdictError(verdict: TCapabilityVerdict | undefined): HttpError | unde
 }
 
 /** The readable a `$with` entry name (`rel` or dotted `rel.sub`) loads from, if resolvable. */
-function relTarget(
+export function relTarget(
   readable: AtscriptDbReadable<any>,
   name: string,
 ): AtscriptDbReadable<any> | undefined {
@@ -77,7 +79,7 @@ function relTarget(
 }
 
 /** The nested `$with` of an entry, wherever the parser put it. */
-function childrenOf(rel: TWithEntry): unknown {
+export function childrenOf(rel: TWithEntry): unknown {
   return rel.controls?.$with ?? rel.$with;
 }
 
@@ -448,4 +450,25 @@ export async function overlayWithFilters(
     out[i] = next;
   }
   return out ?? withRels;
+}
+
+/**
+ * A read's {@link TDbRequestContext}: controls, plus the client filter when
+ * present (since 0.1.147) — a frozen copy, made on first read, so the hook
+ * can never rewrite the object the request gate judges afterwards.
+ */
+export function readRequestContext(
+  endpoint: TDbRequestEndpoint,
+  controls: Record<string, unknown>,
+  filter: FilterExpr | undefined,
+): TDbRequestContext {
+  if (!filter || Object.keys(filter).length === 0) return { endpoint, controls };
+  let copy: FilterExpr | undefined;
+  return {
+    endpoint,
+    controls,
+    get filter() {
+      return (copy ??= copyClientFilter(filter, true));
+    },
+  };
 }

@@ -9,6 +9,7 @@ export {
 export type { TGeoWindow } from "./geo";
 export {
   GEO_DISTANCE_ALIAS,
+  SEARCH_SOURCE_ALIAS,
   buildGeoSearchSelect,
   buildGeoSearchCount,
   geoWindowFromControls,

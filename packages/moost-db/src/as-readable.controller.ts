@@ -25,7 +25,7 @@ import {
   QueryControlsDto,
 } from "./dto/controls.dto.as";
 import { discoverActions, getControllerFormType } from "./actions/discover";
-import { copyClientFilter } from "./relation-predicates";
+import { readRequestContext } from "./relation-predicates";
 import { applyTerminalRefs } from "./meta/terminal-ref";
 
 /**
@@ -395,30 +395,13 @@ export abstract class AsReadableController<
       request = { parsed, controls, hasNonControl };
     }
     if (typeof this.prepareRequest === "function") {
-      await this.prepareRequest(request ? this._requestContext(endpoint, request) : { endpoint });
+      await this.prepareRequest(
+        request
+          ? readRequestContext(endpoint, request.controls, request.parsed.filter as FilterExpr)
+          : { endpoint },
+      );
     }
     return request;
-  }
-
-  /** The read endpoints' {@link TDbRequestContext}: controls, plus the client filter when present (since 0.1.147). */
-  private _requestContext(
-    endpoint: TDbRequestEndpoint,
-    request: TDbParsedRequest,
-  ): TDbRequestContext {
-    const filter = request.parsed.filter as FilterExpr | undefined;
-    if (!filter || Object.keys(filter).length === 0) {
-      return { endpoint, controls: request.controls };
-    }
-    // A frozen copy, made on first read: the hook reads the client filter, it
-    // can never rewrite the object the request gate judges afterwards.
-    let copy: FilterExpr | undefined;
-    return {
-      endpoint,
-      controls: request.controls,
-      get filter() {
-        return (copy ??= copyClientFilter(filter, true));
-      },
-    };
   }
 
   // ── Validation ─────────────────────────────────────────────────────────

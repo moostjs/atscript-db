@@ -238,10 +238,10 @@ function notSupported(path: string, message: string): DbError {
   return new DbError("REL_FILTER_NOT_SUPPORTED", [{ path, message }]);
 }
 
-/** `a AND b`, either side optional / empty. */
-export function andFilters(...parts: Array<FilterExpr | undefined>): FilterExpr {
+/** The present, non-empty `parts` ANDed (`{}` when none, a single one as is). */
+export function andFilters(...parts: Array<FilterExpr | null | undefined>): FilterExpr {
   const present = parts.filter(
-    (p): p is FilterExpr => p !== undefined && Object.keys(p as object).length > 0,
+    (p): p is FilterExpr => p != null && Object.keys(p as object).length > 0,
   );
   if (present.length === 0) return {};
   if (present.length === 1) return present[0]!;

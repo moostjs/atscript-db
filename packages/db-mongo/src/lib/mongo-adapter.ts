@@ -976,9 +976,7 @@ export class MongoAdapter extends BaseDbAdapter {
     if (expectedVersion !== undefined && versionColumn === undefined) {
       throw new Error(`${op}: expectedVersion requires versionColumn`);
     }
-    const mongoFilter = containsRelationPredicate(filter)
-      ? await this._predicateWriteFilterOne(filter)
-      : buildMongoFilter(filter);
+    const mongoFilter = await this._writeFilterOne(filter);
     if (!mongoFilter) {
       return undefined;
     }
@@ -1017,9 +1015,10 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Multi-document write over a predicate filter: calls `write` with one
-   * `_id`-based filter per batch of {@link REL_WRITE_BATCH} matching ids,
-   * streamed from the cursor (never all ids in memory at once).
+   * Multi-document write over `filter`: a predicate-free filter is written
+   * as is; one with predicates calls `write` with one `_id`-based filter per
+   * batch of {@link REL_WRITE_BATCH} matching ids, streamed from the cursor
+   * (never all ids in memory at once).
    *
    * The ids come sorted by `_id`, so writes made while the cursor is open
    * can never feed back into it (otherwise a document an update moves within
@@ -1028,10 +1027,13 @@ export class MongoAdapter extends BaseDbAdapter {
    * batch returns, and an `_id` order read from the `_id` index is stable
    * (`_id` never changes).
    */
-  private async _forEachPredicateBatch(
+  private async _forEachMatching(
     filter: FilterExpr,
     write: (mongoFilter: Filter<any>) => Promise<void>,
   ): Promise<void> {
+    if (!containsRelationPredicate(filter)) {
+      return write(buildMongoFilter(filter));
+    }
     const { pipeline, pre } = this._predicateWritePlan(filter);
     pipeline.push({ $project: { _id: 1 } }, { $sort: { _id: 1 } });
     this._log("aggregate (write ids)", pipeline);
@@ -1058,16 +1060,13 @@ export class MongoAdapter extends BaseDbAdapter {
     }
   }
 
-  /** Runs an update-shaped write over `filter` — batched by `_id` when it holds predicates. */
+  /** Runs an update-shaped write over `filter` ({@link _forEachMatching}), counts summed. */
   private async _updateMatching(
     filter: FilterExpr,
     write: (mongoFilter: Filter<any>) => Promise<TDbUpdateResult>,
   ): Promise<TDbUpdateResult> {
-    if (!containsRelationPredicate(filter)) {
-      return write(buildMongoFilter(filter));
-    }
     const total: TDbUpdateResult = { matchedCount: 0, modifiedCount: 0 };
-    await this._forEachPredicateBatch(filter, async (mongoFilter) => {
+    await this._forEachMatching(filter, async (mongoFilter) => {
       const result = await write(mongoFilter);
       total.matchedCount += result.matchedCount;
       total.modifiedCount += result.modifiedCount;
@@ -1075,18 +1074,11 @@ export class MongoAdapter extends BaseDbAdapter {
     return total;
   }
 
-  /** `deleteMany` over `filter` — batched by `_id` when it holds predicates. */
-  private async _deleteMatching(filter: FilterExpr): Promise<TDbDeleteResult> {
-    let deletedCount = 0;
-    const remove = async (mongoFilter: Filter<any>) => {
-      this._log("deleteMany", mongoFilter);
-      const result = await this.collection.deleteMany(mongoFilter, this._getSessionOpts());
-      deletedCount += result.deletedCount;
-    };
-    await (containsRelationPredicate(filter)
-      ? this._forEachPredicateBatch(filter, remove)
-      : remove(buildMongoFilter(filter)));
-    return { deletedCount };
+  /** The filter of a single-document write — its predicates resolved to one `_id`. */
+  private _writeFilterOne(filter: FilterExpr) {
+    return containsRelationPredicate(filter)
+      ? this._predicateWriteFilterOne(filter)
+      : buildMongoFilter(filter);
   }
 
   /**
@@ -1279,9 +1271,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async deleteOne(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const mongoFilter = containsRelationPredicate(filter)
-      ? await this._predicateWriteFilterOne(filter)
-      : buildMongoFilter(filter);
+    const mongoFilter = await this._writeFilterOne(filter);
     if (!mongoFilter) {
       return { deletedCount: 0 };
     }
@@ -1319,7 +1309,13 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    return this._deleteMatching(filter);
+    let deletedCount = 0;
+    await this._forEachMatching(filter, async (mongoFilter) => {
+      this._log("deleteMany", mongoFilter);
+      const result = await this.collection.deleteMany(mongoFilter, this._getSessionOpts());
+      deletedCount += result.deletedCount;
+    });
+    return { deletedCount };
   }
 
   // ── Schema / Index sync ──────────────────────────────────────────────────

@@ -15,7 +15,8 @@ import {
 } from "./query-target";
 import { asFetchTable, dbActionRowsSlot, seedActionFields } from "./row-cache";
 import { applyActionScope, dbActionOverlaySlot } from "./row-scope";
-import { findRowsByIds, idKey } from "./rows-by-id";
+import { errorMessage, errorStatus } from "./action-target-error";
+import { findRowsByIds, identityKey } from "./rows-by-id";
 import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
 
 /**
@@ -205,15 +206,11 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
       if (batch.ids.length === 0) continue;
       this.processed += batch.ids.length;
       this.current = batch.ids;
-      this.yielded = true;
       yield batch;
       this.current = undefined;
     }
     this.next = ids.length;
   }
-
-  /** At least one batch reached the handler. */
-  yielded = false;
 
   /**
    * The summary of a run the handler failed after it received a batch: the
@@ -221,12 +218,11 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
    * the rows not reached are `failed` as `"not run"`, `aborted` set.
    */
   abort(error: unknown): TDbActionTargetSummary {
-    const message = errorMessageOf(error);
+    const message = errorMessage(error);
     const base = this.summary();
     const holding = this.current ?? [];
-    const reported = new Set(this.failed.map((f) => keyOf(f.id)));
-    const uncertain = holding.filter((id) => !reported.has(keyOf(id)));
-    const status = (error as { body?: { statusCode?: unknown } } | null)?.body?.statusCode;
+    const reported = new Set(this.failed.map((f) => identityKey(f.id)));
+    const uncertain = holding.filter((id) => !reported.has(identityKey(id)));
     return {
       ...base,
       processed: Math.max(0, base.processed - uncertain.length),
@@ -235,8 +231,17 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
         ...uncertain.map((id) => ({ id, reason: message })),
         ...this.source.ids.slice(this.next).map((id) => ({ id, reason: "not run" })),
       ],
-      aborted: { status: typeof status === "number" ? status : 500, message },
+      aborted: { status: errorStatus(error), message },
     };
+  }
+
+  /** The action table and the fields its gate loads — resolved once per run. */
+  private loadPlan?: ReturnType<StreamedTarget["planLoads"]>;
+
+  private planLoads() {
+    const table = asFetchTable(getActionTable(this.ctx));
+    if (!table) throw noTableError(this.ctx);
+    return { table, select: seedActionFields(this.ctx, table) };
   }
 
   /** One batch through the gate: still in the target → in scope → not disabled. */
@@ -244,9 +249,8 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
     ids: Record<string, unknown>[],
   ): Promise<{ ids: Record<string, unknown>[]; rows: Record<string, unknown>[] }> {
     const ctx = this.ctx;
-    const table = asFetchTable(getActionTable(ctx));
-    if (!table) throw noTableError(ctx);
-    const loaded = await this.source.load(ids, seedActionFields(ctx, table));
+    const { table, select } = (this.loadPlan ??= this.planLoads());
+    const loaded = await this.source.load(ids, select);
     const scoped = await applyActionScope(ctx, table, loaded);
     const present: Record<string, unknown>[] = [];
     for (const row of scoped) if (row !== undefined) present.push(row);
@@ -275,16 +279,6 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
   }
 }
 
-function keyOf(id: Record<string, unknown>): string | undefined {
-  return idKey(id, Object.keys(id).toSorted());
-}
-
-function errorMessageOf(error: unknown): string {
-  const body = (error as { body?: { message?: unknown } } | null)?.body;
-  if (typeof body?.message === "string") return body.message;
-  return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * The partial summary of the current `@DbActionTarget` run when its handler
  * failed after receiving a batch (see `StreamedTarget.abort`); `undefined`
@@ -296,7 +290,8 @@ export function abortStreamedTarget(
 ): TDbActionTargetSummary | undefined {
   if (!ctx.has(dbActionTargetKey)) return undefined;
   const target = ctx.get(dbActionTargetKey);
-  return target instanceof StreamedTarget && target.yielded ? target.abort(error) : undefined;
+  // `processed` grows only as a non-empty batch is handed over
+  return target instanceof StreamedTarget && target.processed > 0 ? target.abort(error) : undefined;
 }
 
 /**

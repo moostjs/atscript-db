@@ -56,6 +56,7 @@ import {
   renameGeoDistance,
   replaceColumnsFor,
   foreignKeySql,
+  SEARCH_SOURCE_ALIAS,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -1659,7 +1660,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     const distanceFn = similarityToMysqlFn(vec!.similarity);
     const where = buildWhere(query.filter, {
       // vectorDistanceSource aliases the table `t` — relational predicates correlate to it.
-      qualifier: mysqlDialect.quoteTable("t"),
+      qualifier: mysqlDialect.quoteTable(SEARCH_SOURCE_ALIAS),
     });
     const controls = query.controls || {};
     const threshold = this._resolveVectorThreshold(
@@ -1791,7 +1792,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     return {
       tableName: this.resolveTableName(),
       // The geo builders alias the table `t` — relational predicates correlate to it.
-      where: buildWhere(query.filter, { qualifier: mysqlDialect.quoteTable("t") }),
+      where: buildWhere(query.filter, { qualifier: mysqlDialect.quoteTable(SEARCH_SOURCE_ALIAS) }),
       dist: mysqlGeoDistanceExpr(qi(column), point),
       window: geoWindowFromControls(controls),
       controls,

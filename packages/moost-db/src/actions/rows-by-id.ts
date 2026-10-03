@@ -26,6 +26,56 @@ export function idKey(row: Record<string, unknown>, fields: readonly string[]): 
   return key;
 }
 
+/** {@link idKey} of an identity over its own fields. */
+export function identityKey(id: Record<string, unknown>): string | undefined {
+  return idKey(id, Object.keys(id).toSorted());
+}
+
+/**
+ * The deduped identities of `rows` over `fields` — a value read by `read`
+ * (default: the row's own field) — and, per row, its identity's index in
+ * `ids` (`-1`: the row is absent, or a value is missing / null).
+ */
+export function dedupeIdentities(
+  rows: readonly (Record<string, unknown> | undefined)[],
+  fields: readonly string[],
+  read: (row: Record<string, unknown>, field: string) => unknown = (row, f) => row[f],
+): { ids: Record<string, unknown>[]; index: number[] } {
+  const ids: Record<string, unknown>[] = [];
+  const index: number[] = [];
+  const byKey = new Map<string, number>();
+  const sorted = fields.toSorted();
+  for (const row of rows) {
+    const id = row && fields.length > 0 ? identityOf(row, fields, read) : undefined;
+    const k = id && idKey(id, sorted);
+    if (k === undefined) {
+      index.push(-1);
+      continue;
+    }
+    let at = byKey.get(k);
+    if (at === undefined) {
+      at = ids.push(id!) - 1;
+      byKey.set(k, at);
+    }
+    index.push(at);
+  }
+  return { ids, index };
+}
+
+function identityOf(
+  row: Record<string, unknown>,
+  fields: readonly string[],
+  read: (row: Record<string, unknown>, field: string) => unknown,
+): Record<string, unknown> | undefined {
+  const id: Record<string, unknown> = {};
+  for (const f of fields) {
+    const value = read(row, f);
+    if (value === undefined || value === null) return undefined;
+    id[f] = value;
+  }
+  return id;
+}
+
 /**
  * The rows `ids` address that also match `scope` (none = every row),
  * aligned with `ids` — `undefined` where nothing matched. One `findMany`

@@ -28,7 +28,7 @@ import {
 } from "./query-target";
 import { dbActionRowSlot, dbActionRowsSlot, useDbActionRow, useDbActionRows } from "./row-cache";
 import { dbActionOverlaySlot, scopedControllerSlot } from "./row-scope";
-import { idKey } from "./rows-by-id";
+import { dedupeIdentities, identityKey } from "./rows-by-id";
 import { dbActionTargetKey, type TDbActionTarget } from "./target";
 
 /** Internal: a source controller's batch `$actions` verdicts for delegated ids. */
@@ -358,34 +358,7 @@ export function mapToSourceIds(
   rows: readonly Record<string, unknown>[],
   idMap: Readonly<Record<string, string>>,
 ): { ids: Record<string, unknown>[]; index: number[] } {
-  const fields = Object.keys(idMap).toSorted();
-  const ids: Record<string, unknown>[] = [];
-  const index: number[] = [];
-  const byKey = new Map<string, number>();
-  for (const row of rows) {
-    const id: Record<string, unknown> = {};
-    let complete = true;
-    for (const [field, path] of Object.entries(idMap)) {
-      const value = valueAt(row, path);
-      if (value === undefined || value === null) {
-        complete = false;
-        break;
-      }
-      id[field] = value;
-    }
-    const k = complete ? idKey(id, fields) : undefined;
-    if (k === undefined) {
-      index.push(-1);
-      continue;
-    }
-    let at = byKey.get(k);
-    if (at === undefined) {
-      at = ids.push(id) - 1;
-      byKey.set(k, at);
-    }
-    index.push(at);
-  }
-  return { ids, index };
+  return dedupeIdentities(rows, Object.keys(idMap), (row, field) => valueAt(row, idMap[field]));
 }
 
 // ── Running the source's action pipeline (delegated query targets) ──────────
@@ -453,8 +426,8 @@ export async function runSourceActionBatch(
         return outcome;
       }
       outcome.skipped.push(...refused.skipped);
-      const refusedKeys = new Set(refused.skipped.map((s) => keyOf(s.id)));
-      pending = pending.filter((id) => !refusedKeys.has(keyOf(id)));
+      const refusedKeys = new Set(refused.skipped.map((s) => identityKey(s.id)));
+      pending = pending.filter((id) => !refusedKeys.has(identityKey(id)));
       continue;
     }
     collectOutcome(child!, pending, outcome);
@@ -463,10 +436,6 @@ export async function runSourceActionBatch(
     break;
   }
   return outcome;
-}
-
-function keyOf(id: Record<string, unknown>): string {
-  return idKey(id, Object.keys(id).toSorted()) ?? "";
 }
 
 /** The ids (+ reasons) of an `ActionDisabledError` thrown by the source's gate. */

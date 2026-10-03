@@ -49,6 +49,7 @@ import {
   geoWindowFromControls,
   renameGeoDistance,
   replaceColumnsFor,
+  SEARCH_SOURCE_ALIAS,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
@@ -1594,8 +1595,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const controls = (query.controls ?? {}) as Record<string, unknown>;
     return {
       tableName: this.resolveTableName(),
-      // The geo builders alias the table `"t"` — relational predicates correlate to it.
-      where: buildWhere(query.filter, { qualifier: sqliteDialect.quoteTable("t") }),
+      where: buildWhere(query.filter, { qualifier: sqliteDialect.quoteTable(SEARCH_SOURCE_ALIAS) }),
       dist: haversineDistanceExpr(`"${esc(column)}"`, point),
       window: geoWindowFromControls(controls),
       controls,

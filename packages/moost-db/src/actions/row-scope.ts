@@ -28,8 +28,8 @@ export const ACTION_SCOPED = Symbol.for("atscript-db.actionScoped");
  * `fieldVisibility`, reached duck-typed like the rest of the controller
  * surface (see `id-cache.controllerTable`).
  */
-export interface TScopedController {
-  [ACTION_OVERLAY]?: (action: string | undefined) => Promise<FilterExpr | undefined>;
+interface TScopedController {
+  [ACTION_OVERLAY]?: () => Promise<FilterExpr | undefined>;
   [ACTION_SCOPE]?: (action: string, ctx: TDbActionScopeContext) => Promise<FilterExpr | undefined>;
   readonly [ACTION_SCOPED]?: boolean;
   fieldVisibility?: { readonly scoped: boolean; readonly isVisible: (path: string) => boolean };
@@ -72,7 +72,7 @@ export const dbActionOverlaySlot = cached<Promise<FilterExpr | null>>(async (ctx
   const overlayOf = ctrl?.[ACTION_OVERLAY];
   if (!overlayOf) return null;
   await awaitActionPrepared(ctx);
-  return (await overlayOf.call(ctrl, readCurrentActionMeta(ctx)?.name)) ?? null;
+  return (await overlayOf.call(ctrl)) ?? null;
 });
 
 /** `true` when this action's controller overrides `actionRowScope`. */
@@ -93,20 +93,9 @@ export async function applyActionScope(
   rows: Array<Record<string, unknown> | undefined>,
 ): Promise<Array<Record<string, unknown> | undefined>> {
   const ctrl = ctx.get(scopedControllerSlot);
-  const name = readCurrentActionMeta(ctx)?.name;
-  if (!ctrl?.[ACTION_SCOPED] || name === undefined) return rows;
-  return maskOutOfScope(ctrl, name, table, rows);
-}
-
-/** {@link applyActionScope} for an explicit controller and action. */
-async function maskOutOfScope(
-  ctrl: TScopedController,
-  action: string,
-  table: TScopeTable,
-  rows: Array<Record<string, unknown> | undefined>,
-): Promise<Array<Record<string, unknown> | undefined>> {
-  const scopeOf = ctrl[ACTION_SCOPE];
-  if (!scopeOf || rows.every((row) => row === undefined)) return rows;
+  const action = readCurrentActionMeta(ctx)?.name;
+  const scopeOf = ctrl?.[ACTION_SCOPED] ? ctrl[ACTION_SCOPE] : undefined;
+  if (!scopeOf || action === undefined || rows.every((row) => row === undefined)) return rows;
   const idFields = table.preferredId?.length ? table.preferredId : table.primaryKeys;
   const { ids, index } = candidateIds(rows, idFields);
   // No candidate: no hook call — a row without its identity is in no scope.
@@ -128,13 +117,6 @@ export function withOverlay(
   overlay: FilterExpr | null | undefined,
 ): FilterExpr {
   return overlay ? ({ $and: [filter, overlay] } as FilterExpr) : filter;
-}
-
-/** The non-empty `filters` ANDed (`{}` when none). */
-export function conjoin(...filters: Array<FilterExpr | null | undefined>): FilterExpr {
-  const parts = filters.filter((f): f is FilterExpr => nonEmptyFilter(f) !== undefined);
-  if (parts.length === 0) return {} as FilterExpr;
-  return parts.length === 1 ? parts[0] : ({ $and: parts } as FilterExpr);
 }
 
 /**
