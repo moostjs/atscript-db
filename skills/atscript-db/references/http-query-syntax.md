@@ -165,7 +165,7 @@ GET /tickets/query?$select=bucket(openedAt,week,'Europe/Berlin',sun):week,status
 | 1   | `bucket(field,unit[,tz][,weekStart])[:alias]`; default alias `unit_field`; dotted field needs `:alias`. The alias must be listed in `$groupBy`.                                             |
 | 2   | Quote a zone containing `/` (`'America/New_York'`); bare `UTC` ok; empty slot = default zone: `bucket(openedAt,week,,sun)`.                                                                 |
 | 3   | `bucket` is reserved (never a custom aggregate). Missing field/unit, one argument, > 4 arguments → 400 `Malformed query string`. Unknown unit/zone/week start → 400 with a precise message. |
-| 4   | Labels are `YYYY-MM-DD` strings (`hour`: `YYYY-MM-DDTHH`) — quote them in `$having` (`week>='2026-03-01'`, `h>='2026-03-29T05'`).                                                           |
+| 4   | Labels are `YYYY-MM-DD` strings (`hour`: `YYYY-MM-DDTHH:00`) — quote them in `$having` (`week>='2026-03-01'`, `h>='2026-03-29T05:00'`).                                                     |
 
 Contract (labels, zones, eligible fields, 400/501, `/meta` discovery) → [calendar-buckets.md](calendar-buckets.md).
 

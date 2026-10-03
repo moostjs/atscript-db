@@ -260,15 +260,15 @@ describe("gate wording", () => {
 
   it("hour buckets (since 0.1.147): accepted when advertised, BUCKET_NOT_SUPPORTED and absent from /meta when not", async () => {
     const { controller, adapter } = bind(BucketTicket);
-    adapter.aggregateResult = [{ h: "2026-03-29T10", n: 2 }];
+    adapter.aggregateResult = [{ h: "2026-03-29T10:00", n: 2 }];
     const url =
-      "?$select=bucket(openedAt,hour,'Asia/Kolkata'):h,count(*):n&$groupBy=h&$sort=h&$having=h>='2026-03-29T05'";
-    expect(await controller.query(url)).toEqual([{ h: "2026-03-29T10", n: 2 }]);
+      "?$select=bucket(openedAt,hour,'Asia/Kolkata'):h,count(*):n&$groupBy=h&$sort=h&$having=h>='2026-03-29T05:00'";
+    expect(await controller.query(url)).toEqual([{ h: "2026-03-29T10:00", n: 2 }]);
     const sent = adapter.calls.find((c) => c.method === "aggregate")!.args[0];
     expect(sent.controls.$select.buckets).toMatchObject([
       { alias: "h", field: "openedAt", unit: "hour", tz: "Asia/Kolkata" },
     ]);
-    expect(sent.controls.$having).toEqual({ h: { $gte: "2026-03-29T05" } });
+    expect(sent.controls.$having).toEqual({ h: { $gte: "2026-03-29T05:00" } });
 
     adapter.units = new Set(BUCKET_UNITS.filter((u) => u !== "hour"));
     const meta = await controller.meta();

@@ -59,96 +59,6 @@ const SEED = [
 
 const n = { $fn: "count", $field: "*", $as: "n" };
 
-/**
- * Hour buckets (since 0.1.147): rows per scenario and the expected groups.
- * The label is the local wall-clock hour — a fall-back's repeated hour merges
- * its two UTC hours, a spring-forward's skipped hour never appears, and in
- * +05:30 / +05:45 / −03:30 zones the hour turns at :30 / :15 / :30 UTC.
- */
-const HOUR_SCENARIOS: Array<[tz: string, rows: string[], groups: Array<[string, number]>]> = [
-  [
-    "UTC",
-    ["2026-06-14T00:30:00Z", "2026-06-14T01:00:00Z", "2026-06-14T01:59:59.999Z"],
-    [
-      ["2026-06-14T00", 1],
-      ["2026-06-14T01", 2],
-    ],
-  ],
-  // Berlin fall-back 2026-10-25 (01:00Z): 00:30Z = 02:30 CEST, 01:30Z = 02:30 CET
-  [
-    "Europe/Berlin",
-    [
-      "2026-10-24T23:30:00Z",
-      "2026-10-25T00:30:00Z",
-      "2026-10-25T01:30:00Z",
-      "2026-10-25T02:30:00Z",
-    ],
-    [
-      ["2026-10-25T01", 1],
-      ["2026-10-25T02", 2],
-      ["2026-10-25T03", 1],
-    ],
-  ],
-  // Berlin spring-forward 2026-03-29 (01:00Z): 02:00–03:00 local never happens
-  [
-    "Europe/Berlin",
-    ["2026-03-29T00:30:00Z", "2026-03-29T01:30:00Z"],
-    [
-      ["2026-03-29T01", 1],
-      ["2026-03-29T03", 1],
-    ],
-  ],
-  [
-    "America/New_York",
-    ["2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z", "2026-11-01T07:30:00Z"],
-    [
-      ["2026-11-01T01", 2],
-      ["2026-11-01T02", 1],
-    ],
-  ],
-  [
-    "America/New_York",
-    ["2026-03-08T06:30:00Z", "2026-03-08T07:30:00Z"],
-    [
-      ["2026-03-08T01", 1],
-      ["2026-03-08T03", 1],
-    ],
-  ],
-  [
-    "Asia/Kolkata",
-    ["2026-06-14T04:29:59Z", "2026-06-14T04:30:00Z", "2026-06-14T05:29:59Z"],
-    [
-      ["2026-06-14T09", 1],
-      ["2026-06-14T10", 2],
-    ],
-  ],
-  [
-    "Asia/Kathmandu",
-    ["2026-06-14T04:14:59Z", "2026-06-14T04:15:00Z"],
-    [
-      ["2026-06-14T09", 1],
-      ["2026-06-14T10", 1],
-    ],
-  ],
-  // St. John's −02:30 → −03:30 at 04:30Z on 2026-11-01; −03:30 → −02:30 at 05:30Z on 2026-03-08
-  [
-    "America/St_Johns",
-    ["2026-11-01T03:45:00Z", "2026-11-01T04:45:00Z", "2026-11-01T05:45:00Z"],
-    [
-      ["2026-11-01T01", 2],
-      ["2026-11-01T02", 1],
-    ],
-  ],
-  [
-    "America/St_Johns",
-    ["2026-03-08T05:15:00Z", "2026-03-08T05:45:00Z"],
-    [
-      ["2026-03-08T01", 1],
-      ["2026-03-08T03", 1],
-    ],
-  ],
-];
-
 /** Sorts result rows by their JSON form — for assertions on unordered groups. */
 function bySet(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   return rows.toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -427,9 +337,7 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
   // ── calendar buckets ─────────────────────────────────────────────────────
 
   it("advertises every calendar-bucket unit", () => {
-    expect([...new MemoryAdapter().calendarBucketUnits()].toSorted()).toEqual(
-      ["hour", "day", "month", "quarter", "week", "year"].toSorted(),
-    );
+    expect([...new MemoryAdapter().calendarBucketUnits()]).toEqual([...BUCKET_UNITS]);
   });
 
   // WHY: the Berlin spring-forward day holds 23:00Z..21:59:59Z; UTC splits differently.
@@ -479,31 +387,6 @@ describe("MemoryAdapter aggregate (grouping engine)", () => {
       { week: "2026-03-29", n: 3 },
       { week: "2026-12-27", n: 1 },
     ]);
-  });
-
-  // WHY: the hour is the zone's wall-clock hour (HOUR_SCENARIOS), not a UTC truncation.
-  it("buckets by local wall-clock hour across DST and non-whole-hour offsets", async () => {
-    await table.insertMany(
-      HOUR_SCENARIOS.flatMap(([, rows], s) =>
-        rows.map((iso, i) => ({
-          id: 100 + s * 10 + i,
-          region: "hour",
-          openedAt: at(iso),
-          stats: { views: 0 },
-        })),
-      ) as any,
-    );
-    for (const [tz, rows, groups] of HOUR_SCENARIOS) {
-      const got = await agg(
-        {
-          $groupBy: ["h"],
-          $select: [{ $bucket: "hour", $field: "openedAt", $tz: tz, $as: "h" }, n],
-          $sort: { h: 1 },
-        },
-        { openedAt: { $in: rows.map(at) } },
-      );
-      expect(got, `${tz} ${rows[0]}`).toEqual(groups.map(([h, count]) => ({ h, n: count })));
-    }
   });
 
   // WHY: every unit × zone must agree with the kernel (the oracle SQLite's UDF runs too).

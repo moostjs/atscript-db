@@ -36,8 +36,9 @@ function bucket(unit: BucketUnit, extra: Partial<TResolvedBucket> = {}): TResolv
 }
 
 const L = `(to_timestamp("openedAt"::double precision / 1000) AT TIME ZONE 'Europe/Berlin')::date`;
-const wrap = (first: string) =>
-  `CASE WHEN "openedAt" >= 86400000 AND "openedAt" < 32503680000000 THEN to_char(${first}::timestamp, 'YYYY-MM-DD') END`;
+const GUARD = `"openedAt" >= 86400000 AND "openedAt" < 32503680000000`;
+const wrap = (first: string, format = "YYYY-MM-DD") =>
+  `CASE WHEN ${GUARD} THEN to_char(${first}::timestamp, '${format}') END`;
 
 describe("pgCalendarBucket", () => {
   it("day: the local date", () => {
@@ -67,8 +68,10 @@ describe("pgCalendarBucket", () => {
   // repeated hour is one label.
   it("hour: to_char of the zone's wall time, not of a truncated instant", () => {
     expect(pgCalendarBucket(`"openedAt"`, bucket("hour", { tz: "Asia/Kathmandu" }))).toBe(
-      `CASE WHEN "openedAt" >= 86400000 AND "openedAt" < 32503680000000 THEN ` +
-        `to_char((to_timestamp("openedAt"::double precision / 1000) AT TIME ZONE 'Asia/Kathmandu'), 'YYYY-MM-DD"T"HH24') END`,
+      wrap(
+        `(to_timestamp("openedAt"::double precision / 1000) AT TIME ZONE 'Asia/Kathmandu')`,
+        'YYYY-MM-DD"T"HH24":00"',
+      ),
     );
   });
 

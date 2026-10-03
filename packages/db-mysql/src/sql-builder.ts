@@ -398,7 +398,7 @@ const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
 
 /**
  * Calendar-bucket label: TEXT `'YYYY-MM-DD'` — the local date of the
- * bucket's first day in `b.tz` — or, for `hour`, `'YYYY-MM-DDTHH'` — the
+ * bucket's first day in `b.tz` — or, for `hour`, `'YYYY-MM-DDTHH:00'` — the
  * local wall-clock hour — or NULL for a NULL source or one outside
  * `[BUCKET_MIN_INSTANT, BUCKET_MAX_INSTANT)`.
  *
@@ -414,8 +414,8 @@ const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
  * The local wall time is `CONVERT_TZ(U, '+00:00', '<tz>')`, or `U` for `UTC`
  * (no time zone tables needed) — UTC → local is never ambiguous, so a
  * `+05:30` zone's hour starts at :30 UTC and a DST fall-back's repeated hour
- * is one label. The hour label is formatted straight from it; the other
- * units truncate its `DATE()` with calendar arithmetic. `CONVERT_TZ`
+ * is one label. The hour is formatted from it; the other units truncate
+ * its `DATE()` with calendar arithmetic. `CONVERT_TZ`
  * returns NULL when the zone is unknown to the
  * server and its input unchanged outside its range — `MysqlAdapter` probes
  * each zone before running the query (`BUCKET_TZ_UNAVAILABLE`).
@@ -436,34 +436,40 @@ export function mysqlCalendarBucket(quotedCol: string, b: TResolvedBucket): stri
   }
   const wall = b.tz === "UTC" ? utc : `CONVERT_TZ(${utc}, '+00:00', ${sqlTimeZoneLiteral(b.tz)})`;
   const local = `DATE(${wall})`;
-  let first: string;
+  let value: string;
+  let format = "%Y-%m-%d";
   switch (b.unit) {
     case "hour": {
-      return `CASE WHEN ${inRange} THEN DATE_FORMAT(${wall}, '%Y-%m-%dT%H') END`;
+      value = wall;
+      format = "%Y-%m-%dT%H:00";
+      break;
     }
     case "day": {
-      first = local;
+      value = local;
       break;
     }
     case "week": {
       // WEEKDAY: 0 = Monday, so WEEKDAY + 1 is the ISO weekday
-      first = `DATE_SUB(${local}, INTERVAL ((WEEKDAY(${local}) + 1 - ${b.weekStartIso} + 7) % 7) DAY)`;
+      value = `DATE_SUB(${local}, INTERVAL ((WEEKDAY(${local}) + 1 - ${b.weekStartIso} + 7) % 7) DAY)`;
       break;
     }
     case "month": {
-      first = `DATE_SUB(${local}, INTERVAL DAYOFMONTH(${local}) - 1 DAY)`;
+      value = `DATE_SUB(${local}, INTERVAL DAYOFMONTH(${local}) - 1 DAY)`;
       break;
     }
     case "quarter": {
-      first = `(MAKEDATE(YEAR(${local}), 1) + INTERVAL (QUARTER(${local}) - 1) QUARTER)`;
+      value = `(MAKEDATE(YEAR(${local}), 1) + INTERVAL (QUARTER(${local}) - 1) QUARTER)`;
+      break;
+    }
+    case "year": {
+      value = `MAKEDATE(YEAR(${local}), 1)`;
       break;
     }
     default: {
-      // year
-      first = `MAKEDATE(YEAR(${local}), 1)`;
+      throw new Error(`Unhandled calendar bucket unit "${String(b.unit satisfies never)}"`);
     }
   }
-  return `CASE WHEN ${inRange} THEN DATE_FORMAT(${first}, '%Y-%m-%d') END`;
+  return `CASE WHEN ${inRange} THEN DATE_FORMAT(${value}, '${format}') END`;
 }
 
 // ── Geo helpers (native POINT SRID 4326) ────────────────────────────────────

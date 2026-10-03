@@ -31,13 +31,13 @@ curl "http://localhost:3000/tickets/query?openedAt>=1772323200000&\$select=bucke
 
 ## The bucket entry
 
-| Key          | Required | Values                                                                               | Default          |
-| ------------ | -------- | ------------------------------------------------------------------------------------ | ---------------- |
-| `$bucket`    | yes      | `'hour' \| 'day' \| 'week' \| 'month' \| 'quarter' \| 'year'` (`hour` since 0.1.147) | —                |
-| `$field`     | yes      | a `number.timestamp` field path                                                      | —                |
-| `$tz`        | no       | a canonical IANA time zone (`'Europe/Berlin'`)                                       | `'UTC'`          |
-| `$weekStart` | no       | `'mon' \| 'tue' \| 'wed' \| 'thu' \| 'fri' \| 'sat' \| 'sun'` — unit `week` only     | `'mon'`          |
-| `$as`        | no       | the output key                                                                       | `{unit}_{field}` |
+| Key          | Required | Values                                                                           | Default          |
+| ------------ | -------- | -------------------------------------------------------------------------------- | ---------------- |
+| `$bucket`    | yes      | `'hour' \| 'day' \| 'week' \| 'month' \| 'quarter' \| 'year'`                    | —                |
+| `$field`     | yes      | a `number.timestamp` field path                                                  | —                |
+| `$tz`        | no       | a canonical IANA time zone (`'Europe/Berlin'`)                                   | `'UTC'`          |
+| `$weekStart` | no       | `'mon' \| 'tue' \| 'wed' \| 'thu' \| 'fri' \| 'sat' \| 'sun'` — unit `week` only | `'mon'`          |
+| `$as`        | no       | the output key                                                                   | `{unit}_{field}` |
 
 The alias is how the rest of the query refers to the bucket:
 
@@ -63,11 +63,11 @@ Quote the zone when it contains `/` (`'America/New_York'`); `UTC` may stay bare.
 
 ## The label
 
-Every bucket value is a string `YYYY-MM-DD`: **the local calendar date of the bucket's first day**, in the bucket's zone. The format is the same for every unit except `hour`, whose label adds the local hour, `YYYY-MM-DDTHH`:
+Every bucket value is a string `YYYY-MM-DD`: **the local calendar date of the bucket's first day**, in the bucket's zone. The format is the same for every unit except `hour`, whose label adds the local hour, `YYYY-MM-DDTHH:00`:
 
 | Unit           | Label for a ticket opened on Sunday 2026-03-29, 14:00 in Berlin |
 | -------------- | --------------------------------------------------------------- |
-| `hour`         | `2026-03-29T14`                                                 |
+| `hour`         | `2026-03-29T14:00`                                              |
 | `day`          | `2026-03-29`                                                    |
 | `week` (`mon`) | `2026-03-23`                                                    |
 | `week` (`sun`) | `2026-03-29`                                                    |
@@ -78,7 +78,7 @@ Every bucket value is a string `YYYY-MM-DD`: **the local calendar date of the bu
 What follows from the contract:
 
 - **Days are local.** An instant belongs to the day it falls on in `$tz`, DST included — `2026-03-29T23:30:00Z` is day `2026-03-30` in Berlin and `2026-03-29` in UTC.
-- **Hours are local wall-clock hours** — see [Hour buckets](#hour-buckets).
+- **Labels are wall-clock times in the bucket's zone, not instants.** For the instant a bucket starts use `bucketStartInstant(label, tz)` ([Filling gaps](#filling-gaps)) — `new Date(label)` reads the label in the runtime's own zone. Hours are local wall-clock hours — see [Hour buckets](#hour-buckets).
 - **Labels sort as strings.** `$sort` and `$having` comparisons need no date parsing.
 - **A week label can fall in the previous month or year.** Monday-start week of 2027-01-01 is `2026-12-28`.
 - **Quarters start in January, April, July and October.** Fiscal years are not supported.
@@ -86,13 +86,13 @@ What follows from the contract:
 
 Result typing follows: the label is `string`, or `string | null` when the source field is optional.
 
-## Hour buckets
+## Hour buckets (since 0.1.147) {#hour-buckets}
 
-An `hour` bucket (since 0.1.147) is the hour on the clock in `$tz`, labelled `YYYY-MM-DDTHH`. It follows the same rule as `day` — an instant belongs to the period it falls in locally — so:
+An `hour` bucket is the hour on the clock in `$tz`, labelled `YYYY-MM-DDTHH:00`. It follows the same rule as `day` — an instant belongs to the period it falls in locally — so:
 
 - **Zones with a non-whole-hour offset** turn hours off the UTC hour. In `Asia/Kolkata` (+05:30) hour `10` runs 04:30Z–05:30Z; in `Asia/Kathmandu` (+05:45) 04:15Z–05:15Z; in `America/St_Johns` (−03:30, −02:30 in summer) at :30 past the UTC hour.
-- **DST fall-back:** the repeated hour is **one** label covering both passes. In `Europe/Berlin` on 2026-10-25, `2026-10-25T02` holds 00:00Z–02:00Z (02:00–03:00 CEST, then 02:00–03:00 CET) — two hours of rows. The 25-hour fall-back `day` works the same way.
-- **DST spring-forward:** the skipped hour has **no** label. In `Europe/Berlin` on 2026-03-29, `2026-03-29T01` is followed by `2026-03-29T03`. A 30-minute shift (`Australia/Lord_Howe`) leaves a half-hour bucket instead of none.
+- **DST fall-back:** the repeated hour is **one** label covering both passes. In `Europe/Berlin` on 2026-10-25, `2026-10-25T02:00` holds 00:00Z–02:00Z (02:00–03:00 CEST, then 02:00–03:00 CET) — two hours of rows. The 25-hour fall-back `day` works the same way.
+- **DST spring-forward:** the skipped hour has **no** label. In `Europe/Berlin` on 2026-03-29, `2026-03-29T01:00` is followed by `2026-03-29T03:00`. A 30-minute shift (`Australia/Lord_Howe`) leaves a half-hour bucket instead of none.
 
 Every adapter applies this rule, so the same rows give the same labels on PostgreSQL, MySQL, SQLite, MongoDB and memory. If a chart needs equal-length intervals across a DST change, bucket in `UTC` and convert on the client.
 
@@ -106,10 +106,10 @@ const hourly = await tickets.aggregate({
     ],
     $groupBy: ["hour"],
     $sort: { hour: 1 },
-    $having: { hour: { $gte: "2026-10-25T00" } },
+    $having: { hour: { $gte: "2026-10-25T00:00" } },
   },
 });
-// [{ hour: "2026-10-25T01", n: 7 }, { hour: "2026-10-25T02", n: 15 }, { hour: "2026-10-25T03", n: 6 }, …]
+// [{ hour: "2026-10-25T01:00", n: 7 }, { hour: "2026-10-25T02:00", n: 15 }, { hour: "2026-10-25T03:00", n: 6 }, …]
 ```
 
 ## Time zones
@@ -154,32 +154,23 @@ A UI can build its time-grouping controls from the table's [`/meta`](/http/crud#
 
 ## Filling gaps
 
-Groups exist only where rows exist, so a chart of weekly counts has holes for empty weeks. `@atscript/db-client` re-exports two helpers from `@uniqu/core` to fill them:
+Groups exist only where rows exist, so a chart of weekly counts has holes for empty weeks. `@atscript/db-client` re-exports the label helpers from `@uniqu/core` to fill them:
 
-- `nextBucketLabel(label, unit, weekStart?)` — the label of the following bucket. Calendar arithmetic only; no time zone needed. The third argument may also be an options object `{ weekStart?, tz? }`: with `tz`, a label that never occurs in that zone is skipped (since 0.1.147).
+- `bucketSeries(first, last, unit, { weekStart?, tz?, maxLength? })` — every label from the bucket holding `first` through the one holding `last`, inclusive: the full axis of the chart. Pass the query's unit, `$weekStart` and `$tz`. With `tz`, labels that never occur in that zone — the hour a DST spring-forward skips — are left out, so the axis holds exactly the labels the server can return. Throws a `RangeError` past `maxLength` labels (default 100 000).
+- `nextBucketLabel(label, unit, { weekStart?, tz? })` — the label of the following bucket, one step. Zone-free unless `tz` is given; pass `tz` for `hour`. (The third argument may also be just the week start — the older form.)
 - `bucketStartInstant(label, tz)` — the first instant (epoch ms) of that local date or hour, for a time axis. On a day whose midnight is skipped by DST, it returns the first instant that exists that day. A repeated hour starts at its first pass; a skipped hour returns the transition instant (the start of the next hour).
 
 ```typescript
-import { nextBucketLabel } from "@atscript/db-client";
+import { bucketSeries } from "@atscript/db-client";
 
 const counts = new Map(weekly.map((row) => [row.week, row.n]));
-const series = [];
-for (
-  let week = weekly[0].week;
-  week <= weekly[weekly.length - 1].week;
-  week = nextBucketLabel(week, "week", "sun")
-) {
-  series.push({ week, n: counts.get(week) ?? 0 });
-}
-```
+const series = bucketSeries(weekly[0].week, weekly.at(-1)!.week, "week", { weekStart: "sun" }).map(
+  (week) => ({ week, n: counts.get(week) ?? 0 }),
+);
 
-Pass the same unit and week start the query used. For `hour`, also pass the query's zone, or the series gets an empty bucket for the hour a spring-forward skips:
-
-```typescript
-import { nextBucketLabel } from "@atscript/db-client";
-
-nextBucketLabel("2026-03-29T01", "hour", { tz: "Europe/Berlin" }); // "2026-03-29T03"
-nextBucketLabel("2026-03-29T01", "hour"); // "2026-03-29T02" — never occurs in Berlin
+bucketSeries("2026-03-29T00:00", "2026-03-29T04:00", "hour", { tz: "Europe/Berlin" });
+// ["2026-03-29T00:00", "2026-03-29T01:00", "2026-03-29T03:00", "2026-03-29T04:00"]
+// without tz, "2026-03-29T02:00" would appear — an hour that never occurs in Berlin
 ```
 
 ## Performance
@@ -214,7 +205,7 @@ Changed in 0.1.133: programmatically, a strict-mode bucket source that is not a 
 
 ## Adapter notes
 
-All five adapters support all six units (`hour` since 0.1.147).
+All five adapters support all six units.
 
 | Adapter    | Requirement                                                                                                                                                                 |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -223,8 +214,6 @@ All five adapters support all six units (`hour` since 0.1.147).
 | SQLite     | A driver with the `registerFunction` hook — `BetterSqlite3Driver` has it. See [SQLite — Calendar buckets](/adapters/sqlite#calendar-buckets).                               |
 | MongoDB    | MongoDB 4.0 or later. See [MongoDB — Calendar buckets](/adapters/mongodb#calendar-buckets).                                                                                 |
 | Memory     | None — computed in process. See [Memory — Grouped queries](/adapters/memory#grouped-queries).                                                                               |
-
-Every adapter computes the hour from the zone's local wall time — never by truncating the UTC instant — so non-whole-hour offsets and DST follow [Hour buckets](#hour-buckets) everywhere. MySQL needs its time zone tables for `hour` exactly as for the other units.
 
 Each engine uses its own time zone data: PostgreSQL its tzdata, MySQL its `mysql.time_zone*` tables, MongoDB its bundled database, SQLite and memory the Node.js runtime's ICU data. If they are at different tzdata releases, labels near midnight can differ for dates affected by the changes between those releases. Keep the database's time zone data current.
 

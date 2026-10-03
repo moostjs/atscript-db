@@ -1,6 +1,6 @@
 # calendar-buckets (`{ $bucket }` / `bucket()` — group by hour, day, week, month, quarter, year in a time zone)
 
-Since 0.1.132, every adapter (`hour` since 0.1.147). A computed `$select` entry of a grouped query ([aggregation.md](aggregation.md)); the value is a `YYYY-MM-DD` label (`hour`: `YYYY-MM-DDTHH`).
+Since 0.1.132, every adapter (`hour` since 0.1.147). A computed `$select` entry of a grouped query ([aggregation.md](aggregation.md)); the value is a `YYYY-MM-DD` label (`hour`: `YYYY-MM-DDTHH:00`).
 
 ## Quick start
 
@@ -40,8 +40,8 @@ URL: `bucket(field,unit[,tz][,weekStart])[:alias]`; quote a zone containing `/`;
 
 | #   | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Label = local date (in `$tz`) of the bucket's FIRST day: day `2026-03-29`, week(mon) `2026-03-23`, month `2026-03-01`, quarter/year `2026-01-01`; hour = local date + wall-clock hour `2026-03-29T14`. Week label may fall in the previous month/year. Quarters = Jan/Apr/Jul/Oct.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 1a  | `hour` = the hour on the CLOCK in `$tz` (since 0.1.147), same rule as `day`: +05:30 / +05:45 / −03:30 zones turn hours at :30 / :15 / :30 UTC; DST fall-back → the repeated hour is ONE label holding both passes (Berlin `2026-10-25T02` = 00:00Z–02:00Z, 2 h of rows); spring-forward → the skipped hour has NO label (Berlin `…T01` → `…T03`); 30-min shift (Lord_Howe) → a half-hour bucket. Need equal-length hours across DST → bucket in `UTC`.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 1   | Label = local date (in `$tz`) of the bucket's FIRST day: day `2026-03-29`, week(mon) `2026-03-23`, month `2026-03-01`, quarter/year `2026-01-01`; hour = local date + wall-clock hour `2026-03-29T14:00`. Week label may fall in the previous month/year. Quarters = Jan/Apr/Jul/Oct.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 1a  | `hour` = the hour on the CLOCK in `$tz`, same rule as `day`: +05:30 / +05:45 / −03:30 zones turn hours at :30 / :15 / :30 UTC; DST fall-back → the repeated hour is ONE label holding both passes (Berlin `2026-10-25T02:00` = 00:00Z–02:00Z, 2 h of rows); spring-forward → the skipped hour has NO label (Berlin `…T01:00` → `…T03:00`); 30-min shift (Lord_Howe) → a half-hour bucket. Need equal-length hours across DST → bucket in `UTC`.                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2   | Labels sort chronologically as strings → `$sort` / `$having` need no parsing. `$having` / URL values are strings (quote in URLs: hyphens).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 3   | `null` / missing source, or instant outside `[1970-01-02Z, 3000-01-01Z)` → `null` label; all form ONE `null` group. Typed `string` (`string \| null` for an optional source) in `@atscript/db-client`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 4   | Only in grouped queries; the alias MUST be in `$groupBy`. `findMany` / no `$groupBy` → `INVALID_QUERY` (`Calendar buckets are only valid in grouped queries`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -66,24 +66,31 @@ URL: `bucket(field,unit[,tz][,weekStart])[:alias]`; quote a zone containing `/`;
 ## Gap filling (client or server)
 
 ```ts
-import { nextBucketLabel, bucketStartInstant } from "@atscript/db-client"; // also @uniqu/core
+import { bucketSeries, bucketStartInstant } from "@atscript/db-client"; // also @uniqu/core
 const counts = new Map(weekly.map((r) => [r.week, r.n]));
-for (let w = weekly[0].week; w <= weekly.at(-1)!.week; w = nextBucketLabel(w, "week", "sun")) {
-  series.push({ week: w, n: counts.get(w) ?? 0 });
-}
-bucketStartInstant("2026-03-01", "Europe/Berlin"); // epoch ms of that local midnight (DST-gap safe)
-nextBucketLabel("2026-03-29T01", "hour", { tz: "Europe/Berlin" }); // "2026-03-29T03" — skips the DST gap
-bucketStartInstant("2026-10-25T02", "Europe/Berlin"); // first pass of the repeated hour (00:00Z)
+const series = bucketSeries(weekly[0].week, weekly.at(-1)!.week, "week", { weekStart: "sun" }) // inclusive
+  .map((week) => ({ week, n: counts.get(week) ?? 0 }));
+bucketSeries("2026-03-29T00:00", "2026-03-29T04:00", "hour", { tz: "Europe/Berlin" }); // no T02:00 (DST gap)
+bucketStartInstant("2026-10-25T02:00", "Europe/Berlin"); // first pass of the repeated hour (00:00Z)
 ```
 
-Same unit + week start as the query. `nextBucketLabel` is tz-free unless the 3rd arg is `{ weekStart?, tz? }` (`NextBucketOptions`, since 0.1.147) — ALWAYS pass the query's `tz` for `hour`, else the series gets the never-occurring spring-forward hour. `bucketStartInstant` of a skipped hour = the transition instant (same as the next hour).
+| #   | Rule                                                                                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| G1  | Pass the query's unit, `$weekStart` AND `$tz` to `bucketSeries` / `nextBucketLabel` (`{ weekStart?, tz? }`). Without `tz` they are zone-free → an hourly axis gets the never-occurring spring-forward hour.                    |
+| G2  | Prefer `bucketSeries` over a `nextBucketLabel` loop; it throws `RangeError` past `maxLength` (default 100 000). `nextBucketLabel(label, unit, "sun")` (week start as 3rd arg) is the legacy form.                              |
+| G3  | Labels are wall-clock in the bucket zone, NOT instants — never `new Date(label)` (runtime zone); use `bucketStartInstant(label, tz)`. Skipped hour → transition instant (= next hour's start); repeated hour → its first pass. |
 
 ## Key imports
 
 ```ts
 import type { BucketExpr, BucketUnit, WeekStart, CalendarBucketLabel } from "@atscript/db"; // also @atscript/db-client
 import type { ValidGroupBy } from "@atscript/db-client";
-import { nextBucketLabel, bucketStartInstant, type NextBucketOptions } from "@atscript/db-client";
+import {
+  bucketSeries,
+  nextBucketLabel,
+  bucketStartInstant,
+  type BucketSeriesOptions,
+} from "@atscript/db-client";
 ```
 
 Adapter authors (`calendarBucketUnits()`, `$select.buckets`, `bucketByAlias`, dialect `calendarBucket` / `bucketAliasInHaving`) → [creating-adapters.md](creating-adapters.md).

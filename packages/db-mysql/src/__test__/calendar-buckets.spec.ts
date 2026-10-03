@@ -101,16 +101,16 @@ describe("mysqlCalendarBucket", () => {
   // truncation), so +05:30 / +05:45 zones turn hours at :30 / :15 UTC.
   it("hour: DATE_FORMAT of the converted wall time", () => {
     expect(mysqlCalendarBucket(`"openedAt"`, bucket("hour", { tz: "Asia/Kolkata" }))).toBe(
-      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(CONVERT_TZ(${U_DOUBLE}, '+00:00', 'Asia/Kolkata'), '%Y-%m-%dT%H') END`,
+      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(CONVERT_TZ(${U_DOUBLE}, '+00:00', 'Asia/Kolkata'), '%Y-%m-%dT%H:00') END`,
     );
     expect(mysqlCalendarBucket(`"openedAt"`, bucket("hour", { tz: "UTC" }))).toBe(
-      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(${U_DOUBLE}, '%Y-%m-%dT%H') END`,
+      `CASE WHEN ${GUARD_DOUBLE} THEN DATE_FORMAT(${U_DOUBLE}, '%Y-%m-%dT%H:00') END`,
     );
     const U = `CAST("createdAt" AS DATETIME)`;
     expect(
       mysqlCalendarBucket(`"createdAt"`, bucket("hour", { field: "createdAt", fd: timestampFd })),
     ).toBe(
-      `CASE WHEN ${U} >= '1970-01-02 00:00:00' THEN DATE_FORMAT(CONVERT_TZ(${U}, '+00:00', 'Europe/Berlin'), '%Y-%m-%dT%H') END`,
+      `CASE WHEN ${U} >= '1970-01-02 00:00:00' THEN DATE_FORMAT(CONVERT_TZ(${U}, '+00:00', 'Europe/Berlin'), '%Y-%m-%dT%H:00') END`,
     );
   });
 

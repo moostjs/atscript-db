@@ -402,7 +402,7 @@ export abstract class BaseDbAdapter {
    * by the bucket alias in `$groupBy` — see `controls.$select.buckets`
    * (`TResolvedBucket`: physical `field`, source `fd`) — and return the
    * `YYYY-MM-DD` label of the bucket's first local day, or for `'hour'` the
-   * local wall-clock hour `YYYY-MM-DDTHH` (null for a null or out-of-range
+   * local wall-clock hour `YYYY-MM-DDTHH:00` (null for a null or out-of-range
    * source, uniqu's `bucketLabel` semantics). Since 0.1.132; `'hour'` since
    * 0.1.147 — an adapter returning {@link ALL_BUCKET_UNITS} must render it.
    */

@@ -42,7 +42,7 @@ await users.meta(); // TMetaResponse — cached on the client instance
 ## `aggregate()` and calendar buckets (since 0.1.132)
 
 ```ts
-import { nextBucketLabel, bucketStartInstant } from "@atscript/db-client";
+import { bucketSeries, bucketStartInstant } from "@atscript/db-client";
 
 const weekly = await tickets.aggregate({
   controls: {
@@ -54,13 +54,13 @@ const weekly = await tickets.aggregate({
     $sort: { week: 1 },
   },
 });
-weekly[0].week; // string ("YYYY-MM-DD"; hour bucket "YYYY-MM-DDTHH"); string | null when openedAt is optional
+weekly[0].week; // string ("YYYY-MM-DD"; hour bucket "YYYY-MM-DDTHH:00"); string | null when openedAt is optional
 ```
 
 - Result keys typed from `$select` (`AggregateResult`); aggregates `number`, plain fields keep their type.
 - Offer time grouping only when `meta.bucketUnits` has the unit and `meta.fields[path].bucketable === true`.
-- Gap fill with `nextBucketLabel(label, unit, weekStart?)` (tz-free; for `hour` pass `{ tz }` as the 3rd arg to skip DST-gap hours); time axis via `bucketStartInstant(label, tz)`. Semantics, errors (400 / 501) → [calendar-buckets.md](calendar-buckets.md).
-- Type re-exports: `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel`, `NextBucketOptions`, `ValidGroupBy`.
+- Gap fill with `bucketSeries(first, last, unit, { weekStart?, tz? })` — pass the query's `$tz` (zone-free otherwise); time axis via `bucketStartInstant(label, tz)`. Rules, errors (400 / 501) → [calendar-buckets.md](calendar-buckets.md).
+- Type re-exports: `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel`, `BucketSeriesOptions`, `NextBucketOptions`, `ValidGroupBy`.
 
 ## Generic surface
 

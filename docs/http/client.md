@@ -187,8 +187,6 @@ When `$groupBy` fields and `$select` are typed, the result type is inferred — 
 [Calendar buckets](/api/calendar-buckets) go in `$select` in object form; the client serializes them to `bucket(…)` (since 0.1.132):
 
 ```typescript
-import { nextBucketLabel } from "@atscript/db-client";
-
 const weekly = await tickets.aggregate({
   filter: { openedAt: { $gte: from } },
   controls: {
@@ -200,10 +198,10 @@ const weekly = await tickets.aggregate({
     $sort: { week: 1 },
   },
 });
-weekly[0].week; // string — "YYYY-MM-DD" (string | null when openedAt is optional)
+weekly[0].week; // string — "YYYY-MM-DD", or "YYYY-MM-DDTHH:00" for an hour bucket (string | null when openedAt is optional)
 ```
 
-`nextBucketLabel(label, unit, weekStart?)` and `bucketStartInstant(label, tz)` are re-exported for filling empty buckets and placing labels on a time axis (for `hour` buckets pass the zone: `nextBucketLabel(label, "hour", { tz })`, type `NextBucketOptions`) — see [Filling gaps](/api/calendar-buckets#filling-gaps). Check `meta.bucketUnits` and `meta.fields[path].bucketable` before offering time grouping in a UI.
+`bucketSeries`, `nextBucketLabel` and `bucketStartInstant` are re-exported for filling empty buckets and placing labels on a time axis — see [Filling gaps](/api/calendar-buckets#filling-gaps). Check `meta.bucketUnits` and `meta.fields[path].bucketable` before offering time grouping in a UI.
 
 ### pages {#pages}
 
@@ -718,8 +716,9 @@ import type { FilterExpr, Uniquery } from "@atscript/db-client";
 
 ### Calendar-bucket helpers (from `@uniqu/core`, since 0.1.132)
 
-- `nextBucketLabel(label, unit, weekStart?)` — the label of the following bucket; calendar arithmetic, no time zone
-- `bucketStartInstant(label, tz)` — the first instant (epoch ms) of a label's local date in `tz`
+- `bucketSeries(first, last, unit, { weekStart?, tz?, maxLength? })` — every label from `first` through `last` (type `BucketSeriesOptions`)
+- `nextBucketLabel(label, unit, { weekStart?, tz? })` — the label of the following bucket (type `NextBucketOptions`)
+- `bucketStartInstant(label, tz)` — the first instant (epoch ms) of a label's local date or hour in `tz`
 
 See [Calendar Buckets — Filling gaps](/api/calendar-buckets#filling-gaps).
 

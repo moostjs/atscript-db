@@ -24,14 +24,9 @@ function toAccumulator(expr: AggregateExpr): Document {
 const DAY_MS = 86_400_000;
 const ISO_DATE = "%Y-%m-%d";
 
-/**
- * Units whose label `$dateToString` renders straight from the instant in the
- * zone: the local wall-clock hour (`YYYY-MM-DDTHH` — a DST fall-back's
- * repeated hour is one label), the local day, then the literal `01` for
- * day-of-month / month.
- */
-const LOCAL_DATE_FORMATS: Partial<Record<BucketUnit, string>> = {
-  hour: "%Y-%m-%dT%H",
+/** Units `$dateToString` labels straight from the instant in the zone (literal `01` for day / month). */
+const LOCAL_LABEL_FORMATS: Partial<Record<BucketUnit, string>> = {
+  hour: "%Y-%m-%dT%H:00",
   day: ISO_DATE,
   month: "%Y-%m-01",
   year: "%Y-01-01",
@@ -65,7 +60,7 @@ function naiveFirstDay(b: TResolvedBucket): Document {
 /**
  * The `$group._id` expression of a calendar bucket: the ISO local date
  * `YYYY-MM-DD` of the bucket's first day in `b.tz` (for `hour`, the local
- * `YYYY-MM-DDTHH`), or `null`.
+ * `YYYY-MM-DDTHH:00`), or `null`.
  *
  * The only zone-aware step is instant → local date (`timezone` on
  * `$dateToString` / `$dateToParts`, never ambiguous). `$dateTrunc` is
@@ -84,7 +79,7 @@ export function bucketExpression(b: TResolvedBucket): Document {
   // `$toDate` rejects a 32-bit int — how drivers store an epoch-ms before
   // 1970-01-25 — so the (guarded, hence numeric) source goes through `$toLong`.
   const date = { $toDate: { $toLong: source } };
-  const format = LOCAL_DATE_FORMATS[b.unit];
+  const format = LOCAL_LABEL_FORMATS[b.unit];
   const label: Document = format
     ? { $dateToString: { date, format, timezone: b.tz } }
     : {

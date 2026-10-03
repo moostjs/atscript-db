@@ -131,7 +131,7 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    *
    * `$select` may carry calendar buckets (`{ $bucket, $field, $tz?, $weekStart?, $as? }`);
    * a `$groupBy` entry must be a dimension or a bucket alias (`ValidGroupBy`), and a
-   * bucket's value is typed as its `YYYY-MM-DD` (hour: `YYYY-MM-DDTHH`) label
+   * bucket's value is typed as its `YYYY-MM-DD` (hour: `YYYY-MM-DDTHH:00`) label
    * (`| null` for an optional source).
    * Gap-fill between labels with `nextBucketLabel` (re-exported here).
    */

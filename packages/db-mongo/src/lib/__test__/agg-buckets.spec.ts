@@ -103,10 +103,10 @@ describe("bucketExpression — one literal expression per unit", () => {
     );
   });
 
-  it("hour — the local wall-clock hour (YYYY-MM-DDTHH) of the instant in the zone", () => {
+  it("hour — the local wall-clock hour (YYYY-MM-DDTHH:00) of the instant in the zone", () => {
     expect(bucketExpression(bucket("hour", { tz: "Asia/Kathmandu" }))).toEqual(
       guarded("$openedAt", {
-        $dateToString: { date: DATE, format: "%Y-%m-%dT%H", timezone: "Asia/Kathmandu" },
+        $dateToString: { date: DATE, format: "%Y-%m-%dT%H:00", timezone: "Asia/Kathmandu" },
       }),
     );
   });
@@ -411,14 +411,7 @@ describe("MongoAdapter — calendar bucket capability and time zone errors", () 
 
   it("declares every unit", () => {
     const adapter = new MongoAdapter(db);
-    expect([...adapter.calendarBucketUnits()].toSorted()).toEqual([
-      "day",
-      "hour",
-      "month",
-      "quarter",
-      "week",
-      "year",
-    ]);
+    expect([...adapter.calendarBucketUnits()]).toEqual([...BUCKET_UNITS]);
   });
 
   it("wrapInvalidQuery maps server code 40485 to BUCKET_TZ_UNAVAILABLE naming the zone", async () => {
