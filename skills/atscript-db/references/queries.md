@@ -49,6 +49,23 @@ await tasks.updateOne({ id: 1, note: null }); // clears (omit the key to keep)
 
 `$in: [null]` never matches on SQL (`IN (NULL)`) — use the bare form. Optional columns read back as `null` (SQL) or absent (Mongo): compare with `== null`. `NullableOptional` is exported from `@atscript/db`.
 
+## Value types (since 0.1.147)
+
+Every comparison value (bare, `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`, each `$in`/`$nin` element) must be able to stand for the field's declared type — else `DbError("INVALID_QUERY", [{ path: <field>, message: 'Invalid filter value for "n" ($gte): expected a number, got "abc"' }])` → HTTP 400, before any adapter call. ≤ 0.1.146: PostgreSQL 500, MySQL wrong rows (`'x'` → `0`), others `[]`.
+
+| Field type                                                                                                          | Accepted                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `number`                                                                                                            | number, bigint, decimal-literal string (`"5"`, `"1e3"`; not `"0x10"`)                                                       |
+| integer: `number.int*`, `number.timestamp`, `number` + `@db.default.increment`/`.now`, view `@db.agg.count*` column | integral number, bigint, integer string. `5.5` → 400 (PG int/bigint can't parse it). Timestamp = epoch ms; ISO string → 400 |
+| `decimal`                                                                                                           | number, numeric string (`"12.50"`)                                                                                          |
+| `boolean`                                                                                                           | `true` / `false`, `0` / `1` (`"true"` → 400)                                                                                |
+| `string` / `string.*` / string literals                                                                             | string, number, boolean (URL `?code=123` is a number)                                                                       |
+| union                                                                                                               | any member accepts                                                                                                          |
+| array field (Mongo / memory)                                                                                        | element type; array operand → every element                                                                                 |
+| `@db.json` + contents, object parents, `db.geoPoint`                                                                | never checked                                                                                                               |
+
+Always ok: `null` / `undefined`, class instances (`Date`, `ObjectId`). Literal unions checked by primitive type, not membership. `$regex` / bare `RegExp` → field must hold strings + pattern string/RegExp. Covers views (aggregate + `@db.compute` columns by declared type), `$having` (agg aliases number; `min`/`max` = source type; bucket alias string), `$some`/`$none` operands (path `issues.n`), `updateMany`/`deleteMany`. Runs after the path guard (unknown / unfilterable field keeps its error). Accepted values pass UNCHANGED — `"5"` on a number matches on SQL, not on Mongo / memory (strict types).
+
 ## `$exists` (since 0.1.132)
 
 | #   | Rule                                                                                                                                                                                                                            |

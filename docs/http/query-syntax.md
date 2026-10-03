@@ -324,14 +324,33 @@ See [Relations & Search in URLs](./advanced) for details on `$with`, `$search`, 
 
 ## Type Coercion
 
-URL values are always strings, but the query parser coerces them based on your `.as` schema:
+A URL value gets its type from how it is written, not from your `.as` schema:
 
-- **Numbers** — `priority=3` becomes the number `3`, not the string `"3"`
-- **Booleans** — `completed=true` becomes `true`, `completed=false` becomes `false`
-- **Null** — `assigneeId=null` becomes `null`
-- **Arrays** — `field{a,b,c}` becomes an array of values
+- **Numbers** — an unquoted number is a number: `priority=3` is `3`. Quoted, it is a string: `priority='3'` is `"3"`
+- **Booleans** — `completed=true` is `true`, `completed=false` is `false`
+- **Null** — `assigneeId=null` is `null`
+- **Strings** — any other value, bare or quoted: `status=active`, `name='json-w1'`
+- **Arrays** — `field{a,b,c}` is a list of values, each typed the same way
 
-Coercion is automatic and consistent across adapters.
+The server then checks every value against the field's type (since 0.1.147, see [Value Types](/api/queries#value-types)). A value that cannot stand for it is a **400** naming the field — `priority=high` or `priority>=abc` on a number, `completed=yes` on a boolean — on every adapter:
+
+```json
+{
+  "statusCode": 400,
+  "message": "Invalid filter value for \"priority\": expected a number, got \"high\"",
+  "errors": [
+    {
+      "path": "priority",
+      "message": "Invalid filter value for \"priority\": expected a number, got \"high\""
+    }
+  ]
+}
+```
+
+- A quoted number on a number field (`priority='3'`) and an unquoted one on a string field (`code=123`) are accepted. MongoDB and the memory adapter compare types strictly, so they match only the form that fits the field — write numbers bare and quote numeric strings.
+- Timestamps (`number.timestamp`) take epoch milliseconds: `createdAt>=1767225600000`. An ISO date (`createdAt>='2026-01-01'`) is a 400.
+- Integer fields (`number.int`, timestamps, auto-increment ids, a view's count column) take whole numbers: `qty>5.5` is a 400.
+- Boolean fields take `true`, `false`, `0` or `1`.
 
 ## Comprehensive Examples
 

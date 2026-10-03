@@ -9,6 +9,7 @@ import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/
 import type { TDbFieldMeta } from "../types";
 import { isPlainObject } from "../shared/object";
 import { hasRelationOp, relGuardState, type TRelGuardState } from "./relation-filter";
+import { guardFilterValues, guardHavingValues } from "./filter-values";
 
 /**
  * Engine-agnostic query-time guards, applied in the core layer BEFORE filter
@@ -35,6 +36,9 @@ import { hasRelationOp, relGuardState, type TRelGuardState } from "./relation-fi
  *   {@link canFilterLeaf}) needs → `INVALID_QUERY` (see {@link guardPaths}).
  *   Runs after the checks above so `ENC_*` codes keep firing first for
  *   encrypted subtrees.
+ * - every filter / `$having` comparison value must be able to denote its
+ *   field's declared type (`?n='x'` on a number) → `INVALID_QUERY`, after
+ *   the path guard (see `guardFilterValues`, since 0.1.147).
  */
 
 /** Validates a `[lng, lat]` tuple (GeoJSON coordinate order). */
@@ -852,6 +856,10 @@ function guardRelationRef(
  * `bucket`), `$groupBy` fields are checked, and computed aliases (`$as` or
  * the default) are exempt in `$sort` / `$having`.
  *
+ * Then every filter comparison value must be able to denote its field's
+ * declared type (`guardFilterValues`, since 0.1.147) — after the paths, so
+ * an unknown or unfilterable field keeps its own rejection.
+ *
  * Returns the collected refs so callers can run further structural rules
  * (see {@link checkHavingKeys}) without walking the query again.
  */
@@ -882,6 +890,7 @@ export function guardPaths(
   for (const path of refs.bucket) guardPath(meta, adapter, path, "bucket");
   for (const path of refs.groupBy) guardPath(meta, adapter, path, "groupBy");
   for (const path of refs.having) guardPath(meta, adapter, path, "having");
+  guardFilterValues(meta, query.filter);
   return refs;
 }
 
@@ -939,7 +948,7 @@ export function checkHavingKeys(
  * (`AGG_FN_NOT_SUPPORTED`) and calendar-bucket units
  * (`BUCKET_NOT_SUPPORTED`), then the `$having` key rule
  * ({@link checkHavingKeys} — after the path guard so an unknown key still
- * reads `Unknown field`).
+ * reads `Unknown field`), then the `$having` values (`guardHavingValues`).
  *
  * `buckets` are the query's resolved calendar buckets when the caller already
  * ran `normalizeComputedSelect` (resolved here otherwise).
@@ -980,6 +989,7 @@ export function guardAggregate(
   if (having) {
     throw new DbError("INVALID_QUERY", [having]);
   }
+  guardHavingValues(meta, controls);
 }
 
 /**

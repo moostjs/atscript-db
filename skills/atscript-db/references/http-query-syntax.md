@@ -194,6 +194,17 @@ HTTP/1.1 400 Bad Request
 
 `$with` sub-controls (`$with=assignee($select=name)`) are validated per relation, not at the root. `$having=<alias>` is accepted for every aggregate alias (`sum(amount):total` → `total`; unnamed → `sum_amount`). Any other `$having` key must be a `$groupBy` field — a real but non-grouped column is a 400 `$having key "region" must be an aggregate alias or a $groupBy field` (since 0.1.128). Grouped flattened-object keys come back nested (`$groupBy=stats.views` → `{ "stats": { "views": 10 }, "cnt": 2 }`). Filter nodes carrying anything but `$and` / `$or` / `$not` (e.g. a programmatic `$nor`) → 400.
 
+## Value types (since 0.1.147)
+
+URL values are typed by their syntax, NOT the schema: unquoted number → number (`n=5`), quoted → string (`n='5'`), `true`/`false` → boolean, `null` → null, anything else → string. Then the core checks each comparison value against the field's declared type (rules → [queries.md § Value types](queries.md#value-types-since-01147)); a value that cannot stand for it is a 400 with `errors[0].path` = the field, on every adapter:
+
+```
+?n='x'  ?n>=abc  ?n{0,abc}  ?flag=yes  ?ts>='2026-01-01T00:00:00Z'  ?qty>5.5 (number.int)  → 400 Invalid filter value for "n" …
+?n=5  ?n>=5  ?n{0,5}  ?n=null  ?n='5'  ?code=123  ?flag=true  ?price='12.50'  ?ts>=1767225600000  → ok
+```
+
+≤ 0.1.146 these reached the database: PostgreSQL 500 (`invalid input syntax`), MySQL cast `'x'`→`0` (WRONG rows), SQLite / Mongo / memory `[]`. Accepted cross-type forms (`n='5'`, `code=123`) still pass unchanged — SQL compares them, Mongo / memory match only the declared type.
+
 ## Read-response baseline (preferred-id fields always present)
 
 The server unions the table's `preferredId` field set into `$select` on every row-returning read endpoint, regardless of the URL `$select` value. So `?$select=name` on a `slug`-keyed table still returns rows containing both `slug` AND `name`. Pure exclusion maps (`?$select={id:0}`) are rewritten to inclusion before the readable call so preferred-id fields cannot be excluded (since 0.1.134 the rewrite drops an excluded object parent's whole subtree, and never keeps a parent whole when one of its leaves is excluded — before, `-address` still returned `address.*`); mixed inclusion/exclusion maps (`?$select={name:1,id:0}`) are rejected before read. Aggregate (`$groupBy`) and count (`$count`) responses are NOT widened. See [moost-db.md § Read-response baseline](moost-db.md#read-response-baseline).

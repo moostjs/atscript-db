@@ -192,6 +192,35 @@ You can also filter for null directly:
 
 Since 0.1.128 the filter types admit this: the readable's flat and own-props shapes are wrapped in `NullableOptional`, so every optional property accepts `null` in bare, `$eq`, `$ne` and `$in` positions (`{ note: null }`, `{ note: { $ne: null } }` type-check; `null` on a required property does not). `$in: [null]` never matches on SQL adapters (`IN (NULL)`), use the bare form. Optional columns read back as `null` (SQL) or are absent (MongoDB) — compare with `== null`.
 
+### Value Types {#value-types}
+
+Since 0.1.147 every comparison value — a bare value, `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, each `$in` / `$nin` element — must be able to stand for the field's declared type. A value that cannot is rejected before the query reaches the database, with `DbError("INVALID_QUERY")` (HTTP 400 through moost-db) whose `path` is the field:
+
+```typescript
+await tasks.findMany({ filter: { priority: { $gte: "high" } } });
+// DbError INVALID_QUERY — path "priority":
+// Invalid filter value for "priority" ($gte): expected a number, got "high"
+```
+
+| Field type                                  | Accepted values                                                                                                       |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `number`                                    | a number or a numeric string (`5`, `"5"`, `"-1.5"`, `"1e3"`)                                                          |
+| an integer field (below)                    | a whole number or an integer string (`5`, `"5"`) — not `5.5`. Timestamps are epoch milliseconds, not ISO date strings |
+| `decimal`                                   | a number or a numeric string (`"12.50"`)                                                                              |
+| `boolean`                                   | `true` / `false`, `0` / `1`                                                                                           |
+| `string`, every `string.*`, string literals | a string, number or boolean                                                                                           |
+| a union (`number \| boolean`)               | what any member accepts                                                                                               |
+| an array (`string[]`, MongoDB and memory)   | its element type — for an array operand, every element                                                                |
+
+- **Integer fields** are `number.int` and its sizes, `number.timestamp`, a `number` with `@db.default.increment` or `@db.default.now`, and a view's `@db.agg.count` / `@db.agg.countDistinct` column.
+- **Always accepted:** `null` (`{ f: null }`, `{ f: { $ne: null } }`) and class instances such as `Date` or a MongoDB `ObjectId`.
+- **Never checked:** `@db.json` fields and their contents, nested-object parents, `db.geoPoint` and `$exists` (a boolean, see [Existence](#existence)).
+- **Literal unions are checked by their primitive type**, not by membership: `{ status: "unknown" }` on `'open' | 'closed'` is valid and matches nothing.
+- **`$regex`** (and a bare `RegExp` value) needs a field that holds strings, and a string or `RegExp` pattern.
+- **Accepted values are passed on unchanged.** A numeric string compares as a number on the SQL adapters but matches nothing on MongoDB and memory, which compare types strictly — pass values of the declared type.
+
+The same check covers view columns (aggregates and [computed columns](/views/computed-columns), by their declared type), `$having` (aggregate aliases: numbers, counts: integers; `min` / `max`: the source field's type; [calendar-bucket](/api/calendar-buckets) labels: strings), the operands of [relational filters](#relational-filters) (the path is prefixed with the relation, `issues.severity`) and the filters of `updateMany` / `deleteMany`. An unknown or unfilterable field keeps its own error (see [Nested Field Filters](#nested-field-filters)).
+
 ## Logical Operators
 
 ### Implicit AND
