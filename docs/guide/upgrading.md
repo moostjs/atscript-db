@@ -16,6 +16,8 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **Query targets** — run a `'rows'` action on every row matching a query: [Query Targets](/http/query-targets), [`actionOnQuery`](/http/client#query-targets).
 - **Actions on a view** — `@DbActionsFrom` lists a table controller's row actions on a view controller: [Actions on a View](/http/view-actions).
 - **Relational filters: `$some` / `$none`.** Select rows by their related rows — `{ ticket: { $some: { status: "open" } } }`, `{ issues: { $none: {} } }` — in reads, `aggregate()`, `$with` sub-filters and mutation filters, on every bundled adapter. See [Queries § Relational filters](/api/queries#relational-filters). Over HTTP the form is `ticket=$some(status=open)` ([URL syntax](/http/query-syntax#relational-predicates)); a client may use it only on relations marked with the new [`@db.rel.filterable`](/relations/navigation#db-rel-filterable). Permission layers get [`transformRelationFilter`](/http/customization#transformrelationfilter) and `ctx.filter` in [`prepareRequest`](/http/customization#preparerequest); `/meta.relations[]` gains `filterable: true`.
+- **Computed view columns and first-row joins** — `@db.compute` columns and joins that pick one related row per entry: [Computed Columns](/views/computed-columns), [First-row joins](/views/#first-row-joins). Existing views keep their schema hash, so nothing is recreated on upgrade.
+- **Hourly calendar buckets** — `unit: "hour"`, labelled `YYYY-MM-DDTHH:00` in the bucket's time zone: [Hour buckets](/api/calendar-buckets#hour-buckets).
 
 ### Behavior changes {#v0-1-147-behavior}
 
@@ -50,6 +52,8 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 For custom adapters and filter tooling:
 
+- `BaseDbAdapter.viewCapabilities()` — default empty, so schema sync refuses a view with computed columns or a first-row join on a custom adapter until it returns them. See [Creating Adapters § viewCapabilities](/adapters/creating-adapters#view-capabilities).
+- `ALL_BUCKET_UNITS` now includes `hour`: a custom adapter returning it from `calendarBucketUnits()` must render hour labels, or return a set without `hour`. See [Creating Adapters § Calendar buckets](/adapters/creating-adapters#calendar-buckets).
 - `BaseDbAdapter.supportsRelationFilters(mode)` — default `false`, so a custom adapter rejects predicates with `REL_FILTER_NOT_SUPPORTED` until it renders them. See [Creating Adapters § Relational Predicates](/adapters/creating-adapters#relational-predicates).
 - `walkFilter` dispatches a predicate to the visitor's new `relation(field, op, operand)` callback and throws when the visitor has none. Visitors you wrote only meet one once a filter contains a predicate — add `relation` to those that can.
 - `@atscript/db-sql-tools`: `TFilterVisitorOptions.qualifier` — required on statements that alias their FROM.
