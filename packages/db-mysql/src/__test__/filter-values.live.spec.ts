@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vite-plus/test";
 import { DbSpace } from "@atscript/db";
 import { SchemaSync } from "@atscript/db/sync";
 
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+
+// Live DDL against a real server is slow under the parallel workspace run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Server-gated: runs against a live MySQL 8 when one is reachable, skips
 // otherwise (CI has no server). Override the server with

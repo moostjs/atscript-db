@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vite-plus/test";
 import { DbSpace } from "@atscript/db";
 import { planSchema, syncSchema } from "@atscript/db/sync";
 
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+
+// Live DDL against a real server is slow under the parallel workspace run.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Server-gated (see relation-filter.live.spec.ts): a foreign key into a table
 // of another schema, and introspection of a schema-less table when the
