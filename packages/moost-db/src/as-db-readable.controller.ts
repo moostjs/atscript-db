@@ -1156,15 +1156,18 @@ export class AsDbReadableController<
       // itself). A client predicate the server hook replaced by a copy would
       // escape the overlay: fail closed instead.
       const recorded = this._clientWith.get(controls);
-      const scope = recorded
-        ? { predicates: recorded.predicates, seen: new Set<object>() }
-        : undefined;
-      controls.$with = await overlayWithFilters(controls.$with, "", hook, scope);
-      if (scope && scope.seen.size !== scope.predicates.size) {
-        throw new HttpError(
-          500,
-          "validateControls replaced a client $with relational predicate — wrap the client's $with filter (keep its object), do not copy or drop it",
-        );
+      // `null` / no recorded predicate: the client's `$with` held none.
+      if (recorded !== null && recorded?.predicates.size !== 0) {
+        const scope = recorded
+          ? { predicates: recorded.predicates, seen: new Set<object>() }
+          : undefined;
+        controls.$with = await overlayWithFilters(controls.$with, "", hook, scope);
+        if (scope && scope.seen.size !== scope.predicates.size) {
+          throw new HttpError(
+            500,
+            "validateControls replaced a client $with relational predicate — wrap the client's $with filter (keep its object), do not copy or drop it",
+          );
+        }
       }
     }
     return (

@@ -610,6 +610,25 @@ describe("server predicates conjoined into $with in validateControls", () => {
     // without a client predicate in $with there is nothing to overlay
     expect(Array.isArray(await controller.query("?$with=tickets"))).toBe(true);
   });
+
+  it("a $with the server adds when the client sent none is not overlaid", async () => {
+    const hookLog: string[] = [];
+    class Adds extends AsDbReadableController {
+      protected override validateControls(controls: Record<string, unknown>, type: any) {
+        const error = super.validateControls(controls, type);
+        if (error) return error;
+        controls.$with ??= [{ name: "tickets", filter: { issues: { $some: { title: "c" } } } }];
+        return undefined;
+      }
+      protected override transformRelationFilter(path: string, filter: FilterExpr) {
+        hookLog.push(path);
+        return filter;
+      }
+    }
+    const { controller } = bind(Adds, "teams");
+    expect(ticketsByTeam(await controller.query("?id=t2"))).toEqual({ t2: ["k3"] });
+    expect(hookLog).toEqual([]);
+  });
 });
 
 describe("core caps leave headroom above the client caps", () => {
