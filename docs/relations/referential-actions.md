@@ -207,7 +207,7 @@ Placing `@db.rel.onDelete` on multiple fields within the same composite FK group
 Referential actions are enforced differently depending on the adapter:
 
 - **SQL adapters** (SQLite, MySQL, PostgreSQL) — actions are defined as native SQL `ON DELETE` / `ON UPDATE` clauses on the foreign key constraint. The database engine enforces them atomically.
-- **MongoDB adapter** (and the memory adapter) — there are no native FK constraints. The generic DB layer emulates referential actions at the application level: before deleting, it reads the matching records, applies the configured action to their children (cascade delete, restrict with error, or set null), then deletes exactly those records by primary key. The delete filter is not evaluated a second time, so a filter that depends on the children (`{ issues: { $some: … } }`, or a row scope using one) still removes the parent, and a record inserted meanwhile is not deleted without its cascade (since 0.1.147).
+- **MongoDB adapter** (and the memory adapter) — there are no native FK constraints. The generic DB layer emulates referential actions at the application level: before deleting, it reads the matching records, applies the configured action to their children (cascade delete, restrict with error, or set null), then deletes the matching records. When the delete filter (or row scope) holds a relational predicate, those records are deleted by primary key instead of evaluating the filter a second time, so a filter that depends on the children (`{ issues: { $some: … } }`) still removes the parent (since 0.1.147).
 
 The behavior is identical from the application's perspective — the same `@db.rel.onDelete 'cascade'` annotation works the same way regardless of adapter.
 

@@ -140,7 +140,7 @@ Fields renamed with `@db.column` are honored in `$select` and `$sort` since 0.1.
 
 ### Foreign Keys
 
-There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. The rows a `deleteMany` / `deleteOne` matches are pinned by primary key first; the cascade and the delete then both act on those keys, so a filter that reads the cascaded children (`{ issues: { $some: … } }`) still deletes the parent. See [Referential Actions](/relations/referential-actions).
+There is no native FK enforcement; `supportsNativeForeignKeys()` is `false`. Cascade and set-null run through the generic layer's application-level logic (via the adapter's `updateMany` / `deleteMany`), driven by `@db.rel.onDelete` / `@db.rel.onUpdate`. When a `deleteMany` / `deleteOne` filter holds a relational predicate, the matching rows are pinned by primary key first; the cascade and the delete then both act on those keys, so a filter that reads the cascaded children (`{ issues: { $some: … } }`) still deletes the parent. See [Referential Actions](/relations/referential-actions).
 
 ### Schema Sync
 

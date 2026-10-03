@@ -62,7 +62,7 @@ interface Post {
 | `'setDefault'` | Set FK to its `@db.default` value.       |
 
 - Adapters with `supportsNativeForeignKeys(): true` push this to the DB.
-- Others emulate via `ApplicationIntegrity`: reads the matching parents, counts children (restrict) / cascades / nulls inside the same transaction, then deletes EXACTLY those parents by primary key (the delete filter is never re-evaluated — a `$some` over a cascaded child relation still deletes the parent; since 0.1.147).
+- Others emulate via `ApplicationIntegrity`: reads the matching parents, counts children (restrict) / cascades / nulls inside the same transaction, then deletes them — by the filter again, or, when the filter / row scope holds a `$some` / `$none` (0.1.147), EXACTLY those parents by primary key (a `$some` over a cascaded child relation still deletes the parent; no PK → `REL_FILTER_NOT_SUPPORTED`).
 
 ## Loading — `controls.$with`
 

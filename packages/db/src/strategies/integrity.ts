@@ -6,7 +6,8 @@ import type { TCascadeResolver, TFkLookupResolver, TWriteTableResolver } from ".
 
 /**
  * Result of {@link IntegrityStrategy.cascadeBeforeDelete}:
- * - `undefined` — no cascade ran; delete with the caller's own filter;
+ * - `undefined` — no cascade ran, or the filter holds no relational
+ *   predicate; delete with the caller's own filter;
  * - an array — the rows the cascade ran for, pinned by primary key as
  *   ADAPTER-READY (physical, already translated) filters, in batches. The
  *   caller must delete exactly these rows instead of evaluating its filter

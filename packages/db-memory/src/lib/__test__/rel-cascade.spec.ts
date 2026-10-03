@@ -6,6 +6,7 @@ import { bootstrapStoredTables, createTestSpace, prepareFixtures } from "./test-
 // filter was evaluated again, so a `$some` over the cascaded child relation
 // stopped matching — children were deleted / nulled and the parent survived.
 // The rows are now pinned by key once; cascade and delete both use the pin.
+// A filter without a predicate keeps the single delete by its own filter.
 
 let fx: Record<string, any>;
 
@@ -95,6 +96,20 @@ describe("relational predicates + application-level cascades", () => {
     expect(await keys(tickets)).toEqual(["T1", "T3"]);
     const n = await notes.findMany({ filter: {}, controls: {} });
     expect(n.find((r: any) => r.id === 2).ticketKey ?? null).toBeNull();
+  });
+
+  it("a predicate-free filter deletes by its own filter (no key pin)", async () => {
+    const adapter = tickets.dbAdapter;
+    const seen: unknown[] = [];
+    const deleteMany = adapter.deleteMany.bind(adapter);
+    adapter.deleteMany = (filter: unknown) => {
+      seen.push(filter);
+      return deleteMany(filter);
+    };
+    expect(await tickets.deleteMany({ status: "open" })).toEqual({ deletedCount: 2 });
+    expect(seen).toEqual([{ status: "open" }]);
+    expect(await keys(tickets)).toEqual(["T3"]);
+    expect(await keys(issues)).toEqual([]);
   });
 
   it("deleteOne out of scope touches nothing", async () => {

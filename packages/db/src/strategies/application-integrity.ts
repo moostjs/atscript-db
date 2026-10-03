@@ -145,10 +145,11 @@ export class ApplicationIntegrity extends IntegrityStrategy {
    * - `cascade`: recursively deletes child records
    * - `setNull`: sets FK fields to null
    *
-   * Returns the matched rows PINNED by primary key (see {@link TCascadePin}):
-   * the caller deletes those rows, never re-evaluating `filter` on data the
-   * cascade just changed (a `$some` over a cascaded child relation would
-   * otherwise stop matching and leave the parent behind).
+   * When `filter` holds a relational predicate, returns the matched rows
+   * PINNED by primary key (see {@link TCascadePin}): the caller deletes those
+   * rows, never re-evaluating `filter` on data the cascade just changed (a
+   * `$some` over a cascaded child relation would otherwise stop matching and
+   * leave the parent behind). Any other filter → `undefined`.
    */
   async cascadeBeforeDelete(
     filter: FilterExpr,
@@ -175,8 +176,13 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     if (targets.length === 0) {
       return undefined;
     }
-    const pkPhysical = meta.primaryKeys.map((pk) => meta.physicalPath(pk));
-    if (pkPhysical.length === 0 && containsRelationPredicate(filter)) {
+    // Only a filter holding a relational predicate can stop matching once
+    // the cascade changes the children, so only it is pinned; any other
+    // filter is evaluated again by the caller's own delete.
+    const pkPhysical = containsRelationPredicate(filter)
+      ? meta.primaryKeys.map((pk) => meta.physicalPath(pk))
+      : undefined;
+    if (pkPhysical?.length === 0) {
       // Without a key the rows cannot be pinned, and re-evaluating a
       // relational predicate after the cascade is unsound.
       throw new DbError("REL_FILTER_NOT_SUPPORTED", [
@@ -211,10 +217,10 @@ export class ApplicationIntegrity extends IntegrityStrategy {
       filter: translateFilter(filter),
       controls: { $select: new UniquSelect(physicalFields) },
     });
+    const pin = pkPhysical ? pinByPrimaryKey(rawRecords, pkPhysical) : undefined;
     if (rawRecords.length === 0) {
-      return pkPhysical.length > 0 ? [] : undefined;
+      return pin;
     }
-    const pin = pkPhysical.length > 0 ? pinByPrimaryKey(rawRecords, pkPhysical) : undefined;
 
     // Map physical column names back to logical for FK matching
     const allRecords = rawRecords.map((r) => {
