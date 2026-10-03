@@ -30,7 +30,7 @@ curl "http://localhost:3000/todos/query?status=active&priority=high"
 Multiple conditions are combined with AND by default.
 
 ::: warning Quote values that contain reserved characters
-A bare value may only contain letters, digits, `_`, `.` and percent-encoded spaces. Anything else — a hyphen (`name=json-w1`, `date=2026-01-01`), `/`, `:`, `@`, … — must be wrapped in single quotes: `?name='json-w1'` (`%27json-w1%27` when the client encodes). A query string the grammar cannot parse is rejected with **HTTP 400** and the validation envelope `{ "statusCode": 400, "message": "Malformed query string: …", "errors": [{ "path": "", "message": "…" }] }` (since 0.1.128 — earlier versions failed with a 500). This applies to every read endpoint (`/query`, `/pages`, `/geo`, `/one`, value help) and to values inside `$with=…(…)` sub-filters.
+A bare value may contain letters, digits, `_`, `.`, percent-encoded spaces and — since 0.1.147 — hyphens between word characters (`status=in-progress`, `date=2026-01-01`) and an hour label or date-time of the exact shape `2026-03-29T14:00` (optionally `:SS`). Anything else — a leading or trailing hyphen, `/`, other `:` forms, `@`, … — must be wrapped in single quotes: `?name='a/b'` (`%27a%2Fb%27` when the client encodes). `buildUrl` / the client keep quoting such values. A query string the grammar cannot parse is rejected with **HTTP 400** and the validation envelope `{ "statusCode": 400, "message": "Malformed query string: …", "errors": [{ "path": "", "message": "…" }] }` (since 0.1.128 — earlier versions failed with a 500). This applies to every read endpoint (`/query`, `/pages`, `/geo`, `/one`, value help) and to values inside `$with=…(…)` sub-filters.
 :::
 
 ### Not Equal

@@ -4,8 +4,8 @@ import { HttpError } from "@moostjs/event-http";
 import { AsDbController } from "../as-db.controller";
 
 /**
- * A query string the `@uniqu/url` grammar cannot lex (an unquoted `-` in a
- * value, `?name=json-w1`) is the client's fault: since 0.1.128 every read
+ * A query string the `@uniqu/url` grammar cannot lex (a trailing `-` in a
+ * value, `?name=json-`) is the client's fault: since 0.1.128 every read
  * endpoint answers 400 with the validation envelope instead of a 500, at the
  * single place the query string is parsed (`parseUrlOr400`).
  */
@@ -93,11 +93,11 @@ async function expect400Envelope(p: Promise<unknown>): Promise<void> {
 }
 
 describe("malformed query string → 400 envelope on every read endpoint", () => {
-  it("/query, /pages: an unquoted hyphen in a value never reaches the readable", async () => {
+  it("/query, /pages: a value that fails to lex (trailing hyphen) never reaches the readable", async () => {
     const table = makeMockTable();
     const ctrl = new AsDbController(makeApp(), table);
-    await expect400Envelope(ctrl.query("/query?name=json-w1"));
-    await expect400Envelope(ctrl.pages("/pages?$size=5&name=json-w1"));
+    await expect400Envelope(ctrl.query("/query?name=json-"));
+    await expect400Envelope(ctrl.pages("/pages?$size=5&name=json-"));
     expect(table.findMany).not.toHaveBeenCalled();
     expect(table.findManyWithCount).not.toHaveBeenCalled();
   });
@@ -105,18 +105,20 @@ describe("malformed query string → 400 envelope on every read endpoint", () =>
   it("/one/:id and /one (composite): a control that fails to lex is a 400 too", async () => {
     const table = makeMockTable();
     const ctrl = new AsDbController(makeApp(), table);
-    await expect400Envelope(ctrl.getOne("1", "/one/1?$with=owner(name=a-b)"));
-    await expect400Envelope(ctrl.getOneComposite({ id: "1" }, "/one?id=1&$with=owner(name=a-b)"));
+    await expect400Envelope(ctrl.getOne("1", "/one/1?$with=owner(name=a-)"));
+    await expect400Envelope(ctrl.getOneComposite({ id: "1" }, "/one?id=1&$with=owner(name=a-)"));
     expect(table.findOne).not.toHaveBeenCalled();
   });
 
-  it("the quoted form of the same value parses and runs", async () => {
+  it("a hyphenated word parses unquoted (since 0.1.147) and quoted alike", async () => {
     const table = makeMockTable();
     const ctrl = new AsDbController(makeApp(), table);
-    const rows = await ctrl.query("/query?name='json-w1'");
-    expect(rows).toEqual([]);
-    expect(table.findMany).toHaveBeenCalledTimes(1);
-    const query = table.findMany.mock.calls[0][0] as { filter: Record<string, unknown> };
-    expect(query.filter).toEqual({ name: "json-w1" });
+    for (const url of ["/query?name='json-w1'", "/query?name=json-w1"]) {
+      expect(await ctrl.query(url)).toEqual([]);
+    }
+    expect(table.findMany).toHaveBeenCalledTimes(2);
+    for (const [query] of table.findMany.mock.calls as Array<[{ filter: unknown }]>) {
+      expect(query.filter).toEqual({ name: "json-w1" });
+    }
   });
 });
