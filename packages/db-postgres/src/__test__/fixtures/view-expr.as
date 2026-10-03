@@ -155,3 +155,18 @@ export interface VxLevels {
     @db.compute `coalesce(level, 0) * 2 + n`
     score: number
 }
+
+// HAVING on a computed column whose name equals a grouped source column
+// (`severity`): MySQL would bind a bare `severity` to the GROUP BY column.
+@db.view 'vx_collide'
+@db.view.for VxIssue
+@db.view.having `severity = 2`
+export interface VxCollide {
+    sev: VxIssue.severity
+
+    @db.agg.count
+    n: number
+
+    @db.compute `n * 2`
+    severity: number
+}

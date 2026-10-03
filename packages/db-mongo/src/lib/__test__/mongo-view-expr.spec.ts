@@ -88,13 +88,13 @@ describe("exprToMongo", () => {
         leaf,
       ),
     ).toEqual({
-      $add: [{ $multiply: ["$a", { $literal: 10 }] }, { $multiply: [-1, "$b"] }],
+      $add: [{ $multiply: ["$a", { $toDouble: 10 }] }, { $multiply: [-1, "$b"] }],
     });
     expect(exprToMongo({ op: "/", args: [{ field: "a" }, { field: "b" }] }, leaf)).toEqual({
       $cond: [{ $eq: ["$b", 0] }, null, { $divide: ["$a", "$b"] }],
     });
     expect(exprToMongo({ op: "-", args: [{ field: "a" }, -1] }, leaf)).toEqual({
-      $subtract: ["$a", { $literal: -1 }],
+      $subtract: ["$a", { $toDouble: -1 }],
     });
   });
 
@@ -102,7 +102,7 @@ describe("exprToMongo", () => {
     expect(
       exprToMongo({ op: "coalesce", args: [{ field: "a" }, { field: "b" }, 0] }, leaf),
     ).toEqual({
-      $ifNull: ["$a", { $ifNull: ["$b", { $literal: 0 }] }],
+      $ifNull: ["$a", { $ifNull: ["$b", { $toDouble: 0 }] }],
     });
   });
 });

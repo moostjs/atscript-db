@@ -389,7 +389,7 @@ LEFT JOIN `issues` AS `OldestOpenIssue`
 
 It runs once per entry row; an index on the condition's join key plus the order keys (`(ticket_id, raised_at, id)`) keeps each lookup an index scan.
 
-[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. `DOUBLE` (not `DECIMAL`) avoids `div_precision_increment` rounding; `CAST … AS DOUBLE` needs MySQL 8.0.17+. In a grouped view a computed column over a JSON-extracted dimension reads `MIN(<extract>)` — the value of the group — because `ONLY_FULL_GROUP_BY` rejects an expression over the raw JSON column.
+[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. `DOUBLE` (not `DECIMAL`) avoids `div_precision_increment` rounding. `CAST … AS DOUBLE` needs MySQL 8.0.17+; on MariaDB, plan on 10.4.5 or later for views with computed columns. That is a conservative minimum: it is the release that documents `CAST … AS DOUBLE` / `FLOAT`, and older MariaDB lines are not tested. A result outside the `DOUBLE` range fails the read with `DOUBLE value is out of range`. In a grouped view a computed column over a JSON-extracted dimension reads `MIN(<extract>)` — the value of the group — because `ONLY_FULL_GROUP_BY` rejects an expression over the raw JSON column.
 
 ## Derived Columns
 

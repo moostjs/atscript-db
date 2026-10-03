@@ -1430,8 +1430,9 @@ export class TableMetadata {
 function computedMeta(
   rootType: TAtscriptAnnotatedType<TAtscriptTypeObject>,
   path: string,
-): { operands: readonly string[] } | undefined {
+): { operands: readonly string[]; via: readonly string[] } | undefined {
   if (path.includes(".")) return undefined;
-  const operands = computedOperands(rootType, path);
-  return operands ? { operands: Object.freeze(operands) } : undefined;
+  const via: string[] = [];
+  const operands = computedOperands(rootType, path, via);
+  return operands ? { operands: Object.freeze(operands), via: Object.freeze(via) } : undefined;
 }

@@ -690,7 +690,7 @@ The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the j
 
 Since 0.1.147 a [first-row join](/views/#first-row-joins) always uses the pipeline `$lookup` form, followed by `{ $sort: { <order keys>, <primary key>: 1 } }` and `{ $limit: 1 }` (MongoDB 3.6+). BSON order puts `null` and missing values first, so `NULL` is the smallest order key, as on the SQL adapters.
 
-[Computed columns](/views/computed-columns) render as `$add` / `$subtract` / `$multiply`; `/` is `{ $cond: [{ $eq: [divisor, 0] }, null, { $divide: [...] }] }` (a plain `$divide` by zero is an error), unary minus `$multiply` by `-1`, and `coalesce` nested two-argument `$ifNull` (the multi-argument form needs 5.0). No casts: numeric promotion keeps integers exact and `$divide` returns a double. In a grouped view they are evaluated in an `$addFields` after `$group` (before `@db.view.having`).
+[Computed columns](/views/computed-columns) render as `$add` / `$subtract` / `$multiply`; `/` is `{ $cond: [{ $eq: [divisor, 0] }, null, { $divide: [...] }] }` (a plain `$divide` by zero is an error), unary minus `$multiply` by `-1`, and `coalesce` nested two-argument `$ifNull` (the multi-argument form needs 5.0). Every field and literal leaf is cast with `$toDouble` (MongoDB 4.0+), so values are doubles as on the SQL adapters. Without the cast, int/long arithmetic would stay exact past 2^53 where SQL rounds. In a grouped view they are evaluated in an `$addFields` after `$group` (before `@db.view.having`).
 
 ## Limitations
 

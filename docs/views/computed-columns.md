@@ -68,8 +68,11 @@ Identical on every adapter:
 | NULL        | A NULL operand makes the result NULL; `coalesce(a, b, …)` is the first non-NULL argument               |
 | Division    | Division by zero is NULL — never an error                                                              |
 | Result type | A JS `number` (or `null`)                                                                              |
+| Overflow    | Adapter-specific — see below                                                                           |
 
 Doubles make equality filters on fractional results fragile — prefer ranges (`avgEstimate>=2.5`) over `avgEstimate=2.5`.
+
+**Overflow.** A result beyond the double range (about ±1.8e308) behaves differently per adapter. PostgreSQL (`value out of range: overflow`) and MySQL (`DOUBLE value is out of range`) raise an error, so a single extreme row fails the whole view read. SQLite and MongoDB return `Infinity` / `-Infinity`. Keep operands in a range where the expression cannot overflow.
 
 ## Rules
 
@@ -86,7 +89,7 @@ Checked at compile time:
 
 Sealing follows the operands: a computed field over a `@db.writeOnly` field (directly or through another computed field) is write-only on the view; one over an `@db.encrypted` field is rejected the first time the view is used ("ciphertext cannot be computed").
 
-Over HTTP a computed field is visible only while **every** operand is: a [`hasField`](/http/customization#hasfield) override that hides an operand hides the computed field too (unknown field in filters, sorts and `$select`, sealed out of read projections) — so `salary * 1` can never leak a hidden `salary`.
+Over HTTP a computed field is visible only while **every** operand is, including the computed fields it reads through. A [`hasField`](/http/customization#hasfield) override that hides one of them hides the computed field too: it becomes an unknown field in filters, sorts and `$select`, and is sealed out of read projections. So `salary * 1` can never leak a hidden `salary`. Likewise, hiding `rank` hides `priority = coalesce(oldestSeverity, 0) * 100 + rank`, because `priority - oldestSeverity * 100` would give `rank` back.
 
 ## Querying
 
@@ -94,7 +97,7 @@ A computed column is an ordinary column: `$sort`, `$filter`, `$select`, paginati
 
 ## Adapters
 
-An adapter renders computed columns only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `compute` — every bundled adapter does; sync refuses the view otherwise. SQL adapters cast each leaf (`CAST(x AS REAL | DOUBLE | DOUBLE PRECISION)`) and divide with `NULLIF(divisor, 0)`; MongoDB uses `$add` / `$subtract` / `$multiply` and a guarded `$divide`. The memory adapter holds no view rows (managed views are not evaluated there).
+An adapter renders computed columns only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `compute` — every bundled adapter does; otherwise sync refuses the view and the adapter's `ensureTable()` throws. SQL adapters cast each leaf (`CAST(x AS REAL | DOUBLE | DOUBLE PRECISION)`) and divide with `NULLIF(divisor, 0)`. MongoDB casts each leaf with `$toDouble` (MongoDB 4.0+), so int64 values past 2^53 round the same way as on SQL, and uses `$add` / `$subtract` / `$multiply` with a guarded `$divide`. The memory adapter holds no view rows (managed views are not evaluated there).
 
 ## Schema Sync
 

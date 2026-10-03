@@ -1246,28 +1246,8 @@ export class SchemaSync {
         }
       }
       // A computed column / first-row join the adapter does not render (`viewCapabilities()`)
-      const caps = view.dbAdapter.viewCapabilities();
-      if (!caps.has("compute")) {
-        for (const col of view.getViewColumnMappings()) {
-          if (col.expr !== undefined) {
-            addRefusal(
-              refusals,
-              view.tableName,
-              `View "${view.tableName}" field "${col.viewPath}": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())`,
-            );
-          }
-        }
-      }
-      if (!caps.has("firstJoin")) {
-        for (const join of view.viewPlan.joins) {
-          if (join.first) {
-            addRefusal(
-              refusals,
-              view.tableName,
-              `View "${view.tableName}" join "${join.scope}": first-row joins are not supported by this adapter (viewCapabilities())`,
-            );
-          }
-        }
+      for (const problem of view.viewCapabilityProblems()) {
+        addRefusal(refusals, view.tableName, problem);
       }
       // A source that is neither in the inventory nor in the database
       for (const source of d.viewSources.get(view.tableName)!) {

@@ -162,6 +162,29 @@ export abstract class BaseDbAdapter {
     if (logger) {
       this.logger = logger;
     }
+    if (readable.isView) this._guardViewCapabilities(readable);
+  }
+
+  /**
+   * Makes `ensureTable()` of a managed view fail closed (since 0.1.147): it
+   * throws before the adapter renders a computed column / first-row join its
+   * {@link viewCapabilities} does not list — schema sync refuses such a view
+   * up front, a direct `ensureTable()` call must not render it as a plain
+   * (row-multiplying) join either. Wraps the subclass's own implementation, so
+   * third-party adapters get the guard without code changes.
+   */
+  private _guardViewCapabilities(readable: AtscriptDbReadable<any, any, any, any, any, any, any>) {
+    if (Object.prototype.hasOwnProperty.call(this, "ensureTable")) return;
+    const view = readable as { viewCapabilityProblems?: () => string[] };
+    if (typeof view.viewCapabilityProblems !== "function") return;
+    const ensureTable = this.ensureTable.bind(this);
+    this.ensureTable = (opts?: TEnsureTableOptions) => {
+      const problems = view.viewCapabilityProblems!();
+      if (problems.length > 0) {
+        return Promise.reject(new Error(problems.join("; ")));
+      }
+      return ensureTable(opts);
+    };
   }
 
   /**

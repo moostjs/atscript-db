@@ -248,8 +248,10 @@ export function buildCreateView(
           return resolveFieldRef(ref);
         }
         if (col.expr !== undefined) {
-          // MySQL references the SELECT alias, PostgreSQL the expression
-          return havingGroupRef(dialect, columnExpr(col), col.viewColumn);
+          // Always the expression (it only holds aggregates and grouped
+          // expressions): MySQL binds an unqualified HAVING name that matches a
+          // GROUP BY column to that column, not to the SELECT alias.
+          return columnExpr(col);
         }
         if (col.aggFn) {
           return viewAggExpr(dialect, col, resolveFieldRef);

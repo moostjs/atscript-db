@@ -165,7 +165,8 @@ export interface TDbFieldVisibility {
    * `hasField(path)` and — when {@link scoped} — a `@db.column.derived`
    * field of the bound readable only while its source path is visible too
    * (a derived copy must not outlive a hidden source), a computed view
-   * column (`@db.compute`, since 0.1.147) only while every operand is.
+   * column (`@db.compute`, since 0.1.147) only while every operand and every
+   * intermediate computed field it reads through is.
    */
   readonly isVisible: (path: string) => boolean;
   /**
@@ -322,7 +323,8 @@ export class AsDbReadableController<
   private readonly _hasFieldOverridden: boolean;
   /**
    * `@db.column.derived` path → its source's logical path, `@db.compute` path
-   * → its operands' paths, per readable (bound + `$with` targets).
+   * → its operands' paths plus the computed fields it reads through, per
+   * readable (bound + `$with` targets).
    */
   private readonly _derivedSources = new WeakMap<object, ReadonlyMap<string, readonly string[]>>();
   /** The bound readable's entry of {@link _derivedSources}. */
@@ -476,7 +478,8 @@ export class AsDbReadableController<
       const out = new Map<string, readonly string[]>();
       for (const fd of readable.fieldDescriptors ?? []) {
         if (fd.derived?.sourcePath) out.set(fd.path, [fd.derived.sourcePath]);
-        if (fd.computed) out.set(fd.path, fd.computed.operands);
+        // a computed field also depends on the computed fields it reads through
+        if (fd.computed) out.set(fd.path, [...fd.computed.operands, ...fd.computed.via]);
       }
       map = out;
       this._derivedSources.set(readable, map);
@@ -510,7 +513,8 @@ export class AsDbReadableController<
    * `@db.column.derived` field is visible only while its source path is,
    * and one whose source is hidden is sealed out of every read projection
    * for the request, like a `@db.writeOnly` field. The same holds for a
-   * computed view column (`@db.compute`) and each of its operands.
+   * computed view column (`@db.compute`) and each of its operands, including
+   * the intermediate computed fields it reads through.
    */
   protected hasField(path: string): boolean {
     // Guarded for the partial-mock readables in *.spec.ts that omit

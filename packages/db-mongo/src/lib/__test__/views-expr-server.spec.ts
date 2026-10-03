@@ -41,6 +41,9 @@ beforeAll(async () => {
       fx.VxRatio,
       fx.VxRanked,
       fx.VxLevels,
+      fx.VxCollide,
+      fx.VxBig,
+      fx.VxBigCalc,
     ],
     { force: true },
   );
@@ -231,6 +234,36 @@ describe("MongoDB — first-row joins and computed columns", () => {
       { id: 1, rank: 21, priority: 321 },
     ]);
   });
+  it("HAVING on a computed column named like a grouped source column binds to the computed value", async () => {
+    expect(await rows(fx.VxCollide, { $sort: { sev: 1 } })).toEqual([
+      { sev: 1, n: 1, severity: 2 },
+      { sev: 2, n: 1, severity: 2 },
+      { sev: 3, n: 1, severity: 2 },
+      { sev: 5, n: 1, severity: 2 },
+      { sev: 7, n: 1, severity: 2 },
+    ]);
+  });
+
+  it("evaluates in double: an int64 operand past 2^53 rounds like SQL", async () => {
+    const { Long } = await import("mongodb");
+    // exact int64s around 2^53 — int/long arithmetic would give 2^53 + 2 and 1
+    await db.collection("vx_big").insertOne({
+      id: 1,
+      n: Long.fromString("9007199254740993"),
+      m: Long.fromString("9007199254740992"),
+    } as never);
+    expect(await rows(fx.VxBigCalc, { $select: ["id", "plus", "diff"] })).toEqual([
+      { id: 1, plus: 9007199254740992, diff: 0 },
+    ]);
+  });
+
+  it("casts every leaf with $toDouble", () => {
+    const stages = buildViewPipeline(space.getView(fx.VxBigCalc));
+    expect(stages.at(-1)).toMatchObject({
+      $project: { plus: { $add: [{ $toDouble: "$n" }, { $toDouble: 1 }] } },
+    });
+  });
+
   it("a computed column over a JSON-extracted GROUP BY dimension", async () => {
     expect(await rows(fx.VxLevels, { $sort: { score: 1 } })).toEqual([
       { level: null, n: 2, score: 2 },

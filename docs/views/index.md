@@ -157,22 +157,23 @@ export interface TicketQueue {
 }
 ```
 
-- **Ordering.** Comma-separated keys, each a field of the **join target** with an optional `asc` (default) or `desc`: `` `raisedAt` ``, `` `severity desc, raisedAt` ``. A key may be written qualified (`OldestOpenIssue.raisedAt`) — but only with the target. The target's primary key is appended as the final `asc` key unless it already is one, so the pick is deterministic on every adapter.
+- **Ordering.** Comma-separated keys, each a field of the **join target** with an optional `asc` (default) or `desc`: `` `raisedAt` ``, `` `severity desc, raisedAt` ``. A key may be written qualified (`OldestOpenIssue.raisedAt`) — but only with the target. The target's primary key is appended as the final `asc` key unless it already is one, so each adapter picks deterministically.
 - **Kind.** The kind must be written to reach the 4th position: `'left'` keeps tickets with no matching issue (fields `NULL`, so they must be optional), `'inner'` drops them.
 - **NULL ordering is uniform: NULL is the smallest value** — first in `asc`, last in `desc`, on every adapter. Prefer required order keys.
+- **Text order keys follow the column's collation**, which differs between adapters: SQLite and MongoDB compare bytes (`Banana` before `apple`), PostgreSQL uses the database locale (`apple` before `Banana`), and MySQL's default `utf8mb4_0900_ai_ci` ignores case (`Zed` = `zed`, then the primary key decides). Each adapter is deterministic, but the same data can pick a different row on different adapters. When the pick must match across adapters, order by numeric or timestamp keys; the appended primary key breaks ties.
 - **Grouped views.** First-row fields work as GROUP BY dimensions; they depend only on the entry row, so they never split a per-entry group. Counts over a regular join of the same table are unaffected. For "first per arbitrary group" use a grouping view as the entry ([views over views](#views-over-views)) and first-row join onto it.
 - **Chained joins.** A later join may reference the first-row scope — e.g. the reporter of the oldest issue: ``@db.view.joins Reporter, `Reporter.id = OldestOpenIssue.reporterId`, 'left'``.
 - **Typically through an alias** — so the same table can also be joined normally (for counts) in the same view.
 
 Compile-time rules:
 
-| Rule | Check                                                                                                                        |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------- |
-| VJ6  | Order keys are scalar fields of the target — no object, array, `@db.json`, `@db.encrypted`, `@db.ignore` or navigation field |
-| VJ7  | The target (through `@db.alias`) has exactly one `@meta.id` field — composite-key targets are not supported                  |
-| VJ8  | No order key appears twice                                                                                                   |
+| Rule | Check                                                                                                                                         |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| VJ6  | Order keys are scalar fields of the target — no object, array, `@db.json`, `@db.encrypted`, `@db.writeOnly`, `@db.ignore` or navigation field |
+| VJ7  | The target (through `@db.alias`) has exactly one `@meta.id` field — composite-key targets are not supported                                   |
+| VJ8  | No order key appears twice                                                                                                                    |
 
-An adapter renders a first-row join only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `firstJoin` — every bundled adapter does; sync refuses the view otherwise. How each adapter renders it, and which index serves it, is on the adapter pages ([SQLite](/adapters/sqlite#views), [MySQL](/adapters/mysql#views), [PostgreSQL](/adapters/postgresql#views), [MongoDB](/adapters/mongodb#views)).
+An adapter renders a first-row join only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `firstJoin` — every bundled adapter does; otherwise sync refuses the view and the adapter's `ensureTable()` throws. An `@db.encrypted` or `@db.writeOnly` order key is also rejected when the view is first used, not only at compile time: the chosen row would reveal how the sealed values order. How each adapter renders it, and which index serves it, is on the adapter pages ([SQLite](/adapters/sqlite#views), [MySQL](/adapters/mysql#views), [PostgreSQL](/adapters/postgresql#views), [MongoDB](/adapters/mongodb#views)).
 
 To rank or combine values across fields (`openCount * 10 + overdueCount`), add [computed columns](./computed-columns).
 

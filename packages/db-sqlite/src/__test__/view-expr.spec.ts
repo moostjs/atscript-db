@@ -32,6 +32,7 @@ beforeAll(async () => {
       fx.VxRatio,
       fx.VxRanked,
       fx.VxLevels,
+      fx.VxCollide,
     ],
     { force: true },
   );
@@ -223,6 +224,17 @@ describe("SQLite — first-row joins and computed columns", () => {
       { id: 1, rank: 21, priority: 321 },
     ]);
   });
+  it("HAVING on a computed column named like a grouped source column binds to the computed value", async () => {
+    // `severity` (computed: n * 2 = 2 for every group) collides with the grouped `vx_issues.severity`
+    expect(await rows(fx.VxCollide, { $sort: { sev: 1 } })).toEqual([
+      { sev: 1, n: 1, severity: 2 },
+      { sev: 2, n: 1, severity: 2 },
+      { sev: 3, n: 1, severity: 2 },
+      { sev: 5, n: 1, severity: 2 },
+      { sev: 7, n: 1, severity: 2 },
+    ]);
+  });
+
   it("a computed column over a JSON-extracted GROUP BY dimension", async () => {
     expect(await rows(fx.VxLevels, { $sort: { score: 1 } })).toEqual([
       { level: null, n: 2, score: 2 },

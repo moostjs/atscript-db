@@ -152,14 +152,16 @@ export function queryNodeToExpr(node: AtscriptQueryNode, pathOf: TViewExprPathOf
  * `$add` / `$subtract` / `$multiply`; `/` → `$divide` guarded so a zero
  * divisor yields null (`$divide` by 0 is an error in MongoDB); unary minus →
  * `$multiply` by -1; `coalesce` → nested two-argument `$ifNull` (the
- * multi-argument form needs MongoDB 5.0); literals `$literal`. A null or
- * missing operand yields null, like SQL. No casts — numeric promotion keeps
- * integers exact and `$divide` always returns a double. `operand` renders a
- * field leaf (a view path).
+ * multi-argument form needs MongoDB 5.0). A null or missing operand yields
+ * null, like SQL. Evaluated in double like the SQL adapters (MongoDB 4.0+):
+ * literals render `{ $toDouble: n }` and `operand` — which renders a field
+ * leaf (a view path) — must return a double too (`$toDouble` over a plain
+ * column; a computed operand is one already). Without the casts int/long
+ * arithmetic would stay exact past 2^53 where SQL rounds.
  * @since 0.1.147
  */
 export function exprToMongo(node: AtscriptExprNode, operand: (path: string) => unknown): unknown {
-  if (typeof node === "number") return { $literal: node };
+  if (typeof node === "number") return { $toDouble: node };
   if ("field" in node) return operand(node.field);
   const args = node.args.map((arg) => exprToMongo(arg, operand));
   switch (node.op) {

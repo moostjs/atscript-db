@@ -26,7 +26,7 @@ import { VIEW_SOURCE_ARGUMENT } from "./alias";
 
 /**
  * VJ6–VJ8 — the ordering of a first-row join: every key is a scalar field of
- * the join target (no object, array, `@db.json`, `@db.encrypted` or
+ * the join target (no object, array, `@db.json`, `@db.encrypted`, `@db.writeOnly` or
  * navigation field), no key repeats, and the target (through `@db.alias`)
  * declares exactly one `@meta.id` field — the anchor of the join's
  * correlated subquery.
@@ -82,6 +82,8 @@ function orderKeyProblem(doc: AtscriptDoc, target: string, path: string[]): stri
     if (node && isProp(node)) {
       if (node.countAnnotations("db.json") > 0) return "reads a @db.json field";
       if (node.countAnnotations("db.encrypted") > 0) return "is @db.encrypted";
+      // the chosen row would be an ordering oracle over a write-only value
+      if (node.countAnnotations("db.writeOnly") > 0) return "is @db.writeOnly";
       if (node.countAnnotations("db.ignore") > 0) return "is @db.ignore'd";
     }
     if (isArray(step.def)) return "is an array";

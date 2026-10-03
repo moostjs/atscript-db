@@ -64,11 +64,13 @@ describe.skipIf(!URI)(
       fx.VxRatio,
       fx.VxRanked,
       fx.VxLevels,
+      fx.VxCollide,
     ];
 
     beforeAll(async () => {
       driver = new PgDriver(URI!);
       for (const view of [
+        "vx_collide",
         "vx_levels",
         "vx_ranked",
         "vx_ratio",
@@ -260,6 +262,17 @@ describe.skipIf(!URI)(
       expect(await rows(fx.VxRanked, { $sort: { priority: -1 } })).toEqual([
         { id: 2, rank: 21, priority: 721 },
         { id: 1, rank: 21, priority: 321 },
+      ]);
+    });
+
+    it("HAVING on a computed column named like a grouped source column binds to the computed value", async () => {
+      // `severity` (computed: n * 2 = 2 for every group) collides with the grouped `vx_issues.severity`
+      expect(await rows(fx.VxCollide, { $sort: { sev: 1 } })).toEqual([
+        { sev: 1, n: 1, severity: 2 },
+        { sev: 2, n: 1, severity: 2 },
+        { sev: 3, n: 1, severity: 2 },
+        { sev: 5, n: 1, severity: 2 },
+        { sev: 7, n: 1, severity: 2 },
       ]);
     });
 

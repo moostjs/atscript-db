@@ -72,6 +72,20 @@ describe("computed view columns over HTTP", () => {
     expect([...sealed]).toEqual(["total"]);
   });
 
+  it("a hidden intermediate computed field hides and seals its dependents", async () => {
+    // `total = coalesce(bonus, 0) + salaryBand`: with `bonus` visible,
+    // `total - bonus` would give back the hidden `salaryBand`
+    HIDDEN = new Set(["salaryBand"]);
+    const { controller, view } = bind();
+    expect([...(controller as any).fieldVisibility.sealedFor(view)]).toEqual(["total"]);
+    expect((controller as any).fieldVisibility.isVisible("total")).toBe(false);
+    for (const qs of ["$sort=total", "total>5", "$select=total"]) {
+      const res = await controller.query(`?${qs}`);
+      expect((res as any).body.statusCode, qs).toBe(400);
+      expect(errorsOf(res)?.[0], qs).toEqual({ path: "total", message: 'Unknown field "total"' });
+    }
+  });
+
   it("visible operands keep the computed fields", async () => {
     HIDDEN = new Set(["name"]);
     const { controller, view } = bind();

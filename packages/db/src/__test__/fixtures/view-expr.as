@@ -106,6 +106,24 @@ export interface VeSecret {
     bumped?: number
 }
 
+// First-row join whose order key the runtime-guard test seals (write-only /
+// encrypted) — VJ6 rejects both at compile time, so the seal is set at runtime
+@db.table 've_guard_items'
+export interface VeGuardItem {
+    @meta.id
+    id: number
+    ticketId: number
+    rankKey: number
+}
+
+@db.view 've_order_guard'
+@db.view.for VeTicket
+@db.view.joins VeGuardItem, `VeGuardItem.ticketId = VeTicket.id`, 'left', `rankKey desc`
+export interface VeOrderGuard {
+    id: VeTicket.id
+    itemId?: VeGuardItem.id
+}
+
 // Hash variants (same shape, one difference each)
 
 @db.view 've_h_base'

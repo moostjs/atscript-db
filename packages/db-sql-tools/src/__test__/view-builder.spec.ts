@@ -319,10 +319,11 @@ describe("buildCreateView — computed columns and first-row joins", () => {
     );
   });
 
-  it("HAVING on a computed column: MySQL references the alias, PostgreSQL the expression", () => {
+  it("HAVING on a computed column renders the expression on every dialect (never the alias)", () => {
     const having = { left: { field: "rank" }, op: "$gte", right: 10 };
+    // MySQL would bind a bare alias that matches a GROUP BY column name to the column
     expect(buildCreateView(mysql, "q", plan({ having }), grouped, resolverFor(mysql))).toContain(
-      "GROUP BY `tickets`.`id` HAVING `rank` >= 10",
+      "GROUP BY `tickets`.`id` HAVING ((CAST(COUNT(`Issue`.`id`) AS DOUBLE) * CAST(10 AS DOUBLE)) + CAST(`tickets`.`id` AS DOUBLE)) >= 10",
     );
     expect(buildCreateView(pg, "q", plan({ having }), grouped, resolverFor(pg))).toContain(
       'HAVING ((CAST(COUNT("Issue"."id") AS DOUBLE PRECISION) * CAST(10 AS DOUBLE PRECISION)) + CAST("tickets"."id" AS DOUBLE PRECISION)) >= 10',

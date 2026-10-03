@@ -645,6 +645,8 @@ export interface FxIssue {
     payload: { level: number }
     @db.encrypted
     secret: string
+    @db.writeOnly
+    pinHash?: string
     address: { city: string }
 }
 
@@ -687,8 +689,11 @@ export interface FxQ {
     );
   });
 
-  it("VJ6: rejects array, JSON, encrypted and object keys", async () => {
-    const messages = await view("tags, FxOldest.payload.level, secret, address");
+  it("VJ6: rejects array, JSON, encrypted, write-only and object keys", async () => {
+    const messages = await view("tags, FxOldest.payload.level, secret, address, pinHash");
+    expect(messages).toContain(
+      "Order key 'pinHash' is @db.writeOnly — order by a scalar field of 'FxOldest'",
+    );
     expect(messages).toContain(
       "Order key 'tags' is an array — order by a scalar field of 'FxOldest'",
     );

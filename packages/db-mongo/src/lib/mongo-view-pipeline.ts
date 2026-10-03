@@ -82,8 +82,8 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
   const colValue = (col: TViewColumnMapping): unknown =>
     col.nullable ? orNull(colSourceField(col)) : colSourceField(col);
   // A computed column's expression, `leaf` rendering a non-computed operand
-  // column; computed operands are inlined, each rendered once (one `leaf`
-  // mode per pipeline: grouped or flat)
+  // column (cast to double, like SQL's CAST per leaf); computed operands are
+  // inlined, each rendered once (one `leaf` mode per pipeline: grouped or flat)
   const byPath = new Map(columns.map((c) => [c.viewPath, c]));
   const rendered = new Map<string, unknown>();
   const computedExpr = (col: TViewColumnMapping, leaf: (c: TViewColumnMapping) => unknown) => {
@@ -91,7 +91,7 @@ export function buildViewPipeline(view: AtscriptDbView): Document[] {
     if (out === undefined) {
       out = exprToMongo(col.expr!, (path) => {
         const c = byPath.get(path)!;
-        return c.expr === undefined ? leaf(c) : computedExpr(c, leaf);
+        return c.expr === undefined ? { $toDouble: leaf(c) } : computedExpr(c, leaf);
       });
       rendered.set(col.viewPath, out);
     }

@@ -431,7 +431,7 @@ LEFT JOIN "issues" AS "OldestOpenIssue"
 
 It runs once per entry row; an index on the condition's join key plus the order keys (`(ticket_id, raised_at, id)`) keeps each lookup an index scan. PostgreSQL sorts `NULL` last by default, so order keys render `ASC NULLS FIRST` / `DESC NULLS LAST` — `NULL` is the smallest value on every adapter. A default B-tree index serves `NULLS FIRST` only when declared that way: create `(ticket_id, raised_at NULLS FIRST, id)`, or keep order keys required.
 
-[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE PRECISION)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. Without the cast, PostgreSQL would divide integers (`7 / 2 = 3`) and raise on division by zero.
+[Computed columns](/views/computed-columns) cast every field and literal operand with `CAST(x AS DOUBLE PRECISION)` and divide with `NULLIF(divisor, 0)`, so `7 / 2 = 3.5` and division by zero is `NULL`. Without the cast, PostgreSQL would divide integers (`7 / 2 = 3`) and raise on division by zero. A result outside the `double precision` range fails the read with `value out of range: overflow`.
 
 ## Derived Columns
 

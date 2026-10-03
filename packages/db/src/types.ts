@@ -558,10 +558,13 @@ export interface TDbFieldMeta {
    * A computed view column (`@db.compute`, since 0.1.147): `operands` are the
    * logical paths of the view fields its value is computed from — transitive
    * (a computed operand is replaced by its own operands), never computed
-   * themselves. Read-only; a computed field must not be visible when one of
-   * its operands is hidden.
+   * themselves. `via` lists the intermediate computed fields the value is
+   * computed through (transitively; empty when every leaf is a plain field).
+   * Read-only; a computed field must not be visible when one of its operands
+   * or `via` fields is hidden (the same rule as the `@db.writeOnly` seal —
+   * `priority = x * 100 + rank` would otherwise give back a hidden `rank`).
    */
-  computed?: { operands: readonly string[] };
+  computed?: { operands: readonly string[]; via: readonly string[] };
 }
 
 // ── Value Formatters ─────────────────────────────────────────────────────

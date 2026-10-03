@@ -3145,6 +3145,33 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
     expect(ok.status).toBe("synced");
   });
 
+  it("a direct ensureTable() of such a view fails closed too (viewCapabilities())", async () => {
+    const ve = await import("./fixtures/view-expr.as");
+    const view = createSpace().getView(ve.VeQueue);
+    sharedDdl = [];
+    await expect(view.dbAdapter.ensureTable()).rejects.toThrow(
+      'View "ve_queue" field "rank": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())',
+    );
+    await expect(view.dbAdapter.ensureTable()).rejects.toThrow(
+      'View "ve_queue" join "VeOldest": first-row joins are not supported by this adapter (viewCapabilities())',
+    );
+    expect(sharedDdl).toEqual([]);
+    expect(view.viewCapabilityProblems()).toHaveLength(4);
+
+    class CapableAdapter extends MockAdapter {
+      override viewCapabilities() {
+        return ALL_VIEW_CAPABILITIES;
+      }
+    }
+    const capable = createSpaceOf(() => new CapableAdapter()).getView(ve.VeQueue);
+    expect(capable.viewCapabilityProblems()).toEqual([]);
+    await expect(capable.dbAdapter.ensureTable()).resolves.toBeUndefined();
+    // a plain view (no computed column / first-row join) is unaffected
+    await expect(
+      createSpace().getView(ActiveUsersView).dbAdapter.ensureTable(),
+    ).resolves.toBeUndefined();
+  });
+
   it("refuses when a physical table sits where a managed view is declared (and vice versa)", async () => {
     const space = createSpace();
     const sync = new SchemaSync(space);

@@ -204,7 +204,7 @@ Adapters using session-style APIs (MongoDB) can override `withTransaction()` dir
 
 ## View capabilities (0.1.147)
 
-`viewCapabilities(): ReadonlySet<'compute' | 'firstJoin'>` — default EMPTY (fail-closed: sync refuses a view with a computed column / first-row join). Return `ALL_VIEW_CAPABILITIES` (`@atscript/db`) once `ensureView` renders `TViewColumnMapping.expr` (double arithmetic, NULL on `/ 0`, leaves = view paths, keep out of GROUP BY; `walkViewExpr`) and `TViewJoin.first` (first matching target row by `first.order`, PK last, NULL smallest). SQL adapters on `buildCreateView` only need dialect `castDouble(expr)` (+ `nullsSortLargest: true` when the DB sorts NULL last, like PG).
+`viewCapabilities(): ReadonlySet<'compute' | 'firstJoin'>` — default EMPTY (fail-closed: sync refuses a view with a computed column / first-row join; a direct `ensureTable()` throws too — `BaseDbAdapter` wraps it for managed views, no adapter code needed). Return `ALL_VIEW_CAPABILITIES` (`@atscript/db`) once `ensureView` renders `TViewColumnMapping.expr` (double arithmetic, NULL on `/ 0`, leaves = view paths, keep out of GROUP BY; `walkViewExpr`) and `TViewJoin.first` (first matching target row by `first.order`, PK last, NULL smallest). SQL adapters on `buildCreateView` only need dialect `castDouble(expr)` (+ `nullsSortLargest: true` when the DB sorts NULL last, like PG).
 
 ## Index sync helper
 

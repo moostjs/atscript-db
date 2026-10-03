@@ -44,8 +44,14 @@ describe("MysqlAdapter — first-row joins and computed columns (DDL)", () => {
     expect(sql).not.toContain("NULLS FIRST");
   });
 
-  it("references a computed column in HAVING", async () => {
-    expect(await createViewSql(fx.VxBusy)).toContain("HAVING `rank` > 0");
+  it("references a computed column in HAVING by its expression, not the SELECT alias", async () => {
+    expect(await createViewSql(fx.VxBusy)).toContain(
+      "HAVING (CAST(COUNT(CASE WHEN `vx_issues`.`status` = 'open' THEN `vx_issues`.`id` END) AS DOUBLE) * CAST(10 AS DOUBLE)) > 0",
+    );
+    // a bare `severity` would bind to the grouped `vx_issues`.`severity` on MySQL
+    const collide = await createViewSql(fx.VxCollide);
+    expect(collide).toContain("HAVING (CAST(COUNT(*) AS DOUBLE) * CAST(2 AS DOUBLE)) = 2");
+    expect(collide).not.toContain("HAVING `severity`");
   });
 });
 
@@ -63,11 +69,13 @@ describe.skipIf(!URI)("MysqlAdapter — first-row joins and computed columns (My
     fx.VxRatio,
     fx.VxRanked,
     fx.VxLevels,
+    fx.VxCollide,
   ];
 
   beforeAll(async () => {
     driver = new Mysql2Driver(URI!);
     for (const view of [
+      "vx_collide",
       "vx_levels",
       "vx_ranked",
       "vx_ratio",
@@ -259,6 +267,17 @@ describe.skipIf(!URI)("MysqlAdapter — first-row joins and computed columns (My
       { id: 1, rank: 21, priority: 321 },
     ]);
   });
+  it("HAVING on a computed column named like a grouped source column binds to the computed value", async () => {
+    // `severity` (computed: n * 2 = 2 for every group) collides with the grouped `vx_issues.severity`
+    expect(await rows(fx.VxCollide, { $sort: { sev: 1 } })).toEqual([
+      { sev: 1, n: 1, severity: 2 },
+      { sev: 2, n: 1, severity: 2 },
+      { sev: 3, n: 1, severity: 2 },
+      { sev: 5, n: 1, severity: 2 },
+      { sev: 7, n: 1, severity: 2 },
+    ]);
+  });
+
   it("a computed column over a JSON-extracted GROUP BY dimension", async () => {
     expect(await rows(fx.VxLevels, { $sort: { score: 1 } })).toEqual([
       { level: null, n: 2, score: 2 },

@@ -461,7 +461,7 @@ interface TMetaResponse {
       geo?;
       writeOnly?;
       derived?;
-      computed?; // @db.compute view column (0.1.147) — advisory; hidden with any hidden operand
+      computed?; // @db.compute view column (0.1.147) — advisory; hidden with any hidden operand or intermediate computed field
     }
   >; // exact — see Gate mode; `derived: true` (0.1.141) = `@db.column.derived`, read-only (a written value is dropped)
   type: TSerializedAnnotatedType; // always refDepth: 0.5 (FK refs shallow; chained refs resolve to the terminal field — see relations.md); annotations kept: meta.*, expect.*, db.rel.*, db.json, db.patch.strategy, db.default*, db.http.path, db.writeOnly, db.column.version, db.column.derived (0.1.142) — other db.* stripped (override getSerializeOptions())

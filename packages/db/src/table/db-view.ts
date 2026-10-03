@@ -363,10 +363,18 @@ export class AtscriptDbView<
           // A first-row join: keys are fields of the target (qualified with
           // it), the primary key appended as the final tie-break
           const key = firstJoinKey(this.tableName, targetType(), target.name);
-          const order = join.order.map((item) => ({
-            ref: { type: targetType, field: item.ref.field },
-            desc: item.desc === true,
-          }));
+          const targetSource = viewSourceOf(targetType()).type;
+          const order = join.order.map((item) => {
+            // Runtime twin of VJ6: the chosen row would expose the ordering
+            // of a ciphertext / write-only value
+            const seals = sourceFieldSeals(targetSource, item.ref.field);
+            if (seals.encrypted || seals.writeOnly) {
+              throw new Error(
+                `View "${this.tableName}": the first-row join on "${target.name}" cannot order by the ${seals.encrypted ? "@db.encrypted" : "@db.writeOnly"} field "${item.ref.field}"`,
+              );
+            }
+            return { ref: { type: targetType, field: item.ref.field }, desc: item.desc === true };
+          });
           if (!order.some((item) => item.ref.field === key)) {
             order.push({ ref: { type: targetType, field: key }, desc: false });
           }
@@ -468,6 +476,39 @@ export class AtscriptDbView<
   getViewColumnMappings(): TViewColumnMapping[] {
     this._columnMappings ??= this._buildColumnMappings();
     return this._columnMappings;
+  }
+
+  /**
+   * Why the bound adapter cannot render this managed view: one message per
+   * computed column / first-row join whose feature its `viewCapabilities()`
+   * does not list. Empty for an external view or when every feature is
+   * rendered. Schema sync refuses such a view; the adapter's `ensureTable()`
+   * throws for it (fail-closed for adapters that predate the features).
+   * @since 0.1.147
+   */
+  viewCapabilityProblems(): string[] {
+    if (this.isExternal) return [];
+    const caps = this.dbAdapter.viewCapabilities();
+    const problems: string[] = [];
+    if (!caps.has("compute")) {
+      for (const col of this.getViewColumnMappings()) {
+        if (col.expr !== undefined) {
+          problems.push(
+            `View "${this.tableName}" field "${col.viewPath}": computed columns (@db.compute) are not supported by this adapter (viewCapabilities())`,
+          );
+        }
+      }
+    }
+    if (!caps.has("firstJoin")) {
+      for (const join of this.viewPlan.joins) {
+        if (join.first) {
+          problems.push(
+            `View "${this.tableName}" join "${join.scope}": first-row joins are not supported by this adapter (viewCapabilities())`,
+          );
+        }
+      }
+    }
+    return problems;
   }
 
   private _buildColumnMappings(): TViewColumnMapping[] {

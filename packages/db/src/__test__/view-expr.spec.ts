@@ -96,7 +96,10 @@ describe("computed columns — TViewColumnMapping.expr", () => {
     expect(computedOperands(fx.VeQueue, "title")).toBeUndefined();
     const view = space().getView(fx.VeIssueCost);
     const fd = view.fieldDescriptors.find((f) => f.path === "total")!;
-    expect(fd.computed).toEqual({ operands: ["cost", "estimate", "severity"] });
+    expect(fd.computed).toEqual({
+      operands: ["cost", "estimate", "severity"],
+      via: ["doubleCost", "weight"],
+    });
     expect(view.fieldDescriptors.find((f) => f.path === "severity")!.computed).toBeUndefined();
   });
 });
@@ -110,6 +113,25 @@ describe("computed columns — seals", () => {
     expect(props.get("doubleCost").metadata.get("db.writeOnly")).toBe(true);
     expect(props.get("total").metadata.get("db.writeOnly")).toBe(true);
     expect(props.get("weight").metadata.has("db.writeOnly")).toBe(false);
+  });
+
+  it("rejects a write-only or encrypted first-row order key at first use (VJ6's runtime twin)", () => {
+    expect(space().getView(fx.VeOrderGuard).viewPlan.joins[0].first).toBeDefined();
+    const metadata = fx.VeGuardItem.type.props.get("rankKey").metadata as Map<string, unknown>;
+    try {
+      metadata.set("db.writeOnly", true);
+      expect(() => space().getView(fx.VeOrderGuard).viewPlan).toThrow(
+        'View "ve_order_guard": the first-row join on "ve_guard_items" cannot order by the @db.writeOnly field "rankKey"',
+      );
+      metadata.delete("db.writeOnly");
+      metadata.set("db.encrypted", true);
+      expect(() => space().getView(fx.VeOrderGuard).viewPlan).toThrow(
+        'View "ve_order_guard": the first-row join on "ve_guard_items" cannot order by the @db.encrypted field "rankKey"',
+      );
+    } finally {
+      metadata.delete("db.writeOnly");
+      metadata.delete("db.encrypted");
+    }
   });
 
   it("rejects an encrypted operand at first use", () => {
