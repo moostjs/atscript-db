@@ -13,6 +13,11 @@ import { boundTableKey } from "./controller-access";
 import { isAsDbReadableControllerSubclass } from "./controller-registry";
 import { maxIdsOfOpts } from "./current-action";
 import { discoverActions, discoverRowLevelActions, type TDbActionEnvelope } from "./discover";
+import {
+  actionHandlerStarted,
+  dbActionArgsResolvedKey,
+  dbActionHandlerStartedKey,
+} from "./handler-start";
 import { dbActionIdSlot, dbActionIdsSlot, useDbActionId, useDbActionIds } from "./id-cache";
 import { dbActionBodySlot, dbActionInputSlot, useDbActionInput } from "./input-form-cache";
 import { WARN_PREFIX, type TDbActionsFromMeta } from "./keys";
@@ -29,7 +34,7 @@ import {
 import { dbActionRowSlot, dbActionRowsSlot, useDbActionRow, useDbActionRows } from "./row-cache";
 import { dbActionOverlaySlot, scopedControllerSlot } from "./row-scope";
 import { dedupeIdentities, identityKey } from "./rows-by-id";
-import { dbActionTargetKey, type TDbActionTarget } from "./target";
+import { dbActionAbortedKey, dbActionTargetKey, type TDbActionTarget } from "./target";
 
 /** Internal: a source controller's batch `$actions` verdicts for delegated ids. */
 export const ACTION_VERDICTS = Symbol.for("atscript-db.actionVerdicts");
@@ -78,6 +83,9 @@ export const ACTION_SLOTS: readonly TIsolatedSlot[] = [
   dbActionSkippedKey,
   dbActionStaleKey,
   dbActionTargetKey,
+  dbActionAbortedKey,
+  dbActionArgsResolvedKey,
+  dbActionHandlerStartedKey,
   boundTableKey,
   useDbActionId,
   useDbActionIds,
@@ -368,16 +376,25 @@ export interface TSourceBatchOutcome {
   processed: number;
   skipped: TSkippedRow[];
   failed: { id: Record<string, unknown>; reason: string }[];
-  /** The source's handler ran (its gate let at least part of the batch through). */
+  /**
+   * The source's handler started — every argument resolved (its guards, gate,
+   * `@InputForm` validation and other pipes passed); it may have changed rows.
+   */
   ran: boolean;
   /**
    * The batch failed (any error but the gate's own refusal, which is
    * retried): the ids still pending are NOT counted anywhere — the caller
-   * decides (rethrow when nothing ran yet, else abort with a partial summary).
+   * decides (rethrow when no handler started yet, else abort with a partial
+   * summary).
    */
   error?: unknown;
   /** The ids the failed attempt carried. */
   pending?: Record<string, unknown>[];
+  /**
+   * The source's `@DbActionTarget` handler failed mid-batch and answered its
+   * partial summary (already merged into this outcome): the run stops here.
+   */
+  aborted?: { status: number; message: string };
   /** The `message` (a string) the source's handler returned. */
   message?: string;
 }
@@ -388,11 +405,11 @@ export interface TSourceBatchOutcome {
  * other interceptors, `prepareRequest`, the row overlay, `actionRowScope`,
  * `disabled`, `@InputForm` validation, the handler — with the body
  * `{ ids, input }` (every body reader of the source sees it, never the
- * delegating request's). A batch the gate refuses before the handler ran
- * (409 `ActionDisabledError`) is retried once without the ids it named, so
- * every batch runs with skip semantics; any other error — or a refusal the
- * handler itself threw — is returned as `error` (with the ids it carried and
- * whether the handler ran).
+ * delegating request's). A batch refused before its handler started (409
+ * `ActionDisabledError`, e.g. from the gate) is retried once without the ids
+ * it named, so every batch runs with skip semantics; any other error — or a
+ * refusal the handler itself threw — is returned as `error` (with the ids it
+ * carried and whether the handler started).
  */
 export async function runSourceActionBatch(
   http: MoostHttp,
@@ -415,9 +432,9 @@ export async function runSourceActionBatch(
         },
       });
     } catch (error) {
-      // Only the GATE's refusal (before the handler ran: no target yet) is
-      // retried — a handler that threw it may have mutated rows already.
-      const handlerRan = child?.hasOwn(dbActionTargetKey) === true;
+      // Only a refusal before the handler started (the gate's) is retried —
+      // a handler that threw it may have mutated rows already.
+      const handlerRan = child !== undefined && actionHandlerStarted(child);
       const refused = handlerRan ? undefined : disabledIds(error);
       if (!refused || attempt > 0) {
         if (handlerRan) outcome.ran = true;
@@ -457,20 +474,23 @@ function disabledIds(error: unknown): { skipped: TSkippedRow[] } | undefined {
 
 /**
  * What the source's gate / handler left in the child event: its target's
- * summary. No target → the handler never ran (an interceptor answered
- * instead): every id of the batch failed as `"not run"`.
+ * summary — or the partial one its `@DbActionTarget` handler answered after
+ * failing mid-batch (`aborted`). The handler never started (an interceptor
+ * answered instead): every id of the batch failed as `"not run"`.
  */
 function collectOutcome(
   child: EventContext,
   ids: Record<string, unknown>[],
   outcome: TSourceBatchOutcome,
 ): void {
-  if (!child.hasOwn(dbActionTargetKey)) {
+  if (!actionHandlerStarted(child) || !child.hasOwn(dbActionTargetKey)) {
     for (const id of ids) outcome.failed.push({ id, reason: "not run" });
     return;
   }
   outcome.ran = true;
-  const summary = (child.getOwn(dbActionTargetKey) as TDbActionTarget).summary();
+  const aborted = child.hasOwn(dbActionAbortedKey) ? child.getOwn(dbActionAbortedKey) : undefined;
+  const summary = aborted ?? (child.getOwn(dbActionTargetKey) as TDbActionTarget).summary();
+  if (aborted?.aborted) outcome.aborted = aborted.aborted;
   outcome.processed += summary.processed;
   outcome.skipped.push(...summary.skipped);
   outcome.failed.push(...summary.failed);

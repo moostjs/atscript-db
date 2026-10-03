@@ -31,7 +31,7 @@ The actions stay the source's. Its route runs them, and its guards, `prepareRequ
 
 Without `idMap`, each of the source's `preferredId` fields must map to exactly one plain view column (not aggregated, not inside a JSON column). Otherwise the first request that needs the delegation fails with a configuration error naming the field. A left-joined (nullable) column is fine: a view row whose value is `null` simply gets no delegated actions.
 
-The decorator is repeatable (several sources). The source is referenced lazily, so controllers can reference each other without import cycles, and it must be registered with the app. Unknown or table-level action names, a name already used by the view's own actions or another delegation, and an `idMap` that is not an identification are configuration errors.
+The decorator is repeatable (several sources; `/meta` lists them in declaration order, the top decorator first). The source is referenced lazily, so controllers can reference each other without import cycles, and it must be registered with the app. Unknown or table-level action names, a name already used by the view's own actions or another delegation, and an `idMap` that is not an identification are configuration errors.
 
 ## What the view answers
 
@@ -56,16 +56,16 @@ A caller whose source `prepareRequest` refuses (401 / 403) simply gets no delega
 
 The answer is a `TDbActionTargetSummary`:
 
-| Field                  | Meaning                                                                                                                                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `matched`              | View rows the query matched                                                                                                                          |
-| `processed`            | Source rows the source handlers processed                                                                                                            |
-| `skipped`              | `"unmapped"`, `"stale"`, the gate's refusals (with reasons)                                                                                          |
-| `failed`               | Rows a handler reported, rows of a batch no handler ran for (`"not run"` — an interceptor answered instead), and the rows of an aborted run          |
-| `aborted`              | `{ status, message }` when a batch failed after an earlier one ran — those batches stay applied, the failed batch and every later id are in `failed` |
-| `messages` / `message` | The `message` string each batch's handler returned, in order / the distinct ones joined by newlines                                                  |
+| Field                  | Meaning                                                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `matched`              | View rows the query matched                                                                                                                                     |
+| `processed`            | Source rows the source handlers processed                                                                                                                       |
+| `skipped`              | `"unmapped"`, `"stale"`, the gate's refusals (with reasons)                                                                                                     |
+| `failed`               | Rows a handler reported, rows of a batch no handler ran for (`"not run"` — an interceptor answered instead), and the rows of an aborted run                     |
+| `aborted`              | `{ status, message }` when a batch failed once a source handler had started — earlier batches stay applied, the failed batch and every later id are in `failed` |
+| `messages` / `message` | The `message` string each batch's handler returned, in order / the distinct ones joined by newlines                                                             |
 
-A failure before any source handler ran (e.g. a 403 because the caller holds no grant for the action) is the request's error; nothing ran. A handler that throws `ActionDisabledError` itself is never rerun — only the gate's refusal is.
+A source handler counts as run once it starts — after its guards, the gate, every other interceptor and its argument pipes (`@InputForm` validation included) passed. A failure before any source handler started is the request's error, exactly as the source's own route answers it; nothing ran. That covers a 403 because the caller holds no grant for the action, and an `input` the source's `@InputForm` rejects: every batch carries the same `input`, so the first batch's 400 (with its `errors`) is the answer. A source `@DbActionTarget()` handler that fails mid-batch answers its own partial summary; the view merges it and stops there (`aborted`). A refusal before the handler started (the gate's `ActionDisabledError`) reruns the batch once without the refused ids; a handler that throws `ActionDisabledError` itself is never rerun.
 
 ### What the source sees in a batch
 

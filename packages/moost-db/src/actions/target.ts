@@ -16,6 +16,7 @@ import {
 import { asFetchTable, dbActionRowsSlot, seedActionFields } from "./row-cache";
 import { applyActionScope, dbActionOverlaySlot } from "./row-scope";
 import { errorMessage, errorStatus } from "./action-target-error";
+import { actionHandlerStarted } from "./handler-start";
 import { findRowsByIds, identityKey } from "./rows-by-id";
 import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
 
@@ -47,6 +48,9 @@ export interface TDbActionTarget<Row = Record<string, unknown>> {
 
 /** The current action's target, set by its gate before the handler runs. */
 export const dbActionTargetKey = key<TDbActionTarget>("atscript_db_action_target");
+
+/** The partial summary a `@DbActionTarget` run answered after its handler failed mid-run. */
+export const dbActionAbortedKey = key<TDbActionTargetSummary>("atscript_db_action_aborted");
 
 /**
  * The current `'rows'` action's {@link TDbActionTarget} (since 0.1.147).
@@ -282,16 +286,20 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
 /**
  * The partial summary of the current `@DbActionTarget` run when its handler
  * failed after receiving a batch (see `StreamedTarget.abort`); `undefined`
- * when no batch reached it — the error then stands.
+ * when the handler never started (a guard, `@InputForm` validation or
+ * another pipe failed) or no batch reached it — the error then stands.
  */
 export function abortStreamedTarget(
   ctx: EventContext,
   error: unknown,
 ): TDbActionTargetSummary | undefined {
-  if (!ctx.has(dbActionTargetKey)) return undefined;
+  if (!actionHandlerStarted(ctx) || !ctx.has(dbActionTargetKey)) return undefined;
   const target = ctx.get(dbActionTargetKey);
   // `processed` grows only as a non-empty batch is handed over
-  return target instanceof StreamedTarget && target.processed > 0 ? target.abort(error) : undefined;
+  if (!(target instanceof StreamedTarget) || target.processed === 0) return undefined;
+  const summary = target.abort(error);
+  ctx.set(dbActionAbortedKey, summary);
+  return summary;
 }
 
 /**

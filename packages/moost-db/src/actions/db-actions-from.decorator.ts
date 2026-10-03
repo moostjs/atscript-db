@@ -63,8 +63,9 @@ export interface TDbActionsFromOpts {
  *   source's action route on them in batches — the source re-checks every
  *   batch.
  *
- * Repeatable (several sources). The source is referenced lazily (no import
- * cycles between controllers) and must be registered with the app. Only a
+ * Repeatable (several sources, listed in declaration order). The source is
+ * referenced lazily (no import cycles between controllers) and must be
+ * registered with the app. Only a
  * controller declaring it gets the `POST {prefix}/delegated-actions/:name`
  * route (subclasses inherit it).
  *
@@ -83,9 +84,11 @@ export function DbActionsFrom(
   opts: TDbActionsFromOpts = {},
 ): ClassDecorator {
   const entry: TDbActionsFromMeta = { source, idMap: opts.idMap, actions: opts.actions };
+  // Class decorators apply bottom-up: prepending keeps the declaration order
+  // (the top `@DbActionsFrom` first).
   const decorate = getAtscriptDbMate().decorate((current) => ({
     ...current,
-    atscript_db_actions_from: [...(current.atscript_db_actions_from ?? []), entry],
+    atscript_db_actions_from: [entry, ...(current.atscript_db_actions_from ?? [])],
   })) as ClassDecorator;
   return (target) => {
     if (isAsValueHelpControllerSubclass(target)) {

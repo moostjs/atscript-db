@@ -2915,8 +2915,11 @@ export class AsDbReadableController<
    * each batch the view rows are re-checked against the target: a source id
    * none of whose view rows still matches is skipped as `"stale"`; ids the
    * source's gate refuses are skipped with their reasons. A batch failing
-   * after an earlier batch ran stops the run: the answer is the partial
-   * summary with `aborted` and every id not run listed in `failed`. The
+   * once a source handler started (in it or an earlier batch) stops the run:
+   * the answer is the partial summary with `aborted` and every id not run
+   * listed in `failed`. A failure before any source handler started (a 403,
+   * the source's `@InputForm` 400, …) is the request's error — nothing ran,
+   * and every batch carries the same `input`. The
    * `message` (string) each batch's handler returned is passed on:
    * `messages` per batch, `message` the distinct ones joined by newlines. A
    * dry run answers `{ matched }`; otherwise the answer is the run's
@@ -3013,18 +3016,23 @@ export class AsDbReadableController<
       summary.processed += outcome.processed;
       summary.skipped.push(...outcome.skipped);
       summary.failed.push(...outcome.failed);
-      if (outcome.error === undefined) {
+      if (outcome.error === undefined && outcome.aborted === undefined) {
         ran ||= outcome.ran;
         continue;
       }
-      // Nothing ran yet: the request fails as the source failed it.
-      if (!ran && !outcome.ran) throw outcome.error;
-      const reason = errorMessage(outcome.error);
-      for (const id of outcome.pending ?? []) summary.failed.push({ id, reason });
+      if (outcome.error === undefined) {
+        // The source answered its own partial summary (merged above).
+        summary.aborted = outcome.aborted;
+      } else {
+        // No source handler started yet: the request fails as the source failed it.
+        if (!ran && !outcome.ran) throw outcome.error;
+        const reason = errorMessage(outcome.error);
+        for (const id of outcome.pending ?? []) summary.failed.push({ id, reason });
+        summary.aborted = { status: errorStatus(outcome.error), message: reason };
+      }
       for (const id of queue.slice(start + batchSize)) {
         summary.failed.push({ id, reason: "not run" });
       }
-      summary.aborted = { status: errorStatus(outcome.error), message: reason };
       break;
     }
     if (messages.length > 0) {

@@ -1033,6 +1033,178 @@ describe("@DbActionsFrom — the delegated route and discovery (regressions)", (
   });
 });
 
+interface TLabelOpts {
+  /** An interceptor after the gate (INTERCEPTOR priority) refuses with 418. */
+  lateRefusal?: boolean;
+  /** The handler throws a 500 once it reaches this id. */
+  handlerFails?: number;
+}
+
+/**
+ * A source whose `'rows'` actions validate an `@InputForm` (the gate runs —
+ * and builds the target — BEFORE the form is validated) and a board
+ * delegating them.
+ */
+async function bootLabels(opts: TLabelOpts = {}) {
+  getMoostInfact()._cleanup();
+  const { issues, board } = await space();
+  const n = ++SEQ;
+  const log: unknown[][] = [];
+  const late = defineBeforeInterceptor(() => {
+    if (opts.lateRefusal) throw new HttpError(418, "late refusal");
+  }, TInterceptorPriority.INTERCEPTOR);
+
+  @TableController(issues as never, `lissues${n}`)
+  class LabelSource extends AsDbController {
+    @Post("actions/label")
+    @DbAction("label", { label: "Label", queryTarget: { batchSize: 2 } })
+    @Intercept(late)
+    async label(
+      @DbActionIDs() ids: Array<{ id: number }>,
+      @InputForm(fx.CommentForm) input: { note: string },
+    ) {
+      log.push(ids.map((i) => i.id));
+      for (const { id } of ids) {
+        if (id === opts.handlerFails) throw new HttpError(500, `cannot label ${id}`);
+        await (this.table as any).updateOne({ id, title: input.note });
+      }
+      return { labeled: ids.length };
+    }
+
+    @Post("actions/labelStream")
+    @DbAction("labelStream", { label: "Label (streamed)", queryTarget: { batchSize: 2 } })
+    @Intercept(late)
+    async labelStream(
+      @DbActionTarget() target: TDbActionTarget<{ id: number }>,
+      @InputForm(fx.CommentForm) input: { note: string },
+    ) {
+      for await (const { ids } of target.batches()) {
+        log.push(ids.map((i) => i.id));
+        for (const { id } of ids) {
+          if (id === opts.handlerFails) throw new HttpError(500, `cannot label ${String(id)}`);
+          await (this.table as any).updateOne({ id, title: input.note });
+        }
+      }
+      return target.summary();
+    }
+  }
+
+  @TableController(board as never, `lboard${n}`)
+  @DbActionsFrom(() => LabelSource, { idMap: { id: "issueId" } })
+  class LabelBoard extends AsDbReadableController {}
+
+  const { send } = await bootApp(LabelSource, LabelBoard);
+  const titles = async () =>
+    ((await issues.findMany({ filter: {}, controls: { $sort: { id: 1 } } } as never)) as any[]).map(
+      (r) => r.title,
+    );
+  return { send, log, titles, board: `/lboard${n}`, source: `/lissues${n}` };
+}
+
+describe("query targets — a batch counts as run only once its handler started (regressions)", () => {
+  const ORIGINAL = ISSUES.map((i) => i.title);
+
+  for (const action of ["label", "labelStream"]) {
+    it(`delegated ${action}: an invalid input is the request's 400 — nothing ran`, async () => {
+      const { send, log, titles, board, source } = await bootLabels();
+      const url = `${board}/delegated-actions/${action}`;
+      const direct = await send("POST", `${source}/actions/${action}`, {
+        ids: [{ id: 1 }],
+        input: { note: 7 },
+      });
+      expect(direct.status).toBe(400);
+      for (const input of [{ note: 7 }, undefined]) {
+        const res = await send("POST", url, { query: { q: "teamId=a" }, input });
+        expect(res.status, JSON.stringify(res.body)).toBe(400);
+        expect(res.body).not.toHaveProperty("aborted");
+        expect(res.body.errors).toEqual([expect.objectContaining({ path: "note" })]);
+        if (input) expect(res.body).toEqual(direct.body);
+      }
+      expect(log).toEqual([]);
+      expect(await titles()).toEqual(ORIGINAL);
+    });
+
+    it(`delegated ${action}: an interceptor after the gate refusing is the request's error`, async () => {
+      const { send, log, board } = await bootLabels({ lateRefusal: true });
+      const res = await send("POST", `${board}/delegated-actions/${action}`, {
+        query: { q: "teamId=a" },
+        input: { note: "x" },
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(418);
+      expect(log).toEqual([]);
+    });
+
+    it(`delegated ${action}: a failure after a handler started → the partial summary`, async () => {
+      const { send, log, titles, board } = await bootLabels({ handlerFails: 4 });
+      const res = await send("POST", `${board}/delegated-actions/${action}`, {
+        query: { q: "teamId=a" },
+        input: { note: "x" },
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      // batches [1, 3] then [4] — the second batch's handler throws
+      expect(log).toEqual([[1, 3], [4]]);
+      expect(res.body).toMatchObject({
+        matched: 4,
+        processed: 2,
+        failed: [{ id: { id: 4 }, reason: "cannot label 4" }],
+        aborted: { status: 500, message: "cannot label 4" },
+      });
+      expect(await titles()).toEqual(["x", "two", "x", "four"]);
+    });
+
+    it(`own ${action}: an invalid input on a query target is the request's 400`, async () => {
+      const { send, log, titles, source } = await bootLabels();
+      const res = await send("POST", `${source}/actions/${action}`, {
+        query: { q: "" },
+        input: { note: 7 },
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+      expect(res.body).not.toHaveProperty("aborted");
+      expect(res.body.errors).toEqual([expect.objectContaining({ path: "note" })]);
+      expect(log).toEqual([]);
+      expect(await titles()).toEqual(ORIGINAL);
+    });
+  }
+
+  it("own labelStream: a failure after the handler received a batch → the partial summary", async () => {
+    const { send, log, source } = await bootLabels({ handlerFails: 3 });
+    const res = await send("POST", `${source}/actions/labelStream`, {
+      query: { q: "" },
+      input: { note: "x" },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(log).toEqual([
+      [1, 2],
+      [3, 4],
+    ]);
+    expect(res.body).toMatchObject({
+      matched: 4,
+      processed: 2,
+      aborted: { status: 500, message: "cannot label 3" },
+    });
+  });
+});
+
+describe("@DbActionsFrom — several sources", () => {
+  it("lists the delegations in declaration order (the top decorator first)", async () => {
+    getMoostInfact()._cleanup();
+    const { issues, board } = await space();
+    const n = ++SEQ;
+    const { IssueCtrl: First } = defineSource(issues, `oissues${n}`, {}, []);
+    const { IssueCtrl: Second } = defineSource(issues, `oissuesb${n}`, {}, []);
+    @TableController(board as never, `oboard${n}`)
+    @DbActionsFrom(() => First, { idMap: { id: "issueId" }, actions: ["comment"] })
+    @DbActionsFrom(() => Second, { idMap: { id: "issueId" }, actions: ["close"] })
+    class TwoSources extends AsDbReadableController {}
+    const { send } = await bootApp(First, Second, TwoSources);
+    const meta = (await send("GET", `/oboard${n}/meta`)).body;
+    expect(meta.actions.map((a: any) => [a.name, a.owner])).toEqual([
+      ["comment", `/oissues${n}`],
+      ["close", `/oissuesb${n}`],
+    ]);
+  });
+});
+
 describe("mapToSourceIds", () => {
   it("reads dot paths nested or as flat dotted keys (flat first); dedupes; -1 when unmapped", async () => {
     const { mapToSourceIds } = await import("../actions/delegation");

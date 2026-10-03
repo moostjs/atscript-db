@@ -1,4 +1,4 @@
-import { Intercept } from "moost";
+import { Intercept, Pipe } from "moost";
 
 import { getAtscriptDbMate } from "../mate";
 import { isAsValueHelpControllerSubclass, valueHelpActionError } from "./controller-registry";
@@ -7,6 +7,7 @@ import {
   buildTargetInterceptor,
   buildThinInterceptor,
 } from "./gate-interceptor";
+import { markHandlerStartPipe } from "./handler-start";
 import { WARN_PREFIX, mergeActionMeta } from "./keys";
 import { scanParamLevel } from "./param-level";
 import { actionPrepareInterceptor } from "./prepare-request";
@@ -61,6 +62,10 @@ export function DbAction<TRow = unknown, const R extends readonly FlatKey<TRow>[
     if (isAsValueHelpControllerSubclass(ctor)) {
       throw valueHelpActionError(ctor.name, [name]);
     }
+
+    // Marks the moment the handler starts (every argument resolved): a
+    // query target counts a batch as run only from there.
+    Pipe(markHandlerStartPipe)(target, propertyKey, descriptor);
 
     const merged = mate.read(target, propertyKey as string);
     const scan = scanParamLevel(merged?.params ?? []);
