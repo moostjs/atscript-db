@@ -165,6 +165,19 @@ const REL_WRITE_BATCH = 1000;
 
 // ── Adapter ──────────────────────────────────────────────────────────────────
 
+/** Whether a bulk-write error carries a write-concern failure besides (or instead of) write errors. */
+function hasWriteConcernError(error: MongoBulkWriteError): boolean {
+  const e = error as unknown as {
+    writeConcernError?: unknown;
+    result?: { getWriteConcernError?: () => unknown; writeConcernErrors?: unknown[] };
+  };
+  return Boolean(
+    e.writeConcernError ||
+    e.result?.getWriteConcernError?.() ||
+    e.result?.writeConcernErrors?.length,
+  );
+}
+
 export class MongoAdapter extends BaseDbAdapter {
   private _collection?: Collection<any>;
 
@@ -1219,9 +1232,11 @@ export class MongoAdapter extends BaseDbAdapter {
       await this.collection.insertMany(data, { ordered: false, ...this._getSessionOpts() });
     } catch (error) {
       if (!(error instanceof MongoBulkWriteError)) this._mapConstraintError(error);
-      const writeErrors = Array.isArray(error.writeErrors)
-        ? error.writeErrors
-        : [error.writeErrors];
+      const writeErrors = [error.writeErrors].flat().filter(Boolean);
+      // Only a bulk error made of duplicate-key write errors is a skip. No write error at all
+      // (a write-concern failure, a lost acknowledgement) says nothing about which rows were
+      // written: never report them inserted.
+      if (writeErrors.length === 0 || hasWriteConcernError(error)) throw error;
       for (const writeError of writeErrors) {
         if (writeError.code !== 11000) throw error;
         skipped.add(writeError.index);

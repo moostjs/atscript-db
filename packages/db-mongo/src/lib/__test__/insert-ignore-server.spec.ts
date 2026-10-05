@@ -1,7 +1,8 @@
 import { DbSpace } from "@atscript/db";
 import { SchemaSync } from "@atscript/db/sync";
 import type { Db, MongoClient } from "mongodb";
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vite-plus/test";
+import { Collection, MongoBulkWriteError } from "mongodb";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vite-plus/test";
 
 import { createAdapter } from "../index";
 import { MongoAdapter } from "../mongo-adapter";
@@ -29,6 +30,15 @@ beforeAll(async () => {
   await prepareFixtures();
   fx = await import("./fixtures/insert-ignore.as");
 });
+
+/** A `MongoBulkWriteError` as the driver raises it, with the given parts. */
+const bulkError = (parts: Record<string, unknown>) =>
+  Object.assign(Object.create(MongoBulkWriteError.prototype), {
+    message: "bulk write failed",
+    ...parts,
+  }) as MongoBulkWriteError;
+const fail = (error: unknown) =>
+  vi.spyOn(Collection.prototype, "insertMany").mockRejectedValueOnce(error as never);
 
 describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) => {
   let server: any;
@@ -185,6 +195,33 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
       expect(result.inserted).toEqual([1]);
     });
     expect(((await slugs.findMany({ filter: {}, controls: {} })) as any[]).length).toBe(2);
+  });
+
+  describe("a bulk-write failure that is not a duplicate key", () => {
+    const run = () => items().insertMany([item(1, "a"), item(2, "b")], { onConflict: "ignore" });
+
+    it("a write-concern error (no write errors) rethrows instead of reporting every row inserted", async () => {
+      if (kind !== "MongoMemoryServer") return; // the transaction path pre-checks and inserts ordered
+      const spy = fail(
+        bulkError({ writeErrors: [], result: { getWriteConcernError: () => ({}) } }),
+      );
+      await expect(run()).rejects.toThrow("bulk write failed");
+      spy.mockRestore();
+    });
+
+    it("a bulk error with no write errors at all rethrows", async () => {
+      if (kind !== "MongoMemoryServer") return;
+      const spy = fail(bulkError({ writeErrors: undefined }));
+      await expect(run()).rejects.toThrow("bulk write failed");
+      spy.mockRestore();
+    });
+
+    it("a non-11000 write error rethrows", async () => {
+      if (kind !== "MongoMemoryServer") return;
+      const spy = fail(bulkError({ writeErrors: [{ code: 121, index: 0 }] }));
+      await expect(run()).rejects.toThrow("bulk write failed");
+      spy.mockRestore();
+    });
   });
 
   it("the default mode still throws CONFLICT", async () => {

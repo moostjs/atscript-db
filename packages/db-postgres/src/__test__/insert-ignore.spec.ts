@@ -199,6 +199,18 @@ describe("mapIgnoredBatch", () => {
     expect(mapIgnoredBatch([{ v: 1.4 }, { v: 1 }], [{ v: "1" }], [["v"]])).toBeUndefined();
   });
 
+  it("the same key written differently (NUMERIC 5 / '5.00', CHAR padding) is ambiguous", () => {
+    expect(mapIgnoredBatch([{ v: 5 }, { v: 7 }], [{ v: "5.00" }], [["v"]])).toBeUndefined();
+    expect(mapIgnoredBatch([{ c: "ab" }, { c: "cd" }], [{ c: "ab   " }], [["c"]])).toBeUndefined();
+    // the same value written twice: only the first is inserted — never reported as the second
+    expect(mapIgnoredBatch([{ v: 5 }, { v: "5.00" }], [{ v: "5.00" }], [["v"]])).toBeUndefined();
+    expect(
+      mapIgnoredBatch([{ c: "ab" }, { c: "ab   " }], [{ c: "ab   " }], [["c"]]),
+    ).toBeUndefined();
+    // a returned key that equals no input at all stays a plain skip of the others
+    expect(mapIgnoredBatch([{ v: 5 }, { v: 7 }], [{ v: 7 }], [["v"]])).toEqual([-1, 0]);
+  });
+
   it("compares across Date / bigint / number representations", () => {
     const d = new Date("2026-01-01T00:00:00.000Z");
     expect(mapIgnoredBatch([{ id: 1n }, { id: 2n }], [{ id: 2 }], [["id"]])).toEqual([-1, 0]);

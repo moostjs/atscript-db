@@ -503,6 +503,7 @@ export class AtscriptDbTable<
         // nested re-entries receive already-pruned subtrees) + apply defaults.
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
         let items = payloads.map((p) => this._applyDefaults(clone(p)));
+        if (ignore) this._linkToByKeyInIgnoreMode(items);
         // Nav data for the FROM / VIA phases, read from the pruned rows (nav
         // fields are stripped from `items` before the main insert).
         let originals = canNest ? items.map((item) => ({ ...item })) : [];
@@ -1574,7 +1575,45 @@ export class AtscriptDbTable<
     });
   }
 
-  /** Ignore mode never writes a related parent: it would be orphaned when the row is skipped. */
+  /**
+   * Ignore mode never writes a related parent — it would be orphaned when the
+   * row is skipped. A TO object that names only the target's key fields
+   * (`{ org: { id: 9 } }`) creates nothing: it is a reference to an existing
+   * parent, so it becomes the row's foreign key (the existence check follows
+   * with the other FK validation). Runs before validation (which would demand
+   * the parent's required fields); any other TO object is left for
+   * {@link _rejectNestedToInIgnoreMode}.
+   */
+  private _linkToByKeyInIgnoreMode(items: Array<Record<string, unknown>>): void {
+    for (const [navField, relation] of this._meta.relations) {
+      if (relation.direction !== "to") continue;
+      const fk = this._findFKForRelation(relation);
+      for (const item of items) {
+        const nav = item[navField];
+        if (nav === undefined || nav === null) continue;
+        const keys = nav && typeof nav === "object" && !Array.isArray(nav) ? Object.keys(nav) : [];
+        const byKey =
+          fk !== undefined &&
+          keys.length === fk.targetFields.length &&
+          fk.targetFields.every(
+            (f) => keys.includes(f) && (nav as Record<string, unknown>)[f] != null,
+          );
+        if (!byKey) continue;
+        fk!.localFields.forEach((local, i) => {
+          const value = (nav as Record<string, unknown>)[fk!.targetFields[i]!];
+          if (item[local] !== undefined && item[local] !== null && item[local] !== value) {
+            throw new DbError("INVALID_QUERY", [
+              { path: navField, message: `"${navField}" and "${local}" name different parents` },
+            ]);
+          }
+          item[local] = value;
+        });
+        delete item[navField];
+      }
+    }
+  }
+
+  /** Ignore mode: whatever TO object is left would create a related parent (see {@link _linkToByKeyInIgnoreMode}). */
   private _rejectNestedToInIgnoreMode(items: Array<Record<string, unknown>>): void {
     for (const [navField, relation] of this._meta.relations) {
       if (relation.direction !== "to") continue;

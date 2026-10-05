@@ -56,9 +56,11 @@ function setup(factory: () => MockAdapter = () => new IgnoreAdapter()) {
   });
   const items = space.getTable(fx.IgItem) as AtscriptDbTable;
   const notes = space.getTable(fx.IgNote) as AtscriptDbTable;
+  const orgs = space.getTable(fx.IgOrg) as AtscriptDbTable;
   void adapters;
   return {
     items,
+    orgs,
     notes,
     itemsAdapter: items.dbAdapter as IgnoreAdapter,
     notesAdapter: notes.dbAdapter as MockAdapter,
@@ -175,6 +177,39 @@ describe("insertMany onConflict: ignore", () => {
       onConflict: "ignore",
     });
     expect(result).toEqual({ insertedCount: 0, insertedIds: [], inserted: [], conflicts: [0, 1] });
+  });
+
+  it("a TO object naming only the key links an existing parent (no parent is created)", async () => {
+    const { items, orgs, itemsAdapter } = setup();
+    await orgs.insertOne({ id: 9, name: "o" } as any);
+    const result = await items.insertMany(
+      [row(1, "a", { org: { id: 9 } }), row(2, "b", { orgId: 9 })] as any,
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([]);
+    expect(itemsAdapter.ignoredBatches[0]!.map((r) => [r.orgId, "org" in r])).toEqual([
+      [9, false],
+      [9, false],
+    ]);
+  });
+
+  it("a key-only TO object that disagrees with the row's own foreign key is INVALID_QUERY", async () => {
+    const { items, orgs, itemsAdapter } = setup();
+    await orgs.insertOne({ id: 9, name: "o" } as any);
+    const err = await items
+      .insertMany([row(1, "a", { org: { id: 9 }, orgId: 8 })] as any, { onConflict: "ignore" })
+      .catch((e) => e as DbError);
+    expect((err as DbError).code).toBe("INVALID_QUERY");
+    expect(itemsAdapter.ignoredBatches).toHaveLength(0);
+  });
+
+  it("a TO object with more than the key still creates a parent and is rejected", async () => {
+    const { items } = setup();
+    const err = await items
+      .insertMany([row(1, "a", { org: { id: 9, name: "o" } })] as any, { onConflict: "ignore" })
+      .catch((e) => e as DbError);
+    expect((err as DbError).code).toBe("INVALID_QUERY");
+    expect((err as DbError).errors[0]!.message).toMatch(/cannot create a related parent record/);
   });
 
   it("rejects a nested TO parent in ignore mode, before any write", async () => {
