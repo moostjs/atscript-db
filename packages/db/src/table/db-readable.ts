@@ -528,7 +528,7 @@ export class AtscriptDbReadable<
 
   /**
    * Physical column lists that must be unique: the primary key (when declared)
-   * followed by every unique index. Used by conflict-ignoring inserts.
+   * followed by every unique index and every adapter-contributed unique field. Used by conflict-ignoring inserts.
    * @since 0.1.148
    */
   public get uniqueKeySets(): string[][] {
@@ -539,6 +539,12 @@ export class AtscriptDbReadable<
     }
     for (const index of this._meta.indexes.values()) {
       if (index.type === "unique") sets.push(index.fields.map((f) => f.name));
+    }
+    // Single-field uniques an adapter contributes without a declared index
+    // (e.g. a MongoDB `@meta.id` demoted below an explicit `_id`).
+    for (const prop of this._meta.uniqueProps) {
+      const column = this._meta.physicalPath(prop);
+      if (!sets.some((s) => s.length === 1 && s[0] === column)) sets.push([column]);
     }
     return sets;
   }

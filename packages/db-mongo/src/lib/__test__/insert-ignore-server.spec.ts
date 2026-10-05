@@ -59,7 +59,7 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
     db = client.db(`ig_${kind === "MongoMemoryServer" ? "sa" : "rs"}`);
     await db.dropDatabase();
     space = new DbSpace(() => new MongoAdapter(db, client));
-    const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto, fx.IgNote], {
+    const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgSlug], {
       force: true,
     });
     expect(result.status).toBe("synced");
@@ -145,6 +145,46 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
       await items().insertOne(item(4, "d"));
     });
     expect(await ids()).toEqual([1, 3, 4]);
+  });
+
+  it("a demoted non-_id @meta.id unique key: stored and in-batch duplicates are skipped, never a 409", async () => {
+    const slugs = space.getTable(fx.IgSlug) as any;
+    await slugs.insertMany([{ slug: "a", note: "stored" }]);
+    const result = await slugs.insertMany(
+      [
+        { slug: "a", note: "dup of stored" },
+        { slug: "b", note: "new" },
+        { slug: "b", note: "dup in batch" },
+        { slug: "c", note: "new" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([0, 2]);
+    expect(result.inserted).toEqual([1, 3]);
+    const stored = (await slugs.findMany({ filter: {}, controls: {} })) as any[];
+    expect(stored.map((r) => r.slug).toSorted((x, y) => x.localeCompare(y))).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+    expect(stored.find((r) => r.slug === "a").note).toBe("stored");
+  });
+
+  it("the same demoted key inside an outer transaction", async () => {
+    const slugs = space.getTable(fx.IgSlug) as any;
+    await slugs.insertMany([{ slug: "a", note: "stored" }]);
+    await slugs.dbAdapter.withTransaction(async () => {
+      const result = await slugs.insertMany(
+        [
+          { slug: "a", note: "dup" },
+          { slug: "d", note: "new" },
+        ],
+        { onConflict: "ignore" },
+      );
+      expect(result.conflicts).toEqual([0]);
+      expect(result.inserted).toEqual([1]);
+    });
+    expect(((await slugs.findMany({ filter: {}, controls: {} })) as any[]).length).toBe(2);
   });
 
   it("the default mode still throws CONFLICT", async () => {

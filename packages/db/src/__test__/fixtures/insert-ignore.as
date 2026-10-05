@@ -48,3 +48,11 @@ export interface IgNote {
 
     text: string
 }
+
+@db.table 'ig_codes'
+export interface IgCode {
+    @meta.id
+    id: number
+
+    code: string
+}

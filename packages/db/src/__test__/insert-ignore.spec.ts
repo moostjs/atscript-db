@@ -133,6 +133,27 @@ describe("insertMany onConflict: ignore", () => {
     expect(itemsAdapter.ignoredBatches[0]).toHaveLength(2);
   });
 
+  it("pre-dedups on an adapter-contributed unique field that has no declared index", async () => {
+    class DemotedAdapter extends IgnoreAdapter {
+      override getMetadataOverrides() {
+        return { addUniqueFields: ["code"] };
+      }
+    }
+    const space = new DbSpace(() => new DemotedAdapter());
+    const codes = space.getTable(fx.IgCode) as AtscriptDbTable;
+    const result = await codes.insertMany(
+      [
+        { id: 1, code: "a" },
+        { id: 2, code: "a" },
+        { id: 3, code: "b" },
+      ] as any,
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([1]);
+    expect(result.insertedIds).toEqual([1, 3]);
+    expect((codes.dbAdapter as DemotedAdapter).ignoredBatches[0]).toHaveLength(2);
+  });
+
   it("rows with a null or missing key component never collide with each other", async () => {
     const { items } = setup();
     const result = await items.insertMany(

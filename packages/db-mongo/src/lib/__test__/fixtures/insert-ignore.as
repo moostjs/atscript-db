@@ -42,3 +42,15 @@ export interface IgNote {
 
     text: string
 }
+
+// Explicit `_id`: the `@meta.id` field is demoted to a unique `__pk` index.
+@db.table 'ig_slugs'
+@db.mongo.collection
+export interface IgSlug {
+    _id: mongo.objectId
+
+    @meta.id
+    slug: string
+
+    note: string
+}

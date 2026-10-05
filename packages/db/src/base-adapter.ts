@@ -1088,7 +1088,7 @@ export abstract class BaseDbAdapter {
     );
   }
 
-  /** Whether {@link insertManyIgnore} is implemented (drives `/meta.crud.insertOnConflict`). @since 0.1.148 */
+  /** Whether {@link insertManyIgnore} is implemented (drives `crud.insert: ["onConflict"]` in `/meta`). @since 0.1.148 */
   supportsInsertIgnore(): boolean {
     return false;
   }
