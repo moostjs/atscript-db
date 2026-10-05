@@ -18,6 +18,11 @@ export interface TDecorationPlan {
   requested: readonly string[];
   /** `requires` paths added only for the hook — stripped from the response. */
   requiresOnly: readonly string[];
+  /**
+   * The client's own inclusion paths: of a `requiresOnly` path read for the
+   * hook, a descendant the client selected itself stays in the response.
+   */
+  selected?: readonly string[];
 }
 
 /** The decoration step of a finished read: the keys served and what to strip from the rows. */
@@ -27,6 +32,8 @@ export interface TDecorationRead {
   dropKeys: readonly string[];
   /** `requires` paths added only for the hook, split once per read. */
   dropPaths: readonly (readonly string[])[];
+  /** Per drop path, the client-selected paths below it that survive the strip (dot-split). */
+  keepPaths: readonly (readonly (readonly string[])[])[];
 }
 
 /** What the planner reads of the controller it serves. */
@@ -153,6 +160,7 @@ export class DecorationPlanner {
       select: emit(list),
       requested,
       requiresOnly: [...extra.filter((path) => !this.host.preferred.has(path)), ...added],
+      selected: [...have],
     };
   }
 
@@ -180,8 +188,13 @@ export class DecorationPlanner {
   serve(plan: TDecorationPlan, kept: readonly string[] | null): TDecorationRead {
     const { keys, requires } = this.index;
     const dropPaths = plan.requiresOnly.map((path) => path.split("."));
+    const keepPaths = plan.requiresOnly.map((path) =>
+      (plan.selected ?? [])
+        .filter((sel) => sel.startsWith(`${path}.`))
+        .map((sel) => sel.split(".")),
+    );
     if (plan.requested.length === 0) {
-      return { served: NO_DECORATIONS, dropKeys: keys, dropPaths };
+      return { served: NO_DECORATIONS, dropKeys: keys, dropPaths, keepPaths };
     }
     const keptSet = kept === null ? undefined : new Set(kept);
     const served = new Set(
@@ -191,7 +204,7 @@ export class DecorationPlanner {
           requires.get(key)!.every((path) => selfOrAncestor(path, keptSet) !== undefined),
       ),
     );
-    return { served, dropKeys: keys.filter((key) => !served.has(key)), dropPaths };
+    return { served, dropKeys: keys.filter((key) => !served.has(key)), dropPaths, keepPaths };
   }
 
   /**
@@ -246,12 +259,43 @@ export function stripDecorations(
   rows: readonly Record<string, unknown>[],
   read: TDecorationRead,
 ): void {
-  const { dropKeys, dropPaths } = read;
+  const { dropKeys, dropPaths, keepPaths } = read;
   if (dropKeys.length === 0 && dropPaths.length === 0) return;
   for (const row of rows) {
     for (const key of dropKeys) delete row[key];
-    for (const parts of dropPaths) deletePath(row, parts);
+    dropPaths.forEach((parts, i) => {
+      const keep = keepPaths[i] ?? [];
+      if (keep.length === 0) deletePath(row, parts);
+      else pruneExcept(row, parts, keep);
+    });
   }
+}
+
+/** Deletes everything under `parts` except the branches leading to `keep` (client-selected descendants). */
+function pruneExcept(
+  row: Record<string, unknown>,
+  parts: readonly string[],
+  keep: readonly (readonly string[])[],
+): void {
+  let node: unknown = row;
+  for (const part of parts) {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) return;
+    node = (node as Record<string, unknown>)[part];
+  }
+  const prune = (value: unknown, depth: number, branches: readonly (readonly string[])[]) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+    const obj = value as Record<string, unknown>;
+    for (const key of Object.keys(obj)) {
+      const next = branches.filter((b) => b[depth] === key);
+      if (next.length === 0) delete obj[key];
+      else if (next.some((b) => b.length > depth + 1)) prune(obj[key], depth + 1, next);
+    }
+  };
+  prune(
+    node,
+    parts.length,
+    keep.filter((k) => k.length > parts.length),
+  );
 }
 
 /** `true` when stripping `read` changes nothing — skip the post-hook step. */
