@@ -66,9 +66,12 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
       },
       { logger, onClose: () => driver.close() },
     );
-    const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice], {
-      force: true,
-    });
+    const result = await new SchemaSync(space).run(
+      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice, fx.IgSeq],
+      {
+        force: true,
+      },
+    );
     expect(result.status).toBe("synced");
   });
 
@@ -82,6 +85,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
     await items().deleteMany({});
     await t(fx.IgAuto).deleteMany({});
     await t(fx.IgPrice).deleteMany({});
+    await t(fx.IgSeq).deleteMany({});
     statements.length = 0;
   });
 
@@ -111,6 +115,45 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
     expect(result.conflicts).toEqual([0]);
     const stored = await auto.findOne({ filter: { sku: "s2" }, controls: {} });
     expect(result.insertedIds).toEqual([stored.id]);
+  });
+
+  it("keyless rows: a sequence value colliding with a stored explicit id maps exactly", async () => {
+    const seq = t(fx.IgSeq);
+    await seq.insertMany([
+      { id: 1, label: "s1" },
+      { id: 3, label: "s3" },
+    ]);
+    // the sequence (at 1) hands row a id 1 (taken), row b id 2 (free): keyless rows, so the
+    // chunk is redone per row (a: 3 taken, b: 4 free) — a is the conflict, b the insert
+    const result = await seq.insertMany([{ label: "a" }, { label: "b" }], { onConflict: "ignore" });
+    expect(result.conflicts).toEqual([0]);
+    expect(result.inserted).toEqual([1]);
+    const stored = (await seq.findMany({ filter: {}, controls: { $sort: { id: 1 } } })) as any[];
+    expect(stored.map((r) => [r.id, r.label])).toEqual([
+      [1, "s1"],
+      [3, "s3"],
+      [4, "b"],
+    ]);
+    expect(result.insertedIds).toEqual([4]);
+  });
+
+  it("an explicit id equal to the next sequence value maps to the right row", async () => {
+    const auto = t(fx.IgAuto);
+    await auto.insertOne({ sku: "a", label: "a" });
+    const probe = await auto.insertOne({ sku: "probe", label: "p" });
+    const nextId = Number(probe.insertedId) + 1;
+    // row 0 is skipped on sku; row 1 takes the generated id == row 0's explicit id
+    const result = await auto.insertMany(
+      [
+        { id: nextId, sku: "a", label: "dup" },
+        { sku: "y", label: "y" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([0]);
+    expect(result.inserted).toEqual([1]);
+    expect(result.insertedIds).toEqual([nextId]);
+    expect((await auto.findOne({ filter: { sku: "y" }, controls: {} })).id).toBe(nextId);
   });
 
   it("inside an outer transaction a skipped row never aborts it", async () => {

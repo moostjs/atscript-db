@@ -166,7 +166,7 @@ describe("PostgresAdapter insertManyIgnore", () => {
 describe("mapIgnoredBatch", () => {
   const keys = [["id"], ["sku"], ["a", "b"]];
 
-  it("maps by key values in order; rows with no usable key are assumed inserted", () => {
+  it("maps by key values in order", () => {
     const batch = [
       { id: 1, sku: "x" },
       { id: 2, sku: "y" },
@@ -182,6 +182,21 @@ describe("mapIgnoredBatch", () => {
   it("generated PK: matches on the unique column only", () => {
     const batch = [{ sku: "x" }, { sku: "y" }];
     expect(mapIgnoredBatch(batch, [{ id: 7, sku: "y" }], keys)).toEqual([-1, 0]);
+  });
+
+  it("keyless rows are ambiguous (a colliding sequence value must not be trusted)", () => {
+    expect(
+      mapIgnoredBatch([{ label: "a" }, { label: "b" }], [{ id: 11 }], [["id"]]),
+    ).toBeUndefined();
+  });
+
+  it("every fully-defined key set must match: an explicit id equal to the next sequence value", () => {
+    const batch = [{ id: 8, sku: "x" }, { sku: "y" }];
+    expect(mapIgnoredBatch(batch, [{ id: 8, sku: "y" }], [["id"], ["sku"]])).toEqual([-1, 0]);
+  });
+
+  it("lossy normalisation (NUMERIC(10,0)) is ambiguous, not mis-mapped", () => {
+    expect(mapIgnoredBatch([{ v: 1.4 }, { v: 1 }], [{ v: "1" }], [["v"]])).toBeUndefined();
   });
 
   it("compares across Date / bigint / number representations", () => {

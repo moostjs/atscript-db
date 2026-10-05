@@ -53,3 +53,12 @@ export interface IgPrice {
     @db.column.precision 10, 2
     price: number
 }
+
+@db.table 'ig_seq'
+export interface IgSeq {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    label: string
+}
