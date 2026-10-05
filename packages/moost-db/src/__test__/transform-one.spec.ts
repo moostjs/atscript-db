@@ -50,6 +50,7 @@ function makeTable(rows: Row[]): {
   isGeoSearchable: ReturnType<typeof vi.fn>;
   calendarBucketUnits: ReturnType<typeof vi.fn>;
   aggregateFns: ReturnType<typeof vi.fn>;
+  supportsAggregateExpressions: ReturnType<typeof vi.fn>;
   dimensions: string[];
   measures: string[];
   canFilterField: ReturnType<typeof vi.fn>;
@@ -93,6 +94,7 @@ function makeTable(rows: Row[]): {
     isGeoSearchable: vi.fn().mockReturnValue(false),
     calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
     aggregateFns: vi.fn().mockReturnValue(new Set()),
+    supportsAggregateExpressions: vi.fn().mockReturnValue(false),
     dimensions: [],
     measures: [],
     canFilterField: vi.fn().mockReturnValue(true),

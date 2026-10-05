@@ -69,6 +69,7 @@ weekly[0].week; // string ("YYYY-MM-DD"; hour bucket "YYYY-MM-DDTHH:00"); string
 - Result keys typed from `$select` (`AggregateResult`); aggregates `number`, plain fields keep their type.
 - Offer time grouping only when `meta.bucketUnits` has the unit and `meta.fields[path].bucketable === true`.
 - Gap fill with `bucketSeries(first, last, unit, { weekStart?, tz? })` — pass the query's `$tz` (zone-free otherwise); time axis via `bucketStartInstant(label, tz)`. Rules, errors (400 / 501) → [calendar-buckets.md](calendar-buckets.md).
+- Arithmetic (0.1.148): `{ $fn: "sum", $expr: { $op: "*", $args: ["price", "qty"] }, $as }` and `{ $expr, $as }` serialize to `sum(price*qty)` / `expr(a/b)` (`+` → `%2B`); `{ $fn: "first" | "last", $field, $as }` + `$rowOrder: { f: 1 }` → `first(f)` / `$rowOrder=f`. Aliases typed `number | null` (expressions) / the field's type (first, last). Offer operands from `meta.fields[path].numeric` when `meta.aggregateExpressions`.
 - Type re-exports: `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel`, `BucketSeriesOptions`, `NextBucketOptions`, `ValidGroupBy`.
 
 ## Generic surface

@@ -261,6 +261,12 @@ address: {
 
 [Calendar buckets](/api/calendar-buckets) use `$dateToString`, `$dateToParts` and `$dateFromParts`, so they need **MongoDB 4.0 or later**. Zones come from the server's bundled time zone database; a zone it does not know fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501) — upgrade the server to get newer zone data.
 
+### Aggregate expressions {#aggregate-expressions}
+
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) use `$toDouble` operands (MongoDB 4.0+). `first` / `last` put a `$sort` on `$rowOrder` plus the `_id` before `$group` and take `$first` / `$last` — the form that works from MongoDB 3.6. That `$sort` covers every matching document, so such a pipeline runs with `allowDiskUse`; index `(group key, $rowOrder fields…, _id)` to keep it cheap.
+
+A `sum` over a group with no non-null value is `null`, as in SQL (MongoDB's own `$sum` gives `0`; the pipeline counts the values next to the sum). That holds for a plain `sum` too, since 0.1.148.
+
 ## Native Patch Pipelines
 
 MongoDB uses aggregation pipelines for array patch operations instead of the read-modify-write cycle used by relational adapters. All five patch operators are supported:

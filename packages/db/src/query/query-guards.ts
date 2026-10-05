@@ -1,10 +1,23 @@
 import type { AggregateQuery, FilterExpr, RelationOp, ResolvedBucket } from "@uniqu/core";
-import { isAggregateExpr, isBucketExpr, isPrimitive, isRelationOp } from "@uniqu/core";
+import {
+  isAggregateExpr,
+  isAggregateOfExpr,
+  isBucketExpr,
+  isPrimitive,
+  isRelationOp,
+  isSelectArithExpr,
+} from "@uniqu/core";
 
-import { DbError } from "../db-error";
+import { DbError, aggregateExpressionsNotSupported } from "../db-error";
 import type { BaseDbAdapter } from "../base-adapter";
 import { resolveAlias } from "../agg";
-import { isBucketableField, jsonValueAncestor, normalizeComputedSelect } from "./buckets";
+import {
+  isBucketableField,
+  jsonValueAncestor,
+  resolveComputedSelect,
+  type TComputedSelect,
+} from "./buckets";
+import { checkAggregateExprs, entryFields, rowOrderKeys } from "./aggregate-expr";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 import { isPlainObject } from "../shared/object";
@@ -224,6 +237,7 @@ export interface TGuardedQuery {
     $select?: unknown;
     $groupBy?: unknown;
     $having?: unknown;
+    $rowOrder?: unknown;
   };
 }
 
@@ -580,8 +594,9 @@ function collectFilterKeys(
  *
  * Aggregate mode is `aggregate` when given, else the presence of `$groupBy`.
  * In aggregate mode `$select` computed entries are collected by kind — an
- * aggregate's `$field` into `aggregate`, a calendar bucket's into `bucket` —
- * and their aliases (`$as`, else uniqu's `resolveAlias`) are exempted from
+ * aggregate's `$field` (a row-level expression's names, a `first` / `last`
+ * field) into `aggregate`, a calendar bucket's into `bucket`, a `$rowOrder`
+ * key into `sort` — and their aliases (`$as`, else uniqu's `resolveAlias`) are exempted from
  * `$sort` / `$having`; a bucket alias is also dropped from `groupBy`, which
  * lists grouped fields only.
  *
@@ -629,9 +644,11 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
         refs.select.push(item);
       } else if (!refs.aggregateMode) {
         continue;
-      } else if (isAggregateExpr(item)) {
+      } else if (isAggregateExpr(item) || isAggregateOfExpr(item)) {
         aliases.add(resolveAlias(item));
-        if (item.$field !== "*") refs.aggregate.push(item.$field);
+        refs.aggregate.push(...entryFields(item));
+      } else if (isSelectArithExpr(item)) {
+        aliases.add(item.$as);
       } else if (isBucketExpr(item)) {
         const alias = resolveAlias(item);
         aliases.add(alias);
@@ -648,6 +665,8 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
   for (const name of sortFieldNames(controls.$sort)) {
     if (!aliases.has(name)) refs.sort.push(name);
   }
+  // `$rowOrder` keys are columns (never aliases) ordered like `$sort` keys.
+  if (refs.aggregateMode) refs.sort.push(...rowOrderKeys(controls.$rowOrder));
   if (refs.aggregateMode) {
     collectFilterKeys(controls.$having, (path) => refs.having.push(path), aliases, refs);
   }
@@ -943,7 +962,7 @@ export function guardQuery(
   }
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);
-  normalizeComputedSelect(query.controls, meta, false);
+  resolveComputedSelect(query.controls, meta, false);
   guardPaths(meta, adapter, query, false, state);
 }
 
@@ -983,16 +1002,18 @@ export function checkHavingKeys(
  * ({@link checkHavingKeys} — after the path guard so an unknown key still
  * reads `Unknown field`), then the `$having` values (`guardHavingValues`).
  *
- * `buckets` are the query's resolved calendar buckets when the caller already
- * ran `normalizeComputedSelect` (resolved here otherwise).
+ * `resolved` is the query's normalized computed `$select`
+ * (`resolveComputedSelect`) when the caller already ran it (resolved here
+ * otherwise).
  */
 export function guardAggregate(
   meta: TableMetadata,
   adapter: BaseDbAdapter,
   query: AggregateQuery,
-  resolved?: readonly ResolvedBucket[],
+  resolved?: TComputedSelect,
 ): void {
-  const buckets = resolved ?? normalizeComputedSelect(query.controls, meta, true);
+  const computed = resolved ?? resolveComputedSelect(query.controls, meta, true);
+  const { buckets } = computed;
   guardFilter(meta, adapter, query.filter as FilterExpr | undefined);
   const controls = query.controls;
   if (meta.encryptedFields.size > 0) {
@@ -1002,12 +1023,19 @@ export function guardAggregate(
       }
     }
     if (controls.$select) {
-      // Every computed entry (aggregate or calendar bucket) names its source in `$field`.
-      for (const item of controls.$select) {
-        const field = typeof item === "string" ? item : item.$field;
-        if (field !== "*" && isEncryptedRef(meta, field)) {
-          throw encryptedRefError("ENC_FIELD_AGG", field, "aggregate over");
+      // Every computed entry (aggregate, first / last, expression or calendar
+      // bucket) names its sources: `$field`, or the operands of an expression.
+      for (const item of controls.$select as unknown[]) {
+        for (const field of entryFields(item)) {
+          if (isEncryptedRef(meta, field)) {
+            throw encryptedRefError("ENC_FIELD_AGG", field, "aggregate over");
+          }
         }
+      }
+    }
+    for (const key of rowOrderKeys(controls.$rowOrder)) {
+      if (isEncryptedRef(meta, key)) {
+        throw encryptedRefError("ENC_FIELD_SORT", key, "sort by");
       }
     }
     if (controls.$having) {
@@ -1017,12 +1045,33 @@ export function guardAggregate(
   }
   const refs = guardPaths(meta, adapter, query as TGuardedQuery, true);
   guardAggregateFns(adapter, controls.$select);
+  guardAggregateExpressions(adapter, controls.$select);
+  checkAggregateExprs(meta, query, computed.exprs, computed.rowOrder);
   guardBucketUnits(adapter, buckets);
   const having = refs ? checkHavingKeys(refs) : undefined;
   if (having) {
     throw new DbError("INVALID_QUERY", [having]);
   }
   guardHavingValues(meta, controls);
+}
+
+/**
+ * Rejects an arithmetic `$select` entry (`{ $expr }`, `{ $fn, $expr }`) on an
+ * adapter whose `supportsAggregateExpressions()` is false with
+ * `AGG_EXPR_NOT_SUPPORTED`, before anything is translated.
+ *
+ * @since 0.1.148
+ */
+function guardAggregateExpressions(
+  adapter: BaseDbAdapter,
+  select: AggregateQuery["controls"]["$select"],
+) {
+  if (!Array.isArray(select) || adapter.supportsAggregateExpressions()) return;
+  for (const item of select as unknown[]) {
+    if (isAggregateOfExpr(item) || isSelectArithExpr(item)) {
+      throw aggregateExpressionsNotSupported();
+    }
+  }
 }
 
 /**

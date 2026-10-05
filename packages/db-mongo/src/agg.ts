@@ -6,18 +6,24 @@
  * containing $groupBy, $select (with AggregateExpr), $having, $sort, etc.
  */
 
-import type { DbQuery, TResolvedBucket } from "@atscript/db";
+import { evaluateExpr, type DbQuery, type TResolvedBucket } from "@atscript/db";
 import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/agg";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
 import { buildMongoFilter, mongoFilterStages, type TMongoFilterOptions } from "./lib/mongo-filter";
-import { orNull } from "./lib/mongo-view-expr";
+import { exprToMongo, notNullExpr, orNull } from "./lib/mongo-view-expr";
 
 /** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
 function toAccumulator(expr: AggregateExpr): Document {
   return buildAccumulator(expr.$fn, expr.$field === "*" ? "*" : `$${expr.$field}`);
 }
+
+/** An operand of query-time arithmetic: the field as a double (IEEE, like the SQL adapters). */
+const asDouble = (path: string): Document => ({ $toDouble: `$${path}` });
+
+/** Prefix of the hidden `$group` field counting a sum's non-null values. */
+const NON_NULL_PREFIX = "__as_n_";
 
 // ── Calendar buckets ─────────────────────────────────────────────────────────
 
@@ -180,20 +186,58 @@ function buildGroupedStages(
     return { pipeline, controls };
   }
 
+  // `first` / `last`: order the rows BEFORE grouping (the portable `$sort` +
+  // `$first` / `$last`, MongoDB 3.6+); BSON order puts null / missing first,
+  // like the SQL adapters. The key list ends with the primary key.
+  const firstLast = controls.$select?.firstLast ?? [];
+  const rowOrder = controls.$select?.rowOrder ?? [];
+  if (firstLast.length > 0 && rowOrder.length > 0) {
+    pipeline.push({ $sort: Object.fromEntries(rowOrder.map((k) => [k.column, k.desc ? -1 : 1])) });
+  }
+
   // Build $group accumulators and $project in a single pass over groupBy + aggregates
   const project: Document = { _id: 0 };
   for (const [field, idKey] of groupKeys) {
     project[field] = `$_id.${idKey}`;
   }
+  // `$sum` of no (non-null) value is 0 in MongoDB, NULL in SQL and the memory
+  // adapter: count the values next to the sum and project null over none.
+  const nullWhenEmpty = (alias: string, nonNull: Document): Document => {
+    const count = `${NON_NULL_PREFIX}${alias}`;
+    groupStage[count] = { $sum: { $cond: [nonNull, 1, 0] } };
+    return { $cond: [{ $eq: [`$${count}`, 0] }, null, `$${alias}`] };
+  };
   for (const expr of controls.$select?.aggregates ?? []) {
     const alias = resolveAlias(expr);
     groupStage[alias] = toAccumulator(expr);
     // countDistinct accumulates a set — `$project` turns it into its size, so
     // `$having` and `$sort` (which run after it) compare a number.
-    project[alias] = expr.$fn === "countDistinct" ? distinctCountExpr(`$${alias}`) : 1;
+    project[alias] =
+      expr.$fn === "countDistinct"
+        ? distinctCountExpr(`$${alias}`)
+        : expr.$fn === "sum"
+          ? nullWhenEmpty(alias, notNullExpr(`$${expr.$field}`))
+          : 1;
+  }
+  for (const e of controls.$select?.exprAggregates ?? []) {
+    // sum / avg / min / max over a per-row expression: IEEE double, NULL / ÷0 → null
+    const value = exprToMongo(e.expr, asDouble);
+    groupStage[e.alias] = { [`$${e.fn}`]: value };
+    project[e.alias] = e.fn === "sum" ? nullWhenEmpty(e.alias, notNullExpr(value)) : 1;
+  }
+  for (const fl of firstLast) {
+    groupStage[fl.alias] = { [`$${fl.fn}`]: orNull(`$${fl.column}`) };
+    project[fl.alias] = 1;
   }
   pipeline.push({ $group: groupStage });
   pipeline.push({ $project: project });
+
+  // Group-level expressions, in dependency order: leaves are the projected
+  // aliases or group keys, as doubles.
+  // One `$addFields` per expression: a later one reads the field an earlier one wrote.
+  for (const e of controls.$select?.exprs ?? []) {
+    pipeline.push({ $addFields: { [e.alias]: exprToMongo(e.expr, asDouble) } });
+  }
 
   // $having (post-aggregation filter, aliases are top-level after $project)
   if (controls.$having) {
@@ -236,6 +280,43 @@ export function buildAggregatePipeline(
   }
 
   return pipeline;
+}
+
+/**
+ * The row an UNGROUPED aggregate yields over no input rows: a pipeline's
+ * `$group` emits nothing there, while SQL (and the memory adapter) always
+ * yield the one group — counts 0, every other aggregate, `first` / `last` and
+ * the expressions over them `null`. `undefined` when the query is grouped,
+ * has a `$having` (not evaluable here) or `$skip`, or computes nothing.
+ */
+export function emptyGroupRow(query: DbQuery): Document | undefined {
+  const controls = query.controls;
+  const select = controls?.$select;
+  if (!controls || (controls.$groupBy as string[] | undefined)?.length) return undefined;
+  if (controls.$having || controls.$skip) return undefined;
+  if (!select?.computedAliases.length) return undefined;
+  const row: Document = {};
+  for (const expr of select.aggregates ?? []) {
+    row[resolveAlias(expr)] = expr.$fn === "count" || expr.$fn === "countDistinct" ? 0 : null;
+  }
+  for (const e of select.exprAggregates ?? []) row[e.alias] = null;
+  for (const fl of select.firstLast ?? []) row[fl.alias] = null;
+  for (const e of select.exprs ?? []) {
+    row[e.alias] = evaluateExpr(e.expr, (name) => row[name]);
+  }
+  return row;
+}
+
+/**
+ * `allowDiskUse` for a pipeline that sorts before it groups (`first` / `last`
+ * order every matching row by `$rowOrder` first, which may exceed the
+ * in-memory sort limit); `undefined` otherwise.
+ */
+export function aggregateOptions(pipeline: Document[]): { allowDiskUse: true } | undefined {
+  const group = pipeline.findIndex((stage) => "$group" in stage);
+  return pipeline.slice(0, group < 0 ? 0 : group).some((stage) => "$sort" in stage)
+    ? { allowDiskUse: true }
+    : undefined;
 }
 
 /**

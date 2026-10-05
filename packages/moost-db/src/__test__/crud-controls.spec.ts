@@ -20,6 +20,7 @@ describe("crud-controls — exported constants", () => {
         "threshold",
         "with",
         "groupBy",
+        "rowOrder",
         "actions",
       ]),
     );

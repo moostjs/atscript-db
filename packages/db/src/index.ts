@@ -13,6 +13,7 @@ export {
   bucketTimeZoneUnavailable,
   isConflict,
   aggregateFailure,
+  aggregateExpressionsNotSupported,
 } from "./db-error";
 export type { DbErrorCode } from "./db-error";
 export { DbEncryption } from "./encryption";
@@ -75,8 +76,9 @@ export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
+export type { TExprAggregate, TFirstLast, TRowOrderKey } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
-export { translateQueryTree, isFieldRef } from "./query/query-tree";
+export { translateQueryTree, isFieldRef, evaluateExpr } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
 export { aliasTargetOf } from "./table/view-source";
@@ -247,6 +249,7 @@ export {
   jsonValueAncestor,
 } from "./query/buckets";
 export type { TResolvedBucket, TBucketFieldSource } from "./query/buckets";
+export { numericOperandProblem } from "./query/aggregate-expr";
 export type {
   BucketExpr,
   BucketUnit,

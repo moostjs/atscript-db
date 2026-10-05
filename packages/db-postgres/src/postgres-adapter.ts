@@ -5,7 +5,6 @@ import {
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
-  bucketTimeZoneUnavailable,
   isColumnTypeChanged,
   vectorIndexNotFoundMessage,
   fkColumns,
@@ -59,6 +58,7 @@ import {
   replaceColumnsFor,
   foreignKeySql,
   SEARCH_SOURCE_ALIAS,
+  mapQueryErrors,
 } from "@atscript/db-sql-tools";
 
 import { mapIgnoredBatch } from "./insert-ignore";
@@ -302,9 +302,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     return ALL_BUCKET_UNITS;
   }
 
-  /** Every aggregate function, `countDistinct` included. */
+  /** Every aggregate function: `countDistinct`, `first` and `last` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
+  override supportsAggregateExpressions(): boolean {
+    return true;
   }
 
   /** Computed view columns and first-row joins. */
@@ -672,7 +677,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = await this._wrapBucketZoneError(() =>
+      const row = await mapQueryErrors(pgDialect, () =>
         this._exec().get<{ count: number | string }>(sql, params),
       );
       const count = parseCount(row?.count);
@@ -681,32 +686,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return this._wrapBucketZoneError(() => this._exec().all(sql, params));
-  }
-
-  /**
-   * Maps PostgreSQL's unknown-zone error — SQLSTATE 22023
-   * (`invalid_parameter_value`), `time zone "…" not recognized` — raised by a
-   * calendar bucket's `AT TIME ZONE '<tz>'` to `BUCKET_TZ_UNAVAILABLE`. The
-   * zone passed the core's IANA validation, so the server's tz database is
-   * older than the runtime's. Other errors propagate unchanged.
-   */
-  private async _wrapBucketZoneError<R>(fn: () => Promise<R>): Promise<R> {
-    try {
-      return await fn();
-    } catch (error: unknown) {
-      const err = error as { code?: unknown; message?: unknown } | null;
-      const zone =
-        err?.code === "22023" && typeof err.message === "string"
-          ? /time zone "([^"]*)" not recognized/.exec(err.message)?.[1]
-          : undefined;
-      if (zone !== undefined) {
-        throw bucketTimeZoneUnavailable(
-          `PostgreSQL does not recognize time zone "${zone}" — update the server's time zone data`,
-        );
-      }
-      throw error;
-    }
+    return mapQueryErrors(pgDialect, () => this._exec().all(sql, params));
   }
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────

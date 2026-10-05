@@ -115,9 +115,14 @@ export class SqliteAdapter extends BaseDbAdapter {
     return this._hasBucketFn ? ALL_BUCKET_UNITS : super.calendarBucketUnits();
   }
 
-  /** Every aggregate function, `countDistinct` included. */
+  /** Every aggregate function: `countDistinct`, `first` and `last` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
+  override supportsAggregateExpressions(): boolean {
+    return true;
   }
 
   /** Computed view columns and first-row joins. */

@@ -26,6 +26,7 @@ import {
   parseRegexString,
   jsonDollarPath,
   foreignKeySql,
+  arithOverflowError,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -326,6 +327,10 @@ export const mysqlDialect: SqlDialect = {
     // Flags are ignored — MySQL REGEXP case-sensitivity is determined by column collation
     const { pattern } = parseRegexString(value);
     return { sql: `${quotedCol} REGEXP ?`, params: [pattern] };
+  },
+  // errno 1690 (`DOUBLE value is out of range`): an overflow in aggregate arithmetic
+  mapQueryError(error: unknown) {
+    return (error as { errno?: unknown } | null)?.errno === 1690 ? arithOverflowError() : undefined;
   },
   // Spherical circle search on a POINT SRID 4326 column. POINT(x, y) builds
   // the query point in MySQL's internal axis order (x=lng, y=lat — the SRS

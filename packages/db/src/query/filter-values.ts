@@ -1,6 +1,6 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { FilterExpr } from "@uniqu/core";
-import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
+import { isAggregateExpr, isAggregateOfExpr, isBucketExpr, isSelectArithExpr } from "@uniqu/core";
 
 import { DbError } from "../db-error";
 import { resolveAlias } from "../agg";
@@ -8,6 +8,7 @@ import type { TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 import { isPlainObject } from "../shared/object";
 import { hasRelationOp } from "./relation-filter";
+import { SOURCE_VALUE_FNS } from "./aggregate-fns";
 import { jsonValueAncestor } from "./buckets";
 
 /**
@@ -324,7 +325,8 @@ export function guardFilterValues(meta: TableMetadata, filter: FilterExpr | unde
 
 /**
  * `$having` values: an aggregate alias is a number (`count`,
- * `countDistinct`, `sum`, `avg`) or its source field's type (`min` / `max`),
+ * `countDistinct`, `sum`, `avg`, an expression) or its source field's type
+ * (`min` / `max`, `first` / `last`),
  * a calendar-bucket alias a string label, any other key a `$groupBy`
  * field's own type.
  */
@@ -336,11 +338,12 @@ export function guardHavingValues(
   const aliases = new Map<string, TValueType>();
   if (Array.isArray(controls.$select)) {
     for (const item of controls.$select) {
-      if (isAggregateExpr(item)) {
-        const fd =
-          item.$fn === "min" || item.$fn === "max"
-            ? meta.descriptorByPath.get(item.$field)
-            : undefined;
+      if (isAggregateOfExpr(item) || isSelectArithExpr(item)) {
+        aliases.set(item.$as, NUMBER);
+      } else if (isAggregateExpr(item)) {
+        const fd = SOURCE_VALUE_FNS.has(item.$fn)
+          ? meta.descriptorByPath.get(item.$field)
+          : undefined;
         const counts = item.$fn === "count" || item.$fn === "countDistinct";
         aliases.set(resolveAlias(item), fd ? valueTypeOf(meta, fd) : counts ? INTEGER : NUMBER);
       } else if (isBucketExpr(item)) {

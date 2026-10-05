@@ -1,9 +1,11 @@
 import { buildUrl } from "@uniqu/url/builder";
 import type {
   AggregateExpr,
+  AggregateOfExpr,
   AggregateQuery,
   AggregateResult,
   BucketExpr,
+  SelectArithExpr,
   Uniquery,
   UniqueryControls,
   ValidGroupBy,
@@ -154,11 +156,23 @@ export class Client<
    * bucket's value is typed as its `YYYY-MM-DD` (hour: `YYYY-MM-DDTHH:00`) label
    * (`| null` for an optional source).
    * Gap-fill between labels with `nextBucketLabel` (re-exported here).
+   *
+   * Arithmetic (since 0.1.148): `{ $fn: 'sum', $expr, $as }` aggregates a per-row
+   * expression over numeric fields; `{ $expr, $as }` computes over aliases of other
+   * numeric entries or numeric `$groupBy` fields (`number | null`). `first` / `last`
+   * read a representative row ordered by `$rowOrder`. The URL forms are `expr(a/b):x`,
+   * `sum(a*b):x`, `first(f):x` and `$rowOrder=f,-id`.
    */
   async aggregate<const Q extends AggregateQuery<Own<T>>>(
     query: Q & ValidGroupBy<Own<T>, Q>,
   ): Promise<
-    Q["controls"]["$select"] extends readonly (string | AggregateExpr | BucketExpr)[]
+    Q["controls"]["$select"] extends readonly (
+      | string
+      | AggregateExpr
+      | BucketExpr
+      | AggregateOfExpr
+      | SelectArithExpr
+    )[]
       ? AggregateResult<Own<T>, Q["controls"]["$select"]>[]
       : Record<string, unknown>[]
   > {

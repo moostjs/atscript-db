@@ -608,10 +608,12 @@ Return one row per group, with physical names for grouped fields and each comput
 ### Aggregate functions {#aggregate-functions}
 
 ```typescript
-aggregateFns(): ReadonlySet<AggregateFn> // 'sum' | 'count' | 'avg' | 'min' | 'max' | 'countDistinct'
+aggregateFns(): ReadonlySet<AggregateFn> // 'sum' | 'count' | 'avg' | 'min' | 'max' | 'countDistinct' | 'first' | 'last'
 ```
 
 The aggregate functions your `aggregate()` renders (since 0.1.136). The default is `sum`, `count`, `avg`, `min` and `max`. The core rejects any other known function [with `AGG_FN_NOT_SUPPORTED`](/api/aggregation#validation-and-errors) before it calls `aggregate()`, so an adapter written before a function existed never receives it. moost-db's [`/meta`](/http/crud#get-meta) advertises the set as `aggregateFns`. The same set gates managed views: schema sync refuses a view whose `@db.agg.*` field uses a function missing from it. Conditional aggregates (the `@db.agg.*` second argument) are not a separate capability — an adapter that renders views renders them.
+
+`first` and `last` (since 0.1.148) are not in the default set either: they read a representative row ordered by `controls.$select.rowOrder` — see [Aggregate expressions](#aggregate-expressions).
 
 To support `countDistinct` too, return `ALL_AGGREGATE_FNS` (exported from `@atscript/db`) and follow its semantics: count the **distinct non-null** values of `$field` in each group. `null` and missing values are never counted, a group of only nulls counts `0`, and `'*'` never reaches you (the core rejects `countDistinct(*)`). Distinctness may follow the engine's collation. The value must be a number by the time `$having` and `$sort` see it. For example, MongoDB collects a set with `$addToSet` and turns it into its non-null size before `$having`. SQL adapters built on `buildAggregateSelect` / `buildAggregateCount` render `COUNT(DISTINCT col)` already, in `SELECT` and `HAVING`, and only need to return the set.
 
@@ -626,6 +628,23 @@ class MyAdapter extends BaseDbAdapter {
 ```
 
 `assertAggregateFn` accepts every known function, `countDistinct` included; its type `TDbAggregateFn` is uniqu's full `AggregateFn`. `AGG_FN_SQL` from `@atscript/db-sql-tools` maps only the single-name functions — `countDistinct` renders as `COUNT(DISTINCT x)`.
+
+### Aggregate expressions {#aggregate-expressions}
+
+```typescript
+supportsAggregateExpressions(): boolean // default false
+```
+
+Return `true` (since 0.1.148) when `aggregate()` renders [arithmetic](/api/aggregation#arithmetic-expressions) and, if `aggregateFns()` lists them, `first` / `last`. The default is `false`: a query with an expression entry then fails with `AGG_EXPR_NOT_SUPPORTED` before `aggregate()` is called, and a function missing from `aggregateFns()` with `AGG_FN_NOT_SUPPORTED`. moost-db advertises the flag as `/meta.aggregateExpressions`.
+
+For an adapter that returns `true`, `controls.$select` (a `UniquSelect`, physical names throughout) additionally carries:
+
+- `exprAggregates` — `{ fn: 'sum' | 'avg' | 'min' | 'max', alias, expr, names }`: aggregate `fn` over the per-row expression `expr` (`names`: the columns it reads);
+- `exprs` — `{ alias, expr, names }` in dependency order: expressions evaluated after grouping, whose field leaves name an alias defined earlier (an aggregate, `first` / `last`, another expression) or a grouped column;
+- `firstLast` — `{ fn: 'first' | 'last', column, alias }`, kept out of `aggregates`, with `rowOrder` — `{ column, desc }[]` with the primary key already appended — giving the order of the rows within each group;
+- `computedAliases` — every output alias but the calendar buckets', in emit order (aggregates, `exprAggregates`, `firstLast`, `exprs`), and `sources` — the field descriptors of the columns a `min` / `max` / `first` / `last` reads, for an engine that cannot aggregate a type directly.
+
+`expr` is the `@db.compute` tree (`AtscriptExprNode`: a number, `{ field }`, or `{ op, args }` with `+ - * /`, `neg`, `coalesce`). Keep its semantics: IEEE double, a `null` operand gives `null`, division by zero is `null`. `NULL` order keys sort smallest, and the pick is deterministic because `rowOrder` ends with the primary key. A `sum` over no non-null value is `null`, and an ungrouped query is [one group](/api/aggregation#representative-row-first-last) even over no rows. SQL adapters get all of it from `buildAggregateSelect` / `buildAggregateCount` (`renderArith` is the shared expression renderer, `orderKeySql` the NULL-smallest order key); a dialect opts into `booleanAggregates` (the stand-ins for `MIN` / `MAX` over a boolean) and `mapQueryError` (a driver error → `DbError`, run by `mapQueryErrors`, e.g. `arithOverflowError()` for a double overflow). In process, `evaluateExpr(expr, leaf)` from `@atscript/db` evaluates a tree with the shared semantics.
 
 ### Calendar buckets {#calendar-buckets}
 

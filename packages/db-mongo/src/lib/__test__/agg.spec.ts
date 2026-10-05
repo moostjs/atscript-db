@@ -6,6 +6,19 @@ import { buildAggregatePipeline, buildCountPipeline } from "../../agg";
 /** A plain `$groupBy` key as `$group._id` groups it: missing coalesced into the null group. */
 const nz = (path: string) => ({ $ifNull: [path, null] });
 
+/**
+ * A `sum`'s `$group` entries: the accumulator and the count of its non-null
+ * values, which makes a sum over no value NULL (as in SQL) instead of 0.
+ */
+const sumGroup = (alias: string, path: string) => ({
+  [alias]: { $sum: path },
+  [`__as_n_${alias}`]: { $sum: { $cond: [{ $gt: [path, null] }, 1, 0] } },
+});
+/** What a `sum` alias projects: null over no non-null value. */
+const sumProject = (alias: string) => ({
+  $cond: [{ $eq: [`$__as_n_${alias}`, 0] }, null, `$${alias}`],
+});
+
 /** Helper: build a DbQuery with aggregate controls. */
 function makeQuery(opts: {
   filter?: Record<string, unknown>;
@@ -41,8 +54,8 @@ describe("buildAggregatePipeline", () => {
 
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, ...sumGroup("total", "$amount") } },
+      { $project: { _id: 0, currency: "$_id.k0", total: sumProject("total") } },
     ]);
   });
 
@@ -66,7 +79,7 @@ describe("buildAggregatePipeline", () => {
       {
         $group: {
           _id: { k0: nz("$status"), k1: nz("$region") },
-          total: { $sum: "$amount" },
+          ...sumGroup("total", "$amount"),
           cnt: { $sum: 1 },
           avgAmt: { $avg: "$amount" },
           minAmt: { $min: "$amount" },
@@ -78,7 +91,7 @@ describe("buildAggregatePipeline", () => {
           _id: 0,
           status: "$_id.k0",
           region: "$_id.k1",
-          total: 1,
+          total: sumProject("total"),
           cnt: 1,
           avgAmt: 1,
           minAmt: 1,
@@ -216,7 +229,7 @@ describe("buildAggregatePipeline", () => {
     const projectStage = pipeline.find((s: any) => s.$project)!.$project;
 
     expect(groupStage).toHaveProperty("sum_amount");
-    expect(projectStage).toHaveProperty("sum_amount", 1);
+    expect(projectStage).toHaveProperty("sum_amount", sumProject("sum_amount"));
   });
 
   it("throws INVALID_QUERY on an unknown $fn instead of emitting an accumulator", () => {
@@ -248,11 +261,11 @@ describe("buildAggregatePipeline", () => {
       {
         $group: {
           _id: { k0: nz("$currency") },
-          total: { $sum: "$amount" },
+          ...sumGroup("total", "$amount"),
           cnt: { $sum: 1 },
         },
       },
-      { $project: { _id: 0, currency: "$_id.k0", total: 1, cnt: 1 } },
+      { $project: { _id: 0, currency: "$_id.k0", total: sumProject("total"), cnt: 1 } },
       { $match: { total: { $gt: 100 } } },
       { $sort: { total: -1 } },
       { $limit: 10 },
@@ -384,8 +397,8 @@ describe("buildCountPipeline", () => {
     // and `$count` reports 0 groups. Order: $group → $project → $match(having) → $count.
     expect(pipeline).toEqual([
       { $match: {} },
-      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, ...sumGroup("total", "$amount") } },
+      { $project: { _id: 0, currency: "$_id.k0", total: sumProject("total") } },
       { $match: { total: { $gt: 100 } } },
       { $count: "count" },
     ]);
@@ -457,8 +470,8 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
     expect(pipeline).toEqual([
       TEXT_STAGE,
       { $match: { status: "active" } },
-      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, ...sumGroup("total", "$amount") } },
+      { $project: { _id: 0, currency: "$_id.k0", total: sumProject("total") } },
       { $sort: { total: -1 } },
       { $limit: 5 },
     ]);
@@ -482,8 +495,8 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
     expect(pipeline).toEqual([
       TEXT_STAGE,
       { $match: { status: "active" } },
-      { $group: { _id: { k0: nz("$currency") }, total: { $sum: "$amount" } } },
-      { $project: { _id: 0, currency: "$_id.k0", total: 1 } },
+      { $group: { _id: { k0: nz("$currency") }, ...sumGroup("total", "$amount") } },
+      { $project: { _id: 0, currency: "$_id.k0", total: sumProject("total") } },
       { $match: { total: { $gt: 100 } } },
     ]);
   });

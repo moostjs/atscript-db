@@ -324,7 +324,8 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   override async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    const { buildAggregatePipeline, buildCountPipeline } = await import("../agg");
+    const { aggregateOptions, buildAggregatePipeline, buildCountPipeline, emptyGroupRow } =
+      await import("../agg");
 
     // Grouped-search contract: see `resolveAggregateSearch`. Resolved here
     // because it needs the adapter's index map, and shared by both builders so
@@ -334,13 +335,20 @@ export class MongoAdapter extends BaseDbAdapter {
     if (query.controls?.$count) {
       const pipeline = buildCountPipeline(query, searchStage, this._predicateFilterOpts);
       this._log("aggregate (count)", pipeline);
-      const result = await wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+      const result = await wrapInvalidQuery(() =>
+        this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
+      );
       return result.length > 0 ? result : [{ count: 0 }];
     }
 
     const pipeline = buildAggregatePipeline(query, searchStage, this._predicateFilterOpts);
     this._log("aggregate", pipeline);
-    return wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+    const rows = await wrapInvalidQuery(() =>
+      this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
+    );
+    // An ungrouped aggregate over no rows is still one group (SQL's rule).
+    const empty = rows.length === 0 ? emptyGroupRow(query) : undefined;
+    return empty ? [empty] : rows;
   }
 
   // ── ID handling ──────────────────────────────────────────────────────────
@@ -408,9 +416,14 @@ export class MongoAdapter extends BaseDbAdapter {
     return ALL_BUCKET_UNITS;
   }
 
-  /** Every aggregate function, `countDistinct` included. */
+  /** Every aggregate function: `countDistinct`, `first` and `last` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
+  override supportsAggregateExpressions(): boolean {
+    return true;
   }
 
   /** Computed view columns and first-row joins. */

@@ -61,6 +61,7 @@ import {
   replaceColumnsFor,
   foreignKeySql,
   SEARCH_SOURCE_ALIAS,
+  mapQueryErrors,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -324,9 +325,14 @@ export class MysqlAdapter extends BaseDbAdapter {
     return ALL_BUCKET_UNITS;
   }
 
-  /** Every aggregate function, `countDistinct` included. */
+  /** Every aggregate function: `countDistinct`, `first` and `last` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
+  override supportsAggregateExpressions(): boolean {
+    return true;
   }
 
   /** Computed view columns and first-row joins. */
@@ -693,13 +699,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = await this._exec().get<{ count: number }>(sql, params);
+      const row = await mapQueryErrors(mysqlDialect, () =>
+        this._exec().get<{ count: number }>(sql, params),
+      );
       return [{ count: row?.count ?? 0 }];
     }
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return mapQueryErrors(mysqlDialect, () => this._exec().all(sql, params));
   }
 
   /**

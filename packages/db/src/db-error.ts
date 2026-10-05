@@ -30,6 +30,12 @@ export type DbErrorCode =
   // ── Aggregate functions ($select `{ $fn, $field }`) ──
   /** A known aggregate function the adapter's `aggregateFns()` lacks (moost-db: 400). @since 0.1.136 */
   | "AGG_FN_NOT_SUPPORTED"
+  /**
+   * The adapter's `supportsAggregateExpressions()` is false and the query uses
+   * arithmetic (`{ $expr }`, `{ $fn, $expr }`) in an aggregate `$select`
+   * (moost-db: 400). @since 0.1.148
+   */
+  | "AGG_EXPR_NOT_SUPPORTED"
   // ── Relational filter predicates ($some / $none) ──
   /**
    * The adapter (or the table's wiring) cannot run a relational predicate:
@@ -153,4 +159,16 @@ export class CasMismatchError extends DbError {
  */
 export function bucketTimeZoneUnavailable(message: string): DbError {
   return new DbError("BUCKET_TZ_UNAVAILABLE", [{ path: "$select", message }]);
+}
+
+/**
+ * The adapter's `supportsAggregateExpressions()` is false (or its SQL dialect
+ * cannot cast to a double) and the query uses arithmetic in an aggregate
+ * `$select` (`AGG_EXPR_NOT_SUPPORTED`, `path` `$select`; moost-db: 400).
+ * @since 0.1.148
+ */
+export function aggregateExpressionsNotSupported(): DbError {
+  return new DbError("AGG_EXPR_NOT_SUPPORTED", [
+    { path: "$select", message: "Aggregate expressions are not supported by this adapter" },
+  ]);
 }

@@ -20,6 +20,8 @@ export const QUERY_CONTROLS: readonly string[] = [
   "insights",
   ...dtoControls(QueryControlsDto),
   "groupBy",
+  // `$rowOrder` — the row order `first()` / `last()` read (URL grammar, grouped queries; since 0.1.148)
+  "rowOrder",
 ];
 
 export const PAGES_CONTROLS: readonly string[] = ["filter", ...dtoControls(PagesControlsDto)];

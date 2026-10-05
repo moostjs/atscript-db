@@ -209,6 +209,10 @@ const results = await documents.vectorSearch(queryEmbedding, {
 
 Registration goes through the driver's optional `registerFunction(name, fn, opts)` hook. `BetterSqlite3Driver` implements it. A [custom driver](#custom-drivers) without it reports no bucket units: `/meta` omits `bucketUnits`, and a bucket query fails with `BUCKET_NOT_SUPPORTED` (HTTP 400). Don't register a function of your own named `atscript_bucket` on a shared connection.
 
+### Aggregate expressions {#aggregate-expressions}
+
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) run in SQL. `first` / `last` need window functions, so **SQLite 3.25+** (the bundled `better-sqlite3` is newer). A result past the double range is `±Infinity`.
+
 ### Filters
 
 All standard filter operators are supported (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and`, `$or`, `$not`). Regex patterns are converted to SQL `LIKE` expressions:

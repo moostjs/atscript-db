@@ -95,6 +95,21 @@ export interface SqlDialect {
    */
   castDouble?(expr: string): string;
   /**
+   * The aggregate functions that stand in for `MIN` / `MAX` over a BOOLEAN
+   * column on an engine that has no `MIN(boolean)` (PostgreSQL: `BOOL_AND` /
+   * `BOOL_OR`). Absent: `MIN` / `MAX` apply to booleans as to any column.
+   * @since 0.1.148
+   */
+  booleanAggregates?: { min: string; max: string };
+  /**
+   * Maps a driver error of a grouped query to the `DbError` it means — a
+   * double overflow in aggregate arithmetic (`arithOverflowError`), an unknown
+   * calendar-bucket zone — or `undefined` to let it propagate unchanged. Run by
+   * {@link mapQueryErrors}.
+   * @since 0.1.148
+   */
+  mapQueryError?(error: unknown): Error | undefined;
+  /**
    * `true` when the database sorts NULL as the LARGEST value (PostgreSQL):
    * first-row join order keys then render `ASC NULLS FIRST` /
    * `DESC NULLS LAST`, keeping the uniform "NULL is the smallest value"
@@ -128,6 +143,31 @@ export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSq
  */
 export function havingGroupRef(dialect: SqlDialect, expr: string, alias: string): string {
   return dialect.bucketAliasInHaving ? dialect.quoteIdentifier(alias) : expr;
+}
+
+/**
+ * Runs `fn`, rethrowing a driver error as the `DbError`
+ * {@link SqlDialect.mapQueryError} maps it to (any other error unchanged).
+ * @since 0.1.148
+ */
+export async function mapQueryErrors<R>(dialect: SqlDialect, fn: () => Promise<R>): Promise<R> {
+  try {
+    return await fn();
+  } catch (error: unknown) {
+    throw dialect.mapQueryError?.(error) ?? error;
+  }
+}
+
+/**
+ * One `ORDER BY` key with the uniform "NULL is the smallest value" ordering:
+ * `<expr> ASC` / `<expr> DESC`, plus `NULLS FIRST` / `NULLS LAST` on a
+ * dialect where NULL sorts largest ({@link SqlDialect.nullsSortLargest}).
+ * Shared by first-row joins and `first` / `last` aggregates.
+ * @since 0.1.148
+ */
+export function orderKeySql(dialect: SqlDialect, expr: string, desc: boolean): string {
+  const nulls = dialect.nullsSortLargest ? (desc ? " NULLS LAST" : " NULLS FIRST") : "";
+  return `${expr} ${desc ? "DESC" : "ASC"}${nulls}`;
 }
 
 /**

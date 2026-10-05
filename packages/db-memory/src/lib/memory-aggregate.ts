@@ -1,4 +1,11 @@
-import type { DbControls, FilterExpr } from "@atscript/db";
+import {
+  evaluateExpr,
+  type DbControls,
+  type FilterExpr,
+  type TExprAggregate,
+  type TFirstLast,
+  type TRowOrderKey,
+} from "@atscript/db";
 import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/db/agg";
 import { bucketer } from "@uniqu/core";
 
@@ -30,10 +37,32 @@ type TRow = Record<string, unknown>;
 export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow[] {
   const $select = controls.$select;
   const groupBy = (controls.$groupBy as string[] | undefined) ?? [];
-  const aggregates = $select?.aggregates ?? [];
-  const aliases = aggregates.map((expr) => resolveAlias(expr));
+  // Every accumulated per-group value, in `UniquSelect.computedAliases` order
+  // (aggregates, row-level expression aggregates, `first` / `last`); group-level
+  // expressions are evaluated afterwards.
+  const entries: Array<{ alias: string; create: () => TAccumulator }> = [
+    ...($select?.aggregates ?? []).map((expr) => ({
+      alias: resolveAlias(expr),
+      create: accumulatorFactory(expr),
+    })),
+    ...($select?.exprAggregates ?? []).map((e) => ({
+      alias: e.alias,
+      create: exprAccumulatorFactory(e),
+    })),
+    ...($select?.firstLast ?? []).map((fl) => ({
+      alias: fl.alias,
+      create: firstLastFactory(fl, $select?.rowOrder ?? []),
+    })),
+  ];
+  const aliases = entries.map((e) => e.alias);
+  const groupExprs = ($select?.exprs ?? []).map((e) => ({
+    alias: e.alias,
+    expr: e.expr,
+    // leaves are aliases of the group row or grouped columns (read off the row, once per name)
+    readers: new Map(e.names.map((name) => [name, pathReader(name)] as const)),
+  }));
   const keyReaders = groupBy.map((key) => groupKeyReader(key, controls));
-  const accumulators = aggregates.map(accumulatorFactory);
+  const accumulators = entries.map((e) => e.create);
   const newGroup = (values: unknown[]): TGroup => ({
     values,
     accs: accumulators.map((create) => create()),
@@ -74,6 +103,12 @@ export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow
     for (let i = 0; i < aliases.length; i++) {
       row[aliases[i]!] = accs[i]!.result();
     }
+    // Group-level expressions, in dependency order: leaves are aliases or group keys.
+    for (const e of groupExprs) {
+      row[e.alias] = evaluateExpr(e.expr, (name) =>
+        Object.hasOwn(row, name) ? row[name] : e.readers.get(name)!(row),
+      );
+    }
     out.push(row);
   }
 
@@ -99,7 +134,9 @@ export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow
     (field) => [field, pathReader(field)] as const,
   );
   const outputAliases =
-    $select === undefined ? [] : [...($select.buckets ?? []).map((b) => b.alias), ...aliases];
+    $select === undefined
+      ? []
+      : [...($select.buckets ?? []).map((b) => b.alias), ...$select.computedAliases];
   return paged.map((row) => {
     const picked: TRow = {};
     for (const [field, read] of fields) {
@@ -201,82 +238,119 @@ function numericValue(value: unknown): number | undefined {
   return undefined;
 }
 
+/** `sum` / `avg` / `min` / `max` over a per-row arithmetic expression; NULL results are skipped like NULL fields. */
+function exprAccumulatorFactory(e: TExprAggregate): () => TAccumulator {
+  const readers = new Map(e.names.map((name) => [name, pathReader(name)] as const));
+  return fnAccumulator(e.fn, (row) => evaluateExpr(e.expr, (field) => readers.get(field)!(row)));
+}
+
 /**
- * Resolves an aggregate expression to an accumulator factory (one accumulator
- * per group). Validated up front, so an unknown `$fn` is rejected even when
- * there are no rows.
+ * `first` / `last`: the value of `fl.column` on the group's representative
+ * row — the least (`first`) or greatest (`last`) row by `rowOrder` (NULL
+ * smallest; the primary key is the final key, so the pick is deterministic).
+ */
+function firstLastFactory(fl: TFirstLast, rowOrder: readonly TRowOrderKey[]): () => TAccumulator {
+  const keys = rowOrder.map((k) => ({ read: pathReader(k.column), sign: k.desc ? -1 : 1 }));
+  const read = pathReader(fl.column);
+  const sign = fl.fn === "first" ? -1 : 1;
+  const compare = (a: TRow, b: TRow) => {
+    for (const k of keys) {
+      const c = compareLeaves(k.read(a), k.read(b)) * k.sign;
+      if (c !== 0) return c;
+    }
+    return 0;
+  };
+  return () => {
+    let best: TRow | undefined;
+    return {
+      add: (row) => {
+        if (best === undefined || compare(row, best) * sign > 0) best = row;
+      },
+      result: () => (best === undefined ? null : copyValue(read(best) ?? null)),
+    };
+  };
+}
+
+/**
+ * `sum` / `avg` / `min` / `max` over the values `read` yields per row — a
+ * field's, or a per-row expression's. `sum` / `avg` skip non-numeric values
+ * and are `null` over none; `min` / `max` skip null / missing and order with
+ * the `$sort` comparator.
+ */
+function fnAccumulator(
+  fn: "sum" | "avg" | "min" | "max",
+  read: (row: TRow) => unknown,
+): () => TAccumulator {
+  if (fn === "sum" || fn === "avg") {
+    return () => {
+      let sum = 0;
+      let n = 0;
+      return {
+        add: (row) => {
+          const v = numericValue(read(row));
+          if (v !== undefined) {
+            sum += v;
+            n++;
+          }
+        },
+        result: () => (n === 0 ? null : fn === "avg" ? sum / n : sum),
+      };
+    };
+  }
+  const sign = fn === "min" ? -1 : 1;
+  return () => {
+    let best: unknown = null;
+    return {
+      add: (row) => {
+        const v = read(row);
+        if (v == null) return;
+        if (best === null || compareLeaves(v, best) * sign > 0) best = v;
+      },
+      result: () => best,
+    };
+  };
+}
+
+/**
+ * Resolves a plain aggregate (`first` / `last` are {@link firstLastFactory}'s)
+ * to an accumulator factory (one accumulator per group). Validated up front,
+ * so an unknown `$fn` is rejected even when there are no rows.
  */
 function accumulatorFactory(expr: AggregateExpr): () => TAccumulator {
   assertAggregateFn(expr.$fn);
   const field = expr.$field;
   const read = pathReader(field);
-  switch (expr.$fn) {
-    case "count": {
-      // `count(*)` counts rows, `count(f)` non-null values.
-      const all = field === "*";
-      return () => {
-        let n = 0;
-        return {
-          add: (row) => {
-            if (all || read(row) != null) n++;
-          },
-          result: () => n,
-        };
+  if (expr.$fn === "count") {
+    // `count(*)` counts rows, `count(f)` non-null values.
+    const all = field === "*";
+    return () => {
+      let n = 0;
+      return {
+        add: (row) => {
+          if (all || read(row) != null) n++;
+        },
+        result: () => n,
       };
-    }
-    case "sum":
-    case "avg": {
-      const avg = expr.$fn === "avg";
-      return () => {
-        let sum = 0;
-        let n = 0;
-        return {
-          add: (row) => {
-            const v = numericValue(read(row));
-            if (v !== undefined) {
-              sum += v;
-              n++;
-            }
-          },
-          result: () => (n === 0 ? null : avg ? sum / n : sum),
-        };
-      };
-    }
-    case "countDistinct": {
-      // Distinct non-null values, by group identity: a string or boolean is
-      // its own identity; numbers / bigints / `Date`s / JSON values are
-      // tokenized (a number and a bigint of one value, one instant, one JSON
-      // value count once) in a set of their own, so no token meets a string.
-      return () => {
-        const plain = new Set<unknown>();
-        const tokens = new Set<string>();
-        return {
-          add: (row) => {
-            const v = read(row);
-            if (v == null) return;
-            if (typeof v === "string" || typeof v === "boolean") plain.add(v);
-            else tokens.add(identityToken(v));
-          },
-          result: () => plain.size + tokens.size,
-        };
-      };
-    }
-    case "min":
-    case "max": {
-      const sign = expr.$fn === "min" ? -1 : 1;
-      return () => {
-        let best: unknown = null;
-        return {
-          add: (row) => {
-            const v = read(row);
-            if (v == null) return;
-            if (best === null || compareLeaves(v, best) * sign > 0) best = v;
-          },
-          result: () => best,
-        };
-      };
-    }
-    default:
-      return expr.$fn satisfies never;
+    };
   }
+  if (expr.$fn === "countDistinct") {
+    // Distinct non-null values, by group identity: a string or boolean is
+    // its own identity; numbers / bigints / `Date`s / JSON values are
+    // tokenized (a number and a bigint of one value, one instant, one JSON
+    // value count once) in a set of their own, so no token meets a string.
+    return () => {
+      const plain = new Set<unknown>();
+      const tokens = new Set<string>();
+      return {
+        add: (row) => {
+          const v = read(row);
+          if (v == null) return;
+          if (typeof v === "string" || typeof v === "boolean") plain.add(v);
+          else tokens.add(identityToken(v));
+        },
+        result: () => plain.size + tokens.size,
+      };
+    };
+  }
+  return fnAccumulator(expr.$fn as "sum" | "avg" | "min" | "max", read);
 }

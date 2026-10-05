@@ -199,6 +199,28 @@ const stats = await orders.aggregate({
 
 When `$groupBy` fields and `$select` are typed, the result type is inferred — `stats[0].total` is `number`, `stats[0].status` preserves the original field type. A `$groupBy` entry that is neither a field nor a bucket alias from `$select` is a type error (`ValidGroupBy`).
 
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) (since 0.1.148) go in `$select` in object form too; the client serializes them to `expr(…)`, `sum(<arith>)`, `first(…)` and `$rowOrder`, and types an expression alias as `number | null` and a `first` / `last` alias as its field's type:
+
+```typescript
+const queue = await issues.aggregate({
+  filter: { status: "open" },
+  controls: {
+    $groupBy: ["ticketId"],
+    $select: [
+      "ticketId",
+      { $fn: "count", $field: "*", $as: "open" },
+      { $fn: "sum", $expr: { $op: "*", $args: ["price", "qty"] }, $as: "revenue" },
+      { $expr: { $op: "/", $args: ["revenue", "open"] }, $as: "avg" },
+      { $fn: "first", $field: "title", $as: "oldestTitle" },
+    ],
+    $rowOrder: { raisedAt: 1 },
+  },
+});
+// queue[0].avg is number | null, queue[0].oldestTitle is string
+```
+
+Offer expression operands from `meta.fields[path].numeric` (and check `meta.aggregateExpressions`).
+
 [Calendar buckets](/api/calendar-buckets) go in `$select` in object form; the client serializes them to `bucket(…)` (since 0.1.132):
 
 ```typescript

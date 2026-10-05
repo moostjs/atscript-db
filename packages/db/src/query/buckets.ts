@@ -1,4 +1,9 @@
-import { resolveBuckets, type ResolvedBucket } from "@uniqu/core";
+import {
+  resolveBuckets,
+  type ResolvedBucket,
+  type ResolvedRowOrderKey,
+  type ResolvedSelectExpr,
+} from "@uniqu/core";
 
 import { DbError } from "../db-error";
 import { SUPPORTED_AGGREGATE_FNS } from "./aggregate-fns";
@@ -62,10 +67,29 @@ export interface TBucketFieldSource {
  * @throws DbError `INVALID_QUERY` carrying every issue (`path` `$select` / `$groupBy`).
  */
 export function normalizeComputedSelect(
-  controls: { $select?: unknown; $groupBy?: unknown } | undefined,
+  controls: { $select?: unknown; $groupBy?: unknown; $rowOrder?: unknown } | undefined,
   fields: TBucketFieldSource,
   aggregate?: boolean,
 ): ResolvedBucket[] {
+  return resolveComputedSelect(controls, fields, aggregate).buckets;
+}
+
+/**
+ * Everything {@link normalizeComputedSelect} resolves: the calendar buckets,
+ * the arithmetic entries (`exprs`: row-level first, then group-level in
+ * dependency order — logical names) and the `$rowOrder` keys of `first()` /
+ * `last()` (`rowOrder`, as given — the primary key is appended by the
+ * mapper). The same normalizer, also covering uniqu's expression and
+ * `$rowOrder` rules.
+ *
+ * @throws DbError `INVALID_QUERY` carrying every issue (`path` `$select` / `$groupBy` / `$rowOrder`).
+ * @since 0.1.148
+ */
+export function resolveComputedSelect(
+  controls: { $select?: unknown; $groupBy?: unknown; $rowOrder?: unknown } | undefined,
+  fields: TBucketFieldSource,
+  aggregate?: boolean,
+): TComputedSelect {
   const res = resolveBuckets(controls, {
     aggregate,
     fns: SUPPORTED_AGGREGATE_FNS,
@@ -75,7 +99,14 @@ export function normalizeComputedSelect(
   if (!res.ok) {
     throw new DbError("INVALID_QUERY", res.issues);
   }
-  return res.buckets;
+  return { buckets: res.buckets, exprs: res.exprs, rowOrder: res.rowOrder };
+}
+
+/** The normalized computed `$select` entries of a grouped query — see {@link resolveComputedSelect}. */
+export interface TComputedSelect {
+  buckets: ResolvedBucket[];
+  exprs: ResolvedSelectExpr[];
+  rowOrder?: ResolvedRowOrderKey[];
 }
 
 /**

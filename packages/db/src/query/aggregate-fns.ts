@@ -1,4 +1,4 @@
-import type { AggregateFn } from "@uniqu/core";
+import { ROW_ORDER_FNS, isAggregateExpr, type AggregateExpr, type AggregateFn } from "@uniqu/core";
 
 import { DbError } from "../db-error";
 
@@ -22,7 +22,21 @@ export const SUPPORTED_AGGREGATE_FNS: readonly TDbAggregateFn[] = [
   "min",
   "max",
   "countDistinct",
+  "first",
+  "last",
 ];
+
+/** Whether a `$select` entry is a `first` / `last` aggregate (uniqu's `ROW_ORDER_FNS`). */
+export function isFirstLast(item: unknown): item is AggregateExpr & { $fn: "first" | "last" } {
+  return isAggregateExpr(item) && (ROW_ORDER_FNS as readonly string[]).includes(item.$fn);
+}
+
+/**
+ * The functions that return a value OF their source field (`min` / `max` /
+ * `first` / `last`), rather than a count or a number — their result takes the
+ * field's type.
+ */
+export const SOURCE_VALUE_FNS: ReadonlySet<string> = new Set(["min", "max", "first", "last"]);
 
 /**
  * The aggregates that are NULL over no (non-null) value — every function but
@@ -36,12 +50,23 @@ export const NULL_WHEN_EMPTY_AGGREGATE_FNS: ReadonlySet<TDbAggregateFn> = new Se
   "avg",
   "min",
   "max",
+  "first",
+  "last",
 ]);
 
-/** The `@db.agg.*` annotation names, one per supported aggregate function. */
-export const AGG_ANNOTATIONS = SUPPORTED_AGGREGATE_FNS.map((fn) => `db.agg.${fn}` as const);
+/**
+ * The `@db.agg.*` annotation names, one per aggregate function a managed view
+ * declares — every query-time function but `first` / `last` (a representative
+ * row needs a query's `$rowOrder`).
+ */
+export const AGG_ANNOTATIONS = SUPPORTED_AGGREGATE_FNS.filter(
+  (fn) => !ROW_ORDER_FNS.includes(fn),
+).map((fn) => `db.agg.${fn}` as const);
 
-/** `BaseDbAdapter.aggregateFns()` by default: every function except `countDistinct`. */
+/**
+ * `BaseDbAdapter.aggregateFns()` by default: every function except
+ * `countDistinct`, `first` and `last`.
+ */
 export const BASE_AGGREGATE_FNS: ReadonlySet<TDbAggregateFn> = new Set<TDbAggregateFn>([
   "sum",
   "count",
@@ -52,7 +77,7 @@ export const BASE_AGGREGATE_FNS: ReadonlySet<TDbAggregateFn> = new Set<TDbAggreg
 
 /**
  * Every aggregate function — what an adapter that renders them all returns
- * from `aggregateFns()`.
+ * from `aggregateFns()` (`first` / `last` since 0.1.148).
  *
  * @since 0.1.136
  */

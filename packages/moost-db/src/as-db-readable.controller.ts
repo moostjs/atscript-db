@@ -2095,26 +2095,6 @@ export class AsDbReadableController<
     return out as UniqueryControls["$select"];
   }
 
-  /** First `@db.writeOnly` field referenced by `$groupBy` / aggregate `$select`, or undefined. */
-  private _findWriteOnlyInAggregate(
-    groupBy: readonly string[],
-    select: unknown,
-  ): string | undefined {
-    if (this._writeOnlySet.size === 0) return undefined;
-    // A field hidden by `hasField` falls through to the gate's `Unknown field`.
-    const sealed = (f: string) => this._writeOnlySet.has(f) && this.fieldVisibility.isVisible(f);
-    for (const f of groupBy) {
-      if (sealed(f)) return f;
-    }
-    if (Array.isArray(select)) {
-      for (const item of select as unknown[]) {
-        const field = typeof item === "string" ? item : (item as { $field?: string }).$field;
-        if (field && sealed(field)) return field;
-      }
-    }
-    return undefined;
-  }
-
   /**
    * Merges the `$search` fallback into the filter: a case-insensitive literal
    * substring match OR'd across the `@db.column.searchable` fields, `$and`-combined
@@ -2742,8 +2722,19 @@ export class AsDbReadableController<
       return error;
     }
 
-    if (groupBy?.length) {
-      const sealed = this._findWriteOnlyInAggregate(groupBy, controls.$select);
+    if (groupBy?.length && this._writeOnlySet.size > 0) {
+      // Every path the grouped query reads a sealed value through — grouping,
+      // aggregate / expression operands, `first` / `last` sources, `$rowOrder`
+      // and `$sort` keys, calendar-bucket sources, plain `$select` fields. A
+      // field hidden by `hasField` falls through to the gate's `Unknown field`.
+      const refs = collectQueryPaths(parsed, true);
+      const sealed = [
+        ...refs.groupBy,
+        ...refs.aggregate,
+        ...refs.bucket,
+        ...refs.select,
+        ...refs.sort,
+      ].find((path) => this._writeOnlySet.has(path) && this.fieldVisibility.isVisible(path));
       if (sealed) {
         return new HttpError(400, `Field "${sealed}" is @db.writeOnly and cannot be aggregated`);
       }
@@ -3555,6 +3546,10 @@ export class AsDbReadableController<
         // Exactly when the gate accepts a calendar bucket over this field.
         entry.bucketable = true;
       }
+      if (cap.numeric) {
+        // May be an operand of query-time arithmetic (`sum(price*qty)`, `expr(a/b)`).
+        entry.numeric = true;
+      }
       if (fd.derived) {
         // Computed from a @db.json leaf of the row; a write payload value is
         // dropped — UIs render it read-only.
@@ -3598,6 +3593,8 @@ export class AsDbReadableController<
       ...(capabilities.bucketUnits.length > 0 && { bucketUnits: [...capabilities.bucketUnits] }),
       // Aggregate functions the adapter renders.
       aggregateFns: [...capabilities.aggregateFns],
+      // Arithmetic in an aggregate `$select`; operands are `fields[P].numeric`.
+      aggregateExpressions: capabilities.aggregateExpressions,
     };
   }
 

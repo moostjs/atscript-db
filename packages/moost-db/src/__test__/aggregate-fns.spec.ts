@@ -42,6 +42,8 @@ describe("countDistinct over HTTP", () => {
       "min",
       "max",
       "countDistinct",
+      "first",
+      "last",
     ]);
     expect((await bind(new MockAdapter()).meta()).aggregateFns).toEqual([
       "sum",

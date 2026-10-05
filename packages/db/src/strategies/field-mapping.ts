@@ -3,16 +3,26 @@ import type {
   AggregateQuery,
   FilterExpr,
   ResolvedBucket,
+  ResolvedRowOrderKey,
+  ResolvedSelectExpr,
   Uniquery,
   UniqueryControls,
 } from "@uniqu/core";
-import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
+import { isAggregateExpr, isAggregateOfExpr, isBucketExpr, isSelectArithExpr } from "@uniqu/core";
 
 import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
-import { UniquSelect } from "../query/uniqu-select";
+import { arithToExprNode } from "../query/aggregate-expr";
+import { SOURCE_VALUE_FNS } from "../query/aggregate-fns";
+import {
+  UniquSelect,
+  type TExprAggregate,
+  type TRowOrderKey,
+  type TSelectExpr,
+  type TUniquComputed,
+} from "../query/uniqu-select";
 import {
   containsRelationFilter,
   noteRelationFilter,
@@ -25,7 +35,7 @@ import {
   isPlainObject,
   selfOrAncestor,
 } from "../shared/object";
-import type { DbControls, DbQuery } from "../types";
+import type { DbControls, DbQuery, TDbFieldMeta } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
 
 /**
@@ -157,6 +167,25 @@ export function toBool(value: unknown): unknown {
   return !!value;
 }
 
+/**
+ * Coerces the computed aliases of aggregate rows (`min` / `max` / `first` /
+ * `last` of one boolean or decimal field) the way a column of that type is
+ * coerced on read — the row reverse path cannot, as an alias is no column.
+ * @since 0.1.148
+ */
+export function coerceAliasValues(
+  rows: Array<Record<string, unknown>>,
+  aliases: ReadonlyMap<string, TDbFieldMeta>,
+): void {
+  for (const row of rows) {
+    for (const [alias, fd] of aliases) {
+      if (alias in row) {
+        row[alias] = fd.designType === "boolean" ? toBool(row[alias]) : toDecimalString(row[alias]);
+      }
+    }
+  }
+}
+
 export function toDecimalString(value: unknown): unknown {
   if (value === null || value === undefined) {
     return value;
@@ -233,12 +262,18 @@ export abstract class FieldMappingStrategy {
    * `buckets` are the query's calendar buckets as the core's normalizer
    * resolved them (`normalizeComputedSelect` — `AtscriptDbReadable.aggregate`
    * runs it before the guards); they reach adapters with `field` made
-   * physical and the source descriptor as `fd`.
+   * physical and the source descriptor as `fd`. `exprs` / `rowOrder` are the
+   * arithmetic entries and `$rowOrder` keys of the same normalizer
+   * (`resolveComputedSelect`): they reach adapters as `$select.exprAggregates`
+   * / `.exprs` / `.rowOrder` with physical names (the primary key appended to
+   * the order); `$rowOrder` itself is not forwarded (since 0.1.148).
    */
   translateAggregateQuery(
     query: AggregateQuery,
     meta: TableMetadata,
     buckets: readonly ResolvedBucket[],
+    exprs: readonly ResolvedSelectExpr[] = [],
+    rowOrder?: readonly ResolvedRowOrderKey[],
   ): DbQuery {
     const controls = query.controls;
     const aliases = this.computedAliasSet(controls.$select);
@@ -248,16 +283,18 @@ export abstract class FieldMappingStrategy {
       fd: meta.descriptorByPath.get(b.field)!,
     }));
     const select = controls.$select && this.physicalSelect(controls.$select, meta);
+    const computed = this.physicalComputed(meta, aliases, exprs, rowOrder, controls.$select);
     return {
       filter: this.translateFilter((query.filter ?? {}) as FilterExpr, meta),
       controls: {
         ...controls,
         $with: undefined,
+        $rowOrder: undefined,
         $groupBy: this.renamesPaths(meta)
           ? controls.$groupBy.map((key) => (aliases.has(key) ? key : this.physicalPath(key, meta)))
           : controls.$groupBy,
         $select: select
-          ? new UniquSelect(select, meta.allPhysicalFields, physicalBuckets)
+          ? new UniquSelect(select, meta.allPhysicalFields, physicalBuckets, computed)
           : undefined,
         $sort: controls.$sort && this.physicalSort(controls.$sort, meta, aliases),
         $having: controls.$having ? this.translateFilter(controls.$having, meta) : undefined,
@@ -266,13 +303,62 @@ export abstract class FieldMappingStrategy {
     };
   }
 
-  /** Output aliases of the computed `$select` entries (aggregates and calendar buckets). */
+  /** Output aliases of the computed `$select` entries (aggregates, expressions and calendar buckets). */
   private computedAliasSet(select: AggregateControls["$select"]): Set<string> {
     const aliases = new Set<string>();
     for (const item of select ?? []) {
       if (isAggregateExpr(item) || isBucketExpr(item)) aliases.add(resolveAlias(item));
+      else if (isAggregateOfExpr(item) || isSelectArithExpr(item)) aliases.add(item.$as);
     }
     return aliases;
+  }
+
+  /**
+   * The arithmetic and `$rowOrder` parts of a grouped query with PHYSICAL
+   * names: a row-level operand is a column; a group-level operand stays an
+   * alias, or becomes the physical name of a `$groupBy` field. The primary
+   * key is appended to the order as the final ascending tie-break.
+   */
+  private physicalComputed(
+    meta: TableMetadata,
+    aliases: ReadonlySet<string>,
+    exprs: readonly ResolvedSelectExpr[],
+    rowOrder: readonly ResolvedRowOrderKey[] | undefined,
+    select: AggregateControls["$select"],
+  ): TUniquComputed {
+    // The columns a `min` / `max` / `first` / `last` reads, with their descriptors
+    // (an adapter whose engine cannot aggregate a type directly needs the type).
+    const sources = new Map<string, TDbFieldMeta>();
+    for (const item of select ?? []) {
+      if (!isAggregateExpr(item) || !SOURCE_VALUE_FNS.has(item.$fn)) continue;
+      const fd = meta.descriptorByPath.get(item.$field);
+      if (fd) sources.set(this.physicalPath(item.$field, meta), fd);
+    }
+    const exprAggregates: TExprAggregate[] = [];
+    const groupExprs: TSelectExpr[] = [];
+    for (const e of exprs) {
+      const names = new Set<string>();
+      const node = arithToExprNode(e.expr, (name) => {
+        const resolved =
+          e.level === "group" && aliases.has(name) ? name : this.physicalPath(name, meta);
+        names.add(resolved);
+        return resolved;
+      });
+      if (e.level === "row") {
+        exprAggregates.push({ fn: e.fn!, alias: e.alias, expr: node, names: [...names] });
+      } else {
+        groupExprs.push({ alias: e.alias, expr: node, names: [...names] });
+      }
+    }
+    let order: TRowOrderKey[] | undefined;
+    if (rowOrder?.length) {
+      order = rowOrder.map((k) => ({ column: this.physicalPath(k.field, meta), desc: k.desc }));
+      for (const pk of meta.primaryKeys) {
+        const column = this.physicalPath(pk, meta);
+        if (!order.some((k) => k.column === column)) order.push({ column, desc: false });
+      }
+    }
+    return { exprAggregates, exprs: groupExprs, rowOrder: order, sources };
   }
 
   /**

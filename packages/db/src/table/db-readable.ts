@@ -21,7 +21,7 @@ import type {
   Uniquery,
   WithRelation,
 } from "@uniqu/core";
-import { isAggregateExpr } from "@uniqu/core";
+import { isAggregateExpr, resolveAlias } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError, spaceClosedError } from "../db-error";
@@ -43,12 +43,14 @@ import type {
   TTableResolver,
   TWriteTableResolver,
 } from "../types";
+import { SOURCE_VALUE_FNS, isFirstLast } from "../query/aggregate-fns";
 import { TableMetadata } from "./table-metadata";
 import {
   type FieldMappingStrategy,
   type TReadControls,
   DocumentFieldMapper,
   isExclusionProjection,
+  coerceAliasValues,
 } from "../strategies/field-mapping";
 import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
 import type { TRelationLoaderHost } from "../rel/relation-loader";
@@ -73,7 +75,7 @@ import {
   type TRelationFilterOwner,
   type TRelGuardState,
 } from "../query/relation-filter";
-import { normalizeComputedSelect } from "../query/buckets";
+import { resolveComputedSelect } from "../query/buckets";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
 import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
 import { rowMatchesKey } from "../shared/keys";
@@ -773,8 +775,11 @@ export class AtscriptDbReadable<
   private _fromRead(
     rows: Record<string, unknown>[],
     controls: TReadControls | undefined,
+    aliasFields?: ReadonlyMap<string, TDbFieldMeta>,
   ): Record<string, unknown>[] {
-    return this._fieldMapper.reconstructRows(rows, this._meta, controls);
+    const out = this._fieldMapper.reconstructRows(rows, this._meta, controls);
+    if (aliasFields?.size) coerceAliasValues(out, aliasFields);
+    return out;
   }
 
   /**
@@ -1103,7 +1108,8 @@ export class AtscriptDbReadable<
 
     // Computed-entry shapes + calendar buckets, before any rule reads `$select`
     // (the rules below then meet only strings, aggregates and valid buckets).
-    const buckets = normalizeComputedSelect(query.controls, this._meta, true);
+    const computed = resolveComputedSelect(query.controls, this._meta, true);
+    const { buckets } = computed;
 
     // Validate: plain fields in $select must be in $groupBy
     if ($select) {
@@ -1146,8 +1152,9 @@ export class AtscriptDbReadable<
         for (const item of $select) {
           if (!isAggregateExpr(item) || item.$field === "*" || measSet.has(item.$field)) continue;
           // Counting distinct values is a question about a dimension as much
-          // as a measure ("how many regions sold"), so either may be counted.
-          if (item.$fn === "countDistinct") {
+          // as a measure ("how many regions sold"), so either may be counted;
+          // a representative row (`first` / `last`) reads either too.
+          if (item.$fn === "countDistinct" || isFirstLast(item)) {
             if (dimSet.has(item.$field)) continue;
             throw new DbError("INVALID_QUERY", [
               {
@@ -1197,10 +1204,16 @@ export class AtscriptDbReadable<
 
     // Encrypted-field guards: $groupBy / aggregate refs / $having / filter,
     // then the path guard and the adapter's calendar-bucket units.
-    guardAggregate(this._meta, this.adapter, query, buckets);
+    guardAggregate(this._meta, this.adapter, query, computed);
 
     // Translate and delegate
-    const dbQuery = this._fieldMapper.translateAggregateQuery(query, this._meta, buckets);
+    const dbQuery = this._fieldMapper.translateAggregateQuery(
+      query,
+      this._meta,
+      buckets,
+      computed.exprs,
+      computed.rowOrder,
+    );
     const results = await this.adapter.aggregate(dbQuery);
 
     // Aggregate rows take the same reverse path as regular rows (since
@@ -1215,7 +1228,24 @@ export class AtscriptDbReadable<
     // adapter already returns nested (MongoDB) pass through unchanged. A
     // grouped derived field on a document adapter is filled from its source
     // path (the grouped dimension) and the source pruned (since 0.1.141).
-    return this._fromRead(results, query.controls);
+    return this._fromRead(results, query.controls, this._aliasFields($select));
+  }
+
+  /**
+   * The computed aliases of one source field that is a boolean or a decimal —
+   * `min` / `max` / `first` / `last` — with that field's descriptor: the
+   * aggregate row's value is coerced like the column's own on read.
+   */
+  private _aliasFields(select: AggregateQuery["controls"]["$select"]): Map<string, TDbFieldMeta> {
+    const out = new Map<string, TDbFieldMeta>();
+    for (const item of (select ?? []) as unknown[]) {
+      if (!isAggregateExpr(item) || !SOURCE_VALUE_FNS.has(item.$fn)) continue;
+      const fd = this._meta.descriptorByPath.get(item.$field);
+      if (fd && (fd.designType === "boolean" || fd.designType === "decimal")) {
+        out.set(resolveAlias(item), fd);
+      }
+    }
+    return out;
   }
 
   // ── Search ──────────────────────────────────────────────────────────────
@@ -1233,6 +1263,11 @@ export class AtscriptDbReadable<
   /** Calendar-bucket units the adapter can group by (proxies adapter capability; empty = none). */
   public calendarBucketUnits(): ReadonlySet<BucketUnit> {
     return this.adapter.calendarBucketUnits();
+  }
+
+  /** Whether the adapter renders aggregate arithmetic (proxies adapter capability). @since 0.1.148 */
+  public supportsAggregateExpressions(): boolean {
+    return this.adapter.supportsAggregateExpressions();
   }
 
   /** Aggregate functions the adapter renders (proxies adapter capability). @since 0.1.136 */

@@ -35,7 +35,7 @@ export type {
 // ── Resolved query types (adapter-facing) ──────────────────────────────────
 
 /** Controls with resolved projection. Used in the adapter interface. */
-export interface DbControls extends Omit<_UniqueryControls, "$select"> {
+export interface DbControls extends Omit<_UniqueryControls, "$select" | "$rowOrder"> {
   $select?: UniquSelect;
 }
 
@@ -123,6 +123,13 @@ export interface TFieldMeta {
    * (`bucketUnits`). Since 0.1.132.
    */
   bucketable?: true;
+  /**
+   * Present (true) exactly when the field may be an operand of query-time
+   * arithmetic (`sum(price*qty)`, `expr(a/b)`) — a plain `number` (not a
+   * decimal or timestamp) that is visible and physically aggregatable — on an
+   * adapter with `aggregateExpressions`. Since 0.1.148.
+   */
+  numeric?: true;
   /**
    * Present (true) when the field is a `@db.column.derived` column: its value
    * is computed from a `@db.json` field of the same row and is never written
@@ -216,6 +223,15 @@ export interface TMetaResponse {
    * @since 0.1.136
    */
   aggregateFns?: AggregateFn[];
+  /**
+   * Whether the adapter renders arithmetic in an aggregate `$select`
+   * (`{ $expr }`, URL `expr(a/b):alias`, `sum(price*qty):alias`) — see
+   * `BaseDbAdapter.supportsAggregateExpressions()`. Fields that may be
+   * operands are flagged `fields[P].numeric`.
+   *
+   * @since 0.1.148
+   */
+  aggregateExpressions?: boolean;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────

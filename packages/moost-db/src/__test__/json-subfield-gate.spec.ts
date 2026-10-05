@@ -101,7 +101,7 @@ describe("JSON descendant paths — relational adapter", () => {
     "?$select=address.city",
     "?address.city=x",
     "?$sort=address.city",
-    "?$groupBy=address.city&$select=address.city,count()",
+    "?$groupBy=address.city&$select=address.city,count(*)",
     "?$select=id,sum(address.city):s&$groupBy=name",
   ];
 
@@ -177,7 +177,7 @@ describe("JSON descendant paths — nested-object adapter (native dotted paths)"
     ).not.toBeInstanceOf(HttpError);
     expect(table.findMany).toHaveBeenCalledTimes(1);
     expect(
-      await ctrl.query("?$groupBy=address.city&$select=address.city,count()"),
+      await ctrl.query("?$groupBy=address.city&$select=address.city,count(*)"),
     ).not.toBeInstanceOf(HttpError);
     expect(table.aggregate).toHaveBeenCalledTimes(1);
   });

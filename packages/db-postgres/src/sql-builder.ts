@@ -6,6 +6,7 @@ import type {
   TViewJsonType,
   TViewPlan,
 } from "@atscript/db";
+import { bucketTimeZoneUnavailable } from "@atscript/db";
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
@@ -26,6 +27,7 @@ import {
   parseRegexString,
   quotedJsonPathSegments,
   foreignKeySql,
+  arithOverflowError,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -151,6 +153,29 @@ export const pgDialect: SqlDialect = {
   calendarBucket: pgCalendarBucket,
   jsonExtract: pgJsonExtract,
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE PRECISION)`,
+  // No MIN / MAX over a boolean
+  booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" },
+  /**
+   * SQLSTATE 22003 (`numeric_value_out_of_range`), a double overflow in
+   * aggregate arithmetic, is `INVALID_QUERY`; SQLSTATE 22023
+   * (`invalid_parameter_value`, `time zone "…" not recognized`), raised by a
+   * calendar bucket's `AT TIME ZONE '<tz>'`, is `BUCKET_TZ_UNAVAILABLE` — the
+   * zone passed the core's IANA validation, so the server's tz database is
+   * older than the runtime's.
+   */
+  mapQueryError(error: unknown) {
+    const err = error as { code?: unknown; message?: unknown } | null;
+    if (err?.code === "22003") return arithOverflowError();
+    const zone =
+      err?.code === "22023" && typeof err.message === "string"
+        ? /time zone "([^"]*)" not recognized/.exec(err.message)?.[1]
+        : undefined;
+    return zone === undefined
+      ? undefined
+      : bucketTimeZoneUnavailable(
+          `PostgreSQL does not recognize time zone "${zone}" — update the server's time zone data`,
+        );
+  },
   // PostgreSQL sorts NULL as the largest value — first-row joins render NULLS FIRST / LAST
   nullsSortLargest: true,
   createViewPrefix: "CREATE OR REPLACE VIEW",

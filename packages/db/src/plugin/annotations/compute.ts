@@ -14,15 +14,13 @@ import {
   validateExclusiveWith,
 } from "../../shared/annotation-utils";
 import { AGG_ANNOTATIONS } from "../../query/aggregate-fns";
+import { numericTypeProblem } from "../../shared/numeric-operand";
 import { validateQueryScope } from "../../shared/validation-utils";
 import { viewProps } from "../../shared/view-validation";
 import { fieldScopes, viewHavingScope } from "../lsp-scopes";
 
 /** What a `@db.compute` field cannot also carry (VC1). */
 const EXCLUSIVE_WITH = [...AGG_ANNOTATIONS, "db.json", "db.ignore"].map((key) => ({ key }));
-
-/** Primitive tags of timestamps (MySQL may store them as native `TIMESTAMP`). */
-const TIMESTAMP_TAGS = ["timestamp", "created", "updated"];
 
 /** The `@db.compute` expression token of a prop, if any. */
 function computeArg(prop: SemanticNode | undefined): Token | undefined {
@@ -51,9 +49,7 @@ function operandProblem(prop: SemanticNode, doc: AtscriptDoc): string | undefine
   const leaf = def && isRef(def) ? doc.unwindType(def.id!, def.chain)?.def : def;
   const base = primitiveBaseType(leaf);
   if (base === undefined) return undefined; // unresolved — sync reports it
-  if (base !== "number") return `is ${base === "decimal" ? "a decimal" : `a ${base}`}`;
-  if (isPrimitive(leaf) && TIMESTAMP_TAGS.some((t) => leaf.tags.has(t))) return "is a timestamp";
-  return undefined;
+  return numericTypeProblem({ base, tags: isPrimitive(leaf) ? leaf.tags : undefined });
 }
 
 /** VC6 — whether an expression may be NULL (`/` by zero, an optional operand). */

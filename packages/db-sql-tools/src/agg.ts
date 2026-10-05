@@ -1,17 +1,20 @@
 import { type AggregateExpr, BUCKET_UNITS, WEEK_STARTS, walkFilter } from "@uniqu/core";
-import { DbError, type DbControls, type TResolvedBucket } from "@atscript/db";
+import { DbError, type DbControls, type TResolvedBucket, type UniquSelect } from "@atscript/db";
 import { assertAggregateFn, resolveAlias, type TDbAggregateFn } from "@atscript/db/agg";
 
 import { sqlTimeZoneLiteral } from "./common";
 import type { SqlDialect, TSqlFragment } from "./dialect";
-import { EMPTY_AND, finalizeParams, havingGroupRef } from "./dialect";
+import { EMPTY_AND, finalizeParams, havingGroupRef, orderKeySql } from "./dialect";
+import { renderArith } from "./arith";
 import { createFilterVisitor } from "./filter-builder";
 
 /**
  * SQL function name of each single-name aggregate. `countDistinct` is not a
  * name but a form (`COUNT(DISTINCT x)`) — see {@link renderAggCall}.
  */
-export const AGG_FN_SQL: Readonly<Record<Exclude<TDbAggregateFn, "countDistinct">, string>> = {
+export const AGG_FN_SQL: Readonly<
+  Record<Exclude<TDbAggregateFn, "countDistinct" | "first" | "last">, string>
+> = {
   sum: "SUM",
   avg: "AVG",
   count: "COUNT",
@@ -27,17 +30,37 @@ export const AGG_FN_SQL: Readonly<Record<Exclude<TDbAggregateFn, "countDistinct"
  */
 export function renderAggCall(fn: unknown, arg: string, path?: string): string {
   assertAggregateFn(fn, path);
-  return fn === "countDistinct" ? `COUNT(DISTINCT ${arg})` : `${AGG_FN_SQL[fn]}(${arg})`;
+  if (fn === "countDistinct") return `COUNT(DISTINCT ${arg})`;
+  // `first` / `last` are never a plain call: they read the derived table's window columns.
+  return `${AGG_FN_SQL[fn as keyof typeof AGG_FN_SQL]}(${arg})`;
+}
+
+/**
+ * `MIN` / `MAX` of a column the engine may not aggregate directly: a boolean
+ * on a dialect with {@link SqlDialect.booleanAggregates} (PostgreSQL has no
+ * `MIN(boolean)`) renders its stand-in.
+ */
+function pickSql(
+  dialect: SqlDialect,
+  select: UniquSelect | undefined,
+  fn: "min" | "max",
+  column: string,
+  sql: string,
+): string {
+  const bool =
+    select?.sources.get(column)?.designType === "boolean"
+      ? dialect.booleanAggregates?.[fn]
+      : undefined;
+  return bool ? `${bool}(${sql})` : renderAggCall(fn, sql);
 }
 
 /** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)` / `COUNT(DISTINCT "region")`. */
-function aggFnSql(dialect: SqlDialect, expr: AggregateExpr): string {
-  const field = expr.$field === "*" ? "*" : dialect.quoteIdentifier(expr.$field);
-  return renderAggCall(expr.$fn, field);
-}
-
-function buildAggExpr(dialect: SqlDialect, expr: AggregateExpr): string {
-  return `${aggFnSql(dialect, expr)} AS ${dialect.quoteIdentifier(resolveAlias(expr))}`;
+function aggFnSql(dialect: SqlDialect, select: UniquSelect | undefined, expr: AggregateExpr) {
+  if (expr.$field === "*") return renderAggCall(expr.$fn, "*");
+  const field = dialect.quoteIdentifier(expr.$field);
+  return expr.$fn === "min" || expr.$fn === "max"
+    ? pickSql(dialect, select, expr.$fn as "min" | "max", expr.$field, field)
+    : renderAggCall(expr.$fn, field);
 }
 
 const BUCKET_UNIT_SET: ReadonlySet<string> = new Set(BUCKET_UNITS);
@@ -93,28 +116,73 @@ export function groupKeySql(dialect: SqlDialect, controls: DbControls, key: stri
   return bucket ? bucketSql(dialect, bucket) : dialect.quoteIdentifier(key);
 }
 
+/** Alias of the derived table `first` / `last` aggregates read from. */
+const ROWS_ALIAS = "__as_rows";
+
+/** The derived-table column of the `i`-th `first` / `last` entry. */
+const firstLastColumn = (i: number) => `__as_fl${i}`;
+
+/**
+ * The SQL each computed alias stands for where an alias is not usable
+ * (HAVING; other expressions): an aggregate's call, a `first` / `last`
+ * derived column (aggregated: constant within its group), a row-level
+ * expression aggregate's call, and every group-level expression rendered over
+ * those (in dependency order, operands cast to double). A grouped column
+ * renders as its quoted name.
+ */
+function aliasSqlMap(dialect: SqlDialect, controls: DbControls): Map<string, string> {
+  const map = new Map<string, string>();
+  const select = controls.$select;
+  const quote = (name: string) => dialect.quoteIdentifier(name);
+  for (const expr of select?.aggregates ?? []) {
+    map.set(resolveAlias(expr), aggFnSql(dialect, select, expr));
+  }
+  for (const e of select?.exprAggregates ?? []) {
+    map.set(e.alias, renderAggCall(e.fn, renderArith(dialect, e.expr, quote)));
+  }
+  (select?.firstLast ?? []).forEach((fl, i) => {
+    map.set(fl.alias, pickSql(dialect, select, "min", fl.column, quote(firstLastColumn(i))));
+  });
+  for (const e of select?.exprs ?? []) {
+    map.set(
+      e.alias,
+      renderArith(dialect, e.expr, (name) => map.get(name) ?? quote(name)),
+    );
+  }
+  return map;
+}
+
+/** A rendered HAVING and the keys its predicate names. */
+interface THaving extends TSqlFragment {
+  refs: ReadonlySet<string>;
+}
+
 /**
  * ` HAVING <predicate>` (leading space) + params for `controls.$having`, or
  * `undefined` when there is nothing to render. Shared by the row and the
  * count builders so both filter the same group set.
  *
- * A key that names an aggregate alias (`$as`, else `fn_field`) renders the
- * aggregate expression itself — `SUM("amount") > ?` — because PostgreSQL does
- * not allow a SELECT alias in HAVING (MySQL and SQLite tolerate it, so the
- * expression form keeps all three identical). A calendar-bucket alias renders
- * its bucket expression ({@link groupKeySql}), or its quoted alias when the
- * dialect sets `SqlDialect.bucketAliasInHaving` (`havingGroupRef`). Other keys
- * (grouped columns) render as plain columns.
+ * A key that names a computed alias (`$as`, else `fn_field`) renders what the
+ * alias stands for — `SUM("amount") > ?`, an expression's arithmetic — because
+ * PostgreSQL does not allow a SELECT alias in HAVING (MySQL and SQLite
+ * tolerate it, so the expression form keeps all three identical). A
+ * calendar-bucket alias renders its bucket expression ({@link groupKeySql}),
+ * or its quoted alias when the dialect sets `SqlDialect.bucketAliasInHaving`
+ * (`havingGroupRef`). Other keys (grouped columns) render as plain columns.
+ * `aliasSql` is the query's {@link aliasSqlMap} when the caller has built it.
  */
-function havingClause(dialect: SqlDialect, controls: DbControls): TSqlFragment | undefined {
+function havingClause(
+  dialect: SqlDialect,
+  controls: DbControls,
+  aliasSql?: ReadonlyMap<string, string>,
+): THaving | undefined {
   const having = controls.$having;
   if (!having) return undefined;
-  const exprByAlias = new Map<string, string>();
-  for (const expr of controls.$select?.aggregates ?? []) {
-    exprByAlias.set(resolveAlias(expr), aggFnSql(dialect, expr));
-  }
+  const exprByAlias = aliasSql ?? aliasSqlMap(dialect, controls);
+  const refs = new Set<string>();
   const visitor = createFilterVisitor(dialect, {
     columnRef: (field) => {
+      refs.add(field);
       const aggExpr = exprByAlias.get(field);
       if (aggExpr) return aggExpr;
       const bucket = controls.$select?.bucketByAlias(field);
@@ -125,7 +193,7 @@ function havingClause(dialect: SqlDialect, controls: DbControls): TSqlFragment |
   });
   const fragment = walkFilter(having, visitor);
   if (!fragment || fragment.sql === EMPTY_AND.sql) return undefined;
-  return { sql: ` HAVING ${fragment.sql}`, params: fragment.params };
+  return { sql: ` HAVING ${fragment.sql}`, params: fragment.params, refs };
 }
 
 /** `<bucket expr> AS "alias"` for every calendar bucket in `$select`. */
@@ -135,11 +203,101 @@ function bucketSelectParts(dialect: SqlDialect, controls: DbControls): string[] 
   );
 }
 
+/** ` GROUP BY <keys>` (leading space), or `""` for the whole table as one group. */
+function groupByClause(dialect: SqlDialect, controls: DbControls): string {
+  const keys = (controls.$groupBy as string[] | undefined) ?? [];
+  return keys.length
+    ? ` GROUP BY ${keys.map((key) => groupKeySql(dialect, controls, key)).join(", ")}`
+    : "";
+}
+
+/** Whether any of the HAVING keys is a `first` / `last` alias, or an expression over one. */
+function readsFirstLast(select: UniquSelect | undefined, refs: ReadonlySet<string>): boolean {
+  if (!select?.firstLast) return false;
+  const firstLast = new Set(select.firstLast.map((fl) => fl.alias));
+  const names = new Map((select.exprs ?? []).map((e) => [e.alias, e.names] as const));
+  const visit = (name: string, seen: Set<string>): boolean => {
+    if (firstLast.has(name)) return true;
+    const deps = names.get(name);
+    if (!deps || seen.has(name)) return false;
+    seen.add(name);
+    return deps.some((dep) => visit(dep, seen));
+  };
+  return [...refs].some((key) => visit(key, new Set()));
+}
+
+/**
+ * The columns the outer query reads from the derived table of a `first` /
+ * `last` aggregate: group keys (a bucket's source for its alias), plain
+ * `$select` fields, aggregate fields and the leaves of row-level expressions.
+ * The `$rowOrder` columns and the `first` / `last` sources stay inside the
+ * window; a group-level expression, `$having` and `$sort` read aliases or
+ * group keys only.
+ */
+function rowColumns(controls: DbControls): string[] {
+  const select = controls.$select;
+  const columns = new Set<string>();
+  for (const key of (controls.$groupBy as string[] | undefined) ?? []) {
+    if (!select?.bucketByAlias(key)) columns.add(key);
+  }
+  for (const bucket of select?.buckets ?? []) columns.add(bucket.field);
+  for (const field of select?.asArray ?? []) columns.add(field);
+  for (const expr of select?.aggregates ?? []) {
+    if (expr.$field !== "*") columns.add(expr.$field);
+  }
+  for (const e of select?.exprAggregates ?? []) {
+    for (const name of e.names) columns.add(name);
+  }
+  return [...columns];
+}
+
+/**
+ * The row source of an aggregate: `FROM <table> WHERE <where>`; with `first` /
+ * `last` (and `withRows`) a derived table instead — the table's rows that
+ * pass the WHERE, only the columns {@link rowColumns} lists, plus one
+ * `FIRST_VALUE(col) OVER (PARTITION BY <group keys> ORDER BY <rowOrder>)`
+ * column per entry (`last` over the reversed order). Each group then reads its
+ * representative row's value as an aggregate (constant within the group). The
+ * WHERE moves inside unchanged, so the bind parameters keep their order.
+ */
+function aggSource(
+  dialect: SqlDialect,
+  table: string,
+  where: TSqlFragment,
+  controls: DbControls,
+  withRows: boolean,
+): string {
+  const quotedTable = dialect.quoteTable(table);
+  const firstLast = controls.$select?.firstLast;
+  const rowOrder = controls.$select?.rowOrder;
+  if (!withRows || !firstLast?.length || !rowOrder?.length) {
+    return `FROM ${quotedTable} WHERE ${where.sql}`;
+  }
+  const groupBy = controls.$groupBy as string[] | undefined;
+  const partition = groupBy?.length
+    ? `PARTITION BY ${groupBy.map((key) => groupKeySql(dialect, controls, key)).join(", ")} `
+    : "";
+  const order = (reverse: boolean) =>
+    rowOrder
+      .map((k) => orderKeySql(dialect, dialect.quoteIdentifier(k.column), k.desc !== reverse))
+      .join(", ");
+  const columns = [
+    ...rowColumns(controls).map((column) => dialect.quoteIdentifier(column)),
+    ...firstLast.map((fl, i) => {
+      const col = dialect.quoteIdentifier(firstLastColumn(i));
+      return `FIRST_VALUE(${dialect.quoteIdentifier(fl.column)}) OVER (${partition}ORDER BY ${order(fl.fn === "last")}) AS ${col}`;
+    }),
+  ];
+  return `FROM (SELECT ${columns.join(", ")} FROM ${quotedTable} WHERE ${where.sql}) AS ${dialect.quoteIdentifier(ROWS_ALIAS)}`;
+}
+
 /**
  * Builds a SELECT ... GROUP BY statement with aggregate functions.
  *
  * SELECT lists the plain grouped columns, then `<bucket expr> AS "alias"`
- * per calendar bucket, then the aggregates. Bucket expressions are
+ * per calendar bucket, then every computed alias (aggregates, row-level
+ * expression aggregates, `first` / `last`, group-level expressions — the
+ * order of `UniquSelect.computedAliases`). Bucket expressions are
  * parameter-free, so the bind parameters are exactly those of the same query
  * without buckets (WHERE, HAVING, LIMIT, OFFSET).
  */
@@ -149,41 +307,41 @@ export function buildAggregateSelect(
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
+  const select = controls.$select;
   const selectParts: string[] = [];
 
   // Dimension fields (plain strings from $select)
-  const plainFields = controls.$select?.asArray;
-  if (plainFields) {
-    for (const f of plainFields) {
-      selectParts.push(dialect.quoteIdentifier(f));
-    }
+  for (const f of select?.asArray ?? []) {
+    selectParts.push(dialect.quoteIdentifier(f));
   }
 
   // Calendar buckets: `<label expr> AS "alias"`
   selectParts.push(...bucketSelectParts(dialect, controls));
 
-  // Aggregate expressions
-  const aggregates = controls.$select?.aggregates;
-  if (aggregates) {
-    for (const expr of aggregates) {
-      selectParts.push(buildAggExpr(dialect, expr));
+  // Computed entries. Plain aggregates render directly; with expressions or
+  // `first` / `last` the alias map renders each once, for the select list,
+  // other expressions and HAVING alike.
+  let aliasSql: Map<string, string> | undefined;
+  if (select?.exprAggregates || select?.firstLast || select?.exprs) {
+    aliasSql = aliasSqlMap(dialect, controls);
+    for (const alias of select.computedAliases) {
+      selectParts.push(`${aliasSql.get(alias)} AS ${dialect.quoteIdentifier(alias)}`);
+    }
+  } else {
+    for (const expr of select?.aggregates ?? []) {
+      selectParts.push(
+        `${aggFnSql(dialect, select, expr)} AS ${dialect.quoteIdentifier(resolveAlias(expr))}`,
+      );
     }
   }
 
   const cols = selectParts.length > 0 ? selectParts.join(", ") : "*";
 
-  let sql = `SELECT ${cols} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+  let sql = `SELECT ${cols} ${aggSource(dialect, table, where, controls, true)}${groupByClause(dialect, controls)}`;
   const params = [...where.params];
 
-  // GROUP BY
-  const groupBy = controls.$groupBy as string[] | undefined;
-  if (groupBy?.length) {
-    const groupCols = groupBy.map((key) => groupKeySql(dialect, controls, key)).join(", ");
-    sql += ` GROUP BY ${groupCols}`;
-  }
-
   // HAVING
-  const having = havingClause(dialect, controls);
+  const having = havingClause(dialect, controls, aliasSql);
   if (having) {
     sql += having.sql;
     params.push(...having.params);
@@ -221,7 +379,9 @@ export function buildAggregateSelect(
  * Builds a COUNT query for the number of distinct groups — the groups that
  * survive `$having` when one is given (the same predicate the row query
  * renders, so `$count` agrees with the row set). Returns `{ count: N }` when
- * executed.
+ * executed. The rows come straight from the table, unless `$having` reads a
+ * `first` / `last` value (or an expression over one): only then the window
+ * derived table is built.
  */
 export function buildAggregateCount(
   dialect: SqlDialect,
@@ -237,6 +397,14 @@ export function buildAggregateCount(
     const sql = `SELECT ${countCol} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
     return finalizeParams(dialect, { sql, params: where.params });
   }
+  const from = aggSource(
+    dialect,
+    table,
+    where,
+    controls,
+    !!having && readsFirstLast(controls.$select, having.refs),
+  );
+  const groupBy = groupByClause(dialect, controls);
 
   // HAVING without GROUP BY treats the whole table as one group (0 or 1).
   // The inner select must then be an aggregate — SQLite rejects
@@ -246,13 +414,10 @@ export function buildAggregateCount(
   // legal on every dialect) so a HAVING that names one by alias
   // (`SqlDialect.bucketAliasInHaving`) resolves; the expressions are
   // parameter-free, so the bind order is unchanged.
-  const groupBy = groupFields?.length
-    ? ` GROUP BY ${groupFields.map((key) => groupKeySql(dialect, controls, key)).join(", ")}`
-    : "";
   let inner = "COUNT(*)";
   if (groupBy) {
     inner = bucketSelectParts(dialect, controls).join(", ") || "1";
   }
-  const sql = `SELECT ${countCol} FROM (SELECT ${inner} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
+  const sql = `SELECT ${countCol} FROM (SELECT ${inner} ${from}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
   return finalizeParams(dialect, { sql, params: [...where.params, ...(having?.params ?? [])] });
 }

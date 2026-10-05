@@ -320,6 +320,16 @@ curl "http://localhost:3000/orders/query?\$groupBy=status&\$select=status,sum(am
 
 The standard SQL aggregate functions are available: `count(*)`, `count(field)`, `sum(field)`, `avg(field)`, `min(field)`, `max(field)`, and `countDistinct(field)` (distinct non-null values; [`/meta.aggregateFns`](./crud#get-meta) lists what the adapter supports). Any other function name is rejected with 400 (since 0.1.135), and so is `countDistinct(*)`. See [Grouped Queries — Aggregate functions](/api/aggregation#aggregate-functions) for their null handling.
 
+### Arithmetic and first / last {#aggregate-expressions}
+
+Compute with numbers in the same `$select` (since 0.1.148) — `sum(<arith>):alias` over a per-row expression, `expr(<arith>):alias` over the aliases of other entries — and read a representative row with `first(field)` / `last(field)` ordered by `$rowOrder`:
+
+```bash
+curl "http://localhost:3000/issues/query?status=open&\$groupBy=ticketId&\$select=ticketId,count(*):open,sum(estimate):est,sum(price*qty):revenue,expr(est/open):avgEst,first(id):oldestId,first(title):oldestTitle&\$rowOrder=raisedAt&\$sort=-avgEst&\$having=avgEst>=2"
+```
+
+Every operand is checked like any other aggregate source — a field the caller cannot see answers `Unknown field`, a write-only field is refused, and the numeric rule (`number` only, not decimal or timestamp) is a `400`. `/meta` advertises `aggregateExpressions`, the numeric operands (`fields[path].numeric`) and `first` / `last` in `aggregateFns`. Semantics, rules and errors: [Grouped Queries — Arithmetic expressions](/api/aggregation#arithmetic-expressions) and [Representative row](/api/aggregation#representative-row-first-last); URL grammar: [Computed entries](./query-syntax#computed-entries-grouped-queries).
+
 ### Calendar Buckets
 
 Group a timestamp field by hour, day, week, month, quarter or year in a time zone with `bucket(field,unit[,tz][,weekStart]):alias` in `$select`, and list the alias in `$groupBy` (since 0.1.132):

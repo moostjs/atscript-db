@@ -1,5 +1,13 @@
 export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
-export { EMPTY_AND, EMPTY_OR, finalizeParams, quotedJsonPathSegments } from "./dialect";
+export {
+  EMPTY_AND,
+  EMPTY_OR,
+  finalizeParams,
+  mapQueryErrors,
+  orderKeySql,
+  quotedJsonPathSegments,
+} from "./dialect";
+export { renderArith, arithOverflowError, type TArithFailure } from "./arith";
 export { createFilterVisitor, buildWhere, type TFilterVisitorOptions } from "./filter-builder";
 export type { TGeoWindow } from "./geo";
 export {

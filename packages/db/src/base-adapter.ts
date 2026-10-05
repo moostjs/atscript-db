@@ -437,6 +437,23 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter renders arithmetic in an aggregate `$select`
+   * (`{ $expr }`, `{ $fn, $expr }`) — IEEE double, NULL propagating, `/` by
+   * zero NULL, the same semantics as `@db.compute`. Default `false`
+   * (fail-closed): the core rejects such a query with `AGG_EXPR_NOT_SUPPORTED`
+   * before dispatch. An adapter returning `true` also receives
+   * `controls.$select.exprAggregates` / `.exprs` (see `UniquSelect`), and
+   * `first` / `last` (`aggregateFns()`) with `.firstLast` and `.rowOrder`;
+   * the shared `evaluateExpr` evaluates an expression tree in process.
+   * moost-db advertises it as `/meta.aggregateExpressions`.
+   *
+   * @since 0.1.148
+   */
+  supportsAggregateExpressions(): boolean {
+    return false;
+  }
+
+  /**
    * Revision of how this adapter renders a managed view (its SQL / pipeline)
    * from an unchanged view definition. Stored in each managed view's sync
    * snapshot when defined, so bumping it recreates every managed view of the

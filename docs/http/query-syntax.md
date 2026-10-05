@@ -275,14 +275,26 @@ Every `$select` entry is validated before the read (since 0.1.128, on `/query`, 
 
 With [`$groupBy`](./advanced#groupby), `$select` also takes computed entries, each with an optional `:alias`:
 
-| Entry                                 | Meaning                                                                                                                                                                                                                    |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fn(field)` / `count(*)`              | Aggregate — `count`, `sum`, `avg`, `min`, `max`, `countDistinct` (`countDistinct(*)` is a 400). Default key `fn_field`; `count(*)` → `count_star`. [`/meta.aggregateFns`](./crud#get-meta) lists what the adapter supports |
-| `bucket(field,unit[,tz][,weekStart])` | [Calendar bucket](/api/calendar-buckets) (since 0.1.132). Default key `unit_field`                                                                                                                                         |
+| Entry                                 | Meaning                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fn(field)` / `count(*)`              | Aggregate — `count`, `sum`, `avg`, `min`, `max`, `countDistinct` (`countDistinct(*)` is a 400), `first`, `last` (since 0.1.148, read a field of the row `$rowOrder` picks). Default key `fn_field`; `count(*)` → `count_star`. [`/meta.aggregateFns`](./crud#get-meta) lists what the adapter supports |
+| `expr(<arith>):alias`                 | Group-level [arithmetic](/api/aggregation#arithmetic-expressions) over aliases and numeric `$groupBy` fields (since 0.1.148). `:alias` is required                                                                                                                                                     |
+| `sum(<arith>):alias`                  | Row-level arithmetic aggregated per group — also `avg`, `min`, `max` (since 0.1.148). Used when the argument is neither a field nor `*`. `:alias` is required                                                                                                                                          |
+| `bucket(field,unit[,tz][,weekStart])` | [Calendar bucket](/api/calendar-buckets) (since 0.1.132). Default key `unit_field`                                                                                                                                                                                                                     |
 
 ```bash
 curl "http://localhost:3000/tickets/query?\$select=status,bucket(openedAt,month,'Europe/Berlin'):month,count(*):n&\$groupBy=status,month&\$having=month>='2026-01-01'"
 ```
+
+Arithmetic and `$rowOrder` (since 0.1.148):
+
+```bash
+curl "http://localhost:3000/issues/query?status=open&\$groupBy=ticketId&\$select=ticketId,count(*):n,sum(price*qty):revenue,expr(revenue/n):avg,first(title):oldest&\$rowOrder=raisedAt&\$sort=-avg"
+```
+
+- `<arith>` is `+ - * /`, unary `-`, parentheses, number literals, names and `coalesce(a,b,…)`. **Write `+` as `%2B`** (`expr(n%2B1):m`): an unescaped `+` that a proxy or framework decodes to a space becomes `n 1`, which is rejected (`missing operator`) rather than read as something else. A raw `+` that reaches moost-db is accepted too.
+- `$rowOrder=raisedAt,-id` is parsed like `$sort` and orders the rows inside each group for `first` / `last`; it is rejected without them. See [Representative row](/api/aggregation#representative-row-first-last).
+- A computed `$select` item that matches none of these forms is now a malformed query string (400); older versions silently dropped it.
 
 `bucket()` grammar:
 

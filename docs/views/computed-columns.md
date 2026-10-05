@@ -99,6 +99,13 @@ A computed column is an ordinary column: sorting (`$sort`), filtering (`rank>=10
 
 An adapter renders computed columns only when its [`viewCapabilities()`](/adapters/creating-adapters#view-capabilities) include `compute` — every bundled adapter does; otherwise sync refuses the view and the adapter's `ensureTable()` throws. SQL adapters cast each leaf (`CAST(x AS REAL | DOUBLE | DOUBLE PRECISION)`) and divide with `NULLIF(divisor, 0)`. MongoDB casts each leaf with `$toDouble` (MongoDB 4.0+), so int64 values past 2^53 round the same way as on SQL, and uses `$add` / `$subtract` / `$multiply` with a guarded `$divide`. The memory adapter holds no view rows (managed views are not evaluated there).
 
+## Query-time arithmetic {#query-time}
+
+When the value is needed for one query rather than as a column of its own — an ad-hoc ratio or score over a `filter` the caller chose — the same arithmetic works inside [`aggregate()`](/api/aggregation#arithmetic-expressions) (since 0.1.148): `sum(price*qty)` per group, `expr(est/open)` over aggregate aliases, plus `first` / `last` for a representative row. Choose by where the value must live:
+
+- **A view with `@db.compute`** — a value that is **per row of the view**, or a ranking you sort, filter and page across requests (the global work queue above), with the same name in `/meta`, db-client and every query path.
+- **An aggregate expression** — an ad-hoc grouping with a caller-chosen `filter`. It is grouped queries only: arithmetic in a plain `findMany` / `query` is not provided, so a per-row computed value belongs in a view.
+
 ## Schema Sync
 
 The expression is part of the view's sync hash: changing an expression, an operand, or adding a computed field recreates the view (and its dependent views). Views without computed columns hash exactly as before — upgrading does not recreate them. See [View Types → Schema Sync](./view-types#schema-sync-behavior).

@@ -318,6 +318,10 @@ The column list is the union of every row's fields, and a row that omits a colum
 
 [Calendar buckets](/api/calendar-buckets) (since 0.1.132) use `AT TIME ZONE` with the zone written into the query, so labels do not depend on the session's `TimeZone` setting. Zones come from the server's tz database. A zone the server does not know — typically one newer than its tzdata — fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501): `PostgreSQL does not recognize time zone "…" — update the server's time zone data`.
 
+### Aggregate expressions {#aggregate-expressions}
+
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) run in SQL. A double overflow (SQLSTATE `22003`) is `INVALID_QUERY` (`Arithmetic overflow`), not a 500. `min` / `max` / `first` / `last` of a boolean field render as `BOOL_AND` / `BOOL_OR` (PostgreSQL has no `MIN(boolean)`).
+
 ## Schema Support
 
 Tables can be placed in PostgreSQL schemas (namespaces) using `@db.pg.schema`:

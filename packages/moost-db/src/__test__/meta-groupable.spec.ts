@@ -38,7 +38,7 @@ function bind(type: any, hasField?: (path: string) => boolean) {
 }
 
 async function groupAccepted(controller: AsDbController, path: string): Promise<HttpError | true> {
-  const res = await controller.query(`?$groupBy=${path}&$select=${path},count()`);
+  const res = await controller.query(`?$groupBy=${path}&$select=${path},count(*)`);
   return res instanceof HttpError ? res : true;
 }
 

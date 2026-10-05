@@ -23,22 +23,23 @@ await orders.aggregate({
 
 ## Controls
 
-| Control             | Rule                                                                                                                          |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `$groupBy`          | Required `string[]`: field paths or bucket aliases from `$select`.                                                            |
-| `$select`           | Plain fields (each also in `$groupBy`), `{ $fn, $field, $as? }` aggregates, `{ $bucket, $field, … }` buckets. Always pass it. |
-| `$having`           | Keys = aggregate aliases, bucket aliases or `$groupBy` fields ONLY.                                                           |
-| `$sort`             | Grouped field or alias. No implicit order.                                                                                    |
-| `$skip` / `$limit`  | Page over groups.                                                                                                             |
-| `$count`            | `[{ count: N }]` = groups surviving `$having` (since 0.1.129).                                                                |
-| `$search`, `$index` | Not declared on the type (ride the `$`-key pass-through) — text search applied BEFORE grouping (since 0.1.130), see below.    |
-| `$with`             | Not allowed (HTTP 400).                                                                                                       |
+| Control             | Rule                                                                                                                                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$groupBy`          | Required `string[]`: field paths or bucket aliases from `$select`.                                                                                                                            |
+| `$select`           | Plain fields (each also in `$groupBy`), `{ $fn, $field, $as? }` aggregates, `{ $fn, $expr, $as }` / `{ $expr, $as }` expressions (0.1.148), `{ $bucket, $field, … }` buckets. Always pass it. |
+| `$rowOrder`         | `{ field: 1 \| -1 }` — order of the rows INSIDE each group for `first` / `last` (0.1.148). Required with them, rejected without.                                                              |
+| `$having`           | Keys = aggregate aliases, bucket aliases or `$groupBy` fields ONLY.                                                                                                                           |
+| `$sort`             | Grouped field or alias. No implicit order.                                                                                                                                                    |
+| `$skip` / `$limit`  | Page over groups.                                                                                                                                                                             |
+| `$count`            | `[{ count: N }]` = groups surviving `$having` (since 0.1.129).                                                                                                                                |
+| `$search`, `$index` | Not declared on the type (ride the `$`-key pass-through) — text search applied BEFORE grouping (since 0.1.130), see below.                                                                    |
+| `$with`             | Not allowed (HTTP 400).                                                                                                                                                                       |
 
 ## Invariants
 
 | #   | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | SQL semantics on EVERY adapter: `count(*)` rows, `count(f)` non-null and non-missing, `countDistinct(f)` distinct non-null values, `sum`/`avg` over non-null numerics → `null` when none (**MongoDB `sum` → `0`** — only divergence), `min`/`max` over non-null.                                                                                                                                                                                                                       |
+| 1   | SQL semantics on EVERY adapter: `count(*)` rows, `count(f)` non-null and non-missing, `countDistinct(f)` distinct non-null values, `sum`/`avg` over non-null numerics → `null` when none (MongoDB too since 0.1.148; it was `0`), `min`/`max` over non-null. An UNGROUPED query is one group: over no rows it returns ONE row (counts `0`, the rest `null`) on every adapter (Mongo since 0.1.148).                                                                                    |
 | 2   | Output key = `$as`, else `{fn}_{field}` with the LOGICAL field (also over a `@db.column` rename: `sum(amount)` over `amount_cents` → `sum_amount`); `count(*)` → **`count_star`**. `resolveAlias` (`@atscript/db/agg`) = uniqu's rule since 0.1.132 (≤ 0.1.131 it returned `count_*`, mismatching the URL parser).                                                                                                                                                                     |
 | 3   | `null` and missing grouped values = ONE `null` group on every adapter (≤ 0.1.131 MongoDB split them).                                                                                                                                                                                                                                                                                                                                                                                  |
 | 4   | Rows carry only what `$select` lists. Grouped flattened leaf comes back nested (`$groupBy: ["stats.views"]` → `{ stats: { views } }`); grouped boolean/decimal/`@db.json` coerced like `findMany` (0.1.128).                                                                                                                                                                                                                                                                           |
@@ -48,11 +49,43 @@ await orders.aggregate({
 | 8   | Unknown `$select` entry (not string / aggregate / bucket) → `Unsupported $select entry at index i`; non-string `$groupBy` entry → `Unsupported $groupBy entry at index i — …` (since 0.1.132; ≤ 0.1.131 silently DROPPED — the query ran without it).                                                                                                                                                                                                                                  |
 | 9   | Path guard applies to `$groupBy`, aggregate `$field`, `$having` keys (minus aliases) — see [queries.md § Path guard](queries.md#path-guard-since-01128). Encrypted field → `ENC_FIELD_AGG`.                                                                                                                                                                                                                                                                                            |
 | 10  | Every adapter aggregates. **Memory since 0.1.132** (was `INVALID_QUERY`) — in-process scan over one snapshot, provider mode too. MongoDB `@db.column`-renamed fields in `$groupBy` / aggregates / `$sort` / `$having` fixed in 0.1.132.                                                                                                                                                                                                                                                |
-| 11  | `$fn` ∈ `sum`/`count`/`avg`/`min`/`max`/`countDistinct` ONLY — else `Unknown aggregate function "x" — use sum, count, avg, min, max or countDistinct`; `'*'` is `count`'s only — else `Aggregate "countDistinct" needs a field — only count accepts *`. `INVALID_QUERY`, path `$select`, HTTP 400, before any adapter runs. Adapters re-assert with `assertAggregateFn`.                                                                                                               |
-| 12  | A known `$fn` the adapter doesn't list in `aggregateFns()` → `DbError("AGG_FN_NOT_SUPPORTED")`, `Aggregate function "countDistinct" is not supported by this adapter`, HTTP 400, before dispatch. Every built-in adapter supports all six; `/meta.aggregateFns` lists them.                                                                                                                                                                                                            |
+| 11  | `$fn` ∈ `sum`/`count`/`avg`/`min`/`max`/`countDistinct`/`first`/`last` ONLY — else `Unknown aggregate function "x" — use sum, count, avg, min, max, countDistinct, first or last`; `'*'` is `count`'s only — else `Aggregate "countDistinct" needs a field — only count accepts *`. `INVALID_QUERY`, path `$select`, HTTP 400, before any adapter runs. Adapters re-assert with `assertAggregateFn`.                                                                                   |
+| 12  | A known `$fn` the adapter doesn't list in `aggregateFns()` → `DbError("AGG_FN_NOT_SUPPORTED")`, `Aggregate function "countDistinct" is not supported by this adapter`, HTTP 400, before dispatch. Every built-in adapter supports all eight (`first` / `last` since 0.1.148); `/meta.aggregateFns` lists them.                                                                                                                                                                         |
 | 13  | `countDistinct` distinctness follows collation: MySQL `*_ci` counts `'A'`/`'a'` once; PG / SQLite / Mongo case-sensitive. Mongo builds an in-memory `$addToSet` per group (100 MB `$group` limit on huge cardinalities).                                                                                                                                                                                                                                                               |
 
-Runtime arithmetic in `$select` / `$sort` (e.g. `sum(a) / count(*)`, a weighted rank) is NOT supported — declare it in a view: two `@db.agg.*` fields + `@db.compute` (0.1.147) → an ordinary sortable / filterable column. See [tables-and-views.md § Computed columns](tables-and-views.md#computed-columns-01147).
+## Arithmetic and `first` / `last` (since 0.1.148)
+
+```ts
+await issues.aggregate({
+  filter: { status: "open" },
+  controls: {
+    $groupBy: ["ticketId"],
+    $select: [
+      "ticketId",
+      { $fn: "count", $field: "*", $as: "open" },
+      { $fn: "sum", $field: "estimate", $as: "est" },
+      { $fn: "sum", $expr: { $op: "*", $args: ["price", "qty"] }, $as: "revenue" }, // row-level: fields
+      { $expr: { $op: "/", $args: ["est", "open"] }, $as: "avgEst" }, // group-level: aliases / $groupBy fields
+      { $fn: "first", $field: "id", $as: "oldestId" }, // same representative row for every first()
+      { $fn: "first", $field: "title", $as: "oldestTitle" },
+    ],
+    $rowOrder: { raisedAt: 1 }, // PK appended as final tie-break
+    $sort: { avgEst: -1 },
+    $having: { avgEst: { $gte: 2 } },
+  },
+});
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                                          |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 14  | Expression = number \| name \| `{ $op: '+'\|'-'\|'*'\|'/', $args:[a,b] }` \| unary `{ $op:'-', $args:[a] }` \| `{ $op:'coalesce', $args:[a,b,…] }` — `@db.compute` semantics: IEEE double, NULL propagates, `/` by 0 → `null`. `$as` required; ≤ 64 nodes, depth ≤ 16, ≤ 256 once aliases are inlined; at least one name.                                                     |
+| 15  | Row-level `{ $fn: sum\|avg\|min\|max, $expr, $as }` names FIELDS; group-level `{ $expr, $as }` names ALIASES of numeric entries (acyclic) or numeric `$groupBy` fields. No inline aggregates (`sum(a)/count(*)`): name each, then combine. Operands must be `number` — not decimal / timestamp / string / boolean / JSON / encrypted (`ENC_FIELD_AGG`). Grouped queries ONLY. |
+| 16  | `first` / `last` read a scalar field of ONE representative row per group, ordered by `$rowOrder` (PK appended; NULL key smallest; ties → lowest PK); a NULL on that row is returned. `$rowOrder` is required with them, rejected without. Strict tables: row-level operands = measures, `$rowOrder` keys = dimension or measure.                                              |
+| 17  | `supportsAggregateExpressions()` (default `false`) else `AGG_EXPR_NOT_SUPPORTED` (400); `first`/`last` in `aggregateFns()` else `AGG_FN_NOT_SUPPORTED`. All built-in adapters support both. No per-aggregate `$where` and no per-row computed values on plain reads → a view (`@db.agg.*` with condition, `@db.compute`).                                                     |
+
+Full rules, error messages and per-adapter notes: [docs → Grouped Queries](https://db.atscript.dev/api/aggregation#arithmetic-expressions).
+
+URL: `sum(price*qty):revenue`, `expr(est/open):avgEst` (write `+` as `%2B`), `first(title):oldest`, `$rowOrder=raisedAt,-id`. Types: `AggregateOfExpr`, `SelectArithExpr`, `ArithExpr` (`@uniqu/core`); expression aliases are `number | null`, first/last = the field's type. `/meta`: `aggregateExpressions`, `fields[P].numeric`.
 
 ## `$search` on an aggregate query (since 0.1.130)
 
@@ -67,6 +100,7 @@ Search narrows the ROWS, `$groupBy` shapes what is left — the adapter applies 
 ```ts
 import type { AggregateQuery, AggregateExpr, AggregateResult } from "@atscript/db/agg";
 import { resolveAlias, isAggregateExpr, isBucketExpr, assertAggregateFn } from "@atscript/db/agg";
+import { evaluateExpr } from "@atscript/db"; // shared expression evaluator (adapter authors)
 ```
 
 ## References

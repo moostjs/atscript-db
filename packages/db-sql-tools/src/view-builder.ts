@@ -1,15 +1,10 @@
-import type {
-  AtscriptExprNode,
-  AtscriptQueryFieldRef,
-  TViewColumnMapping,
-  TViewJoin,
-  TViewPlan,
-} from "@atscript/db";
+import type { AtscriptQueryFieldRef, TViewColumnMapping, TViewJoin, TViewPlan } from "@atscript/db";
 
 import type { SqlDialect } from "./dialect";
-import { havingGroupRef } from "./dialect";
+import { havingGroupRef, orderKeySql } from "./dialect";
 import { queryNodeToSql } from "./common";
 import { renderAggCall } from "./agg";
+import { renderArith, type TArithFailure } from "./arith";
 
 /**
  * The SQL expression a view column reads: `"table"."column"` — the physical
@@ -96,48 +91,25 @@ export function viewComputeExpr(
 ): string {
   const cached = cache.get(c.viewPath);
   if (cached !== undefined) return cached;
-  const cast = dialect.castDouble?.bind(dialect);
-  if (!cast) {
-    throw new Error(
-      `View column "${c.viewColumn}": computed view columns are not supported by this adapter`,
+  const fail = (reason: TArithFailure) =>
+    new Error(
+      reason === "no-cast"
+        ? `View column "${c.viewColumn}": computed view columns are not supported by this adapter`
+        : `View column "${c.viewColumn}": non-finite literal in @db.compute`,
     );
-  }
-  const render = (e: AtscriptExprNode): string => {
-    if (typeof e === "number") {
-      if (!Number.isFinite(e)) {
-        throw new Error(`View column "${c.viewColumn}": non-finite literal in @db.compute`);
-      }
-      return cast(String(e));
+  const leaf = (field: string): string | { double: string } => {
+    const mapping = byPath.get(field);
+    if (!mapping) {
+      throw new Error(`View column "${c.viewColumn}": "${field}" is not a column of the view`);
     }
-    if ("field" in e) {
-      const leaf = byPath.get(e.field);
-      if (!leaf) {
-        throw new Error(`View column "${c.viewColumn}": "${e.field}" is not a column of the view`);
-      }
-      if (leaf.expr !== undefined) {
-        return viewComputeExpr(dialect, leaf, byPath, resolveFieldRef, grouped, cache);
-      }
-      if (leaf.aggFn) return cast(viewAggExpr(dialect, leaf, resolveFieldRef));
-      const source = viewSourceExpr(dialect, leaf);
-      return cast(grouped && leaf.json ? `MIN(${source})` : source);
+    if (mapping.expr !== undefined) {
+      return { double: viewComputeExpr(dialect, mapping, byPath, resolveFieldRef, grouped, cache) };
     }
-    const args = e.args.map(render);
-    switch (e.op) {
-      case "neg": {
-        return `(-${args[0]})`;
-      }
-      case "coalesce": {
-        return `COALESCE(${args.join(", ")})`;
-      }
-      case "/": {
-        return `(${args[0]} / NULLIF(${args[1]}, 0))`;
-      }
-      default: {
-        return `(${args[0]} ${e.op} ${args[1]})`;
-      }
-    }
+    if (mapping.aggFn) return viewAggExpr(dialect, mapping, resolveFieldRef);
+    const source = viewSourceExpr(dialect, mapping);
+    return grouped && mapping.json ? `MIN(${source})` : source;
   };
-  const sql = render(c.expr!);
+  const sql = renderArith(dialect, c.expr!, leaf, fail);
   cache.set(c.viewPath, sql);
   return sql;
 }
@@ -166,10 +138,7 @@ function firstRowOn(
   const first = join.first!;
   const key = resolveFieldRef({ type: join.targetType, field: first.key });
   const orderBy = first.order
-    .map(({ ref, desc }) => {
-      const nulls = dialect.nullsSortLargest ? (desc ? " NULLS LAST" : " NULLS FIRST") : "";
-      return `${resolveFieldRef(ref)} ${desc ? "DESC" : "ASC"}${nulls}`;
-    })
+    .map(({ ref, desc }) => orderKeySql(dialect, resolveFieldRef(ref), desc))
     .join(", ");
   return `${key} = (SELECT ${key} FROM ${target} WHERE ${condition} ORDER BY ${orderBy} LIMIT 1)`;
 }

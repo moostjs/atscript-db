@@ -961,9 +961,14 @@ export class MemoryAdapter extends BaseDbAdapter {
     return ALL_BUCKET_UNITS;
   }
 
-  /** Every aggregate function, `countDistinct` included. */
+  /** Every aggregate function: `countDistinct`, `first` and `last` included. */
   override aggregateFns(): ReadonlySet<AggregateFn> {
     return ALL_AGGREGATE_FNS;
+  }
+
+  /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
+  override supportsAggregateExpressions(): boolean {
+    return true;
   }
 
   /** Managed views render nothing (non-goal) — both are accepted like `aggregateFns()`. */

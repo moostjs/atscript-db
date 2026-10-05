@@ -352,7 +352,7 @@ describe("aggregate function allow-list", () => {
         {
           path: "$select",
           message:
-            'Unknown aggregate function "sleep" — use sum, count, avg, min, max or countDistinct',
+            'Unknown aggregate function "sleep" — use sum, count, avg, min, max, countDistinct, first or last',
         },
       ],
     };
@@ -397,9 +397,18 @@ class DistinctMockAdapter extends MockAdapter {
 const distinct = (field: string) => ({ $fn: "countDistinct", $field: field, $as: "n" });
 
 describe("countDistinct and aggregateFns()", () => {
-  it("the base adapter advertises sum/count/avg/min/max; ALL_AGGREGATE_FNS adds countDistinct", () => {
+  it("the base adapter advertises sum/count/avg/min/max; ALL_AGGREGATE_FNS adds countDistinct, first, last", () => {
     expect([...new MockAdapter().aggregateFns()]).toEqual(["sum", "count", "avg", "min", "max"]);
-    expect([...ALL_AGGREGATE_FNS]).toEqual(["sum", "count", "avg", "min", "max", "countDistinct"]);
+    expect([...ALL_AGGREGATE_FNS]).toEqual([
+      "sum",
+      "count",
+      "avg",
+      "min",
+      "max",
+      "countDistinct",
+      "first",
+      "last",
+    ]);
   });
 
   it("AGG_FN_NOT_SUPPORTED when the adapter lacks countDistinct — before the adapter runs", async () => {

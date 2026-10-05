@@ -467,20 +467,21 @@ if (!validator.validate(data, true)) {
 
 Database operations throw `DbError` with a `code` property indicating the error type:
 
-| Code                    | Meaning                                                                                                                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CONFLICT`              | Unique constraint violation; a nested write that names a related row outside the record's relation (since 0.1.143, see [Nested write rules](/relations/patches#nested-write-rules))                    |
-| `FK_VIOLATION`          | Foreign key constraint violated                                                                                                                                                                        |
-| `NOT_FOUND`             | Record not found                                                                                                                                                                                       |
-| `CASCADE_CYCLE`         | Circular cascade detected                                                                                                                                                                              |
-| `INVALID_QUERY`         | Malformed query or filter                                                                                                                                                                              |
-| `DEPTH_EXCEEDED`        | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                                                                                                |
-| `VERSION_COLUMN_WRITE`  | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
-| `CAS_EXHAUSTED`         | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
-| `CAS_MISMATCH`          | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
-| `BUCKET_NOT_SUPPORTED`  | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit, or has no calendar buckets at all. HTTP 400. Since 0.1.132                                                    |
-| `BUCKET_TZ_UNAVAILABLE` | The database cannot convert to the calendar bucket's time zone (e.g. MySQL time zone tables not loaded). HTTP 501. Since 0.1.132                                                                       |
-| `AGG_FN_NOT_SUPPORTED`  | A [grouped query](/api/aggregation#aggregate-functions) uses an aggregate function the adapter does not render (e.g. `countDistinct` on a custom adapter). HTTP 400                                    |
+| Code                     | Meaning                                                                                                                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CONFLICT`               | Unique constraint violation; a nested write that names a related row outside the record's relation (since 0.1.143, see [Nested write rules](/relations/patches#nested-write-rules))                    |
+| `FK_VIOLATION`           | Foreign key constraint violated                                                                                                                                                                        |
+| `NOT_FOUND`              | Record not found                                                                                                                                                                                       |
+| `CASCADE_CYCLE`          | Circular cascade detected                                                                                                                                                                              |
+| `INVALID_QUERY`          | Malformed query or filter                                                                                                                                                                              |
+| `DEPTH_EXCEEDED`         | Nested-write payload deeper than `@db.depth.limit N` (also a `DepthLimitExceededError`)                                                                                                                |
+| `VERSION_COLUMN_WRITE`   | Direct write to a `@db.column.version` column — use `$cas` instead. See [Versioning](/api/versioning#direct-write-rejection)                                                                           |
+| `CAS_EXHAUSTED`          | `withOptimisticRetry` exhausted `maxAttempts` (also a `CasExhaustedError`). See [Versioning](/api/versioning#casexhaustederror)                                                                        |
+| `CAS_MISMATCH`           | `touchMany` (`require: 'all'`) found a stale or missing key: refused before the first write, or rolled back on SQL (also a `CasMismatchError`). HTTP 409. See [Versioning](/api/versioning#touch-many) |
+| `BUCKET_NOT_SUPPORTED`   | The adapter cannot group by the requested [calendar bucket](/api/calendar-buckets) unit, or has no calendar buckets at all. HTTP 400. Since 0.1.132                                                    |
+| `BUCKET_TZ_UNAVAILABLE`  | The database cannot convert to the calendar bucket's time zone (e.g. MySQL time zone tables not loaded). HTTP 501. Since 0.1.132                                                                       |
+| `AGG_FN_NOT_SUPPORTED`   | A [grouped query](/api/aggregation#aggregate-functions) uses an aggregate function the adapter does not render (e.g. `countDistinct` on a custom adapter). HTTP 400                                    |
+| `AGG_EXPR_NOT_SUPPORTED` | A [grouped query](/api/aggregation#arithmetic-expressions) uses an arithmetic entry and the adapter's `supportsAggregateExpressions()` is false (a custom adapter). HTTP 400. Since 0.1.148            |
 
 Handle errors by checking the code:
 

@@ -102,7 +102,7 @@ describe.each(["sql", "nested"] as const)(
           false,
         );
         expect(
-          await accepted(() => controller.query(`?$groupBy=${path}&$select=${path},count()`)),
+          await accepted(() => controller.query(`?$groupBy=${path}&$select=${path},count(*)`)),
           `$groupBy "${path}"`,
         ).toBe(false);
       }
@@ -249,7 +249,7 @@ describe("/meta contract per adapter family", () => {
     // Sort / groupBy positions are unchanged.
     expect(await controller.query("?$exists=prefs&$sort=prefs")).toBeInstanceOf(HttpError);
     expect(
-      await controller.query("?$exists=prefs&$groupBy=prefs&$select=prefs,count()"),
+      await controller.query("?$exists=prefs&$groupBy=prefs&$select=prefs,count(*)"),
     ).toBeInstanceOf(HttpError);
     expect(calls).toHaveLength(5);
   });
@@ -293,7 +293,7 @@ describe("/meta contract per adapter family", () => {
     const json = await controller.query("?$sort=prefs");
     expect((json as HttpError).message).toContain("adapter");
     // Manual-mode policy applies to filter / $sort only — $groupBy uses physical capability.
-    expect(await accepted(() => controller.query("?$groupBy=other&$select=other,count()"))).toBe(
+    expect(await accepted(() => controller.query("?$groupBy=other&$select=other,count(*)"))).toBe(
       true,
     );
   });

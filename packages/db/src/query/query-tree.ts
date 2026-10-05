@@ -134,6 +134,48 @@ export function walkViewExpr(expr: AtscriptExprNode, leaf: (path: string) => voi
 }
 
 /**
+ * Evaluates a computed expression in process (the memory adapter, a test, a
+ * third-party adapter) with the semantics every adapter shares: IEEE double,
+ * a leaf is `Number()`-ed, NULL / undefined propagates as `null`, `/` by zero
+ * is `null`, `coalesce` returns its first non-null value.
+ * @since 0.1.148
+ */
+export function evaluateExpr(
+  expr: AtscriptExprNode,
+  leaf: (field: string) => unknown,
+): number | null {
+  if (typeof expr === "number") return expr;
+  if ("field" in expr) {
+    const v = leaf(expr.field);
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isNaN(n) ? null : n;
+  }
+  if (expr.op === "coalesce") {
+    for (const arg of expr.args) {
+      const v = evaluateExpr(arg, leaf);
+      if (v !== null) return v;
+    }
+    return null;
+  }
+  const a = evaluateExpr(expr.args[0], leaf);
+  if (a === null) return null;
+  if (expr.op === "neg") return -a;
+  const b = evaluateExpr(expr.args[1], leaf);
+  if (b === null) return null;
+  switch (expr.op) {
+    case "+":
+      return a + b;
+    case "-":
+      return a - b;
+    case "*":
+      return a * b;
+    default:
+      return b === 0 ? null : a / b;
+  }
+}
+
+/**
  * Whether a computed-column expression may yield NULL: a `/` (division by
  * zero is NULL), a leaf for which `nullableLeaf` holds, or an operation over
  * a nullable operand — `coalesce` only when every argument is nullable.

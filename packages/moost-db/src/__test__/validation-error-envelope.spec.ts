@@ -98,6 +98,7 @@ function makeMockTable(overrides: Record<string, any> = {}) {
     isGeoSearchable: vi.fn().mockReturnValue(false),
     calendarBucketUnits: vi.fn().mockReturnValue(new Set()),
     aggregateFns: vi.fn().mockReturnValue(new Set()),
+    supportsAggregateExpressions: vi.fn().mockReturnValue(false),
     dimensions: [],
     measures: [],
     canFilterField: vi.fn().mockReturnValue(true),

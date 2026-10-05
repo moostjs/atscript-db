@@ -375,6 +375,10 @@ MySQL cannot convert to time zone "Europe/Berlin": its time zone tables are not 
 Some distributions ship "slim" zoneinfo files that describe DST after 2037 with a rule instead of explicit transitions. `mysql_tzinfo_to_sql` ignores that rule, so the loaded tables have no DST after 2037, and labels of timestamps near local midnight (for `hour` buckets, near any DST change) after 2037 can differ from the other adapters. Load the tables from "fat" zoneinfo if you bucket far-future dates.
 :::
 
+## Aggregate Expressions {#aggregate-expressions}
+
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) run in SQL. `first` / `last` need window functions, so **MySQL 8.0+** (the same requirement as per-parent `$with` limits). A double overflow (errno 1690) is `INVALID_QUERY` (`Arithmetic overflow`), not a 500.
+
 ## Views
 
 Managed [views](/views/) are created with `CREATE OR REPLACE VIEW`.

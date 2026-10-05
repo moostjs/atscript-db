@@ -22,6 +22,7 @@ import {
   isJsonValueField,
   narrowerFilterOps,
   selfOrAncestor,
+  numericOperandProblem,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
 
@@ -74,6 +75,13 @@ export interface TFieldCapability {
   groupReason?: string;
   /** Present when `bucketable` is `false` — the reason clause appended to the HTTP 400 message. */
   bucketReason?: string;
+  /**
+   * The path may be an operand of query-time arithmetic: a numeric field
+   * ({@link numericOperandProblem}) that aggregates (`$groupBy` / aggregate
+   * capability, ¬writeOnly, visible). Only on an adapter with
+   * `supportsAggregateExpressions()`. Since 0.1.148.
+   */
+  numeric: boolean;
 }
 
 /** One rejected path: `path` is the offending logical path, `message` the full sentence. */
@@ -108,6 +116,7 @@ const DECORATION_CAP: Readonly<TFieldCapability> = {
   indexed: false,
   bucketable: false,
   groupable: false,
+  numeric: false,
 };
 
 /** The readable members the index reads. */
@@ -124,6 +133,7 @@ export type TCapabilityReadable = Pick<
   | "isGeoSearchable"
   | "calendarBucketUnits"
   | "aggregateFns"
+  | "supportsAggregateExpressions"
   | "dimensions"
   | "measures"
 >;
@@ -258,6 +268,8 @@ export class FieldCapabilityIndex implements TQueryPathSource {
   readonly bucketUnits: readonly BucketUnit[];
   /** Aggregate functions the adapter renders, in canonical `ALL_AGGREGATE_FNS` order (`/meta.aggregateFns`). */
   readonly aggregateFns: readonly AggregateFn[];
+  /** Whether the adapter renders aggregate arithmetic (`/meta.aggregateExpressions`). */
+  readonly aggregateExpressions: boolean;
   /** The adapter-level capabilities this index was built against — see {@link adapterSignature}. */
   readonly signature: string;
 
@@ -268,11 +280,14 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    * the index reads must be added here.
    */
   static adapterSignature(
-    source: Pick<TCapabilityReadable, "isGeoSearchable" | "calendarBucketUnits" | "aggregateFns">,
+    source: Pick<
+      TCapabilityReadable,
+      "isGeoSearchable" | "calendarBucketUnits" | "aggregateFns" | "supportsAggregateExpressions"
+    >,
   ): string {
     return `${source.isGeoSearchable()}|${[...source.calendarBucketUnits()].join(",")}|${[
       ...source.aggregateFns(),
-    ].join(",")}`;
+    ].join(",")}|${source.supportsAggregateExpressions()}`;
   }
 
   /**
@@ -324,6 +339,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     this.bucketUnits = BUCKET_UNITS.filter((unit) => units.has(unit));
     const fns = source.aggregateFns();
     this.aggregateFns = [...ALL_AGGREGATE_FNS].filter((fn) => fns.has(fn));
+    this.aggregateExpressions = source.supportsAggregateExpressions();
     const physicalNames = new Set<string>();
     const jsonValueParents = new Set<string>();
     for (const fd of source.fieldDescriptors) {
@@ -454,6 +470,10 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       indexed: fd.isIndexed === true,
       bucketable: bucketReason === undefined,
       groupable: groupReason === undefined,
+      numeric:
+        this.aggregateExpressions &&
+        physicalReason === undefined &&
+        numericOperandProblem(fd) === undefined,
     };
     if (groupReason) cap.groupReason = groupReason;
     if (filterOps.length > 0) cap.filterOps = filterOps;
