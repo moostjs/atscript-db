@@ -451,7 +451,7 @@ export class AsDbController<
       try {
         filter = table.recordFilter(data as Record<string, unknown>, this._idOpts);
       } catch (error) {
-        if (!(error instanceof DbError)) throw error;
+        if (!(error instanceof DbError) || error.code === "SPACE_CLOSED") throw error;
         filter = null; // no identifying fields → nothing to report but a 404
       }
     } else {

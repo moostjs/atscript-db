@@ -720,7 +720,9 @@ export class AsDbReadableController<
         navFields: capabilities.navFields,
       });
     } catch (error) {
-      if (!(error instanceof DbError)) throw error;
+      // Only the query-shape verdict is a 400; anything else (a closed space's
+      // SPACE_CLOSED from reading the field map, …) keeps its own mapping.
+      if (!(error instanceof DbError) || error.code !== "INVALID_QUERY") throw error;
       const [issue] = error.errors;
       return badRequest(issue.path, issue.message);
     }

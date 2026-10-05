@@ -137,6 +137,28 @@ describe("DbError → HTTP status", () => {
   });
 });
 
+describe("a closed space on read routes", () => {
+  it("the computed-$select check rethrows SPACE_CLOSED (→ 503) instead of answering 400", async () => {
+    const { db, controller } = await setup();
+    // A served controller has built its capability index before the space closes.
+    await controller.query("/query");
+    await db.close();
+    const check = () =>
+      (controller as unknown as { checkComputedSelect(c: object): unknown }).checkComputedSelect(
+        {},
+      );
+    let err: unknown;
+    try {
+      check();
+    } catch (error) {
+      err = error;
+    }
+    expect(err).toBeInstanceOf(DbError);
+    expect((err as DbError).code).toBe("SPACE_CLOSED");
+    expect(httpReplyFor(err as DbError).body.statusCode).toBe(503);
+  });
+});
+
 describe("closeDbSpaces()", () => {
   it("closes every distinct registered space once and clears the registry", async () => {
     clearDbSpaces();
