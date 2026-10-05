@@ -9,6 +9,7 @@ export * from "./assert-exposed";
 export { getDbEndpoint } from "./db-endpoint";
 export * from "./validation-interceptor";
 export * from "./actions";
+export { DbDecorations, type TDbDecorationsOpts } from "./decorations/db-decorations.decorator";
 export {
   type AtscriptDbMate,
   type AtscriptDbMeta,
@@ -39,6 +40,7 @@ export {
   type TFieldCapability,
   type TCapabilityReadable,
   type TCapabilityVerdict,
+  type TGateOp,
 } from "./meta/field-capabilities";
 export { applyTerminalRefs, resolveTerminalRef, resolveProp } from "./meta/terminal-ref";
 export type { TTerminalRef } from "./meta/terminal-ref";

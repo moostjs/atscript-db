@@ -253,6 +253,8 @@ curl "http://localhost:3000/todos/query?\$select=-password,-secret"       # excl
 **Include mode** returns only the listed fields. **Exclude mode** (prefix with `-`) returns all fields except the listed ones.
 
 ::: warning Avoid mixed mode
+A controller may also declare display-only columns ([`@DbDecorations`](./customization#declared-decorations), since 0.1.148): `$select` can name them like fields (`$select=title,ownerName`), they are served without a `$select`, and they cannot be used in a filter, `$sort`, `$groupBy`, `$having` or an aggregate. `/meta.fields[key].decoration` is `true` for each.
+
 Mixing includes and excludes (e.g., `$select=name,-password`) produces unpredictable results depending on the adapter. Use either include-only or exclude-only.
 :::
 

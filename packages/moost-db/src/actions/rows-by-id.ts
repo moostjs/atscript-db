@@ -32,6 +32,40 @@ export function identityKey(id: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * The result of a `resolveRowIds` call over an action's ids: the resolved
+ * ids with duplicate identities collapsed to the first, and — only when some
+ * id changed — the id each resolved identity was requested as.
+ */
+export interface TAppliedIds {
+  ids: Record<string, unknown>[];
+  /** Resolved {@link identityKey} → the request's (first) id; set only when `resolveRowIds` changed an id. */
+  requestIds?: ReadonlyMap<string, Record<string, unknown>>;
+}
+
+/**
+ * `resolved` (index-aligned with `requested`) with duplicate identities
+ * collapsed to the first, plus the request-id echo map ({@link TAppliedIds}).
+ */
+export function applyResolvedIds(
+  requested: readonly Record<string, unknown>[],
+  resolved: readonly Record<string, unknown>[],
+): TAppliedIds {
+  const ids: Record<string, unknown>[] = [];
+  const requestIds = new Map<string, Record<string, unknown>>();
+  let changed = false;
+  for (let i = 0; i < resolved.length; i++) {
+    const k = identityKey(resolved[i]);
+    if (k !== undefined) {
+      if (requestIds.has(k)) continue; // a duplicate identity collapses to the first
+      requestIds.set(k, requested[i]);
+      if (k !== identityKey(requested[i])) changed = true;
+    }
+    ids.push(resolved[i]);
+  }
+  return changed ? { ids, requestIds } : { ids };
+}
+
+/**
  * The deduped identities of `rows` over `fields` — a value read by `read`
  * (default: the row's own field) — and, per row, its identity's index in
  * `ids` (`-1`: the row is absent, or a value is missing / null).

@@ -137,6 +137,20 @@ export interface TFieldMeta {
    * Since 0.1.147.
    */
   computed?: true;
+  /**
+   * Present (true) exactly when `$groupBy` on this field passes the gate:
+   * physically filterable (adapter, not write-only, not encrypted) and, on a
+   * table declaring dimensions or measures, a dimension. Since 0.1.148.
+   */
+  groupable?: true;
+  /**
+   * Present (true) for a declared display-only decoration (`@DbDecorations`):
+   * a value the controller computes (`decorateRows`) and attaches to rows. Name
+   * it in `$select` to receive it; it is never filterable, sortable or
+   * groupable, and its column definition is in {@link TMetaResponse.decorations}
+   * (not in `type`). Since 0.1.148.
+   */
+  decoration?: true;
 }
 
 /** Built-in CRUD operation names; map 1:1 to public method names. */
@@ -170,6 +184,14 @@ export interface TMetaResponse {
   relations: TRelationInfo[];
   fields: Record<string, TFieldMeta>;
   type: TSerializedAnnotatedType;
+  /**
+   * The declared display-only fields (`@DbDecorations`): an object type whose
+   * props are the decorations (with their `@meta.*`, `@expect.*` and `@ui.*`
+   * annotations), each also listed in {@link fields} with `decoration: true`.
+   * Absent when none is declared (or none is visible to the caller). Not part
+   * of {@link type}, so forms and write validation never see it. Since 0.1.148.
+   */
+  decorations?: TSerializedAnnotatedType;
   actions: TDbActionInfo[];
   crud: TCrudPermissions;
   /**

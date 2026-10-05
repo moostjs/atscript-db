@@ -131,7 +131,9 @@ export class AsDbController<
   }
 
   /**
-   * Intercepts delete operations. Return `undefined` to abort (500 "Not
+   * Intercepts delete operations. Receives the id {@link resolveRowIds}
+   * resolved (the one the request carried when it is not overridden; since
+   * 0.1.148). Return `undefined` to abort (500 "Not
    * deleted"); return an `Error` instance to respond with that error.
    * Runs outside any transaction. May be async (e.g. to resolve composite
    * ids from external state).
@@ -312,8 +314,7 @@ export class AsDbController<
    * table's transaction and an out-of-scope row is not deleted — a 404,
    * exactly like a missing one.
    */
-  private async _deleteOrThrow(id: unknown): Promise<unknown> {
-    const scope = await this.rowOverlay();
+  private async _deleteOrThrow(id: unknown, scope: FilterExpr | undefined): Promise<unknown> {
     const args: [] | [TDeleteOptions<any>] = scope
       ? [{ ...this._removeArgs[0], scope }]
       : this._removeArgs;
@@ -485,8 +486,9 @@ export class AsDbController<
   @Delete(":id")
   async remove(@Param("id") id: string): Promise<unknown> {
     await this.parseRequest("remove");
-    const resolvedId = await this._checkHook(this.onRemove(id), "Not deleted");
-    return this._deleteOrThrow(resolvedId);
+    const { id: resolved, overlay } = await this._resolveWithOverlay(id, "remove");
+    const resolvedId = await this._checkHook(this.onRemove(resolved), "Not deleted");
+    return this._deleteOrThrow(resolvedId, overlay);
   }
 
   /**
@@ -500,7 +502,8 @@ export class AsDbController<
     if (idObj instanceof HttpError) {
       throw idObj;
     }
-    const resolvedId = await this._checkHook(this.onRemove(idObj), "Not deleted");
-    return this._deleteOrThrow(resolvedId);
+    const { id: resolved, overlay } = await this._resolveWithOverlay(idObj, "remove");
+    const resolvedId = await this._checkHook(this.onRemove(resolved), "Not deleted");
+    return this._deleteOrThrow(resolvedId, overlay);
   }
 }

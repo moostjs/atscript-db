@@ -5,7 +5,13 @@ import type { BucketUnit } from "@uniqu/core";
 import { BUCKET_UNITS } from "@uniqu/core";
 
 import { DbError } from "../db-error";
-import { bucketSourceVerdict, collectQueryPaths } from "../query/query-guards";
+import {
+  ADAPTER_FILTER_REASON,
+  bucketSourceVerdict,
+  collectQueryPaths,
+  ENCRYPTED_REASON,
+  groupSourceVerdict,
+} from "../query/query-guards";
 import { resolveCalendarBuckets, type TResolvedBucket } from "../query/buckets";
 import { UniquSelect } from "../query/uniqu-select";
 import { DocumentFieldMapper } from "../strategies/field-mapping";
@@ -455,6 +461,62 @@ describe("bucketSourceVerdict — the one bucket-source rule set", () => {
         }
       }
     }
+  });
+});
+
+const groupVerdict = (
+  bound: { table: AtscriptDbTable; adapter: MockAdapter },
+  path: string,
+  adapter: Parameters<typeof groupSourceVerdict>[2] = bound.adapter,
+) => {
+  const meta = bound.table.getMetadata();
+  const fd = meta.descriptorByPath.get(path);
+  expect(fd, path).toBeDefined();
+  return groupSourceVerdict(fd!, meta, adapter);
+};
+
+describe("groupSourceVerdict — the one $groupBy-key rule", () => {
+  it("encrypted, notFilterable, then notDimension on a strict table", () => {
+    const events = sql();
+    expect(groupVerdict(events, "openedAt")).toEqual({ ok: true });
+    expect(groupVerdict(events, "secretAt")).toEqual({
+      ok: false,
+      code: "encrypted",
+      reason: ENCRYPTED_REASON,
+    });
+    expect(groupVerdict(events, "openedAt", { canFilterField: () => false })).toEqual({
+      ok: false,
+      code: "notFilterable",
+      reason: ADAPTER_FILTER_REASON,
+    });
+    const strict = sql("BucketStrict");
+    expect(groupVerdict(strict, "reviewedAt")).toEqual({
+      ok: false,
+      code: "notDimension",
+      reason: "not a dimension",
+    });
+    expect(groupVerdict(strict, "openedAt")).toEqual({ ok: true });
+  });
+
+  it("aggregate() applies it to fields; a bucket alias groups by its source (bucketSourceVerdict)", async () => {
+    const { table } = sql("BucketStrict");
+    const err = await rejection(
+      table.aggregate({
+        filter: {},
+        controls: { $select: ["reviewedAt"], $groupBy: ["reviewedAt"] },
+      } as any),
+    );
+    expect(err.errors).toEqual([
+      { path: "$groupBy", message: 'Field "reviewedAt" is not a dimension' },
+    ]);
+    // the alias `d` is no field: its source `openedAt` is a dimension, so it groups
+    await table.aggregate({
+      filter: {},
+      controls: {
+        $select: [{ $bucket: "day", $field: "openedAt", $as: "d" }],
+        $groupBy: ["d"],
+      },
+    } as any);
   });
 });
 

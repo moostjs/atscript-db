@@ -137,6 +137,51 @@ describe("Client<T> — generic typing (compile-only assertions)", () => {
       expectTypeOf<Row["$disabledReasons"]>().toEqualTypeOf<Record<string, string> | undefined>();
     }
   });
+
+  it("Client<T, D>: $select accepts the declared decorations; rows carry them as optional (since 0.1.148)", () => {
+    if (!shouldRun()) {
+      interface PostDecorations {
+        unreadCount?: number;
+        ownerName?: string;
+      }
+      const c = new Client<typeof Post, PostDecorations>("/api/posts");
+      void c.query({ controls: { $select: ["title", "ownerName"] } });
+      void c.query({ controls: { $select: { unreadCount: 1, title: 1 } } });
+      void c.pages({ controls: { $select: ["unreadCount"] } }, 1, 5);
+      void c.one(1, { controls: { $select: ["ownerName"] } });
+      void c.geoSearch([0, 0], { controls: { $select: ["unreadCount"] } });
+      // @ts-expect-error — neither an own field nor a declared decoration
+      void c.query({ controls: { $select: ["nope"] } });
+      // filters stay over the own fields: a decoration is display-only
+      // @ts-expect-error — `unreadCount` is not an own field
+      void c.query({ filter: { unreadCount: 1 } });
+
+      const rows = c.query({ controls: { $select: ["ownerName"] } });
+      type Row = Awaited<typeof rows>[number];
+      expectTypeOf<Row["ownerName"]>().toEqualTypeOf<string | undefined>();
+      expectTypeOf<Row["unreadCount"]>().toEqualTypeOf<number | undefined>();
+      expectTypeOf<Row>().toHaveProperty("title");
+
+      const one = c.one(1);
+      type OneRow = NonNullable<Awaited<typeof one>>;
+      expectTypeOf<OneRow["ownerName"]>().toEqualTypeOf<string | undefined>();
+
+      // Without D nothing changes: no decoration keys.
+      const plain = new Client<typeof Post>("/api/posts");
+      // @ts-expect-error — no declared decorations
+      void plain.query({ controls: { $select: ["ownerName"] } });
+    }
+  });
+
+  it("meta() carries the declared decorations (since 0.1.148)", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Post>("/api/posts");
+      const meta = c.meta();
+      type Meta = Awaited<typeof meta>;
+      expectTypeOf<Meta["decorations"]>().not.toEqualTypeOf<never>();
+      expectTypeOf<NonNullable<Meta["fields"][string]["decoration"]>>().toEqualTypeOf<true>();
+    }
+  });
 });
 
 // Non-inlinable false guard — keeps the body type-checked but unreachable at

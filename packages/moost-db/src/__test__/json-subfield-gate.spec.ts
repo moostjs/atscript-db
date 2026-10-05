@@ -166,8 +166,12 @@ describe("JSON descendant paths — nested-object adapter (native dotted paths)"
     const table = makeMockTable("nested");
     const ctrl = new AsDbController(makeApp(), table);
     const meta = await ctrl.meta();
-    expect(meta.fields["address.city"]).toEqual({ filterable: true, sortable: true });
-    expect(meta.fields.address).toEqual({ filterable: true, sortable: false });
+    expect(meta.fields["address.city"]).toEqual({
+      filterable: true,
+      groupable: true,
+      sortable: true,
+    });
+    expect(meta.fields.address).toEqual({ filterable: true, groupable: true, sortable: false });
     expect(
       await ctrl.query("?address.city=x&$sort=address.city&$select=id,address.city"),
     ).not.toBeInstanceOf(HttpError);

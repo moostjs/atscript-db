@@ -10,6 +10,9 @@ export type {
   TDbActionDisabledVerdict,
   TDbActionsEntry,
   TDbActionsEntryUnpinned,
+  TDbRowIdInput,
+  TDbRowIdPurpose,
+  TDbRowIdsContext,
 } from "./types";
 export {
   discoverActions,

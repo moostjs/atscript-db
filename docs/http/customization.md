@@ -14,30 +14,31 @@ This page is about **intercepting existing CRUD**. For exposing **new domain ope
 
 All hooks are protected methods with sensible defaults (pass-through or no-op). Override only the ones you need.
 
-| Hook                                    | Available On   | Called When                      | Purpose                                                           |
-| --------------------------------------- | -------------- | -------------------------------- | ----------------------------------------------------------------- |
-| `prepareRequest(ctx)`                   | Both           | First, on every endpoint         | Resolve per-request policy asynchronously (since 0.1.143)         |
-| `transformFilter(filter)`               | Both           | Before `/query` / `/pages` reads | Modify filters (add tenant, soft-delete)                          |
-| `transformOne(filter)`                  | Both           | Before `/one` / `/one/:id` reads | Filter overlay for id-based reads (defaults to `transformFilter`) |
-| `transformRelationFilter(path, filter)` | Both           | Each client `$some` / `$none`    | Row overlay of the related table (since 0.1.147)                  |
-| `transformProjection(projection)`       | Both           | Before every read                | Restrict visible fields                                           |
-| `hasField(path)`                        | Both           | Every field a request references | Hide fields per request — answered as `Unknown field`             |
-| `validateInsights(insights)`            | Both           | After query parsing              | Field-level access control                                        |
-| `computeEmbedding(search, fieldName?)`  | Both           | When `$vector` is present        | Convert text to embedding vector                                  |
-| `decorateRows(rows, ctx)`               | Both           | After every row read             | Attach computed `$`-keys to returned rows                         |
-| `actionRowScope(action, ctx)`           | Both           | Action gate, `$actions` reads    | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
-| `queryTargetScope(action)`              | Both           | Resolving a query target         | Read scope "all matching rows" resolve under (since 0.1.147)      |
-| `onWrite(action, data)`                 | AsDbController | Before insert/replace/update     | Transform or reject write data (untrusted body, outside any tx)   |
-| `onRemove(id)`                          | AsDbController | Before delete                    | Allow or prevent deletion                                         |
-| `guardWrite(ctx)`                       | AsDbController | Inside the table's tx, validated | Validated-stage checks / enrichment (since 0.1.128)               |
-| `guardRemove(ctx)`                      | AsDbController | Inside the table's tx, id known  | Validated-stage delete checks (since 0.1.128)                     |
-| `checkWrite(ctx)`                       | AsDbController | Inside the table's tx, after it  | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
-| `withTransaction(fn)`                   | AsDbController | Called by you                    | One transaction across several table ops in a custom route        |
-| `meta()`                                | Both           | On `GET /meta` request           | Enrich the metadata response (cached)                             |
-| `applyMetaOverlay(meta)`                | Both           | Per request, after `meta()`      | Per-principal `crud` / `actions` filtering (returns a clone)      |
-| `allowedActions(names)`                 | Both           | `$actions`, `/meta/actions`      | Row-level actions the caller may run (0.1.145)                    |
-| `authorizeForm(name, actionNames)`      | Both           | On `GET /meta/form/:name`        | Refuse a form per request — answered as an unknown form (0.1.143) |
-| `init()`                                | Both           | On controller construction       | One-time setup                                                    |
+| Hook                                    | Available On                          | Called When                                    | Purpose                                                           |
+| --------------------------------------- | ------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
+| `prepareRequest(ctx)`                   | Both                                  | First, on every endpoint                       | Resolve per-request policy asynchronously (since 0.1.143)         |
+| `transformFilter(filter)`               | Both                                  | Before `/query` / `/pages` reads               | Modify filters (add tenant, soft-delete)                          |
+| `transformOne(filter)`                  | Both                                  | Before `/one` / `/one/:id` reads               | Filter overlay for id-based reads (defaults to `transformFilter`) |
+| `transformRelationFilter(path, filter)` | Both                                  | Each client `$some` / `$none`                  | Row overlay of the related table (since 0.1.147)                  |
+| `transformProjection(projection)`       | Both                                  | Before every read                              | Restrict visible fields                                           |
+| `hasField(path)`                        | Both                                  | Every field a request references               | Hide fields per request — answered as `Unknown field`             |
+| `validateInsights(insights)`            | Both                                  | After query parsing                            | Field-level access control                                        |
+| `computeEmbedding(search, fieldName?)`  | Both                                  | When `$vector` is present                      | Convert text to embedding vector                                  |
+| `decorateRows(rows, ctx)`               | Both                                  | After every row read                           | Attach computed `$`-keys, or `@DbDecorations` columns, to rows    |
+| `resolveRowIds(ids, ctx)`               | Both (`"remove"` on `AsDbController`) | Before any id-addressed read, delete or action | Map stale / alias ids to the row's current id (since 0.1.148)     |
+| `actionRowScope(action, ctx)`           | Both                                  | Action gate, `$actions` reads                  | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
+| `queryTargetScope(action)`              | Both                                  | Resolving a query target                       | Read scope "all matching rows" resolve under (since 0.1.147)      |
+| `onWrite(action, data)`                 | AsDbController                        | Before insert/replace/update                   | Transform or reject write data (untrusted body, outside any tx)   |
+| `onRemove(id)`                          | AsDbController                        | Before delete                                  | Allow or prevent deletion                                         |
+| `guardWrite(ctx)`                       | AsDbController                        | Inside the table's tx, validated               | Validated-stage checks / enrichment (since 0.1.128)               |
+| `guardRemove(ctx)`                      | AsDbController                        | Inside the table's tx, id known                | Validated-stage delete checks (since 0.1.128)                     |
+| `checkWrite(ctx)`                       | AsDbController                        | Inside the table's tx, after it                | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
+| `withTransaction(fn)`                   | AsDbController                        | Called by you                                  | One transaction across several table ops in a custom route        |
+| `meta()`                                | Both                                  | On `GET /meta` request                         | Enrich the metadata response (cached)                             |
+| `applyMetaOverlay(meta)`                | Both                                  | Per request, after `meta()`                    | Per-principal `crud` / `actions` filtering (returns a clone)      |
+| `allowedActions(names)`                 | Both                                  | `$actions`, `/meta/actions`                    | Row-level actions the caller may run (0.1.145)                    |
+| `authorizeForm(name, actionNames)`      | Both                                  | On `GET /meta/form/:name`                      | Refuse a form per request — answered as an unknown form (0.1.143) |
+| `init()`                                | Both                                  | On controller construction                     | One-time setup                                                    |
 
 ::: info Deprecated hook
 `checkGates(parsed)` still runs after the field capability gate but is deprecated since 0.1.128: the gate derived from `/meta.fields` already rejects every unlisted or non-sortable / non-filterable path before it. Override the read hooks above, or the table-level `guard` options, instead.
@@ -316,11 +317,19 @@ export class TicketsController extends AsDbController<typeof Ticket> {
 
 `ctx` carries:
 
-| Field        | Value                                                                                                                     |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `endpoint`   | `"query"`, `"pages"`, `"geo"` or `"one"` (`/one/:id` and the composite `/one?…` both report `"one"`)                      |
-| `projection` | The effective `$select` of the read, after `transformProjection` and the `@db.writeOnly` seal (`undefined` = all columns) |
-| `controls`   | The request's parsed controls (`$select`, `$with`, `$actions`, …) — treat as read-only                                    |
+| Field         | Value                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint`    | `"query"`, `"pages"`, `"geo"` or `"one"` (`/one/:id` and the composite `/one?…` both report `"one"`)                      |
+| `projection`  | The effective `$select` of the read, after `transformProjection` and the `@db.writeOnly` seal (`undefined` = all columns) |
+| `controls`    | The request's parsed controls (`$select`, `$with`, `$actions`, …) — treat as read-only                                    |
+| `decorations` | The [declared decoration keys](#declared-decorations) this response must carry; empty without `@DbDecorations`            |
+
+The keys the hook sets are of two kinds:
+
+| Kind                                         | Example       | Listed in `/meta`, selectable | In the response                      |
+| -------------------------------------------- | ------------- | ----------------------------- | ------------------------------------ |
+| Undeclared — a `$`-prefixed key              | `$unread`     | No                            | Always                               |
+| [Declared](#declared-decorations) (a column) | `unreadCount` | Yes (`$select=unreadCount`)   | Only when named in `ctx.decorations` |
 
 When it runs:
 
@@ -329,15 +338,106 @@ When it runs:
 - Not for `$count`, `$groupBy` aggregates, a `/one` 404, or [value-help controllers](./actions#value-help-controllers-are-excluded).
 - Nested `$with` rows are not passed on their own — reach them through the parent row.
 
+#### Declared decorations — `@DbDecorations` {#declared-decorations}
+
+Since 0.1.148. A `$` key is invisible to `/meta` and a client cannot select it. To make a computed value a **column** — shown in a table, selectable, described by its label and width — declare it. The declaration is a plain atscript interface (no `@db.table` / `@db.view`):
+
+```atscript
+// tickets.decorations.as
+export interface TicketDecorations {
+    @meta.label 'Unread'
+    unreadCount?: number.int
+
+    @meta.label 'Owner'
+    ownerName?: string
+}
+```
+
+```typescript
+import { DbDecorations, type TDbDecorateContext } from "@atscript/moost-db";
+
+@TableController(TicketTable)
+@DbDecorations(TicketDecorations, { requires: { ownerName: ["ownerId"] } })
+export class TicketsController extends AsDbController<typeof TicketTable> {
+  protected async decorateRows(rows: Record<string, unknown>[], ctx: TDbDecorateContext) {
+    if (ctx.decorations.has("ownerName")) {
+      // read rows[i].ownerId, set rows[i].ownerName
+    }
+  }
+}
+```
+
+- **`/meta`** gains `decorations` — the declared interface, serialized with its `@meta.*`, `@expect.*` and `@ui.*` annotations — and a `fields[key]` entry `{ sortable: false, filterable: false, decoration: true }` for each key. Neither is in `/meta.type`, so forms and client-side write validation never see them.
+- **A client names a key in `$select`** like a field: `$select=title,ownerName`. Without a `$select` every visible decoration is served; `$select=-ownerName` leaves one out. Anywhere else — a filter (`$exists` included), `$sort`, `$groupBy`, `$having`, an aggregate, a calendar bucket, a grouped `$select` — a decoration answers `400 Field "x" is display-only and cannot be used in …`.
+- **`requires`** lists the readable's own fields the hook reads to compute a key. They are selected for you and stripped from the response again unless the client selected them, so `transformProjection` needs no widening and nothing leaks.
+- **Visibility follows the sources.** A decoration is served — and listed in `/meta` — only while every `requires` path is visible ([`hasField`](#hasfield)) and survives [`transformProjection`](#transformprojection). A hidden source answers `Unknown field "x"` like any hidden field; a source that `transformProjection` strips silently drops the decoration, as it drops a field. A decoration that reveals a field's data MUST list it in `requires`; data from outside the table (another service) is yours to protect. Decoration keys never reach `transformProjection`, `hasField` or filters, so a permission layer needs no change; an [`applyMetaOverlay`](#applymetaoverlay) may delete a prop from `meta.decorations` to hide a decoration per principal.
+- **Compute `ctx.decorations` only** (the keys requested and served). A declared key you set that is not in it is removed after the hook; `$` keys are untouched.
+
+Checked once per class, with a `[moost-db]` error: the type is an object interface without `@db.table` / `@db.view`; keys are plain top-level identifiers (no `$` prefix, no dots) that collide with no field or relation of the readable; every `requires` key is declared and every path is an own, readable (not `@db.writeOnly`) field. A decoration cannot be declared on a value-help controller; declaring one without implementing `decorateRows` logs a warning. The declaration is inherited under `@Inherit()`. On the client, `new Client<typeof Ticket, TicketDecorations>(…)` types the keys ([Decorations](./client#decorations)).
+
 **DO**
 
 - Name the keys you add with a `$` prefix, like `$actions` and `$distance`. Such a key can never collide with a field. The prefix is a convention; nothing enforces it.
-- Add any column the hook reads but the client might not select in [`transformProjection`](#transformprojection). That column is then part of the response.
+- Add any column the hook reads but the client might not select in [`transformProjection`](#transformprojection). That column is then part of the response. (With [`@DbDecorations`](#declared-decorations) list it in `requires` instead — it is stripped again.)
 
 **DON'T**
 
 - Overwrite or remove `$actions` or `$disabledReasons`.
 - Rely on columns that only an action's `requiredFields` pulled in — they are stripped again before the hook runs.
+
+### resolveRowIds {#resolverowids}
+
+Since 0.1.148. A client may hold a stale key — a ticket key that was renamed, an alias. Override `resolveRowIds(ids, ctx)` to map such ids to the row's **current** id. One hook covers every id-addressed endpoint, so the alias policy lives in one place:
+
+| `ctx.purpose` | Endpoint                                                     | `ids`                                                                              |
+| ------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `"one"`       | `GET /one/:id`, `GET /one?…`                                 | One id: the path string (always a string), or the `?`-form identification object   |
+| `"available"` | `GET /meta/actions/:id`, `?…` — and a view asking its source | One id, as above                                                                   |
+| `"remove"`    | `DELETE /:id`, `DELETE /?…` (`AsDbController`)               | One id, as above                                                                   |
+| `"action"`    | An [action route](./actions#resolve-row-ids)                 | The body's validated ids (one for a `'row'` action); `ctx.action`, `ctx.level` set |
+
+```typescript
+import type { TDbRowIdInput, TDbRowIdsContext } from "@atscript/moost-db";
+
+@TableController(ticketsTable)
+export class TicketsController extends AsDbController<typeof Ticket> {
+  protected async resolveRowIds(ids: readonly TDbRowIdInput[], ctx: TDbRowIdsContext) {
+    return Promise.all(
+      ids.map(async (id) => {
+        const code = typeof id === "object" ? id.code : id;
+        if (typeof code !== "string") return id;
+        // the current holder of a key wins; consult the alias table on a miss
+        if ((await ticketsTable.count({ filter: { code } })) > 0) return id;
+        const alias = await aliases.findOne({ filter: { oldCode: code } });
+        if (!alias) return id;
+        return typeof id === "object" ? { code: alias.newCode } : alias.newCode;
+      }),
+    );
+  }
+}
+```
+
+It runs once per request, after [`prepareRequest`](#preparerequest) and the request's own validation (controls, the `?`-form id, the action body's shape and `maxIds` — a bad request answers 400 before the hook), and before anything reads the row; the [order on the action route](./actions#action-row-scope) is written once there. It costs nothing when not overridden: no call, no allocation.
+
+**Contract**
+
+- Return one id per input id, in order (anything else is a `500`).
+- An id that already names a row comes back **unchanged** — the current holder of a key wins over an alias, the same precedence a primary key has over a unique key. An id you cannot resolve also comes back unchanged: the endpoint then answers its normal miss.
+- The output is validated, and a bad one is a server bug (`500`, never a client `400`). A scalar (`string | number | boolean`) is resolved like a path scalar — primary key first, then the visible unique keys, inside the row overlay. An object must be one of the visible identifications, so the hook cannot route through a unique index over a field [`hasField`](#hasfield) hides. For `"action"` every entry must be such an object.
+- `ctx.overlay` is the row overlay the endpoint will apply to the resolved id (`undefined` when none) — server data, never sent to the client.
+- Handlers (`@DbActionID()`, `useDbActionId()`), `onRemove`, `guardRemove`, [`actionRowScope`](./actions#action-row-scope) and the row reads receive the **resolved** id. Error bodies and target summaries keep the id the **client sent**.
+- Write bodies (`POST` / `PUT` / `PATCH`) are not resolved: in `PATCH { code: "T-OLD", … }`, "address the row by its former key" and "set the key" cannot be told apart, and the write addresses its row inside the table's transaction. Rewrite a body in [`onWrite`](#onwrite).
+- Value-help controllers do not have it: they implement `getOne(id)` themselves, which is already the resolution seam. `resolveRowFilter` is not one either — `/one` reads through `findOneByRow` on every real table and view.
+- On a `@DbActionsFrom` view, `GET /meta/actions` resolves the id by the view first, then the source's own `resolveRowIds` (`"available"`) resolves the source id: the source decides.
+
+**Resolving safely** — the resolved id is never trusted for access: every endpoint still reads or deletes it under the same row overlay and visible identifications. The remaining question is whether the _answers_ can tell an alias of an unreachable row from a missing id:
+
+1. Return unchanged instead of throwing for an unknown id — a custom error for "no such alias" is an oracle.
+2. When an alias could map to several rows, resolve inside `ctx.overlay` (`findOne({ filter: { $and: [aliasFilter, ctx.overlay] } })`), so an unreachable row never wins over a reachable one.
+3. Do not log or return the canonical id in custom errors.
+4. The hook runs before the overlay read: its own query timing is yours to manage.
+
+With that, `/one`, `DELETE`, `/meta/actions` and a `'row'` action answer an unreachable alias, a missing id and an unknown alias identically (`404`, or `{ actions: [] }`), and a `'rows'` refusal lists the ids you sent. **Cost:** one hook call per request when overridden — check the id's current holder first (one indexed read, or an in-memory alias map) and consult the alias table only on a miss.
 
 ## Write Hooks
 
@@ -412,7 +512,7 @@ protected async onWrite(action: string, data: unknown) {
 
 ### onRemove {#onremove}
 
-Intercepts DELETE requests. Receives the record ID (a string for single-key tables, or an object for composite keys). Return the ID to proceed with deletion, or `undefined` to abort (returns HTTP `500`); return or throw an `Error` to respond with it.
+Intercepts DELETE requests. Receives the record ID (a string for single-key tables, or an object for composite keys) — the id [`resolveRowIds`](#resolverowids) resolved, when it is overridden; `guardRemove` sees the resolved id too. Return the ID to proceed with deletion, or `undefined` to abort (returns HTTP `500`); return or throw an `Error` to respond with it.
 
 **Delete guard:**
 

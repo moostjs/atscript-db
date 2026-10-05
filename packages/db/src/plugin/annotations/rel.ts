@@ -30,6 +30,41 @@ import {
 } from "../../shared/validation-utils";
 import { fieldScopes, isDbTable, relFilterScope } from "../lsp-scopes";
 
+/**
+ * X2b: on a `@db.table` a foreign key is a real constraint — one column of a
+ * composite primary key is not unique on its own. Columns that together cover
+ * the whole key (same alias, same target, each naming a top-level key column)
+ * are a valid composite foreign key. Returns whether `token`'s FK is covered
+ * (or the rule does not apply). Cheap checks run before the sibling scan.
+ */
+function checkCompositeFkCoverage(
+  token: Parameters<typeof getDbTableOwner>[0],
+  alias: string | undefined,
+  refTypeName: string,
+  targetStruct: SemanticStructureNode,
+  targetProp: ReturnType<SemanticStructureNode["props"]["get"]> & object,
+): boolean {
+  if (targetProp.countAnnotations("db.index.unique") > 0) return true;
+  const pk = [...targetStruct.props.entries()]
+    .filter(([, p]) => p.countAnnotations("meta.id") > 0)
+    .map(([name]) => name);
+  if (pk.length <= 1) return true;
+  const hostStruct = getParentStruct(token);
+  const owner = getDbTableOwner(token);
+  if (!hostStruct || owner === undefined || !isDbTable(owner)) return true;
+  const covered = new Set<string>();
+  for (const [, sibling] of hostStruct.props) {
+    if (sibling.countAnnotations("db.rel.FK") === 0) continue;
+    if (getAnnotationAlias(sibling, "db.rel.FK") !== alias) continue;
+    const siblingDef = sibling.getDefinition();
+    // A chain into a nested path (`Ref.a.b`) does not cover the key column `a`.
+    if (siblingDef && isRef(siblingDef) && siblingDef.id === refTypeName) {
+      if (siblingDef.chain.length === 1) covered.add(siblingDef.chain[0].text);
+    }
+  }
+  return pk.every((name) => covered.has(name));
+}
+
 export const dbRelAnnotations: TAnnotationsTree = {
   rel: {
     FK: new AnnotationSpec({
@@ -117,6 +152,15 @@ export const dbRelAnnotations: TAnnotationsTree = {
                 ) {
                   errors.push({
                     message: `@db.rel.FK target '${refTypeName}.${chainFields.join(".")}' is not a primary key (@meta.id) or unique (@db.index.unique) field`,
+                    severity: 1,
+                    range: token.range,
+                  });
+                }
+
+                // X2b: a column of a composite primary key is not unique on its own
+                if (!checkCompositeFkCoverage(token, alias, refTypeName, struct, targetProp)) {
+                  errors.push({
+                    message: `@db.rel.FK target '${refTypeName}.${chainFields.join(".")}' is one column of a composite primary key — a foreign key must reference a unique column; for value help without a constraint use @ui.valueHelp`,
                     severity: 1,
                     range: token.range,
                   });

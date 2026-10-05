@@ -183,7 +183,11 @@ describe("$select — composite /one, writeOnly, encrypted descendants, object p
     expect(errorsOf(s)[0].path).toBe("contact");
     const meta = await ctrl.meta();
     expect(meta.fields.contact).toBeUndefined();
-    expect(meta.fields["contact.email"]).toEqual({ filterable: true, sortable: true });
+    expect(meta.fields["contact.email"]).toEqual({
+      filterable: true,
+      groupable: true,
+      sortable: true,
+    });
   });
 
   it("unknown paths in include and exclude form → 400 Unknown field (message unchanged)", async () => {

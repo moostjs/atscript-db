@@ -157,6 +157,21 @@ const orphans = await issues.count({ filter: { ticket: { $none: {} } } });
 
 The filter type accepts a predicate on navigation keys only — `{ title: { $some: {} } }` and unknown keys are compile errors; the operand itself is not typed field by field. `query`, `count`, `pages` and the geo methods all take it. `meta().relations[i].filterable` is `true` on the relations that accept one.
 
+### Decorations — `Client<T, D>` {#decorations}
+
+Since 0.1.148. A controller can declare display-only columns with [`@DbDecorations`](./customization#declared-decorations). Pass the declaring interface as the second generic to type them:
+
+```typescript
+import type { TicketDecorations } from "./tickets.decorations.as";
+
+const tickets = new Client<typeof Ticket, TicketDecorations>("/api/tickets");
+
+const rows = await tickets.query({ controls: { $select: ["title", "ownerName"] } });
+rows[0].ownerName; // string | undefined
+```
+
+`$select` of `query`, `pages`, `one`, `geoSearch` and `geoPages` accepts the decoration keys beside the own fields, and rows carry them as optional properties. Filters stay over the own fields — a decoration is display-only, and the server answers a filter on one with a `400`. `meta()` returns the declaration in `decorations` and flags each key with `fields[key].decoration`. Without the second generic nothing changes.
+
 ### count {#count}
 
 `GET /query` with `$count: true` — returns the number of matching records.

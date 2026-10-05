@@ -18,7 +18,13 @@ import {
   dbActionArgsResolvedKey,
   dbActionHandlerStartedKey,
 } from "./handler-start";
-import { dbActionIdSlot, dbActionIdsSlot, useDbActionId, useDbActionIds } from "./id-cache";
+import {
+  dbActionIdSlot,
+  dbActionIdsSlot,
+  dbActionRequestIdsKey,
+  useDbActionId,
+  useDbActionIds,
+} from "./id-cache";
 import { dbActionBodySlot, dbActionInputSlot, useDbActionInput } from "./input-form-cache";
 import { WARN_PREFIX, type TDbActionsFromMeta } from "./keys";
 import { dbActionPreparedSlot } from "./prepare-request";
@@ -31,7 +37,13 @@ import {
   type TQueryTargetLimits,
   type TSkippedRow,
 } from "./query-target";
-import { dbActionRowSlot, dbActionRowsSlot, useDbActionRow, useDbActionRows } from "./row-cache";
+import {
+  dbActionPreScopeSlot,
+  dbActionRowSlot,
+  dbActionRowsSlot,
+  useDbActionRow,
+  useDbActionRows,
+} from "./row-cache";
 import { dbActionOverlaySlot, scopedControllerSlot } from "./row-scope";
 import { dedupeIdentities, identityKey } from "./rows-by-id";
 import { dbActionAbortedKey, dbActionTargetKey, type TDbActionTarget } from "./target";
@@ -73,6 +85,8 @@ export const ACTION_SLOTS: readonly TIsolatedSlot[] = [
   dbActionInputSlot,
   dbActionIdSlot,
   dbActionIdsSlot,
+  dbActionRequestIdsKey,
+  dbActionPreScopeSlot,
   dbActionRowSlot,
   dbActionRowsSlot,
   dbActionOverlaySlot,

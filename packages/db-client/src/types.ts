@@ -1,5 +1,6 @@
 import type {
   FilterExpr,
+  SelectExpr,
   UniqueryControls,
   Uniquery,
   AggregateQuery,
@@ -31,6 +32,7 @@ import type {
 
 export type {
   FilterExpr,
+  SelectExpr,
   UniqueryControls,
   Uniquery,
   AggregateQuery,
@@ -172,6 +174,20 @@ export type DataOf<T> = T extends { type: { __dataType?: infer D } }
       : Record<string, unknown>
     : D & Record<string, unknown>
   : Record<string, unknown>;
+
+/**
+ * `$select` controls of a read over `T` whose controller declares the display-only
+ * fields `D` (`@DbDecorations`): `$select` also accepts `keyof D`; filter, sort
+ * and every other control stay over the own fields. Since 0.1.148.
+ */
+export type DecoratedControls<T, D> = Omit<UniqueryControls<OwnOf<T>, NavOf<T>>, "$select"> & {
+  $select?: SelectExpr<OwnOf<T> & D>;
+};
+
+/** A read query over `T` — {@link DecoratedControls} for the controls. Since 0.1.148. */
+export type DecoratedQuery<T, D> = Omit<Uniquery<OwnOf<T>, NavOf<T>>, "controls"> & {
+  controls?: DecoratedControls<T, D>;
+};
 
 /** Extract own (non-nav) properties from an Atscript annotated type. */
 export type OwnOf<T> = T extends { __ownProps: infer O } ? O : DataOf<T>;

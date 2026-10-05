@@ -124,9 +124,10 @@ async function boot(
 
   const http = await bootHttp(IssueCtrl);
   const findMany = vi.spyOn(issues, "findMany");
+  const findOne = vi.spyOn(issues, "findOne");
   const send = (method: string, path: string, body?: unknown) =>
     http(method, `/${prefix}/${path}`, body);
-  return { send, calls, handled, findMany };
+  return { send, calls, handled, findMany, findOne };
 }
 
 beforeAll(async () => {
@@ -227,12 +228,14 @@ describe("actionRowScope(action, ctx) — the action gate (purpose: execute)", (
     expect(handled).toEqual([{ id: 1 }]);
   });
 
-  it("'rows': the hook sees the loaded rows only; out-of-scope ids follow onDisabledRows", async () => {
+  it("'rows': without an overlay the hook is asked first, with the request's ids; out-of-scope ids follow onDisabledRows", async () => {
     const { send, calls, handled } = await boot();
     const res = await send("POST", "actions/bulk", { ids: [{ id: 1 }, { id: 2 }, { id: 99 }] });
     expect(res.status).toBe(201);
     expect(res.body.ids).toEqual([{ id: 1 }]);
-    expect(calls).toEqual([{ action: "bulk", purpose: "execute", ids: [{ id: 1 }, { id: 2 }] }]);
+    expect(calls).toEqual([
+      { action: "bulk", purpose: "execute", ids: [{ id: 1 }, { id: 2 }, { id: 99 }] },
+    ]);
     const rejected = await send("POST", "actions/bulkRows", { ids: [{ id: 1 }, { id: 2 }] });
     expect(rejected.status).toBe(409);
     expect(rejected.body.ids).toEqual([{ id: 2 }]);
@@ -253,9 +256,10 @@ describe("actionRowScope(action, ctx) — the action gate (purpose: execute)", (
   });
 
   it("an action the hook does not scope runs with no scope query", async () => {
-    const { send, findMany } = await boot();
+    const { send, findMany, findOne } = await boot();
     expect((await send("POST", "actions/approve", { ids: { id: 2 } })).status).toBe(201);
     expect(findMany).not.toHaveBeenCalled();
+    expect(findOne).not.toHaveBeenCalled();
   });
 });
 

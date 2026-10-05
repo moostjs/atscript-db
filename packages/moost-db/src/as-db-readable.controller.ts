@@ -1,4 +1,8 @@
-import { type TAtscriptAnnotatedType, type TAtscriptDataType } from "@atscript/typescript/utils";
+import {
+  ValidatorError,
+  type TAtscriptAnnotatedType,
+  type TAtscriptDataType,
+} from "@atscript/typescript/utils";
 import type {
   AtscriptDbReadable,
   FilterExpr,
@@ -54,7 +58,7 @@ import {
   type TDelegateSource,
   type TDelegation,
 } from "./actions/delegation";
-import { validateMultiId } from "./actions/id-validation";
+import { validateMultiId, validateSingleId } from "./actions/id-validation";
 import {
   parseQueryTargetBody,
   RESOLVE_TARGET,
@@ -66,8 +70,11 @@ import {
   ACTION_SCOPE,
   ACTION_SCOPED,
   nonEmptyFilter,
+  ROW_RESOLVE_IDS,
+  ROW_RESOLVES,
   withOverlay,
 } from "./actions/row-scope";
+import type { TDbRowIdInput, TDbRowIdPurpose, TDbRowIdsContext } from "./actions/types";
 import {
   candidateIds,
   createScopeContext,
@@ -78,17 +85,30 @@ import {
 import {
   actionRowFields,
   alignRowsToIds,
+  applyResolvedIds,
   findRowsByIds,
   idKey,
   projectRow,
   requiredFieldsOf,
+  type TAppliedIds,
   type TRowsByIdSource,
 } from "./actions/rows-by-id";
 import { judgeRows, verdictReason } from "./actions/verdict";
 import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
 import { DbEndpoint } from "./db-endpoint";
+import { buildDecorationIndex, type TDecorationIndex } from "./decorations/decoration-index";
+import {
+  DecorationPlanner,
+  NO_DECORATIONS,
+  stripDecorations,
+  stripsNothing,
+  type TDecorationPlan,
+  type TDecorationRead,
+} from "./decorations/decoration-planner";
+import { mapShape, selectShape } from "./select-shape";
+import { getAtscriptDbMate } from "./mate";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
-import { FieldCapabilityIndex, writeOnlyVerdict } from "./meta/field-capabilities";
+import { FieldCapabilityIndex, writeOnlyVerdict, type TGateOp } from "./meta/field-capabilities";
 import { insightError, unknownInsight, unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
@@ -139,6 +159,15 @@ export interface TDbDecorateContext {
   projection: UniqueryControls["$select"] | undefined;
   /** The request's parsed controls (`$select`, `$with`, `$actions`, …). Read-only by convention. */
   controls: Record<string, unknown>;
+  /**
+   * The declared decoration keys ([`@DbDecorations`](./decorations/db-decorations.decorator.ts))
+   * this response must carry — the ones the client asked for (all of them
+   * without a `$select`) whose sources are visible and kept by
+   * `transformProjection`. Compute only these; a declared key not listed is
+   * removed from the rows after the hook. Empty when none is declared.
+   * Undeclared (`$`-prefixed) keys are not affected. Since 0.1.148.
+   */
+  decorations: ReadonlySet<string>;
 }
 
 /**
@@ -204,6 +233,23 @@ function writeOnlyError(path: string, op: "filter" | "sort"): HttpError {
 type TSealedControls = Record<string, unknown> & {
   $select: UniqueryControls["$select"] | undefined;
 };
+
+/**
+ * Validated `@DbDecorations` per readable and controller class — a
+ * `FOR_EVENT` controller is constructed per event, and must not re-validate
+ * (nor re-serialize) its declaration each time.
+ */
+const decorationIndexes = new WeakMap<object, Map<Function, TDecorationIndex>>();
+
+/** A read's projection once the final `$select` is known — see `AsDbReadableController._projectRead`. */
+interface TProjectedRead {
+  /** The final `$select` (sealed, widened by the preferred id). */
+  readonly select: UniqueryControls["$select"] | undefined;
+  /** The paths the final projection keeps (`null` = every field); resolved once, on first use. */
+  kept(): string[] | null;
+  /** The decoration step; `undefined` without `@DbDecorations`. */
+  readonly read: TDecorationRead | undefined;
+}
 
 /**
  * Row-level actions sharing one {@link AsDbReadableController.actionRowScope}
@@ -291,7 +337,11 @@ export class AsDbReadableController<
     if (current && current.signature === FieldCapabilityIndex.adapterSignature(this.readable)) {
       return current;
     }
-    const index = new FieldCapabilityIndex(this.readable, this._writeOnlySet);
+    const index = new FieldCapabilityIndex(
+      this.readable,
+      this._writeOnlySet,
+      this._decorations?.requires,
+    );
     this._capabilities = index;
     return index;
   }
@@ -352,8 +402,14 @@ export class AsDbReadableController<
   private readonly _gateFieldsMemo = new WeakMap<TDbActionEnvelope, ReadonlySet<string>>();
   /** `true` when a subclass overrides {@link allowedActions}. */
   private readonly _hasAllowedActions: boolean;
+  /** The class's validated `@DbDecorations` (since 0.1.148), `undefined` when none is declared. */
+  private readonly _decorations: TDecorationIndex | undefined;
+  /** The decoration plumbing of {@link _decorations} — see `DecorationPlanner`. */
+  private readonly _planner: DecorationPlanner | undefined;
   /** `true` when a subclass overrides {@link actionRowScope} (the gate, `$actions` and `/meta/actions` apply it). */
   private readonly _hasActionRowScope: boolean;
+  /** @internal `true` when a subclass overrides {@link resolveRowIds} (every id-addressed endpoint calls it; since 0.1.148). */
+  readonly [ROW_RESOLVES]: boolean;
   /** `true` when the class declares `@DbActionsFrom` (since 0.1.147). */
   private readonly _hasDelegations: boolean;
   /** `transformProjection` is overridden (a delegation's id paths are checked against it). */
@@ -390,6 +446,9 @@ export class AsDbReadableController<
     this._writeOnlySet = this._writeOnlyOf(resolved);
     this._derivedSource = this._derivedSourcesOf(resolved);
     this._invertibleFields = this._collectInvertibleFields();
+    this._decorates = typeof this.decorateRows === "function";
+    // Before the first `capabilities` read: the decorations are virtual entries of the index.
+    this._decorations = this._resolveDecorations(new.target);
     this._searchFallbackFields = this._collectSearchFallbackFields();
     this._preferredIdSet = new Set(resolved.preferredId ?? []);
     this._quantityRefByPath = this._collectQuantityRefs();
@@ -397,11 +456,11 @@ export class AsDbReadableController<
       AsReadableController.prototype as unknown as { applyMetaOverlay: unknown }
     ).applyMetaOverlay;
     this._overlayIsNoOp = (this.applyMetaOverlay as unknown) === defaultOverlay;
-    this._decorates = typeof this.decorateRows === "function";
     const proto = AsDbReadableController.prototype;
     this._hasRowOverlay =
       this.transformOne !== proto.transformOne || this.transformFilter !== proto.transformFilter;
     this._hasActionRowScope = this.actionRowScope !== proto.actionRowScope;
+    this[ROW_RESOLVES] = this.resolveRowIds !== proto.resolveRowIds;
     this._hasProjectionHook = this.transformProjection !== proto.transformProjection;
     this._hasAllowedActions = this.allowedActions !== proto.allowedActions;
     this._hasDelegations = hasActionDelegations(new.target);
@@ -418,6 +477,44 @@ export class AsDbReadableController<
       sealedFor: (readable, prefix = "") => this._sealedFor(readable, prefix),
     };
     this._idOpts = scoped ? { isFieldVisible: isVisible } : undefined;
+    this._planner =
+      this._decorations &&
+      new DecorationPlanner(this._decorations, {
+        isVisible,
+        scoped,
+        preferred: this._preferredIdSet,
+        capabilities: () => this.capabilities,
+        firstVisibleField: () => this._invertibleFields.find((path) => isVisible(path)),
+      });
+  }
+
+  /**
+   * The class's `@DbDecorations`, validated against the bound readable once
+   * per class and readable (a `[moost-db]` error when invalid); warns once
+   * when `decorateRows` is not implemented.
+   */
+  private _resolveDecorations(ctor: Function): TDecorationIndex | undefined {
+    const meta = getAtscriptDbMate().read(ctor)?.atscript_db_decorations;
+    if (!meta) return undefined;
+    let perCtor = decorationIndexes.get(this.readable);
+    if (!perCtor) decorationIndexes.set(this.readable, (perCtor = new Map()));
+    let index = perCtor.get(ctor);
+    if (!index) {
+      index = buildDecorationIndex(ctor.name, meta, {
+        flatMap: this.readable.flatMap,
+        relations: this.readable.relations,
+        navFields: FieldCapabilityIndex.navPathsOf(this.readable),
+        ownPaths: new Set(this._invertibleFields),
+        writeOnly: this._writeOnlySet,
+      });
+      perCtor.set(ctor, index);
+      if (!this._decorates) {
+        this.logger.warn(
+          `@DbDecorations declares ${index.keys.join(", ")} but ${ctor.name} does not implement decorateRows() — the keys are never filled`,
+        );
+      }
+    }
+    return index;
   }
 
   /**
@@ -442,7 +539,7 @@ export class AsDbReadableController<
 
   private _collectInvertibleFields(): string[] {
     const out: string[] = [];
-    const nav = this.capabilities.navFields;
+    const nav = FieldCapabilityIndex.navPathsOf(this.readable);
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
       if (selfOrAncestor(fd.path, nav) !== undefined) continue;
@@ -548,7 +645,11 @@ export class AsDbReadableController<
   }): HttpError | undefined {
     const capabilities = this.capabilities;
     const isVisible = this.fieldVisibility.isVisible;
-    const refs = collectQueryPaths(parsed);
+    // Aggregate mode as the core defines it: `$groupBy`, or computed entries
+    // (aggregates, calendar buckets) in `$select`.
+    const select = (parsed.controls as { $select?: unknown } | undefined)?.$select;
+    const computed = Array.isArray(select) && select.some((item) => typeof item !== "string");
+    const refs = collectQueryPaths(parsed, computed || undefined);
     if (refs.unsupportedOperator !== undefined) {
       return badRequest(
         refs.unsupportedOperator,
@@ -582,8 +683,10 @@ export class AsDbReadableController<
     );
     if (withRelError) return withRelError;
     for (const op of PATH_OPS) {
+      // A plain `$select` field of an aggregate query must be a `$groupBy` key.
+      const gateOp: TGateOp = op === "select" && refs.aggregateMode ? "groupedSelect" : op;
       for (const path of refs[op]) {
-        const verdict = capabilities.check(path, op, isVisible);
+        const verdict = capabilities.check(path, gateOp, isVisible);
         if (verdict) return badRequest(verdict.path, verdict.message);
       }
     }
@@ -1212,34 +1315,24 @@ export class AsDbReadableController<
    * The rows the row-level action `actionName` may run on (since 0.1.145),
    * as an extra row filter; `undefined` or `{}` = no restriction (the
    * default). Enforced by the action gate — the action's ids / rows are
-   * loaded under {@link rowOverlay}, then checked against this filter, so an
-   * id outside it gets the same 404 "Row not found for action identifier"
+   * loaded under {@link rowOverlay}, then checked against this filter (or —
+   * without an overlay — the filter joins the load), so an id outside it gets
+   * the same 404 "Row not found for action identifier"
    * as a missing one — and reflected in `$actions` and
    * `GET /meta/actions`, which list the action only on rows inside it.
    *
-   * Since 0.1.147 the hook receives the candidate rows (`ctx`), so a scope
-   * can depend on them — e.g. derive `{ ticketKey: { $in: … } }` from a
-   * related table read for exactly these rows:
-   *
-   * | `ctx.purpose` | asked by | `ctx.ids` |
-   * | --- | --- | --- |
-   * | `"execute"` | the action gate | the loaded ids / rows (≤ `maxIds`; one batch of a query target) |
-   * | `"rows"` | `$actions` on a read (and a view's delegated verdicts) | the read's rows |
-   * | `"available"` | `GET /meta/actions/:id` | the one row |
-   *
-   * - Called only with at least one candidate, at most once per action per
-   *   evaluation; `ctx.ids` is the same array object for every action of
-   *   one evaluation (memoize on it with a `WeakMap`).
-   * - Candidates are already inside the row overlay — ids that do not exist
-   *   or fall outside it never reach the hook.
-   * - The result only restricts (`ids ∧ rowOverlay ∧ scope`); a throw fails
-   *   the request — never a silent "allow".
-   * - The filter runs straight against the bound readable: it may use
-   *   fields {@link hasField} hides, and nothing of it (nor of
-   *   `ctx.loadRows`) reaches the response. Equal filters — the same object,
-   *   or structurally equal ones — share one id-only query.
-   * - Runs after {@link prepareRequest} and, on the action route, after the
-   *   request body is read (it needs the ids).
+   * The hook receives the candidate rows (`ctx`), so a scope can depend on
+   * them — what `ctx.purpose`, `ctx.ids` and `ctx.loadRows` hold, and when the
+   * hook is asked before any load, is documented on {@link TDbActionScopeContext}.
+   * Called only with at least one candidate, at most once per action per
+   * evaluation. An answer restricting nothing (`undefined`, `null`, `{}`)
+   * makes the gate load no row at all; a restriction is folded into the one
+   * row load. The result only restricts (`ids ∧ rowOverlay ∧ scope`); a throw
+   * fails the request — never a silent "allow". The filter runs straight
+   * against the bound readable: it may use fields {@link hasField} hides, and
+   * nothing of it reaches the response. Runs after {@link prepareRequest} and,
+   * on the action route, after the request body is read and
+   * {@link resolveRowIds}.
    *
    * Not overriding it costs nothing; a one-parameter override keeps working.
    * moost-db always passes `ctx` — it is optional in the signature only so
@@ -1317,6 +1410,43 @@ export class AsDbReadableController<
     return projection;
   }
 
+  // ── Declared decorations (@DbDecorations, since 0.1.148) ───────────────
+
+  /**
+   * The shared projection step of `/query`, `/pages`, `/geo` and `/one`:
+   * splits the declared decoration keys out of the wire `$select`
+   * ({@link DecorationPlanner.plan}), runs {@link transformProjection} on the
+   * rest (decoration keys never reach it — a permission layer needs no
+   * change; their `requires` paths are added so the hook's inputs are read),
+   * then seals every projection level. `finish` completes it once the
+   * endpoint is past its own checks: the preferred-id widening (an
+   * `HttpError` for a mixed `$select`) and the decoration step — what every
+   * read endpoint then passes to {@link _runReadWithActions}.
+   */
+  private async _projectRead(controls: Record<string, unknown>): Promise<{
+    sealed: TSealedControls;
+    finish: () => TProjectedRead | HttpError;
+  }> {
+    const plan: TDecorationPlan | undefined = this._planner?.plan(controls.$select);
+    const transformed = await this.transformProjection(
+      plan ? plan.select : (controls.$select as UniqueryControls["$select"]),
+    );
+    const sealed = this._sealControls(controls, transformed);
+    const finish = (): TProjectedRead | HttpError => {
+      const select = this.widenPreferredIdProjection(sealed.$select);
+      if (select instanceof HttpError) return select;
+      let kept: string[] | null | undefined;
+      const keptPaths = (): string[] | null =>
+        kept === undefined ? (kept = this._resolveProjectionForAugmenter(select)) : kept;
+      return {
+        select,
+        kept: keptPaths,
+        read: plan && this._planner!.serve(plan, keptPaths()),
+      };
+    };
+    return { sealed, finish };
+  }
+
   private widenPreferredIdProjection(
     projection?: UniqueryControls["$select"],
   ): UniqueryControls["$select"] | undefined | HttpError {
@@ -1358,15 +1488,10 @@ export class AsDbReadableController<
   private _widenMapProjection(
     projection: Record<string, unknown>,
   ): UniqueryControls["$select"] | undefined | HttpError {
-    const entries = Object.entries(projection);
-    if (entries.length === 0) return projection as UniqueryControls["$select"];
-
-    const included = new Set<string>();
-    const excluded = new Set<string>();
-    for (const [k, v] of entries) {
-      if (v === 1 || v === true) included.add(k);
-      else if (v === 0 || v === false) excluded.add(k);
-    }
+    if (Object.keys(projection).length === 0) return projection as UniqueryControls["$select"];
+    const shape = mapShape(projection);
+    const included = new Set(shape.included);
+    const excluded = new Set(shape.excluded);
     if (included.size > 0 && excluded.size > 0) {
       return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
     }
@@ -1448,15 +1573,10 @@ export class AsDbReadableController<
   private _widenQuantityMapProjection(
     projection: Record<string, unknown>,
   ): UniqueryControls["$select"] | undefined | HttpError {
-    const entries = Object.entries(projection);
-    if (entries.length === 0) return projection as UniqueryControls["$select"];
-
-    const included = new Set<string>();
-    const excluded = new Set<string>();
-    for (const [k, v] of entries) {
-      if (v === 1 || v === true) included.add(k);
-      else if (v === 0 || v === false) excluded.add(k);
-    }
+    if (Object.keys(projection).length === 0) return projection as UniqueryControls["$select"];
+    const shape = mapShape(projection);
+    const included = new Set(shape.included);
+    const excluded = new Set(shape.excluded);
     if (included.size > 0 && excluded.size > 0) {
       return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
     }
@@ -1483,26 +1603,13 @@ export class AsDbReadableController<
   private _resolveProjectionForAugmenter(
     select: UniqueryControls["$select"] | undefined,
   ): string[] | null {
-    if (select === undefined) return null;
-    if (Array.isArray(select)) {
-      const out: string[] = [];
-      const seen = new Set<string>();
-      for (const item of select) {
-        if (typeof item === "string" && !seen.has(item)) {
-          seen.add(item);
-          out.push(item);
-        }
-      }
-      return out;
+    const shape = selectShape(select);
+    if (shape.kind === "all") return null;
+    if (shape.kind === "list") {
+      return [...new Set(shape.items.filter((item): item is string => typeof item === "string"))];
     }
-    const obj = select as Record<string, unknown>;
-    const included: string[] = [];
-    const excluded: string[] = [];
-    for (const [k, v] of Object.entries(obj)) {
-      if (v === 1 || v === true) included.push(k);
-      else if (v === 0 || v === false) excluded.push(k);
-    }
-    if (included.length > 0 && excluded.length === 0) return included;
+    const { included, excluded } = shape;
+    if (included.length > 0 && excluded.length === 0) return [...included];
     if (excluded.length > 0 && included.length === 0) {
       return this._invertExclusion(new Set(excluded));
     }
@@ -1578,7 +1685,7 @@ export class AsDbReadableController<
 
   private async _prepareAugmentation(
     controls: Record<string, unknown>,
-    select: UniqueryControls["$select"] | undefined,
+    projected: TProjectedRead,
   ): Promise<TAugmentationPrep | null> {
     if (!controls.$actions) return null;
     const [own, delegations] = await Promise.all([
@@ -1594,7 +1701,7 @@ export class AsDbReadableController<
       scopeOverlay = this.rowOverlay();
       scopeOverlay.catch(() => {});
     }
-    let resolvedProjection = this._resolveProjectionForAugmenter(select);
+    let resolvedProjection = projected.kept();
     let widenedSelect =
       resolvedProjection === null
         ? null
@@ -1723,6 +1830,19 @@ export class AsDbReadableController<
    */
   [ACTION_OVERLAY](): Promise<FilterExpr | undefined> {
     return this.rowOverlay();
+  }
+
+  /**
+   * @internal {@link resolveRowIds} for an action's validated ids (since
+   * 0.1.148): the output validated, duplicate identities collapsed, and the
+   * ids as the client sent them kept for the error bodies and summaries.
+   */
+  async [ROW_RESOLVE_IDS](
+    ids: readonly Record<string, unknown>[],
+    ctx: TDbRowIdsContext,
+  ): Promise<TAppliedIds> {
+    const resolved = (await this._runResolveRowIds(ids, ctx)) as Record<string, unknown>[];
+    return applyResolvedIds(ids, resolved);
   }
 
   /** @internal {@link actionRowScope} for the gate's loaded candidates (since 0.1.147). */
@@ -2082,11 +2202,17 @@ export class AsDbReadableController<
    * (reach them through the parent row), a `/one` 404, or value-help
    * controllers.
    *
-   * Convention (not enforced): name decoration keys with a `$` prefix, like
-   * `$actions` and `$distance`, so they can never collide with a field name.
-   * Do not overwrite `$actions` or `$disabledReasons`. Columns the
-   * hook needs but the client did not select must be added in
-   * {@link transformProjection} — they are then part of the response.
+   * Two kinds of keys. **Undeclared** keys: name them with a `$` prefix, like
+   * `$actions` and `$distance`, so they can never collide with a field; they
+   * are always kept and a client cannot select them. **Declared** keys
+   * ({@link DbDecorations}, since 0.1.148): list them with `@DbDecorations`,
+   * and a client may name them in `$select`; compute only `ctx.decorations`,
+   * read your inputs from the columns `requires` names, and any declared key
+   * not in `ctx.decorations` — and every column added only for the hook — is
+   * removed from the rows afterwards. Do not overwrite `$actions` or
+   * `$disabledReasons`. Without `@DbDecorations`, columns the hook needs but
+   * the client did not select must be added in {@link transformProjection} —
+   * they are then part of the response.
    *
    * ```ts
    * protected async decorateRows(rows: Record<string, unknown>[], ctx: TDbDecorateContext) {
@@ -2113,10 +2239,11 @@ export class AsDbReadableController<
     rows: Record<string, unknown>[],
     prep: TAugmentationPrep | null,
     ctx: TDbDecorateContext,
+    read?: TDecorationRead,
   ): void | Promise<void> {
     const overlay = prep?.scopeOverlay;
     if (!prep || (!overlay && prep.delegations.length === 0)) {
-      return this._augmentAndDecorate(rows, prep, ctx);
+      return this._augmentAndDecorate(rows, prep, ctx, read);
     }
     return (async () => {
       const names = prep.envelopes.map((e) => e.info.name);
@@ -2124,7 +2251,7 @@ export class AsDbReadableController<
         overlay ? this._scopeMasks(rows, names, "rows", overlay) : undefined,
         Promise.all(prep.delegations.map((d) => this._delegatedRowVerdicts(rows, d))),
       ]);
-      await this._augmentAndDecorate(rows, prep, ctx, masks, delegated);
+      await this._augmentAndDecorate(rows, prep, ctx, read, masks, delegated);
     })();
   }
 
@@ -2137,6 +2264,7 @@ export class AsDbReadableController<
     rows: Record<string, unknown>[],
     prep: TAugmentationPrep | null,
     ctx: TDbDecorateContext,
+    read: TDecorationRead | undefined,
     outOfScope?: ReadonlyMap<string, readonly boolean[]>,
     delegated?: ReadonlyArray<ReadonlyArray<TDbAvailableActions | undefined>>,
   ): void | Promise<void> {
@@ -2150,7 +2278,11 @@ export class AsDbReadableController<
       });
       if (prep.delegations.length > 0) mergeDelegatedActions(rows, delegated ?? []);
     }
-    return this._decorates ? this.decorateRows!(rows, ctx) : undefined;
+    const decorated = this._decorates ? this.decorateRows!(rows, ctx) : undefined;
+    if (!read || stripsNothing(read)) return decorated;
+    const strip = (): void => stripDecorations(rows, read);
+    if (decorated === undefined) return strip();
+    return Promise.resolve(decorated).then(strip);
   }
 
   // ── @DbActionsFrom (since 0.1.147) ─────────────────────────────────────
@@ -2252,12 +2384,15 @@ export class AsDbReadableController<
    */
   protected override resolveMeta(): TMetaResponse | Promise<TMetaResponse> {
     const own = super.resolveMeta();
-    if (!this._hasDelegations && !this._hasFieldOverridden) return own;
+    if (!this._hasDelegations && !this._hasFieldOverridden && !this._planner) return own;
     return (async () => {
-      const [meta, delegated] = await Promise.all([
+      const [overlaid, delegated] = await Promise.all([
         own,
         this._hasDelegations ? this._delegatedInfos() : [],
       ]);
+      // After `applyMetaOverlay`: an overlay never sees the decoration `fields`
+      // entries, so a pruning-by-visibility one cannot drop them.
+      const meta = this._planner ? this._planner.meta(overlaid) : overlaid;
       const visible = this._applyIndexVisibility(meta);
       return delegated.length > 0
         ? { ...visible, actions: [...visible.actions, ...delegated] }
@@ -2331,7 +2466,8 @@ export class AsDbReadableController<
     names: readonly string[],
   ): Promise<TDbAvailableActions> {
     await this.parseRequest("availableActions");
-    return this._availableActions(id, names);
+    // The source decides: its own `resolveRowIds` (`"available"`) maps the id.
+    return (await this._availableResolved(id, names)).own;
   }
 
   /** @internal Source side of a delegation: the `names` the caller may run (`allowedActions`). */
@@ -2359,14 +2495,14 @@ export class AsDbReadableController<
     endpoint: Exclude<TDbDecorateEndpoint, "one">,
     queryObj: Uniquery<any, any>,
     controls: Record<string, unknown>,
-    select: UniqueryControls["$select"] | undefined,
+    projected: TProjectedRead,
     exec: (
       q: Uniquery<any, any>,
       strategy: Awaited<ReturnType<AsDbReadableController["_resolveReadStrategy"]>>,
     ) => Promise<R>,
   ): Promise<R> {
     const [prep, strategy] = await Promise.all([
-      this._prepareAugmentation(controls, select),
+      this._prepareAugmentation(controls, projected),
       this._resolveReadStrategy(controls),
     ]);
 
@@ -2378,13 +2514,122 @@ export class AsDbReadableController<
       : queryObj;
 
     const result = await exec(initialQuery, strategy);
-    const pending = this._finishRows(result.data as Record<string, unknown>[], prep, {
-      endpoint,
-      projection: select,
-      controls,
-    });
+    const pending = this._finishRows(
+      result.data as Record<string, unknown>[],
+      prep,
+      {
+        endpoint,
+        projection: projected.select,
+        controls,
+        decorations: projected.read?.served ?? NO_DECORATIONS,
+      },
+      projected.read,
+    );
     if (pending) await pending;
     return result;
+  }
+
+  /**
+   * Maps the ids an id-addressed endpoint received to the rows' current ids
+   * (since 0.1.148) — the seam for stale or alias ids, e.g. a natural key that
+   * was renamed. Called once per request, after {@link prepareRequest} and
+   * after the request's own validation, before anything reads the row, by:
+   *
+   * | `ctx.purpose` | endpoint | `ids` |
+   * | --- | --- | --- |
+   * | `"one"` | `GET /one/:id`, `GET /one?…` | one id: the path string, or the `?`-form identification object |
+   * | `"available"` | `GET /meta/actions/:id`, `?…` (and a view asking its source) | one id, as above |
+   * | `"remove"` | `DELETE /:id`, `DELETE /?…` (`AsDbController`) | one id, as above |
+   * | `"action"` | an action route | the body's validated ids (one for a `'row'` action) |
+   *
+   * Contract:
+   *
+   * - Return one id per input id, index-aligned (anything else is a 500). An
+   *   id that already names a row must come back UNCHANGED — the current
+   *   holder of a key wins over an alias; so must an id you cannot resolve
+   *   (never throw for an unknown alias: a custom error is an oracle — the
+   *   endpoint then answers its normal miss).
+   * - The output is validated (a server bug is a 500, never a client 400): a
+   *   scalar is resolved like a path scalar (primary key first, then the
+   *   visible unique keys, inside the row overlay); an object must be one of
+   *   the visible identifications ({@link idSource}); an `"action"` id must
+   *   be such an object.
+   * - The resolved id is never trusted for access: the endpoint still reads
+   *   or deletes it under {@link rowOverlay} and the visible identifications.
+   *   `ctx.overlay` is that overlay — resolve INSIDE it when an alias could
+   *   name several rows, so a row the caller can't reach never shadows one
+   *   they can. Don't log or return the canonical id in errors.
+   * - Handlers (`@DbActionID()`, `useDbActionId()`), {@link rowOverlay} reads,
+   *   {@link actionRowScope} and `onRemove` / `guardRemove` receive the
+   *   resolved ids; error bodies and `summary()` echo the ids the client sent.
+   * - Write bodies (`POST` / `PUT` / `PATCH`) are not resolved — use
+   *   `onWrite`. Not called by value-help controllers, `$actions` on a read
+   *   or a query target. Not overriding it costs nothing.
+   *
+   * It is NOT overridden by {@link resolveRowFilter}, which does not take part
+   * in `/one` for real tables and views.
+   *
+   * ```ts
+   * protected async resolveRowIds(ids: readonly TDbRowIdInput[], ctx: TDbRowIdsContext) {
+   *   return Promise.all(ids.map(async (id) => {
+   *     const key = typeof id === "object" ? id.code : id
+   *     if (typeof key !== "string") return id
+   *     // the current holder of the key wins; consult the alias table on a miss
+   *     if (await this.readable.count({ filter: { code: key } })) return id
+   *     const alias = await aliases.findOne({ filter: { oldCode: key } })
+   *     return alias ? (typeof id === "object" ? { code: alias.newCode } : alias.newCode) : id
+   *   }))
+   * }
+   * ```
+   *
+   * @since 0.1.148
+   */
+  protected resolveRowIds(
+    ids: readonly TDbRowIdInput[],
+    _ctx: TDbRowIdsContext,
+  ): readonly TDbRowIdInput[] | Promise<readonly TDbRowIdInput[]> {
+    return ids;
+  }
+
+  /** {@link resolveRowIds} with its output validated (a server bug is a 500). */
+  private async _runResolveRowIds(
+    ids: readonly TDbRowIdInput[],
+    ctx: TDbRowIdsContext,
+  ): Promise<readonly TDbRowIdInput[]> {
+    const out = await this.resolveRowIds(ids, ctx);
+    if (!Array.isArray(out) || out.length !== ids.length) {
+      throw new HttpError(500, "resolveRowIds must return one id per request id");
+    }
+    const source = this.idSource;
+    for (const id of out as readonly unknown[]) {
+      const scalar = typeof id === "string" || typeof id === "number" || typeof id === "boolean";
+      if (scalar && ctx.purpose !== "action") continue;
+      try {
+        validateSingleId(id, source, { strictTypes: ctx.purpose === "action" });
+      } catch (error) {
+        if (error instanceof ValidatorError) {
+          throw new HttpError(500, "resolveRowIds returned an invalid id");
+        }
+        throw error;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * @internal The one id of an id-addressed endpoint through
+   * {@link resolveRowIds} (identity, at no cost, when it is not overridden)
+   * and the row overlay it was resolved inside — computed once, for the
+   * endpoint's read or delete under that overlay.
+   */
+  protected async _resolveWithOverlay(
+    id: TDbRowIdInput,
+    purpose: Exclude<TDbRowIdPurpose, "action">,
+  ): Promise<{ id: TDbRowIdInput; overlay: FilterExpr | undefined }> {
+    const overlay = await this.rowOverlay();
+    if (!this[ROW_RESOLVES]) return { id, overlay };
+    const [resolved] = await this._runResolveRowIds([id], { purpose, overlay });
+    return { id: resolved, overlay };
   }
 
   /**
@@ -2393,7 +2638,8 @@ export class AsDbReadableController<
    * identifications (`_idOpts`). `scope` (the row overlay) restricts which
    * rows count while the id is pinned, so a row outside it never shadows one
    * inside it. Readables without it (partial mocks) fall back to
-   * `resolveIdFilter`.
+   * `resolveIdFilter`. Not an alias seam: `/one` reads through `findOneByRow`
+   * on every real table or view — map stale ids in {@link resolveRowIds}.
    */
   protected resolveRowFilter(id: unknown, scope?: FilterExpr): Promise<FilterExpr | null> {
     const readable = this.readable;
@@ -2521,12 +2767,11 @@ export class AsDbReadableController<
 
     // ── Regular query path ──────────────────────────────────────────
 
-    const [transformedFilter, transformedSelect] = await Promise.all([
+    const [transformedFilter, { sealed, finish }] = await Promise.all([
       this.transformFilter(clientFilter),
-      this.transformProjection(controls.$select as UniqueryControls["$select"]),
+      this._projectRead(controls),
     ]);
     const filter = this.applySearchFallback(transformedFilter, controls);
-    const sealed = this._sealControls(controls, transformedSelect);
 
     if (controls.$count) {
       return this.readable.count({
@@ -2535,9 +2780,9 @@ export class AsDbReadableController<
       } as Uniquery<any, any>);
     }
 
-    const select = this.widenPreferredIdProjection(sealed.$select);
-    if (select instanceof HttpError) {
-      return select;
+    const projected = finish();
+    if (projected instanceof HttpError) {
+      return projected;
     }
 
     const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
@@ -2546,7 +2791,7 @@ export class AsDbReadableController<
       filter,
       controls: {
         ...sealed,
-        $select: select,
+        $select: projected.select,
         $limit: (controls.$limit as number | undefined) || 1000,
         $threshold: threshold,
       },
@@ -2556,7 +2801,7 @@ export class AsDbReadableController<
       "query",
       queryObj,
       controls,
-      select,
+      projected,
       async (q, strategy): Promise<{ data: DataType[] }> => {
         switch (strategy.kind) {
           case "vector":
@@ -2607,15 +2852,14 @@ export class AsDbReadableController<
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
 
-    const [transformedFilter, transformedSelect] = await Promise.all([
+    const [transformedFilter, { sealed, finish }] = await Promise.all([
       this.transformFilter(clientFilter),
-      this.transformProjection(controls.$select as UniqueryControls["$select"]),
+      this._projectRead(controls),
     ]);
     const filter = this.applySearchFallback(transformedFilter, controls);
-    const sealed = this._sealControls(controls, transformedSelect);
-    const select = this.widenPreferredIdProjection(sealed.$select);
-    if (select instanceof HttpError) {
-      return select;
+    const projected = finish();
+    if (projected instanceof HttpError) {
+      return projected;
     }
 
     const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
@@ -2624,7 +2868,7 @@ export class AsDbReadableController<
       filter,
       controls: {
         ...sealed,
-        $select: select,
+        $select: projected.select,
         $skip: skip,
         $limit: size,
         $threshold: threshold,
@@ -2635,7 +2879,7 @@ export class AsDbReadableController<
       "pages",
       query as Uniquery<any, any>,
       controls,
-      select,
+      projected,
       async (q, strategy): Promise<{ data: DataType[]; count: number }> => {
         switch (strategy.kind) {
           case "vector":
@@ -2716,14 +2960,13 @@ export class AsDbReadableController<
     }
     const clientFilter = await this._relationOverlay(parsed);
 
-    const [filter, transformedSelect] = await Promise.all([
+    const [filter, { sealed, finish }] = await Promise.all([
       this.transformFilter(clientFilter),
-      this.transformProjection(controls.$select as UniqueryControls["$select"]),
+      this._projectRead(controls),
     ]);
-    const sealed = this._sealControls(controls, transformedSelect);
-    const select = this.widenPreferredIdProjection(sealed.$select);
-    if (select instanceof HttpError) {
-      return select;
+    const projected = finish();
+    if (projected instanceof HttpError) {
+      return projected;
     }
 
     const paginated = controls.$page !== undefined || controls.$size !== undefined;
@@ -2736,7 +2979,7 @@ export class AsDbReadableController<
         ...sealed,
         $center: undefined,
         $index: undefined,
-        $select: select,
+        $select: projected.select,
         ...(paginated
           ? { $skip: (page - 1) * size, $limit: size }
           : { $limit: (controls.$limit as number | undefined) || 1000 }),
@@ -2748,7 +2991,7 @@ export class AsDbReadableController<
         "geo",
         queryObj,
         controls,
-        select,
+        projected,
         async (q): Promise<{ data: DataType[]; count: number }> =>
           (indexName
             ? this.readable.geoSearchWithCount(indexName, point, q)
@@ -2770,7 +3013,7 @@ export class AsDbReadableController<
       "geo",
       queryObj,
       controls,
-      select,
+      projected,
       async (q): Promise<{ data: DataType[] }> => ({
         data: (await (indexName
           ? this.readable.geoSearch(indexName, point, q)
@@ -2849,28 +3092,31 @@ export class AsDbReadableController<
     }
     // `/one` takes no filter; its `$with` sub-filters may carry predicates.
     await this._relationOverlay(parsed);
-    const sealed = this._sealControls(
-      controls,
-      await this.transformProjection(controls.$select as UniqueryControls["$select"]),
-    );
-    const select = this.widenPreferredIdProjection(sealed.$select);
-    if (select instanceof HttpError) {
-      return select;
+    const { sealed, finish } = await this._projectRead(controls);
+    const projected = finish();
+    if (projected instanceof HttpError) {
+      return projected;
     }
 
-    const [prep, overlay] = await Promise.all([
-      this._prepareAugmentation(controls, select),
-      this.rowOverlay(),
+    const [prep, { id: resolvedId, overlay }] = await Promise.all([
+      this._prepareAugmentation(controls, projected),
+      this._resolveWithOverlay(id, "one"),
     ]);
-    const readControls = { ...sealed, $select: prep?.widenedSelect ?? select };
+    const readControls = { ...sealed, $select: prep?.widenedSelect ?? projected.select };
 
-    const item = await this.returnOne(this._findRow(id, overlay, readControls));
+    const item = await this.returnOne(this._findRow(resolvedId, overlay, readControls));
     if (item instanceof HttpError) return item;
-    const pending = this._finishRows([item as unknown as Record<string, unknown>], prep, {
-      endpoint: "one",
-      projection: select,
-      controls,
-    });
+    const pending = this._finishRows(
+      [item as unknown as Record<string, unknown>],
+      prep,
+      {
+        endpoint: "one",
+        projection: projected.select,
+        controls,
+        decorations: projected.read?.served ?? NO_DECORATIONS,
+      },
+      projected.read,
+    );
     if (pending) await pending;
     return item;
   }
@@ -2890,16 +3136,9 @@ export class AsDbReadableController<
   @DbEndpoint("availableActions")
   async availableActionsById(@Param("id") id: string): Promise<TDbAvailableActions> {
     await this.parseRequest("availableActions");
-    const own = await this._availableActions(id);
+    const { own, id: resolved } = await this._availableResolved(id);
     if (!this._hasDelegations) return own;
-    // `@DbActionsFrom`: the source id is this id renamed — only when the
-    // delegation maps every source field from the single-field preferredId.
-    const preferred = this.readable.preferredId;
-    return this._delegatedAvailable(own, (d) =>
-      preferred.length === 1 && d.paths.every((p) => p === preferred[0])
-        ? Object.fromEntries(Object.keys(d.idMap).map((f) => [f, id]))
-        : undefined,
-    );
+    return this._delegatedAvailable(own, (d) => this._sourceIdOf(d, resolved));
   }
 
   /**
@@ -2914,18 +3153,53 @@ export class AsDbReadableController<
   ): Promise<TDbAvailableActions | HttpError> {
     await this.parseRequest("availableActions");
     const idObj = this.extractIdShape(query);
-    const sourceIdOf = (d: TDelegation): Record<string, unknown> | undefined =>
-      d.paths.every((p) => query[p] !== undefined)
-        ? Object.fromEntries(Object.entries(d.idMap).map(([f, p]) => [f, query[p]]))
-        : undefined;
     if (idObj instanceof HttpError) {
       // `@DbActionsFrom`: the query may still name a source id by renaming.
       const delegations = await this._activeDelegations();
-      if (!delegations.some((d) => sourceIdOf(d) !== undefined)) return idObj;
-      return this._delegatedAvailable({ actions: [] }, sourceIdOf);
+      if (!delegations.some((d) => this._sourceIdOf(d, undefined, query) !== undefined)) {
+        return idObj;
+      }
+      return this._delegatedAvailable({ actions: [] }, (d) =>
+        this._sourceIdOf(d, undefined, query),
+      );
     }
-    const own = await this._availableActions(idObj);
-    return this._hasDelegations ? this._delegatedAvailable(own, sourceIdOf) : own;
+    const { own, id: resolved } = await this._availableResolved(idObj);
+    if (!this._hasDelegations) return own;
+    return this._delegatedAvailable(own, (d) => this._sourceIdOf(d, resolved, query));
+  }
+
+  /**
+   * A delegation's source id: each source id field from the row's mapped path
+   * — the resolved `id`'s value, else `fallback`'s (the raw `?` query, which may
+   * name paths outside the identification); `undefined` when a path has none.
+   */
+  private _sourceIdOf(
+    d: TDelegation,
+    id: Record<string, unknown> | undefined,
+    fallback?: Record<string, unknown>,
+  ): Record<string, unknown> | undefined {
+    const value = (path: string): unknown => id?.[path] ?? fallback?.[path];
+    return d.paths.every((path) => value(path) !== undefined)
+      ? Object.fromEntries(Object.entries(d.idMap).map(([field, path]) => [field, value(path)]))
+      : undefined;
+  }
+
+  /**
+   * {@link _availableActions} for a request id (`names`: only those actions):
+   * through {@link resolveRowIds} (`"available"`) first, the row overlay
+   * computed once for both — and the resolved id returned as an object (a
+   * scalar is the single-field `preferredId` value) for the delegated part to
+   * derive its source id from.
+   */
+  private async _availableResolved(
+    id: TDbRowIdInput,
+    names?: readonly string[],
+  ): Promise<{ own: TDbAvailableActions; id: Record<string, unknown> | undefined }> {
+    const { id: resolved, overlay } = await this._resolveWithOverlay(id, "available");
+    const own = await this._availableActions(resolved, overlay, names);
+    if (typeof resolved === "object") return { own, id: resolved };
+    const preferred = this.readable.preferredId;
+    return { own, id: preferred.length === 1 ? { [preferred[0]]: resolved } : undefined };
   }
 
   /**
@@ -3142,12 +3416,10 @@ export class AsDbReadableController<
    */
   private async _availableActions(
     id: unknown,
+    overlay: FilterExpr | undefined,
     names?: readonly string[],
   ): Promise<TDbAvailableActions> {
-    const [envelopes, overlay] = await Promise.all([
-      names ? this._envelopesNamed(names) : this._resolveAugmentEnvelopes(),
-      this.rowOverlay(),
-    ]);
+    const envelopes = await (names ? this._envelopesNamed(names) : this._resolveAugmentEnvelopes());
     if (!envelopes?.length) return { actions: [] };
     const idKeys = id !== null && typeof id === "object" ? Object.keys(id) : [];
     const fieldsOf = envelopes.map((e) => {
@@ -3275,6 +3547,10 @@ export class AsDbReadableController<
         // input; filter/sort are vetoed in the index regardless of annotations.
         entry.writeOnly = true;
       }
+      if (cap.groupable) {
+        // `$groupBy` on this field passes the gate (distinct-values pickers).
+        entry.groupable = true;
+      }
       if (cap.bucketable) {
         // Exactly when the gate accepts a calendar bucket over this field.
         entry.bucketable = true;
@@ -3306,6 +3582,12 @@ export class AsDbReadableController<
       relations,
       fields,
       type: this.getSerializedType(),
+      // Declared display-only fields (since 0.1.148) — not part of `type`.
+      ...(this._decorations && {
+        decorations: this._planner!.serialized(() =>
+          this.serializeForMeta(this._decorations!.type),
+        ),
+      }),
       actions: this.buildActions(),
       crud: this.buildCrud(),
       // OCC pointer (§6.1 of VERSION_PROPOSAL.md). `undefined` for tables

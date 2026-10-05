@@ -74,10 +74,14 @@ weekly[0].week; // string ("YYYY-MM-DD"; hour bucket "YYYY-MM-DDTHH:00"); string
 ## Generic surface
 
 ```ts
-class Client<T extends AtscriptClientShape = AtscriptClientShape>
+class Client<T extends AtscriptClientShape = AtscriptClientShape, D extends object = Record<never, never>>
 ```
 
 `T` is the Atscript-annotated type for the endpoint (e.g. `typeof User`). The constraint accepts any object with the standard Atscript brand fields (`__pk`, `__ownProps`, `__navProps`, `type`); plain interfaces and `Record<string, unknown>` also satisfy it. **`new Client('/users')` (no generic) keeps working** with `unknown` / `Record<string, unknown>` fallbacks — typed callers gain inference, untyped callers see no breakage.
+
+### Decorations (since 0.1.148)
+
+`D` = the interface a controller declares with `@DbDecorations` (display-only columns): `new Client<typeof Ticket, TicketDecorations>("/api/tickets")`. `$select` of `query` / `pages` / `one` / `geoSearch` / `geoPages` accepts `keyof D` beside the own fields (`DecoratedControls<T, D>` / `DecoratedQuery<T, D>`), rows are `Response<T, Q> & Partial<D>`. Filter and `$sort` stay over the own fields — a decoration is never filterable / sortable (server: 400 `display-only`). `meta().decorations` = the declared type, `meta().fields[key].decoration === true`. No `D` → no change. Server side → [moost-db.md](moost-db.md#hooks-override-on-subclass).
 
 Per-method generic narrowing on `query()`, `pages()`, `one()`:
 

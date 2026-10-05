@@ -49,12 +49,25 @@ export function isIdValidationSource(value: unknown): value is IdValidationSourc
   return Array.isArray(v.identifications) && Array.isArray(v.fieldDescriptors);
 }
 
+/** Options of {@link validateSingleId}. */
+export interface TIdCheckOptions {
+  /** Prefix of the error paths (default none). */
+  path?: string;
+  /**
+   * `false` for the URL forms, whose `?field=value` values are strings the
+   * table coerces per field: the key set must still be an exact
+   * identification and every value a scalar, but its declared type is not
+   * checked (default `true`).
+   */
+  strictTypes?: boolean;
+}
+
 export function validateSingleId(
   body: unknown,
   source: IdValidationSource,
-  path = "",
+  opts: TIdCheckOptions = {},
 ): Record<string, unknown> {
-  const errors = collectIdErrors(body, source, path);
+  const errors = collectIdErrors(body, source, opts);
   if (errors.length > 0) {
     throw new ValidatorError(errors);
   }
@@ -84,7 +97,7 @@ export function validateMultiId(
 
   const errors: IdError[] = [];
   for (let i = 0; i < body.length; i++) {
-    errors.push(...collectIdErrors(body[i], source, `[${i}]`));
+    errors.push(...collectIdErrors(body[i], source, { path: `[${i}]` }));
   }
   if (errors.length > 0) {
     throw new ValidatorError(errors);
@@ -95,8 +108,9 @@ export function validateMultiId(
 function collectIdErrors(
   value: unknown,
   source: IdValidationSource,
-  pathPrefix: string,
+  opts: TIdCheckOptions,
 ): IdError[] {
+  const pathPrefix = opts.path ?? "";
   if (!isPlainObject(value)) {
     return [{ path: pathPrefix, message: "Expected JSON object for row identifier", details: [] }];
   }
@@ -120,23 +134,34 @@ function collectIdErrors(
   const errors: IdError[] = [];
   for (const fieldName of match.fields) {
     const sub = pathPrefix ? `${pathPrefix}.${fieldName}` : fieldName;
-    const err = checkScalar(value[fieldName], cache.fieldByName.get(fieldName), sub);
+    // The scalar shape always; the declared type only in strict mode.
+    const err =
+      checkScalar(value[fieldName], sub) ??
+      (opts.strictTypes === false
+        ? undefined
+        : checkType(value[fieldName], cache.fieldByName.get(fieldName), sub));
     if (err) errors.push(err);
   }
   return errors;
 }
 
-function checkScalar(
+/**
+ * An identifier value is always a scalar: an object would reach the filter
+ * as an operator expression (`{ $ne: null }`) whatever the field's type.
+ */
+function checkScalar(value: unknown, path: string): IdError | undefined {
+  return typeof value === "object" && value !== null
+    ? scalarMismatch(path, "a scalar", value)
+    : undefined;
+}
+
+/** The value's type against the field's declared design type (default `string`). */
+function checkType(
   value: unknown,
   fd: TDbFieldMeta | undefined,
   path: string,
 ): IdError | undefined {
   const expected = fd?.designType ?? "string";
-  // An identifier value is always a scalar: an object would reach the filter
-  // as an operator expression (`{ $ne: null }`) whatever the field's type.
-  if (typeof value === "object" && value !== null) {
-    return scalarMismatch(path, "a scalar", value);
-  }
   if (expected === "string" && typeof value !== "string") {
     return scalarMismatch(path, expected, value);
   }

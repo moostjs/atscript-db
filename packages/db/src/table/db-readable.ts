@@ -64,6 +64,7 @@ import {
   guardAggregate,
   guardFilter,
   guardPaths,
+  groupSourceVerdict,
   guardQuery,
   isStrictTable,
 } from "../query/query-guards";
@@ -1128,8 +1129,13 @@ export class AtscriptDbReadable<
       // A bucket alias groups by its source field, whose dimension rule is the
       // bucket source verdict's (the path guard, shared with moost-db's gate).
       const bucketAliases = new Set(buckets.map((b) => b.alias));
+      const descriptors = new Map(this._meta.fieldDescriptors.map((fd) => [fd.path, fd]));
       for (const field of $groupBy) {
-        if (!dimSet.has(field) && !bucketAliases.has(field)) {
+        if (bucketAliases.has(field)) continue;
+        const fd = descriptors.get(field);
+        const verdict = fd && groupSourceVerdict(fd, this._meta, this.adapter);
+        // The path guard answers the physical rules; this check is the dimension rule.
+        if (verdict ? !verdict.ok && verdict.code === "notDimension" : !dimSet.has(field)) {
           throw new DbError("INVALID_QUERY", [
             { path: "$groupBy", message: `Field "${field}" is not a dimension` },
           ]);

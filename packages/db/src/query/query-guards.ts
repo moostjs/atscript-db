@@ -436,6 +436,39 @@ function rejectSource(
   return { ok: false, code, reason };
 }
 
+/** {@link groupSourceVerdict}'s answer — the `reason` clause has no trailing period. */
+export type TGroupSourceVerdict =
+  | { ok: true }
+  | { ok: false; code: "encrypted" | "notFilterable" | "notDimension"; reason: string };
+
+/**
+ * Whether the stored leaf `fd` may be a `$groupBy` key (since 0.1.148) — the
+ * one rule for the core's strict-table check and moost-db's capability index
+ * (`/meta.fields[P].groupable` and the HTTP gate). First failing rule wins:
+ *
+ * 1. `encrypted` — `@db.encrypted`;
+ * 2. `notFilterable` — the adapter cannot filter (so cannot group) the storage;
+ * 3. `notDimension` — a strict table ({@link isStrictTable}) and the field is
+ *    not a dimension.
+ *
+ * A calendar-bucket alias is not a field: it groups by its source, whose
+ * dimension rule is {@link bucketSourceVerdict}'s (callers skip aliases).
+ */
+export function groupSourceVerdict(
+  fd: TDbFieldMeta,
+  table: Pick<TBucketSourceTable, "dimensions" | "measures">,
+  adapter: Pick<BaseDbAdapter, "canFilterField">,
+): TGroupSourceVerdict {
+  if (fd.encrypted) return { ok: false, code: "encrypted", reason: ENCRYPTED_REASON };
+  if (!adapter.canFilterField(fd)) {
+    return { ok: false, code: "notFilterable", reason: ADAPTER_FILTER_REASON };
+  }
+  if (isStrictTable(table) && !table.dimensions.includes(fd.path)) {
+    return { ok: false, code: "notDimension", reason: "not a dimension" };
+  }
+  return { ok: true };
+}
+
 /**
  * Whether the stored leaf `fd` may be the source of a calendar bucket
  * (since 0.1.133) — every schema and adapter rule, once, for the core path

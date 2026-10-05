@@ -2,8 +2,15 @@ import { current, type EventContext } from "@wooksjs/event-core";
 import { defineBeforeInterceptor, defineInterceptor, type TInterceptorDef } from "moost";
 
 import { ActionDisabledError } from "./action-disabled-error";
-import { boundTableKey, controllerTable, dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
-import { dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
+import {
+  boundTableKey,
+  controllerTable,
+  dbActionIdSlot,
+  dbActionIdsSlot,
+  requestIdOf,
+  requestIdsOf,
+} from "./id-cache";
+import { dbActionPreScopeSlot, dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import { ACTION_GATE_PRIORITY, awaitActionPrepared } from "./prepare-request";
 import {
   dbActionQueryTargetSlot,
@@ -11,7 +18,7 @@ import {
   dbActionStaleKey,
   type TSkippedRow,
 } from "./query-target";
-import { dbActionOverlaySlot, isActionScoped } from "./row-scope";
+import { dbActionOverlaySlot } from "./row-scope";
 import {
   abortStreamedTarget,
   dbActionTargetKey,
@@ -70,7 +77,7 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
       const verdict = judgeRow(action, disabled, row);
       if (verdict) {
         const id = await ctx.get(dbActionIdSlot);
-        throw new ActionDisabledError(action, id, undefined, [verdictReason(verdict)]);
+        throw disabledError(ctx, action, id, [verdictReason(verdict)]);
       }
       return;
     }
@@ -132,7 +139,7 @@ async function gateRows(
   if (onDisabledRows === "skip") {
     if (passingRows.length === 0) {
       // Zero survivors: every request id failed, so failingReasons aligns with `ids`.
-      throw new ActionDisabledError(action, undefined, [...ids], failingReasons);
+      throw disabledError(ctx, action, ids, failingReasons);
     }
     if (failingIds.length > 0) {
       ctx.set(dbActionRowsSlot, Promise.resolve(passingRows) as never);
@@ -142,8 +149,29 @@ async function gateRows(
     return;
   }
   if (failingIds.length > 0) {
-    throw new ActionDisabledError(action, undefined, failingIds, failingReasons);
+    throw disabledError(ctx, action, failingIds, failingReasons);
   }
+}
+
+/**
+ * The 409 for `ids` (one id for a `'row'` action, the failing ids for
+ * `'rows'`) — each echoed as the client sent it (`resolveRowIds`, since 0.1.148).
+ */
+function disabledError(
+  ctx: EventContext,
+  action: string,
+  ids: Record<string, unknown> | Record<string, unknown>[],
+  reasons: readonly (string | null | undefined)[],
+): ActionDisabledError {
+  return Array.isArray(ids)
+    ? new ActionDisabledError(action, undefined, requestIdsOf(ctx, ids), reasons)
+    : new ActionDisabledError(action, requestIdOf(ctx, ids), undefined, reasons);
+}
+
+/** The action's scope restricts (or needs the loaded rows to decide) — see `TPreScope`. */
+async function needsScopeLoad(ctx: EventContext, level: "row" | "rows"): Promise<boolean> {
+  const pre = await ctx.get(dbActionPreScopeSlot)(level);
+  return pre.kind === "deferred" || pre.scope !== null;
 }
 
 export interface ThinInterceptorOpts {
@@ -163,13 +191,15 @@ export interface ThinInterceptorOpts {
  * Interceptor for `'row'` / `'rows'` actions without `disabled` (and for a
  * `@DbActionRow*` handler of any other level: bound-table injection only):
  * runs the controller's `prepareRequest` (when defined, since 0.1.143),
- * injects the bound table and — only when the controller has a row overlay
- * (`transformOne` / `transformFilter` overridden, non-empty), overrides
- * `actionRowScope` (since 0.1.145) or the request is a query target (since
- * 0.1.147) — verifies the requested ids before the handler runs by loading
- * the row(s) the handler would get: `'row'` → the 404 of a missing row;
- * `'rows'` → out-of-scope and missing ids fail like disabled rows with no
- * reason (`onDisabledRows`). Nothing to verify → no query.
+ * injects the bound table and — only when there is something to verify —
+ * checks the requested ids before the handler runs by loading the row(s) the
+ * handler would get: `'row'` → the 404 of a missing row; `'rows'` →
+ * out-of-scope and missing ids fail like disabled rows with no reason
+ * (`onDisabledRows`). Something to verify: a row overlay (`transformOne` /
+ * `transformFilter` overridden, non-empty), a non-empty `actionRowScope` for
+ * the action (the hook is asked first, with the request's ids — an override
+ * that restricts nothing verifies nothing; since 0.1.148), or a query target
+ * (since 0.1.147). Nothing to verify → no query.
  */
 export function buildThinInterceptor(opts: ThinInterceptorOpts): TInterceptorDef {
   const { table, scope } = opts;
@@ -180,12 +210,14 @@ export function buildThinInterceptor(opts: ThinInterceptorOpts): TInterceptorDef
     if (!scope) return;
     const overlay = await ctx.get(dbActionOverlaySlot);
     if (scope.level === "row") {
-      if (overlay || isActionScoped(ctx)) await ctx.get(dbActionRowSlot);
+      if (overlay || (await needsScopeLoad(ctx, "row"))) {
+        await ctx.get(dbActionRowSlot);
+      }
       return;
     }
     if (await queryTargetReply(ctx, reply)) return;
     const target = await ctx.get(dbActionQueryTargetSlot);
-    if (overlay || target || isActionScoped(ctx)) {
+    if (overlay || target || (await needsScopeLoad(ctx, "rows"))) {
       await gateRows(ctx, scope.action, undefined, scope.onDisabledRows);
     }
     await setMaterializedTarget(ctx);

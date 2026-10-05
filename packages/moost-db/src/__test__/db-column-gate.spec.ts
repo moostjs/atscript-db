@@ -220,8 +220,13 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    expect(meta.fields.name).toEqual({ filterable: true, sortable: true });
-    expect(meta.fields.createdAt).toEqual({ filterable: true, sortable: true, indexed: true });
+    expect(meta.fields.name).toEqual({ filterable: true, groupable: true, sortable: true });
+    expect(meta.fields.createdAt).toEqual({
+      filterable: true,
+      groupable: true,
+      sortable: true,
+      indexed: true,
+    });
     // Parity: what /meta advertises is what the gate accepts.
     expect(await controller.query("?$sort=name")).not.toBeInstanceOf(HttpError);
     expect(await controller.query("?$sort=-createdAt,name")).not.toBeInstanceOf(HttpError);
@@ -292,7 +297,7 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    expect(meta.fields.address).toEqual({ filterable: true, sortable: false });
+    expect(meta.fields.address).toEqual({ filterable: true, groupable: true, sortable: false });
   });
 
   it("Mongo-like adapter: array field is filterable but not sortable", async () => {
@@ -303,7 +308,7 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     });
     const controller = makeController(table);
     const meta = await controller.meta();
-    expect(meta.fields.tags).toEqual({ filterable: true, sortable: false });
+    expect(meta.fields.tags).toEqual({ filterable: true, groupable: true, sortable: false });
   });
 });
 

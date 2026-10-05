@@ -42,6 +42,8 @@ import type {
   AtscriptClientShape,
   ClientOptions,
   ClientResponse,
+  DecoratedControls,
+  DecoratedQuery,
   IdOf,
   MetaResponse,
   NavOf,
@@ -56,6 +58,8 @@ type Own<T> = OwnOf<T>;
 type Nav<T> = NavOf<T>;
 type Id<T> = IdOf<T>;
 type Response<T, Q> = ClientResponse<T, Q>;
+/** A read row: the response over the own fields plus the declared decorations `D`, each optional. */
+type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
 type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 /**
@@ -78,8 +82,22 @@ type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
  * const all = await users.query()
  * const page = await users.pages({ filter: { active: true } }, 1, 20)
  * ```
+ *
+ * `D` (since 0.1.148) types the display-only fields the controller declares
+ * with `@DbDecorations`: `$select` of the read methods accepts their keys and
+ * rows carry them as optional properties. Filter and sort stay over `T`'s own
+ * fields — a decoration is never filterable or sortable.
+ *
+ * ```typescript
+ * const tickets = new Client<typeof Ticket, TicketDecorations>('/api/tickets')
+ * const rows = await tickets.query({ controls: { $select: ['title', 'ownerName'] } })
+ * rows[0].ownerName // string | undefined
+ * ```
  */
-export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
+export class Client<
+  T extends AtscriptClientShape = AtscriptClientShape,
+  D extends object = Record<never, never>,
+> {
   private readonly _path: string;
   private readonly _baseUrl: string;
   private readonly _fetch: typeof globalThis.fetch;
@@ -108,10 +126,10 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * The response type narrows by the literal `$with` array in `query` —
    * relations not listed in `$with` are stripped from the row type.
    */
-  async query<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+  async query<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
-  ): Promise<Response<T, Q>[]> {
-    return this._get("query", query) as Promise<Response<T, Q>[]>;
+  ): Promise<DecoratedRow<T, Q, D>[]> {
+    return this._get("query", query as Uniquery) as Promise<DecoratedRow<T, Q, D>[]>;
   }
 
   // ── GET /query ($count) ────────────────────────────────────────────────────
@@ -155,15 +173,15 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * Response rows narrow by the literal `$with` array — same algebra as
    * {@link query}.
    */
-  async pages<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+  async pages<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
     page = 1,
     size = 10,
-  ): Promise<PageResult<Response<T, Q>>> {
+  ): Promise<PageResult<DecoratedRow<T, Q, D>>> {
     return this._get("pages", {
       ...query,
       controls: { ...query?.controls, $page: page, $size: size },
-    } as Uniquery) as Promise<PageResult<Response<T, Q>>>;
+    } as Uniquery) as Promise<PageResult<DecoratedRow<T, Q, D>>>;
   }
 
   // ── GET /geo ───────────────────────────────────────────────────────────────
@@ -177,29 +195,29 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * in `query.controls`; filter / `$select` / `$with` / `$skip` / `$limit`
    * compose as usual.
    */
-  async geoSearch<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+  async geoSearch<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     point: [number, number],
     query?: Q,
-  ): Promise<Array<Response<T, Q> & { $distance: number }>> {
+  ): Promise<Array<DecoratedRow<T, Q, D> & { $distance: number }>> {
     return this._get("geo", {
       ...query,
       controls: { ...query?.controls, $center: point.join(",") },
-    } as Uniquery) as Promise<Array<Response<T, Q> & { $distance: number }>>;
+    } as Uniquery) as Promise<Array<DecoratedRow<T, Q, D> & { $distance: number }>>;
   }
 
   /**
    * `GET /geo` with `$page` / `$size` — paginated distance-ranked search.
    */
-  async geoPages<Q extends Uniquery<Own<T>, Nav<T>> = Uniquery<Own<T>, Nav<T>>>(
+  async geoPages<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     point: [number, number],
     query?: Q,
     page = 1,
     size = 10,
-  ): Promise<PageResult<Response<T, Q> & { $distance: number }>> {
+  ): Promise<PageResult<DecoratedRow<T, Q, D> & { $distance: number }>> {
     return this._get("geo", {
       ...query,
       controls: { ...query?.controls, $center: point.join(","), $page: page, $size: size },
-    } as Uniquery) as Promise<PageResult<Response<T, Q> & { $distance: number }>>;
+    } as Uniquery) as Promise<PageResult<DecoratedRow<T, Q, D> & { $distance: number }>>;
   }
 
   // ── GET /one/:id ───────────────────────────────────────────────────────────
@@ -211,14 +229,18 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * `query.controls` — same algebra as {@link query}.
    */
   async one<
-    Q extends { controls?: UniqueryControls<Own<T>, Nav<T>> } = {
-      controls?: UniqueryControls<Own<T>, Nav<T>>;
+    Q extends { controls?: DecoratedControls<T, D> } = {
+      controls?: DecoratedControls<T, D>;
     },
-  >(id: Id<T>, query?: Q): Promise<Response<T, Q> | null> {
+  >(id: Id<T>, query?: Q): Promise<DecoratedRow<T, Q, D> | null> {
     const controlStr = query?.controls
       ? buildUrl({ controls: query.controls as UniqueryControls })
       : "";
-    return this._getOrNull<Q>(this._idUrl("one", id, controlStr));
+    return this._getOrNull<Q>(this._idUrl("one", id, controlStr)) as Promise<DecoratedRow<
+      T,
+      Q,
+      D
+    > | null>;
   }
 
   // ── POST / ─────────────────────────────────────────────────────────────────

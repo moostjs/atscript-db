@@ -220,6 +220,7 @@ export {
   narrowerFilterOps,
   acceptedOperatorsHint,
   bucketSourceVerdict,
+  groupSourceVerdict,
   ADAPTER_FILTER_REASON,
   ENCRYPTED_REASON,
 } from "./query/query-guards";
@@ -233,6 +234,7 @@ export type {
   TQueryPathSource,
   TBucketSourceVerdict,
   TBucketSourceTable,
+  TGroupSourceVerdict,
 } from "./query/query-guards";
 export { findAncestorInSet } from "./table/table-metadata";
 

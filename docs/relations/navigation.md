@@ -47,6 +47,8 @@ assignee?: User
 - **the tasks** by their assignee — a [relational predicate](/api/queries#relational-filters) on the relation: `{ assignee: { $some: { name: "x" } } }` (since 0.1.147; over HTTP `assignee=$some(name=x)`, which needs [`@db.rel.filterable`](#db-rel-filterable));
 - **the loaded assignee** — `$with`: `$with=assignee($select=name)` to project, `$with=assignee(name=x)` to filter the related rows.
 
+A `@db.table` foreign key is a real constraint, so its target must be unique on its own: a column of a composite primary key is a compile error (since 0.1.148) unless it is also `@db.index.unique` or the FK columns together cover the whole key. For value help over such a dictionary without a constraint, use the `@ui.valueHelp` annotation of `@atscript/ui`.
+
 In `/meta`, `@db.rel.FK` also follows reference chains to their terminal field (see [annotations — dual role](../adapters/annotations#db-rel-fk-dual-role)).
 :::
 

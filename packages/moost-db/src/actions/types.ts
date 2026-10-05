@@ -1,6 +1,7 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type {
   AtscriptDbTable,
+  FilterExpr,
   FlatOf,
   TDbActionInfo,
   TDbActionIntent,
@@ -240,3 +241,45 @@ export type ValidatedDict<TRow, D extends DbActionsDictBase> = {
 export type ValidatedUnpinnedDict<TRow, D extends DbActionsDictBase> = {
   [K in keyof D]: TDbActionsEntryUnpinned<TRow, EntryRequiredFields<D[K], TRow>>;
 };
+
+/**
+ * An id as an id-addressed endpoint received it: a path scalar (always a
+ * string from the URL) or an identification object (`?field=value` forms,
+ * action bodies).
+ *
+ * @since 0.1.148
+ */
+export type TDbRowIdInput = string | number | boolean | Record<string, unknown>;
+
+/**
+ * Which endpoint asks `resolveRowIds`:
+ *
+ * - `"action"` — an action route: the body's validated ids;
+ * - `"available"` — `GET /meta/actions/:id` | `?…` (and a view asking its source);
+ * - `"one"` — `GET /one/:id` | `?…`;
+ * - `"remove"` — `DELETE /:id` | `?…`.
+ *
+ * @since 0.1.148
+ */
+export type TDbRowIdPurpose = "action" | "available" | "one" | "remove";
+
+/**
+ * Context of `AsDbReadableController.resolveRowIds`.
+ *
+ * @since 0.1.148
+ */
+export interface TDbRowIdsContext {
+  readonly purpose: TDbRowIdPurpose;
+  /** `"action"` only: the action's name. */
+  readonly action?: string;
+  /** `"action"` only: the action's level. */
+  readonly level?: "row" | "rows";
+  /**
+   * The row overlay the endpoint will apply to the resolved id
+   * (`rowOverlay()`; for actions the gate's overlay), `undefined` when none.
+   * Server data — never sent to the client. Resolve INSIDE it when an alias
+   * could name several rows, so a row the caller can't reach never shadows
+   * one they can.
+   */
+  readonly overlay?: FilterExpr;
+}

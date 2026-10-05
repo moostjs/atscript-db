@@ -153,6 +153,8 @@ A scalar can fit several identifications (string PK next to a string unique `slu
 | `recordFilter(payload, { isFieldVisible? })` (0.1.143, tables)                                      | The filter `updateOne` / `replaceOne` of `payload` target (PK when complete, else a unique index) — explain a write's outcome (e.g. a CAS 0-match) against exactly the row it addressed. Throws `NOT_FOUND` without identifying fields.                                                                       |
 | `findById`, `deleteOne` (pinned inside its tx), write guard `current(i)`, remove guard `ctx.filter` | `resolveRowFilter` semantics.                                                                                                                                                                                                                                                                                 |
 
+moost-db: `GET /one`, `DELETE` and action ids pass through the controller's `resolveRowIds` (0.1.148) before this resolution — see [moost-db.md](moost-db.md#resolverowids--stale--alias-ids-01148). `resolveRowFilter` on the controller is NOT that seam (`/one` reads through `findOneByRow`).
+
 `scope` (`TRowResolveOptions`, a row overlay such as a tenant filter): only in-scope rows count while identifications are tried — an out-of-scope row never shadows an in-scope one. `resolveRowFilter` does NOT filter its result: AND the scope on before reading. `deleteOne(id, { scope })` also scopes the delete itself (out-of-scope row → `{ deletedCount: 0 }`, guard `current()` → `null`).
 
 ```ts

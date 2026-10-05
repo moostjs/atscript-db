@@ -4,7 +4,8 @@ import { cached, type EventContext } from "@wooksjs/event-core";
 import { readCurrentActionMeta } from "./current-action";
 import { controllerOf, controllerTable, getActionTable } from "./controller-access";
 import { awaitActionPrepared } from "./prepare-request";
-import { findRowsByIds, type TRowsByIdSource } from "./rows-by-id";
+import { findRowsByIds, type TAppliedIds, type TRowsByIdSource } from "./rows-by-id";
+import type { TDbRowIdsContext } from "./types";
 import { candidateIds, createScopeContext, type TDbActionScopeContext } from "./scope-context";
 
 /**
@@ -22,6 +23,12 @@ export const ACTION_SCOPE = Symbol.for("atscript-db.actionScope");
 /** `true` when the controller overrides `actionRowScope` (since 0.1.147). */
 export const ACTION_SCOPED = Symbol.for("atscript-db.actionScoped");
 
+/** The controller's internal `resolveRowIds` call for an action's ids (since 0.1.148). */
+export const ROW_RESOLVE_IDS = Symbol.for("atscript-db.resolveRowIds");
+
+/** `true` when the controller overrides `resolveRowIds` (since 0.1.148). */
+export const ROW_RESOLVES = Symbol.for("atscript-db.rowResolves");
+
 /**
  * What the actions module applies to action ids / rows (since 0.1.143): the
  * controller's {@link ACTION_OVERLAY} / {@link ACTION_SCOPE} methods and
@@ -32,6 +39,11 @@ interface TScopedController {
   [ACTION_OVERLAY]?: () => Promise<FilterExpr | undefined>;
   [ACTION_SCOPE]?: (action: string, ctx: TDbActionScopeContext) => Promise<FilterExpr | undefined>;
   readonly [ACTION_SCOPED]?: boolean;
+  [ROW_RESOLVE_IDS]?: (
+    ids: readonly Record<string, unknown>[],
+    ctx: TDbRowIdsContext,
+  ) => Promise<TAppliedIds>;
+  readonly [ROW_RESOLVES]?: boolean;
   fieldVisibility?: { readonly scoped: boolean; readonly isVisible: (path: string) => boolean };
 }
 
@@ -74,11 +86,6 @@ export const dbActionOverlaySlot = cached<Promise<FilterExpr | null>>(async (ctx
   await awaitActionPrepared(ctx);
   return (await overlayOf.call(ctrl)) ?? null;
 });
-
-/** `true` when this action's controller overrides `actionRowScope`. */
-export function isActionScoped(ctx: EventContext): boolean {
-  return ctx.get(scopedControllerSlot)?.[ACTION_SCOPED] === true;
-}
 
 /**
  * The loaded `rows` (already inside the row overlay) with every row outside

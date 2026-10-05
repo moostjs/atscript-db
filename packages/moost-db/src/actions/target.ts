@@ -5,7 +5,7 @@ import { ApplyDecorators, Resolve } from "moost";
 import { getAtscriptDbMate } from "../mate";
 import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
-import { dbActionIdsSlot } from "./id-cache";
+import { dbActionIdsSlot, requestIdOf, requestIdsOf } from "./id-cache";
 import {
   DEFAULT_QUERY_TARGET_BATCH_SIZE,
   dbActionSkippedKey,
@@ -109,6 +109,8 @@ class TargetBase {
   constructor(
     readonly kind: "ids" | "query",
     readonly matched: number,
+    /** Every id a summary reports is the request's (`resolveRowIds`, since 0.1.148). */
+    protected readonly ctx: EventContext,
   ) {}
 
   fail(id: Record<string, unknown>, reason: string): void {
@@ -119,8 +121,8 @@ class TargetBase {
     return {
       matched: this.matched,
       processed: Math.max(0, this.processed - this.failed.length),
-      skipped: [...this.skipped],
-      failed: [...this.failed],
+      skipped: this.skipped.map((s) => ({ ...s, id: requestIdOf(this.ctx, s.id) })),
+      failed: this.failed.map((f) => ({ ...f, id: requestIdOf(this.ctx, f.id) })),
     };
   }
 }
@@ -138,8 +140,9 @@ class MaterializedTarget extends TargetBase implements TDbActionTarget {
     private readonly ids: Record<string, unknown>[],
     private readonly rows: () => Promise<Record<string, unknown>[]>,
     skipped: readonly TSkippedRow[],
+    ctx: EventContext,
   ) {
-    super(kind, matched);
+    super(kind, matched, ctx);
     this.skipped.push(...skipped);
     this.processed = ids.length;
   }
@@ -167,6 +170,7 @@ export async function setMaterializedTarget(ctx: EventContext): Promise<void> {
         return rows.filter((r): r is Record<string, unknown> => r !== undefined);
       },
       skipped,
+      ctx,
     ),
   );
 }
@@ -186,13 +190,13 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
 
   constructor(
     matched: number,
-    private readonly ctx: EventContext,
+    ctx: EventContext,
     private readonly source: TStreamedSource,
     private readonly batchSize: number,
     private readonly action: string,
     private readonly disabled: TDisabledFn | undefined,
   ) {
-    super(source.kind, matched);
+    super(source.kind, matched, ctx);
   }
 
   /** The batch the handler holds (yielded, not yet given back) and where the next one starts. */
@@ -232,8 +236,11 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
       processed: Math.max(0, base.processed - uncertain.length),
       failed: [
         ...base.failed,
-        ...uncertain.map((id) => ({ id, reason: message })),
-        ...this.source.ids.slice(this.next).map((id) => ({ id, reason: "not run" })),
+        ...requestIdsOf(this.ctx, uncertain).map((id) => ({ id, reason: message })),
+        ...requestIdsOf(this.ctx, this.source.ids.slice(this.next)).map((id) => ({
+          id,
+          reason: "not run",
+        })),
       ],
       aborted: { status: errorStatus(error), message },
     };

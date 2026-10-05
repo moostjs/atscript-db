@@ -3,6 +3,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import { type Mate, type TMateParamMeta, type TMoostMetadata, getMoostMate } from "moost";
 
 import type { TDbRequestEndpoint } from "./as-readable.controller";
+import type { TDbDecorationsMeta } from "./decorations/db-decorations.decorator";
 import type {
   TDbActionInputFormMeta,
   TDbActionMeta,
@@ -61,6 +62,8 @@ export interface AtscriptDbMeta {
   atscript_db_endpoint?: TDbRequestEndpoint;
   /** Class-level — written by `@DbActionsFrom(...)` (since 0.1.147). Decorators accumulate. */
   atscript_db_actions_from?: TDbActionsFromMeta[];
+  /** Class-level — written by `@DbDecorations(...)` (since 0.1.148). */
+  atscript_db_decorations?: TDbDecorationsMeta;
 }
 
 /**

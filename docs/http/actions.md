@@ -149,15 +149,19 @@ Identifier values must be scalars (since 0.1.143). An object or array value, suc
 
 A `'rows'` request carries at most `maxIds` identifiers (default 1000, since 0.1.143). See [Id-count cap](#id-cap).
 
+### Resolving ids — `resolveRowIds` {#resolve-row-ids}
+
+Since 0.1.148. A controller that overrides [`resolveRowIds(ids, ctx)`](./customization#resolverowids) maps each action id through it once per request (`ctx.purpose === "action"`, with `ctx.action` and `ctx.level`). Handlers (`@DbActionID()` / `@DbActionIDs()`, `useDbActionId(s)`, `@DbActionRow(s)`), [`actionRowScope`](#action-row-scope) and `target.batches()` receive the resolved ids; a `'rows'` request whose ids resolve to the same row keeps the first. The [`ActionDisabledError`](#action-disabled-error) ids and a [target summary](./query-targets)'s `skipped` / `failed` ids are the ones the client sent. A query target's ids come from rows and never go through the hook. The contract and the safety rules are on the [`resolveRowIds`](./customization#resolverowids) page.
+
 ## Row scoping {#row-scoping}
 
-Since 0.1.143, action ids and rows obey the controller's row overlay. The overlay is the one `GET /one/:id` uses: `transformOne({})`, which defaults to [`transformFilter`](./customization#transformfilter). Since 0.1.145 the loaded rows must also lie inside the action's own [`actionRowScope`](#action-row-scope). If the controller overrides `transformOne`, `transformFilter` or `actionRowScope`, every `'row'` and `'rows'` action checks its ids before the handler runs. This applies with or without `disabled`:
+Since 0.1.143, action ids and rows obey the controller's row overlay. The overlay is the one `GET /one/:id` uses: `transformOne({})`, which defaults to [`transformFilter`](./customization#transformfilter). Since 0.1.145 the loaded rows must also lie inside the action's own [`actionRowScope`](#action-row-scope). Whether the gate verifies a request's ids before the handler runs depends on what there is to verify (see the [gate table](#gate-table) below). This applies with or without `disabled`:
 
-| Action                                                       | Id outside the overlay                                                                                                                       |
-| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'row'`: `@DbActionRow()` or a `disabled` gate               | The row load includes the overlay. The request gets the same 404 as a missing row: `"Row not found for action identifier"`.                  |
-| `'row'`: `@DbActionID()` only                                | The row is loaded (`id AND overlay`) before the handler, like `@DbActionRow()`. The request gets the same 404.                               |
-| `'rows'`: `@DbActionIDs()` / `@DbActionRows()`, gated or not | The id fails like a missing id: same position in `ids`, `null` reason. `onDisabledRows` then applies (`'reject'` → 409, `'skip'` → dropped). |
+| Action                                                       | Id outside the overlay                                                                                                                                                      |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'row'`: `@DbActionRow()` or a `disabled` gate               | The row load includes the overlay. The request gets the same 404 as a missing row: `"Row not found for action identifier"`.                                                 |
+| `'row'`: `@DbActionID()` only                                | With an overlay or a restricting `actionRowScope`, the row is loaded (`id AND overlay AND scope`) before the handler, like `@DbActionRow()`. The request gets the same 404. |
+| `'rows'`: `@DbActionIDs()` / `@DbActionRows()`, gated or not | The id fails like a missing id: same position in `ids`, `null` reason. `onDisabledRows` then applies (`'reject'` → 409, `'skip'` → dropped).                                |
 
 An out-of-scope id gets exactly the answer a nonexistent id gets. Nothing in the status, body, `ids` or `reasons` tells them apart. A `disabled` reason is never computed for an out-of-scope row, so the reason cannot leak that row's state. The handler never runs for an out-of-scope id.
 
@@ -178,11 +182,24 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 
 Notes:
 
-- The check costs nothing when none of `transformOne`, `transformFilter` and `actionRowScope` is overridden. No hook runs and no query is added. Without an overlay, `'rows'` actions keep today's behavior: an unmatched id is an `undefined` gap in `@DbActionRows()` (gated actions still fail it).
+- The check costs nothing when there is nothing to verify (see the [gate table](#gate-table)). No query is added. Without an overlay and a restricting scope, `'rows'` actions keep an unmatched id as an `undefined` gap in `@DbActionRows()` (gated actions still fail it).
 - Under an overlay, an ungated `'rows'` action rejects unmatched ids by default, missing and out-of-scope alike. Set `onDisabledRows: 'skip'` to drop them instead.
 - The checks run in an interceptor that `@DbAction` registers. A `@DbActionID*` param on a route without `@DbAction` is not checked. `@DbActionRow*` loads still include the overlay.
 - The overlay applies only to the controller's own table. An `opts.table` binding on a plain controller has no overlay.
 - A `requiredFields` entry that the controller's [`hasField`](./customization#hasfield) hides is never loaded, nor is a `@db.column.derived` field whose source it hides. The `disabled` predicate and `@DbActionRow*` see it as `undefined`, so a hidden column never drives a verdict.
+
+### What the gate verifies {#gate-table}
+
+Since 0.1.148 the gate asks the action's [`actionRowScope`](#action-row-scope) **first**, with the request's ids, and loads rows only when its answer restricts. An override that restricts nothing — it returns `undefined`, `null` or `{}` for this action, as a permission layer does for the actions a caller may run on any row — makes the gate load nothing ([upgrading](/guide/upgrading#v0-1-148-behavior)).
+
+| Row overlay | `actionRowScope` for the action         | Gate on `'row'` / ungated `'rows'`                                                                                                                                                  |
+| ----------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| none        | not overridden, or unrestricted         | Nothing. A missing id reaches the handler: `@DbActionRow` / `useDbActionRow` answer 404 when they load it; an id-only handler sees the miss itself (for example `matchedCount: 0`). |
+| none        | restricted, ids in `preferredId` shape  | One query `id AND scope`. A miss or an out-of-scope id gets the same 404 / failing id.                                                                                              |
+| none        | restricted, ids in a unique-index shape | The row loads, then the scope is asked for the loaded candidate (the hook sees its `preferredId`).                                                                                  |
+| present     | any                                     | The row loads as `id AND overlay`, then the scope is asked for the loaded candidate.                                                                                                |
+
+The gate verifies existence only when it has something to verify: a row overlay, a non-empty action scope, a `disabled` rule or a query target. `403` means no grant (from `prepareRequest`); an out-of-scope id and a missing one stay indistinguishable (404 / failing id with a `null` reason). The hook's presence no longer changes behavior — only its answer does — and no new oracle appears, because the unrestricted case is exactly a controller without the hook. A `disabled` gate and handler-side `@DbActionRow*` loads fold a restricting scope into their one row query, too.
 
 ### Per-action scope — `actionRowScope` {#action-row-scope}
 
@@ -197,7 +214,7 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 }
 ```
 
-- **Enforced by the action gate.** The action's ids and rows load under the row overlay above, then must match this filter, with the same outcomes as the table: an out-of-scope id gets `404 "Row not found for action identifier"` on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
+- **Enforced by the action gate.** The action's ids and rows load under the row overlay above and must match this filter (without an overlay the filter joins the load — see the [gate table](#gate-table)), with the same outcomes as the table: an out-of-scope id gets `404 "Row not found for action identifier"` on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
 - **Reflected in reads.** [`$actions`](#actions-row-scope) and [`GET /meta/actions/:id`](#available-actions) list the action only on rows inside its scope.
 - It runs after [`prepareRequest`](#preparerequest-on-actions), at most once per action per evaluation, and may be async. Equal filters share one query: the same object, or (since 0.1.147) structurally equal ones.
 - The filter may use fields [`hasField`](./customization#hasfield) hides. It is never exposed in a response.
@@ -239,16 +256,16 @@ export class IssuesController extends AsDbController<typeof IssueTable> {
 }
 ```
 
-| `ctx` member       | What it is                                                                                                                                                                   |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `purpose`          | `"execute"` — the action gate; `"rows"` — `$actions` on a read (also a [view's delegated verdicts](./view-actions)); `"available"` — `GET /meta/actions/:id`.                |
-| `ids`              | The candidates' identities (`preferredId` shape), deduped, never empty. The same array object for every action of one evaluation, so you can memoize on it with a `WeakMap`. |
-| `loadRows(fields)` | The candidates' `fields` plus their id fields, read from the bound table without any overlay. Memoized per evaluation and field set. Nothing it reads reaches the response.  |
+| `ctx` member       | What it is                                                                                                                                                                                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `purpose`          | `"execute"` — the action gate; `"rows"` — `$actions` on a read (also a [view's delegated verdicts](./view-actions)); `"available"` — `GET /meta/actions/:id`.                                                                                                  |
+| `ids`              | The candidates' identities (`preferredId` shape), deduped, never empty. The same array object for every action of one evaluation, so you can memoize on it with a `WeakMap`. At `"execute"` without a row overlay these are the **request's** ids (see below). |
+| `loadRows(fields)` | The candidates' `fields` plus their id fields, read from the bound table without any overlay. Memoized per evaluation and field set. Nothing it reads reaches the response.                                                                                    |
 
 - Candidates are bounded: the read's rows (at most its `$limit`), the action's ids (at most `maxIds`), one batch of a [query target](./query-targets), or the single row.
-- Candidates are already inside the row overlay. Ids that don't exist or fall outside it never reach the hook. With no candidate, the hook is not called and no scope query runs.
+- Candidates are inside the row overlay: ids that fall outside it never reach the hook. On the action route **without a row overlay** (and ids in `preferredId` shape, not a query target) the hook is asked **before** any load: `ctx.ids` are then the request's ids and may name rows that don't exist — `ctx.loadRows` omits them. With no candidate, the hook is not called and no scope query runs.
 - The result only restricts the candidates. A throw fails the request; it is never read as "allow".
-- **Order on the action route:** `prepareRequest` → row overlay (before the body is read) → ids from the body → row load → `actionRowScope`. Before 0.1.147 the hook ran before the body; it now needs the ids.
+- **Order on the action route:** `prepareRequest` → row overlay (before the body is read) → ids from the body → [`resolveRowIds`](#resolve-row-ids) → `actionRowScope` (before the load when there is no overlay) → row load → `actionRowScope` on the loaded candidates otherwise.
 - One-parameter overrides keep compiling and behaving as before, and so does `super.actionRowScope(name)` — `ctx` is optional in the signature only; moost-db always passes it.
 - An `actionRowScope` override on a controller over a table without a primary key (a view) is warned about only when the controller has row actions of its own — their `$actions` can't be scoped without an identity.
 
@@ -440,6 +457,8 @@ async lock(@DbActionIDs() ids: Array<{ id: string }>) {
   // body: { "ids": [{ "id": "a" }, { "id": "b" }] }  (mixed shapes per element are allowed)
 }
 ```
+
+The id the handler receives is the **resolved** one when the controller overrides [`resolveRowIds`](#resolve-row-ids).
 
 Validation is **strict** — unknown fields are rejected, no coercion. The identifier object's field set must EXACTLY match one legitimate identification on the table. See [Identifier shape](#identifier-shape) for precedence rules and the full contract.
 
@@ -944,7 +963,7 @@ When the gate rejects, the response is HTTP 409 with this body:
 }
 ```
 
-For `'rows'`-level rejections, `ids: [...]` replaces `id` — each entry is the originally-submitted identifier object (`Record<string, unknown>` in PK or unique-index form):
+For `'rows'`-level rejections, `ids: [...]` replaces `id` — each entry is the originally-submitted identifier object (`Record<string, unknown>` in PK or unique-index form). `id` / `ids` are the ids **you sent**, even when [`resolveRowIds`](#resolve-row-ids) mapped them to others:
 
 - `'reject'` mode: `ids` lists ALL failing identifiers in original request order (predicate-rejected + missing-row both included).
 - `'skip'` mode with zero survivors: `ids` lists ALL request identifiers.

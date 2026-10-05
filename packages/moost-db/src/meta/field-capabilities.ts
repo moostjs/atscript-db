@@ -18,6 +18,7 @@ import {
   classifyQueryPath,
   ENCRYPTED_REASON,
   findAncestorInSet,
+  groupSourceVerdict,
   isJsonValueField,
   narrowerFilterOps,
   selfOrAncestor,
@@ -63,6 +64,14 @@ export interface TFieldCapability {
    * `bucketSourceVerdict`). Since 0.1.132.
    */
   bucketable: boolean;
+  /**
+   * `$groupBy` on this path passes the gate: physically filterable (adapter ∧
+   * ¬writeOnly ∧ ¬encrypted) and, on a table declaring dimensions / measures,
+   * a dimension. Since 0.1.148.
+   */
+  groupable: boolean;
+  /** Present when `groupable` is `false` — the reason clause appended to the HTTP 400 message. */
+  groupReason?: string;
   /** Present when `bucketable` is `false` — the reason clause appended to the HTTP 400 message. */
   bucketReason?: string;
 }
@@ -72,6 +81,34 @@ export interface TCapabilityVerdict {
   path: string;
   message: string;
 }
+
+/**
+ * The positions {@link FieldCapabilityIndex.check} judges: the core's path
+ * positions plus the `$select` of an aggregate query (`groupedSelect`), where
+ * a plain field must be a `$groupBy` key — a display-only decoration never is.
+ */
+export type TGateOp = TQueryPathOp | "groupedSelect";
+
+/** The display-only refusal clause per position. */
+const DISPLAY_ONLY_POSITION: Record<Exclude<TGateOp, "select">, string> = {
+  filter: "a filter",
+  sort: "$sort",
+  groupedSelect: "a grouped $select",
+  groupBy: "$groupBy",
+  having: "$having",
+  aggregate: "an aggregate",
+  bucket: "a calendar bucket",
+};
+
+/** The capability of a declared decoration: selectable, nothing else. */
+const DECORATION_CAP: Readonly<TFieldCapability> = {
+  filterable: false,
+  sortable: false,
+  selectable: true,
+  indexed: false,
+  bucketable: false,
+  groupable: false,
+};
 
 /** The readable members the index reads. */
 export type TCapabilityReadable = Pick<
@@ -238,7 +275,25 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     ].join(",")}`;
   }
 
+  /**
+   * The navigation paths of a readable: its `navFields`, else its relation
+   * names (partial readables list only the latter).
+   */
+  static navPathsOf(source: Pick<TCapabilityReadable, "navFields" | "relations">): Set<string> {
+    const nav = new Set<string>(source.navFields);
+    if (nav.size === 0) {
+      for (const name of source.relations.keys()) nav.add(name);
+    }
+    return nav;
+  }
+
   private readonly _entries = new Map<string, TEntry>();
+  /**
+   * Declared display-only decorations (`@DbDecorations`, since 0.1.148) —
+   * virtual entries: key → the readable paths it `requires`. Selectable only;
+   * visible while every required path is.
+   */
+  private readonly _decorations: ReadonlyMap<string, readonly string[]>;
   /** Nested-object parents (never listed, always selectable) → their listed leaves. */
   private readonly _objectParents = new Map<string, string[]>();
   /** What `bucketSourceVerdict` reads of the table (JSON-value parents, dimensions, measures). */
@@ -254,7 +309,12 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     return this._objectParents;
   }
 
-  constructor(source: TCapabilityReadable, writeOnly: ReadonlySet<string>) {
+  constructor(
+    source: TCapabilityReadable,
+    writeOnly: ReadonlySet<string>,
+    decorations: ReadonlyMap<string, readonly string[]> = new Map(),
+  ) {
+    this._decorations = decorations;
     const tableMeta = source.type.metadata;
     this.filterableManual = tableMeta.get("db.table.filterable") === "manual";
     this.sortableManual = tableMeta.get("db.table.sortable") === "manual";
@@ -277,10 +337,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       measures: source.measures,
     };
 
-    const nav = new Set<string>(source.navFields);
-    if (nav.size === 0) {
-      for (const name of source.relations.keys()) nav.add(name);
-    }
+    const nav = FieldCapabilityIndex.navPathsOf(source);
     this.navFields = nav;
     const isNavOrDescendant = (path: string) => selfOrAncestor(path, nav) !== undefined;
 
@@ -386,13 +443,19 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     const bucket = isWriteOnly ? undefined : bucketSourceVerdict(fd, this._bucketTable, source);
     const bucketReason = !bucket ? REASON_WRITE_ONLY : bucket.ok ? undefined : `${bucket.reason}.`;
 
+    // `$groupBy`: the HTTP-only writeOnly veto, then the core's verdict (physical
+    // rule, then the strict-table dimension rule).
+    const group = isWriteOnly ? undefined : groupSourceVerdict(fd, this._bucketTable, source);
+    const groupReason = !group ? REASON_WRITE_ONLY : group.ok ? undefined : `${group.reason}.`;
     const cap: TFieldCapability = {
       filterable: filterBy.compare === undefined,
       sortable: sortReason === undefined,
       selectable: true,
       indexed: fd.isIndexed === true,
       bucketable: bucketReason === undefined,
+      groupable: groupReason === undefined,
     };
+    if (groupReason) cap.groupReason = groupReason;
     if (filterOps.length > 0) cap.filterOps = filterOps;
     if (filterBy.compare) cap.filterReason = filterBy.compare;
     if (sortReason) cap.sortReason = sortReason;
@@ -411,6 +474,21 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     for (const [path, entry] of this._entries) {
       yield [path, entry.cap, entry.fd];
     }
+  }
+
+  /** The declared decoration keys, in declaration order. */
+  get decorationKeys(): IterableIterator<string> {
+    return this._decorations.keys();
+  }
+
+  /** The capability of the declared decoration `key` (selectable only), `undefined` when `key` is none. */
+  decorationCap(key: string): Readonly<TFieldCapability> | undefined {
+    return this._decorations.has(key) ? DECORATION_CAP : undefined;
+  }
+
+  /** The decoration `key` is visible: every path it `requires` passes `exists` (the hidden-field hook). */
+  decorationVisible(key: string, exists: (path: string) => boolean): boolean {
+    return this._decorations.get(key)?.every(exists) === true;
   }
 
   /** Physical filter capability (adapter ∧ ¬writeOnly ∧ ¬encrypted) — ignores the manual-mode policy. */
@@ -438,6 +516,11 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    * JSON-stored column" — clients pin that wording, so do not "align" it
    * with the core backstop's text.
    *
+   * A declared decoration (`@DbDecorations`) is a virtual entry: `select` while
+   * every path it requires passes `exists`, any other position a display-only
+   * refusal (`groupedSelect` is a `$select` of an aggregate query), and hidden
+   * sources answer `Unknown field` like a nonexistent path.
+   *
    * `predicate` is a filter entry's class (`collectQueryPaths` records it per
    * occurrence); it only matters for `op === "filter"` on a listed leaf.
    *
@@ -449,13 +532,27 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    */
   check(
     local: string,
-    op: TQueryPathOp,
+    gateOp: TGateOp,
     exists: (path: string) => boolean,
     predicate: TFilterPredicate = "compare",
     prefix = "",
   ): TCapabilityVerdict | undefined {
     // Messages name the prefixed path; `exists` / classification use the local one.
     const path = prefix + local;
+    // A declared decoration (this controller's own level only): selectable while
+    // its sources are visible — anywhere else display-only; hidden sources answer
+    // like any unknown field.
+    const requires = prefix === "" ? this._decorations.get(local) : undefined;
+    if (requires) {
+      if (!requires.every(exists)) return unknownField(path);
+      if (gateOp === "select") return undefined;
+      return {
+        path,
+        message: `Field "${path}" is display-only and cannot be used in ${DISPLAY_ONLY_POSITION[gateOp]}`,
+      };
+    }
+    // Past the decoration rule `groupedSelect` is a plain `$select`.
+    const op: TQueryPathOp = gateOp === "groupedSelect" ? "select" : gateOp;
     if (!exists(local)) {
       return unknownField(path);
     }
@@ -490,6 +587,13 @@ export class FieldCapabilityIndex implements TQueryPathSource {
             : {
                 path,
                 message: `Bucketing field "${path}" is not permitted — ${entry.cap.bucketReason}`,
+              };
+        case "groupBy":
+          return entry.cap.groupable
+            ? undefined
+            : {
+                path,
+                message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.cap.groupReason}`,
               };
         default:
           return entry.physicalFilterable

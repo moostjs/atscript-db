@@ -16,17 +16,30 @@ export type TDbActionScopePurpose = "execute" | "rows" | "available";
 
 /**
  * The candidate rows `AsDbReadableController.actionRowScope` is asked about
- * (since 0.1.147). Every candidate is already inside the controller's row
- * overlay; the hook's result restricts them further.
+ * (since 0.1.147). Every candidate is inside the controller's row overlay;
+ * the hook's result restricts them further.
+ *
+ * Exception (since 0.1.148): at `purpose: "execute"` with NO row overlay, the
+ * hook is asked BEFORE the rows are loaded when the request's ids are in
+ * `preferredId` shape — `ids` are then the request's (resolved) ids, deduped,
+ * and may name rows that do not exist (`loadRows` omits them). A restriction
+ * it returns joins the single row load (`id ∧ scope`); an answer of
+ * `undefined` / `null` / `{}` makes the gate load nothing.
  *
  * @since 0.1.147
  */
 export interface TDbActionScopeContext {
-  /** Which surface asks — the action gate, `$actions` on a read, or `GET /meta/actions`. */
+  /**
+   * Which surface asks: `"execute"` — the action gate (≤ `maxIds` ids; one
+   * batch of a query target); `"rows"` — `$actions` on a read (also a view's
+   * delegated verdicts), the read's rows; `"available"` — `GET /meta/actions/:id`,
+   * the one row.
+   */
   readonly purpose: TDbActionScopePurpose;
   /**
    * The candidates' identities (`preferredId`-shaped), deduped and never
-   * empty. ONE array object per evaluation, shared by every action of it —
+   * empty — at `"execute"` without a row overlay, the request's ids (they may
+   * not exist; see above). ONE array object per evaluation, shared by every action of it —
    * memoize on it (`WeakMap`) when several actions derive the same filter.
    */
   readonly ids: readonly Record<string, unknown>[];

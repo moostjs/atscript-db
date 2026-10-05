@@ -273,8 +273,8 @@ describe("/meta contract per adapter family", () => {
   it("manual mode: policy narrows filter/$sort to annotated fields; adapter veto still wins on JSON", async () => {
     const { controller } = bind("sql", CapManual);
     const meta = await controller.meta();
-    expect(meta.fields.name).toEqual({ filterable: true, sortable: true });
-    expect(meta.fields.other).toEqual({ filterable: false, sortable: false });
+    expect(meta.fields.name).toEqual({ filterable: true, groupable: true, sortable: true });
+    expect(meta.fields.other).toEqual({ filterable: false, groupable: true, sortable: false });
     // Existence obeys the same policy gate: annotated `prefs` accepts `$exists`, `other` does not.
     expect(meta.fields.prefs).toEqual({
       filterable: false,
