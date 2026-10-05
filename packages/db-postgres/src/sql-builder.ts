@@ -28,6 +28,7 @@ import {
   quotedJsonPathSegments,
   foreignKeySql,
   arithOverflowError,
+  numericOutOfRangeError,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -153,6 +154,8 @@ export const pgDialect: SqlDialect = {
   calendarBucket: pgCalendarBucket,
   jsonExtract: pgJsonExtract,
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE PRECISION)`,
+  // `first` / `last` derived columns: no MIN over uuid / bytea / point / …
+  anyValue: (expr: string) => `(ARRAY_AGG(${expr}))[1]`,
   // No MIN / MAX over a boolean
   booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" },
   /**
@@ -163,9 +166,9 @@ export const pgDialect: SqlDialect = {
    * zone passed the core's IANA validation, so the server's tz database is
    * older than the runtime's.
    */
-  mapQueryError(error: unknown) {
+  mapQueryError(error: unknown, arithmetic: boolean) {
     const err = error as { code?: unknown; message?: unknown } | null;
-    if (err?.code === "22003") return arithOverflowError();
+    if (err?.code === "22003") return arithmetic ? arithOverflowError() : numericOutOfRangeError();
     const zone =
       err?.code === "22023" && typeof err.message === "string"
         ? /time zone "([^"]*)" not recognized/.exec(err.message)?.[1]

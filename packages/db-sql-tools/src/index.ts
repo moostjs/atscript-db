@@ -7,7 +7,12 @@ export {
   orderKeySql,
   quotedJsonPathSegments,
 } from "./dialect";
-export { renderArith, arithOverflowError, type TArithFailure } from "./arith";
+export {
+  renderArith,
+  arithOverflowError,
+  numericOutOfRangeError,
+  type TArithFailure,
+} from "./arith";
 export { createFilterVisitor, buildWhere, type TFilterVisitorOptions } from "./filter-builder";
 export type { TGeoWindow } from "./geo";
 export {

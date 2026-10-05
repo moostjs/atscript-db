@@ -27,3 +27,17 @@ export interface AeIssue {
 
     cost?: decimal
 }
+
+// first / last over a column type without MIN (uuid)
+@db.table 'ae_refs'
+export interface AeRef {
+    @meta.id
+    id: number
+
+    grp: number
+
+    @db.pg.type 'UUID'
+    ref: string
+
+    at: number
+}

@@ -67,7 +67,7 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
     url.pathname = `/${DB}`;
     driver = new PgDriver({ connectionString: url.toString() });
     space = new DbSpace(() => new PostgresAdapter(driver));
-    const result = await syncSchema(space, [fx.AeIssue]);
+    const result = await syncSchema(space, [fx.AeIssue, fx.AeRef]);
     expect(result.status).toBe("synced");
     await (issues() as any).insertMany(AE_ROWS);
   });
@@ -78,6 +78,36 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
   });
 
   defineAggregateExprCases("PostgreSQL", issues);
+
+  describe("first / last over a type without MIN", () => {
+    it("a uuid column renders through a type-agnostic pick", async () => {
+      const refs = space.getTable(fx.AeRef) as any;
+      const A = "11111111-1111-4111-8111-111111111111";
+      const B = "22222222-2222-4222-8222-222222222222";
+      await refs.insertMany([
+        { id: 1, grp: 1, ref: B, at: 2 },
+        { id: 2, grp: 1, ref: A, at: 1 },
+        { id: 3, grp: 2, ref: B, at: 1 },
+      ]);
+      const rows = await refs.aggregate({
+        filter: {},
+        controls: {
+          $groupBy: ["grp"],
+          $select: [
+            "grp",
+            { $fn: "first", $field: "ref", $as: "firstRef" },
+            { $fn: "last", $field: "ref", $as: "lastRef" },
+          ],
+          $rowOrder: { at: 1 },
+          $sort: { grp: 1 },
+        },
+      });
+      expect(rows).toEqual([
+        { grp: 1, firstRef: A, lastRef: B },
+        { grp: 2, firstRef: B, lastRef: B },
+      ]);
+    });
+  });
 
   describe("overflow", () => {
     it("a double overflow in a row-level expression is INVALID_QUERY, not a 500", async () => {

@@ -1,6 +1,5 @@
 import {
   ARITH_MAX_NODES,
-  arithNames,
   isAggregateExpr,
   isAggregateOfExpr,
   isBucketExpr,
@@ -22,6 +21,9 @@ import { isJsonValueField } from "./buckets";
 
 /** Most nodes a group-level expression may have once the aliases it names are inlined (SQL repeats them). */
 const EXPANDED_MAX_NODES = 4 * ARITH_MAX_NODES;
+
+/** Most expanded nodes ALL the expression entries of one query may have together. */
+export const QUERY_EXPANDED_MAX_NODES = 1024;
 
 /**
  * Why a field cannot be an arithmetic operand, or `undefined` when it can: it
@@ -67,10 +69,31 @@ export function arithToExprNode(
  * names, a calendar bucket's source. A group-level expression contributes
  * none (its names are aliases).
  */
+/** Most nodes {@link entryFields} visits of one expression — the shape rules reject anything larger later. */
+const NAMES_SCAN_MAX_NODES = 4 * ARITH_MAX_NODES;
+
+/**
+ * The names an expression reads, found iteratively and bounded: this runs on
+ * a raw, not yet validated expression (a 10k-deep chain must not overflow the
+ * stack — `normalizeComputedSelect` rejects it afterwards).
+ */
+function boundedArithNames(expr: unknown): string[] {
+  const out = new Set<string>();
+  const stack: unknown[] = [expr];
+  for (let visited = 0; stack.length > 0 && visited < NAMES_SCAN_MAX_NODES; visited++) {
+    const e = stack.pop();
+    if (typeof e === "string") out.add(e);
+    else if (e && typeof e === "object" && Array.isArray((e as { $args?: unknown }).$args)) {
+      stack.push(...(e as { $args: unknown[] }).$args.toReversed());
+    }
+  }
+  return [...out];
+}
+
 export function entryFields(item: unknown): string[] {
   if (typeof item === "string") return [item];
   if (isAggregateExpr(item)) return item.$field === "*" ? [] : [item.$field];
-  if (isAggregateOfExpr(item)) return arithNames(item.$expr);
+  if (isAggregateOfExpr(item)) return boundedArithNames(item.$expr);
   if (isBucketExpr(item)) return [item.$field];
   return [];
 }
@@ -96,7 +119,8 @@ export function rowOrderKeys(rowOrder: unknown): string[] {
  * - an operand or `first` / `last` field tagged with a quantity ref needs that
  *   ref in `$groupBy`;
  * - a group-level expression stays within {@link EXPANDED_MAX_NODES} once the
- *   aliases it names are inlined (SQL repeats them at every use).
+ *   aliases it names are inlined (SQL repeats them at every use), and all the
+ *   expression entries of the query together within {@link QUERY_EXPANDED_MAX_NODES}.
  *
  * Unknown fields are the path guard's, so they are skipped here.
  *
@@ -209,15 +233,26 @@ export function checkAggregateExprs(
       : typeof expr === "string"
         ? (expanded.get(expr) ?? 1)
         : 1 + expr.$args.reduce<number>((sum, arg) => sum + countNodes(arg), 0);
+  let total = 0;
+  const issuesBeforeSize = issues.length;
   for (const e of exprs) {
     const size = countNodes(e.expr);
     expanded.set(e.alias, size);
+    total += size;
     if (size > EXPANDED_MAX_NODES) {
       issues.push({
         path: "$select",
         message: `Expression "${e.alias}" is too large once its aliases are expanded (more than ${EXPANDED_MAX_NODES} nodes)`,
       });
     }
+  }
+
+  // (a per-entry issue already says the query is too large)
+  if (total > QUERY_EXPANDED_MAX_NODES && issues.length === issuesBeforeSize) {
+    issues.push({
+      path: "$select",
+      message: `The expressions of this query are too large together (more than ${QUERY_EXPANDED_MAX_NODES} nodes once their aliases are expanded)`,
+    });
   }
 
   if (issues.length) throw new DbError("INVALID_QUERY", issues);

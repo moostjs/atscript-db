@@ -157,7 +157,7 @@ describe("PostgresAdapter calendar buckets", () => {
     );
     const call = driver.calls[0];
     expect(call.sql).toBe(
-      `SELECT ${expr} AS "week", COUNT(*) AS "n" FROM "bucket_tickets" WHERE "status" = $1 GROUP BY ${expr} ORDER BY "week" ASC LIMIT $2`,
+      `SELECT ${expr} AS "week", COUNT(*) AS "n" FROM "bucket_tickets" WHERE "status" = $1 GROUP BY ${expr} ORDER BY "week" ASC NULLS FIRST LIMIT $2`,
     );
     expect(call.params).toEqual(["open", 5]);
   });

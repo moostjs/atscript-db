@@ -18,6 +18,8 @@ export const AE_T = Date.parse("2026-03-01T00:00:00Z");
  * The rows of the table. `cost` values are chosen so numeric and text order
  * agree and no trailing zero is needed (`"3.5"`, never `"3.50"`).
  */
+// Row 5 is listed BEFORE row 4 on purpose: they tie on `raisedAt`, so the primary-key
+// tie-break of first / last is what picks id 4, never the insertion order.
 export const AE_ROWS = [
   {
     id: 1,
@@ -47,6 +49,18 @@ export const AE_ROWS = [
   },
   { id: 3, ticketId: 1, status: "closed", price: 1, qty: 1, severity: 2, title: "c", flag: true },
   {
+    id: 5,
+    ticketId: 2,
+    status: "open",
+    price: 3,
+    qty: 3,
+    severity: 5,
+    raisedAt: AE_T + 700,
+    title: "e",
+    flag: true,
+    cost: "6.25",
+  },
+  {
     id: 4,
     ticketId: 2,
     status: "open",
@@ -58,18 +72,6 @@ export const AE_ROWS = [
     title: "d",
     flag: false,
     cost: "7.5",
-  },
-  {
-    id: 5,
-    ticketId: 2,
-    status: "open",
-    price: 3,
-    qty: 3,
-    severity: 5,
-    raisedAt: AE_T + 700,
-    title: "e",
-    flag: true,
-    cost: "6.25",
   },
   {
     id: 6,
@@ -251,6 +253,115 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
     });
   });
 
+  describe(`${name} $sort on nullable computed aliases`, () => {
+    // ticket 3 has no estimate: sum(estimate) and everything over it is NULL
+    const select = [
+      "ticketId",
+      { $fn: "sum", $field: "estimate", $as: "est" },
+      { $expr: arith("*", "est", 2), $as: "est2" },
+      { $expr: arith("/", "est", { $op: "-", $args: ["est", "est"] }), $as: "ratio" },
+    ];
+    const order = async (sort: Record<string, 1 | -1>) =>
+      (await run({ ...byTicket, $select: select, $sort: { ...sort, ticketId: 1 } })).map(
+        (r) => r.ticketId,
+      );
+
+    it("NULL sorts smallest on every adapter: first ascending, last descending", async () => {
+      expect(await order({ est: 1 })).toEqual([3, 2, 1]);
+      expect(await order({ est: -1 })).toEqual([1, 2, 3]);
+      expect(await order({ est2: 1 })).toEqual([3, 2, 1]);
+      expect(await order({ est2: -1 })).toEqual([1, 2, 3]);
+    });
+
+    it("a ratio whose divisor is zero is NULL for every group and sorts as one tie", async () => {
+      expect(await order({ ratio: -1 })).toEqual([1, 2, 3]);
+      expect(await order({ ratio: 1 })).toEqual([1, 2, 3]);
+    });
+  });
+
+  describe(`${name} malformed entries and reserved aliases`, () => {
+    it("an entry carrying both $field and $expr is INVALID_QUERY", async () => {
+      await expect(
+        run({
+          ...byTicket,
+          $select: ["ticketId", { $fn: "sum", $field: "price", $expr: "qty", $as: "x" }],
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+    });
+
+    it("an alias in the engine's internal prefix is INVALID_QUERY", async () => {
+      for (const alias of ["__as_n_total", "__as_rows", "__as_fl0"]) {
+        await expect(
+          run({
+            ...byTicket,
+            $select: ["ticketId", { $fn: "sum", $field: "price", $as: alias }],
+          }),
+        ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+        await expect(
+          run({
+            ...byTicket,
+            $select: ["ticketId", count, { $expr: arith("+", "n", 1), $as: alias }],
+          }),
+        ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+      }
+    });
+  });
+
+  describe(`${name} hostile expressions`, () => {
+    const chain = (depth: number, leaf: unknown): unknown => {
+      let e: unknown = leaf;
+      for (let i = 0; i < depth; i++) e = { $op: "+", $args: [e, 1] };
+      return e;
+    };
+
+    it("a 10k-deep row-level expression is INVALID_QUERY, not a stack overflow", async () => {
+      await expect(
+        run({
+          ...byTicket,
+          $select: ["ticketId", { $fn: "sum", $expr: chain(10_000, "price"), $as: "x" }],
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+    });
+
+    it("a 10k-deep group-level expression is INVALID_QUERY, not a stack overflow", async () => {
+      await expect(
+        run({ ...byTicket, $select: ["ticketId", count, { $expr: chain(10_000, "n"), $as: "y" }] }),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+    });
+
+    it("a wide expression (10k terms) is INVALID_QUERY", async () => {
+      const wide = {
+        $op: "+",
+        $args: [chain(1, "price"), ...Array.from({ length: 10_000 }, () => 1)],
+      };
+      await expect(
+        run({ ...byTicket, $select: ["ticketId", { $fn: "sum", $expr: wide, $as: "x" }] }),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY" });
+    });
+
+    it("the expanded size of ALL expression entries together is capped", async () => {
+      // a balanced sum of 31 `n` (61 nodes): within every per-entry limit, 20 of them past the query cap
+      const balanced = (leaves: number): unknown =>
+        leaves === 1
+          ? "n"
+          : {
+              $op: "+",
+              $args: [balanced(Math.ceil(leaves / 2)), balanced(Math.floor(leaves / 2))],
+            };
+      const one = await run({
+        ...byTicket,
+        $select: ["ticketId", count, { $expr: balanced(31), $as: "e0" }],
+        $sort: { ticketId: 1 },
+      });
+      expect(one[0]).toMatchObject({ ticketId: 1, e0: 93 });
+      const select: unknown[] = ["ticketId", count];
+      for (let i = 0; i < 20; i++) select.push({ $expr: balanced(31), $as: `e${i}` });
+      await expect(run({ ...byTicket, $select: select })).rejects.toMatchObject({
+        code: "INVALID_QUERY",
+      });
+    });
+  });
+
   describe(`${name} first / last`, () => {
     const firstLast = [
       "ticketId",
@@ -365,6 +476,21 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
       ]);
     });
 
+    it("$having on an alias named like a renamed field is the alias, not the column", async () => {
+      // `estimate` is stored as `est_points`
+      const rows = await run({
+        ...byTicket,
+        $select: ["ticketId", { $fn: "first", $field: "estimate", $as: "estimate" }],
+        $rowOrder: { id: 1 },
+        $having: { estimate: { $gt: 0 } },
+        $sort: { ticketId: 1 },
+      });
+      expect(rows).toEqual([
+        { ticketId: 1, estimate: 3 },
+        { ticketId: 2, estimate: 4 },
+      ]);
+    });
+
     it("$count counts the groups", async () => {
       const rows = await run({
         ...byTicket,
@@ -402,6 +528,33 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
         { status: "nope" },
       );
       expect(rows).toEqual([{ n: 0, est: null, f: null, l: null, n1: 1 }]);
+    });
+
+    describe("ungrouped $count equals the number of rows the data query returns", () => {
+      const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, number]> = [
+        ["over rows", { $select: [count] }, {}, 1],
+        ["over no rows", { $select: [count] }, { status: "nope" }, 1],
+        ["a $having that holds", { $select: [count], $having: { n: { $gt: 0 } } }, {}, 1],
+        ["a $having that fails", { $select: [count], $having: { n: { $gt: 100 } } }, {}, 0],
+        [
+          "a first() alias in $having",
+          {
+            $select: [{ $fn: "first", $field: "id", $as: "f" }],
+            $rowOrder: { id: 1 },
+            $having: { f: { $gte: 1 } },
+          },
+          {},
+          1,
+        ],
+      ];
+      for (const [label, controls, filter, expected] of cases) {
+        it(label, async () => {
+          const data = await run({ $groupBy: [], ...controls }, filter);
+          const counted = await run({ $groupBy: [], ...controls, $count: true }, filter);
+          expect(data).toHaveLength(expected);
+          expect(counted).toEqual([{ count: expected }]);
+        });
+      }
     });
 
     it("ungrouped, over rows: one row of the whole table", async () => {

@@ -1,4 +1,4 @@
-import type { TResolvedBucket, TViewJsonType } from "@atscript/db";
+import type { DbControls, TResolvedBucket, TViewJsonType } from "@atscript/db";
 
 export interface TSqlFragment {
   sql: string;
@@ -102,13 +102,24 @@ export interface SqlDialect {
    */
   booleanAggregates?: { min: string; max: string };
   /**
+   * Renders the type-agnostic "any value of the group" pick over an already
+   * rendered column — what a `first` / `last` derived column (constant within
+   * its group) aggregates through. `MIN` does not exist for every column type
+   * (PostgreSQL: uuid, bytea, point, …), so those dialects set it
+   * (PostgreSQL `(ARRAY_AGG(x))[1]`, MySQL `ANY_VALUE(x)`). Absent: `MIN(x)`.
+   * @since 0.1.148
+   */
+  anyValue?(expr: string): string;
+  /**
    * Maps a driver error of a grouped query to the `DbError` it means — a
-   * double overflow in aggregate arithmetic (`arithOverflowError`), an unknown
-   * calendar-bucket zone — or `undefined` to let it propagate unchanged. Run by
+   * numeric overflow (`arithOverflowError` when the query has arithmetic
+   * expressions, else `numericOutOfRangeError`), an unknown calendar-bucket
+   * zone — or `undefined` to let it propagate unchanged. `arithmetic` is
+   * whether the query selects any arithmetic expression. Run by
    * {@link mapQueryErrors}.
    * @since 0.1.148
    */
-  mapQueryError?(error: unknown): Error | undefined;
+  mapQueryError?(error: unknown, arithmetic: boolean): Error | undefined;
   /**
    * `true` when the database sorts NULL as the LARGEST value (PostgreSQL):
    * first-row join order keys then render `ASC NULLS FIRST` /
@@ -148,13 +159,20 @@ export function havingGroupRef(dialect: SqlDialect, expr: string, alias: string)
 /**
  * Runs `fn`, rethrowing a driver error as the `DbError`
  * {@link SqlDialect.mapQueryError} maps it to (any other error unchanged).
+ * `controls` of the query tell whether it has arithmetic expressions.
  * @since 0.1.148
  */
-export async function mapQueryErrors<R>(dialect: SqlDialect, fn: () => Promise<R>): Promise<R> {
+export async function mapQueryErrors<R>(
+  dialect: SqlDialect,
+  fn: () => Promise<R>,
+  controls?: DbControls,
+): Promise<R> {
   try {
     return await fn();
   } catch (error: unknown) {
-    throw dialect.mapQueryError?.(error) ?? error;
+    const select = controls?.$select;
+    const arithmetic = !!(select?.exprAggregates?.length || select?.exprs?.length);
+    throw dialect.mapQueryError?.(error, arithmetic) ?? error;
   }
 }
 

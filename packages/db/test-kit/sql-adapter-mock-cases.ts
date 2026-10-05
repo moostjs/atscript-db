@@ -102,6 +102,27 @@ export function defineSqlAdapterMockCases<D extends { calls: Array<{ sql: string
       }
     });
 
+    it("an overflow in a query WITHOUT arithmetic is INVALID_QUERY 'Numeric value out of range' (not 'Arithmetic overflow')", async () => {
+      const driver = dialect.createDriver([]) as any;
+      driver.all = async () => {
+        throw dialect.overflowError();
+      };
+      driver.get = async () => {
+        throw dialect.overflowError();
+      };
+      const { table } = bind(driver);
+      const select = [{ $fn: "sum", $field: "id", $as: "total" }];
+      for (const query of [
+        grouped(select),
+        grouped(select, { $count: true, $having: { total: { $gt: 0 } } }),
+      ]) {
+        const err = await table.aggregate(query).catch((e) => e);
+        expect(err).toBeInstanceOf(DbError);
+        expect(err.code).toBe("INVALID_QUERY");
+        expect(err.errors).toEqual([{ path: "", message: "Numeric value out of range" }]);
+      }
+    });
+
     it("leaves other driver errors untouched", async () => {
       const other = dialect.otherError();
       const driver = dialect.createDriver([]) as any;

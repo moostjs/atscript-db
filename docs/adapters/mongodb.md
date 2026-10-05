@@ -257,7 +257,7 @@ address: {
 
 ## Grouped Queries and Calendar Buckets {#calendar-buckets}
 
-[Grouped queries](/api/aggregation) compile to a `$group` pipeline. Since 0.1.132 a `null` and a missing grouped value form one `null` group, as on the SQL adapters (earlier versions returned two groups). One difference remains: `sum` over a group with no numeric values returns `0` here and `null` elsewhere.
+[Grouped queries](/api/aggregation) compile to a `$group` pipeline. Since 0.1.132 a `null` and a missing grouped value form one `null` group, as on the SQL adapters (earlier versions returned two groups). `sum` over a group with no non-null value is `null` here too (since 0.1.148; it was `0`).
 
 [Calendar buckets](/api/calendar-buckets) use `$dateToString`, `$dateToParts` and `$dateFromParts`, so they need **MongoDB 4.0 or later**. Zones come from the server's bundled time zone database; a zone it does not know fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501) — upgrade the server to get newer zone data.
 
@@ -686,7 +686,7 @@ Null semantics follow SQL:
 - `matches` is not supported in join conditions (`$regexMatch` needs MongoDB 4.2); it still works in `@db.view.filter`, which is a regular `$match`.
 - `@db.view.filter` and `@db.view.having` use [query](../api/queries) semantics: `!=` also matches documents where the field is null or missing, `exists` means "holds a value" (a stored `null` counts as absent), `not exists` its negation, and `matches` accepts `/pattern/flags`.
 - A field-to-field comparison in `@db.view.filter` / `@db.view.having` (`` `Item.qty > Item.cap` ``, any of `=`, `!=`, `<`, `<=`, `>`, `>=`) is false when either field is null or missing, as on SQL and in join conditions (since 0.1.137; before, a missing field compared below every value, so `7 > missing` matched).
-- Aggregates: `$sum` over a group with no values is `0` (SQL: `NULL`).
+- Aggregates: `sum` over a group with no non-null value is `null`, as on SQL (since 0.1.148; it was `0`).
 
 ::: tip Indexes
 The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the join field required and the condition a single `=` when the joined collection is large.

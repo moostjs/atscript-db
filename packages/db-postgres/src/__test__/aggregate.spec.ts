@@ -59,7 +59,7 @@ describe("PostgresAdapter aggregate", () => {
 
     const call = driver.calls[0];
     expect(call.sql).toBe(
-      'SELECT "status", COUNT(DISTINCT "currency") AS "currencies" FROM "orders" WHERE 1=1 GROUP BY "status" HAVING COUNT(DISTINCT "currency") > $1 ORDER BY "currencies" DESC',
+      'SELECT "status", COUNT(DISTINCT "currency") AS "currencies" FROM "orders" WHERE 1=1 GROUP BY "status" HAVING COUNT(DISTINCT "currency") > $1 ORDER BY "currencies" DESC NULLS LAST',
     );
     expect(call.params).toEqual([1]);
   });
@@ -108,7 +108,7 @@ describe("PostgresAdapter aggregate", () => {
     });
 
     expect(driver.calls[0].sql).toBe(
-      'SELECT "status", SUM("amount") AS "total", COUNT(*) AS "cnt" FROM "orders" WHERE "currency" = $1 GROUP BY "status" HAVING SUM("amount") > $2 AND ("status" = $3 OR COUNT(*) >= $4) ORDER BY "total" DESC LIMIT $5',
+      'SELECT "status", SUM("amount") AS "total", COUNT(*) AS "cnt" FROM "orders" WHERE "currency" = $1 GROUP BY "status" HAVING SUM("amount") > $2 AND ("status" = $3 OR COUNT(*) >= $4) ORDER BY "total" DESC NULLS LAST LIMIT $5',
     );
     expect(driver.calls[0].params).toEqual(["USD", 100, "active", 2, 5]);
   });
@@ -301,7 +301,7 @@ describe("PostgresAdapter aggregate + $search", () => {
 
     const call = driver.calls[0]!;
     expect(call.sql).toBe(
-      `SELECT "status", COUNT(*) AS "cnt" FROM "auth"."users" WHERE "status" = $1 AND ${SEARCH_PRED} GROUP BY "status" HAVING COUNT(*) > $3 ORDER BY "status" ASC LIMIT $4 OFFSET $5`,
+      `SELECT "status", COUNT(*) AS "cnt" FROM "auth"."users" WHERE "status" = $1 AND ${SEARCH_PRED} GROUP BY "status" HAVING COUNT(*) > $3 ORDER BY "status" ASC NULLS FIRST LIMIT $4 OFFSET $5`,
     );
     expect(call.params).toEqual(["active", "hello", 2, 5, 2]);
   });

@@ -297,10 +297,43 @@ export abstract class FieldMappingStrategy {
           ? new UniquSelect(select, meta.allPhysicalFields, physicalBuckets, computed)
           : undefined,
         $sort: controls.$sort && this.physicalSort(controls.$sort, meta, aliases),
-        $having: controls.$having ? this.translateFilter(controls.$having, meta) : undefined,
+        $having: controls.$having
+          ? this.translateHaving(controls.$having, meta, aliases)
+          : undefined,
       },
       insights: query.insights,
     };
+  }
+
+  /**
+   * `$having` with physical keys — except the computed output `aliases`,
+   * which stay as written (an alias equal to a renamed field's name,
+   * `first(raisedAt):raisedAt`, is the alias, exactly as in `$sort`).
+   */
+  private translateHaving(
+    having: FilterExpr,
+    meta: TableMetadata,
+    aliases: ReadonlySet<string>,
+  ): FilterExpr {
+    if (aliases.size === 0 || !having || typeof having !== "object") {
+      return this.translateFilter(having, meta);
+    }
+    const out: Record<string, unknown> = {};
+    const fields: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(having as Record<string, unknown>)) {
+      if (key === "$and" || key === "$or") {
+        out[key] = (value as FilterExpr[]).map((f) => this.translateHaving(f, meta, aliases));
+      } else if (key === "$not") {
+        out[key] = this.translateHaving(value as FilterExpr, meta, aliases);
+      } else if (aliases.has(key)) {
+        out[key] = value;
+      } else {
+        fields[key] = value;
+      }
+    }
+    return Object.keys(fields).length > 0
+      ? { ...out, ...(this.translateFilter(fields as FilterExpr, meta) as object) }
+      : (out as FilterExpr);
   }
 
   /** Output aliases of the computed `$select` entries (aggregates, expressions and calendar buckets). */

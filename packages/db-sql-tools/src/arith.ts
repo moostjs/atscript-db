@@ -66,6 +66,11 @@ function defaultFailure(reason: TArithFailure): Error {
       ]);
 }
 
+/** The error of a numeric overflow that is no arithmetic expression's (`INVALID_QUERY`, `path` `""`). */
+export function numericOutOfRangeError(): DbError {
+  return new DbError("INVALID_QUERY", [{ path: "", message: "Numeric value out of range" }]);
+}
+
 /** The error of a double overflow in aggregate arithmetic (`INVALID_QUERY`, `path` `$select`). */
 export function arithOverflowError(): DbError {
   return new DbError("INVALID_QUERY", [{ path: "$select", message: "Arithmetic overflow" }]);

@@ -141,7 +141,9 @@ function aliasSqlMap(dialect: SqlDialect, controls: DbControls): Map<string, str
     map.set(e.alias, renderAggCall(e.fn, renderArith(dialect, e.expr, quote)));
   }
   (select?.firstLast ?? []).forEach((fl, i) => {
-    map.set(fl.alias, pickSql(dialect, select, "min", fl.column, quote(firstLastColumn(i))));
+    // constant within its group: any value of it, whatever the column type
+    const col = quote(firstLastColumn(i));
+    map.set(fl.alias, dialect.anyValue ? dialect.anyValue(col) : renderAggCall("min", col));
   });
   for (const e of select?.exprs ?? []) {
     map.set(
@@ -347,11 +349,12 @@ export function buildAggregateSelect(
     params.push(...having.params);
   }
 
-  // ORDER BY — bare names: output aliases (aggregate or bucket) are legal here on every dialect
+  // ORDER BY — bare names: output aliases (aggregate or bucket) are legal here on every dialect.
+  // NULL is the smallest value everywhere (`orderKeySql`: NULLS FIRST / LAST where the engine differs).
   if (controls.$sort) {
     const orderParts: string[] = [];
     for (const [col, dir] of Object.entries(controls.$sort)) {
-      orderParts.push(`${dialect.quoteIdentifier(col)} ${dir === -1 ? "DESC" : "ASC"}`);
+      orderParts.push(orderKeySql(dialect, dialect.quoteIdentifier(col), dir === -1));
     }
     if (orderParts.length > 0) {
       sql += ` ORDER BY ${orderParts.join(", ")}`;
@@ -393,7 +396,15 @@ export function buildAggregateCount(
   const having = havingClause(dialect, controls);
   const countCol = `COUNT(*) AS ${dialect.quoteIdentifier("count")}`;
   if (!groupFields?.length && !having) {
-    // No groupBy — just count all matching rows
+    // Ungrouped aggregates are ONE result row whatever the input (even none): that is
+    // what the row query returns, so that is what is counted.
+    if ((controls.$select?.computedAliases.length ?? 0) > 0) {
+      return finalizeParams(dialect, {
+        sql: `SELECT 1 AS ${dialect.quoteIdentifier("count")}`,
+        params: [],
+      });
+    }
+    // No aggregates at all — just count all matching rows
     const sql = `SELECT ${countCol} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
     return finalizeParams(dialect, { sql, params: where.params });
   }

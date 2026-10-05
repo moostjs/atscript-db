@@ -677,8 +677,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = await mapQueryErrors(pgDialect, () =>
-        this._exec().get<{ count: number | string }>(sql, params),
+      const row = await mapQueryErrors(
+        pgDialect,
+        () => this._exec().get<{ count: number | string }>(sql, params),
+        query.controls,
       );
       const count = parseCount(row?.count);
       return [{ count }];
@@ -686,7 +688,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return mapQueryErrors(pgDialect, () => this._exec().all(sql, params));
+    return mapQueryErrors(pgDialect, () => this._exec().all(sql, params), query.controls);
   }
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────

@@ -261,11 +261,15 @@ describe("first / last", () => {
     expect(r.sql).not.toContain(".*");
   });
 
-  it("postgres: a first / last of a boolean aggregates with BOOL_AND, a min / max of one with BOOL_AND / BOOL_OR", () => {
+  it("postgres: a first / last aggregates through the type-agnostic pick, a min / max of a boolean with BOOL_AND / BOOL_OR", () => {
     const flag = { designType: "boolean" } as never;
     const sources = new Map([["flag", flag]]);
     const r = buildAggregateSelect(
-      { ...pg, booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" } },
+      {
+        ...pg,
+        booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" },
+        anyValue: (x: string) => `(ARRAY_AGG(${x}))[1]`,
+      },
       "issues",
       where,
       controls(
@@ -280,7 +284,7 @@ describe("first / last", () => {
       ),
     );
     expect(r.sql).toContain(
-      'BOOL_AND("flag") AS "lo", BOOL_OR("flag") AS "hi", MAX("title") AS "t", BOOL_AND("__as_fl0") AS "f"',
+      'BOOL_AND("flag") AS "lo", BOOL_OR("flag") AS "hi", MAX("title") AS "t", (ARRAY_AGG("__as_fl0"))[1] AS "f"',
     );
   });
 

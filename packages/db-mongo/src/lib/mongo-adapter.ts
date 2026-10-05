@@ -338,7 +338,8 @@ export class MongoAdapter extends BaseDbAdapter {
       const result = await wrapInvalidQuery(() =>
         this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
       );
-      return result.length > 0 ? result : [{ count: 0 }];
+      // An ungrouped aggregate over no rows is still one group (the row query's rule).
+      return result.length > 0 ? result : [{ count: emptyGroupRow(query) ? 1 : 0 }];
     }
 
     const pipeline = buildAggregatePipeline(query, searchStage, this._predicateFilterOpts);

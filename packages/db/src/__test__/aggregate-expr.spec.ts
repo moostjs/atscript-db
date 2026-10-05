@@ -649,3 +649,18 @@ describe("computed aliases of one source field read back like the column", () =>
     expect(sources.get("flag")!.designType).toBe("boolean");
   });
 });
+
+describe("collectQueryPaths over a hostile expression", () => {
+  it("a 10k-deep expression is collected without a stack overflow (the shape rules reject it later)", () => {
+    let expr: unknown = "price";
+    for (let i = 0; i < 10_000; i++) expr = { $op: "+", $args: [expr, 1] };
+    const refs = collectQueryPaths(
+      {
+        filter: {},
+        controls: { $groupBy: ["a"], $select: ["a", { $fn: "sum", $expr: expr, $as: "x" }] },
+      } as never,
+      true,
+    );
+    expect(refs.aggregate.length).toBeLessThanOrEqual(1);
+  });
+});

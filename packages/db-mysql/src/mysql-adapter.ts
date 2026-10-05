@@ -865,15 +865,17 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (query.controls.$count) {
       const { sql, params } = buildAggregateCount(tableName, where, query.controls);
       this._log(sql, params);
-      const row = await mapQueryErrors(mysqlDialect, () =>
-        this._exec().get<{ count: number }>(sql, params),
+      const row = await mapQueryErrors(
+        mysqlDialect,
+        () => this._exec().get<{ count: number }>(sql, params),
+        query.controls,
       );
       return [{ count: row?.count ?? 0 }];
     }
 
     const { sql, params } = buildAggregateSelect(tableName, where, query.controls);
     this._log(sql, params);
-    return mapQueryErrors(mysqlDialect, () => this._exec().all(sql, params));
+    return mapQueryErrors(mysqlDialect, () => this._exec().all(sql, params), query.controls);
   }
 
   /**

@@ -27,6 +27,7 @@ import {
   jsonDollarPath,
   foreignKeySql,
   arithOverflowError,
+  numericOutOfRangeError,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -328,9 +329,12 @@ export const mysqlDialect: SqlDialect = {
     const { pattern } = parseRegexString(value);
     return { sql: `${quotedCol} REGEXP ?`, params: [pattern] };
   },
+  // No `anyValue`: MySQL's ANY_VALUE() is rejected by HAVING (`Unknown column` for the derived
+  // column), and MIN works over every MySQL column type a first / last can read.
   // errno 1690 (`DOUBLE value is out of range`): an overflow in aggregate arithmetic
-  mapQueryError(error: unknown) {
-    return (error as { errno?: unknown } | null)?.errno === 1690 ? arithOverflowError() : undefined;
+  mapQueryError(error: unknown, arithmetic: boolean) {
+    if ((error as { errno?: unknown } | null)?.errno !== 1690) return undefined;
+    return arithmetic ? arithOverflowError() : numericOutOfRangeError();
   },
   // Spherical circle search on a POINT SRID 4326 column. POINT(x, y) builds
   // the query point in MySQL's internal axis order (x=lng, y=lat — the SRS
