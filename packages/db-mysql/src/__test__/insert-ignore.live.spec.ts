@@ -120,7 +120,7 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
     expect(await ids()).toEqual([1, 3, 4]);
   });
 
-  it("bisects a chunk with a few duplicates: fewer statements than rows, exact result", async () => {
+  it("a few duplicates: pre-check skips them, ONE INSERT, exact result", async () => {
     await items().insertMany([item(1000, "dup1"), item(1001, "dup2")]);
     statements.length = 0;
     const rows = Array.from({ length: 64 }, (_, i) => item(i + 1, `s${i}`));
@@ -133,9 +133,19 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
       rows.map((r) => r.id).filter((id) => id !== 11 && id !== 41),
     );
     const inserts = statements.filter((s) => s.startsWith("INSERT")).length;
-    expect(inserts).toBeGreaterThan(1);
-    expect(inserts).toBeLessThan(rows.length);
+    expect(inserts).toBe(1);
     expect(await items().count({ filter: {}, controls: {} })).toBe(64);
+  });
+
+  it("dense interleaved duplicates stay O(chunks) statements", async () => {
+    await items().insertMany(Array.from({ length: 3000 }, (_, i) => item(2 * i + 1, `old${i}`)));
+    statements.length = 0;
+    const rows = Array.from({ length: 20000 }, (_, i) => item(i + 1, `n${i + 1}`));
+    const result = await items().insertMany(rows, { onConflict: "ignore" });
+    expect(result.insertedCount).toBe(17000);
+    expect(result.conflicts).toHaveLength(3000);
+    expect(statements.filter((s) => /^(INSERT|SELECT)/.test(s)).length).toBeLessThanOrEqual(4);
+    expect(await items().count({ filter: {}, controls: {} })).toBe(20000);
   });
 
   it("NOT NULL still raises", async () => {

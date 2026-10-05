@@ -6,6 +6,7 @@ import {
   BaseDbAdapter,
   DbError,
   isConflict,
+  uniqueKeyTuple,
   bucketTimeZoneUnavailable,
   containsRelationFilter,
   forEachResolvedRelation,
@@ -592,14 +593,17 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Optimistic multi-row INSERT per chunk. A duplicate key (errno 1062 /
-   * 1586) fails the whole statement — InnoDB rolls back only that statement, so
-   * the transaction stays usable — and the chunk is bisected: each half is
-   * retried, recursively, so a few duplicates cost O(d log n) statements
-   * instead of one per row; a single row that still collides is skipped.
-   * Deliberately NOT `INSERT IGNORE` (it would downgrade NOT NULL / FK /
-   * truncation errors to warnings) and not `ON DUPLICATE KEY UPDATE` (a no-op
-   * update is indistinguishable from an insert in the affected-rows count).
+   * Per chunk: ONE SELECT of the chunk's primary / unique key tuples finds the
+   * rows whose key is already stored (skipped as conflicts), and the survivors
+   * go in as one multi-row INSERT. Only if that INSERT still hits a duplicate
+   * key (errno 1062 / 1586 — a concurrent writer raced in, or a collation-equal
+   * value the exact-match pre-check missed) is the survivor chunk bisected: each
+   * half is retried, recursively, and a single row that still collides is
+   * skipped. A failed statement is rolled back by InnoDB alone, so the
+   * transaction stays usable. Deliberately NOT `INSERT IGNORE` (it would
+   * downgrade NOT NULL / FK / truncation errors to warnings) and not
+   * `ON DUPLICATE KEY UPDATE` (a no-op update is indistinguishable from an
+   * insert in the affected-rows count).
    */
   override async insertManyIgnore(
     data: Array<Record<string, unknown>>,
@@ -610,12 +614,86 @@ export class MysqlAdapter extends BaseDbAdapter {
       const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
       for (const batch of batches) {
-        slots.push(...(await this._insertIgnoringChunk(tableName, columns, batch)));
+        const skipped = await this._findStoredKeyConflicts(tableName, batch);
+        const survivors = skipped.size > 0 ? batch.filter((_, i) => !skipped.has(i)) : batch;
+        const inserted =
+          survivors.length > 0
+            ? await this._insertIgnoringChunk(tableName, columns, survivors)
+            : [];
+        let next = 0;
+        for (let i = 0; i < batch.length; i++) {
+          slots.push(skipped.has(i) ? null : inserted[next++]!);
+        }
       }
       return slots;
     });
   }
 
+  /**
+   * Indices of `rows` whose primary / unique-index key tuple is already stored
+   * (a row with a null / missing key component never collides). One SELECT
+   * covers every key set; it is split only to stay under the parameter limit.
+   * Skipped entirely when no row carries a key value (generated PK, no unique
+   * index values).
+   */
+  private async _findStoredKeyConflicts(
+    tableName: string,
+    rows: Array<Record<string, unknown>>,
+  ): Promise<Set<number>> {
+    const keySets = this._table.uniqueKeySets.filter((f) => f.length > 0);
+    const rowTuples = rows.map((row) => keySets.map((fields) => uniqueKeyTuple(row, fields)));
+    const used = keySets.map((_, k) => rowTuples.some((t) => t[k] !== undefined));
+    if (!used.includes(true)) return new Set();
+
+    const width = keySets.reduce((n, f, k) => n + (used[k] ? f.length : 0), 0);
+    const sliceSize = Math.max(1, Math.floor(60000 / width));
+    const selectCols = [...new Set(keySets.flat())].map((c) => qi(c)).join(", ");
+    const stored = keySets.map(() => new Set<string>());
+
+    for (let offset = 0; offset < rows.length; offset += sliceSize) {
+      const end = Math.min(rows.length, offset + sliceSize);
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      keySets.forEach((fields, k) => {
+        if (!used[k]) return;
+        const group: Array<Record<string, unknown>> = [];
+        for (let i = offset; i < end; i++) {
+          if (rowTuples[i]![k] !== undefined) group.push(rows[i]!);
+        }
+        if (group.length === 0) return;
+        const values = (row: Record<string, unknown>) =>
+          fields.map((f) => mysqlDialect.toValue(row[f]));
+        if (fields.length === 1) {
+          clauses.push(`${qi(fields[0]!)} IN (${group.map(() => "?").join(", ")})`);
+          for (const row of group) params.push(...values(row));
+        } else {
+          const tuple = `(${fields.map(() => "?").join(", ")})`;
+          clauses.push(
+            `(${fields.map((f) => qi(f)).join(", ")}) IN (${group.map(() => tuple).join(", ")})`,
+          );
+          for (const row of group) params.push(...values(row));
+        }
+      });
+      if (clauses.length === 0) continue;
+      const sql = `SELECT ${selectCols} FROM ${quoteTableName(tableName)} WHERE ${clauses.join(" OR ")}`;
+      this._log(sql, params);
+      const found = await this._exec().all(sql, params);
+      for (const doc of found) {
+        keySets.forEach((fields, k) => {
+          const tuple = uniqueKeyTuple(doc, fields);
+          if (tuple !== undefined) stored[k]!.add(tuple);
+        });
+      }
+    }
+
+    const skipped = new Set<number>();
+    rowTuples.forEach((tuples, i) => {
+      if (tuples.some((t, k) => t !== undefined && stored[k]!.has(t))) skipped.add(i);
+    });
+    return skipped;
+  }
+
+  /** One INSERT of `rows`; on a duplicate key (a race) bisects. */
   private async _insertIgnoringChunk(
     tableName: string,
     columns: string[],
