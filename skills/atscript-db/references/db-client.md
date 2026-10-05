@@ -46,7 +46,7 @@ await tickets.insert({ id: 1, title: "A" }, { onConflict: "ignore" }); // POST /
 await tickets.insert(rows, { onConflict: "ignore" }); // → { insertedCount, insertedIds, inserted, conflicts } (indices into `rows`)
 ```
 
-Types: `TDbInsertIgnoreResult`, `TDbInsertManyIgnoreResult`, `TInsertOnConflictOptions`. Offer it only when `meta.crud.insert` includes `"onConflict"`.
+Types: `TDbInsertIgnoreResult` (single insert), `TDbInsertManyIgnoreResult` (batch). The option is `{ onConflict: "ignore" }` (inline, no named options type). Offer it only when `meta.crud.insert` includes `"onConflict"`.
 
 ## `aggregate()` and calendar buckets (since 0.1.132)
 
@@ -326,7 +326,7 @@ try {
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response.
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.
 - The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`. Since 0.1.128 a prop declared through a reference chain carries the terminal `ref` (e.g. the dictionary, not the intermediate table) plus `db.rel.FK: true` — `deserializeAnnotatedType` yields `prop.ref.type().metadata.get('db.http.path')` of the dictionary.
-- `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone. `bucketable?: true` (since 0.1.132) marks fields that accept a calendar bucket; top-level `meta.bucketUnits` (absent when none).
+- `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone. `bucketable?: true` (since 0.1.132) marks fields that accept a calendar bucket; `groupable?: true` (since 0.1.148) marks fields that accept `$groupBy` (a distinct-values picker needs `filterable ∧ groupable`); top-level `meta.bucketUnits` (absent when none).
 - Every `/meta` field (incl. `crud` whitelists, `versionColumn`, the inline read-only check — there is no `readOnly` field) → [moost-db.md § Meta endpoint shape](moost-db.md#meta-endpoint-shape).
 - `TCrudOp` and `TCrudPermissions` are re-exported from `@atscript/db-client` for consumer convenience.
 

@@ -108,6 +108,16 @@ describe("DbSpace.close", () => {
     });
   });
 
+  it("dropTableByName / dropViewByName / dropTablesByName throw SPACE_CLOSED afterwards", async () => {
+    const space = new DbSpace(() => new MockAdapter());
+    await space.close();
+    await expect(space.dropTableByName("t")).rejects.toMatchObject({ code: "SPACE_CLOSED" });
+    await expect(space.dropViewByName("v")).rejects.toMatchObject({ code: "SPACE_CLOSED" });
+    await expect(space.dropTablesByName(["a", "b"])).rejects.toMatchObject({
+      code: "SPACE_CLOSED",
+    });
+  });
+
   it("operations on an existing table handle throw SPACE_CLOSED", async () => {
     const space = new DbSpace(() => new MockAdapter());
     const table = space.getTable(fx.IgOrg);

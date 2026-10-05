@@ -13,7 +13,7 @@ Value help is the dropdown/autocomplete/row-picker UI that renders on FK fields.
 Before this release, value help only fired for fields whose `.ref` resolved to a `@db.table` interface — anything else (static enums, external lookups, view-backed entities) had no path through. Now:
 
 - **Any interface can be a value-help source**, as long as it is bound to a controller that registers the shared `/query`, `/pages`, `/one(/:id)`, `/meta` surface and stamps `@db.http.path` on the interface metadata.
-- **`@db.rel.FK` is the explicit marker** on the field side. The client-side picker looks for this annotation to decide whether a field should render a value-help picker. See the [annotations page](annotations#db-rel-fk-dual-role) for the dual-role semantics.
+- **`@db.rel.FK` is the explicit marker** on the field side. The client-side picker looks for this annotation to decide whether a field should render a value-help picker. See the [annotations page](annotations#db-rel-fk-dual-role) for the dual-role semantics. A field can also be bound **without** a foreign key by `@ui.valueHelp` (see [Constraint-free binding](#ui-value-help) below).
 - **Capability hints live on the bound interface** via `@ui.dict.filterable`, `@ui.dict.sortable`, and `@ui.dict.searchable` — the client picker reads these from `/meta` to decide which controls to render. They are **hints only**: the server accepts any filter/sort the client sends. `$search` uses `@ui.dict.searchable` to pick which fields to match (falling back to every string prop when absent).
 
 ## Controllers
@@ -103,6 +103,26 @@ export interface InviteForm {
 
 The picker resolves via `prop.ref.type().metadata.get('db.http.path')` (stamped by the controller at registration) → `/api/dicts/status`. It fetches `/api/dicts/status/meta` once, caches it app-wide, and uses the capability hints to drive its UI.
 
+## Constraint-free binding with `@ui.valueHelp` {#ui-value-help}
+
+`@db.rel.FK` needs the target to be a unique key of a `@db.table` and creates a database constraint. When the values live in a shared dictionary (an attribute-value table, a country list) and no constraint is wanted, bind the field with the `@ui.valueHelp` annotation of `@atscript/ui` instead:
+
+```atscript
+export interface TicketOverview {
+    @ui.valueHelp AttributeValue, 'value', `attribute = 'color'`
+    color: Ticket.color
+
+    @ui.valueHelp Country, 'code'
+    countryCode: Ticket.countryCode
+}
+```
+
+Arguments: the dictionary interface, the field the picker commits, and an optional static filter (literal comparisons on the dictionary's own fields). The binding creates no foreign key and no DDL; it travels through chain refs and `extends` like a value-domain annotation. The dictionary must be served by a controller (a DB controller or any value-help controller): `/meta` carries the binding as `{ target: { id, metadata: { "db.http.path": … } }, field, filter }`, with the path stamped by the controller. The binding wins over a `@db.rel.FK` on the same field. The server applies the usual row scope and field visibility of the dictionary controller to every picker query; the filter is applied by the client as a forced filter and is not a permission boundary.
+
+### Distinct values of a column {#distinct-values}
+
+To offer the values already stored in a column as picker options, mark it `@ui.valueHelp.distinct`. The client then queries the column's own controller with a plain aggregation (`$groupBy=city&$select=city&$sort=city&$limit=…`), so no dictionary is needed. It is offered only when `/meta.fields[path]` has both `filterable: true` and `groupable: true` (`groupable` is present exactly when `$groupBy` on that field passes the gate; on a table declaring `@db.column.dimension`, only dimensions are groupable). A permission overlay that strips the `$groupBy` control removes the offer too.
+
 ## Per-request scoping {#scoping}
 
 Since 0.1.143, `AsValueHelpController` has the same three scoping seams as the DB controllers. The base routes apply them to every value-help source, so a permission layer needs no extra code per subclass. Each hook may be async.
@@ -162,7 +182,7 @@ The `new AsJsonValueHelpController(Type, rows, app)` constructor and the action-
 
 On the client (`@atscript/ui`), value help resolves from the FK prop as follows:
 
-1. `extractValueHelp(prop)` returns `undefined` unless `prop.metadata.has('db.rel.FK')`.
+1. `extractValueHelp(prop)` returns `undefined` unless the prop carries a `@ui.valueHelp` binding or `prop.metadata.has('db.rel.FK')` (the binding wins when both are present).
 2. It reads `prop.ref.type().metadata.get('db.http.path')` to get the picker URL.
 3. On picker open, the client fetches `{url}/meta` once and caches it app-wide.
 4. The picker calls `{url}/query` / `{url}/pages` with the user's filter/sort/search input.

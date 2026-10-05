@@ -2557,9 +2557,13 @@ export class AsDbReadableController<
    *     const key = typeof id === "object" ? id.code : id
    *     if (typeof key !== "string") return id
    *     // the current holder of the key wins; consult the alias table on a miss
-   *     if (await this.readable.count({ filter: { code: key } })) return id
+   *     // resolve INSIDE the overlay: a row the caller cannot reach never wins
+   *     const inScope = (code: string) =>
+   *       this.readable.count({ filter: ctx.overlay ? { $and: [{ code }, ctx.overlay] } : { code } })
+   *     if (await inScope(key)) return id
    *     const alias = await aliases.findOne({ filter: { oldCode: key } })
-   *     return alias ? (typeof id === "object" ? { code: alias.newCode } : alias.newCode) : id
+   *     if (!alias || !(await inScope(alias.newCode))) return id
+   *     return typeof id === "object" ? { code: alias.newCode } : alias.newCode
    *   }))
    * }
    * ```

@@ -406,10 +406,15 @@ export class TicketsController extends AsDbController<typeof Ticket> {
       ids.map(async (id) => {
         const code = typeof id === "object" ? id.code : id;
         if (typeof code !== "string") return id;
+        // resolve INSIDE the row overlay: a row the caller cannot reach never wins
+        const inScope = (code: string) =>
+          ticketsTable.count({
+            filter: ctx.overlay ? { $and: [{ code }, ctx.overlay] } : { code },
+          });
         // the current holder of a key wins; consult the alias table on a miss
-        if ((await ticketsTable.count({ filter: { code } })) > 0) return id;
+        if ((await inScope(code)) > 0) return id;
         const alias = await aliases.findOne({ filter: { oldCode: code } });
-        if (!alias) return id;
+        if (!alias || (await inScope(alias.newCode)) === 0) return id;
         return typeof id === "object" ? { code: alias.newCode } : alias.newCode;
       }),
     );
@@ -433,11 +438,11 @@ It runs once per request, after [`prepareRequest`](#preparerequest) and the requ
 **Resolving safely** — the resolved id is never trusted for access: every endpoint still reads or deletes it under the same row overlay and visible identifications. The remaining question is whether the _answers_ can tell an alias of an unreachable row from a missing id:
 
 1. Return unchanged instead of throwing for an unknown id — a custom error for "no such alias" is an oracle.
-2. When an alias could map to several rows, resolve inside `ctx.overlay` (`findOne({ filter: { $and: [aliasFilter, ctx.overlay] } })`), so an unreachable row never wins over a reachable one.
+2. Always resolve inside `ctx.overlay` (as the example does), at least when an alias could map to several rows (`findOne({ filter: { $and: [aliasFilter, ctx.overlay] } })`), so an unreachable row never wins over a reachable one.
 3. Do not log or return the canonical id in custom errors.
 4. The hook runs before the overlay read: its own query timing is yours to manage.
 
-With that, `/one`, `DELETE`, `/meta/actions` and a `'row'` action answer an unreachable alias, a missing id and an unknown alias identically (`404`, or `{ actions: [] }`), and a `'rows'` refusal lists the ids you sent. **Cost:** one hook call per request when overridden — check the id's current holder first (one indexed read, or an in-memory alias map) and consult the alias table only on a miss.
+With that, `/one`, `DELETE`, `/meta/actions` and a `'row'` action answer an unreachable alias, a missing id and an unknown alias identically (`404`, or `{ actions: [] }`), and a `'rows'` refusal lists every id you sent (when several ids resolve to one row, all of them are listed, so the refusal never reveals which ids are aliases of the same row). **Cost:** one hook call per request when overridden — check the id's current holder first (one indexed read, or an in-memory alias map) and consult the alias table only on a miss.
 
 ## Write Hooks
 

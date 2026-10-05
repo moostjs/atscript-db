@@ -27,6 +27,8 @@ Three components:
 ```
 ?role{admin,editor}        # IN — comma INSIDE {…} is structural
 ?status!{draft,deleted}    # NOT IN
+?f{}                       # EMPTY set: IN matches nothing
+?f!{}                      # EMPTY set: NOT IN excludes nothing; !(f{}) matches all
 ```
 
 ## Range

@@ -467,19 +467,19 @@ describe("no leaks under a row overlay", () => {
     expect(none.body.ids).toEqual([{ code: "T-B-OLD" }]);
   });
 
-  it("two request ids collapsing to one resolved id echo the first, consistently", async () => {
+  it("two request ids collapsing to one resolved id are ALL echoed (no alias grouping leak)", async () => {
     const { send, handled } = await boot({ hook: collapse, overlay });
-    // refused (the row is outside the overlay): one resolved id, echoed as the first request id
+    // refused (the row is outside the overlay): one resolved id, echoed as every request id
     const strict = await send("POST", "actions/manyStrict", {
       ids: [{ code: "ALIAS-1" }, { code: "ALIAS-2" }],
     });
     expect(strict.status).toBe(409);
-    expect(strict.body.ids).toEqual([{ code: "ALIAS-1" }]);
+    expect(strict.body.ids).toEqual([{ code: "ALIAS-1" }, { code: "ALIAS-2" }]);
     const skip = await send("POST", "actions/many", {
       ids: [{ code: "ALIAS-1" }, { code: "ALIAS-2" }],
     });
     expect(skip.status).toBe(409);
-    expect(skip.body.ids).toEqual([{ code: "ALIAS-1" }]);
+    expect(skip.body.ids).toEqual([{ code: "ALIAS-1" }, { code: "ALIAS-2" }]);
     // reachable: the handler gets the one resolved id
     const open = await boot({ hook: collapse });
     const ok = await open.send("POST", "actions/many", {

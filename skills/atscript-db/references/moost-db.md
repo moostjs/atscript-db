@@ -402,6 +402,7 @@ Status-code mapping (`validation-interceptor.ts`):
 
 `AsReadableController`, `AsValueHelpController`, and `AsJsonValueHelpController` back non-DB `@db.rel.FK` sources (enums, static lists, JSON documents) so forms can resolve picker URLs from `@db.http.path` regardless of whether the target is a table.
 
+- Field-side binding: `@db.rel.FK` (constraint) OR `@ui.valueHelp Target, 'field', <static filter>` (atscript-ui, 0.1.148 — no FK, no DDL; `/meta` carries `{ target: { id, metadata: { "db.http.path" } }, field, filter }`; the controller stamps the path, the dictionary `.as` need not declare it). `@ui.valueHelp.distinct` on a column = distinct stored values via `$groupBy=f&$select=f`, offered only when `fields[f].filterable ∧ groupable`.
 - `AsValueHelpController` — **abstract**. `query()` and `getOne()` are abstract; subclass must implement them (`as-value-help.controller.ts:105,111`).
 - `AsJsonValueHelpController` — **the only concrete subclass shipped**. `new AsJsonValueHelpController(Type, rows, app)` — holds a static in-memory row set and serves `/query` `/pages` `/one` `/meta` over it. Filter/sort/projection delegate to the shared `@atscript/db-memory` engine (see § query engine below).
 

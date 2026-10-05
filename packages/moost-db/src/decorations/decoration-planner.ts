@@ -106,12 +106,19 @@ export class DecorationPlanner {
       const skip = new Set(excluded);
       const requested = keys.filter((key) => !skip.has(key) && this.visible(key));
       const real = Object.fromEntries(Object.entries(map).filter(([k]) => !keySet.has(k)));
-      const requiresOnly = this.requiresOf(requested).filter((path) => path in real);
-      for (const path of requiresOnly) delete real[path];
+      // A required path the client excluded — itself or through an excluded ancestor — is
+      // un-excluded (the whole excluded entry is read) and stripped again.
+      const requiresOnly = new Set<string>();
+      for (const path of this.requiresOf(requested)) {
+        const hit = selfOrAncestor(path, new Set(Object.keys(real)));
+        if (hit === undefined) continue;
+        requiresOnly.add(hit);
+        delete real[hit];
+      }
       return {
         select: Object.keys(real).length > 0 ? (real as TSelect) : undefined,
         requested,
-        requiresOnly,
+        requiresOnly: [...requiresOnly],
       };
     }
     const named = included.filter((k) => keySet.has(k));
@@ -136,7 +143,11 @@ export class DecorationPlanner {
     emit: (list: unknown[]) => TSelect,
   ): TDecorationPlan {
     const requested = named.filter((key) => this.visible(key));
-    const extra = this.requiresOf(requested).filter((path) => !have.has(path));
+    // A path the client already selected — itself or through a selected ancestor — is
+    // neither added nor stripped: it is the client's data.
+    const extra = this.requiresOf(requested).filter(
+      (path) => selfOrAncestor(path, have) === undefined,
+    );
     const { list, added } = this.nonEmptyInclusion([...real, ...extra]);
     return {
       select: emit(list),

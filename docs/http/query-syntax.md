@@ -61,6 +61,8 @@ curl "http://localhost:3000/todos/query?status!{Draft,Deleted}"  # NOT IN
 
 The IN operator matches records where the field equals any value in the comma-separated list.
 
+An **empty** set follows the usual semantics: `f{}` matches nothing, `f!{}` excludes nothing (matches every row), and `!(f{})` matches every row. The same holds on every adapter.
+
 ### Range (Between)
 
 Filter a field within a range:

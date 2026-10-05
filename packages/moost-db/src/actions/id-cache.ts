@@ -34,26 +34,34 @@ export { DEFAULT_MAX_ACTION_IDS } from "./current-action";
  * `resolveRowIds` changed an id. Every id moost-db reports back (gate
  * refusals, target summaries) is mapped through {@link requestIdOf}.
  */
-export const dbActionRequestIdsKey = key<ReadonlyMap<string, Record<string, unknown>>>(
+export const dbActionRequestIdsKey = key<ReadonlyMap<string, Record<string, unknown>[]>>(
   "atscript_db_action_request_ids",
 );
 
-/** The id as the client sent it — `id` itself when `resolveRowIds` did not change it. */
+/** EVERY id the client sent that resolved to `id` — `[id]` when `resolveRowIds` did not change it. */
+export function requestIdsFor(
+  ctx: EventContext,
+  id: Record<string, unknown>,
+): Record<string, unknown>[] {
+  if (!ctx.has(dbActionRequestIdsKey)) return [id];
+  const k = identityKey(id);
+  return (k === undefined ? undefined : ctx.get(dbActionRequestIdsKey).get(k)) ?? [id];
+}
+
+/** The id as the client sent it (the first, for an id several requests resolved to). */
 export function requestIdOf(
   ctx: EventContext,
   id: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (!ctx.has(dbActionRequestIdsKey)) return id;
-  const k = identityKey(id);
-  return (k === undefined ? undefined : ctx.get(dbActionRequestIdsKey).get(k)) ?? id;
+  return requestIdsFor(ctx, id)[0]!;
 }
 
-/** {@link requestIdOf} of every id. */
+/** {@link requestIdsFor} of every id, flattened — all request aliases are echoed. */
 export function requestIdsOf(
   ctx: EventContext,
   ids: readonly Record<string, unknown>[],
 ): Record<string, unknown>[] {
-  return ids.map((id) => requestIdOf(ctx, id));
+  return ids.flatMap((id) => requestIdsFor(ctx, id));
 }
 
 /**

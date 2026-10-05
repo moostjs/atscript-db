@@ -5,7 +5,7 @@ import { ApplyDecorators, Resolve } from "moost";
 import { getAtscriptDbMate } from "../mate";
 import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
-import { dbActionIdsSlot, requestIdOf, requestIdsOf } from "./id-cache";
+import { dbActionIdsSlot, requestIdsFor, requestIdsOf } from "./id-cache";
 import {
   DEFAULT_QUERY_TARGET_BATCH_SIZE,
   dbActionSkippedKey,
@@ -121,8 +121,10 @@ class TargetBase {
     return {
       matched: this.matched,
       processed: Math.max(0, this.processed - this.failed.length),
-      skipped: this.skipped.map((s) => ({ ...s, id: requestIdOf(this.ctx, s.id) })),
-      failed: this.failed.map((f) => ({ ...f, id: requestIdOf(this.ctx, f.id) })),
+      skipped: this.skipped.flatMap((s) =>
+        requestIdsFor(this.ctx, s.id).map((id) => ({ ...s, id })),
+      ),
+      failed: this.failed.flatMap((f) => requestIdsFor(this.ctx, f.id).map((id) => ({ ...f, id }))),
     };
   }
 }

@@ -38,8 +38,13 @@ export function identityKey(id: Record<string, unknown>): string | undefined {
  */
 export interface TAppliedIds {
   ids: Record<string, unknown>[];
-  /** Resolved {@link identityKey} → the request's (first) id; set only when `resolveRowIds` changed an id. */
-  requestIds?: ReadonlyMap<string, Record<string, unknown>>;
+  /**
+   * Resolved {@link identityKey} → EVERY id the client requested that resolved
+   * to it (in request order, distinct); set only when `resolveRowIds` changed
+   * an id. Echoing all of them keeps the alias → canonical grouping of an
+   * unreachable row from leaking.
+   */
+  requestIds?: ReadonlyMap<string, Record<string, unknown>[]>;
 }
 
 /**
@@ -51,14 +56,20 @@ export function applyResolvedIds(
   resolved: readonly Record<string, unknown>[],
 ): TAppliedIds {
   const ids: Record<string, unknown>[] = [];
-  const requestIds = new Map<string, Record<string, unknown>>();
+  const requestIds = new Map<string, Record<string, unknown>[]>();
   let changed = false;
   for (let i = 0; i < resolved.length; i++) {
     const k = identityKey(resolved[i]);
     if (k !== undefined) {
-      if (requestIds.has(k)) continue; // a duplicate identity collapses to the first
-      requestIds.set(k, requested[i]);
       if (k !== identityKey(requested[i])) changed = true;
+      const seen = requestIds.get(k);
+      if (seen) {
+        // a duplicate identity collapses to the first; its request id is still echoed
+        const rk = identityKey(requested[i]);
+        if (rk === undefined || !seen.some((r) => identityKey(r) === rk)) seen.push(requested[i]);
+        continue;
+      }
+      requestIds.set(k, [requested[i]]);
     }
     ids.push(resolved[i]);
   }

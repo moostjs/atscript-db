@@ -197,6 +197,7 @@ export class DbSpace implements AsyncDisposable {
    * See `BaseDbAdapter.dropTableByName` for an adapter that does not support it.
    */
   async dropTableByName(tableName: string): Promise<void> {
+    this._assertOpen();
     await this._getAdminAdapter().dropTableByName(tableName);
   }
 
@@ -205,6 +206,7 @@ export class DbSpace implements AsyncDisposable {
    * See `BaseDbAdapter.dropViewByName` for an adapter that does not support it.
    */
   async dropViewByName(viewName: string): Promise<void> {
+    this._assertOpen();
     await this._getAdminAdapter().dropViewByName(viewName);
   }
 
@@ -214,6 +216,7 @@ export class DbSpace implements AsyncDisposable {
    * @since 0.1.128
    */
   async dropTablesByName(tableNames: string[]): Promise<void> {
+    this._assertOpen();
     await this._getAdminAdapter().dropTablesByName(tableNames);
   }
 
