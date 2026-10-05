@@ -150,6 +150,13 @@ const TZ_PROBE_SQL =
  */
 const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
 
+/** Rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
+interface TIdGroup {
+  rows: Array<Record<string, unknown>>;
+  at: number[];
+  generated: boolean;
+}
+
 /**
  * MySQL adapter for {@link AtscriptDbTable}.
  *
@@ -565,27 +572,64 @@ export class MysqlAdapter extends BaseDbAdapter {
       const allIds: unknown[] = [];
 
       for (const batch of batches) {
-        const { sql, params } = buildInsertMany(tableName, batch, columns);
-        this._log(sql, params);
-        const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-        allIds.push(...this._batchInsertedIds(batch, result.insertId));
+        const ids: unknown[] = Array.from({ length: batch.length });
+        for (const group of this._idGroups(batch)) {
+          const { sql, params } = buildInsertMany(tableName, group.rows, columns);
+          this._log(sql, params);
+          const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
+          this._groupInsertedIds(group, result.insertId).forEach((id, k) => {
+            ids[group.at[k]!] = id;
+          });
+        }
+        allIds.push(...ids);
       }
 
       return { insertedCount: allIds.length, insertedIds: allIds };
     });
   }
 
+  /** Physical column of the single-column AUTO_INCREMENT primary key, if the table has one. */
+  private _autoIncrementPk(): string | undefined {
+    const pks = this._table.primaryKeys;
+    if (pks.length !== 1 || !this._incrementFields.has(pks[0]!)) return undefined;
+    return this._table.getMetadata().physicalPath(pks[0]!);
+  }
+
   /**
-   * Ids of the rows of ONE successful multi-row INSERT. MySQL reports only the
-   * first auto-generated id (`insertId`); the statement's rows get consecutive
-   * ids from it (guaranteed for a simple multi-row INSERT under
-   * `innodb_autoinc_lock_mode` 0 / 1; mode 2 — the 8.0 default — is also
-   * consecutive within one statement of known row count). For user-supplied
-   * PKs `_resolveInsertedId` ignores `insertId`.
+   * Splits `rows` into groups that each map to ONE statement with a derivable
+   * id sequence. MySQL reports only the first GENERATED id of a statement, and
+   * an explicit auto-increment value above the counter bumps the counter, so a
+   * statement mixing explicit and generated PKs cannot be mapped by
+   * `insertId + i`: such a chunk becomes one statement per kind. A table
+   * without an AUTO_INCREMENT PK, or a chunk of one kind, stays one group.
    */
-  private _batchInsertedIds(batch: Array<Record<string, unknown>>, insertId: unknown): unknown[] {
-    const firstId = Number(insertId);
-    return batch.map((row, i) => this._resolveInsertedId(row, firstId > 0 ? firstId + i : 0));
+  private _idGroups(rows: Array<Record<string, unknown>>): TIdGroup[] {
+    const col = this._autoIncrementPk();
+    if (!col) return [{ rows, at: rows.map((_, i) => i), generated: false }];
+    const explicit: TIdGroup = { rows: [], at: [], generated: false };
+    const generated: TIdGroup = { rows: [], at: [], generated: true };
+    rows.forEach((row, i) => {
+      const v = row[col];
+      const target = v === undefined || v === null || v === 0 || v === "0" ? generated : explicit;
+      target.rows.push(row);
+      target.at.push(i);
+    });
+    return [explicit, generated].filter((g) => g.rows.length > 0);
+  }
+
+  /**
+   * Ids of the rows of ONE successful multi-row INSERT of a homogeneous
+   * {@link _idGroups} group: generated rows get consecutive ids from `insertId`
+   * (guaranteed for a simple multi-row INSERT under `innodb_autoinc_lock_mode`
+   * 0 / 1; mode 2 — the 8.0 default — is also consecutive within one statement
+   * of known row count), explicit rows keep their own value.
+   */
+  private _groupInsertedIds(group: TIdGroup, insertId: unknown): unknown[] {
+    const first = Number(insertId);
+    return group.rows.map((row, i) => {
+      const generatedId = first > 0 ? first + i : 0;
+      return group.generated ? generatedId : this._resolveInsertedId(row, generatedId);
+    });
   }
 
   override supportsInsertIgnore(): boolean {
@@ -593,17 +637,20 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Per chunk: ONE SELECT of the chunk's primary / unique key tuples finds the
-   * rows whose key is already stored (skipped as conflicts), and the survivors
-   * go in as one multi-row INSERT. Only if that INSERT still hits a duplicate
-   * key (errno 1062 / 1586 — a concurrent writer raced in, or a collation-equal
-   * value the exact-match pre-check missed) is the survivor chunk bisected: each
-   * half is retried, recursively, and a single row that still collides is
-   * skipped. A failed statement is rolled back by InnoDB alone, so the
-   * transaction stays usable. Deliberately NOT `INSERT IGNORE` (it would
-   * downgrade NOT NULL / FK / truncation errors to warnings) and not
-   * `ON DUPLICATE KEY UPDATE` (a no-op update is indistinguishable from an
-   * insert in the affected-rows count).
+   * Per chunk: ONE optimistic multi-row INSERT (an all-new batch costs a single
+   * statement). Only when it hits a duplicate key (errno 1062 / 1586) does ONE
+   * SELECT of the chunk's primary / unique key tuples find the stored rows
+   * (skipped as conflicts) and the survivors go in as one more multi-row
+   * INSERT — a dense-duplicate chunk is three statements, never O(rows). Only
+   * if that INSERT still collides (a concurrent writer raced in, or a
+   * collation-equal value the exact-match pre-check missed) are the survivors
+   * bisected: each half is retried, recursively, and a single row that still
+   * collides is skipped. A failed statement is rolled back by InnoDB alone, so
+   * the transaction stays usable. A chunk mixing explicit and generated
+   * auto-increment ids is processed as one such sequence per kind. Deliberately
+   * NOT `INSERT IGNORE` (it would downgrade NOT NULL / FK / truncation errors
+   * to warnings) and not `ON DUPLICATE KEY UPDATE` (a no-op update is
+   * indistinguishable from an insert in the affected-rows count).
    */
   override async insertManyIgnore(
     data: Array<Record<string, unknown>>,
@@ -614,16 +661,14 @@ export class MysqlAdapter extends BaseDbAdapter {
       const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
       for (const batch of batches) {
-        const skipped = await this._findStoredKeyConflicts(tableName, batch);
-        const survivors = skipped.size > 0 ? batch.filter((_, i) => !skipped.has(i)) : batch;
-        const inserted =
-          survivors.length > 0
-            ? await this._insertIgnoringChunk(tableName, columns, survivors)
-            : [];
-        let next = 0;
-        for (let i = 0; i < batch.length; i++) {
-          slots.push(skipped.has(i) ? null : inserted[next++]!);
+        const out: TDbInsertIgnoreSlot[] = Array.from({ length: batch.length }, () => null);
+        for (const group of this._idGroups(batch)) {
+          const groupSlots = await this._insertIgnoringGroup(tableName, columns, group);
+          groupSlots.forEach((slot, k) => {
+            out[group.at[k]!] = slot;
+          });
         }
+        slots.push(...out);
       }
       return slots;
     });
@@ -693,25 +738,68 @@ export class MysqlAdapter extends BaseDbAdapter {
     return skipped;
   }
 
-  /** One INSERT of `rows`; on a duplicate key (a race) bisects. */
-  private async _insertIgnoringChunk(
+  /** Optimistic INSERT of a group, then pre-check + survivor INSERT (+ bisect on a race). */
+  private async _insertIgnoringGroup(
     tableName: string,
     columns: string[],
-    rows: Array<Record<string, unknown>>,
+    group: TIdGroup,
   ): Promise<TDbInsertIgnoreSlot[]> {
-    const { sql, params } = buildInsertMany(tableName, rows, columns);
+    const direct = await this._tryInsertGroup(tableName, columns, group);
+    if (direct) return direct;
+    if (group.rows.length === 1) return [null];
+
+    const skipped = await this._findStoredKeyConflicts(tableName, group.rows);
+    // Nothing known stored (a collation-equal value, or a race): bisect.
+    if (skipped.size === 0) return this._bisectGroup(tableName, columns, group);
+
+    const survivors: TIdGroup = {
+      rows: group.rows.filter((_, i) => !skipped.has(i)),
+      at: [],
+      generated: group.generated,
+    };
+    const inserted =
+      survivors.rows.length > 0
+        ? ((await this._tryInsertGroup(tableName, columns, survivors)) ??
+          (survivors.rows.length === 1
+            ? [null]
+            : await this._bisectGroup(tableName, columns, survivors)))
+        : [];
+    let next = 0;
+    return group.rows.map((_, i) => (skipped.has(i) ? null : inserted[next++]!));
+  }
+
+  /** Retries the halves of a group whose one INSERT is known to collide; a lone colliding row is skipped. */
+  private async _bisectGroup(
+    tableName: string,
+    columns: string[],
+    group: TIdGroup,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    const mid = group.rows.length >> 1;
+    const out: TDbInsertIgnoreSlot[] = [];
+    for (const rows of [group.rows.slice(0, mid), group.rows.slice(mid)]) {
+      const half: TIdGroup = { rows, at: [], generated: group.generated };
+      out.push(
+        ...((await this._tryInsertGroup(tableName, columns, half)) ??
+          (rows.length === 1 ? [null] : await this._bisectGroup(tableName, columns, half))),
+      );
+    }
+    return out;
+  }
+
+  /** ONE INSERT of a group's rows; `undefined` on a duplicate key (errno 1062 / 1586). */
+  private async _tryInsertGroup(
+    tableName: string,
+    columns: string[],
+    group: TIdGroup,
+  ): Promise<TDbInsertIgnoreSlot[] | undefined> {
+    const { sql, params } = buildInsertMany(tableName, group.rows, columns);
     this._log(sql, params);
     try {
       const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-      return this._batchInsertedIds(rows, result.insertId).map((insertedId) => ({ insertedId }));
+      return this._groupInsertedIds(group, result.insertId).map((insertedId) => ({ insertedId }));
     } catch (error) {
       if (!isConflict(error)) throw error;
-      if (rows.length === 1) return [null];
-      const mid = rows.length >> 1;
-      return [
-        ...(await this._insertIgnoringChunk(tableName, columns, rows.slice(0, mid))),
-        ...(await this._insertIgnoringChunk(tableName, columns, rows.slice(mid))),
-      ];
+      return undefined;
     }
   }
 

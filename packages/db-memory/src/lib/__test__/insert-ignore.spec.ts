@@ -31,6 +31,18 @@ beforeEach(async () => {
 });
 
 describe("MemoryAdapter insertMany onConflict: ignore", () => {
+  it("inside withTransaction a skipped row does not throw and later writes still run (no rollback: memory has no transactions)", async () => {
+    await items().insertMany([item(1, "a")]);
+    await items().dbAdapter.withTransaction(async () => {
+      const result = await items().insertMany([item(2, "a"), item(3, "c")], {
+        onConflict: "ignore",
+      });
+      expect(result.conflicts).toEqual([0]);
+      await items().insertOne(item(4, "d"));
+    });
+    expect(await ids()).toEqual([1, 3, 4]);
+  });
+
   it("skips rows colliding with stored rows on the PK and on a unique index", async () => {
     await items().insertMany([item(1, "a"), item(2, "b")]);
     const result = await items().insertMany([item(1, "zz"), item(3, "b"), item(4, "d")], {

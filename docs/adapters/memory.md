@@ -165,7 +165,7 @@ Leaf-comparison semantics are **JS-native and documented — deliberately not cl
 
 ## Conflict-ignoring inserts {#insert-ignore}
 
-`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) tries each row and turns a primary-key / unique-index `CONFLICT` into a skipped slot. Closing the space drops its in-memory tables ([Closing the space](/guide/setup#closing)).
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) tries each row and turns a primary-key / unique-index `CONFLICT` into a skipped slot. Memory has no transactions, so inside `withTransaction` a skipped row simply does not throw and nothing rolls back. Closing the space drops its in-memory tables ([Closing the space](/guide/setup#closing)).
 
 ## Limitations
 
