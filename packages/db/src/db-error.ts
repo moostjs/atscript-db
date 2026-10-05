@@ -38,6 +38,12 @@ export type DbErrorCode =
    * `DbSpace` (moost-db: 400). @since 0.1.147
    */
   | "REL_FILTER_NOT_SUPPORTED"
+  // ── Space lifecycle ──
+  /** The `DbSpace` was closed; the table/view handle can no longer be used (moost-db: 503). @since 0.1.148 */
+  | "SPACE_CLOSED"
+  // ── Conflict-ignoring insert ──
+  /** The adapter does not implement `insertManyIgnore` (moost-db: 400). @since 0.1.148 */
+  | "ON_CONFLICT_NOT_SUPPORTED"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
   | "TX_WAIT_TIMEOUT";
 
@@ -52,6 +58,33 @@ export class DbError extends Error {
     super(message ?? errors[0]?.message ?? "Database error");
     this.stack = undefined;
   }
+}
+
+/** Whether `error` is a `DbError` with code `CONFLICT` (unique / primary-key violation). */
+export function isConflict(error: unknown): error is DbError {
+  return error instanceof DbError && error.code === "CONFLICT";
+}
+
+/** @internal The error every handle of a closed `DbSpace` throws. */
+export function spaceClosedError(): DbError {
+  return new DbError("SPACE_CLOSED", [
+    {
+      path: "",
+      message: "The DbSpace is closed; table and view handles can no longer be used",
+    },
+  ]);
+}
+
+/**
+ * Collapses the failures of a multi-step shutdown into one `AggregateError`
+ * (message lists every failure).
+ * @internal
+ */
+export function aggregateFailure(label: string, errors: unknown[]): AggregateError {
+  return new AggregateError(
+    errors,
+    `${label}: ${errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
+  );
 }
 
 /**

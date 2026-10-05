@@ -6,6 +6,19 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.148 {#v0-1-148}
+
+### New features
+
+- **Conflict-ignoring inserts** — `insertOne` / `insertMany` with `{ onConflict: "ignore" }` skip rows that collide on the primary key or a unique index and report them by input index: [Skip conflicting rows](/api/crud#insert-ignore). Over HTTP it is `POST /?$onConflict=ignore` ([details](/http/crud#post-insert-ignore)), from the client `insert(rows, { onConflict: "ignore" })`. All bundled adapters support it; `/meta` lists `crud.insert: ["onConflict"]`. A custom adapter opts in with `insertManyIgnore` / `supportsInsertIgnore` ([Creating adapters](/adapters/creating-adapters#insert-ignore)) and otherwise gets `DbError("ON_CONFLICT_NOT_SUPPORTED")` (400). `prepareRequest` receives `ctx.onConflict` on the `insert` endpoint.
+- **`DbSpace.close()`** — and `await using db = createAdapter(…)` — close a space and its connections: [Closing the space](/guide/setup#closing). Pass `onClose` to the `DbSpace` constructor to let it close a driver you own; `createAdapter()` already does. moost-db gets `closeDbSpaces()` ([details](/http/#closing-spaces)), which you call from your shutdown path (it is not hooked into `Moost.dispose()`). A custom adapter may implement `dispose()`.
+
+### Behavior changes {#v0-1-148-behavior}
+
+- **Non-finite operands are rejected.** `$inc` / `$dec` / `$mul` with `NaN`, `Infinity` or `-Infinity` fail validation (`Field operation operand must be a finite number`); a non-finite number as a filter value on a `number` / `decimal` field is `INVALID_QUERY`. They used to reach the database and poison the stored value or answer with an engine error. See [Field operations](/api/update-patch#field-ops) and [Value Types](/api/queries#value-types).
+- **A closed space refuses work.** After `space.close()`, `getTable` / `getView` / `get` / `getAdapter` and every operation on an existing table or view handle throw `DbError("SPACE_CLOSED")` (HTTP 503 in moost-db). Nothing changes until you call `close()`.
+- **`createAdapter()` spaces own their driver.** `space.close()` ends the pool / client / file handle that `createAdapter()` created; before, nothing could. If you closed the driver separately you can keep doing so: the PostgreSQL, MySQL and SQLite drivers' `close()` is now idempotent, so a second close is a no-op instead of an error (`Called end on pool more than once`).
+
 ## 0.1.147 {#v0-1-147}
 
 **Requires `moost` / `@moostjs/event-http` 0.6.43 and `@wooksjs/event-http` / `@wooksjs/http-body` 0.7.26** (`withControllerContext`, `MoostHttp.invoke`, `seedBody`).

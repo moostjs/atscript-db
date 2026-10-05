@@ -95,6 +95,10 @@ const driver = new BetterSqlite3Driver("./app.db"); // or ':memory:' in test env
 const db = new DbSpace(() => new SqliteAdapter(driver)); // factory runs once per table
 ```
 
+### Closing a space (0.1.148) {#closing-a-space-01148}
+
+`await db.close()` (idempotent; also `await using db = createAdapter(…)`) marks the space closed, calls `dispose()` on every adapter it created, then runs the `onClose` hook — `new DbSpace(factory, { onClose: () => driver.close() })`; the `createAdapter()` helpers already pass it, so `close()` ends their pool / client / file handle. The space closes only what it was handed. Afterwards `getTable` / `getView` / `get` / `getAdapter` and every operation on an existing handle throw `DbError("SPACE_CLOSED")` (moost-db 503). It does NOT cancel running queries — call it after the server stopped accepting requests. Failures from several steps arrive as one `AggregateError`. PostgreSQL / MySQL / SQLite driver `close()` is idempotent. moost-db: `closeDbSpaces()` ([moost-db.md](moost-db.md#insert-ignore-and-closing-spaces-01148)).
+
 Each SQL adapter package also exports a `createAdapter(connection)` one-liner — convenient for scripts; see [testing.md](testing.md) for the `:memory:` test-harness pattern.
 
 ## Sync the schema

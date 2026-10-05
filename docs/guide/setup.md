@@ -240,6 +240,31 @@ const db = createAdapter(); // in-memory, no connection string
 
 :::
 
+## Ownership and Closing the Space {#closing}
+
+A `DbSpace` closes only what it was handed. Adapters it creates through the factory are always its own; a driver or client you pass in through the factory stays yours unless you give the space an `onClose` hook (since 0.1.148):
+
+```typescript
+const driver = new PgDriver("postgresql://user@localhost:5432/mydb");
+const db = new DbSpace(() => new PostgresAdapter(driver), {
+  onClose: () => driver.close(), // the space closes what you hand it
+});
+```
+
+The `createAdapter()` shorthand (above) builds the driver itself and wires this hook, so `db.close()` ends its pool / client / file handle.
+
+```typescript
+await db.close(); // idempotent: later calls return the same promise
+db.closed; // true
+
+// or scoped, with explicit resource management:
+await using db = createAdapter("./myapp.db");
+```
+
+`close()` marks the space closed, calls `dispose()` on every adapter the space created, then runs `onClose`. Every step is attempted; failures are collected into one `AggregateError`. Afterwards `getTable` / `getView` / `get` / `getAdapter` and every operation on an existing table or view handle throw `DbError("SPACE_CLOSED")` (HTTP 503 in moost-db).
+
+`close()` does not cancel or drain running queries — call it after the server stopped accepting requests (pool shutdown waits for connections that are checked out; SQLite closes synchronously). With moost-db use [`closeDbSpaces()`](/http/#closing-spaces).
+
 ## Registering Types
 
 Get typed table and view instances by passing compiled `.as` types to the space:

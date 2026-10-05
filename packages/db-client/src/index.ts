@@ -54,6 +54,8 @@ export type {
   DbRow,
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
   TDbUpdateResult,
   TDbDeleteResult,
   // Re-exported from @uniqu/core

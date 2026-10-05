@@ -12,7 +12,7 @@ import type {
   TWriteOptions,
 } from "@atscript/db";
 import { DbError, isEmptyObject, isPlainObject, reconcileCas } from "@atscript/db";
-import { Body, Delete, HttpError, Patch, Post, Put, Query } from "@moostjs/event-http";
+import { Body, Delete, HttpError, Patch, Post, Put, Query, Url } from "@moostjs/event-http";
 import { Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
@@ -105,7 +105,9 @@ export class AsDbController<
   protected override buildCrud(): TCrudPermissions {
     return {
       ...super.buildCrud(),
-      insert: [],
+      // `insert` lists the POST controls: `onConflict` (`?$onConflict=ignore`,
+      // since 0.1.148) when the adapter implements `insertManyIgnore`.
+      insert: this.readable.dbAdapter?.supportsInsertIgnore() ? ["onConflict"] : [],
       update: [],
       replace: [],
       remove: [],
@@ -326,17 +328,39 @@ export class AsDbController<
 
   /**
    * **POST /** — inserts one or many records.
+   *
+   * `?$onConflict=ignore` (since 0.1.148) skips rows colliding on the primary
+   * key or a unique index instead of answering 409. The response then is
+   * `{ insertedId?, conflict }` for an object body and
+   * `{ insertedCount, insertedIds, inserted, conflicts }` for an array body.
+   * Any other `$` control on POST answers 400.
    */
   @Post("")
-  async insert(@Body() payload: unknown): Promise<unknown> {
-    await this.parseRequest("insert");
+  async insert(@Body() payload: unknown, @Url() url?: string): Promise<unknown> {
+    const { controls } = await this.parseRequest("insert", url ?? "");
+    const onConflict = this._readOnConflict(controls);
     assertWriteShape(payload);
+    const args: [] | [TWriteOptions<any>] = onConflict
+      ? [{ ...this._writeArgs[0], onConflict } as TWriteOptions<any>]
+      : this._writeArgs;
     if (Array.isArray(payload)) {
       const rows = await this._writeBody("insertMany", payload, true);
-      return this.table.insertMany(rows as never, ...this._writeArgs);
+      return this.table.insertMany(rows as never, ...(args as []));
     }
     const row = await this._writeBody("insert", payload, false);
-    return this.table.insertOne(row as never, ...this._writeArgs);
+    return this.table.insertOne(row as never, ...(args as []));
+  }
+
+  /** The only POST control: `$onConflict` (`error` | `ignore`). Anything else `$…` → 400. */
+  private _readOnConflict(controls: Record<string, unknown>): "ignore" | undefined {
+    for (const key of Object.keys(controls)) {
+      if (key !== "$onConflict") throw badRequest("", `Unsupported control "${key}" on insert`);
+    }
+    const mode = controls.$onConflict;
+    if (mode !== undefined && mode !== "error" && mode !== "ignore") {
+      throw badRequest("", `$onConflict must be "error" or "ignore", got ${JSON.stringify(mode)}`);
+    }
+    return mode === "ignore" ? "ignore" : undefined;
   }
 
   /**

@@ -19,6 +19,8 @@ import type {
   TDbAvailableActions,
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
   TDbUpdateResult,
   TDbDeleteResult,
 } from "@atscript/db";
@@ -230,8 +232,25 @@ export class Client<T extends AtscriptClientShape = AtscriptClientShape> {
    * `POST /` — insert many records.
    */
   async insert(data: PatchOf<T>[]): Promise<TDbInsertManyResult>;
-  async insert(data: PatchOf<T> | PatchOf<T>[]): Promise<unknown> {
-    return this._request("POST", "", await this._prepareWrite(data, "insert"));
+  /**
+   * `POST /?$onConflict=ignore` — insert one record, skipping it when it
+   * collides on the primary key or a unique index (since 0.1.148).
+   */
+  async insert(data: PatchOf<T>, opts: { onConflict: "ignore" }): Promise<TDbInsertIgnoreResult>;
+  /**
+   * `POST /?$onConflict=ignore` — insert many records, skipping the ones that
+   * collide; the result reports inserted and skipped input indices (since 0.1.148).
+   */
+  async insert(
+    data: PatchOf<T>[],
+    opts: { onConflict: "ignore" },
+  ): Promise<TDbInsertManyIgnoreResult>;
+  async insert(
+    data: PatchOf<T> | PatchOf<T>[],
+    opts?: { onConflict?: "ignore" },
+  ): Promise<unknown> {
+    const query = opts?.onConflict === "ignore" ? "?$onConflict=ignore" : "";
+    return this._request("POST", query, await this._prepareWrite(data, "insert"));
   }
 
   // ── PATCH / ────────────────────────────────────────────────────────────────

@@ -59,6 +59,26 @@ These are abstract — every adapter must implement all of them.
 
 Data is already validated, defaults applied, and columns mapped by the table layer. Your adapter only needs to translate to the database's native insert syntax.
 
+### Conflict-ignoring insert (optional) {#insert-ignore}
+
+Since 0.1.148. `insertMany(rows, { onConflict: "ignore" })` calls `insertManyIgnore(rows)` instead of `insertMany`, and `supportsInsertIgnore()` advertises it (moost-db lists the control in `/meta.crud.insert`).
+
+```typescript
+insertManyIgnore(data: Array<Record<string, unknown>>): Promise<TDbInsertIgnoreSlot[]>
+supportsInsertIgnore(): boolean // default false
+```
+
+`TDbInsertIgnoreSlot` (exported from `@atscript/db`) is `{ insertedId: unknown } | null`.
+
+- Return **one slot per input row**, in order: `{ insertedId }` for an inserted row, `null` for a row skipped because it collided with a **stored** row on the primary key or a unique index. The core already removed duplicates inside the batch and defaults/validation/guards ran, so you only see the survivors.
+- Skip uniqueness collisions only. `NOT NULL`, foreign-key, check and every other error must still throw — do not use `INSERT IGNORE`, `INSERT OR IGNORE` or any construct that downgrades them.
+- A skipped row must never abort the surrounding transaction. Use `ON CONFLICT DO NOTHING` where the engine has it, or catch a duplicate-key error only where the engine rolls back just that statement.
+- The default implementation throws `DbError("ON_CONFLICT_NOT_SUPPORTED")` (moost-db: 400), so an adapter that does not override it fails closed.
+
+## Disposing resources {#dispose}
+
+Since 0.1.148. `DbSpace.close()` calls the optional `dispose?(): void | Promise<void>` of every adapter the space created — release timers, caches or change streams there. Do **not** close the shared driver in `dispose()`: it is shared by every adapter of the space; the owner passes `onClose` to the `DbSpace` instead ([Closing the space](/guide/setup#closing)).
+
 ::: warning Constraint errors must be `DbError`s
 Wrap every write (insert, update, replace, patch, delete) so that a native constraint error is rethrown as `DbError` from `@atscript/db`: a duplicate primary or unique key as `DbError("CONFLICT")`, a foreign-key violation as `DbError("FK_VIOLATION")`. moost-db maps them to 409 / 400, and schema sync relies on `CONFLICT` to recognise a lock held by another pod — a raw driver error there makes `run()` reject when two pods start together (since 0.1.141).
 :::

@@ -17,6 +17,8 @@ import type {
   DbRow,
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
   TDbUpdateResult,
   TDbDeleteResult,
   TFieldMeta,
@@ -43,7 +45,14 @@ export type {
 
 // ── Re-export CRUD result types from @atscript/db ───────────────────────────
 
-export type { TDbInsertResult, TDbInsertManyResult, TDbUpdateResult, TDbDeleteResult };
+export type {
+  TDbInsertResult,
+  TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
+  TDbUpdateResult,
+  TDbDeleteResult,
+};
 
 // ── Write payload aliases (since 0.1.128) ───────────────────────────────────
 

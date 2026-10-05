@@ -285,6 +285,43 @@ describe("Client", () => {
     expect(result.insertedId).toBe("abc");
   });
 
+  it("insert with { onConflict: 'ignore' } sends POST /?$onConflict=ignore and types the result", async () => {
+    fetchFn = mockFetch({ insertedCount: 1, insertedIds: ["b"], inserted: [1], conflicts: [0] });
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const many = await client.insert(
+      [
+        { name: "A", status: "active" },
+        { name: "B", status: "active" },
+      ],
+      {
+        onConflict: "ignore",
+      },
+    );
+    expect(many.conflicts).toEqual([0]);
+    expect(many.inserted).toEqual([1]);
+    const writeCall = fetchFn.mock.calls.find(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    )!;
+    expect(writeCall[0]).toBe("/api/users?$onConflict=ignore");
+    expect(writeCall[1].method).toBe("POST");
+
+    fetchFn = mockFetch({ conflict: true });
+    const one = await new Client("/api/users", { fetch: fetchFn }).insert(
+      { name: "A", status: "active" },
+      { onConflict: "ignore" },
+    );
+    expect(one.conflict).toBe(true);
+  });
+
+  it("insert without onConflict keeps the plain URL", async () => {
+    fetchFn = mockFetch({ insertedId: 1 });
+    await new Client("/api/users", { fetch: fetchFn }).insert({ name: "A", status: "active" });
+    const writeCall = fetchFn.mock.calls.find(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    )!;
+    expect(writeCall[0]).toBe("/api/users");
+  });
+
   it("insert array sends POST with array body", async () => {
     fetchFn = mockFetch({ insertedCount: 2, insertedIds: ["a", "b"] });
     const client = new Client("/api/users", { fetch: fetchFn });

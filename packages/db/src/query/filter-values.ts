@@ -172,7 +172,7 @@ function acceptsScalar(kind: TScalarKind, value: unknown): boolean {
     case "number":
     case "decimal":
       return (
-        typeof value === "number" ||
+        (typeof value === "number" && Number.isFinite(value)) ||
         typeof value === "bigint" ||
         (typeof value === "string" && NUMERIC_RE.test(value))
       );

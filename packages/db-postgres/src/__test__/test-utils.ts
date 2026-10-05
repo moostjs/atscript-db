@@ -28,6 +28,8 @@ export interface CapturedCall {
  */
 export function createMockDriver(overrides?: {
   runResult?: Partial<TPgRunResult>;
+  /** Per-statement `run()` result (overrides `runResult`). */
+  runResponder?: (sql: string, params?: unknown[]) => Partial<TPgRunResult>;
   /** Rows for every `all()` — or a responder keyed on the statement. */
   allResult?: unknown[] | ((sql: string, params?: unknown[]) => unknown[]);
   /** The row for every `get()` — or a responder keyed on the statement. */
@@ -62,7 +64,7 @@ export function createMockDriver(overrides?: {
     calls,
     async run(sql: string, params?: unknown[]): Promise<TPgRunResult> {
       calls.push({ method: "run", sql, params });
-      return runResult;
+      return { ...runResult, ...overrides?.runResponder?.(sql, params) };
     },
     async all<T>(sql: string, params?: unknown[]): Promise<T[]> {
       calls.push({ method: "all", sql, params });
@@ -77,7 +79,7 @@ export function createMockDriver(overrides?: {
       return {
         async run(sql: string, params?: unknown[]): Promise<TPgRunResult> {
           calls.push({ method: "run", sql, params });
-          return runResult;
+          return { ...runResult, ...overrides?.runResponder?.(sql, params) };
         },
         async all<T>(sql: string, params?: unknown[]): Promise<T[]> {
           calls.push({ method: "all", sql, params });

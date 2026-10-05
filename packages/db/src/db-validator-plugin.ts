@@ -6,7 +6,7 @@ import type {
 } from "@atscript/typescript/utils";
 
 import { DepthLimitExceededError } from "./db-error";
-import { isDbFieldOp } from "./ops";
+import { getDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
 
 export interface DbValidationContext {
@@ -131,7 +131,8 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     // ── Patch-only checks ───────────────────────────────────────────────────
     if (dbCtx.mode === "patch") {
       // Field operation handling ($inc / $dec / $mul)
-      if (isDbFieldOp(value)) {
+      const fieldOp = getDbFieldOp(value);
+      if (fieldOp) {
         // A derived column is computed from its JSON source — arithmetic on it
         // has nothing to write to (the source leaf is the thing to patch).
         if (def.metadata.has("db.column.derived")) {
@@ -152,6 +153,12 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
           def.type.kind === "" && (def.type as { designType?: string }).designType === "number";
         if (!isNumeric) {
           ctx.error("Field operations ($inc/$dec/$mul) can only be applied to numeric fields");
+          return false;
+        }
+        // NaN / ±Infinity would poison the stored value (IEEE arithmetic).
+        const operand = fieldOp.value;
+        if (!Number.isFinite(operand)) {
+          ctx.error(`Field operation operand must be a finite number, got ${operand}`);
           return false;
         }
         return true;

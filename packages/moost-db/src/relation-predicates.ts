@@ -547,6 +547,10 @@ export function readRequestContext(
   controls: Record<string, unknown>,
   filter: FilterExpr | undefined,
 ): TDbRequestContext {
+  // `POST /` carries one control, `$onConflict`: surfaced as `onConflict`, not as `controls`.
+  if (endpoint === "insert") {
+    return controls.$onConflict === "ignore" ? { endpoint, onConflict: "ignore" } : { endpoint };
+  }
   if (!filter || Object.keys(filter).length === 0) {
     return { endpoint, controls, hasRelationFilters: false };
   }

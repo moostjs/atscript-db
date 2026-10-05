@@ -102,7 +102,7 @@ const client = new MongoClient(mongod.getUri());
 const db = new DbSpace(() => new MongoAdapter(client.db("test"), client));
 
 // after tests:
-await client.close();
+await client.close(); // or `db.close()` when the space was built with `createAdapter()` or `{ onClose: () => client.close() }`
 await mongod.stop();
 ```
 
@@ -691,6 +691,13 @@ The pipeline `$lookup` form can't use an index on MongoDB before 5.0. Keep the j
 Since 0.1.147 a [first-row join](/views/#first-row-joins) always uses the pipeline `$lookup` form, followed by `{ $sort: { <order keys>, <primary key>: 1 } }` and `{ $limit: 1 }` (MongoDB 3.6+). BSON order puts `null` and missing values first, so `NULL` is the smallest order key, as on the SQL adapters.
 
 [Computed columns](/views/computed-columns) render as `$add` / `$subtract` / `$multiply`; `/` is `{ $cond: [{ $eq: [divisor, 0] }, null, { $divide: [...] }] }` (a plain `$divide` by zero is an error), unary minus `$multiply` by `-1`, and `coalesce` nested two-argument `$ifNull` (the multi-argument form needs 5.0). Every field and literal leaf is cast with `$toDouble` (MongoDB 4.0+), so values are doubles as on the SQL adapters. Without the cast, int/long arithmetic would stay exact past 2^53 where SQL rounds. In a grouped view they are evaluated in an `$addFields` after `$group` (before `@db.view.having`).
+
+## Conflict-ignoring inserts {#insert-ignore}
+
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) depends on whether a transaction is active.
+
+- **Outside a transaction** (standalone server, or no `withTransaction`): `insertMany(rows, { ordered: false })`. Write errors with code 11000 mark the skipped rows; any other write error is rethrown after the batch, and rows already written stay (as with a plain non-transactional `insertMany`).
+- **Inside a transaction** (replica set): a duplicate key would abort the transaction even with `ordered: false`, so the stored keys are looked up first, inside the session, in chunks of 1000; the matches are skipped and the rest is inserted ordered. A concurrent writer that commits the same key in between is retried by the transaction; a residual duplicate (for example a collation-equal value the plain-equality lookup missed) throws `CONFLICT`, so the call never reports a partial result silently.
 
 ## Limitations
 

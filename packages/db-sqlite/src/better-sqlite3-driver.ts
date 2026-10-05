@@ -103,7 +103,9 @@ export class BetterSqlite3Driver implements TSqliteDriver {
     this.db.function(name, { deterministic: opts?.deterministic ?? false }, fn);
   }
 
+  /** Idempotent: closing an already closed database is a no-op. */
   close(): void {
+    if (!this.db.open) return;
     this.db.close();
   }
 }

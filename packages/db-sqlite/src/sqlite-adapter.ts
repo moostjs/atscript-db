@@ -21,6 +21,7 @@ import type {
   TDbFieldMeta,
   TDbIndex,
   TDbInsertManyResult,
+  TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
   TExistingColumn,
@@ -434,6 +435,39 @@ export class SqliteAdapter extends BaseDbAdapter {
         ids.push(this._resolveInsertedId(row, result.lastInsertRowid));
       }
       return { insertedCount: ids.length, insertedIds: ids };
+    });
+  }
+
+  override supportsInsertIgnore(): boolean {
+    return true;
+  }
+
+  /**
+   * Per row `INSERT … ON CONFLICT DO NOTHING` (covers the primary key and every
+   * unique index; NOT NULL / CHECK / FK still raise — never `INSERT OR IGNORE`).
+   * `changes === 0` marks a skipped row.
+   */
+  override async insertManyIgnore(
+    data: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    return this.withTransaction(async () => {
+      const slots: TDbInsertIgnoreSlot[] = [];
+      const tableName = this.resolveTableName();
+      for (const row of data) {
+        const built = buildInsert(tableName, row);
+        const sql = `${built.sql} ON CONFLICT DO NOTHING`;
+        const params = built.params;
+        this._log(sql, params);
+        const result = await this._stmt(() =>
+          this._wrapConstraintError(() => this.driver.run(sql, params)),
+        );
+        slots.push(
+          result.changes === 0
+            ? null
+            : { insertedId: this._resolveInsertedId(row, result.lastInsertRowid) },
+        );
+      }
+      return slots;
     });
   }
 

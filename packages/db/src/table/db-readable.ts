@@ -24,7 +24,7 @@ import type {
 import { isAggregateExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError } from "../db-error";
+import { DbError, spaceClosedError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type {
@@ -293,8 +293,12 @@ export class AtscriptDbReadable<
     this._encryption = encryption;
   }
 
+  /** @internal Set by the owning `DbSpace` when it closes. */
+  _spaceClosed = false;
+
   /** Ensures metadata is built. Called before any metadata access. */
   protected _ensureBuilt(): void {
+    if (this._spaceClosed) throw spaceClosedError();
     if (!this._meta.isBuilt) {
       this._meta.build(this.type, this.adapter, this.logger);
       if (this._meta.navFields.size > 0 && this._tableResolver) {
@@ -517,6 +521,23 @@ export class AtscriptDbReadable<
   public get primaryKeys(): readonly string[] {
     this._ensureBuilt();
     return this._meta.primaryKeys;
+  }
+
+  /**
+   * Physical column lists that must be unique: the primary key (when declared)
+   * followed by every unique index. Used by conflict-ignoring inserts.
+   * @since 0.1.148
+   */
+  public get uniqueKeySets(): string[][] {
+    this._ensureBuilt();
+    const sets: string[][] = [];
+    if (this._meta.primaryKeys.length > 0) {
+      sets.push(this._meta.primaryKeys.map((f) => this._meta.physicalPath(f)));
+    }
+    for (const index of this._meta.indexes.values()) {
+      if (index.type === "unique") sets.push(index.fields.map((f) => f.name));
+    }
+    return sets;
   }
 
   /** Preferred row identifier field names. Defaults to primary keys. */

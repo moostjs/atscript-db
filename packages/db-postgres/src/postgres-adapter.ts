@@ -22,6 +22,7 @@ import type {
   TDbDeleteResult,
   TDbIndex,
   TDbInsertManyResult,
+  TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
   TExistingColumn,
@@ -52,7 +53,7 @@ import {
   type TSqlFragment,
   fillReplacePayload,
   geoWindowFromControls,
-  insertManyColumns,
+  chunkInsertRows,
   normalizeGeoPointValue,
   renameGeoDistance,
   replaceColumnsFor,
@@ -60,6 +61,7 @@ import {
   SEARCH_SOURCE_ALIAS,
 } from "@atscript/db-sql-tools";
 
+import { mapIgnoredBatch } from "./insert-ignore";
 import { buildWhere } from "./filter-builder";
 import {
   buildCreateTable,
@@ -111,6 +113,9 @@ function parseCount(value: number | string | undefined): number {
  * ```
  */
 /** The suffix PostgreSQL gives an auto-named constraint of each `pg_constraint.contype`. */
+/** Savepoint guarding one `insertManyIgnore` chunk (see {@link PostgresAdapter.insertManyIgnore}). */
+const IGNORE_SAVEPOINT = "atscript_ignore_chunk";
+
 const PG_CONSTRAINT_LABELS: Record<string, string | undefined> = {
   p: "pkey",
   u: "key",
@@ -418,28 +423,33 @@ export class PostgresAdapter extends BaseDbAdapter {
     try {
       return await fn();
     } catch (error: unknown) {
-      if (error && typeof error === "object" && "code" in error) {
-        const err = error as {
-          code: string;
-          detail?: string;
-          constraint?: string;
-          message: string;
-        };
-
-        // Unique constraint violation
-        if (err.code === "23505") {
-          const field = this._extractFieldFromConstraint(err.constraint) ?? "";
-          throw new DbError("CONFLICT", [{ path: field, message: err.detail ?? err.message }]);
-        }
-
-        // FK violation
-        if (err.code === "23503") {
-          const errors = this._mapFkError(err.detail ?? err.message, err.constraint);
-          throw new DbError("FK_VIOLATION", errors);
-        }
-      }
-      throw error;
+      return this._mapConstraintError(error);
     }
+  }
+
+  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation, else as is. */
+  private _mapConstraintError(error: unknown): never {
+    if (error && typeof error === "object" && "code" in error) {
+      const err = error as {
+        code: string;
+        detail?: string;
+        constraint?: string;
+        message: string;
+      };
+
+      // Unique constraint violation
+      if (err.code === "23505") {
+        const field = this._extractFieldFromConstraint(err.constraint) ?? "";
+        throw new DbError("CONFLICT", [{ path: field, message: err.detail ?? err.message }]);
+      }
+
+      // FK violation
+      if (err.code === "23503") {
+        const errors = this._mapFkError(err.detail ?? err.message, err.constraint);
+        throw new DbError("FK_VIOLATION", errors);
+      }
+    }
+    throw error;
   }
 
   private _extractFieldFromConstraint(constraint?: string): string | undefined {
@@ -503,13 +513,11 @@ export class PostgresAdapter extends BaseDbAdapter {
         pkCols.length > 0 ? ` RETURNING ${pkCols.map((pk) => qi(pk)).join(", ")}` : "";
 
       // Batch rows into multi-row INSERT statements over the column union of
-      // ALL rows. PG max params is ~65535; chunk to stay well under the limit.
-      const columns = insertManyColumns(data);
-      const maxRowsPerBatch = columns.length > 0 ? Math.floor(60000 / columns.length) : data.length;
+      // ALL rows (PG max params is ~65535; chunked well under the limit).
+      const { columns, batches } = chunkInsertRows(data);
       const allIds: unknown[] = [];
 
-      for (let offset = 0; offset < data.length; offset += maxRowsPerBatch) {
-        const batch = data.slice(offset, offset + maxRowsPerBatch);
+      for (const batch of batches) {
         const insert = buildInsertMany(tableName, batch, columns);
         const sql = insert.sql + returningSuffix;
         const params = insert.params;
@@ -526,6 +534,78 @@ export class PostgresAdapter extends BaseDbAdapter {
       }
 
       return { insertedCount: allIds.length, insertedIds: allIds };
+    });
+  }
+
+  override supportsInsertIgnore(): boolean {
+    return true;
+  }
+
+  /**
+   * Batched `INSERT … VALUES (…), (…) ON CONFLICT DO NOTHING RETURNING <pk +
+   * unique key columns>`: one statement per chunk (a conflict never raises, so
+   * the surrounding transaction survives). Skipped rows are the ones missing
+   * from RETURNING — mapped back by key values, see {@link mapIgnoredBatch}.
+   * Each chunk runs inside a SAVEPOINT: when the mapping is ambiguous (a key
+   * the server returns in another form than it was sent) the chunk is rolled
+   * back to the savepoint and redone row by row with the same
+   * `ON CONFLICT DO NOTHING`, so the result is always exact.
+   */
+  override async insertManyIgnore(
+    data: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    if (data.length === 0) return [];
+    return this.withTransaction(async () => {
+      const tableName = this.resolveTableName();
+      const pkCols = this._pkColumns();
+      const keySets = this._table.uniqueKeySets;
+      const returning = [...new Set(keySets.flat())];
+      const returningSuffix =
+        returning.length > 0 ? ` RETURNING ${returning.map((c) => qi(c)).join(", ")}` : "";
+      const insertedId = (row: Record<string, unknown>, returned?: Record<string, unknown>) => ({
+        insertedId: this._resolveInsertedId(
+          row,
+          pkCols.length > 0 ? returned?.[pkCols[0]!] : undefined,
+        ),
+      });
+
+      const { columns, batches } = chunkInsertRows(data);
+      const slots: TDbInsertIgnoreSlot[] = [];
+
+      for (const batch of batches) {
+        const insert = buildInsertMany(tableName, batch, columns);
+        const sql = `${insert.sql} ON CONFLICT DO NOTHING${returningSuffix}`;
+        // The savepoint lets an ambiguous chunk be undone and redone row by row.
+        await this._exec().run(`SAVEPOINT ${IGNORE_SAVEPOINT}`);
+        this._log(sql, insert.params);
+        const result = await this._wrapConstraintError(() => this._exec().run(sql, insert.params));
+        const returned = result.rows ?? [];
+        // No key at all (no PK, no unique index): nothing can collide.
+        const mapping =
+          returning.length === 0
+            ? batch.map((_, i) => i)
+            : mapIgnoredBatch(batch, returned, keySets);
+        if (mapping) {
+          await this._exec().run(`RELEASE SAVEPOINT ${IGNORE_SAVEPOINT}`);
+          mapping.forEach((hit, i) =>
+            slots.push(hit < 0 ? null : insertedId(batch[i]!, returned[hit])),
+          );
+          continue;
+        }
+        // The returned rows cannot be matched back to the input (a key the
+        // server normalizes, e.g. NUMERIC(10,2)): redo this chunk per row.
+        await this._exec().run(`ROLLBACK TO SAVEPOINT ${IGNORE_SAVEPOINT}`);
+        for (const row of batch) {
+          const single = buildInsert(tableName, row);
+          const rowSql = `${single.sql} ON CONFLICT DO NOTHING${returningSuffix}`;
+          this._log(rowSql, single.params);
+          const rowResult = await this._wrapConstraintError(() =>
+            this._exec().run(rowSql, single.params),
+          );
+          slots.push(rowResult.rows?.length ? insertedId(row, rowResult.rows[0]) : null);
+        }
+      }
+      return slots;
     });
   }
 

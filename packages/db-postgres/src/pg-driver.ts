@@ -177,8 +177,11 @@ export class PgDriver implements TPgDriver {
     };
   }
 
-  async close(): Promise<void> {
-    const pool = await this.getPool();
-    await pool.end();
+  private _closing?: Promise<void>;
+
+  /** Idempotent: every call returns the first call's promise. */
+  close(): Promise<void> {
+    // The pool is created with the driver (eagerly), so closing never builds one.
+    return (this._closing ??= Promise.resolve(this.getPool()).then((pool) => pool.end()));
   }
 }

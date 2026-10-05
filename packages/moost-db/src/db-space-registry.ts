@@ -1,5 +1,5 @@
 import type { DbSpace } from "@atscript/db";
-import { DEFAULT_DB_SPACE } from "@atscript/db";
+import { DEFAULT_DB_SPACE, aggregateFailure } from "@atscript/db";
 
 /** Name under which {@link provideDbSpace} registers a space when none is given. */
 export { DEFAULT_DB_SPACE } from "@atscript/db";
@@ -54,4 +54,35 @@ export function resolveDbSpace(name: string = DEFAULT_DB_SPACE): DbSpace {
 /** Removes all registered spaces. Intended for test teardown. */
 export function clearDbSpaces(): void {
   spaces.clear();
+}
+
+/**
+ * Closes every distinct registered space (see `DbSpace.close`), then clears
+ * the registry like {@link clearDbSpaces}. Failures are collected into an
+ * `AggregateError`; every space is attempted.
+ *
+ * Not wired into `Moost.dispose()` automatically: the registry outlives app
+ * instances (the Vite dev server disposes the app on every HMR reload while the
+ * next one reuses the space). Call it from your shutdown path:
+ *
+ * ```ts
+ * app.disposeOnSignals()
+ * // in any DI singleton: @MoostDispose() close() { return closeDbSpaces() }
+ * ```
+ * @since 0.1.148
+ */
+export async function closeDbSpaces(): Promise<void> {
+  const distinct = [...new Set(spaces.values())];
+  spaces.clear();
+  const errors: unknown[] = [];
+  for (const space of distinct) {
+    try {
+      await space.close();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw aggregateFailure("closeDbSpaces failed", errors);
+  }
 }

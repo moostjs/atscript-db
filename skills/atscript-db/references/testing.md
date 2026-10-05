@@ -36,7 +36,7 @@ export async function makeTestDb() {
 ```
 
 - One fresh `DbSpace` per test (or per `beforeEach`) gives full isolation.
-- `:memory:` databases are destroyed when the driver is closed.
+- `:memory:` databases are destroyed when the driver is closed. With `createAdapter(":memory:")`, `await db.close()` (0.1.148) closes the driver for you; after it, handles throw `SPACE_CLOSED`.
 - `syncSchema` is idempotent — safe to call in `beforeEach` even after the first run.
 
 ## Wiring a MongoDB in-memory server

@@ -37,6 +37,11 @@ app.registerControllers(["todos", TodoController]); // URL prefix segment
 await app.init();
 ```
 
+## Insert ignore and closing spaces (0.1.148) {#insert-ignore-and-closing-spaces-01148}
+
+- **`POST /?$onConflict=ignore`** — skip rows colliding on the PK / a unique index. Object body → `{ insertedId?, conflict }`, array body → `{ insertedCount, insertedIds, inserted, conflicts }` (index-based; same 2xx status even when all rows conflicted). `$onConflict` ∈ `error` (default) | `ignore`; other value or any other `$` control on POST → 400. Nested TO-parent payload / validation / NOT NULL / FK errors → 400/409 as for a plain insert. `guardWrite` / `checkWrite` run as usual (guard sees every submitted row). `prepareRequest` gets `ctx.onConflict === "ignore"` on `endpoint: "insert"` — throw to refuse the mode. `/meta.crud.insert` = `["onConflict"]` when the adapter supports it (`supportsInsertIgnore()`). Existence disclosure = an input index only (no row data, no constraint name).
+- **`closeDbSpaces()`** (`@atscript/moost-db`) closes every distinct `provideDbSpace()`-registered space (`AggregateError` on failures) and clears the registry. NOT hooked into `Moost.dispose()` (the registry outlives app instances; Vite HMR reloads would close the live connection) — wire it into your shutdown: `app.disposeOnSignals()` + a DI singleton `@MoostDispose() close() { return closeDbSpaces() }`; one space: `await app.dispose(); await space.close()`. Requests after close → `DbError("SPACE_CLOSED")` → 503.
+
 ## Binding forms
 
 `TableController` / `ReadableController` / `ViewController` all accept three

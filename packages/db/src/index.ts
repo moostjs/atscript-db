@@ -11,6 +11,8 @@ export {
   CasExhaustedError,
   CasMismatchError,
   bucketTimeZoneUnavailable,
+  isConflict,
+  aggregateFailure,
 } from "./db-error";
 export type { DbErrorCode } from "./db-error";
 export { DbEncryption } from "./encryption";
@@ -52,6 +54,7 @@ export type {
 export { getDbFieldOp, separateFieldOps, separateCas, reconcileCas } from "./ops";
 export type { TFieldOps } from "./ops";
 export { isPlainObject, isEmptyObject, getPath, deletePath } from "./shared/object";
+export { uniqueKeyTuple } from "./shared/keys";
 // ── Since 0.1.143 ────────────────────────────────────────────────────────────
 export { selfOrAncestor } from "./shared/object";
 export {
@@ -97,6 +100,10 @@ export type {
   Uniquery,
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
+  TDbInsertIgnoreSlot,
+  TInsertOptions,
   TDbUpdateResult,
   TDbDeleteResult,
   TDbIndex,

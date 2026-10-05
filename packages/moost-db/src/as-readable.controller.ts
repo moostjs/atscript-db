@@ -97,6 +97,14 @@ export interface TDbRequestContext {
   readonly hasRelationFilters?: boolean;
   /** `"action"` / `"delegatedAction"` endpoints only: the `@DbAction` name being run. */
   readonly action?: string;
+  /**
+   * `"insert"` endpoint only: the `?$onConflict=` mode the request carries
+   * (`"ignore"`); absent for a plain insert. A controller can refuse it by
+   * throwing from `prepareRequest`.
+   *
+   * @since 0.1.148
+   */
+  readonly onConflict?: "ignore";
 }
 
 /** Control DTO a {@link AsReadableController.validateControls} call checks against. @since 0.1.143 (`"geo"`) */
@@ -374,8 +382,8 @@ export abstract class AsReadableController<
 
   /**
    * The ONE request entry of every built-in route: with a `url` (read
-   * endpoints) it parses the query string — `/one` keeps only the `$`
-   * controls ({@link parseControlsOnlyFromUrl}), every other endpoint the
+   * endpoints, and `POST /`) it parses the query string — `/one` and `POST /`
+   * keep only the `$` controls ({@link parseControlsOnlyFromUrl}), every other endpoint the
    * whole query ({@link parseQueryString}) — and coerces boolean controls the
    * URL grammar leaves as strings (`$actions=true`); then it awaits
    * {@link prepareRequest} (when implemented) with the parsed controls.
@@ -393,7 +401,7 @@ export abstract class AsReadableController<
     let request: TDbParsedRequest | undefined;
     if (url !== undefined) {
       const { parsed, hasNonControl } =
-        endpoint === "one"
+        endpoint === "one" || endpoint === "insert"
           ? this.parseControlsOnlyFromUrl(url)
           : { parsed: this.parseQueryString(url), hasNonControl: false };
       const controls = parsed.controls as Record<string, unknown>;

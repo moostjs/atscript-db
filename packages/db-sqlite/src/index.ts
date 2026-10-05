@@ -19,5 +19,7 @@ export function createAdapter(connection: string, options?: TCreateSqliteAdapter
   const { transactionWaitTimeoutMs, transactionWaitWarnMs, ...driverOptions } = options ?? {};
   const driver = new BetterSqlite3Driver(connection, driverOptions);
   const adapterOptions: SqliteAdapterOptions = { transactionWaitTimeoutMs, transactionWaitWarnMs };
-  return new DbSpace(() => new SqliteAdapter(driver, adapterOptions));
+  return new DbSpace(() => new SqliteAdapter(driver, adapterOptions), {
+    onClose: () => driver.close(),
+  });
 }

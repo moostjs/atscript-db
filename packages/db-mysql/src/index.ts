@@ -24,5 +24,5 @@ export type { TMysqlDriver, TMysqlRunResult, TMysqlConnection } from "./types";
  */
 export function createAdapter(uri: string, options?: Record<string, unknown>): DbSpace {
   const driver = new Mysql2Driver({ uri, ...options } as any);
-  return new DbSpace(() => new MysqlAdapter(driver));
+  return new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
 }

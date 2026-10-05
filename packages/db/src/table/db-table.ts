@@ -52,6 +52,9 @@ import type {
   TCascadeResolver,
   TDbDeleteResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreResult,
+  TDbInsertManyIgnoreResult,
+  TInsertOptions,
   TDbInsertResult,
   TDbRemoveGuardContext,
   TDbUpdateResult,
@@ -68,7 +71,7 @@ import type {
   TWriteTableResolver,
   NullableOptional,
 } from "../types";
-import { pkTupleKey, rowMatchesKey, sameKey } from "../shared/keys";
+import { pkTupleKey, rowMatchesKey, sameKey, uniqueKeyTuple } from "../shared/keys";
 import { isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
@@ -416,12 +419,24 @@ export class AtscriptDbTable<
    */
   public async insertOne(
     payload: DbPatch<DataType>,
-    opts?: TWriteOptions<DataType>,
-  ): Promise<TDbInsertResult> {
-    const result = await this.insertMany([payload], {
+    opts: TInsertOptions<DataType> & { onConflict: "ignore" },
+  ): Promise<TDbInsertIgnoreResult>;
+  public async insertOne(
+    payload: DbPatch<DataType>,
+    opts?: TInsertOptions<DataType>,
+  ): Promise<TDbInsertResult>;
+  public async insertOne(
+    payload: DbPatch<DataType>,
+    opts?: TInsertOptions<DataType>,
+  ): Promise<TDbInsertResult | TDbInsertIgnoreResult> {
+    const result = await this._insertMany([payload], {
       ...opts,
       _action: "insert",
     } as TInternalWriteOptions<DataType>);
+    if ("conflicts" in result) {
+      const conflict = result.conflicts.length > 0;
+      return conflict ? { conflict } : { insertedId: result.insertedIds[0], conflict };
+    }
     return { insertedId: result.insertedIds[0] };
   }
 
@@ -443,8 +458,23 @@ export class AtscriptDbTable<
    */
   public async insertMany(
     payloads: Array<DbPatch<DataType>>,
-    opts?: TWriteOptions<DataType>,
-  ): Promise<TDbInsertManyResult> {
+    opts: TInsertOptions<DataType> & { onConflict: "ignore" },
+  ): Promise<TDbInsertManyIgnoreResult>;
+  public async insertMany(
+    payloads: Array<DbPatch<DataType>>,
+    opts?: TInsertOptions<DataType>,
+  ): Promise<TDbInsertManyResult>;
+  public async insertMany(
+    payloads: Array<DbPatch<DataType>>,
+    opts?: TInsertOptions<DataType>,
+  ): Promise<TDbInsertManyResult | TDbInsertManyIgnoreResult> {
+    return this._insertMany(payloads, opts);
+  }
+
+  private async _insertMany(
+    payloads: Array<DbPatch<DataType>>,
+    opts?: TInsertOptions<DataType>,
+  ): Promise<TDbInsertManyResult | TDbInsertManyIgnoreResult> {
     this._ensureBuilt();
     const {
       _depth,
@@ -452,7 +482,14 @@ export class AtscriptDbTable<
       maxDepth: userMax,
       guard,
       check,
-    } = (opts ?? {}) as TInternalWriteOptions<DataType>;
+      onConflict,
+    } = (opts ?? {}) as TInternalWriteOptions<DataType> & TInsertOptions<DataType>;
+    if (onConflict !== undefined && onConflict !== "error" && onConflict !== "ignore") {
+      throw new DbError("INVALID_QUERY", [
+        { path: "onConflict", message: `Unknown onConflict mode "${String(onConflict)}"` },
+      ]);
+    }
+    const ignore = onConflict === "ignore";
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
@@ -465,10 +502,10 @@ export class AtscriptDbTable<
         // Clone (dropping `undefined` props — deep at the root call only, the
         // nested re-entries receive already-pruned subtrees) + apply defaults.
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
-        const items = payloads.map((p) => this._applyDefaults(clone(p)));
+        let items = payloads.map((p) => this._applyDefaults(clone(p)));
         // Nav data for the FROM / VIA phases, read from the pruned rows (nav
         // fields are stripped from `items` before the main insert).
-        const originals = canNest ? items.map((item) => ({ ...item })) : [];
+        let originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         // Validate full payload (including nav fields) before any writes.
         // Depth is only enforced at the root call — nested-writer re-entries
@@ -496,6 +533,8 @@ export class AtscriptDbTable<
         // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
         await this._encryptItems(items, "write");
 
+        if (ignore) this._rejectNestedToInIgnoreMode(items);
+
         // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
         const host = this as any as TNestedWriterHost;
         if (canNest) {
@@ -503,7 +542,7 @@ export class AtscriptDbTable<
         }
 
         // Strip nav fields, prepare for write
-        const prepared: Array<Record<string, unknown>> = [];
+        let prepared: Array<Record<string, unknown>> = [];
         for (const data of items) {
           for (const navField of this._meta.navFields) {
             delete data[navField];
@@ -526,17 +565,31 @@ export class AtscriptDbTable<
           await preValidateNestedFrom(host, originals);
         }
 
+        // Conflict-ignoring mode: core removes in-batch duplicates (earlier row
+        // wins), the adapter reports one slot per remaining row. Rows skipped
+        // for a conflict are compacted away: the nested phases, the check and
+        // the ids below only see inserted rows (dense, aligned with insertedIds).
+        let ignored: TDbInsertManyIgnoreResult | undefined;
+        if (ignore) {
+          ignored = await this._insertIgnoring(prepared);
+          const keep = ignored.inserted;
+          items = keep.map((i) => items[i]!);
+          originals = canNest ? keep.map((i) => originals[i]!) : originals;
+          prepared = keep.map((i) => prepared[i]!);
+        }
+
         // Phase 2: Batch main insert
-        const result = await this.adapter.insertMany(prepared);
+        const result = ignored ?? (await this.adapter.insertMany(prepared));
+        const parentIds = result.insertedIds;
 
         // Phase 3: Batch FROM dependents (they need our PKs)
         if (canNest) {
-          await batchInsertNestedFrom(host, originals, result.insertedIds, maxDepth, depth);
+          await batchInsertNestedFrom(host, originals, parentIds, maxDepth, depth);
         }
 
         // Phase 4: Batch VIA relations (insert targets + junction entries)
         if (canNest) {
-          await batchInsertNestedVia(host, originals, result.insertedIds, maxDepth, depth);
+          await batchInsertNestedVia(host, originals, parentIds, maxDepth, depth);
         }
 
         // Post-write check: every inserted row by its resulting primary key.
@@ -1519,6 +1572,73 @@ export class AtscriptDbTable<
       transactional: this.adapter.isInTransaction(),
       count: (filter) => this.count({ filter, controls: {} } as never),
     });
+  }
+
+  /** Ignore mode never writes a related parent: it would be orphaned when the row is skipped. */
+  private _rejectNestedToInIgnoreMode(items: Array<Record<string, unknown>>): void {
+    for (const [navField, relation] of this._meta.relations) {
+      if (relation.direction !== "to") continue;
+      if (items.some((item) => item[navField] !== undefined && item[navField] !== null)) {
+        throw new DbError("INVALID_QUERY", [
+          {
+            path: navField,
+            message:
+              'onConflict "ignore" cannot create a related parent record — insert it first or reference it by key',
+          },
+        ]);
+      }
+    }
+  }
+
+  /**
+   * Conflict-ignoring main insert: marks rows repeating an earlier row's
+   * primary / unique key tuple (NULL components never collide), sends the rest
+   * to the adapter and assembles one slot per input row.
+   */
+  private async _insertIgnoring(
+    prepared: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertManyIgnoreResult> {
+    const keySets = this.uniqueKeySets;
+    const seen = keySets.map(() => new Set<string>());
+    const conflictAt = new Set<number>();
+    const send: number[] = [];
+    for (let i = 0; i < prepared.length; i++) {
+      const row = prepared[i]!;
+      const tuples = keySets.map((fields) => uniqueKeyTuple(row, fields));
+      if (tuples.some((t, k) => t !== undefined && seen[k]!.has(t))) {
+        conflictAt.add(i);
+        continue;
+      }
+      tuples.forEach((t, k) => {
+        if (t !== undefined) seen[k]!.add(t);
+      });
+      send.push(i);
+    }
+    const slots = send.length
+      ? await this.adapter.insertManyIgnore(send.map((i) => prepared[i]!))
+      : [];
+    if (slots.length !== send.length) {
+      throw new DbError("INVALID_QUERY", [
+        { path: "", message: "Adapter insertManyIgnore must return one slot per input row" },
+      ]);
+    }
+    const insertedIds: unknown[] = [];
+    const inserted: number[] = [];
+    send.forEach((rowIndex, k) => {
+      const slot = slots[k];
+      if (slot) {
+        inserted.push(rowIndex);
+        insertedIds.push(slot.insertedId);
+      } else {
+        conflictAt.add(rowIndex);
+      }
+    });
+    return {
+      insertedCount: insertedIds.length,
+      insertedIds,
+      inserted,
+      conflicts: [...conflictAt].toSorted((a, b) => a - b),
+    };
   }
 
   /**

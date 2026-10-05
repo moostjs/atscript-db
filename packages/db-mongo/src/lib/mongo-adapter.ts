@@ -10,10 +10,13 @@ import {
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
+  getPath,
+  uniqueKeyTuple,
   type DbQuery,
   type FilterExpr,
   type TDbInsertResult,
   type TDbInsertManyResult,
+  type TDbInsertIgnoreSlot,
   type TDbUpdateResult,
   type TDbDeleteResult,
   type TSearchIndexInfo,
@@ -45,7 +48,7 @@ import type {
   Filter,
   MongoClient,
 } from "mongodb";
-import { MongoServerError, ObjectId } from "mongodb";
+import { MongoBulkWriteError, MongoServerError, ObjectId } from "mongodb";
 import type { AggregateFn, BucketUnit } from "@uniqu/core";
 import type { TViewCapability } from "@atscript/db";
 import { dedupeProjection } from "./projection-dedupe";
@@ -1099,12 +1102,17 @@ export class MongoAdapter extends BaseDbAdapter {
     try {
       return await fn();
     } catch (error: unknown) {
-      if (error instanceof MongoServerError && error.code === 11000) {
-        const field = error.keyPattern ? (Object.keys(error.keyPattern)[0] ?? "") : "";
-        throw new DbError("CONFLICT", [{ path: field, message: error.message }]);
-      }
-      throw error;
+      return this._mapConstraintError(error);
     }
+  }
+
+  /** Rethrows a duplicate-key (11000) server error as `CONFLICT`, anything else as is. */
+  private _mapConstraintError(error: unknown): never {
+    if (error instanceof MongoServerError && error.code === 11000) {
+      const field = error.keyPattern ? (Object.keys(error.keyPattern)[0] ?? "") : "";
+      throw new DbError("CONFLICT", [{ path: field, message: error.message }]);
+    }
+    throw error;
   }
 
   /** An update-shaped write under {@link _wrapDuplicateKeyError}, reduced to `TDbUpdateResult`. */
@@ -1141,6 +1149,125 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
+    await this._prepareInsertBatch(data);
+
+    this._log("insertMany", `${data.length} docs`);
+    const result = await this._wrapDuplicateKeyError(() =>
+      this.collection.insertMany(data, this._getSessionOpts()),
+    );
+    return {
+      insertedCount: result.insertedCount,
+      insertedIds: data.map((item, i) =>
+        objectIdFromStorage(this._resolveInsertedId(item, result.insertedIds[i])),
+      ),
+    };
+  }
+
+  override supportsInsertIgnore(): boolean {
+    return true;
+  }
+
+  /**
+   * Conflict-ignoring batch insert (the core already removed in-batch duplicates).
+   *
+   * Outside a transaction: `insertMany(…, { ordered: false })`; duplicate-key
+   * write errors (11000) mark the skipped rows, every other write error
+   * rethrows after the batch (rows already written stay — as for a plain
+   * non-transactional `insertMany`).
+   *
+   * Inside a transaction a duplicate key would abort the transaction even with
+   * `ordered: false`, so the stored keys are looked up first (inside the
+   * session), the matches are skipped and the rest is inserted ordered. A
+   * residual 11000 (e.g. a collation-equal value) throws `CONFLICT`.
+   */
+  override async insertManyIgnore(
+    data: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    if (data.length === 0) return [];
+    await this._prepareInsertBatch(data);
+    this._log("insertManyIgnore", `${data.length} docs`);
+    const idOf = (item: Record<string, unknown>) =>
+      objectIdFromStorage(this._resolveInsertedId(item, item._id));
+
+    if (this._getTransactionState()) {
+      const skipped = await this._findStoredKeyConflicts(data);
+      const survivors = data.filter((_, i) => !skipped.has(i));
+      if (survivors.length > 0) {
+        await this._wrapDuplicateKeyError(() =>
+          this.collection.insertMany(survivors, { ordered: true, ...this._getSessionOpts() }),
+        );
+      }
+      return data.map((item, i) => (skipped.has(i) ? null : { insertedId: idOf(item) }));
+    }
+
+    const skipped = new Set<number>();
+    try {
+      await this.collection.insertMany(data, { ordered: false, ...this._getSessionOpts() });
+    } catch (error) {
+      if (!(error instanceof MongoBulkWriteError)) this._mapConstraintError(error);
+      const writeErrors = Array.isArray(error.writeErrors)
+        ? error.writeErrors
+        : [error.writeErrors];
+      for (const writeError of writeErrors) {
+        if (writeError.code !== 11000) throw error;
+        skipped.add(writeError.index);
+      }
+    }
+    return data.map((item, i) => (skipped.has(i) ? null : { insertedId: idOf(item) }));
+  }
+
+  /**
+   * Indices of `data` rows whose primary (`_id`) or unique-index key tuple is
+   * already stored (rows with a null / missing key component never collide).
+   * One `$or` query per chunk covers every key set.
+   */
+  private async _findStoredKeyConflicts(
+    data: Array<Record<string, unknown>>,
+  ): Promise<Set<number>> {
+    // `_id` (driver-assigned or explicit), the declared primary key (a unique
+    // index on its own fields when it is not `_id`) and every unique index.
+    const keySets: string[][] = [
+      ["_id"],
+      ...this._table.uniqueKeySets.filter((f) => !(f.length === 1 && f[0] === "_id")),
+    ];
+    const rowTuples = data.map((row) => keySets.map((fields) => uniqueKeyTuple(row, fields)));
+    const projection = Object.fromEntries(keySets.flat().map((f) => [f, 1]));
+
+    const stored = keySets.map(() => new Set<string>());
+    const CHUNK = 1000;
+    for (let offset = 0; offset < data.length; offset += CHUNK) {
+      const clauses: Document[] = [];
+      keySets.forEach((fields, k) => {
+        const rows = data.slice(offset, offset + CHUNK).filter((_, i) => rowTuples[offset + i]![k]);
+        if (rows.length === 0) return;
+        if (fields.length === 1) {
+          clauses.push({ [fields[0]!]: { $in: rows.map((row) => getPath(row, fields[0]!)) } });
+        } else {
+          for (const row of rows) {
+            clauses.push(Object.fromEntries(fields.map((f) => [f, getPath(row, f)])));
+          }
+        }
+      });
+      if (clauses.length === 0) continue;
+      const found = await this.collection
+        .find({ $or: clauses }, { projection, ...this._getSessionOpts() })
+        .toArray();
+      for (const doc of found) {
+        keySets.forEach((fields, k) => {
+          const tuple = uniqueKeyTuple(doc as Record<string, unknown>, fields);
+          if (tuple !== undefined) stored[k]!.add(tuple);
+        });
+      }
+    }
+    const skipped = new Set<number>();
+    rowTuples.forEach((tuples, i) => {
+      if (tuples.some((t, k) => t !== undefined && stored[k]!.has(t))) skipped.add(i);
+    });
+    return skipped;
+  }
+
+  /** Version default + `@db.default.increment` allocation shared by every batch insert. */
+  private async _prepareInsertBatch(data: Array<Record<string, unknown>>): Promise<void> {
     // §4.6 — version default per item (parity with SQL DDL DEFAULT 0).
     const versionColumn = this._table.versionColumnPhysical;
     if (versionColumn !== undefined) {
@@ -1163,17 +1290,6 @@ export class MongoAdapter extends BaseDbAdapter {
         await this._assignBatchIncrements(data, allFields);
       }
     }
-
-    this._log("insertMany", `${data.length} docs`);
-    const result = await this._wrapDuplicateKeyError(() =>
-      this.collection.insertMany(data, this._getSessionOpts()),
-    );
-    return {
-      insertedCount: result.insertedCount,
-      insertedIds: data.map((item, i) =>
-        objectIdFromStorage(this._resolveInsertedId(item, result.insertedIds[i])),
-      ),
-    };
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {

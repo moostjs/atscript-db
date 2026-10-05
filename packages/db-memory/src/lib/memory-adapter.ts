@@ -4,6 +4,7 @@ import {
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
+  isConflict,
   DbSpace,
   containsRelationFilter,
   isAtscriptDbView,
@@ -17,6 +18,7 @@ import type {
   TDbFieldMeta,
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreSlot,
   TDbUpdateResult,
   TDbDeleteResult,
 } from "@atscript/db";
@@ -592,6 +594,26 @@ export class MemoryAdapter extends BaseDbAdapter {
     return { insertedCount: data.length, insertedIds };
   }
 
+  override supportsInsertIgnore(): boolean {
+    return true;
+  }
+
+  /** A row colliding on the primary key or a unique index (`CONFLICT`) becomes a skipped slot. */
+  override async insertManyIgnore(
+    data: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    this._assertWritable();
+    const state = this._state();
+    return data.map((item) => {
+      try {
+        return { insertedId: this._insertRow(state, item) };
+      } catch (error) {
+        if (isConflict(error)) return null;
+        throw error;
+      }
+    });
+  }
+
   // ── Write helpers ─────────────────────────────────────────────────────────
 
   /**
@@ -1104,4 +1126,9 @@ export function setMemoryProvider(
     throw new Error("setMemoryProvider: table is not backed by MemoryAdapter");
   }
   adapter.setProvider(fn);
+}
+
+/** @internal Drops the in-memory database of a closed space (called from `createAdapter`'s `onClose`). */
+export function clearMemoryDatabase(space: DbSpace): void {
+  databases.get(space)?.clear();
 }

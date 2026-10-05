@@ -161,6 +161,10 @@ Leaf-comparison semantics are **JS-native and documented — deliberately not cl
 - **`$exists`** — "holds a value", the same on every adapter: `$exists: true` ⇔ `$ne: null`, `$exists: false` ⇔ `$eq: null`. Before 0.1.132 a key holding `null` counted as present; it now counts as absent. See [Existence](/api/queries#existence).
 - **Ordering** — JS-native (`<` / `>`); strings compare by code point. There is **no collation** or locale awareness.
 
+## Conflict-ignoring inserts {#insert-ignore}
+
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) tries each row and turns a primary-key / unique-index `CONFLICT` into a skipped slot. Closing the space drops its in-memory tables ([Closing the space](/guide/setup#closing)).
+
 ## Limitations
 
 Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary for the small computed surfaces this adapter targets. All are documented, none silent:

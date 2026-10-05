@@ -39,6 +39,15 @@ await users.remove({ orderId: 1, productId: 2 }); // composite → DELETE /?orde
 await users.meta(); // TMetaResponse — cached on the client instance
 ```
 
+## `insert()` with `onConflict: "ignore"` (since 0.1.148)
+
+```ts
+await tickets.insert({ id: 1, title: "A" }, { onConflict: "ignore" }); // POST /?$onConflict=ignore → { insertedId, conflict: false } | { conflict: true }
+await tickets.insert(rows, { onConflict: "ignore" }); // → { insertedCount, insertedIds, inserted, conflicts } (indices into `rows`)
+```
+
+Types: `TDbInsertIgnoreResult`, `TDbInsertManyIgnoreResult`, `TInsertOnConflictOptions`. Offer it only when `meta.crud.insert` includes `"onConflict"`.
+
 ## `aggregate()` and calendar buckets (since 0.1.132)
 
 ```ts

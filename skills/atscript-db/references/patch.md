@@ -13,6 +13,8 @@ await products.updateOne({ id: 42, price: $mul(1.1) });
 await users.updateMany({ status: "active" }, { points: $inc(100) });
 ```
 
+Operands must be finite numbers (since 0.1.148): `$inc(NaN)`, `$dec(Infinity)`, `$mul(-Infinity)` fail validation with `Field operation operand must be a finite number, got <n>` (HTTP 400) instead of poisoning the stored value.
+
 | Helper      | SQL                 | MongoDB          |
 | ----------- | ------------------- | ---------------- |
 | `$inc(n=1)` | `SET col = col + ?` | `$inc`           |

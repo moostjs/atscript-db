@@ -213,6 +213,7 @@ await tasks.findMany({ filter: { priority: { $gte: "high" } } });
 | an array (`string[]`, MongoDB and memory)   | its element type — for an array operand, every element                                                                |
 
 - **Integer fields** are `number.int` and its sizes, `number.timestamp`, a `number` with `@db.default.increment` or `@db.default.now`, and a view's `@db.agg.count` / `@db.agg.countDistinct` column.
+- **Non-finite numbers are rejected** (since 0.1.148): `NaN`, `Infinity` and `-Infinity` — bare or inside `$in` / `$nin` — fail with `expected a number, got NaN` on `number` and `decimal` fields. A numeric string such as `"Infinity"` is rejected too.
 - **Always accepted:** `null` (`{ f: null }`, `{ f: { $ne: null } }`) and class instances such as `Date` or a MongoDB `ObjectId`.
 - **Never checked:** `@db.json` fields and their contents, nested-object parents, `db.geoPoint` and `$exists` (a boolean, see [Existence](#existence)).
 - **Literal unions are checked by their primitive type**, not by membership: `{ status: "unknown" }` on `'open' | 'closed'` is valid and matches nothing.

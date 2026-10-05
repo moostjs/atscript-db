@@ -366,7 +366,7 @@ const driver = new PgDriver({
 
 The pool is initialized lazily — the `pg` module is dynamically imported on first use, so the package works in both ESM and CJS environments without top-level import issues.
 
-To shut down cleanly, call `driver.close()` which ends the pool and all its connections.
+To shut down cleanly, close the space — see [Closing the space](/guide/setup#closing). `driver.close()` is idempotent.
 
 ### SSL for managed Postgres
 
@@ -454,6 +454,10 @@ export interface Issue {
     ticketKey?: Ticket.key
 }
 ```
+
+## Conflict-ignoring inserts {#insert-ignore}
+
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) runs **one batched statement per chunk**: `INSERT … VALUES (…), (…) ON CONFLICT DO NOTHING RETURNING <primary key and unique-index columns>`. A conflict never raises, so an outer transaction stays usable. The rows missing from `RETURNING` are the skipped ones; the adapter maps the returned rows back to input positions by key values (duplicates inside the batch are removed beforehand, so keys are unique within a batch). If the returned rows cannot be matched to the input (a key the server returns in another form than it was sent, such as a value rounded by `NUMERIC(10,2)`), the chunk runs inside a `SAVEPOINT`: it is rolled back to it and redone row by row with the same `ON CONFLICT DO NOTHING`, so the result is always exact. Chunks follow the same parameter limit as a plain `insertMany`. A table with generated keys and no unique index cannot collide, so every row is reported inserted. Sequences advance for skipped rows (gaps).
 
 ## Limitations
 

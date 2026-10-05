@@ -24,5 +24,5 @@ export type { TPgDriver, TPgRunResult, TPgConnection } from "./types";
  */
 export function createAdapter(uri: string, options?: Record<string, unknown>): DbSpace {
   const driver = new PgDriver({ connectionString: uri, ...options } as any);
-  return new DbSpace(() => new PostgresAdapter(driver));
+  return new DbSpace(() => new PostgresAdapter(driver), { onClose: () => driver.close() });
 }

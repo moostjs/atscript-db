@@ -3,6 +3,11 @@ import { describe, it, expect } from "vite-plus/test";
 import { buildMongoFilter } from "../mongo-filter";
 
 describe("buildMongoFilter", () => {
+  it("passes an empty $in / $nin through natively (match none / match all)", () => {
+    expect(buildMongoFilter({ status: { $in: [] } })).toEqual({ status: { $in: [] } });
+    expect(buildMongoFilter({ status: { $nin: [] } })).toEqual({ status: { $nin: [] } });
+  });
+
   it("should return empty for empty filter", () => {
     expect(buildMongoFilter({})).toEqual({});
   });

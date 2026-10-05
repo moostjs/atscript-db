@@ -375,6 +375,33 @@ export interface TDbInsertManyResult {
   insertedIds: unknown[];
 }
 
+/**
+ * `insertOne` result in conflict-ignoring mode (`onConflict: 'ignore'`).
+ * @since 0.1.148
+ */
+export interface TDbInsertIgnoreResult {
+  /** Id of the inserted row; absent when the row was skipped. */
+  insertedId?: unknown;
+  /** `true` when the row collided on the primary key or a unique index and was skipped. */
+  conflict: boolean;
+}
+
+/**
+ * `insertMany` result in conflict-ignoring mode (`onConflict: 'ignore'`):
+ * `insertedCount` / `insertedIds` cover the INSERTED rows only (dense, input
+ * order); `inserted` and `conflicts` map back to input indices.
+ * @since 0.1.148
+ */
+export interface TDbInsertManyIgnoreResult extends TDbInsertManyResult {
+  /** Input index of each `insertedIds` entry. */
+  inserted: number[];
+  /** Input indices skipped because of a unique / primary-key conflict, ascending. */
+  conflicts: number[];
+}
+
+/** One slot per input row of `BaseDbAdapter.insertManyIgnore`: the inserted id, or `null` for a skipped (conflicting) row. */
+export type TDbInsertIgnoreSlot = { insertedId: unknown } | null;
+
 export interface TDbUpdateResult {
   matchedCount: number;
   modifiedCount: number;
@@ -1085,6 +1112,22 @@ export interface TWriteOptions<Row = Record<string, unknown>> extends TIdResolve
    * Never runs for the nested re-entries a deep write performs on related tables.
    */
   check?: TDbWriteCheck;
+}
+
+/**
+ * Options of `insertOne` / `insertMany`.
+ * @since 0.1.148
+ */
+export interface TInsertOptions<Row = Record<string, unknown>> extends TWriteOptions<Row> {
+  /**
+   * `'error'` (default): a unique / primary-key violation throws `CONFLICT`.
+   * `'ignore'`: rows that collide on the primary key or any unique index —
+   * with a stored row or an earlier row of the same batch — are skipped and
+   * reported by input index. Everything else (validation, NOT NULL, FK, check,
+   * guard) still throws and rolls the call back. A row that creates a related
+   * parent (`@db.rel.to` nested object) is rejected in this mode.
+   */
+  onConflict?: "error" | "ignore";
 }
 
 /**

@@ -270,6 +270,24 @@ const { insertedId } = await users.insert({
 const { insertedCount } = await users.insert([{ name: "Alice" }, { name: "Bob" }]);
 ```
 
+Pass `{ onConflict: "ignore" }` (since 0.1.148) to skip rows that collide on the primary key or a unique index — it sends `POST /?$onConflict=ignore` ([details](./crud#post-insert-ignore)):
+
+```typescript
+const one = await users.insert({ id: 1, name: "Alice" }, { onConflict: "ignore" });
+// { insertedId: 1, conflict: false }  or  { conflict: true }
+
+const many = await users.insert(
+  [
+    { id: 1, name: "Alice" },
+    { id: 2, name: "Bob" },
+  ],
+  {
+    onConflict: "ignore",
+  },
+);
+// { insertedCount, insertedIds, inserted, conflicts } — one slot per input row, by index
+```
+
 Payloads are typed as `PatchOf<T>` — every key optional, optional columns also accept `null` (explicit NULL). On a versioned table the `version` column is server-managed: leave it out (preflight accepts its absence since 0.1.128) — a value passes through and is stored as sent. `$cas` is rejected on insert with a `ClientValidationError` at path `$cas`.
 
 ### update {#update}
@@ -784,20 +802,20 @@ import type { ClientValidationError } from "@atscript/db-client";
 
 ## Method ↔ Endpoint Reference
 
-| Method                | HTTP   | Endpoint                               | Returns                                                 |
-| --------------------- | ------ | -------------------------------------- | ------------------------------------------------------- |
-| `query()`             | GET    | `/query`                               | `DataOf<T>[]`                                           |
-| `count()`             | GET    | `/query` (`$count`)                    | `number`                                                |
-| `aggregate()`         | GET    | `/query` (`$groupBy`)                  | `AggregateResult[]`                                     |
-| `pages()`             | GET    | `/pages`                               | `PageResult<DataOf<T>>`                                 |
-| `one()`               | GET    | `/one/:id` or `/one?k=v`               | `DataOf<T> \| null`                                     |
-| `insert()`            | POST   | `/`                                    | `TDbInsertResult` or `TDbInsertManyResult`              |
-| `update()`            | PATCH  | `/`                                    | `TDbUpdateResult`                                       |
-| `replace()`           | PUT    | `/`                                    | `TDbUpdateResult`                                       |
-| `remove()`            | DELETE | `/:id` or `/?k=v`                      | `TDbDeleteResult`                                       |
-| `meta()`              | GET    | `/meta`                                | `MetaResponse`                                          |
-| `getActionForm()`     | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                        |
-| `getValidator()`      | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                        |
-| `action()`            | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`) |
-| `actionOnQuery()`     | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)    |
-| `countActionTarget()` | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                   |
+| Method                | HTTP   | Endpoint                               | Returns                                                                                              |
+| --------------------- | ------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `query()`             | GET    | `/query`                               | `DataOf<T>[]`                                                                                        |
+| `count()`             | GET    | `/query` (`$count`)                    | `number`                                                                                             |
+| `aggregate()`         | GET    | `/query` (`$groupBy`)                  | `AggregateResult[]`                                                                                  |
+| `pages()`             | GET    | `/pages`                               | `PageResult<DataOf<T>>`                                                                              |
+| `one()`               | GET    | `/one/:id` or `/one?k=v`               | `DataOf<T> \| null`                                                                                  |
+| `insert()`            | POST   | `/` (`?$onConflict=ignore`)            | `TDbInsertResult` / `TDbInsertManyResult`, or the `…IgnoreResult` shapes with `onConflict: "ignore"` |
+| `update()`            | PATCH  | `/`                                    | `TDbUpdateResult`                                                                                    |
+| `replace()`           | PUT    | `/`                                    | `TDbUpdateResult`                                                                                    |
+| `remove()`            | DELETE | `/:id` or `/?k=v`                      | `TDbDeleteResult`                                                                                    |
+| `meta()`              | GET    | `/meta`                                | `MetaResponse`                                                                                       |
+| `getActionForm()`     | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                                                                     |
+| `getValidator()`      | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                                                                     |
+| `action()`            | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`)                                              |
+| `actionOnQuery()`     | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)                                                 |
+| `countActionTarget()` | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                                                                |

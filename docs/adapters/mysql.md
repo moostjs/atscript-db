@@ -409,6 +409,10 @@ which MySQL materializes first. The rewrite needs a primary key; a table without
 
 **Indexes.** InnoDB creates an index for every foreign-key constraint, so the foreign-key columns that schema sync constrains — on the `@db.rel.from` side and in `@db.rel.via` junctions — are already indexed. Index them yourself only when the constraint is not managed by schema sync.
 
+## Conflict-ignoring inserts {#insert-ignore}
+
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) first tries one multi-row `INSERT` per chunk. A duplicate-key error (errno 1062 / 1586) fails only that statement — InnoDB rolls back just the failed statement, so the transaction stays usable — and the chunk is **bisected**: each half is retried, recursively, until a single colliding row is skipped. A batch without conflicts costs one statement; a few duplicates cost about `d · log₂(n)` statements, not one per row. The adapter deliberately does **not** use `INSERT IGNORE` (it downgrades `NOT NULL`, foreign-key and truncation errors to warnings) or `ON DUPLICATE KEY UPDATE` (a no-op update is indistinguishable from an insert in the affected-rows count). Auto-increment values advance for skipped rows (gaps).
+
 ## Limitations
 
 - **UUID generated client-side** — MySQL's `DEFAULT (UUID())` generates the value server-side, but the adapter cannot retrieve it via `insertId` (which only works for `AUTO_INCREMENT` columns). UUIDs are generated client-side via `crypto.randomUUID()` to ensure the generated ID is immediately available in the insert result

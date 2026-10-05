@@ -35,6 +35,25 @@ export function insertManyColumns(rows: readonly Record<string, unknown>[]): str
 }
 
 /**
+ * Splits `rows` into batches that stay under the driver's bind-parameter limit
+ * (PostgreSQL ~65535, MySQL packet size): `maxParams` (default 60000) divided
+ * by the column count. Returns the shared column union and the batches.
+ */
+export function chunkInsertRows(
+  rows: readonly Record<string, unknown>[],
+  maxParams = 60000,
+): { columns: string[]; batches: Record<string, unknown>[][] } {
+  const columns = insertManyColumns(rows);
+  const size =
+    columns.length > 0 ? Math.max(1, Math.floor(maxParams / columns.length)) : rows.length;
+  const batches: Record<string, unknown>[][] = [];
+  for (let offset = 0; offset < rows.length; offset += size) {
+    batches.push(rows.slice(offset, offset + size));
+  }
+  return { columns, batches };
+}
+
+/**
  * Builds a multi-row `INSERT … VALUES (…), (…)` statement over `columns`
  * (default: {@link insertManyColumns} of `rows`). A row lacking a column gets
  * `DEFAULT` — exactly what a single-row INSERT omitting it stores. Callers

@@ -24,6 +24,7 @@ export {
   buildInsert,
   buildInsertMany,
   insertManyColumns,
+  chunkInsertRows,
   buildSelect,
   buildPartitionedSelect,
   stripPartitionRowNumber,

@@ -77,4 +77,30 @@ describe("buildWhere (PostgreSQL)", () => {
     expect(result.sql).toBe('("name" = $1 OR "name" = $2)');
     expect(result.params).toEqual(["A", "B"]);
   });
+
+  // Empty membership (since 0.1.148 round-trip fix: `field{}` / `field!{}` URLs):
+  // an empty IN matches nothing, an empty NOT IN excludes nothing — never `IN ()`.
+  it("renders an empty $in as 0=1 (matches nothing) and never emits IN ()", () => {
+    const result = finalizeParams(pgDialect, buildWhere({ status: { $in: [] } }));
+    expect(result.sql).toBe("0=1");
+    expect(result.params).toEqual([]);
+  });
+
+  it("renders an empty $nin as 1=1 (excludes nothing)", () => {
+    const result = finalizeParams(pgDialect, buildWhere({ status: { $nin: [] } }));
+    expect(result.sql).toBe("1=1");
+    expect(result.params).toEqual([]);
+  });
+
+  it("empty membership composes: AND/OR/NOT keep their meaning", () => {
+    expect(
+      finalizeParams(pgDialect, buildWhere({ status: { $in: [] }, priority: "high" })).sql,
+    ).toBe('0=1 AND "priority" = $1');
+    expect(
+      finalizeParams(
+        pgDialect,
+        buildWhere({ $or: [{ status: { $in: [] } }, { priority: "high" }] }),
+      ).sql,
+    ).toContain("0=1");
+  });
 });

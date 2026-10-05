@@ -59,6 +59,36 @@ Rows may carry different sets of fields: each row is stored as `insertOne` would
 Up to 0.1.131 the PostgreSQL and MySQL adapters built the column list from the **first** row only, so any column absent from row 1 was silently dropped from every row of the batch. If you inserted heterogeneous batches on those adapters, check the affected columns. SQLite, MongoDB and memory were not affected.
 :::
 
+### Skip conflicting rows {#insert-ignore}
+
+Pass `onConflict: "ignore"` (since 0.1.148) to skip rows that collide on the primary key or any unique index instead of failing the call with `CONFLICT`. The result has one slot per input row, by index:
+
+```typescript
+const result = await users.insertMany(
+  [
+    { email: "alice@example.com", name: "Alice" }, // new
+    { email: "bob@example.com", name: "Bob" }, // already stored
+    { email: "alice@example.com", name: "Alice again" }, // duplicate inside the batch
+  ],
+  { onConflict: "ignore" },
+);
+// result: { insertedCount: 1, insertedIds: [7], inserted: [0], conflicts: [1, 2] }
+
+const one = await users.insertOne(
+  { email: "bob@example.com", name: "Bob" },
+  { onConflict: "ignore" },
+);
+// one: { conflict: true }   — or { insertedId, conflict: false }
+```
+
+- `insertedIds` holds the ids of the inserted rows only (dense, input order); `inserted` gives each one's input index, and `conflicts` lists the skipped input indices.
+- A row repeating the key of an **earlier row of the same batch** is a conflict too: the earlier row wins. A key with a `NULL` / missing component never collides (SQL `NULLS DISTINCT`).
+- Only uniqueness collisions are skipped. Validation, `NOT NULL`, foreign-key, `guard` and `check` failures still throw and roll the call back. The `guard` sees every submitted row (a forbidden row is an error even if it would have conflicted); `check` sees the inserted rows only.
+- A payload that creates a related **parent** (a nested `@db.rel.to` object) is rejected with `INVALID_QUERY`: the parent would be orphaned when the row is skipped. Nested children (`@db.rel.from`) and `@db.rel.via` links of a skipped row are not written; a conflict inside a nested child insert is not ignored (nested inserts use the default mode, so it throws and rolls the call back).
+- SDK-side defaults of skipped rows are discarded; database sequences and increments may leave gaps.
+- A skipped row never aborts the surrounding [transaction](/api/transactions).
+- An adapter that does not implement conflict-ignoring inserts throws `DbError("ON_CONFLICT_NOT_SUPPORTED")`; the built-in adapters all do. Over HTTP the mode is `POST /?$onConflict=ignore` ([CRUD endpoints](/http/crud)).
+
 ::: info Nested Creation
 Both `insertOne` and `insertMany` support nested relation data — inserting related records across foreign keys in a single call. This is covered in [Relations — Deep Operations](/relations/deep-operations).
 :::

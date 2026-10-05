@@ -5,6 +5,7 @@ import {
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
   DbError,
+  isConflict,
   bucketTimeZoneUnavailable,
   containsRelationFilter,
   forEachResolvedRelation,
@@ -16,6 +17,7 @@ import type {
   TDbDeleteResult,
   TDbIndex,
   TDbInsertManyResult,
+  TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
   TExistingColumn,
@@ -53,7 +55,7 @@ import {
   type TSqlFragment,
   fillReplacePayload,
   geoWindowFromControls,
-  insertManyColumns,
+  chunkInsertRows,
   normalizeGeoPointValue,
   renameGeoDistance,
   replaceColumnsFor,
@@ -490,6 +492,7 @@ export class MysqlAdapter extends BaseDbAdapter {
    *
    * MySQL uses numeric error codes:
    * - 1062 = ER_DUP_ENTRY (unique constraint violation)
+   * - 1586 = ER_DUP_ENTRY_WITH_KEY_NAME (same, for a multi-row INSERT)
    * - 1451 = ER_ROW_IS_REFERENCED_2 (FK violation on delete)
    * - 1452 = ER_NO_REFERENCED_ROW_2 (FK violation on insert/update)
    */
@@ -497,24 +500,29 @@ export class MysqlAdapter extends BaseDbAdapter {
     try {
       return await fn();
     } catch (error: unknown) {
-      if (error && typeof error === "object" && "errno" in error) {
-        const err = error as { errno: number; message: string; sqlMessage?: string };
-
-        // Duplicate key (unique constraint)
-        if (err.errno === 1062) {
-          const match = err.message?.match(/for key '(?:\w+\.)?(\w+)'/);
-          const field = match?.[1] ?? "";
-          throw new DbError("CONFLICT", [{ path: field, message: err.sqlMessage ?? err.message }]);
-        }
-
-        // FK violation
-        if (err.errno === 1451 || err.errno === 1452) {
-          const errors = this._mapFkError(err.message);
-          throw new DbError("FK_VIOLATION", errors);
-        }
-      }
-      throw error;
+      return this._mapConstraintError(error);
     }
+  }
+
+  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation, else as is. */
+  private _mapConstraintError(error: unknown): never {
+    if (error && typeof error === "object" && "errno" in error) {
+      const err = error as { errno: number; message: string; sqlMessage?: string };
+
+      // Duplicate key (unique constraint)
+      if (err.errno === 1062 || err.errno === 1586) {
+        const match = err.message?.match(/for key '(?:\w+\.)?(\w+)'/);
+        const field = match?.[1] ?? "";
+        throw new DbError("CONFLICT", [{ path: field, message: err.sqlMessage ?? err.message }]);
+      }
+
+      // FK violation
+      if (err.errno === 1451 || err.errno === 1452) {
+        const errors = this._mapFkError(err.message);
+        throw new DbError("FK_VIOLATION", errors);
+      }
+    }
+    throw error;
   }
 
   private _mapFkError(message: string): Array<{ path: string; message: string }> {
@@ -545,29 +553,82 @@ export class MysqlAdapter extends BaseDbAdapter {
       const tableName = this.resolveTableName();
 
       // Batch rows into multi-row INSERT statements over the column union of
-      // ALL rows, to reduce round-trips; chunk to stay under max packet size.
-      const columns = insertManyColumns(data);
-      const maxRowsPerBatch = columns.length > 0 ? Math.floor(60000 / columns.length) : data.length;
+      // ALL rows, to reduce round-trips; chunked to stay under max packet size.
+      const { columns, batches } = chunkInsertRows(data);
       const allIds: unknown[] = [];
 
-      for (let offset = 0; offset < data.length; offset += maxRowsPerBatch) {
-        const batch = data.slice(offset, offset + maxRowsPerBatch);
+      for (const batch of batches) {
         const { sql, params } = buildInsertMany(tableName, batch, columns);
         this._log(sql, params);
         const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-
-        // MySQL multi-row INSERT returns insertId = first auto-generated ID.
-        // Subsequent IDs are sequential with innodb_autoinc_lock_mode <= 1 (traditional/consecutive).
-        // With innodb_autoinc_lock_mode = 2 (MySQL 8.0+ default), IDs may have gaps under
-        // concurrent inserts. For user-supplied PKs, _resolveInsertedId ignores insertId.
-        const firstId = Number(result.insertId);
-        for (let i = 0; i < batch.length; i++) {
-          allIds.push(this._resolveInsertedId(batch[i], firstId > 0 ? firstId + i : 0));
-        }
+        allIds.push(...this._batchInsertedIds(batch, result.insertId));
       }
 
       return { insertedCount: allIds.length, insertedIds: allIds };
     });
+  }
+
+  /**
+   * Ids of the rows of ONE successful multi-row INSERT. MySQL reports only the
+   * first auto-generated id (`insertId`); the statement's rows get consecutive
+   * ids from it (guaranteed for a simple multi-row INSERT under
+   * `innodb_autoinc_lock_mode` 0 / 1; mode 2 — the 8.0 default — is also
+   * consecutive within one statement of known row count). For user-supplied
+   * PKs `_resolveInsertedId` ignores `insertId`.
+   */
+  private _batchInsertedIds(batch: Array<Record<string, unknown>>, insertId: unknown): unknown[] {
+    const firstId = Number(insertId);
+    return batch.map((row, i) => this._resolveInsertedId(row, firstId > 0 ? firstId + i : 0));
+  }
+
+  override supportsInsertIgnore(): boolean {
+    return true;
+  }
+
+  /**
+   * Optimistic multi-row INSERT per chunk. A duplicate key (errno 1062 /
+   * 1586) fails the whole statement — InnoDB rolls back only that statement, so
+   * the transaction stays usable — and the chunk is bisected: each half is
+   * retried, recursively, so a few duplicates cost O(d log n) statements
+   * instead of one per row; a single row that still collides is skipped.
+   * Deliberately NOT `INSERT IGNORE` (it would downgrade NOT NULL / FK /
+   * truncation errors to warnings) and not `ON DUPLICATE KEY UPDATE` (a no-op
+   * update is indistinguishable from an insert in the affected-rows count).
+   */
+  override async insertManyIgnore(
+    data: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    if (data.length === 0) return [];
+    return this.withTransaction(async () => {
+      const tableName = this.resolveTableName();
+      const { columns, batches } = chunkInsertRows(data);
+      const slots: TDbInsertIgnoreSlot[] = [];
+      for (const batch of batches) {
+        slots.push(...(await this._insertIgnoringChunk(tableName, columns, batch)));
+      }
+      return slots;
+    });
+  }
+
+  private async _insertIgnoringChunk(
+    tableName: string,
+    columns: string[],
+    rows: Array<Record<string, unknown>>,
+  ): Promise<TDbInsertIgnoreSlot[]> {
+    const { sql, params } = buildInsertMany(tableName, rows, columns);
+    this._log(sql, params);
+    try {
+      const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
+      return this._batchInsertedIds(rows, result.insertId).map((insertedId) => ({ insertedId }));
+    } catch (error) {
+      if (!isConflict(error)) throw error;
+      if (rows.length === 1) return [null];
+      const mid = rows.length >> 1;
+      return [
+        ...(await this._insertIgnoringChunk(tableName, columns, rows.slice(0, mid))),
+        ...(await this._insertIgnoringChunk(tableName, columns, rows.slice(mid))),
+      ];
+    }
   }
 
   // ── CRUD: Read ────────────────────────────────────────────────────────────

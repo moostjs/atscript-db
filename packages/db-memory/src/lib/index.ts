@@ -1,9 +1,10 @@
 import { DbSpace } from "@atscript/db";
 
-import { MemoryAdapter } from "./memory-adapter";
+import { MemoryAdapter, clearMemoryDatabase } from "./memory-adapter";
 
 // Public adapter surface: `MemoryAdapter`, `MemoryProviderFn`, `setMemoryProvider`.
-export * from "./memory-adapter";
+export { MemoryAdapter, setMemoryProvider } from "./memory-adapter";
+export type { MemoryProviderFn } from "./memory-adapter";
 
 // The reusable in-memory query engine, re-exported BY NAME (never `export *`)
 // so its internal dot-path helpers stay private:
@@ -28,5 +29,8 @@ export { sortRows, projectRow } from "./memory-engine";
  * adapter has been built.
  */
 export function createAdapter(): DbSpace {
-  return new DbSpace(() => new MemoryAdapter());
+  const space: DbSpace = new DbSpace(() => new MemoryAdapter(), {
+    onClose: () => clearMemoryDatabase(space),
+  });
+  return space;
 }

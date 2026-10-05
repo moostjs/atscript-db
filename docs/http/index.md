@@ -219,6 +219,24 @@ The controller operates on the same `DbSpace` that your programmatic code uses. 
 
 See [Setup](/guide/setup) for details on configuring `DbSpace`.
 
+## Closing Spaces on Shutdown {#closing-spaces}
+
+`closeDbSpaces()` (since 0.1.148) closes every distinct space registered with `provideDbSpace()` — see [Closing the space](/guide/setup#closing) — and clears the registry. It is **not** hooked into `Moost.dispose()` automatically: the registry outlives app instances (under `@moostjs/vite` each hot reload disposes the old app while the next one reuses the registered space), so an automatic close would end the connection on every reload. Wire it into your shutdown path:
+
+```typescript
+import { closeDbSpaces } from "@atscript/moost-db";
+
+app.disposeOnSignals();
+
+// in any DI singleton:
+@MoostDispose()
+close() {
+  return closeDbSpaces();
+}
+```
+
+For a single space, call `space.close()` after `await app.dispose()`. Requests that arrive after the close answer `503`.
+
 ## Adapter Agnostic
 
 The same controller code works identically regardless of which database adapter backs the table. Swap the adapter in your table setup and the HTTP API stays unchanged:

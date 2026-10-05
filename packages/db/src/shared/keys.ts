@@ -1,7 +1,17 @@
 import { getPath } from "./object";
 
-/** String form of a key value (an ObjectId stringifies to its hex, a bigint to its digits). */
+/**
+ * String form of a key value, equal across driver representations: an
+ * ObjectId stringifies to its hex, a bigint to its digits, a Date to its ISO
+ * instant, a Buffer / Uint8Array to hex.
+ */
 export function keyString(value: unknown): string {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+  }
+  if (value instanceof Uint8Array) {
+    return Array.from(value, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
   return String(value as string | number | { toString(): string });
 }
 
@@ -32,4 +42,22 @@ export function rowMatchesKey(row: Record<string, unknown>, key: Record<string, 
     if (!sameKey(getPath(row, field), key[field])) return false;
   }
   return true;
+}
+
+/**
+ * Identity of the key tuple `fields` of `row` for uniqueness checks, or
+ * `undefined` when any component is null / missing (a NULL never collides).
+ * Equal across driver representations (see {@link keyString}).
+ */
+export function uniqueKeyTuple(
+  row: Record<string, unknown>,
+  fields: readonly string[],
+): string | undefined {
+  const parts: string[] = [];
+  for (const field of fields) {
+    const value = getPath(row, field);
+    if (value === undefined || value === null) return undefined;
+    parts.push(keyString(value));
+  }
+  return JSON.stringify(parts);
 }

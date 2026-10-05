@@ -25,6 +25,30 @@ describe("getPath", () => {
   });
 });
 
+describe("empty membership ($in: [] / $nin: [])", () => {
+  const rows = [{ status: "open" }, { status: null }, {}];
+
+  it("an empty $in matches no row, null and missing included", () => {
+    const p = buildMemoryPredicate({ status: { $in: [] } });
+    expect(rows.filter(p)).toEqual([]);
+  });
+
+  it("an empty $nin matches every row, null and missing included", () => {
+    const p = buildMemoryPredicate({ status: { $nin: [] } });
+    expect(rows.filter(p)).toEqual(rows);
+  });
+
+  it("composes: $not of an empty $in matches all; AND with another clause narrows", () => {
+    expect(rows.filter(buildMemoryPredicate({ $not: { status: { $in: [] } } }))).toEqual(rows);
+    expect(
+      [
+        { status: "a", p: 1 },
+        { status: "b", p: 2 },
+      ].filter(buildMemoryPredicate({ status: { $nin: [] }, p: 2 })),
+    ).toEqual([{ status: "b", p: 2 }]);
+  });
+});
+
 describe("empty / degenerate filters", () => {
   it("empty filter {} matches everything (why: absent expr → match-all)", () => {
     const p = buildMemoryPredicate({});

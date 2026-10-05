@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vite-plus/test";
+import { describe, it, expect, beforeAll } from "vite-plus/test";
 
+import { DbSpace } from "../table/db-space";
+import type { AtscriptDbTable } from "../table/db-table";
 import { DbError } from "../db-error";
+import { MockAdapter, prepareFixtures } from "./test-utils";
 import {
   $inc,
   $dec,
@@ -231,5 +234,34 @@ describe("separateCas", () => {
     const data: Record<string, unknown> = { a: 1 };
     expect(separateCas(data)).toBeUndefined();
     expect(data).toEqual({ a: 1 });
+  });
+});
+
+describe("field ops — operand must be finite", () => {
+  let items: AtscriptDbTable;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    const fx = await import("./fixtures/filter-values.as");
+    items = new DbSpace(() => new MockAdapter()).getTable(fx.FvItem) as AtscriptDbTable;
+  });
+
+  it.each([
+    ["$inc", Number.NaN],
+    ["$inc", Number.POSITIVE_INFINITY],
+    ["$dec", Number.NEGATIVE_INFINITY],
+    ["$mul", Number.POSITIVE_INFINITY],
+    ["$mul", Number.NaN],
+  ])("rejects { %s: %s } on a number field", async (op, operand) => {
+    await expect(items.updateOne({ id: 1, n: { [op]: operand } } as any)).rejects.toThrow(
+      /Field operation operand must be a finite number/,
+    );
+  });
+
+  it("accepts finite operands (0, negative, fractional)", async () => {
+    for (const operand of [0, -3, 1.5]) {
+      await expect(items.updateOne({ id: 1, n: { $inc: operand } } as any)).resolves.toBeDefined();
+      await expect(items.updateOne({ id: 1, n: { $mul: operand } } as any)).resolves.toBeDefined();
+    }
   });
 });

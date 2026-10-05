@@ -259,6 +259,28 @@ Default values from `@db.default` and generated defaults (`@db.default.increment
 - **Partial failure** — if any item fails validation or violates a constraint, the entire batch is rolled back
   :::
 
+#### Skip conflicting rows: `?$onConflict=ignore` {#post-insert-ignore}
+
+Since 0.1.148. `POST /?$onConflict=ignore` skips rows that collide on the primary key or a unique index instead of answering `409`. The status code is the normal insert status even when every row conflicted; the body reports each row by input index.
+
+```bash
+curl -X POST 'http://localhost:3000/todos/?$onConflict=ignore' \
+  -H "Content-Type: application/json" \
+  -d '[{"id": 1, "title": "Buy milk"}, {"id": 2, "title": "Write docs"}, {"id": 1, "title": "dup"}]'
+```
+
+```json
+{ "insertedCount": 1, "insertedIds": [2], "inserted": [1], "conflicts": [0, 2] }
+```
+
+A single-object body answers `{ "insertedId": 2, "conflict": false }`, or `{ "conflict": true }` when it was skipped.
+
+- `$onConflict` takes `error` (the default) or `ignore`; any other value, and any other `$` control on POST, answers `400`.
+- Validation, `NOT NULL` and foreign-key errors still fail the whole request and write nothing. A body that creates a nested related parent answers `400`.
+- A conflict reveals only the input index of the colliding row, never the stored row or the constraint name. Insert permission is all it needs; [`guardWrite` / `checkWrite`](./customization) run exactly as for a plain insert, and `guardWrite` sees every submitted row.
+- [`GET /meta`](#get-meta) lists the mode as `crud.insert: ["onConflict"]` when the adapter supports it. [`prepareRequest`](./customization) receives `onConflict: "ignore"` on the `insert` endpoint, so a controller can refuse it.
+- The [client](./client) sends it as `client.insert(rows, { onConflict: "ignore" })`.
+
 ## Updating Records
 
 ### PUT / {#put-replace}

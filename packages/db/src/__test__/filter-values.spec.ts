@@ -78,6 +78,22 @@ async function expectAccepted(table: AtscriptDbTable, filter: Record<string, unk
   await expect(table.findMany({ filter } as any)).resolves.toBeDefined();
 }
 
+describe("filter values — non-finite numbers", () => {
+  it("rejects NaN and ±Infinity on number and decimal fields, top-level and in lists", async () => {
+    const { items, calls } = tables();
+    await expectRejected(items, { n: Number.NaN }, "n", /expected a number, got NaN/);
+    await expectRejected(items, { n: Number.POSITIVE_INFINITY }, "n", /got Infinity/);
+    await expectRejected(items, { n: { $gt: Number.NEGATIVE_INFINITY } }, "n", /\(\$gt\)/);
+    await expectRejected(items, { n: { $in: [1, Number.POSITIVE_INFINITY] } }, "n", /\(\$in\)/);
+    await expectRejected(items, { price: Number.NaN }, "price");
+    await expectRejected(items, { qty: Number.POSITIVE_INFINITY }, "qty");
+    expect(calls().filter((c) => c.method === "findMany")).toHaveLength(0);
+    await expectAccepted(items, { n: 0 });
+    await expectAccepted(items, { n: -0 });
+    await expectAccepted(items, { n: { $in: [1, 1.5] } });
+  });
+});
+
 describe("filter values — number fields", () => {
   it("rejects values that cannot denote a number", async () => {
     const { items, calls } = tables();

@@ -258,6 +258,10 @@ await adapter.withTransaction(async () => {
 
 See [Transactions](/api/transactions) for explicit transaction management and nesting behavior.
 
+## Conflict-Ignoring Inserts
+
+Nested FROM children and VIA links of a skipped row are not written, a nested TO parent is rejected, and a conflict inside a nested child insert still throws — see [Skip conflicting rows](/api/crud#insert-ignore).
+
 ## Batch Deep Operations
 
 `insertMany`, `bulkReplace`, and `bulkUpdate` all support nested data per item in the array. Each item goes through the same multi-phase process:

@@ -4,6 +4,7 @@ import { describe, it, expect } from "vite-plus/test";
 import {
   SQL_DEFAULT,
   buildInsert,
+  chunkInsertRows,
   buildSelect,
   buildPartitionedSelect,
   stripPartitionRowNumber,
@@ -62,6 +63,28 @@ describe("buildInsert", () => {
       note: null,
     });
     expect(result.params).toEqual([1, '["a","b"]', null]);
+  });
+});
+
+describe("chunkInsertRows", () => {
+  it("returns the shared column union and batches under the parameter budget", () => {
+    const rows = Array.from({ length: 10 }, (_, i) => (i === 9 ? { a: 1, b: 2, c: 3 } : { a: i }));
+    const { columns, batches } = chunkInsertRows(rows, 9);
+    expect(columns).toEqual(["a", "b", "c"]);
+    // 9 params / 3 columns = 3 rows per batch
+    expect(batches.map((b) => b.length)).toEqual([3, 3, 3, 1]);
+    expect(batches.flat()).toEqual(rows);
+  });
+
+  it("defaults to 60000 params; a column-less row set stays one batch", () => {
+    expect(
+      chunkInsertRows(Array.from({ length: 30_000 }, () => ({ a: 1, b: 2 }))).batches,
+    ).toHaveLength(1);
+    expect(
+      chunkInsertRows(Array.from({ length: 30_001 }, () => ({ a: 1, b: 2 }))).batches,
+    ).toHaveLength(2);
+    expect(chunkInsertRows([{}, {}]).batches).toEqual([[{}, {}]]);
+    expect(chunkInsertRows([]).batches).toEqual([]);
   });
 });
 

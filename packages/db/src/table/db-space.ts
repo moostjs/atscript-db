@@ -5,6 +5,7 @@ import { AtscriptDbView, isViewType } from "./db-view";
 import type { AtscriptDbReadable } from "./db-readable";
 import { aliasTargetOf } from "./view-source";
 import type { BaseDbAdapter } from "../base-adapter";
+import { aggregateFailure, spaceClosedError } from "../db-error";
 import { DbEncryption, type TDbEncryptionOptions } from "../encryption";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
@@ -22,6 +23,14 @@ export interface TDbSpaceOptions {
   logger?: TGenericLogger;
   /** Field-level encryption configuration for `@db.encrypted` fields. */
   encryption?: TDbEncryptionOptions;
+  /**
+   * Runs once from {@link DbSpace.close}, after every adapter was disposed.
+   * Pass the resource the space does not own by itself, e.g.
+   * `() => driver.close()`. The `createAdapter` helpers of the adapter
+   * packages set it to close the driver they built.
+   * @since 0.1.148
+   */
+  onClose?: () => void | Promise<void>;
 }
 
 /**
@@ -61,14 +70,26 @@ interface TWeakMapOf<V> {
  * const activeUsers = db.getView(ActiveUsersType)
  * ```
  */
-export class DbSpace {
+export class DbSpace implements AsyncDisposable {
+  /** `await using` support — an alias for {@link close}, installed below where the runtime has the symbol. */
+  declare [Symbol.asyncDispose]: () => Promise<void>;
+
   private _readables = new WeakMap() as TWeakMapOf<AtscriptDbReadable>;
 
   /** All tables created in this space — used for reverse FK lookup during cascade. */
   private _allTables = new Set<AtscriptDbTable>();
 
+  /** Every table / view handle the space created — flagged closed on {@link close}. */
+  private _handles = new Set<AtscriptDbReadable>();
+
   /** Lazily created adapter for administrative ops (drop table/view) that don't need a registered readable. */
   private _adminAdapter?: BaseDbAdapter;
+
+  /** Every adapter this space created (tables, views, admin) — disposed on close. */
+  private _adapters = new Set<BaseDbAdapter>();
+
+  private _onClose?: () => void | Promise<void>;
+  private _closing?: Promise<void>;
 
   protected readonly logger: TGenericLogger;
 
@@ -89,6 +110,7 @@ export class DbSpace {
     } else {
       const options = (loggerOrOptions ?? {}) as TDbSpaceOptions;
       this.logger = options.logger ?? NoopLogger;
+      this._onClose = options.onClose;
       if (options.encryption) {
         this._encryption = new DbEncryption(options.encryption);
       }
@@ -100,6 +122,7 @@ export class DbSpace {
    * appropriate instance. Uses `@db.view` or `@db.view.for` presence to distinguish.
    */
   get<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbReadable<T> {
+    this._assertOpen();
     if (isViewType(type)) {
       return this.getView(type, logger);
     }
@@ -111,6 +134,7 @@ export class DbSpace {
    * Creates the table + adapter on first access, caches for subsequent calls.
    */
   getTable<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbTable<T> {
+    this._assertOpen();
     let readable = this._readables.get(type) as AtscriptDbTable<T> | undefined;
     if (!readable) {
       assertNotAlias(type);
@@ -130,6 +154,7 @@ export class DbSpace {
       readable.setFkLookupResolver((tableName) => this._getFkLookupTarget(tableName));
       readable.setEncryption(this._encryption);
       this._readables.set(type, readable as AtscriptDbReadable);
+      this._handles.add(readable as AtscriptDbReadable);
     }
     return readable as AtscriptDbTable<T>;
   }
@@ -139,6 +164,7 @@ export class DbSpace {
    * Creates the view + adapter on first access, caches for subsequent calls.
    */
   getView<T extends TAtscriptAnnotatedType>(type: T, logger?: TGenericLogger): AtscriptDbView<T> {
+    this._assertOpen();
     let readable = this._readables.get(type) as AtscriptDbView<T> | undefined;
     if (!readable) {
       assertNotAlias(type);
@@ -151,6 +177,7 @@ export class DbSpace {
       );
       readable.setEncryption(this._encryption);
       this._readables.set(type, readable as AtscriptDbReadable);
+      this._handles.add(readable as AtscriptDbReadable);
     }
     return readable as AtscriptDbView<T>;
   }
@@ -160,6 +187,7 @@ export class DbSpace {
    * Creates the table/view + adapter on first access if needed.
    */
   getAdapter(type: TAtscriptAnnotatedType): BaseDbAdapter {
+    this._assertOpen();
     const readable = this.get(type);
     return readable.dbAdapter;
   }
@@ -198,6 +226,7 @@ export class DbSpace {
   async getReferencingForeignKeys(
     tableName: string,
   ): Promise<TReferencingForeignKey[] | undefined> {
+    this._assertOpen();
     const adapter = this._getAdminAdapter();
     return adapter.getReferencingForeignKeys?.(tableName);
   }
@@ -219,7 +248,53 @@ export class DbSpace {
   private _createAdapter(): BaseDbAdapter {
     const adapter = this.adapterFactory();
     (adapter as Partial<Pick<BaseDbAdapter, "registerSpace">>).registerSpace?.(this);
+    this._adapters.add(adapter);
     return adapter;
+  }
+
+  /** `true` once {@link close} was called. @since 0.1.148 */
+  get closed(): boolean {
+    return this._closing !== undefined;
+  }
+
+  /** Throws `SPACE_CLOSED` once the space is closed. */
+  private _assertOpen(): void {
+    if (this._closing) throw spaceClosedError();
+  }
+
+  /**
+   * Closes the space: marks it closed, disposes every adapter it created, then
+   * runs the `onClose` hook (the `createAdapter` helpers close their driver
+   * there). Idempotent — every call returns the first call's promise. Every
+   * step is attempted; failures are collected into an `AggregateError`.
+   *
+   * It does not cancel or drain in-flight queries: call it after the server
+   * stopped accepting requests. After close, `get*` and operations on existing
+   * table/view handles throw `DbError("SPACE_CLOSED")`.
+   * @since 0.1.148
+   */
+  close(): Promise<void> {
+    return (this._closing ??= this._doClose());
+  }
+
+  private async _doClose(): Promise<void> {
+    for (const readable of this._handles) readable._spaceClosed = true;
+    const errors: unknown[] = [];
+    for (const adapter of this._adapters) {
+      try {
+        await adapter.dispose?.();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    try {
+      await this._onClose?.();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) {
+      throw aggregateFailure("DbSpace close failed", errors);
+    }
   }
 
   /**
@@ -258,4 +333,11 @@ export class DbSpace {
     }
     return undefined;
   }
+}
+
+// `await using space = createAdapter(...)` — only where the runtime defines the symbol.
+if (typeof Symbol.asyncDispose === "symbol") {
+  DbSpace.prototype[Symbol.asyncDispose] = function (this: DbSpace) {
+    return this.close();
+  };
 }

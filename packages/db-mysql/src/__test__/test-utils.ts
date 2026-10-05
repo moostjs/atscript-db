@@ -26,6 +26,8 @@ export interface CapturedCall {
 
 export interface TMockDriverOptions {
   runResult?: Partial<TMysqlRunResult>;
+  /** Per-statement `run` answer (may throw, e.g. a MySQL errno); overrides `runResult`. */
+  runResponder?: (sql: string, params?: unknown[]) => Partial<TMysqlRunResult> | undefined;
   /** Result of every `all` (unless a canned `all` entry matches). */
   allResult?: unknown[];
   /** Result of every `get` (unless a canned `get` entry matches). */
@@ -61,7 +63,7 @@ export function createMockDriver(
   const make = (via: CapturedCall["via"]) => ({
     async run(sql: string, params?: unknown[]): Promise<TMysqlRunResult> {
       calls.push({ via, method: "run", sql, params });
-      return runResult;
+      return { ...runResult, ...overrides?.runResponder?.(sql, params) };
     },
     async all<T>(sql: string, params?: unknown[]): Promise<T[]> {
       calls.push({ via, method: "all", sql, params });

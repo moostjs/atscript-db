@@ -39,6 +39,7 @@ import type {
 import type {
   TDbInsertResult,
   TDbInsertManyResult,
+  TDbInsertIgnoreSlot,
   TDbUpdateResult,
   TDbDeleteResult,
 } from "./types";
@@ -201,6 +202,14 @@ export abstract class BaseDbAdapter {
    * @since 0.1.137
    */
   registerSpace(_space: DbSpace): void {}
+
+  /**
+   * Releases timers, caches or change streams the adapter holds. Called once
+   * by {@link DbSpace.close}; the driver itself is closed by the space's
+   * `onClose` hook, never here. No-op by default.
+   * @since 0.1.148
+   */
+  dispose?(): void | Promise<void>;
 
   /**
    * Enables or disables verbose (debug-level) logging for this adapter.
@@ -1038,6 +1047,34 @@ export abstract class BaseDbAdapter {
 
   abstract insertOne(data: Record<string, unknown>): Promise<TDbInsertResult>;
   abstract insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult>;
+
+  /**
+   * Conflict-ignoring batch insert (`insertMany(rows, { onConflict: 'ignore' })`).
+   * Returns ONE SLOT PER INPUT ROW, in order: `{ insertedId }` for an inserted
+   * row, `null` for a row skipped because it collided with a STORED row on the
+   * primary key or a unique index. (The core already removed duplicates inside
+   * the batch.) Only uniqueness collisions are skipped — NOT NULL, FK, check
+   * and every other error must throw — and a skipped row must never abort the
+   * surrounding transaction. Fail-closed by default: throws
+   * `DbError("ON_CONFLICT_NOT_SUPPORTED")`; also override
+   * {@link supportsInsertIgnore}.
+   * @since 0.1.148
+   */
+  insertManyIgnore(_data: Array<Record<string, unknown>>): Promise<TDbInsertIgnoreSlot[]> {
+    return Promise.reject(
+      new DbError("ON_CONFLICT_NOT_SUPPORTED", [
+        {
+          path: "",
+          message: `The ${this.constructor.name} adapter does not support onConflict "ignore"`,
+        },
+      ]),
+    );
+  }
+
+  /** Whether {@link insertManyIgnore} is implemented (drives `/meta.crud.insertOnConflict`). @since 0.1.148 */
+  supportsInsertIgnore(): boolean {
+    return false;
+  }
   abstract replaceOne(
     filter: FilterExpr,
     data: Record<string, unknown>,

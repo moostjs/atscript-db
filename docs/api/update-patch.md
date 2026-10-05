@@ -61,6 +61,8 @@ await products.updateOne({ id: 42, stock: $dec(5) });
 await products.updateOne({ id: 42, price: $mul(1.1) });
 ```
 
+The operand must be a **finite number**: `$inc(NaN)`, `$dec(Infinity)` or `$mul(-Infinity)` fail validation with `Field operation operand must be a finite number, got NaN` (since 0.1.148). Floating-point arithmetic with a non-finite operand would poison the stored value.
+
 Field operations can be mixed with regular field assignments in the same update:
 
 ```typescript
