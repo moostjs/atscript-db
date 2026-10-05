@@ -20,6 +20,7 @@ import {
 import { checkAggregateExprs, entryFields, rowOrderKeys } from "./aggregate-expr";
 import { findAncestorInSet, isGeoPointType, type TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
+import { NOT_DIMENSION_REASON } from "../shared/aggregate-rules";
 import { isPlainObject } from "../shared/object";
 import { hasRelationOp, relGuardState, type TRelGuardState } from "./relation-filter";
 import { guardFilterValues, guardHavingValues } from "./filter-values";
@@ -478,7 +479,7 @@ export function groupSourceVerdict(
     return { ok: false, code: "notFilterable", reason: ADAPTER_FILTER_REASON };
   }
   if (isStrictTable(table) && !table.dimensions.includes(fd.path)) {
-    return { ok: false, code: "notDimension", reason: "not a dimension" };
+    return { ok: false, code: "notDimension", reason: NOT_DIMENSION_REASON };
   }
   return { ok: true };
 }
@@ -519,7 +520,7 @@ export function bucketSourceVerdict(
   }
   if (!adapter.canFilterField(fd)) return rejectSource("notFilterable", ADAPTER_FILTER_REASON);
   if (isStrictTable(table) && !table.dimensions.includes(fd.path)) {
-    return rejectSource("notDimension", "not a dimension");
+    return rejectSource("notDimension", NOT_DIMENSION_REASON);
   }
   if (adapter.calendarBucketUnits().size === 0) {
     return rejectSource("noBuckets", "adapter has no calendar buckets");
