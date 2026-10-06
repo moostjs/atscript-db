@@ -83,7 +83,7 @@ await jobs.findMany({
 | 11  | The filter/sort/projection engine (`buildMemoryPredicate` + `sortRows` + `projectRow`) is **shared**: it also backs `@atscript/moost-db`'s `AsJsonValueHelpController` (static value-help). Same JS-native semantics (Mongo-like null model, `/pat/flags` regex, dot-paths) apply there — see [moost-db.md § Value-help controllers](moost-db.md).                       |
 | 12  | An inclusion `$select` returns **exactly** the selected fields — like SQLite/Postgres/MySQL (since 0.1.145; earlier the primary key was always added). Select the PK when you need it.                                                                                                                                                                                   |
 
-Also: no Mongo-style implicit array-element / `$elemMatch` matching — the dot-path getter reaches scalars and nested-object paths only. Semantics are JS-native, deliberately NOT SQL-identical; not a production datastore.
+Also: a scalar `$eq` / `$in` / `$ne` / `$nin` against an array field matches by containment (like Mongo, `null` included), but there is no `$elemMatch` and no array-of-object dot-paths — the dot-path getter reaches scalars and nested-object paths only. Semantics are JS-native, deliberately NOT SQL-identical; not a production datastore.
 
 ## Key imports
 

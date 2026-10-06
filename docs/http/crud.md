@@ -489,7 +489,7 @@ credentials?: string
 
 The controller enforces the seal, not just hides the value:
 
-- Every read projection force-excludes the field (`$select`ing it explicitly is silently stripped — even when it's the only selected field).
+- Every read projection force-excludes the field (`$select`ing it explicitly is silently stripped — even when it's the only selected field). Selecting a parent object (`$select=secret` over `secret: { @db.writeOnly hash, salt }`) returns the parent's other leaves only (since 0.1.148).
 - Filtering, sorting, and aggregate `$groupBy`/`$select` on it are rejected — an equality probe or sort order would leak the sealed value.
 - `/meta` still serves the field's **type**, flagged `writeOnly: true`, so generated forms render a set-only input and client preflight validation accepts the field in write payloads.
 - Server-side code reading through `AtscriptDbTable` still sees the value — the seal is an HTTP-layer contract.
