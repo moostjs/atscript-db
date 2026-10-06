@@ -7,8 +7,8 @@ import {
   controllerTable,
   dbActionIdSlot,
   dbActionIdsSlot,
+  echoRequests,
   requestIdOf,
-  requestIdsOf,
 } from "./id-cache";
 import { dbActionPreScopeSlot, dbActionRowSlot, dbActionRowsSlot } from "./row-cache";
 import { ACTION_GATE_PRIORITY, awaitActionPrepared } from "./prepare-request";
@@ -77,7 +77,7 @@ export function buildGateInterceptor(opts: GateInterceptorOpts): TInterceptorDef
       const verdict = judgeRow(action, disabled, row);
       if (verdict) {
         const id = await ctx.get(dbActionIdSlot);
-        throw disabledError(ctx, action, id, [verdictReason(verdict)]);
+        throw rowDisabledError(ctx, action, id, verdictReason(verdict));
       }
       return;
     }
@@ -114,8 +114,7 @@ async function gateRows(
 
   const verdicts = disabled ? judgeRows(action, disabled, existingRows) : undefined;
 
-  const failingIds: Record<string, unknown>[] = [];
-  const failingReasons: (string | undefined)[] = [];
+  const failing: { id: Record<string, unknown>; reason: string | undefined }[] = [];
   const passingRows: unknown[] = [];
   const passingIds: Record<string, unknown>[] = [];
   const skipped: TSkippedRow[] = [];
@@ -126,8 +125,7 @@ async function gateRows(
     const verdict = row === undefined ? undefined : verdicts?.[verdictIndex++];
     if (row === undefined || verdict) {
       const reason = verdictReason(verdict);
-      failingIds.push(ids[i]);
-      failingReasons.push(reason);
+      failing.push({ id: ids[i], reason });
       const skipReason = reason ?? (stale?.has(i) ? "stale" : undefined);
       skipped.push(skipReason === undefined ? { id: ids[i] } : { id: ids[i], reason: skipReason });
     } else {
@@ -138,34 +136,48 @@ async function gateRows(
 
   if (onDisabledRows === "skip") {
     if (passingRows.length === 0) {
-      // Zero survivors: every request id failed, so failingReasons aligns with `ids`.
-      throw disabledError(ctx, action, ids, failingReasons);
+      // Zero survivors: every request id failed.
+      throw disabledError(ctx, action, failing);
     }
-    if (failingIds.length > 0) {
+    if (failing.length > 0) {
       ctx.set(dbActionRowsSlot, Promise.resolve(passingRows) as never);
       ctx.set(dbActionIdsSlot, Promise.resolve(passingIds));
       ctx.set(dbActionSkippedKey, skipped);
     }
     return;
   }
-  if (failingIds.length > 0) {
-    throw disabledError(ctx, action, failingIds, failingReasons);
+  if (failing.length > 0) {
+    throw disabledError(ctx, action, failing);
   }
 }
 
 /**
- * The 409 for `ids` (one id for a `'row'` action, the failing ids for
- * `'rows'`) — each echoed as the client sent it (`resolveRowIds`, since 0.1.148).
+ * The 409 of a `'rows'` gate: every failing REQUEST id in request order, each
+ * as the client sent it, with its own reason (`resolveRowIds`, since 0.1.148)
+ * — {@link echoRequests} is the one place that maps resolved ids back.
  */
 function disabledError(
   ctx: EventContext,
   action: string,
-  ids: Record<string, unknown> | Record<string, unknown>[],
-  reasons: readonly (string | null | undefined)[],
+  failing: readonly { id: Record<string, unknown>; reason: string | undefined }[],
 ): ActionDisabledError {
-  return Array.isArray(ids)
-    ? new ActionDisabledError(action, undefined, requestIdsOf(ctx, ids), reasons)
-    : new ActionDisabledError(action, requestIdOf(ctx, ids), undefined, reasons);
+  const echoed = echoRequests(ctx, failing);
+  return new ActionDisabledError(
+    action,
+    undefined,
+    echoed.map((f) => f.id),
+    echoed.map((f) => f.reason),
+  );
+}
+
+/** The 409 of a `'row'` gate: the id as the client sent it. */
+function rowDisabledError(
+  ctx: EventContext,
+  action: string,
+  id: Record<string, unknown>,
+  reason: string | undefined,
+): ActionDisabledError {
+  return new ActionDisabledError(action, requestIdOf(ctx, id), undefined, [reason]);
 }
 
 /** The action's scope restricts (or needs the loaded rows to decide) — see `TPreScope`. */

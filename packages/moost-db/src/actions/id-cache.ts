@@ -11,7 +11,7 @@ import {
   ROW_RESOLVES,
   scopedControllerSlot,
 } from "./row-scope";
-import { identityKey } from "./rows-by-id";
+import { identityKey, type TRequestedId } from "./rows-by-id";
 import {
   isIdValidationSource,
   validateMultiId,
@@ -29,23 +29,56 @@ export {
 export { DEFAULT_MAX_ACTION_IDS } from "./current-action";
 
 /**
- * The ids as the client sent them, keyed by the {@link identityKey} of the id
- * they resolved to (since 0.1.148) — set only when the controller's
- * `resolveRowIds` changed an id. Every id moost-db reports back (gate
- * refusals, target summaries) is mapped through {@link requestIdOf}.
+ * EVERY id the client sent, in request order, with the identity of the id it
+ * resolved to (since 0.1.148) — set only when the controller's
+ * `resolveRowIds` changed or collapsed an id. The single model: refusals,
+ * `reasons`, summaries and counts are judged and reported per request id
+ * through {@link echoRequests}; the resolved (deduped) ids serve only the
+ * row load and the handler.
  */
-export const dbActionRequestIdsKey = key<ReadonlyMap<string, Record<string, unknown>[]>>(
-  "atscript_db_action_request_ids",
-);
+export const dbActionRequestIdsKey = key<readonly TRequestedId[]>("atscript_db_action_request_ids");
 
-/** EVERY id the client sent that resolved to `id` — `[id]` when `resolveRowIds` did not change it. */
-export function requestIdsFor(
+/** Number of request ids (`fallback` when no id was resolved to another). */
+export function requestCount(ctx: EventContext, fallback: number): number {
+  return ctx.has(dbActionRequestIdsKey) ? ctx.get(dbActionRequestIdsKey).length : fallback;
+}
+
+/** Number of request ids that resolved to one of `ids` (`ids.length` when none was rewritten). */
+export function requestCountOf(ctx: EventContext, ids: readonly Record<string, unknown>[]): number {
+  if (!ctx.has(dbActionRequestIdsKey)) return ids.length;
+  const keys = new Set(ids.map((id) => identityKey(id)));
+  return ctx.get(dbActionRequestIdsKey).filter((r) => keys.has(r.key)).length;
+}
+
+/**
+ * Entries keyed by a resolved id, reported for every REQUEST id that resolved
+ * to it — in request order, each as the client sent it (`id` replaced). Two
+ * aliases of one row come back exactly like two distinct rows (same order,
+ * same count). Entries whose id no request resolved to stay as they are,
+ * after the request ones.
+ */
+export function echoRequests<E extends { id: Record<string, unknown> }>(
   ctx: EventContext,
-  id: Record<string, unknown>,
-): Record<string, unknown>[] {
-  if (!ctx.has(dbActionRequestIdsKey)) return [id];
-  const k = identityKey(id);
-  return (k === undefined ? undefined : ctx.get(dbActionRequestIdsKey).get(k)) ?? [id];
+  entries: readonly E[],
+): E[] {
+  if (!ctx.has(dbActionRequestIdsKey)) return [...entries];
+  const byKey = new Map<string, E>();
+  const rest: E[] = [];
+  for (const e of entries) {
+    const k = identityKey(e.id);
+    if (k === undefined) rest.push(e);
+    else if (!byKey.has(k)) byKey.set(k, e);
+  }
+  const out: E[] = [];
+  const matched = new Set<string>();
+  for (const r of ctx.get(dbActionRequestIdsKey)) {
+    const e = byKey.get(r.key);
+    if (!e) continue;
+    matched.add(r.key);
+    out.push({ ...e, id: r.id });
+  }
+  for (const [k, e] of byKey) if (!matched.has(k)) rest.push(e);
+  return [...out, ...rest];
 }
 
 /** The id as the client sent it (the first, for an id several requests resolved to). */
@@ -53,15 +86,7 @@ export function requestIdOf(
   ctx: EventContext,
   id: Record<string, unknown>,
 ): Record<string, unknown> {
-  return requestIdsFor(ctx, id)[0]!;
-}
-
-/** {@link requestIdsFor} of every id, flattened — all request aliases are echoed. */
-export function requestIdsOf(
-  ctx: EventContext,
-  ids: readonly Record<string, unknown>[],
-): Record<string, unknown>[] {
-  return ids.flatMap((id) => requestIdsFor(ctx, id));
+  return echoRequests(ctx, [{ id }])[0]!.id;
 }
 
 /**
@@ -98,13 +123,13 @@ async function resolveValidatedId(
 
   const requested = (level === "row" ? [env.ids] : env.ids) as Record<string, unknown>[];
   const overlay = await ctx.get(dbActionOverlaySlot);
-  const { ids, requestIds } = await resolve.call(scoped, requested, {
+  const { ids, requests } = await resolve.call(scoped, requested, {
     purpose: "action",
     action: readCurrentActionMeta(ctx)?.name,
     level,
     overlay: overlay ?? undefined,
   });
-  if (requestIds) ctx.set(dbActionRequestIdsKey, requestIds);
+  if (requests) ctx.set(dbActionRequestIdsKey, requests);
   return level === "row" ? ids[0] : ids;
 }
 

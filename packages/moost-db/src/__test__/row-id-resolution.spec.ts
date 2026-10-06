@@ -138,6 +138,16 @@ async function boot(opts: TBootOpts = {}) {
       return { ok: true };
     }
 
+    @Post("actions/manyLock")
+    @DbAction("manyLock", {
+      label: "Many lock",
+      disabled: (rows: any[]) => rows.map((r) => (r.code === "T-LOCK" ? "locked" : false)),
+    })
+    manyLock(@DbActionRows() rows: unknown) {
+      handled.push(["manyLock", rows]);
+      return { ok: true };
+    }
+
     @Post("actions/targeted")
     @DbAction("targeted", { label: "Targeted", queryTarget: true })
     async targeted(@DbActionTarget() target: TDbActionTarget) {
@@ -514,6 +524,69 @@ describe("no leaks under a row overlay", () => {
   });
 });
 
+describe("every request id is judged on its own, in request order", () => {
+  const overlay = { tenant: "a" } as FilterExpr;
+  /** ALIAS-* all resolve to the out-of-scope T-B; every other id stays as is. */
+  const aliasesToB: THook = (ids) =>
+    ids.map((id) => ((id as any).code.startsWith("ALIAS") ? { code: "T-B" } : id));
+  const aliases = (ids: string[]) => ids.map((code) => ({ code }));
+
+  it("two aliases of one unreachable row are indistinguishable from two distinct rows (order, count)", async () => {
+    const { send } = await boot({ hook: aliasesToB, overlay });
+    const strict = await send("POST", "actions/manyStrict", {
+      ids: aliases(["ALIAS-1", "MISS-X", "ALIAS-2"]),
+    });
+    expect(strict.status).toBe(409);
+    // request order — NOT regrouped as [ALIAS-1, ALIAS-2, MISS-X]
+    expect(strict.body.ids).toEqual(aliases(["ALIAS-1", "MISS-X", "ALIAS-2"]));
+  });
+
+  it("'reasons' stay aligned with the request ids", async () => {
+    const { send, tickets } = await boot({ hook: aliasesToB, overlay });
+    await tickets.insertOne({
+      id: 4,
+      code: "T-LOCK",
+      tenant: "a",
+      status: "open",
+      hiddenKey: "h4",
+    } as never);
+    const res = await send("POST", "actions/manyLock", {
+      ids: aliases(["ALIAS-1", "ALIAS-2", "T-LOCK"]),
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.ids).toEqual(aliases(["ALIAS-1", "ALIAS-2", "T-LOCK"]));
+    expect(res.body.reasons).toEqual([null, null, "locked"]);
+  });
+
+  it("'matched' counts request ids, not resolved ones (skip mode and streamed target)", async () => {
+    const hook: THook = (ids) =>
+      ids.map((id) => ((id as any).code.startsWith("ALIAS") ? { code: "T-NEW" } : id));
+    const open = await boot({ hook });
+    const res = await open.send("POST", "actions/targeted", {
+      ids: aliases(["ALIAS-1", "T-B", "ALIAS-2", "MISS-X"]),
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.matched).toBe(4);
+    expect(res.body.processed).toBe(3);
+    expect(res.body.skipped).toEqual([{ id: { code: "MISS-X" } }]);
+    // the handler runs the row once
+    expect(open.handled.at(-1)).toEqual(["targeted", [{ code: "T-NEW" }, { code: "T-B" }]]);
+  });
+
+  it("a streamed @DbActionTarget refusal lists every request id in request order", async () => {
+    const { send } = await boot({ hook: aliasesToB, overlay });
+    const res = await send("POST", "actions/targeted", {
+      ids: aliases(["ALIAS-1", "MISS-X", "ALIAS-2", "ALIAS-3"]),
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.matched).toBe(4);
+    expect(res.body.processed).toBe(0);
+    expect(res.body.skipped.map((e: any) => e.id)).toEqual(
+      aliases(["ALIAS-1", "MISS-X", "ALIAS-2", "ALIAS-3"]),
+    );
+  });
+});
+
 describe("@DbActionsFrom", () => {
   it("the view resolves its own id, then the source's hook (purpose 'available') maps the source id", async () => {
     getMoostInfact()._cleanup();
@@ -569,6 +642,51 @@ describe("@DbActionsFrom", () => {
     // the `?` form carries strings, as for /one
     expect(viewCalls).toEqual([[{ rowId: "999" }]]);
     expect(sourceCalls).toEqual([{ ids: [{ id: "99" }], purpose: "available" }]);
+  });
+});
+
+describe("@DbActionsFrom never forwards a raw alias to the source", () => {
+  it("a delegation path the request's identification named comes from the resolved id only", async () => {
+    getMoostInfact()._cleanup();
+    const space = createAdapter();
+    await space
+      .getTable(FwTicket)
+      .insertMany([{ key: "T1", teamId: "a", status: "open" }] as never);
+    const issues = space.getTable(FwIssue);
+    await issues.insertMany([{ id: 1, ticketKey: "T1", status: "open", title: "one" }] as never);
+    const tickets = space.getTable(RidTicket);
+    await tickets.insertMany(structuredClone(TICKETS) as never);
+    const sourceCalls: Array<readonly TDbRowIdInput[]> = [];
+
+    @TableController(issues, "ridsrc2")
+    @Inherit()
+    class IssueCtrl extends AsDbController {
+      protected override resolveRowIds(ids: readonly TDbRowIdInput[]) {
+        sourceCalls.push(ids);
+        return ids;
+      }
+
+      @Post("actions/close")
+      @DbAction("close", { label: "Close" })
+      close(@DbActionID() id: unknown) {
+        return { id };
+      }
+    }
+
+    @TableController(tickets, "ridview2")
+    @DbActionsFrom(() => IssueCtrl, { idMap: { id: "code" } })
+    @Inherit()
+    class BoardCtrl extends AsDbReadableController {
+      // the alias resolves to an id that carries no `code` at all
+      protected override resolveRowIds(ids: readonly TDbRowIdInput[]) {
+        return ids.map(() => ({ id: 1 }));
+      }
+    }
+
+    const http = await bootHttp(IssueCtrl, BoardCtrl);
+    const res = await http("GET", "/ridview2/meta/actions?code=T-OLD");
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(JSON.stringify(sourceCalls)).not.toContain("T-OLD");
   });
 });
 

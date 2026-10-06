@@ -3162,20 +3162,27 @@ export class AsDbReadableController<
     }
     const { own, id: resolved } = await this._availableResolved(idObj);
     if (!this._hasDelegations) return own;
-    return this._delegatedAvailable(own, (d) => this._sourceIdOf(d, resolved, query));
+    return this._delegatedAvailable(own, (d) =>
+      this._sourceIdOf(d, resolved, query, Object.keys(idObj)),
+    );
   }
 
   /**
    * A delegation's source id: each source id field from the row's mapped path
-   * — the resolved `id`'s value, else `fallback`'s (the raw `?` query, which may
-   * name paths outside the identification); `undefined` when a path has none.
+   * of the RESOLVED `id`. A path the request's identification named
+   * (`consumed`) is NEVER taken from the raw `?` query: that value may be an
+   * alias `resolveRowIds` rewrote, and the source would see (and answer for)
+   * it. Paths outside the identification fall back to `fallback`'s (the raw
+   * query's) value; `undefined` when a path has none.
    */
   private _sourceIdOf(
     d: TDelegation,
     id: Record<string, unknown> | undefined,
     fallback?: Record<string, unknown>,
+    consumed: readonly string[] = [],
   ): Record<string, unknown> | undefined {
-    const value = (path: string): unknown => id?.[path] ?? fallback?.[path];
+    const value = (path: string): unknown =>
+      id?.[path] ?? (consumed.includes(path) ? undefined : fallback?.[path]);
     return d.paths.every((path) => value(path) !== undefined)
       ? Object.fromEntries(Object.entries(d.idMap).map(([field, path]) => [field, value(path)]))
       : undefined;

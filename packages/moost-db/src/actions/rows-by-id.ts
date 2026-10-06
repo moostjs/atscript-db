@@ -31,49 +31,52 @@ export function identityKey(id: Record<string, unknown>): string | undefined {
   return idKey(id, Object.keys(id).toSorted());
 }
 
+/** One id the client sent, with the {@link identityKey} of the id it resolved to. */
+export interface TRequestedId {
+  id: Record<string, unknown>;
+  key: string;
+}
+
 /**
  * The result of a `resolveRowIds` call over an action's ids: the resolved
- * ids with duplicate identities collapsed to the first, and — only when some
- * id changed — the id each resolved identity was requested as.
+ * ids with duplicate identities collapsed to the first (what handlers and
+ * the row load see) and — only when an id changed or collapsed — EVERY
+ * request id in request order (`requests`), the single model all refusals,
+ * reasons, summaries and counts are judged and reported in.
  */
 export interface TAppliedIds {
   ids: Record<string, unknown>[];
-  /**
-   * Resolved {@link identityKey} → EVERY id the client requested that resolved
-   * to it (in request order, distinct); set only when `resolveRowIds` changed
-   * an id. Echoing all of them keeps the alias → canonical grouping of an
-   * unreachable row from leaking.
-   */
-  requestIds?: ReadonlyMap<string, Record<string, unknown>[]>;
+  requests?: readonly TRequestedId[];
 }
 
 /**
  * `resolved` (index-aligned with `requested`) with duplicate identities
- * collapsed to the first, plus the request-id echo map ({@link TAppliedIds}).
+ * collapsed to the first, plus the per-request list ({@link TAppliedIds}).
  */
 export function applyResolvedIds(
   requested: readonly Record<string, unknown>[],
   resolved: readonly Record<string, unknown>[],
 ): TAppliedIds {
   const ids: Record<string, unknown>[] = [];
-  const requestIds = new Map<string, Record<string, unknown>[]>();
+  const requests: TRequestedId[] = [];
+  const seen = new Set<string>();
   let changed = false;
   for (let i = 0; i < resolved.length; i++) {
     const k = identityKey(resolved[i]);
-    if (k !== undefined) {
-      if (k !== identityKey(requested[i])) changed = true;
-      const seen = requestIds.get(k);
-      if (seen) {
-        // a duplicate identity collapses to the first; its request id is still echoed
-        const rk = identityKey(requested[i]);
-        if (rk === undefined || !seen.some((r) => identityKey(r) === rk)) seen.push(requested[i]);
-        continue;
-      }
-      requestIds.set(k, [requested[i]]);
+    if (k === undefined) {
+      ids.push(resolved[i]);
+      continue;
     }
+    if (k !== identityKey(requested[i])) changed = true;
+    requests.push({ id: requested[i], key: k });
+    if (seen.has(k)) {
+      changed = true; // a duplicate identity collapses to the first; its request is still reported
+      continue;
+    }
+    seen.add(k);
     ids.push(resolved[i]);
   }
-  return changed ? { ids, requestIds } : { ids };
+  return changed ? { ids, requests } : { ids };
 }
 
 /**

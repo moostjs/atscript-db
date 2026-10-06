@@ -442,7 +442,7 @@ It runs once per request, after [`prepareRequest`](#preparerequest) and the requ
 3. Do not log or return the canonical id in custom errors.
 4. The hook runs before the overlay read: its own query timing is yours to manage.
 
-With that, `/one`, `DELETE`, `/meta/actions` and a `'row'` action answer an unreachable alias, a missing id and an unknown alias identically (`404`, or `{ actions: [] }`), and a `'rows'` refusal lists every id you sent (when several ids resolve to one row, all of them are listed, so the refusal never reveals which ids are aliases of the same row). **Cost:** one hook call per request when overridden — check the id's current holder first (one indexed read, or an in-memory alias map) and consult the alias table only on a miss.
+With that, `/one`, `DELETE`, `/meta/actions` and a `'row'` action answer an unreachable alias, a missing id and an unknown alias identically (`404`, or `{ actions: [] }`), and a `'rows'` refusal lists every id you sent, in the order you sent them, each with its own `reasons` entry, and `matched` counts the ids you sent (two aliases of one row look exactly like two distinct rows; the handler still receives the row once). A `@DbActionsFrom` source id is built from the resolved id, never from a raw alias. **Cost:** one hook call per request when overridden — check the id's current holder first (one indexed read, or an in-memory alias map) and consult the alias table only on a miss.
 
 ## Write Hooks
 

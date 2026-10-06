@@ -5,7 +5,7 @@ import { ApplyDecorators, Resolve } from "moost";
 import { getAtscriptDbMate } from "../mate";
 import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
-import { dbActionIdsSlot, requestIdsFor, requestIdsOf } from "./id-cache";
+import { dbActionIdsSlot, echoRequests, requestCount, requestCountOf } from "./id-cache";
 import {
   DEFAULT_QUERY_TARGET_BATCH_SIZE,
   dbActionSkippedKey,
@@ -117,14 +117,28 @@ class TargetBase {
     this.failed.push({ id, reason });
   }
 
+  /**
+   * A batch handed to the handler, counted per request id (two aliases of one
+   * row count twice, like two distinct rows).
+   */
+  protected countProcessed(ids: readonly Record<string, unknown>[]): void {
+    this.processed += requestCountOf(this.ctx, ids);
+  }
+
   summary(): TDbActionTargetSummary {
+    return this.summaryOf(this.failed);
+  }
+
+  /** {@link summary} over `failed` (the run's, plus an abort's), all in request order. */
+  protected summaryOf(
+    failed: readonly { id: Record<string, unknown>; reason: string }[],
+  ): TDbActionTargetSummary {
+    const echoedFailed = echoRequests(this.ctx, failed);
     return {
       matched: this.matched,
-      processed: Math.max(0, this.processed - this.failed.length),
-      skipped: this.skipped.flatMap((s) =>
-        requestIdsFor(this.ctx, s.id).map((id) => ({ ...s, id })),
-      ),
-      failed: this.failed.flatMap((f) => requestIdsFor(this.ctx, f.id).map((id) => ({ ...f, id }))),
+      processed: Math.max(0, this.processed - echoedFailed.length),
+      skipped: echoRequests(this.ctx, this.skipped),
+      failed: echoedFailed,
     };
   }
 }
@@ -146,7 +160,7 @@ class MaterializedTarget extends TargetBase implements TDbActionTarget {
   ) {
     super(kind, matched, ctx);
     this.skipped.push(...skipped);
-    this.processed = ids.length;
+    this.countProcessed(ids);
   }
 
   async *batches(): AsyncIterable<{ ids: Record<string, unknown>[]; rows: any[] }> {
@@ -165,7 +179,7 @@ export async function setMaterializedTarget(ctx: EventContext): Promise<void> {
     dbActionTargetKey,
     new MaterializedTarget(
       target ? "query" : "ids",
-      target ? target.matched : ids.length + skipped.length,
+      target ? target.matched : requestCount(ctx, ids.length + skipped.length),
       ids,
       async () => {
         const rows = await ctx.get(dbActionRowsSlot);
@@ -214,7 +228,7 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
       const batch = await this.gate(ids.slice(start, start + this.batchSize));
       this.next = start + this.batchSize;
       if (batch.ids.length === 0) continue;
-      this.processed += batch.ids.length;
+      this.countProcessed(batch.ids);
       this.current = batch.ids;
       yield batch;
       this.current = undefined;
@@ -229,21 +243,23 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
    */
   abort(error: unknown): TDbActionTargetSummary {
     const message = errorMessage(error);
-    const base = this.summary();
     const holding = this.current ?? [];
     const reported = new Set(this.failed.map((f) => identityKey(f.id)));
     const uncertain = holding.filter((id) => !reported.has(identityKey(id)));
+    const failed = [
+      ...this.failed,
+      ...uncertain.map((id) => ({ id, reason: message })),
+      ...this.source.ids.slice(this.next).map((id) => ({ id, reason: "not run" })),
+    ];
+    const base = this.summaryOf(failed);
     return {
       ...base,
-      processed: Math.max(0, base.processed - uncertain.length),
-      failed: [
-        ...base.failed,
-        ...requestIdsOf(this.ctx, uncertain).map((id) => ({ id, reason: message })),
-        ...requestIdsOf(this.ctx, this.source.ids.slice(this.next)).map((id) => ({
-          id,
-          reason: "not run",
-        })),
-      ],
+      processed: Math.max(
+        0,
+        this.processed -
+          echoRequests(this.ctx, this.failed).length -
+          requestCountOf(this.ctx, uncertain),
+      ),
       aborted: { status: errorStatus(error), message },
     };
   }
@@ -340,7 +356,7 @@ export async function setStreamedTarget(
       },
     };
   }
-  const matched = query ? query.matched : source.ids.length;
+  const matched = query ? query.matched : requestCount(ctx, source.ids.length);
   const target = new StreamedTarget(matched, ctx, source, batchSize, action, disabled);
   ctx.set(dbActionTargetKey, target);
   return { target, dryRun: query?.dryRun === true };
