@@ -121,6 +121,17 @@ function evalEq(row: Record<string, unknown>, field: string, value: unknown): bo
   if (value instanceof RegExp) {
     return fieldValue != null && value.test(stringifyLeaf(fieldValue));
   }
+  return matchesScalar(fieldValue, value);
+}
+
+/**
+ * Mongo containment: a scalar compared with an array field matches when ANY element
+ * equals it (`{ labels: "bug" }` matches `["bug", "ui"]`). Non-array fields compare as before.
+ */
+function matchesScalar(fieldValue: unknown, value: unknown): boolean {
+  if (Array.isArray(fieldValue) && !Array.isArray(value)) {
+    return fieldValue.some((el) => valuesEqual(el, value));
+  }
   return valuesEqual(fieldValue, value);
 }
 
@@ -130,7 +141,7 @@ function evalIn(row: Record<string, unknown>, field: string, value: unknown): bo
     return false;
   }
   const fieldValue = getPath(row, field);
-  return value.some((element) => valuesEqual(fieldValue, element));
+  return value.some((element) => matchesScalar(fieldValue, element));
 }
 
 /**

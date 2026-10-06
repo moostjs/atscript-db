@@ -179,6 +179,33 @@ describe("$in / $nin", () => {
   });
 });
 
+describe("scalar vs array field (Mongo containment)", () => {
+  const row = { labels: ["bug", "ui"] };
+
+  it("$eq / bare match when any element equals the scalar (why: Mongo array containment)", () => {
+    expect(match({ labels: "bug" }, row)).toBe(true);
+    expect(match({ labels: { $eq: "ui" } }, row)).toBe(true);
+    expect(match({ labels: { $eq: "ops" } }, row)).toBe(false);
+  });
+
+  it("$ne is the exact negation (why: no element may equal)", () => {
+    expect(match({ labels: { $ne: "bug" } }, row)).toBe(false);
+    expect(match({ labels: { $ne: "ops" } }, row)).toBe(true);
+  });
+
+  it("$in matches when any element is in the list; $nin negates (why: containment)", () => {
+    expect(match({ labels: { $in: ["ops", "ui"] } }, row)).toBe(true);
+    expect(match({ labels: { $in: ["ops"] } }, row)).toBe(false);
+    expect(match({ labels: { $nin: ["ops"] } }, row)).toBe(true);
+    expect(match({ labels: { $nin: ["ui"] } }, row)).toBe(false);
+  });
+
+  it("an empty array contains nothing (why: no element equals)", () => {
+    expect(match({ labels: { $eq: "bug" } }, { labels: [] })).toBe(false);
+    expect(match({ labels: { $ne: "bug" } }, { labels: [] })).toBe(true);
+  });
+});
+
 describe("$regex", () => {
   it("honors flags — /foo/i matches FOO case-insensitively (why: flags parsed from RegExp)", () => {
     expect(match({ name: { $regex: /foo/i } }, { name: "FOO" })).toBe(true);

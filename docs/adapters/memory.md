@@ -174,7 +174,7 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 - **JS-native regex / null semantics** — not byte-identical to any SQL engine (see [Comparison semantics](#comparison-semantics)).
 - **No collation** — `@db.column.collate` (nocase / unicode) is not honored; `$eq` and sort are code-point / JS-native.
 - **No sort on array / `@db.json` columns** — `$sort` on them is rejected (400 / `INVALID_QUERY`, since 0.1.128); sort by a nested leaf (`address.zip`) instead.
-- **No array-element matching** — the dot-path getter matches scalars and nested-object paths; Mongo-style implicit array-element / `$elemMatch` matching is not provided.
+- **Array fields: scalar containment only** — like Mongo, a scalar `$eq` / `$in` / `$ne` / `$nin` against an array field matches when any element equals it (`{ labels: "bug" }` matches `["bug", "ui"]`; `$ne` / `$nin` are the negation). Dot-paths do not descend into arrays and `$elemMatch` is not provided.
 - **Non-atomic stored batch writes** — `insertMany` / `updateMany` / `replaceMany` / `deleteMany` apply sequentially with no rollback; a mid-batch conflict leaves earlier items written. Single writes are safe.
 - **No transactions** — `withTransaction` runs the callback but nothing rolls back on a throw. Rollback behaviour (including `moost-db` write guards) is not observable on this adapter; assert it on SQLite `:memory:` or with adapter spies. See [Transactions](/api/transactions#adapter-behavior).
 - **Provider tables are read-only** — writes throw, and there is no cross-request pagination stability (page 1 and page 2 are separate requests over separate snapshots).
