@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vite-plus/test";
-import { DbSpace } from "@atscript/db";
+import { AtscriptDbTable, DbSpace } from "@atscript/db";
 import { SchemaSync } from "@atscript/db/sync";
 
 import { MysqlAdapter } from "../mysql-adapter";
@@ -188,6 +188,28 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
         await conn.exec("SET SESSION auto_increment_increment = 1");
       }
     });
+  });
+
+  it("@@auto_increment_increment = 3 as a server default, outside a transaction: ids are the stored ids", async () => {
+    // GLOBAL applies to connections opened afterwards: a fresh pool sees stride 3 on every connection
+    expect(await adminQuery("SET GLOBAL auto_increment_increment = 3")).toBe(true);
+    const pool = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    try {
+      const auto = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(pool)) as any;
+      expect(auto.dbAdapter.isInTransaction()).toBe(false);
+      const res = await auto.insertMany([
+        { sku: "o1", label: "a" },
+        { sku: "o2", label: "b" },
+        { sku: "o3", label: "c" },
+      ]);
+      const rows = (await auto.findMany({ filter: {}, controls: {} })) as any[];
+      const id = (sku: string) => rows.find((r) => r.sku === sku).id;
+      expect(res.insertedIds).toEqual([id("o1"), id("o2"), id("o3")]);
+      expect(id("o2") - id("o1")).toBe(3);
+    } finally {
+      await adminQuery("SET GLOBAL auto_increment_increment = 1");
+      await pool.close();
+    }
   });
 
   it("inside an outer transaction a skipped row never aborts it", async () => {

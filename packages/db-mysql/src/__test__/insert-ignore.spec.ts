@@ -279,6 +279,17 @@ describe("MysqlAdapter mixed explicit and generated auto-increment PKs", () => {
     expect(inserts[1]!.params).toContain("dup");
   });
 
+  it("the increment step is read on the SAME connection as the INSERT it maps ids for", async () => {
+    const driver = mixedDriver(3);
+    const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
+    await table.insertMany([rows[0], rows[2]]);
+    await table.insertMany([rows[0], rows[2]], { onConflict: "ignore" });
+    const step = driver.calls.filter((c) => c.sql.startsWith("SELECT @@"));
+    const inserts = driver.calls.filter((c) => c.sql.startsWith("INSERT"));
+    expect(step.length).toBeGreaterThan(0);
+    expect([...step, ...inserts].every((c) => c.via === "conn")).toBe(true);
+  });
+
   it("insertMany ignore: same runs, ids in input order, no SELECT for a clean batch", async () => {
     const driver = mixedDriver();
     const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
