@@ -206,6 +206,34 @@ describe("scalar vs array field (Mongo containment)", () => {
   });
 });
 
+describe("null against array fields (as on a real mongod)", () => {
+  // The documented Mongo results over these docs (ids 1..7):
+  //   { labels: null } / $in:[null]   → 2 (null element), 4 (missing), 5 (null)
+  //   $ne:null / $nin:[null]          → 1, 3, 6, 7
+  const docs: Array<[number, Record<string, unknown>]> = [
+    [1, { labels: ["bug", "ui"] }],
+    [2, { labels: [null, "a"] }],
+    [3, { labels: [] }],
+    [4, {}],
+    [5, { labels: null }],
+    [6, { labels: [["x"]] }],
+    [7, { labels: ["bug"] }],
+  ];
+  const ids = (filter: FilterExpr) =>
+    docs.filter(([, row]) => match(filter, row)).map(([id]) => id);
+
+  it("{ labels: null } and $in: [null] match a null element, a null and a missing field", () => {
+    expect(ids({ labels: null } as FilterExpr)).toEqual([2, 4, 5]);
+    expect(ids({ labels: { $eq: null } })).toEqual([2, 4, 5]);
+    expect(ids({ labels: { $in: [null] } })).toEqual([2, 4, 5]);
+  });
+
+  it("$ne: null and $nin: [null] are their exact negation", () => {
+    expect(ids({ labels: { $ne: null } })).toEqual([1, 3, 6, 7]);
+    expect(ids({ labels: { $nin: [null] } })).toEqual([1, 3, 6, 7]);
+  });
+});
+
 describe("$regex", () => {
   it("honors flags — /foo/i matches FOO case-insensitively (why: flags parsed from RegExp)", () => {
     expect(match({ name: { $regex: /foo/i } }, { name: "FOO" })).toBe(true);

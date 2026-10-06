@@ -112,7 +112,7 @@ function evalEq(row: Record<string, unknown>, field: string, value: unknown): bo
   // `$eq: null`. Consequently `$ne: null` (the strict negation of this) matches
   // ONLY rows whose field holds a concrete, present, non-null value.
   if (value === null) {
-    return fieldValue == null;
+    return matchesScalar(fieldValue, null);
   }
   // A bare `RegExp` value is treated as a match test (matches Mongo, where a
   // bare RegExp field value becomes a regex match rather than a literal eq).
@@ -127,8 +127,13 @@ function evalEq(row: Record<string, unknown>, field: string, value: unknown): bo
 /**
  * Mongo containment: a scalar compared with an array field matches when ANY element
  * equals it (`{ labels: "bug" }` matches `["bug", "ui"]`). Non-array fields compare as before.
+ * `null` also matches a missing field (`undefined`) and an array holding a `null` element,
+ * as `{ labels: null }` / `$in: [null]` do in Mongo.
  */
 function matchesScalar(fieldValue: unknown, value: unknown): boolean {
+  if (value === null) {
+    return fieldValue == null || (Array.isArray(fieldValue) && fieldValue.includes(null));
+  }
   if (Array.isArray(fieldValue) && !Array.isArray(value)) {
     return fieldValue.some((el) => valuesEqual(el, value));
   }
