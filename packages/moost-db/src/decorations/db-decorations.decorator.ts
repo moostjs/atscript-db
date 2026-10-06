@@ -53,7 +53,8 @@ export interface TDbDecorationsMeta {
  * Validated once per class at first use (a `[moost-db]` error): the type is an
  * object interface; keys are top-level identifiers that collide with no field
  * or relation of the readable; every `requires` path is an own, readable
- * (not `@db.writeOnly`) field. Inherited under `@Inherit()`. Not supported on
+ * (not `@db.writeOnly`) field or a parent object of own fields (on SQL a nested
+ * object is flattened to leaf columns; the hook still gets the whole object). Inherited under `@Inherit()`. Not supported on
  * value-help controllers.
  *
  * @since 0.1.148

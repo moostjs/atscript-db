@@ -35,6 +35,17 @@ export interface TDecorationSource {
 }
 
 /**
+ * The own readable paths a `requires` path stands for: itself when it is an
+ * own field, else — a parent object of a flattened (SQL) readable — every own
+ * field below it. Empty when the path is neither.
+ */
+function ownLeaves(path: string, ownPaths: ReadonlySet<string>): string[] {
+  if (ownPaths.has(path)) return [path];
+  const prefix = `${path}.`;
+  return [...ownPaths].filter((own) => own.startsWith(prefix));
+}
+
+/**
  * Validates `@DbDecorations` metadata against the bound readable and indexes
  * it. Throws `[moost-db]` errors (once per class — the caller memoizes).
  */
@@ -74,15 +85,22 @@ export function buildDecorationIndex(
   for (const key of keys) requires.set(key, []);
   for (const [key, paths] of Object.entries(meta.requires)) {
     if (!requires.has(key)) fail(`\`requires\` names "${key}", which is not a declared decoration`);
+    const resolved: string[] = [];
     for (const path of paths) {
-      if (!source.ownPaths.has(path)) {
+      const leaves = ownLeaves(path, source.ownPaths);
+      if (leaves.length === 0) {
         fail(`"${key}" requires "${path}", which is not an own field of the bound readable`);
       }
-      if (selfOrAncestor(path, source.writeOnly) !== undefined) {
-        fail(`"${key}" requires "${path}", which is @db.writeOnly (a sealed value cannot be read)`);
+      for (const leaf of leaves) {
+        if (selfOrAncestor(leaf, source.writeOnly) !== undefined) {
+          fail(
+            `"${key}" requires "${path}", which is @db.writeOnly (a sealed value cannot be read)`,
+          );
+        }
       }
+      resolved.push(...leaves);
     }
-    requires.set(key, [...new Set(paths)]);
+    requires.set(key, [...new Set(resolved)]);
   }
   return { type, keys, keySet: new Set(keys), requires, memo: { meta: new WeakMap() } };
 }

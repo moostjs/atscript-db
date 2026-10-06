@@ -55,12 +55,14 @@
   },
   "devDependencies": {
     "@atscript/core": "catalog:",
+    "@atscript/db-sqlite": "workspace:^",
     "@atscript/typescript": "catalog:",
     "@moostjs/event-http": "catalog:",
     "@uniqu/core": "catalog:",
     "@wooksjs/event-core": "catalog:",
     "@wooksjs/event-http": "catalog:",
     "@wooksjs/http-body": "catalog:",
+    "better-sqlite3": "^12.6.2",
     "moost": "catalog:",
     "unplugin-atscript": "catalog:"
   },

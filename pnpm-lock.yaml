@@ -275,6 +275,9 @@ importers:
       '@atscript/core':
         specifier: 'catalog:'
         version: 0.1.99
+      '@atscript/db-sqlite':
+        specifier: workspace:^
+        version: link:../db-sqlite
       '@atscript/typescript':
         specifier: 'catalog:'
         version: 0.1.99(@atscript/core@0.1.99)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.26)(wooks@0.7.26)
@@ -293,6 +296,9 @@ importers:
       '@wooksjs/http-body':
         specifier: 'catalog:'
         version: 0.7.26(@wooksjs/event-core@0.7.26)(@wooksjs/event-http@0.7.26(@prostojs/logger@0.4.3)(@prostojs/router@0.3.4)(@wooksjs/event-core@0.7.26)(wooks@0.7.26))
+      better-sqlite3:
+        specifier: ^12.6.2
+        version: 12.8.0
       moost:
         specifier: 'catalog:'
         version: 0.6.43
