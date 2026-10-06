@@ -57,6 +57,17 @@ const pool = mysql.createPool({ host: "localhost", database: "mydb" });
 const driver = new Mysql2Driver(pool);
 ```
 
+### Strict mode per session {#strict-mode}
+
+Since 0.1.148 the driver appends `STRICT_TRANS_TABLES` to the session `sql_mode` of every connection its pool opens (the server's own modes stay; a session that already has `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` is left alone). A server with a non-strict default — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — therefore rejects a missing `NOT NULL` value, an out-of-range number and an over-long string, in plain inserts and in [ignore mode](#insert-ignore) alike, instead of storing a coerced default. Pass `strictMode: false` as the second argument to keep the server's `sql_mode`:
+
+```typescript
+const driver = new Mysql2Driver("mysql://root:pass@localhost:3306/mydb", { strictMode: false });
+// createAdapter(uri, { strictMode: false, ...poolOptions }) does the same
+```
+
+For a `Pool` you create yourself the driver adds the statement to connections the pool opens after the driver is constructed; connections already open keep their mode. A custom `TMysqlDriver` is not touched — set the mode in your own connection init.
+
 ### Convenience Helper
 
 For quick setup, use the `createAdapter` shortcut that creates both the driver and `DbSpace` in one call:
@@ -285,7 +296,7 @@ Schema sync runs the statements that convert stored values — `MODIFY COLUMN`, 
 - changing `code: string` to `code: number` fails on a stored `'abc'`;
 - lowering `@expect.maxLength` below a stored value fails with `Data too long`.
 
-Before 0.1.140 this depended on the server. A server whose `sql_mode` is not strict — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — coerced `'abc'` to `0` and truncated text, and the sync reported success. Clean or migrate such values before changing the type. Your application's own connections keep the server's `sql_mode`.
+Before 0.1.140 this depended on the server. A server whose `sql_mode` is not strict — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — coerced `'abc'` to `0` and truncated text, and the sync reported success. Clean or migrate such values before changing the type. Your application's own connections are strict too since 0.1.148 ([Strict mode per session](#strict-mode)); with `strictMode: false` they keep the server's `sql_mode`.
 
 ### Column definitions (since 0.1.128)
 
@@ -419,7 +430,7 @@ which MySQL materializes first. The rewrite needs a primary key; a table without
 
 - **A generated id that collides is an error, not a conflict.** A duplicate on `PRIMARY` for a row that carried no primary key (a generated id, for instance an exhausted `AUTO_INCREMENT`) is rethrown as `CONFLICT`; it is never silently skipped. Duplicates of an explicit key or a unique index are the ignorable ones.
 - **`NO_AUTO_VALUE_ON_ZERO`.** When the session `sql_mode` contains it, an explicit `0` / `"0"` primary key is a value, not a request for a generated id. The adapter reads `sql_mode` once per call (only when a row carries such a `0`), on the same connection as the inserts.
-- **Strict `sql_mode` is assumed.** Ignore mode — like every write of this adapter — assumes `STRICT_TRANS_TABLES` (the MySQL 8 default) or `STRICT_ALL_TABLES`: a non-strict mode silently coerces a `NOT NULL` violation to the column default instead of failing. When the adapter has a logger, it warns once per driver (at the first schema operation or insert-ignore) if the session `sql_mode` lacks a strict mode.
+- **Strict `sql_mode` is assumed.** Ignore mode — like every write of this adapter — assumes `STRICT_TRANS_TABLES` (the MySQL 8 default) or `STRICT_ALL_TABLES`: a non-strict mode silently coerces a `NOT NULL` violation to the column default instead of failing. `Mysql2Driver` makes every session strict by default ([Strict mode per session](#strict-mode)), so the assumption holds. Only when you opt out with `strictMode: false` (or use another driver) and the adapter has a logger does it warn once per driver — at the first schema operation or insert-ignore — if the session `sql_mode` lacks a strict mode.
 
 ## Limitations
 

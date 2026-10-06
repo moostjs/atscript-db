@@ -30,6 +30,41 @@ function atscriptTypeCast(field: any, next: () => any): any {
   return next();
 }
 
+/** Options of {@link Mysql2Driver}. */
+export interface TMysql2DriverOptions {
+  /**
+   * Add `STRICT_TRANS_TABLES` to the session `sql_mode` of every new pool
+   * connection (default `true`, since 0.1.148). The server's own modes are
+   * kept — the mode is appended, never replaced. A non-strict server (Amazon
+   * RDS defaults to `NO_ENGINE_SUBSTITUTION`) otherwise coerces a `NOT NULL`,
+   * out-of-range or too-long value instead of failing the write. Pass `false`
+   * to keep the server's `sql_mode` untouched.
+   */
+  strictMode?: boolean;
+}
+
+/** Appends `STRICT_TRANS_TABLES` to the session `sql_mode` unless a strict mode is already set. */
+export const ENSURE_STRICT_SQL =
+  "SET SESSION sql_mode = IF(FIND_IN_SET('STRICT_TRANS_TABLES', @@SESSION.sql_mode) OR FIND_IN_SET('STRICT_ALL_TABLES', @@SESSION.sql_mode), @@SESSION.sql_mode, CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'STRICT_TRANS_TABLES'))";
+
+/**
+ * Runs {@link ENSURE_STRICT_SQL} on each connection the pool opens. The
+ * statement is queued on the connection before the pool hands it out, so it
+ * precedes every query; a failure leaves the server's mode in place.
+ */
+function ensureStrict(pool: import("mysql2/promise").Pool): void {
+  // the promise pool forwards `on` to the callback pool: the listener gets the raw connection
+  const raw = pool as unknown as {
+    on(
+      event: "connection",
+      listener: (conn: { query(sql: string, cb: () => void): unknown }) => void,
+    ): void;
+  };
+  raw.on("connection", (conn) => {
+    conn.query(ENSURE_STRICT_SQL, () => {});
+  });
+}
+
 /**
  * {@link TMysqlDriver} implementation backed by `mysql2/promise`.
  *
@@ -57,6 +92,11 @@ function atscriptTypeCast(field: any, next: () => any): any {
  * const driver = new Mysql2Driver(pool)
  * ```
  *
+ * Every new pool connection gets `STRICT_TRANS_TABLES` appended to its session
+ * `sql_mode` (since 0.1.148); pass `{ strictMode: false }` as the second
+ * argument to opt out. For a pre-created `Pool` this covers connections the
+ * pool opens after the driver is constructed.
+ *
  * Requires `mysql2` to be installed:
  * ```bash
  * pnpm add mysql2
@@ -68,10 +108,13 @@ export class Mysql2Driver implements TMysqlDriver {
 
   constructor(
     poolOrConfig: string | import("mysql2/promise").Pool | import("mysql2/promise").PoolOptions,
+    options: TMysql2DriverOptions = {},
   ) {
+    const strict = options.strictMode !== false;
     if (typeof poolOrConfig === "object" && "execute" in poolOrConfig) {
       // Pre-created pool instance
       this.pool = poolOrConfig as import("mysql2/promise").Pool;
+      if (strict) ensureStrict(this.pool);
     } else {
       // Dynamic import to keep mysql2 optional and support both CJS and ESM
       this.poolInit = import("mysql2/promise").then((mysql) => {
@@ -92,6 +135,7 @@ export class Mysql2Driver implements TMysqlDriver {
             typeCast: atscriptTypeCast,
           });
         }
+        if (strict) ensureStrict(this.pool);
         return this.pool;
       });
     }
