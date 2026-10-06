@@ -664,3 +664,17 @@ describe("collectQueryPaths over a hostile expression", () => {
     expect(refs.aggregate.length).toBeLessThanOrEqual(1);
   });
 });
+
+describe("collectQueryPaths over a huge $args array", () => {
+  it("a 1M-argument node is collected without exceeding the call-argument limit", () => {
+    const expr = { $op: "+", $args: Array.from({ length: 1_000_000 }, () => "price") };
+    const refs = collectQueryPaths(
+      {
+        filter: {},
+        controls: { $groupBy: ["a"], $select: ["a", { $fn: "sum", $expr: expr, $as: "x" }] },
+      } as never,
+      true,
+    );
+    expect(refs.aggregate).toContain("price");
+  });
+});

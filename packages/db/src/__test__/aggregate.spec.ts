@@ -494,6 +494,22 @@ describe("countDistinct and aggregateFns()", () => {
     expect(adapter.calls).toEqual([]);
   });
 
+  it('rejects "_id" as a computed alias (the group key of document stores), for every entry kind', () => {
+    const fields = {
+      flatMap: new Map(),
+      navFields: new Set<string>(),
+      physicalNames: new Set<string>(),
+    };
+    for (const entry of [
+      { $fn: "sum", $field: "qty", $as: "_id" },
+      { $fn: "count", $field: "*", $as: "_id" },
+    ]) {
+      expect(() =>
+        normalizeComputedSelect({ $groupBy: ["a"], $select: ["a", entry] }, fields as never, true),
+      ).toThrowError(expect.objectContaining({ code: "INVALID_QUERY" }));
+    }
+  });
+
   it("resolveCalendarBuckets is a deprecated alias of normalizeComputedSelect", () => {
     expect(resolveCalendarBuckets).toBe(normalizeComputedSelect);
   });

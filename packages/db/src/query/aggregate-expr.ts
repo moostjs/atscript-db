@@ -84,7 +84,8 @@ function boundedArithNames(expr: unknown): string[] {
     const e = stack.pop();
     if (typeof e === "string") out.add(e);
     else if (e && typeof e === "object" && Array.isArray((e as { $args?: unknown }).$args)) {
-      stack.push(...(e as { $args: unknown[] }).$args.toReversed());
+      const args = (e as { $args: unknown[] }).$args;
+      for (let i = args.length - 1; i >= 0; i--) stack.push(args[i]);
     }
   }
   return [...out];

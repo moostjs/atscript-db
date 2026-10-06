@@ -90,14 +90,28 @@ export function resolveComputedSelect(
   fields: TBucketFieldSource,
   aggregate?: boolean,
 ): TComputedSelect {
+  // `_id` is the document id of grouped output on document stores (MongoDB's
+  // `$group` key): every adapter rejects it as a computed alias, so they agree.
+  const select = controls?.$select;
+  const idIssues = Array.isArray(select)
+    ? select
+        .filter(
+          (e): e is { $as: string } =>
+            !!e && typeof e === "object" && (e as { $as?: unknown }).$as === "_id",
+        )
+        .map(() => ({
+          path: "$select",
+          message: 'Alias "_id" is reserved — pick another alias for this $select entry',
+        }))
+    : [];
   const res = resolveBuckets(controls, {
     aggregate,
     fns: SUPPORTED_AGGREGATE_FNS,
     isField: (name) =>
       fields.flatMap.has(name) || fields.navFields.has(name) || fields.physicalNames.has(name),
   });
-  if (!res.ok) {
-    throw new DbError("INVALID_QUERY", res.issues);
+  if (!res.ok || idIssues.length > 0) {
+    throw new DbError("INVALID_QUERY", [...idIssues, ...(res.ok ? [] : res.issues)]);
   }
   return { buckets: res.buckets, exprs: res.exprs, rowOrder: res.rowOrder };
 }
