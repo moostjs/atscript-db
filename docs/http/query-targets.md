@@ -39,20 +39,23 @@ The action's `/meta` entry carries `queryTarget: { maxRows }`, so a UI knows it 
 
 The body is `{ query, input? }` instead of `{ ids, input? }` (see [Body envelope](./actions#body-envelope)):
 
-| `query` key   | Meaning                                                                                                                                         |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `q`           | The query string `GET /query` accepts — the filter plus `$search` / `$index` only. Same parsing, `$search` fallback and field gate as `/query`. |
-| `exclude`     | Identifiers to leave out (any identification of the table), at most `maxIds`.                                                                   |
-| `expectCount` | Fail with 409 `TARGET_CHANGED` when the query no longer matches exactly this many rows.                                                         |
-| `maxRows`     | A client-side cap. It never raises the action's `maxRows`.                                                                                      |
-| `dryRun`      | Count only: the answer is `{ matched }` and the handler does not run.                                                                           |
+| `query` key   | Meaning                                                                                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `q`           | The `GET /query` string — the filter plus `$search` / `$index` only. Parsed and gated as `/query`, but see [`$search` follows the read](#search). |
+| `exclude`     | Identifiers to leave out (any identification of the table), at most `maxIds`.                                                                     |
+| `expectCount` | Fail with 409 `TARGET_CHANGED` when the query no longer matches exactly this many rows.                                                           |
+| `maxRows`     | A client-side cap. It never raises the action's `maxRows`.                                                                                        |
+| `dryRun`      | Count only: the answer is `{ matched }` and the handler does not run.                                                                             |
 
 `ids` and `query` together, a control other than `$search` / `$index` (`$sort`, `$limit`, `$select`, `$with`, `$vector`, …), an unknown key, or `query` on an action without `queryTarget` → 400 `TARGET_INVALID`. A body with a `query` key on any `'rows'` action is validated this way — it is never ignored.
 
-The query is checked twice, and must pass both:
+The query is checked once, **as a read** of the table: [`validateControls`](./customization#validatecontrols) (per-control authorization), the field / index gate, [`hasField`](./customization#hasfield) and the `exclude` identifications run after `prepareRequest({ endpoint: "query", controls, filter })` in a child of the action request whose controller method is `query` (see [`queryTargetScope`](#which-rows)). A filter or `$index` on a hidden field answers exactly like `/query` does (`Unknown field`): a field the caller can't read can't filter a target, and its `matched` count is no oracle for it.
 
-- as the **action** request sees it: [`validateControls`](./customization#validatecontrols) (per-control authorization), the field / index gate and [`hasField`](./customization#hasfield) — a filter or `$index` on a hidden field answers exactly like `/query` does (`Unknown field`);
-- as a **read**: the same checks, plus the `exclude` identifications, run after `prepareRequest({ endpoint: "query", controls, filter })` in a child of the action request whose controller method is `query` (see [`queryTargetScope`](#which-rows)). A field the caller can't read can't filter a target, and its `matched` count is no oracle for it.
+### `$search` follows the read {#search}
+
+The `$search` fallback (the `@db.column.searchable` substring match, and the choice between native and fallback search) is resolved by the **read's** field visibility, never the action's. If the read can't apply the term — every searchable field is hidden from the reader, or the table has neither a native search nor a searchable column — the request is a 400 `TARGET_INVALID` (`$search is not available here`). A term that matched every row would turn "act on rows matching this search" into "act on every row". `/query`, `/pages` and grouped reads stay lenient and ignore such a term; `/meta` already turns `searchable` off in that case, so a conforming UI never sends one.
+
+On a natively searchable table the default text index answers a `$search` with no `$index`. When it reads a field the read hides, the index gate refuses first — the same 400 `No search index available` a `/query` gets — rather than `TARGET_INVALID`; the `$search is not available here` answer is for the searchable-column fallback and for tables with no search at all.
 
 ## Which rows
 
@@ -127,6 +130,76 @@ async archive(@DbActionIDs() ids: Array<{ id: number }>) {
 
 `@atscript/db-client` maps it to its own typed [`ActionTargetError`](./client#query-targets).
 
+## From your own command — `resolveQuery` {#resolve-query}
+
+Since 0.1.149. A command you wrote (an action on a ticket that attaches "every issue matching this search") often needs the rows of **another** table controller that match a client's query. `resolveQuery` returns them, resolved as that controller's read for the current caller:
+
+```typescript
+import { useControllerContext } from "moost";
+import { Body, Post } from "@moostjs/event-http";
+import type { AtscriptDbTable } from "@atscript/db";
+import { DbAction, DbActionID, type TDbActionQueryTarget } from "@atscript/moost-db";
+
+// In your ticket controller; `links` is the ticket-to-issue link table, `TicketIssueController` the issues controller.
+declare const links: AtscriptDbTable;
+
+@Post("actions/attach-matching")
+@DbAction("attachMatching", { label: "Attach matching issues" })
+async attachMatching(
+  @DbActionID() ticket: { id: number },
+  @Body() body: { input: { query: TDbActionQueryTarget } },
+) {
+  const issues = await useControllerContext().instantiate(TicketIssueController);
+  const { dryRun, ...query } = body.input.query; // resolveQuery takes no dryRun
+  return this.withTransaction(async () => {
+    const rows = await issues.resolveQuery(query, {
+      select: ["issueId"],
+      scope: { ticketId: { $exists: false } },
+    });
+    if (dryRun) return { matched: rows.length };
+    await links.insertMany(rows.map((r) => ({ ticketId: ticket.id, issueId: r.issueId })));
+    return { attached: rows.length };
+  });
+}
+```
+
+```typescript
+resolveQuery<K extends string = never>(
+  q: TDbResolveQueryInput, // a `/query` string, or { q, exclude?, expectCount?, maxRows? }
+  opts?: TDbResolveQueryOpts<K>, // { select?, cap?, scope? }
+): Promise<Array<Pick<Data, K> & Record<string, unknown>>>
+```
+
+It is available on every table and view controller (not value-help controllers). Obtain the instance by injecting the controller class, or with `await useControllerContext().instantiate(Controller)` (use the latter for circular pairs); both give the registered singleton, bound to its table.
+
+| Option   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `select` | Fields to return besides the identity, gated by [`hasField`](./customization#hasfield) and the capability index like `/query` `$select`: a hidden, nonexistent, `@DbDecorations` or navigation path is `Unknown field` (400), a visible `@db.writeOnly` field a 400. An object parent expands to its visible leaves; write-only and hidden leaves never return (a parent with none is `Unknown field`). [`transformProjection`](./customization#transformprojection) is **not** applied to it — hide fields with `hasField`. |
+| `cap`    | The most rows, default 1000. `q.maxRows` can only lower it. More rows → 400 `TARGET_TOO_LARGE` with `cap`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `scope`  | A server-side restriction, ANDed in. It is trusted: not gated (it may name a hidden field) and not shown to `prepareRequest`.                                                                                                                                                                                                                                                                                                                                                                                                |
+
+What it does, in order:
+
+1. Parses `q` in the caller's event — a `dryRun` key is a 400 `TARGET_INVALID` (read it yourself, as above). Errors carry the calling action's name, or `""` from a plain route.
+2. Runs as a **read** of the target, in a child of the current event: `prepareRequest({ endpoint: "query", controls, filter })` with the **client's** filter (not `scope`), then `validateControls`, the field / index / relational gate, `exclude` and the `select` gate — all under the read's `hasField`.
+3. Applies the read overlay (`transformFilter`) and the [`$search` rule](#search). [`queryTargetScope`](#which-rows) is **not** called: it is a per-action hook and there is no action of that controller here.
+4. Reads once: identity plus `select`, ordered by identity (`preferredId`, else the primary key), at most `cap + 1` rows, via native search when the table has it. The identity fields are always returned, even when `hasField` hides them from the reader (they address rows; they are not a way to read other columns). A readable with no identity (an aggregate view) is ordered by `select` instead, and each of those fields must be sortable like a `$sort` — otherwise 400 `TARGET_INVALID`. `expectCount` other than the match count → 409 `TARGET_CHANGED` with `matched`.
+
+The errors are the ones a query target answers (`ActionTargetError`, plus 403 from `prepareRequest` and the `Unknown field` 400), so a command forwarding a client's `{ query }` answers like any query target and the "select all matching → `expectCount` → 409 → refresh" flow works unchanged. A programmer error (bad `cap`, non-string `select` entry, a readable with no identity and no `select`) is a plain `Error`. Calling it outside a running event handler throws `[moost-db] resolveQuery must be awaited inside an event handler`.
+
+**Authorization.** Route interceptors and guards on the target's `query` route do **not** run — the call never goes through HTTP. Read authorization belongs in [`prepareRequest`](./permissions) (an aooth-style permission layer does this), which does run. The calling command's own route guards protect the call itself. The read runs with the current event's identity.
+
+**Route params.** The target's read hooks (`prepareRequest`, `transformFilter`, …; `resolveQuery` never calls `queryTargetScope`) see **no** route params of the calling route: the child carries an empty set, so a hook written like the [multi-tenant recipe](./customization#multi-tenant) fails closed (400) when the param is missing. Only a call made from the routed event's own controller instance (a custom route of that very controller) keeps its params; a call from another controller, or from a [`@DbActionsFrom`](./view-actions) source hook running for a view's action, gets none. Pass route-derived restrictions as `scope` — a hook that treats a missing param as "unrestricted" is an app bug.
+
+**Transactions.** `resolveQuery` never opens a transaction and takes no row locks. Awaited inside the caller's `withTransaction` callback it reads **in that transaction** (it sees the transaction's own uncommitted writes) when both tables share the adapter owner: the same `DbSpace` driver for SQLite / PostgreSQL / MySQL, the same client (and a replica set) for MongoDB. The memory adapter has no transactions and reads live state. The adapter's isolation level applies; a native search the engine refuses inside a transaction (Atlas `$search`) surfaces as its `DbError`.
+
+### DOs and DON'Ts
+
+- **Don't** put client input into `scope` field names — it is trusted, not gated, and can only narrow the read.
+- **Don't** call it after the handler returned (a detached promise, a timer, a queue): the event is gone.
+- **Don't** read the target's table directly instead — that skips the user's read policy.
+- **Don't** expect `$sort`, `$limit`, `$select`, `$with` or `$vector` in `q`; this is a query target, not `/query` in-process.
+
 ## DOs and DON'Ts
 
 - **Do** confirm with a dry run first and pass its `matched` as `expectCount` — the run then fails instead of acting on a different set.
@@ -141,3 +214,4 @@ async archive(@DbActionIDs() ids: Array<{ id: number }>) {
 - [Actions](./actions) — levels, the gate, `actionRowScope`
 - [Actions on a view](./view-actions) — query targets for delegated actions
 - [Permissions](./permissions) — how `prepareRequest`, overlays and scopes compose
+- [Customization](./customization) — `transformFilter`, `hasField`, multi-tenant hooks

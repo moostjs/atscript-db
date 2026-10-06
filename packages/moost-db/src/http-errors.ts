@@ -1,3 +1,4 @@
+import { ValidatorError } from "@atscript/typescript/utils";
 import { HttpError } from "@moostjs/event-http";
 
 /** One entry of the structured error envelope's `errors` array. */
@@ -73,4 +74,14 @@ export function unknownInsight(insights: Map<string, unknown>, path: string): st
 export function insightError(insights: Map<string, unknown>, message: string): HttpError {
   const entry = insightPaths.get(insights);
   return entry?.message === message ? badRequest(entry.path, message) : new HttpError(400, message);
+}
+
+/**
+ * The 400 envelope of a `ValidatorError`; `undefined` for any other error.
+ * @internal Not part of the public API (not re-exported from the barrel).
+ */
+export function validatorErrorToHttp(error: unknown): HttpError | undefined {
+  return error instanceof ValidatorError
+    ? errorEnvelope(400, error.message, error.errors)
+    : undefined;
 }

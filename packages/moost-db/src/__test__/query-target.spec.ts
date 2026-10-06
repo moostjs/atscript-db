@@ -57,6 +57,8 @@ interface TBoot {
   onBatch?: (batch: number, table: any) => Promise<void>;
   /** A field hidden on READ requests only (the action request sees it). */
   hideOnRead?: string;
+  /** A field hidden on the ACTION request only (the read sees it). */
+  hideOnAction?: string;
   /** A read scope applied on READ requests only (the action overlay is unrestricted). */
   readOnlyScope?: FilterExpr;
   /** The caller holds no read grant (prepareRequest refuses `query`). */
@@ -107,6 +109,7 @@ async function boot(opts: TBoot = {}) {
 
     protected override hasField(path: string): boolean {
       if (opts.hideOnRead === path && endpoint() === "query") return false;
+      if (opts.hideOnAction === path && endpoint() === "action") return false;
       return (!opts.hideSecret || path !== "secret") && super.hasField(path);
     }
 
@@ -326,6 +329,77 @@ describe("query targets — phase 1 (resolve)", () => {
     expect(res.body.ids).toEqual([{ id: 1 }, { id: 2 }, { id: 4 }]);
   });
 });
+
+describe("query targets — $search by the READ's visibility (FW-20)", () => {
+  it("a field hidden on the read is not searched: 400 TARGET_INVALID (was: substring oracle)", async () => {
+    const { query, handled } = await boot({ hideOnRead: "title" });
+    const res = await query("close", "$search=alpha", { dryRun: true });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: "TARGET_INVALID", action: "close" });
+    expect(handled).toEqual([]);
+  });
+
+  it("a field hidden on the ACTION request only still scopes the term (was: fail-open, every row)", async () => {
+    const b = await boot({ hideOnAction: "title" });
+    expect((await b.query("close", "$search=zzz", { dryRun: true })).body).toEqual({ matched: 0 });
+    expect((await b.query("close", "$search=alpha", { dryRun: true })).body).toEqual({
+      matched: 2,
+    });
+  });
+
+  it("native search: the strategy is decided by the READ's visibility (hidden on the action only)", async () => {
+    const searchable = async (opts: TBoot) => {
+      const b = await boot(opts);
+      vi.spyOn(b.issues, "isSearchable").mockReturnValue(true);
+      vi.spyOn(b.issues, "getSearchIndexes").mockReturnValue([
+        { name: "DEFAULT", type: "text", fields: ["title"], isDefault: true },
+      ] as never);
+      const search = vi
+        .spyOn(b.issues, "search")
+        .mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 4 }] as never);
+      return { ...b, search };
+    };
+    // The default index reads `title`, hidden on the ACTION request only: the read sees it, so the native search runs.
+    const act = await searchable({ hideOnAction: "title" });
+    expect((await act.query("close", "$search=alpha", { dryRun: true })).body).toEqual({
+      matched: 3,
+    });
+    expect(act.search).toHaveBeenCalledTimes(1);
+    // Hidden on the READ: the index gate refuses, nothing is searched.
+    const read = await searchable({ hideOnRead: "title" });
+    const res = await read.query("close", "$search=alpha", { dryRun: true });
+    expect(res.status).toBe(400);
+    expect(res.body.errors[0].path).toBe("$search");
+    expect(read.search).not.toHaveBeenCalled();
+  });
+
+  it("every searchable field hidden on the read: the term is refused (closeRows)", async () => {
+    const { query } = await boot({ hideOnRead: "title" });
+    // every searchable field hidden on the read → nothing to search
+    expect((await query("closeRows", "$search=alpha")).status).toBe(400);
+  });
+
+  it("/query stays lenient: the un-appliable term is ignored (all rows)", async () => {
+    const { http } = await bootLenient();
+    expect((await http.get("$search=alpha&$count=true")).body).toBe(5);
+  });
+});
+
+async function bootLenient() {
+  getMoostInfact()._cleanup();
+  const issues = await issuesTable();
+  await issues.insertMany(structuredClone(ISSUES) as never);
+  const prefix = `qtl${++SEQ}`;
+  @TableController(issues, prefix)
+  @Inherit()
+  class LenientCtrl extends AsDbController {
+    protected override hasField(path: string): boolean {
+      return path !== "title" && super.hasField(path);
+    }
+  }
+  const send = await bootHttp(LenientCtrl);
+  return { http: { get: (qs: string) => send("GET", `/${prefix}/query?${qs}`) } };
+}
 
 describe("query targets — the gate (materialized)", () => {
   it("'skip' records the skipped rows with their reasons", async () => {

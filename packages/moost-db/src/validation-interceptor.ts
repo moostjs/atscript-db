@@ -1,8 +1,7 @@
-import { ValidatorError } from "@atscript/typescript/utils";
 import { DbError } from "@atscript/db";
 import { defineInterceptor, Intercept, TInterceptorPriority } from "moost";
 
-import { errorEnvelope } from "./http-errors";
+import { errorEnvelope, validatorErrorToHttp } from "./http-errors";
 
 export { badRequest, errorEnvelope } from "./http-errors";
 export type { THttpErrorEntry } from "./http-errors";
@@ -24,8 +23,9 @@ const dbErrorCodeToStatus: Record<string, number> = {
 };
 
 function transformValidationError(error: unknown, reply: (response: unknown) => void) {
-  if (error instanceof ValidatorError) {
-    reply(errorEnvelope(400, error.message, error.errors));
+  const validation = validatorErrorToHttp(error);
+  if (validation) {
+    reply(validation);
   } else if (error instanceof DbError) {
     reply(errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, error.errors));
   }

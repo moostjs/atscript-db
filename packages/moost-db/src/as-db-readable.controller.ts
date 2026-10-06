@@ -31,7 +31,7 @@ import {
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import { Get, HttpError, MoostHttp, Query, Url } from "@moostjs/event-http";
-import { current, useRouteParams } from "@wooksjs/event-core";
+import { current, routeParamsKey, useRouteParams, type EventContext } from "@wooksjs/event-core";
 import { useBody } from "@wooksjs/http-body";
 import { Inherit, Inject, Moost, Optional, Param, useControllerContext } from "moost";
 
@@ -59,9 +59,12 @@ import {
   type TDelegation,
 } from "./actions/delegation";
 import { validateMultiId, validateSingleId } from "./actions/id-validation";
+import { DEFAULT_MAX_ACTION_IDS, readCurrentActionMeta } from "./actions/current-action";
 import {
   parseQueryTargetBody,
   RESOLVE_TARGET,
+  type TDbActionQueryTarget,
+  type TDbResolveQueryInput,
   type TResolvedTarget,
   type TTargetRequest,
 } from "./actions/query-target";
@@ -121,7 +124,8 @@ import {
   snapshotClientWith,
   type TClientWithSnapshot,
 } from "./relation-predicates";
-import { badRequest } from "./validation-interceptor";
+import { badRequest, validatorErrorToHttp } from "./http-errors";
+import { controllerOf } from "./actions/controller-access";
 
 /** Gate positions checked after the filter entries, in order; `refs[op]` are their paths. */
 const PATH_OPS: readonly Exclude<TQueryPathOp, "filter">[] = [
@@ -138,6 +142,16 @@ import {
   PAGES_CONTROLS,
   QUERY_CONTROLS,
 } from "./permissions/crud-controls";
+
+/** Options of {@link AsDbReadableController.resolveQuery}. @since 0.1.149 */
+export interface TDbResolveQueryOpts<K extends string = string> {
+  /** Fields to return besides the identity. Gated like `/query` `$select` under `hasField`. */
+  select?: readonly K[];
+  /** Most rows (default 1000); `q.maxRows` can only lower it. */
+  cap?: number;
+  /** Server-side restriction, ANDed in. Trusted: not gated, not shown to `prepareRequest`. */
+  scope?: FilterExpr;
+}
 
 /** Read endpoint a {@link AsDbReadableController.decorateRows} call serves. */
 export type TDbDecorateEndpoint = "query" | "pages" | "geo" | "one";
@@ -222,6 +236,19 @@ type TWithEntry = {
   filter?: FilterExpr;
   controls?: Record<string, unknown>;
 } & Record<string, unknown>;
+
+/** The controller of the event that owns the route params (nearest ancestor that set them). */
+function routedController(ctx: EventContext): unknown {
+  for (let c: EventContext | undefined = ctx; c; c = c.parent) {
+    try {
+      c.getOwn(routeParamsKey);
+    } catch {
+      continue;
+    }
+    return controllerOf(c);
+  }
+  return undefined;
+}
 
 /** The 400 of a filter / sort on a `@db.writeOnly` field. */
 function writeOnlyError(path: string, op: "filter" | "sort"): HttpError {
@@ -606,7 +633,9 @@ export class AsDbReadableController<
    * (`$vector`) or a geo index (`/geo`, `$index`) reading a hidden path
    * answers exactly like a nonexistent index (400); a hidden DEFAULT text
    * index falls back to the `@db.column.searchable` substring search over
-   * visible fields (or ignores the term when there are none). A
+   * visible fields (or ignores the term when there are none — on list
+   * endpoints; query targets, delegated targets and {@link resolveQuery}
+   * answer 400 `TARGET_INVALID` instead). A
    * `@db.column.derived` field is visible only while its source path is,
    * and one whose source is hidden is sealed out of every read projection
    * for the request, like a `@db.writeOnly` field. The same holds for a
@@ -1395,6 +1424,8 @@ export class AsDbReadableController<
    * {@link checkCapabilities}, {@link hasField}), where the client
    * predicates' {@link transformRelationFilter} also runs: a query target
    * never filters on, nor counts by, a field the caller can't read.
+   * {@link resolveQuery} does not call it (there is no action of this
+   * controller to scope).
    *
    * @since 0.1.147
    */
@@ -1872,110 +1903,18 @@ export class AsDbReadableController<
   async [RESOLVE_TARGET](req: TTargetRequest): Promise<TResolvedTarget> {
     const { action } = req;
     const body = parseQueryTargetBody(action, req.query);
-    const parsed = this.parseUrlOr400(body.q.startsWith("?") ? body.q.slice(1) : body.q);
-    const controls: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries((parsed.controls ?? {}) as Record<string, unknown>)) {
-      if (v === undefined) continue;
-      if (k !== "$search" && k !== "$index") {
-        throw targetInvalid(
-          action,
-          `A query target takes a filter, $search and $index only — "${k}" is not accepted`,
-        );
-      }
-      if (k === "$search" && typeof v !== "string" && typeof v !== "number") {
-        throw targetInvalid(action, "$search must be a search term");
-      }
-      controls[k] = k === "$search" ? `${v as string | number}` : v;
-    }
-    if (controls.$index !== undefined && typeof controls.$index !== "string") {
-      throw targetInvalid(action, "$index must be an index name");
-    }
-    const exclude = body.exclude ?? [];
-    const shapes = req.excludeShapes ?? [];
-    // The query (filter, controls, exclusions) as THIS request may run it:
-    // `validateControls` (per-control authorization), the capability / index
-    // gate and the identifications under `hasField`.
-    const check = (): void => {
-      const controlsError = this.validateControls(controls, "query");
-      if (controlsError) throw new HttpError(400, controlsError);
-      const gateError = this.checkCapabilities({ filter: parsed.filter, controls });
-      if (gateError) throw gateError;
-      if (exclude.length > 0) {
-        const source =
-          shapes.length === 0
-            ? this.idSource
-            : {
-                identifications: [
-                  ...this.idSource.identifications,
-                  ...shapes.map((fields) => ({ fields, source: "target" })),
-                ],
-                fieldDescriptors: this.readable.fieldDescriptors,
-              };
-        validateMultiId(exclude, source, req.maxExclude);
-      }
-    };
-
-    // The query is checked, and its read hooks run, as a READ of this
-    // controller (see `queryTargetScope`) — after `prepareRequest({ endpoint:
-    // "query", controls, filter })` with the target's own filter, so a
-    // permission layer resolves the policy of its relational predicates as
-    // on `/query`: the client predicates' `transformRelationFilter`,
-    // `queryTargetScope` and, for a view resolving a delegated target, its
-    // read overlay `transformFilter` — which the default `queryTargetScope`
-    // (`transformFilter({})`) would only conjoin a second time.
-    const ownScope =
-      req.overlay === "action" ||
-      this.queryTargetScope !== AsDbReadableController.prototype.queryTargetScope;
-    const [[base, scope], overlay] = await Promise.all([
-      this._asRead(controls, parsed.filter as FilterExpr | undefined, async () => {
-        check();
-        const [clientFilter, readScope] = await Promise.all([
-          this._relationOverlay(parsed),
-          ownScope ? this.queryTargetScope(action) : undefined,
-        ]);
-        const read =
-          req.overlay === "read"
-            ? await this.transformFilter(clientFilter ?? ({} as FilterExpr))
-            : clientFilter;
-        return [read, readScope] as const;
-      }),
-      req.overlay === "action" ? this.rowOverlay() : undefined,
-    ]);
-    const filter = andFilters(
-      this.applySearchFallback(base, controls),
-      overlay,
-      scope,
-      exclude.length > 0 ? ({ $not: { $or: exclude } } as FilterExpr) : undefined,
-    );
-    const strategy = await this._resolveReadStrategy(controls);
-    const findMany = (q: unknown): Promise<Record<string, unknown>[]> =>
-      (strategy.kind === "search"
-        ? this.readable.search(strategy.term, q as Uniquery<any, any>, strategy.index)
-        : this.readable.findMany(q as Uniquery<any, any>)) as Promise<Record<string, unknown>[]>;
-
-    const cap = Math.min(req.cap, body.maxRows ?? Infinity);
-    const sort: Record<string, 1> = {};
-    for (const f of req.select) sort[f] = 1;
-    const rows = await findMany({
-      filter,
-      controls: { $select: [...new Set(req.select)], $sort: sort, $limit: cap + 1 },
+    const { rows, filter, findMany, exclude, visibleOf, cap } = await this._resolveMatching({
+      label: action,
+      body,
+      cap: req.cap,
+      maxExclude: req.maxExclude,
+      overlay: req.overlay,
+      scopeByAction: true,
+      select: [...new Set(req.select)],
+      sortBy: req.select,
+      excludeShapes: req.excludeShapes,
+      visibleOf: req.visibleOf,
     });
-    if (rows.length > cap) {
-      throw new ActionTargetError(
-        "TARGET_TOO_LARGE",
-        action,
-        `The query matches more than ${cap} rows`,
-        { cap },
-      );
-    }
-    if (body.expectCount !== undefined && body.expectCount !== rows.length) {
-      throw new ActionTargetError(
-        "TARGET_CHANGED",
-        action,
-        `The query now matches ${rows.length} rows (expected ${body.expectCount})`,
-        { matched: rows.length },
-      );
-    }
     // A `$limit` of its own: a search pipeline defaults to 1000 rows, which
     // would turn every later row of a large batch "stale".
     const byIds = (
@@ -2003,6 +1942,7 @@ export class AsDbReadableController<
       rows,
       dryRun: body.dryRun === true,
       exclude,
+      visibleOf,
       load: (ids, select) => {
         if (!first) return byIds(findMany, ids, filter, select);
         // The first batch directly follows the snapshot in this request —
@@ -2026,18 +1966,328 @@ export class AsDbReadableController<
   }
 
   /**
+   * The shared resolver behind query targets and {@link resolveQuery}: the
+   * query body validated, checked and run as a READ of this controller, then
+   * ONE read of `select` ordered by `sort` — `filter (+ $search) ∧ overlay ∧
+   * scope ∧ ¬exclude`, at most `cap + 1` rows. More than `cap` → 400
+   * `TARGET_TOO_LARGE`; a count other than `expectCount` → 409
+   * `TARGET_CHANGED`.
+   *
+   * Everything that depends on the read's visibility — the `$search`
+   * fallback, the native-search memo, the un-appliable-term refusal and the
+   * delegated identity — is computed INSIDE the read child, where the
+   * permission layer's per-request state is the read's.
+   */
+  private async _resolveMatching(spec: {
+    label: string;
+    body: TDbActionQueryTarget;
+    cap: number;
+    maxExclude: number;
+    overlay: "action" | "read";
+    /** Ask `queryTargetScope(label)` (query targets); `resolveQuery` does not. */
+    scopeByAction?: boolean;
+    /** Trusted server-side restriction, ANDed in. */
+    scope?: FilterExpr;
+    select: readonly string[];
+    /** Fields the rows are ordered by. */
+    sortBy: readonly string[];
+    /** Paths the `select` gate judges (`resolveQuery`'s `opts.select`). */
+    selectGate?: readonly string[];
+    /** Identity fields of a `selectGate` read: never sealed. */
+    identity?: readonly string[];
+    /** Paths `sortBy` must be sortable on (an identity-less readable orders by `select`). */
+    sortGate?: readonly string[];
+    excludeShapes?: readonly (readonly string[])[];
+    routeParams?: Record<string, string | string[]>;
+    /** Identity fields to answer the visible subset of (a delegated target). */
+    visibleOf?: readonly string[];
+  }): Promise<{
+    rows: Record<string, unknown>[];
+    filter: FilterExpr | undefined;
+    findMany: (q: unknown) => Promise<Record<string, unknown>[]>;
+    exclude: Record<string, unknown>[];
+    visibleOf: string[] | undefined;
+    /** The effective cap: `spec.cap` lowered by `body.maxRows`. */
+    cap: number;
+    /** The sealed `spec.select` the rows were read with. */
+    select: readonly string[];
+  }> {
+    const { label, body } = spec;
+    const cap = Math.min(spec.cap, body.maxRows ?? Infinity);
+    const parsed = this.parseUrlOr400(body.q.startsWith("?") ? body.q.slice(1) : body.q);
+    const controls: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries((parsed.controls ?? {}) as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      if (k !== "$search" && k !== "$index") {
+        throw targetInvalid(
+          label,
+          `A query target takes a filter, $search and $index only — "${k}" is not accepted`,
+        );
+      }
+      if (k === "$search" && typeof v !== "string" && typeof v !== "number") {
+        throw targetInvalid(label, "$search must be a search term");
+      }
+      controls[k] = k === "$search" ? `${v as string | number}` : v;
+    }
+    if (controls.$index !== undefined && typeof controls.$index !== "string") {
+      throw targetInvalid(label, "$index must be an index name");
+    }
+    const exclude = body.exclude ?? [];
+    const shapes = spec.excludeShapes ?? [];
+    // The query (filter, controls, exclusions) as THIS request may run it:
+    // `validateControls` (per-control authorization), the capability / index
+    // gate and the identifications under `hasField`.
+    const sealedSet = (): Set<string> =>
+      new Set([
+        ...this.fieldVisibility.sealedFor(this.readable),
+        ...this._leavesOf(this.readable).filter((leaf) => !this.fieldVisibility.isVisible(leaf)),
+      ]);
+    const check = (): void => {
+      let sealed: Set<string> | undefined;
+      const readableLeaf = (leaf: string): boolean => !(sealed ??= sealedSet()).has(leaf);
+      const controlsError = this.validateControls(controls, "query");
+      if (controlsError) throw new HttpError(400, controlsError);
+      const gateError = this.checkCapabilities({ filter: parsed.filter, controls });
+      if (gateError) throw gateError;
+      if (exclude.length > 0) {
+        const source =
+          shapes.length === 0
+            ? this.idSource
+            : {
+                identifications: [
+                  ...this.idSource.identifications,
+                  ...shapes.map((fields) => ({ fields, source: "target" })),
+                ],
+                fieldDescriptors: this.readable.fieldDescriptors,
+              };
+        try {
+          validateMultiId(exclude, source, spec.maxExclude);
+        } catch (error) {
+          // A 400 even where no validation interceptor renders it (`resolveQuery`).
+          throw validatorErrorToHttp(error) ?? error;
+        }
+      }
+      const nav = FieldCapabilityIndex.navPathsOf(this.readable);
+      for (const path of spec.selectGate ?? []) {
+        // A declared decoration is display-only (computed by a hook, not a
+        // column) and a navigation path is no column here: neither can be read.
+        if (this.capabilities.decorationCap(path) || selfOrAncestor(path, nav) !== undefined) {
+          throw badRequest(path, `Unknown field "${path}"`);
+        }
+        // Visibility first: a hidden write-only field is just unknown.
+        const verdict = this.capabilities.check(path, "select", this.fieldVisibility.isVisible);
+        if (verdict) throw badRequest(verdict.path, verdict.message);
+        if (this._writeOnlySet.has(path)) {
+          throw badRequest(path, `Field "${path}" is @db.writeOnly`);
+        }
+        // An object parent stands for its leaves: it needs one a caller may read.
+        const prefix = `${path}.`;
+        const leaves = this._leavesOf(this.readable).filter((leaf) => leaf.startsWith(prefix));
+        if (leaves.length > 0 && !leaves.some((leaf) => readableLeaf(leaf))) {
+          throw badRequest(path, `Unknown field "${path}"`);
+        }
+      }
+      // Ordering fields the server picked (no identity): sortable like `$sort`.
+      for (const path of spec.sortGate ?? []) {
+        const verdict = this.capabilities.check(path, "sort", this.fieldVisibility.isVisible);
+        if (verdict) throw targetInvalid(label, verdict.message);
+      }
+    };
+
+    // The query is checked, and its read hooks run, as a READ of this
+    // controller (see `queryTargetScope`) — after `prepareRequest({ endpoint:
+    // "query", controls, filter })` with the target's own filter, so a
+    // permission layer resolves the policy of its relational predicates as
+    // on `/query`: the client predicates' `transformRelationFilter`,
+    // `queryTargetScope` and, for a view resolving a delegated target, its
+    // read overlay `transformFilter` — which the default `queryTargetScope`
+    // (`transformFilter({})`) would only conjoin a second time.
+    const ownScope =
+      spec.scopeByAction === true &&
+      (spec.overlay === "action" ||
+        this.queryTargetScope !== AsDbReadableController.prototype.queryTargetScope);
+    const [read, overlay] = await Promise.all([
+      this._asRead(
+        controls,
+        parsed.filter as FilterExpr | undefined,
+        async () => {
+          check();
+          const [clientFilter, readScope, strategy] = await Promise.all([
+            this._relationOverlay(parsed),
+            ownScope ? this.queryTargetScope(label) : undefined,
+            this._resolveReadStrategy(controls),
+          ]);
+          const base =
+            spec.overlay === "action"
+              ? clientFilter
+              : await this.transformFilter(clientFilter ?? ({} as FilterExpr));
+          // The `$search` part, by THIS read's visibility. A term nothing can
+          // apply would match every row — an act-on-rows surface refuses it.
+          const searched = this.applySearchFallback(base, controls);
+          const term = controls.$search as string | undefined;
+          if (term && strategy.kind !== "search" && searched === base) {
+            throw targetInvalid(label, "$search is not available here");
+          }
+          const visibleOf = spec.visibleOf?.filter((f) => this.fieldVisibility.isVisible(f));
+          // `resolveQuery`'s select, sealed like `/query`'s `$select`: an object
+          // parent expands to its readable leaves (identity fields stay).
+          let select: readonly string[] = spec.select;
+          if (spec.selectGate) {
+            const sealed = sealedSet();
+            for (const id of spec.identity ?? []) sealed.delete(id);
+            select = this._sealSelect([...spec.select], sealed, this.readable) as string[];
+          }
+          return { searched, readScope, strategy, visibleOf, select };
+        },
+        spec.routeParams,
+      ),
+      spec.overlay === "action" ? this.rowOverlay() : undefined,
+    ]);
+    const { strategy } = read;
+    const filter = andFilters(
+      read.searched,
+      overlay,
+      read.readScope,
+      spec.scope,
+      exclude.length > 0 ? ({ $not: { $or: exclude } } as FilterExpr) : undefined,
+    );
+    const findMany = (q: unknown): Promise<Record<string, unknown>[]> =>
+      (strategy.kind === "search"
+        ? this.readable.search(strategy.term, q as Uniquery<any, any>, strategy.index)
+        : this.readable.findMany(q as Uniquery<any, any>)) as Promise<Record<string, unknown>[]>;
+
+    const rows = await findMany({
+      filter,
+      controls: {
+        $select: [...read.select],
+        $sort: Object.fromEntries(spec.sortBy.map((f) => [f, 1])),
+        $limit: cap + 1,
+      },
+    });
+    if (rows.length > cap) {
+      throw new ActionTargetError(
+        "TARGET_TOO_LARGE",
+        label,
+        `The query matches more than ${cap} rows`,
+        { cap },
+      );
+    }
+    if (body.expectCount !== undefined && body.expectCount !== rows.length) {
+      throw new ActionTargetError(
+        "TARGET_CHANGED",
+        label,
+        `The query now matches ${rows.length} rows (expected ${body.expectCount})`,
+        { matched: rows.length },
+      );
+    }
+    return { rows, filter, findMany, exclude, visibleOf: read.visibleOf, cap, select: read.select };
+  }
+
+  /**
+   * Rows of THIS controller matching `q`, resolved as a READ of it for the
+   * current event's caller (since 0.1.149) — from your own command, e.g. to
+   * act on "every issue matching this search". `q` is a `GET /query` string
+   * (`$search` / `$index` and a filter only) or a query-target envelope
+   * `{ q, exclude?, expectCount?, maxRows? }` (no `dryRun`).
+   *
+   * The read runs under this controller's full read policy
+   * ({@link prepareRequest} with `endpoint: "query"`, {@link hasField},
+   * {@link validateControls}, the capability / index gate and the
+   * {@link transformFilter} overlay) with the current event's identity.
+   * Route interceptors and guards of the `query` route do not run; read
+   * authorization belongs in {@link prepareRequest}. {@link queryTargetScope}
+   * is not called. Hooks see no route params of the caller (only a call from
+   * the routed event's own controller instance keeps its params); pass route-derived
+   * restrictions as `opts.scope`. Joins the caller's open transaction.
+   *
+   * Rows are ordered by identity (`preferredId`, else the primary key) and
+   * carry the identity fields plus `opts.select` (gated like `/query`
+   * `$select`; `transformProjection` is not applied — hide fields with
+   * {@link hasField}; decoration keys and navigation paths are refused). An
+   * identity-less readable is ordered by `select` (each path sortable, else
+   * `TARGET_INVALID`). More than `opts.cap` (default 1000) rows → 400
+   * `TARGET_TOO_LARGE`; a count other than `expectCount` → 409
+   * `TARGET_CHANGED`; a `$search` that can't be applied → 400
+   * `TARGET_INVALID`. Must be awaited inside a running event handler.
+   */
+  async resolveQuery<K extends string = never>(
+    q: TDbResolveQueryInput,
+    opts: TDbResolveQueryOpts<K> = {},
+  ): Promise<Array<Pick<DataType, K & keyof DataType> & Record<string, unknown>>> {
+    let caller: ReturnType<typeof current>;
+    try {
+      caller = current();
+    } catch {
+      throw new Error("[moost-db] resolveQuery must be awaited inside an event handler");
+    }
+    const cap = opts.cap ?? DEFAULT_MAX_ACTION_IDS;
+    if (!Number.isInteger(cap) || cap < 1) {
+      throw new Error("[moost-db] resolveQuery: `cap` must be a positive integer");
+    }
+    const select = opts.select ?? [];
+    if (!Array.isArray(select) || select.some((p) => typeof p !== "string")) {
+      throw new Error("[moost-db] resolveQuery: `select` must be an array of field paths");
+    }
+    const ids = this.readable.preferredId?.length
+      ? this.readable.preferredId
+      : this.readable.primaryKeys;
+    const order = ids.length > 0 ? ids : select;
+    if (order.length === 0) {
+      throw new Error(
+        "[moost-db] resolveQuery: this readable has no identity — pass `select` (rows are ordered by it)",
+      );
+    }
+    const label = readCurrentActionMeta(caller)?.name ?? "";
+    const body = parseQueryTargetBody(label, typeof q === "string" ? { q } : q);
+    if (body.dryRun !== undefined) {
+      throw targetInvalid(label, "resolveQuery takes no `dryRun` — read `query.dryRun` yourself");
+    }
+    let sameRoute = false;
+    try {
+      // Both the current controller and the one the params' own event was
+      // routed to must be this instance: a forked child (e.g. a
+      // `@DbActionsFrom` source hook) reads the view route's params through.
+      sameRoute =
+        (controllerOf(caller) as unknown) === this &&
+        (routedController(caller) as unknown) === this;
+    } catch {
+      /* not routed to a controller */
+    }
+    const fields = [...new Set([...ids, ...select])];
+    const { rows, select: sealedSelect } = await this._resolveMatching({
+      label,
+      body,
+      cap,
+      maxExclude: DEFAULT_MAX_ACTION_IDS,
+      overlay: "read",
+      scope: opts.scope,
+      select: fields,
+      sortBy: order,
+      selectGate: select,
+      identity: ids,
+      sortGate: ids.length > 0 ? undefined : order,
+      routeParams: sameRoute ? undefined : {},
+    });
+    return rows.map((row) => projectRow(row, sealedSelect)) as never;
+  }
+
+  /**
    * Runs `fn` as a READ of this controller (since 0.1.147): in a child of
    * the current event whose controller context is this controller's `query`
    * handler, after `prepareRequest({ endpoint: "query", controls, filter })` — the
    * request-scoped state a permission layer builds there (read grant, field
-   * visibility) is the read's and stays in the child.
+   * visibility) is the read's and stays in the child. `routeParams` (since
+   * 0.1.149) replaces the route params the child's hooks read.
    */
   private _asRead<R>(
     controls: Record<string, unknown>,
     filter: FilterExpr | undefined,
     fn: () => R | Promise<R>,
+    routeParams?: Record<string, string | string[]>,
   ): Promise<R> {
     return runAsController(this, "query", async () => {
+      // An own slot of the child: shadows the caller's route params for the hooks.
+      if (routeParams) current().set(routeParamsKey, routeParams);
       if (typeof this.prepareRequest === "function") {
         await this.prepareRequest(readRequestContext("query", controls, filter));
       }
@@ -2149,7 +2399,10 @@ export class AsDbReadableController<
    * with the existing filter. Applies only when native search does not serve
    * the request (no native search, or — since 0.1.143 — its default index
    * reads a field {@link hasField} hides) and the request isn't a vector
-   * search (`$vector` consumes the term).
+   * search (`$vector` consumes the term). Lenient on list endpoints: a term
+   * nothing can apply is ignored. Resolvers (query targets, `resolveQuery`)
+   * refuse it — a subclass override that applies the term must return a new
+   * filter object.
    */
   protected applySearchFallback(
     filter: FilterExpr | undefined,
@@ -3339,6 +3592,7 @@ export class AsDbReadableController<
       overlay: "read",
       select: [...new Set([...identity, ...delegation.paths])],
       excludeShapes: [delegation.paths],
+      visibleOf: identity,
     });
     if (resolved.dryRun) return { matched: resolved.matched };
 
@@ -3349,7 +3603,7 @@ export class AsDbReadableController<
       failed: [],
     };
     const { ids, index } = mapToSourceIds(resolved.rows, delegation.idMap);
-    const visibleIdentity = identity.filter((f) => this.fieldVisibility.isVisible(f));
+    const visibleIdentity = resolved.visibleOf ?? [];
     for (let i = 0; i < index.length; i++) {
       if (index[i] >= 0) continue;
       const row = resolved.rows[i];

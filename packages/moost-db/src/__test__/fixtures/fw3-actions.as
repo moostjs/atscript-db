@@ -39,6 +39,7 @@ export interface FwBoardRow {
 
     ticketKey: string
 
+    @db.column.searchable
     title: string
 
     teamId: string

@@ -117,6 +117,11 @@ function bodyGuard(opts: TSourceOpts) {
   }, TInterceptorPriority.GUARD);
 }
 
+/** The `prepareRequest` endpoint the current (child) event of the board saw. */
+const boardEndpointKey = key<string>("da.board.endpoint");
+const boardEndpoint = () =>
+  current().has(boardEndpointKey) ? current().get(boardEndpointKey) : undefined;
+
 let SEQ = 0;
 
 async function bootApp(...controllers: Function[]) {
@@ -219,6 +224,8 @@ async function boot(
       projectAwayIssueId?: boolean;
       /** The view hides its own identity (`rowId`). */
       hideRowId?: boolean;
+      /** The view hides `path` for requests of this `prepareRequest` endpoint only. */
+      hideAt?: { endpoint: string; path: string };
     };
   } = {},
 ) {
@@ -233,12 +240,17 @@ async function boot(
   @DbActionsFrom(() => IssueCtrl, { idMap: { id: "issueId" }, actions: b.actions })
   @Inherit()
   class BoardCtrl extends AsDbReadableController {
+    protected override prepareRequest(ctx: TDbRequestContext) {
+      current().set(boardEndpointKey, ctx.endpoint);
+    }
+
     protected override transformFilter(filter: FilterExpr): FilterExpr {
       return b.readScope ? ({ $and: [filter, b.readScope] } as FilterExpr) : filter;
     }
 
     protected override hasField(path: string): boolean {
       if (b.hideRowId && path === "rowId") return false;
+      if (b.hideAt?.path === path && boardEndpoint() === b.hideAt.endpoint) return false;
       return (!b.hideIssueId || path !== "issueId") && super.hasField(path);
     }
 
@@ -514,6 +526,45 @@ describe("@DbActionsFrom — query targets (delegated)", () => {
     ).toBe(404);
     const ids = await send("POST", `${board}/delegated-actions/close`, { ids: [{ id: 1 }] });
     expect(ids.body.code).toBe("TARGET_INVALID");
+  });
+});
+
+describe("@DbActionsFrom — query targets: $search by the READ's visibility", () => {
+  it("a title hidden on the read refuses $search (400 TARGET_INVALID), whatever the route sees", async () => {
+    const { send, board, log } = await boot({
+      board: { hideAt: { endpoint: "query", path: "title" } },
+    });
+    const res = await send("POST", `${board}/delegated-actions/close`, {
+      query: { q: "$search=one", dryRun: true },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: "TARGET_INVALID", action: "close" });
+    expect(log).toEqual([]);
+  });
+
+  it("a title hidden on the route only never drops the term (matches nothing, not everything)", async () => {
+    const { send, board } = await boot({
+      board: { hideAt: { endpoint: "delegatedAction", path: "title" } },
+    });
+    const res = await send("POST", `${board}/delegated-actions/close`, {
+      query: { q: "$search=zzz", dryRun: true },
+    });
+    expect(res.body).toEqual({ matched: 0 });
+    const hit = await send("POST", `${board}/delegated-actions/close`, {
+      query: { q: "$search=three", dryRun: true },
+    });
+    expect(hit.body).toEqual({ matched: 1 });
+  });
+
+  it("'unmapped' skipped ids list the identity fields the READ shows", async () => {
+    const { send, board } = await boot({
+      board: { hideAt: { endpoint: "query", path: "rowId" } },
+    });
+    const res = await send("POST", `${board}/delegated-actions/close`, {
+      query: { q: "teamId=a" },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.skipped).toEqual(expect.arrayContaining([{ id: {}, reason: "unmapped" }]));
   });
 });
 

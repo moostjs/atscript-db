@@ -6,6 +6,19 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.149 {#v0-1-149}
+
+### New features
+
+- **`controller.resolveQuery(q, { select, cap, scope })`** — rows of a table controller matching a `/query` string or query-target envelope, resolved as its read for the current user inside your open transaction. Its hooks see no route params of yours (pass route-derived restrictions as `scope`) and its route guards do not run (authorize in `prepareRequest`). See [From your own command](/http/query-targets#resolve-query).
+- Types `TDbResolveQueryInput` and `TDbResolveQueryOpts` are exported from `@atscript/moost-db`.
+
+### Behavior changes {#v0-1-149-behavior}
+
+- **A query target's `$search` is applied by the read's visibility** (action and delegated query targets). A `$search` that can't be applied is now a 400 `TARGET_INVALID` (`$search is not available here`); before, it matched every row. `/query`, `/pages` and grouped reads are unchanged. See [`$search` follows the read](/http/query-targets#search).
+- A `@DbActionsFrom` view's `unmapped` skipped ids list the identity fields the _read_ shows (previously the delegating request's).
+- Docs fix: a query target's query is checked once, as a read (it was documented as checked twice).
+
 ## 0.1.148 {#v0-1-148}
 
 **Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.100 and `@uniqu/core` / `@uniqu/url` 0.1.13** (annotation-ref serialization in `/meta`; the arithmetic and `first` / `last` grammar, the `$rowOrder` control).

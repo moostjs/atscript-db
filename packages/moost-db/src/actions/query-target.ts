@@ -60,6 +60,13 @@ export function queryTargetLimitsOf(opts: unknown): TQueryTargetLimits | undefin
  */
 export const RESOLVE_TARGET = Symbol.for("atscript-db.resolveTarget");
 
+/**
+ * `q` of {@link AsDbReadableController.resolveQuery}: a `GET /query` string, or a
+ * query-target envelope without `dryRun`.
+ * @since 0.1.149
+ */
+export type TDbResolveQueryInput = string | Omit<TDbActionQueryTarget, "dryRun">;
+
 /** What {@link RESOLVE_TARGET} resolves. */
 export interface TTargetRequest {
   action: string;
@@ -75,6 +82,8 @@ export interface TTargetRequest {
    * rows); `"read"` — `transformFilter` (a view resolving rows it delegates).
    */
   overlay: "action" | "read";
+  /** Identity fields to report the READ-visible subset of ({@link TResolvedTarget.visibleOf}). */
+  visibleOf?: readonly string[];
   /** Fields of the phase-1 read (sorted by the first identification's fields). */
   select: readonly string[];
   /** Key sets `exclude` entries may use besides the controller's identifications. */
@@ -90,6 +99,8 @@ export interface TResolvedTarget {
   dryRun: boolean;
   /** The validated `exclude` entries (already applied to {@link rows}). */
   exclude: Record<string, unknown>[];
+  /** {@link TTargetRequest.visibleOf} filtered by the read's field visibility. */
+  visibleOf?: readonly string[];
   /**
    * The rows `ids` address that STILL match the target (filter, search,
    * overlay, `queryTargetScope`, `exclude`), aligned with `ids`; `select`

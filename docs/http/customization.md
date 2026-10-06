@@ -818,6 +818,8 @@ export class TodoController extends AsDbController<typeof Todo> {
 
 This adds `GET /todos/stats` alongside the generated CRUD endpoints.
 
+To get another controller's rows matching a client's `/query` string inside your own route or command, with that controller's read policy applied, use [`resolveQuery`](./query-targets#resolve-query).
+
 ### Multiple Controllers
 
 Mount multiple tables and views on different prefixes:
@@ -918,7 +920,7 @@ import { todosTable } from "./db";
 @TableController(todosTable)
 export class TenantTodoController extends AsDbController<typeof Todo> {
   private getTenantId(): string {
-    const { tenantId } = useRouteParams<{ tenantId: string }>().get();
+    const tenantId = useRouteParams<{ tenantId: string }>().get("tenantId");
     if (!tenantId) throw new HttpError(400, "tenantId route param missing");
     return tenantId;
   }
@@ -952,6 +954,10 @@ The generated endpoints become:
 - ...
 
 Every operation is automatically scoped to `tenantId = "acme"`. Cross-tenant access through the API is not possible because the filter overlay is applied unconditionally — even direct PK lookups like `GET /tenant/acme/todos/one/42` are rejected with 404 if record `42` belongs to a different tenant.
+
+::: warning Resolved from another route, the hooks see no route params
+Read through [`resolveQuery`](./query-targets#resolve-query) from another controller's command, `getTenantId()` above throws 400 — pass the tenant as `scope`.
+:::
 
 ::: tip Combine with `transformOne` for asymmetric scoping
 If `/one` should bypass the tenant scope (e.g. when an admin can address any row by PK), override `transformOne` separately and leave `transformFilter` strict.
