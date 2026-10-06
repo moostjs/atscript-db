@@ -35,7 +35,10 @@ beforeAll(async () => {
 let SEQ = 0;
 type Hook = ((ids: any[]) => any[]) | undefined;
 
-async function boot(hook: Hook, opts: { overlay?: object; throwFirst?: boolean } = {}) {
+async function boot(
+  hook: Hook,
+  opts: { overlay?: object; throwFirst?: boolean; throwAt?: number } = {},
+) {
   getMoostInfact()._cleanup();
   const tickets = createAdapter().getTable(RidTicket);
   await tickets.insertMany(structuredClone(TICKETS) as never);
@@ -72,7 +75,8 @@ async function boot(hook: Hook, opts: { overlay?: object; throwFirst?: boolean }
     async targeted(@DbActionTarget() target: any) {
       let n = 0;
       for await (const _batch of target.batches()) {
-        if (opts.throwFirst && n++ === 0) throw new Error("boom");
+        if (opts.throwFirst && n === 0) throw new Error("boom");
+        if (n++ === opts.throwAt) throw new Error("boom");
       }
       return target.summary();
     }
@@ -176,6 +180,26 @@ describe("an aborted streamed run judges each request id by its own position", (
     const same = await distinct("actions/targeted", { ids: c("T-B", "T-NEW", "T-HOLD", "MISS") });
     expect(same.body.skipped).toEqual([{ id: { code: "T-B" } }]);
     expect(same.body.failed.map((f: any) => f.reason)).toEqual(["boom", "not run", "not run"]);
+  });
+});
+
+describe("an abort on the LAST batch counts a later alias like distinct rows", () => {
+  it("the alias after the failing last batch is 'not run', not processed", async () => {
+    const aliased = await boot(aliasTo("T-NEW"), { throwAt: 1 });
+    const res = await aliased("actions/targeted", { ids: c("ALIAS-1", "T-HOLD", "ALIAS-2") });
+    expect(res.body).toMatchObject({
+      matched: 3,
+      processed: 1,
+      failed: [
+        { id: { code: "T-HOLD" }, reason: "boom" },
+        { id: { code: "ALIAS-2" }, reason: "not run" },
+      ],
+      aborted: { status: 500, message: "boom" },
+    });
+    const distinct = await boot(undefined, { throwAt: 1 });
+    const same = await distinct("actions/targeted", { ids: c("T-NEW", "T-HOLD", "T-LOCK") });
+    expect(same.body.processed).toBe(1);
+    expect(same.body.failed.map((f: any) => f.reason)).toEqual(["boom", "not run"]);
   });
 });
 

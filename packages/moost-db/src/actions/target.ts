@@ -276,17 +276,18 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
     const requests: readonly TRequestedId[] = this.ctx.has(dbActionRequestIdsKey)
       ? this.ctx.get(dbActionRequestIdsKey)
       : ids.map((id, i) => ({ id, key: identityKey(id) ?? `#${i}` }));
-    let cutoff = requests.length;
-    if (this.next < ids.length) {
-      if (this.ctx.has(dbActionRequestIdsKey)) {
-        const at = identityKey(ids[this.next]!);
-        const first = requests.findIndex((r) => r.key === at);
-        if (first >= 0) cutoff = first;
-      } else {
-        cutoff = this.next;
-      }
-    }
     const held = new Set((this.current ?? []).map((id) => identityKey(id)));
+    let cutoff = requests.length;
+    if (this.ctx.has(dbActionRequestIdsKey)) {
+      // The run stopped after the last held request id's first appearance; with nothing
+      // held (the gate failed) it stopped where the next batch starts.
+      const firstOf = (key: string | undefined) => requests.findIndex((r) => r.key === key);
+      if (held.size > 0) cutoff = 1 + Math.max(...[...held].map(firstOf));
+      else if (this.next < ids.length) cutoff = firstOf(identityKey(ids[this.next]!));
+      if (cutoff < 0) cutoff = requests.length;
+    } else if (this.next < ids.length) {
+      cutoff = this.next;
+    }
     const failedBy = new Map(this.failed.map((f) => [identityKey(f.id), f]));
     const skippedBy = new Map<string | undefined, TSkippedRow>();
     for (const row of this.skipped) {
