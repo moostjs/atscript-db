@@ -64,23 +64,16 @@ export function arithToExprNode(
 }
 
 /**
- * The field paths a `$select` entry reads from the table's rows: a plain
- * field, an aggregate's `$field` (`*` excluded), a row-level expression's
- * names, a calendar bucket's source. A group-level expression contributes
- * none (its names are aliases).
- */
-/** Most nodes {@link entryFields} visits of one expression — the shape rules reject anything larger later. */
-const NAMES_SCAN_MAX_NODES = 4 * ARITH_MAX_NODES;
-
-/**
  * The names an expression reads, found iteratively and bounded: this runs on
  * a raw, not yet validated expression (a 10k-deep chain must not overflow the
- * stack — `normalizeComputedSelect` rejects it afterwards).
+ * stack — `normalizeComputedSelect` rejects it afterwards). Stops after
+ * {@link EXPANDED_MAX_NODES} nodes: the shape rules reject anything larger later.
+ * (`@uniqu/core`'s `arithNames` is iterative too but unbounded, so it is not used here.)
  */
 function boundedArithNames(expr: unknown): string[] {
   const out = new Set<string>();
   const stack: unknown[] = [expr];
-  for (let visited = 0; stack.length > 0 && visited < NAMES_SCAN_MAX_NODES; visited++) {
+  for (let visited = 0; stack.length > 0 && visited < EXPANDED_MAX_NODES; visited++) {
     const e = stack.pop();
     if (typeof e === "string") out.add(e);
     else if (e && typeof e === "object" && Array.isArray((e as { $args?: unknown }).$args)) {
@@ -91,6 +84,12 @@ function boundedArithNames(expr: unknown): string[] {
   return [...out];
 }
 
+/**
+ * The field paths a `$select` entry reads from the table's rows: a plain
+ * field, an aggregate's `$field` (`*` excluded), a row-level expression's
+ * names, a calendar bucket's source. A group-level expression contributes
+ * none (its names are aliases).
+ */
 export function entryFields(item: unknown): string[] {
   if (typeof item === "string") return [item];
   if (isAggregateExpr(item)) return item.$field === "*" ? [] : [item.$field];

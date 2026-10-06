@@ -93,17 +93,17 @@ export function resolveComputedSelect(
   // `_id` is the document id of grouped output on document stores (MongoDB's
   // `$group` key): every adapter rejects it as a computed alias, so they agree.
   const select = controls?.$select;
-  const idIssues = Array.isArray(select)
-    ? select
-        .filter(
-          (e): e is { $as: string } =>
-            !!e && typeof e === "object" && (e as { $as?: unknown }).$as === "_id",
-        )
-        .map(() => ({
+  const idIssues: Array<{ path: string; message: string }> = [];
+  if (Array.isArray(select)) {
+    for (const entry of select) {
+      if (entry && typeof entry === "object" && (entry as { $as?: unknown }).$as === "_id") {
+        idIssues.push({
           path: "$select",
           message: 'Alias "_id" is reserved — pick another alias for this $select entry',
-        }))
-    : [];
+        });
+      }
+    }
+  }
   const res = resolveBuckets(controls, {
     aggregate,
     fns: SUPPORTED_AGGREGATE_FNS,

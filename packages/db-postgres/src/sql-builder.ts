@@ -463,6 +463,14 @@ function intTypeFromTags(tags: Set<string> | undefined): string {
 const MIN_ORDERED_TYPE =
   /^(smallint|int2|integer|int|int4|bigint|int8|real|float4|double precision|float8|numeric|decimal|money|text|varchar|character varying|char|character|bpchar|date|time|timetz|timestamp|timestamptz|interval|time (with|without) time zone|timestamp (with|without) time zone)\b/;
 
+/** Text key types: a value comes back in the form it was sent (modulo case for `citext`), so a returned key maps to its input row. */
+const TEXT_KEY_TYPE = /^(text|varchar|character varying|char|character|bpchar|citext)\b/;
+
+/** `true` when the physical column type `type` is a text type (see {@link TEXT_KEY_TYPE}). */
+export function isTextKeyType(type: string): boolean {
+  return TEXT_KEY_TYPE.test(type.trim().toLowerCase());
+}
+
 /**
  * The "any value of the group" pick of a `first` / `last` derived column
  * (constant within its group) over a PostgreSQL column: `MIN` (streaming — one

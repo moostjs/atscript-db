@@ -1,5 +1,5 @@
 import type { TMetaResponse, UniqueryControls } from "@atscript/db";
-import { selfOrAncestor } from "@atscript/db";
+import { isPlainObject, selfOrAncestor } from "@atscript/db";
 import type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 import type { FieldCapabilityIndex } from "../meta/field-capabilities";
@@ -125,19 +125,20 @@ export class DecorationPlanner {
       // DESCENDANT of a required path is un-excluded too (the hook reads the path
       // fully) and only that descendant is stripped again.
       const requiresOnly = new Set<string>();
+      const remaining = new Set(Object.keys(real));
+      const unexclude = (key: string): void => {
+        requiresOnly.add(key);
+        remaining.delete(key);
+        delete real[key];
+      };
       for (const path of this.requiresOf(requested)) {
-        const hit = selfOrAncestor(path, new Set(Object.keys(real)));
+        const hit = selfOrAncestor(path, remaining);
         if (hit !== undefined) {
-          requiresOnly.add(hit);
-          delete real[hit];
+          unexclude(hit);
           continue;
         }
         const prefix = `${path}.`;
-        for (const key of Object.keys(real)) {
-          if (!key.startsWith(prefix)) continue;
-          requiresOnly.add(key);
-          delete real[key];
-        }
+        for (const key of remaining) if (key.startsWith(prefix)) unexclude(key);
       }
       return {
         select: Object.keys(real).length > 0 ? (real as TSelect) : undefined,
@@ -303,14 +304,10 @@ export function stripDecorations(
   }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 /** An object without keys, or an array (of any nesting) holding nothing but such values (what a strip left of a parent). */
 function isHollow(value: unknown): boolean {
   if (Array.isArray(value)) return value.every((el) => isHollow(el));
-  return isObject(value) && Object.keys(value).length === 0;
+  return isPlainObject(value) && Object.keys(value).length === 0;
 }
 
 /**
@@ -332,15 +329,15 @@ function deleteDescending(
     const dropEmptied = clean && depth > 0 && !owned(parts.slice(0, depth));
     for (let i = value.length - 1; i >= 0; i--) {
       const el = value[i];
-      const wasHollow = el !== null && typeof el === "object" && isHollow(el);
+      const wasHollow = isHollow(el);
       deleteDescending(el, parts, depth, clean, owned);
-      if (dropEmptied && !wasHollow && el !== null && typeof el === "object" && isHollow(el)) {
+      if (dropEmptied && !wasHollow && isHollow(el)) {
         value.splice(i, 1);
       }
     }
     return;
   }
-  if (!isObject(value)) return;
+  if (!isPlainObject(value)) return;
   const key = parts[depth];
   if (depth === parts.length - 1) {
     delete value[key];
@@ -353,7 +350,7 @@ function deleteDescending(
     return;
   }
   deleteDescending(child, parts, depth + 1, clean, owned);
-  if (clean && child !== null && typeof child === "object" && isHollow(child) && !owned(prefix)) {
+  if (clean && isHollow(child) && !owned(prefix)) {
     delete value[key];
   }
 }
@@ -372,7 +369,7 @@ function pruneExcept(
     for (const el of value) pruneExcept(el, parts, depth, keep);
     return;
   }
-  if (!isObject(value)) return;
+  if (!isPlainObject(value)) return;
   if (depth < parts.length) {
     pruneExcept(value[parts[depth]], parts, depth + 1, keep);
     return;
@@ -389,7 +386,7 @@ function prune(value: unknown, depth: number, branches: readonly (readonly strin
     for (const el of value) prune(el, depth, branches);
     return;
   }
-  if (!isObject(value)) return;
+  if (!isPlainObject(value)) return;
   for (const key of Object.keys(value)) {
     const next = branches.filter((b) => b[depth] === key);
     if (next.length === 0) delete value[key];

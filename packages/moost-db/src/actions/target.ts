@@ -149,19 +149,12 @@ class TargetBase {
   }
 
   summary(): TDbActionTargetSummary {
-    return this.summaryOf(this.failed);
-  }
-
-  /** {@link summary} over `failed` (the run's, plus an abort's), all in request order. */
-  protected summaryOf(
-    failed: readonly { id: Record<string, unknown>; reason: string }[],
-  ): TDbActionTargetSummary {
-    const echoedFailed = echoRequests(this.ctx, failed);
+    const failed = echoRequests(this.ctx, this.failed);
     return {
       matched: this.matched,
-      processed: Math.max(0, this.processed - echoedFailed.length),
+      processed: Math.max(0, this.processed - failed.length),
       skipped: echoRequests(this.ctx, this.skipped),
-      failed: echoedFailed,
+      failed,
     };
   }
 }

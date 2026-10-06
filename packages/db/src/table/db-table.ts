@@ -1588,19 +1588,20 @@ export class AtscriptDbTable<
     for (const [navField, relation] of this._meta.relations) {
       if (relation.direction !== "to") continue;
       const fk = this._findFKForRelation(relation);
+      if (fk === undefined) continue;
       for (const item of items) {
         const nav = item[navField];
-        if (nav === undefined || nav === null) continue;
-        const keys = nav && typeof nav === "object" && !Array.isArray(nav) ? Object.keys(nav) : [];
+        if (nav === undefined || nav === null || typeof nav !== "object" || Array.isArray(nav)) {
+          continue;
+        }
+        const target = nav as Record<string, unknown>;
+        const keys = Object.keys(target);
         const byKey =
-          fk !== undefined &&
           keys.length === fk.targetFields.length &&
-          fk.targetFields.every(
-            (f) => keys.includes(f) && (nav as Record<string, unknown>)[f] != null,
-          );
+          fk.targetFields.every((f) => keys.includes(f) && target[f] != null);
         if (!byKey) continue;
-        fk!.localFields.forEach((local, i) => {
-          const value = (nav as Record<string, unknown>)[fk!.targetFields[i]!];
+        fk.localFields.forEach((local, i) => {
+          const value = target[fk.targetFields[i]!];
           if (item[local] !== undefined && item[local] !== null && !sameKey(item[local], value)) {
             throw new DbError("INVALID_QUERY", [
               { path: navField, message: `"${navField}" and "${local}" name different parents` },

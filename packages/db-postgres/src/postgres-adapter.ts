@@ -81,6 +81,7 @@ import {
   pgDerivedColumnDef,
   pgGeoDistanceExpr,
   pgTypeFromField,
+  isTextKeyType,
   qi,
   quoteTableName,
   pgDialect,
@@ -565,15 +566,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       const pkCols = this._pkColumns();
       const keySets = this._table.uniqueKeySets;
       const returning = [...new Set(keySets.flat())];
+      const returningCols = new Set(returning);
       const nonTextKeyCols = new Set(
         this._table.fieldDescriptors
-          .filter((f) => returning.includes(f.physicalName))
-          .filter(
-            (f) =>
-              !/^(text|varchar|character varying|char|character|bpchar|citext)\b/.test(
-                this.typeMapper(f).trim().toLowerCase(),
-              ),
-          )
+          .filter((f) => returningCols.has(f.physicalName) && !isTextKeyType(this.typeMapper(f)))
           .map((f) => f.physicalName),
       );
       const returningSuffix =

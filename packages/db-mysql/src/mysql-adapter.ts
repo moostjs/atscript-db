@@ -144,19 +144,16 @@ const TZ_PROBE_SQL =
   "SELECT CONVERT_TZ('2040-06-01 12:00:00', '+00:00', ?) IS NULL AS missing, " +
   "TIMESTAMPDIFF(MINUTE, '2040-06-01 12:00:00', CONVERT_TZ('2040-06-01 12:00:00', '+00:00', '+01:00')) AS shift";
 
+const isZero = (v: unknown) => v === 0 || v === "0";
+
+/** Drivers whose session `sql_mode` was already checked for strictness (see `_warnNonStrictMode`). */
+const nonStrictChecked = new WeakSet<TMysqlDriver>();
+
 /**
  * Zones `CONVERT_TZ` is known to handle, per driver (adapters are per table
  * and share a driver). Positives only: a failed zone is probed again, so
  * loading the time zone tables fixes a running server without a restart.
  */
-const isZero = (v: unknown) => v === 0 || v === "0";
-
-/** The `sql_mode` text of a `SELECT @@SESSION.sql_mode AS mode` row. */
-const modeText = (row: { mode: unknown } | null | undefined): string =>
-  typeof row?.mode === "string" ? row.mode : "";
-
-const nonStrictChecked = new WeakSet<TMysqlDriver>();
-
 const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
 
 /**
@@ -654,17 +651,20 @@ export class MysqlAdapter extends BaseDbAdapter {
     return groups;
   }
 
+  /** The session `sql_mode` text on the current connection (`undefined` when the server returns no row). */
+  private async _sessionSqlMode(): Promise<string | undefined> {
+    const row = await this._exec().get<{ mode: unknown }>("SELECT @@SESSION.sql_mode AS mode", []);
+    if (!row) return undefined;
+    return typeof row.mode === "string" ? row.mode : "";
+  }
+
   /** The {@link TZeroIsExplicit} of one `insertMany` / `insertManyIgnore` call. */
   private _zeroIsExplicit(): TZeroIsExplicit {
     let mode: Promise<boolean> | undefined;
     return () =>
-      (mode ??= (async () => {
-        const row = await this._exec().get<{ mode: unknown }>(
-          "SELECT @@SESSION.sql_mode AS mode",
-          [],
-        );
-        return modeText(row).includes("NO_AUTO_VALUE_ON_ZERO");
-      })());
+      (mode ??= this._sessionSqlMode().then((text) =>
+        (text ?? "").includes("NO_AUTO_VALUE_ON_ZERO"),
+      ));
   }
 
   /**
@@ -677,13 +677,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (this.logger === NoopLogger || nonStrictChecked.has(this.driver)) return;
     nonStrictChecked.add(this.driver);
     try {
-      const row = await this._exec().get<{ mode: unknown }>(
-        "SELECT @@SESSION.sql_mode AS mode",
-        [],
-      );
-      if (row && !/STRICT_(TRANS|ALL)_TABLES/.test(modeText(row))) {
+      const mode = await this._sessionSqlMode();
+      if (mode !== undefined && !/STRICT_(TRANS|ALL)_TABLES/.test(mode)) {
         this.logger.warn(
-          `MySQL session sql_mode lacks STRICT_TRANS_TABLES / STRICT_ALL_TABLES (${modeText(row)}): writes assume a strict mode and a non-strict server silently coerces NOT NULL violations`,
+          `MySQL session sql_mode lacks STRICT_TRANS_TABLES / STRICT_ALL_TABLES (${mode}): writes assume a strict mode and a non-strict server silently coerces NOT NULL violations`,
         );
       }
     } catch {
