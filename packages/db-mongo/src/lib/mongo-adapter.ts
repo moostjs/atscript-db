@@ -341,13 +341,20 @@ export class MongoAdapter extends BaseDbAdapter {
       aggregateOptions,
       buildAggregatePipeline,
       buildCountPipeline,
+      buildMatchedProbe,
       emptyGroupRow,
       emptyGroupStages,
     } = await import("../agg");
     // The one group of an ungrouped aggregate over no rows, after `$having` / `$skip` / `$limit`.
+    // It exists only when ZERO input rows matched: an empty result may also mean
+    // the real group was filtered out by `$having` / `$skip` / `$limit`.
     const emptyGroup = async (forCount: boolean) => {
       const row = emptyGroupRow(query);
       if (!row) return undefined;
+      const probe = buildMatchedProbe(query, searchStage, this._predicateFilterOpts);
+      if ((await wrapInvalidQuery(() => this.aggregatePipeline(probe).toArray())).length > 0) {
+        return undefined;
+      }
       const stages = emptyGroupStages(query, row, forCount);
       if (!stages) return row;
       return (await wrapInvalidQuery(() => this.aggregatePipeline(stages).toArray()))[0];

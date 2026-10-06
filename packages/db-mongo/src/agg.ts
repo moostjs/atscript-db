@@ -308,6 +308,21 @@ export function emptyGroupRow(query: DbQuery): Document | undefined {
 }
 
 /**
+ * A pipeline yielding at most one document iff ANY input row matches the
+ * query's filter (and search) — the probe that tells "no rows matched" (the
+ * one empty group exists) from "the real group was removed by `$having`".
+ */
+export function buildMatchedProbe(
+  query: DbQuery,
+  searchStage?: Document,
+  filterOptions?: TMongoFilterOptions,
+): Document[] {
+  const { pipeline } = buildPrefix(query, searchStage, filterOptions);
+  pipeline.push({ $limit: 1 }, { $project: { _id: 1 } });
+  return pipeline;
+}
+
+/**
  * The pipeline that applies the query's `$having` (and, for the row query, `$skip`
  * and `$limit`) to the {@link emptyGroupRow} — over a single synthetic document
  * (a `$facet` emits exactly one document, even from an empty input), so the

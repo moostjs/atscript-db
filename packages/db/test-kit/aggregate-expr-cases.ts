@@ -549,6 +549,12 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
           0,
         ],
         [
+          "a $having that fails on the real group but would hold on the empty group",
+          { $select: [count], $having: { n: { $lt: 1 } } },
+          {},
+          0,
+        ],
+        [
           "a first() alias in $having",
           {
             $select: [{ $fn: "first", $field: "id", $as: "f" }],
