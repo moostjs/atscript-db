@@ -218,7 +218,7 @@ describe("MysqlAdapter insertManyIgnore pre-check", () => {
     expect(result.inserted).toEqual([1, 2]);
     expect(result.insertedIds).toEqual([9, 10]);
     const kinds = driver.calls
-      .filter((c) => /^(INSERT|SELECT)/.test(c.sql))
+      .filter((c) => /^(INSERT|SELECT)/.test(c.sql) && !c.sql.startsWith("SELECT @@"))
       .map((c) => c.sql.split(" ")[0]);
     expect(kinds).toEqual(["INSERT", "SELECT", "INSERT"]);
   });
@@ -240,10 +240,11 @@ describe("MysqlAdapter insertManyIgnore pre-check", () => {
 });
 
 /** Generated-only statements report insertId 50; an explicit-only statement reports its last id. */
-const mixedDriver = () =>
+const mixedDriver = (step?: number) =>
   createMockDriver({
     runResponder: (sql, params) =>
       sql.startsWith("INSERT") ? { insertId: params?.includes(100) ? 100 : 50 } : {},
+    get: [["@@auto_increment_increment", { step }]],
   });
 
 describe("MysqlAdapter mixed explicit and generated auto-increment PKs", () => {
@@ -253,33 +254,59 @@ describe("MysqlAdapter mixed explicit and generated auto-increment PKs", () => {
     { sku: "g2", label: "gen" },
   ];
 
-  it("insertMany: explicit and generated rows are separate statements, ids in input order", async () => {
+  it("insertMany: consecutive runs of one kind are separate statements, executed in input order", async () => {
     const driver = mixedDriver();
     const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
     const result = await table.insertMany(rows);
-    expect(result.insertedIds).toEqual([50, 100, 51]);
+    expect(result.insertedIds).toEqual([50, 100, 50]);
     const inserts = driver.calls.filter((c) => c.sql.startsWith("INSERT"));
-    expect(inserts).toHaveLength(2);
-    expect(inserts[0]!.params).toContain(100);
-    expect(inserts[1]!.params).not.toContain(100);
+    expect(inserts).toHaveLength(3);
+    expect(inserts.map((c) => c.params?.includes(100))).toEqual([false, true, false]);
+    // single-row runs need no stride: no @@auto_increment_increment read
+    expect(driver.calls.some((c) => c.sql.includes("@@"))).toBe(false);
   });
 
-  it("insertMany ignore: same split, ids in input order, no SELECT for a clean batch", async () => {
+  it("an explicit row between two generated ones does not move before the earlier row (earlier row wins under _ci)", async () => {
+    const driver = mixedDriver();
+    const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
+    // g1 (generated) and e1 (explicit) differ only by case in their unique value
+    await table.insertMany([
+      { sku: "Dup", label: "earlier, generated" },
+      { id: 100, sku: "dup", label: "later, explicit" },
+    ]);
+    const inserts = driver.calls.filter((c) => c.sql.startsWith("INSERT"));
+    expect(inserts[0]!.params).toContain("Dup");
+    expect(inserts[1]!.params).toContain("dup");
+  });
+
+  it("insertMany ignore: same runs, ids in input order, no SELECT for a clean batch", async () => {
     const driver = mixedDriver();
     const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
     const result = await table.insertMany(rows, { onConflict: "ignore" });
-    expect(result.insertedIds).toEqual([50, 100, 51]);
+    expect(result.insertedIds).toEqual([50, 100, 50]);
     expect(result.inserted).toEqual([0, 1, 2]);
-    expect(driver.calls.filter((c) => /^(INSERT|SELECT)/.test(c.sql))).toHaveLength(2);
+    expect(driver.calls.filter((c) => /^(INSERT|SELECT)/.test(c.sql))).toHaveLength(3);
     expect(driver.calls.some((c) => c.method === "all")).toBe(false);
   });
 
-  it("a chunk of one kind stays ONE statement (generated ids are insertId + i)", async () => {
-    const driver = mixedDriver();
+  it("a chunk of one kind stays ONE statement (generated ids are insertId + i * @@auto_increment_increment)", async () => {
+    const driver = mixedDriver(3);
     const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(driver)) as any;
-    const result = await table.insertMany([rows[0], rows[2]]);
-    expect(result.insertedIds).toEqual([50, 51]);
+    const result = await table.insertMany([rows[0], rows[2], { sku: "g3", label: "gen" }]);
+    expect(result.insertedIds).toEqual([50, 53, 56]);
     expect(driver.calls.filter((c) => c.sql.startsWith("INSERT"))).toHaveLength(1);
+    // the stride is read once for the call
+    expect(driver.calls.filter((c) => c.sql.startsWith("SELECT @@"))).toHaveLength(1);
+    const ignored = await table.insertMany([rows[0], rows[2]], { onConflict: "ignore" });
+    expect(ignored.insertedIds).toEqual([50, 53]);
+  });
+
+  it("an increment of 1 (or an unreadable one) is the plain consecutive sequence", async () => {
+    for (const step of [1, undefined]) {
+      const table = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(mixedDriver(step))) as any;
+      const result = await table.insertMany([rows[0], rows[2]]);
+      expect(result.insertedIds).toEqual([50, 51]);
+    }
   });
 });
 

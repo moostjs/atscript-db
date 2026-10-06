@@ -121,7 +121,8 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
     ]);
     let stored = await idsBySku();
     expect(plain.insertedIds).toEqual([stored.g1, 100, stored.g2]);
-    expect(stored.g2).toBe(stored.g1 + 1);
+    // g2 follows the explicit 100 in input order: the counter moved past it
+    expect(stored.g2).toBeGreaterThan(100);
 
     const ignored = await auto.insertMany(
       [
@@ -136,6 +137,57 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
     expect(ignored.conflicts).toEqual([3]);
     expect(ignored.insertedIds).toEqual([stored.g3, 200, stored.g4]);
     expect(stored.g3).toBeGreaterThan(100);
+  });
+
+  it("a later explicit-id row never beats an earlier generated one on a case-insensitive unique value", async () => {
+    const auto = t(fx.IgAuto);
+    const result = await auto.insertMany(
+      [
+        { sku: "CiWins", label: "earlier, generated" },
+        { id: 900, sku: "ciwins", label: "later, explicit" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([1]);
+    const rows = (await auto.findMany({ filter: { sku: "CiWins" }, controls: {} })) as any[];
+    expect(rows.map((r) => r.label)).toEqual(["earlier, generated"]);
+  });
+
+  it("@@auto_increment_increment = 3: reported ids are the stored ids (insertMany and ignore)", async () => {
+    const auto = t(fx.IgAuto);
+    const stored = async () =>
+      Object.fromEntries(
+        ((await auto.findMany({ filter: {}, controls: {} })) as any[]).map((r) => [r.sku, r.id]),
+      );
+    await auto.dbAdapter.withTransaction(async () => {
+      // session-scoped: this transaction's connection only, restored below
+      const conn = (auto.dbAdapter as any)._exec();
+      await conn.exec("SET SESSION auto_increment_increment = 3");
+      try {
+        const plain = await auto.insertMany([
+          { sku: "i1", label: "a" },
+          { sku: "i2", label: "b" },
+          { sku: "i3", label: "c" },
+        ]);
+        const ignored = await auto.insertMany(
+          [
+            { sku: "i4", label: "d" },
+            { sku: "i1", label: "dup" },
+            { sku: "i5", label: "e" },
+          ],
+          { onConflict: "ignore" },
+        );
+        const ids = await stored();
+        expect(plain.insertedIds).toEqual([ids.i1, ids.i2, ids.i3]);
+        expect(ids.i2 - ids.i1).toBe(3);
+        expect(ids.i3 - ids.i2).toBe(3);
+        expect(ignored.conflicts).toEqual([1]);
+        expect(ignored.insertedIds).toEqual([ids.i4, ids.i5]);
+        expect(ids.i5 - ids.i4).toBe(3);
+      } finally {
+        await conn.exec("SET SESSION auto_increment_increment = 1");
+      }
+    });
   });
 
   it("inside an outer transaction a skipped row never aborts it", async () => {

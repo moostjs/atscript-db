@@ -150,7 +150,14 @@ const TZ_PROBE_SQL =
  */
 const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
 
-/** Rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
+/**
+ * The session's `@@auto_increment_increment`, read lazily (only when a
+ * multi-row statement of generated ids needs it) and at most once per call —
+ * it is per connection / session, and a transaction keeps one connection.
+ */
+type TIncrementStep = () => Promise<number>;
+
+/** A run of consecutive rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
 interface TIdGroup {
   rows: Array<Record<string, unknown>>;
   at: number[];
@@ -570,6 +577,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       // ALL rows, to reduce round-trips; chunked to stay under max packet size.
       const { columns, batches } = chunkInsertRows(data);
       const allIds: unknown[] = [];
+      const step = this._incrementStep();
 
       for (const batch of batches) {
         const ids: unknown[] = Array.from({ length: batch.length });
@@ -577,7 +585,7 @@ export class MysqlAdapter extends BaseDbAdapter {
           const { sql, params } = buildInsertMany(tableName, group.rows, columns);
           this._log(sql, params);
           const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-          this._groupInsertedIds(group, result.insertId).forEach((id, k) => {
+          (await this._groupInsertedIds(group, result.insertId, step)).forEach((id, k) => {
             ids[group.at[k]!] = id;
           });
         }
@@ -596,38 +604,64 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Splits `rows` into groups that each map to ONE statement with a derivable
+   * Splits `rows` into runs that each map to ONE statement with a derivable
    * id sequence. MySQL reports only the first GENERATED id of a statement, and
    * an explicit auto-increment value above the counter bumps the counter, so a
    * statement mixing explicit and generated PKs cannot be mapped by
-   * `insertId + i`: such a chunk becomes one statement per kind. A table
-   * without an AUTO_INCREMENT PK, or a chunk of one kind, stays one group.
+   * `insertId + i * step`: the chunk is cut into CONSECUTIVE runs of one kind,
+   * executed in input order (so "an earlier row wins" a unique collision, even
+   * under a case-insensitive collation). A table without an AUTO_INCREMENT PK,
+   * or a chunk of one kind, stays one group.
    */
   private _idGroups(rows: Array<Record<string, unknown>>): TIdGroup[] {
     const col = this._autoIncrementPk();
     if (!col) return [{ rows, at: rows.map((_, i) => i), generated: false }];
-    const explicit: TIdGroup = { rows: [], at: [], generated: false };
-    const generated: TIdGroup = { rows: [], at: [], generated: true };
+    const groups: TIdGroup[] = [];
     rows.forEach((row, i) => {
       const v = row[col];
-      const target = v === undefined || v === null || v === 0 || v === "0" ? generated : explicit;
-      target.rows.push(row);
-      target.at.push(i);
+      const generated = v === undefined || v === null || v === 0 || v === "0";
+      let last = groups.at(-1);
+      if (!last || last.generated !== generated) {
+        last = { rows: [], at: [], generated };
+        groups.push(last);
+      }
+      last.rows.push(row);
+      last.at.push(i);
     });
-    return [explicit, generated].filter((g) => g.rows.length > 0);
+    return groups;
+  }
+
+  /** The {@link TIncrementStep} of one `insertMany` / `insertManyIgnore` call. */
+  private _incrementStep(): TIncrementStep {
+    let step: Promise<number> | undefined;
+    return () =>
+      (step ??= (async () => {
+        const row = await this._exec().get<{ step: unknown }>(
+          "SELECT @@auto_increment_increment AS step",
+          [],
+        );
+        const n = Number(row?.step);
+        return Number.isInteger(n) && n > 0 ? n : 1;
+      })());
   }
 
   /**
    * Ids of the rows of ONE successful multi-row INSERT of a homogeneous
-   * {@link _idGroups} group: generated rows get consecutive ids from `insertId`
-   * (guaranteed for a simple multi-row INSERT under `innodb_autoinc_lock_mode`
-   * 0 / 1; mode 2 — the 8.0 default — is also consecutive within one statement
-   * of known row count), explicit rows keep their own value.
+   * {@link _idGroups} group: generated rows get ids from `insertId` stepping by
+   * the session's `@@auto_increment_increment` (consecutive within one
+   * statement under `innodb_autoinc_lock_mode` 0 / 1, and — for a known row
+   * count — mode 2, the 8.0 default), explicit rows keep their own value.
    */
-  private _groupInsertedIds(group: TIdGroup, insertId: unknown): unknown[] {
+  private async _groupInsertedIds(
+    group: TIdGroup,
+    insertId: unknown,
+    step: TIncrementStep,
+  ): Promise<unknown[]> {
     const first = Number(insertId);
+    // one row has no stride: skip the read
+    const stride = group.generated && group.rows.length > 1 && first > 0 ? await step() : 1;
     return group.rows.map((row, i) => {
-      const generatedId = first > 0 ? first + i : 0;
+      const generatedId = first > 0 ? first + i * stride : 0;
       return group.generated ? generatedId : this._resolveInsertedId(row, generatedId);
     });
   }
@@ -647,7 +681,7 @@ export class MysqlAdapter extends BaseDbAdapter {
    * bisected: each half is retried, recursively, and a single row that still
    * collides is skipped. A failed statement is rolled back by InnoDB alone, so
    * the transaction stays usable. A chunk mixing explicit and generated
-   * auto-increment ids is processed as one such sequence per kind. Deliberately
+   * auto-increment ids is processed as one such sequence per consecutive run of a kind. Deliberately
    * NOT `INSERT IGNORE` (it would downgrade NOT NULL / FK / truncation errors
    * to warnings) and not `ON DUPLICATE KEY UPDATE` (a no-op update is
    * indistinguishable from an insert in the affected-rows count).
@@ -660,10 +694,11 @@ export class MysqlAdapter extends BaseDbAdapter {
       const tableName = this.resolveTableName();
       const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
+      const step = this._incrementStep();
       for (const batch of batches) {
         const out: TDbInsertIgnoreSlot[] = Array.from({ length: batch.length }, () => null);
         for (const group of this._idGroups(batch)) {
-          const groupSlots = await this._insertIgnoringGroup(tableName, columns, group);
+          const groupSlots = await this._insertIgnoringGroup(tableName, columns, group, step);
           groupSlots.forEach((slot, k) => {
             out[group.at[k]!] = slot;
           });
@@ -743,14 +778,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     tableName: string,
     columns: string[],
     group: TIdGroup,
+    step: TIncrementStep,
   ): Promise<TDbInsertIgnoreSlot[]> {
-    const direct = await this._tryInsertGroup(tableName, columns, group);
+    const direct = await this._tryInsertGroup(tableName, columns, group, step);
     if (direct) return direct;
     if (group.rows.length === 1) return [null];
 
     const skipped = await this._findStoredKeyConflicts(tableName, group.rows);
     // Nothing known stored (a collation-equal value, or a race): bisect.
-    if (skipped.size === 0) return this._bisectGroup(tableName, columns, group);
+    if (skipped.size === 0) return this._bisectGroup(tableName, columns, group, step);
 
     const survivors: TIdGroup = {
       rows: group.rows.filter((_, i) => !skipped.has(i)),
@@ -759,10 +795,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     };
     const inserted =
       survivors.rows.length > 0
-        ? ((await this._tryInsertGroup(tableName, columns, survivors)) ??
+        ? ((await this._tryInsertGroup(tableName, columns, survivors, step)) ??
           (survivors.rows.length === 1
             ? [null]
-            : await this._bisectGroup(tableName, columns, survivors)))
+            : await this._bisectGroup(tableName, columns, survivors, step)))
         : [];
     let next = 0;
     return group.rows.map((_, i) => (skipped.has(i) ? null : inserted[next++]!));
@@ -773,14 +809,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     tableName: string,
     columns: string[],
     group: TIdGroup,
+    step: TIncrementStep,
   ): Promise<TDbInsertIgnoreSlot[]> {
     const mid = group.rows.length >> 1;
     const out: TDbInsertIgnoreSlot[] = [];
     for (const rows of [group.rows.slice(0, mid), group.rows.slice(mid)]) {
       const half: TIdGroup = { rows, at: [], generated: group.generated };
       out.push(
-        ...((await this._tryInsertGroup(tableName, columns, half)) ??
-          (rows.length === 1 ? [null] : await this._bisectGroup(tableName, columns, half))),
+        ...((await this._tryInsertGroup(tableName, columns, half, step)) ??
+          (rows.length === 1 ? [null] : await this._bisectGroup(tableName, columns, half, step))),
       );
     }
     return out;
@@ -791,12 +828,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     tableName: string,
     columns: string[],
     group: TIdGroup,
+    step: TIncrementStep,
   ): Promise<TDbInsertIgnoreSlot[] | undefined> {
     const { sql, params } = buildInsertMany(tableName, group.rows, columns);
     this._log(sql, params);
     try {
       const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-      return this._groupInsertedIds(group, result.insertId).map((insertedId) => ({ insertedId }));
+      return (await this._groupInsertedIds(group, result.insertId, step)).map((insertedId) => ({
+        insertedId,
+      }));
     } catch (error) {
       if (!isConflict(error)) throw error;
       return undefined;
