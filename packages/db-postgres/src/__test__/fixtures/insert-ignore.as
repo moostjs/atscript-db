@@ -71,3 +71,24 @@ export interface IgUuid {
 
     label: string
 }
+
+@db.table 'ig_renamed'
+export interface IgRenamed {
+    @meta.id
+    @db.default.increment
+    @db.column 'item_id'
+    id: number
+
+    label: string
+}
+
+@db.table 'ig_inets'
+export interface IgInet {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.index.unique 'inet_idx'
+    @db.pg.type 'INET'
+    addr: string
+}

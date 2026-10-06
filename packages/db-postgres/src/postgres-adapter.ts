@@ -565,6 +565,17 @@ export class PostgresAdapter extends BaseDbAdapter {
       const pkCols = this._pkColumns();
       const keySets = this._table.uniqueKeySets;
       const returning = [...new Set(keySets.flat())];
+      const nonTextKeyCols = new Set(
+        this._table.fieldDescriptors
+          .filter((f) => returning.includes(f.physicalName))
+          .filter(
+            (f) =>
+              !/^(text|varchar|character varying|char|character|bpchar|citext)\b/.test(
+                this.typeMapper(f).trim().toLowerCase(),
+              ),
+          )
+          .map((f) => f.physicalName),
+      );
       const returningSuffix =
         returning.length > 0 ? ` RETURNING ${returning.map((c) => qi(c)).join(", ")}` : "";
       const insertedId = (row: Record<string, unknown>, returned?: Record<string, unknown>) => ({
@@ -589,7 +600,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         const mapping =
           returning.length === 0
             ? batch.map((_, i) => i)
-            : mapIgnoredBatch(batch, returned, keySets);
+            : mapIgnoredBatch(batch, returned, keySets, nonTextKeyCols);
         if (mapping) {
           await this._exec().run(`RELEASE SAVEPOINT ${IGNORE_SAVEPOINT}`);
           mapping.forEach((hit, i) =>

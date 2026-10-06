@@ -67,7 +67,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
       { logger, onClose: () => driver.close() },
     );
     const result = await new SchemaSync(space).run(
-      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice, fx.IgSeq, fx.IgUuid],
+      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice, fx.IgSeq, fx.IgUuid, fx.IgRenamed, fx.IgInet],
       {
         force: true,
       },
@@ -87,6 +87,8 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
     await t(fx.IgPrice).deleteMany({});
     await t(fx.IgSeq).deleteMany({});
     await t(fx.IgUuid).deleteMany({});
+    await t(fx.IgRenamed).deleteMany({});
+    await t(fx.IgInet).deleteMany({});
     statements.length = 0;
   });
 
@@ -208,6 +210,42 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
       controls: {},
     })) as any;
     expect(first.label).toBe("first");
+  });
+
+  it("uuid keys without hyphens / in braces: normalised by the server, never mis-mapped", async () => {
+    const uuids = t(fx.IgUuid);
+    const hyphenated = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const result = await uuids.insertMany(
+      [
+        { id: "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa", label: "first" },
+        { id: hyphenated, label: "second" },
+        { id: "{bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb}", label: "other" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.inserted).toEqual([0, 2]);
+    expect(result.conflicts).toEqual([1]);
+    const first = (await uuids.findOne({ filter: { id: hyphenated }, controls: {} })) as any;
+    expect(first.label).toBe("first");
+  });
+
+  it("inet keys written in another form: the duplicate is detected exactly", async () => {
+    const inets = t(fx.IgInet);
+    const result = await inets.insertMany(
+      [{ addr: "10.0.0.1/32" }, { addr: "10.0.0.1" }, { addr: "10.0.0.2" }],
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([1]);
+    expect(result.inserted).toEqual([0, 2]);
+  });
+
+  it("a renamed @db.default.increment PK is an IDENTITY column: inserts without an id work", async () => {
+    const renamed = t(fx.IgRenamed);
+    const a = await renamed.insertOne({ label: "a" });
+    const b = await renamed.insertMany([{ label: "b" }, { label: "c" }]);
+    expect(typeof a.insertedId).toBe("number");
+    expect(b.insertedCount).toBe(2);
+    expect(new Set([a.insertedId, ...b.insertedIds]).size).toBe(3);
   });
 
   it("a mappable batch stays ONE statement", async () => {

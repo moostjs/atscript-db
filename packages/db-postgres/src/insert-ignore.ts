@@ -23,7 +23,10 @@ function looselySame(a: unknown, b: unknown): boolean {
 }
 
 /** A key value the server may store in another form than it was sent (NUMERIC / decimal rounding). */
-function mayNormalize(value: unknown): boolean {
+function mayNormalize(value: unknown, col?: string, formCols?: ReadonlySet<string>): boolean {
+  // a string key of a non-text column (uuid without hyphens / in braces, inet,
+  // cidr, macaddr, timestamps, …) comes back in the server's canonical form
+  if (typeof value === "string" && col !== undefined && formCols?.has(col)) return true;
   return (
     (typeof value === "number" && !Number.isInteger(value)) ||
     (typeof value === "string" && /^-?\d+\.\d+$/.test(value))
@@ -55,11 +58,15 @@ function mayNormalize(value: unknown): boolean {
  * a fully-returned batch (everything inserted) are exact without any matching.
  *
  * @param keySets Physical column names of the primary key and every unique index.
+ * @param formCols Key columns whose physical type is not text (uuid, inet, cidr,
+ *   macaddr, …, `@db.pg.type` overrides): a string key there may come back
+ *   normalized, so a skipped-looking row of such a key is ambiguous.
  */
 export function mapIgnoredBatch(
   batch: ReadonlyArray<Record<string, unknown>>,
   returned: ReadonlyArray<Record<string, unknown>>,
   keySets: readonly (readonly string[])[],
+  formCols?: ReadonlySet<string>,
 ): number[] | undefined {
   if (returned.length === 0) return batch.map(() => -1);
   if (returned.length === batch.length) return batch.map((_, i) => i);
@@ -90,7 +97,9 @@ export function mapIgnoredBatch(
     }
     // Skipped — only provable when no key value could have been normalized.
     if (
-      keySets.some((cols, k) => tuples[k] !== undefined && cols.some((c) => mayNormalize(row[c])))
+      keySets.some(
+        (cols, k) => tuples[k] !== undefined && cols.some((c) => mayNormalize(row[c], c, formCols)),
+      )
     ) {
       return undefined;
     }
