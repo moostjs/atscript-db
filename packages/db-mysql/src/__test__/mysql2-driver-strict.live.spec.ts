@@ -8,9 +8,10 @@ import { prepareFixtures } from "./test-utils";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
-// Server-gated (see insert-ignore.live.spec.ts): the driver makes a fresh
-// connection strict even when the server's default mode is not, and a missing
-// NOT NULL column then raises in plain and ignore mode (since 0.1.148).
+// Server-gated (see insert-ignore.live.spec.ts): the driver makes a connection
+// strict even when its session starts non-strict (simulated per connection —
+// the shared server's GLOBAL sql_mode is never touched), and a missing NOT NULL
+// column then raises in plain and ignore mode (since 0.1.148).
 
 const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "driver_strict";
@@ -34,19 +35,28 @@ const reachable = (await admin((c) => c.query("SELECT 1"))) !== undefined;
 const modeOf = async (driver: Mysql2Driver) =>
   ((await driver.get<{ m: string }>("SELECT @@SESSION.sql_mode AS m"))?.m ?? "").split(",");
 
+/**
+ * A pool whose every NEW connection starts non-strict — what a server with a
+ * non-strict default (RDS) gives — without touching the shared server's GLOBAL
+ * `sql_mode`: the listener runs before the driver's own, on the same session.
+ */
+async function nonStrictPool(db: string) {
+  const mysql = await import("mysql2/promise");
+  const pool = mysql.createPool({ uri: `${SERVER_URL}/${db}`, connectionLimit: 3 });
+  (pool as any).on("connection", (conn: any) =>
+    conn.query("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'", () => {}),
+  );
+  return pool;
+}
+
 describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
   let fx: Record<string, any>;
-  let original = "";
 
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
     await admin((c) => c.query(`DROP DATABASE IF EXISTS \`${DB}\``));
     await admin((c) => c.query(`CREATE DATABASE \`${DB}\``));
-    // make the SERVER default non-strict (what RDS ships); restored in afterAll
-    original =
-      (await admin(async (c) => (await c.query("SELECT @@GLOBAL.sql_mode AS m"))[0][0].m)) ?? "";
-    await admin((c) => c.query("SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'"));
     const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
     const space = new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
     await new SchemaSync(space).run([fx.IgItem], { force: true });
@@ -54,12 +64,12 @@ describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
   });
 
   afterAll(async () => {
-    await admin((c) => c.query("SET GLOBAL sql_mode = ?", [original]));
     await admin((c) => c.query(`DROP DATABASE IF EXISTS \`${DB}\``));
   });
 
-  it("a fresh connection is strict and keeps the server's other modes", async () => {
-    const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+  it("a fresh connection is strict and keeps the other modes", async () => {
+    const pool = await nonStrictPool(DB);
+    const driver = new Mysql2Driver(pool);
     try {
       const modes = await modeOf(driver);
       expect(modes).toContain("STRICT_TRANS_TABLES");
@@ -69,8 +79,37 @@ describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
     }
   });
 
-  it("strictMode: false keeps the server's non-strict mode", async () => {
-    const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`, { strictMode: false });
+  it("every connection of a pre-used pool is strict, not just the ones opened afterwards", async () => {
+    const mysql = await import("mysql2/promise");
+    const pool = mysql.createPool({ uri: `${SERVER_URL}/${DB}`, connectionLimit: 3 });
+    // the app warmed the pool (health check) on a non-strict session BEFORE the driver existed
+    const warm = await Promise.all([pool.getConnection(), pool.getConnection()]);
+    for (const conn of warm) await conn.query("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+    for (const conn of warm) conn.release();
+    const driver = new Mysql2Driver(pool);
+    try {
+      const a = await driver.getConnection();
+      const b = await driver.getConnection();
+      const c = await driver.getConnection();
+      try {
+        for (const conn of [a, b, c]) {
+          const row = await conn.get<{ m: string }>("SELECT @@SESSION.sql_mode AS m");
+          expect(row?.m.split(",")).toContain("STRICT_TRANS_TABLES");
+        }
+      } finally {
+        a.release();
+        b.release();
+        c.release();
+      }
+      // the pool-level path hits whichever connection is free
+      for (let i = 0; i < 6; i++) expect(await modeOf(driver)).toContain("STRICT_TRANS_TABLES");
+    } finally {
+      await driver.close();
+    }
+  });
+
+  it("strictMode: false keeps the non-strict mode of the session", async () => {
+    const driver = new Mysql2Driver(await nonStrictPool(DB), { strictMode: false });
     try {
       expect(await modeOf(driver)).not.toContain("STRICT_TRANS_TABLES");
       // the coercion the opt-out accepts: a missing NOT NULL column is stored as ''
@@ -84,7 +123,7 @@ describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
   });
 
   it("a missing NOT NULL column raises in plain and ignore mode", async () => {
-    const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    const driver = new Mysql2Driver(await nonStrictPool(DB));
     const space = new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
     try {
       const table = space.getTable(fx.IgItem as never) as any;

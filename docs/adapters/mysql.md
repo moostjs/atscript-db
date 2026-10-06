@@ -66,7 +66,7 @@ const driver = new Mysql2Driver("mysql://root:pass@localhost:3306/mydb", { stric
 // createAdapter(uri, { strictMode: false, ...poolOptions }) does the same
 ```
 
-For a `Pool` you create yourself the driver adds the statement to connections the pool opens after the driver is constructed; connections already open keep their mode. A custom `TMysqlDriver` is not touched — set the mode in your own connection init.
+For a `Pool` you create yourself the driver adds the statement to connections the pool opens after the driver is constructed, and to a connection it opened earlier the first time that connection is acquired — so a pool warmed before the driver existed ends up uniformly strict. A custom `TMysqlDriver` is not touched — set the mode in your own connection init.
 
 ### Convenience Helper
 

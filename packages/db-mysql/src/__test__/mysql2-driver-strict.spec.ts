@@ -8,9 +8,11 @@ import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
  */
 
 const listeners: Array<(conn: unknown) => void> = [];
+const acquireListeners: Array<(conn: unknown) => void> = [];
 const createPool = vi.fn((_opts: unknown) => ({
   on: (event: string, cb: (conn: unknown) => void) => {
     if (event === "connection") listeners.push(cb);
+    if (event === "acquire") acquireListeners.push(cb);
   },
   end: async () => {},
 }));
@@ -27,6 +29,7 @@ const open = () => {
 
 beforeEach(() => {
   listeners.length = 0;
+  acquireListeners.length = 0;
   createPool.mockClear();
 });
 
@@ -44,9 +47,30 @@ describe("Mysql2Driver strictMode", () => {
     await new Mysql2Driver({ host: "h" }).close();
     expect(open()).toEqual([ENSURE_STRICT_SQL]);
     listeners.length = 0;
-    const pool = { execute() {}, on: (_e: string, cb: (c: unknown) => void) => listeners.push(cb) };
+    const pool = {
+      execute() {},
+      on: (e: string, cb: (c: unknown) => void) => e === "connection" && listeners.push(cb),
+    };
     new Mysql2Driver(pool as never);
     expect(open()).toEqual([ENSURE_STRICT_SQL]);
+  });
+
+  it("a connection opened before the driver is made strict once, on its first acquire", () => {
+    const pool = {
+      execute() {},
+      on: (e: string, cb: (c: unknown) => void) =>
+        (e === "acquire" ? acquireListeners : listeners).push(cb),
+    };
+    new Mysql2Driver(pool as never);
+    const queries: string[] = [];
+    const warmed = { query: (sql: string, done: () => void) => (queries.push(sql), done()) };
+    for (let i = 0; i < 3; i++) for (const cb of acquireListeners) cb(warmed);
+    expect(queries).toEqual([ENSURE_STRICT_SQL]);
+    // a connection the pool opens later is handled by `connection`, and not re-queued on acquire
+    const fresh = { query: (sql: string, done: () => void) => (queries.push(sql), done()) };
+    for (const cb of listeners) cb(fresh);
+    for (const cb of acquireListeners) cb(fresh);
+    expect(queries).toEqual([ENSURE_STRICT_SQL, ENSURE_STRICT_SQL]);
   });
 
   it("strictMode: false installs nothing", async () => {
@@ -54,5 +78,6 @@ describe("Mysql2Driver strictMode", () => {
     expect(listeners).toHaveLength(0);
     await new Mysql2Driver({ host: "h" }, { strictMode: false }).close();
     expect(listeners).toHaveLength(0);
+    expect(acquireListeners).toHaveLength(0);
   });
 });

@@ -548,7 +548,9 @@ export class MysqlAdapter extends BaseDbAdapter {
 
       // Duplicate key (unique constraint)
       if (err.errno === 1062 || err.errno === 1586) {
-        const match = err.message?.match(/for key '(?:\w+\.)?(\w+)'/);
+        // `for key 'table.index'` — the table part may hold any character but `'` (hyphen,
+        // non-ASCII, a space); the LAST such clause is the key (the entry may quote one)
+        const match = err.message?.match(/^[\s\S]*for key '(?:[^']*\.)?([^'.]+)'/);
         const field = match?.[1] ?? "";
         throw new DbError("CONFLICT", [{ path: field, message: err.sqlMessage ?? err.message }]);
       }

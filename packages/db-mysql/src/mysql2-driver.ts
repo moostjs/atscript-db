@@ -48,21 +48,26 @@ export const ENSURE_STRICT_SQL =
   "SET SESSION sql_mode = IF(FIND_IN_SET('STRICT_TRANS_TABLES', @@SESSION.sql_mode) OR FIND_IN_SET('STRICT_ALL_TABLES', @@SESSION.sql_mode), @@SESSION.sql_mode, CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'STRICT_TRANS_TABLES'))";
 
 /**
- * Runs {@link ENSURE_STRICT_SQL} on each connection the pool opens. The
- * statement is queued on the connection before the pool hands it out, so it
- * precedes every query; a failure leaves the server's mode in place.
+ * Runs {@link ENSURE_STRICT_SQL} once on every connection of the pool: on
+ * `connection` for the ones the pool opens, and on `acquire` for a connection
+ * opened before the driver was constructed (a pre-used pool). The statement is
+ * queued on the connection before the pool hands it out, so it precedes every
+ * query; a failure leaves the server's mode in place.
  */
 function ensureStrict(pool: import("mysql2/promise").Pool): void {
   // the promise pool forwards `on` to the callback pool: the listener gets the raw connection
+  type TRawConn = { query(sql: string, cb: () => void): unknown };
   const raw = pool as unknown as {
-    on(
-      event: "connection",
-      listener: (conn: { query(sql: string, cb: () => void): unknown }) => void,
-    ): void;
+    on(event: "connection" | "acquire", listener: (conn: TRawConn) => void): void;
   };
-  raw.on("connection", (conn) => {
+  const seen = new WeakSet<TRawConn>();
+  const strict = (conn: TRawConn): void => {
+    if (seen.has(conn)) return;
+    seen.add(conn);
     conn.query(ENSURE_STRICT_SQL, () => {});
-  });
+  };
+  raw.on("connection", strict);
+  raw.on("acquire", strict);
 }
 
 /**
@@ -94,8 +99,8 @@ function ensureStrict(pool: import("mysql2/promise").Pool): void {
  *
  * Every new pool connection gets `STRICT_TRANS_TABLES` appended to its session
  * `sql_mode` (since 0.1.148); pass `{ strictMode: false }` as the second
- * argument to opt out. For a pre-created `Pool` this covers connections the
- * pool opens after the driver is constructed.
+ * argument to opt out. A pre-created `Pool` is covered too: connections it
+ * opened earlier get the statement when they are first acquired through it.
  *
  * Requires `mysql2` to be installed:
  * ```bash

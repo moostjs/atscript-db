@@ -378,6 +378,21 @@ describe("generated ids, NO_AUTO_VALUE_ON_ZERO and strict mode", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
+  it("a PRIMARY duplicate of a generated id on a hyphenated / non-ASCII table is rethrown too", async () => {
+    for (const table of ["order-items", "tbl_ü"]) {
+      const dup = Object.assign(new Error(`Duplicate entry '5' for key '${table}.PRIMARY'`), {
+        errno: 1062,
+      });
+      const { table: t } = auto((sql) => {
+        if (sql.startsWith("INSERT")) throw dup;
+        return undefined;
+      });
+      await expect(
+        t.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+  });
+
   it("a unique-index duplicate of a generated-id row is still an ignorable conflict", async () => {
     const { table } = auto((sql) => {
       if (sql.startsWith("INSERT"))

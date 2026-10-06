@@ -121,6 +121,21 @@ describe("MysqlAdapter — FK error mapping", () => {
     }
   });
 
+  it.each([
+    ["order-items.PRIMARY", "PRIMARY"],
+    ["tbl_ü.PRIMARY", "PRIMARY"],
+    ["my table.email-idx", "email-idx"],
+    ["PRIMARY", "PRIMARY"],
+  ])("extracts the key name of a duplicate on %s", async (key, expected) => {
+    const message = `Duplicate entry "x' for key 'y" for key '${key}'`;
+    const err = Object.assign(new Error(message), { errno: 1062, sqlMessage: message });
+    const table = new AtscriptDbTable(TaskType, new MysqlAdapter(createErrorDriver(err)));
+    const error = await table
+      .insertOne({ id: 1, title: "Test", projectId: 1 } as any)
+      .catch((e: unknown) => e);
+    expect((error as DbError).errors[0].path).toBe(expected);
+  });
+
   it("should use physical column when FK column has no logical mapping", async () => {
     const err = Object.assign(new Error("FK violation"), {
       errno: 1452,
