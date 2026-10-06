@@ -374,3 +374,78 @@ describe("@DbDecorations — the request gate", () => {
     expect(messageOf(await controller.query("?$select=unreadCount.x"))).toMatch(/Unknown field/);
   });
 });
+
+describe("@DbDecorations — nested sources through the controller", () => {
+  const NESTED = [
+    {
+      id: 1,
+      title: "one",
+      secret: { hash: "h1", salt: "s1" },
+      contact: { phone: "p1", email: "e1" },
+      items: [
+        { sku: "a", qty: 1 },
+        { sku: "b", qty: 2 },
+      ],
+    },
+  ];
+
+  async function nested(requires: Record<string, string[]>) {
+    const { DecoNested, DecoNestedDecorations } = await import("./fixtures/decorations-nested.as");
+    const table = createAdapter().getTable(DecoNested);
+    await table.insertMany(structuredClone(NESTED) as never);
+    const hookSaw: Array<Record<string, unknown>> = [];
+
+    @DbDecorations(DecoNestedDecorations, { requires } as never)
+    class Ctrl extends AsDbController {}
+    (Ctrl.prototype as any).decorateRows = function (
+      rows: Record<string, unknown>[],
+      ctx: TDbDecorateContext,
+    ) {
+      for (const row of rows) {
+        hookSaw.push(structuredClone(row));
+        if (ctx.decorations.has("digest")) row.digest = "d";
+      }
+    };
+    return { controller: new Ctrl(createMockApp(), table as any), hookSaw };
+  }
+
+  it("NEW-4: excluding a descendant of a required path still serves the decoration (hook reads it fully, then only the excluded descendant is stripped)", async () => {
+    const { controller, hookSaw } = await nested({ digest: ["secret"] });
+    const rows = await controller.query("?$select=-secret.hash");
+    expect(row(rows).digest).toBe("d");
+    // the hook saw the whole required path
+    expect(hookSaw[0].secret).toEqual({ hash: "h1", salt: "s1" });
+    // the client's exclusion still applies to the response
+    expect(row(rows).secret).toEqual({ salt: "s1" });
+    expect(row(rows).title).toBe("one");
+  });
+
+  it("NEW-5: arrays of objects are pruned to the client-selected items[].field", async () => {
+    const { controller, hookSaw } = await nested({ digest: ["items"] });
+    const rows = await controller.query("?$select=items.sku,digest");
+    expect(row(rows).digest).toBe("d");
+    expect(hookSaw[0].items).toEqual([
+      { sku: "a", qty: 1 },
+      { sku: "b", qty: 2 },
+    ]);
+    expect(row(rows).items).toEqual([{ sku: "a" }, { sku: "b" }]);
+  });
+
+  it("NEW-5: a hook-only array source is removed from the response", async () => {
+    const { controller } = await nested({ digest: ["items.qty"] });
+    const rows = await controller.query("?$select=title,digest");
+    expect(row(rows).digest).toBe("d");
+    expect(Object.keys(row(rows)).toSorted()).toEqual(["digest", "id", "title"]);
+  });
+
+  it("NEW-6: a hook-only nested path leaves no empty parent behind", async () => {
+    const { controller } = await nested({ digest: ["contact.phone"] });
+    const rows = await controller.query("?$select=title,digest");
+    expect(row(rows).digest).toBe("d");
+    expect(row(rows).contact).toBeUndefined();
+    expect("contact" in row(rows)).toBe(false);
+    // a sibling the client selected itself keeps the parent, minus the hook-only path
+    const both = await controller.query("?$select=title,contact.email,digest");
+    expect(row(both).contact).toEqual({ email: "e1" });
+  });
+});

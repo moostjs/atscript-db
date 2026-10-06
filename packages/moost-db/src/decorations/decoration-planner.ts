@@ -1,5 +1,5 @@
 import type { TMetaResponse, UniqueryControls } from "@atscript/db";
-import { deletePath, selfOrAncestor } from "@atscript/db";
+import { selfOrAncestor } from "@atscript/db";
 import type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 import type { FieldCapabilityIndex } from "../meta/field-capabilities";
@@ -34,6 +34,13 @@ export interface TDecorationRead {
   dropPaths: readonly (readonly string[])[];
   /** Per drop path, the client-selected paths below it that survive the strip (dot-split). */
   keepPaths: readonly (readonly (readonly string[])[])[];
+  /**
+   * The client's own inclusion paths (dot-split) — set for an inclusion read
+   * only. A strip then also removes a parent it emptied (or a `null` one)
+   * unless the client selected something at or below it; an exclusion read
+   * leaves a parent as a plain read would.
+   */
+  selectedPaths?: readonly (readonly string[])[];
 }
 
 /** What the planner reads of the controller it serves. */
@@ -114,13 +121,23 @@ export class DecorationPlanner {
       const requested = keys.filter((key) => !skip.has(key) && this.visible(key));
       const real = Object.fromEntries(Object.entries(map).filter(([k]) => !keySet.has(k)));
       // A required path the client excluded — itself or through an excluded ancestor — is
-      // un-excluded (the whole excluded entry is read) and stripped again.
+      // un-excluded (the whole excluded entry is read) and stripped again. An excluded
+      // DESCENDANT of a required path is un-excluded too (the hook reads the path
+      // fully) and only that descendant is stripped again.
       const requiresOnly = new Set<string>();
       for (const path of this.requiresOf(requested)) {
         const hit = selfOrAncestor(path, new Set(Object.keys(real)));
-        if (hit === undefined) continue;
-        requiresOnly.add(hit);
-        delete real[hit];
+        if (hit !== undefined) {
+          requiresOnly.add(hit);
+          delete real[hit];
+          continue;
+        }
+        const prefix = `${path}.`;
+        for (const key of Object.keys(real)) {
+          if (!key.startsWith(prefix)) continue;
+          requiresOnly.add(key);
+          delete real[key];
+        }
       }
       return {
         select: Object.keys(real).length > 0 ? (real as TSelect) : undefined,
@@ -193,8 +210,9 @@ export class DecorationPlanner {
         .filter((sel) => sel.startsWith(`${path}.`))
         .map((sel) => sel.split(".")),
     );
+    const selectedPaths = plan.selected?.map((sel) => sel.split("."));
     if (plan.requested.length === 0) {
-      return { served: NO_DECORATIONS, dropKeys: keys, dropPaths, keepPaths };
+      return { served: NO_DECORATIONS, dropKeys: keys, dropPaths, keepPaths, selectedPaths };
     }
     const keptSet = kept === null ? undefined : new Set(kept);
     const served = new Set(
@@ -204,7 +222,13 @@ export class DecorationPlanner {
           requires.get(key)!.every((path) => selfOrAncestor(path, keptSet) !== undefined),
       ),
     );
-    return { served, dropKeys: keys.filter((key) => !served.has(key)), dropPaths, keepPaths };
+    return {
+      served,
+      dropKeys: keys.filter((key) => !served.has(key)),
+      dropPaths,
+      keepPaths,
+      selectedPaths,
+    };
   }
 
   /**
@@ -259,43 +283,105 @@ export function stripDecorations(
   rows: readonly Record<string, unknown>[],
   read: TDecorationRead,
 ): void {
-  const { dropKeys, dropPaths, keepPaths } = read;
+  const { dropKeys, dropPaths, keepPaths, selectedPaths } = read;
   if (dropKeys.length === 0 && dropPaths.length === 0) return;
+  // a parent the client selected something at or below is its own data
+  const owned = (prefix: readonly string[]): boolean =>
+    selectedPaths !== undefined &&
+    selectedPaths.some((sel) => prefix.every((part, i) => sel[i] === part));
   for (const row of rows) {
     for (const key of dropKeys) delete row[key];
     dropPaths.forEach((parts, i) => {
       const keep = keepPaths[i] ?? [];
-      if (keep.length === 0) deletePath(row, parts);
-      else pruneExcept(row, parts, keep);
+      if (keep.length === 0) deleteDescending(row, parts, 0, selectedPaths !== undefined, owned);
+      else pruneExcept(row, parts, 0, keep);
     });
   }
 }
 
-/** Deletes everything under `parts` except the branches leading to `keep` (client-selected descendants). */
-function pruneExcept(
-  row: Record<string, unknown>,
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** An object without keys, or an array holding nothing but such objects (what a strip left of a parent). */
+function isHollow(value: unknown): boolean {
+  if (Array.isArray(value))
+    return value.every((el) => isObject(el) && Object.keys(el).length === 0);
+  return isObject(value) && Object.keys(value).length === 0;
+}
+
+/**
+ * Deletes the path `parts` below `value`, descending through arrays of objects
+ * (`items.qty` strips every element's `qty`). With `clean` (an inclusion read),
+ * a parent the strip emptied — or a `null` one — goes too, unless the client
+ * selected something at or below it.
+ */
+function deleteDescending(
+  value: unknown,
   parts: readonly string[],
+  depth: number,
+  clean: boolean,
+  owned: (prefix: readonly string[]) => boolean,
+): void {
+  if (Array.isArray(value)) {
+    for (const el of value) deleteDescending(el, parts, depth, clean, owned);
+    return;
+  }
+  if (!isObject(value)) return;
+  const key = parts[depth];
+  if (depth === parts.length - 1) {
+    delete value[key];
+    return;
+  }
+  const child = value[key];
+  const prefix = parts.slice(0, depth + 1);
+  if (child === null && clean && !owned(prefix)) {
+    delete value[key];
+    return;
+  }
+  deleteDescending(child, parts, depth + 1, clean, owned);
+  if (clean && child !== null && typeof child === "object" && isHollow(child) && !owned(prefix)) {
+    delete value[key];
+  }
+}
+
+/**
+ * Below `parts`, deletes everything except the branches leading to `keep`
+ * (client-selected descendants), through arrays of objects as well.
+ */
+function pruneExcept(
+  value: unknown,
+  parts: readonly string[],
+  depth: number,
   keep: readonly (readonly string[])[],
 ): void {
-  let node: unknown = row;
-  for (const part of parts) {
-    if (node === null || typeof node !== "object" || Array.isArray(node)) return;
-    node = (node as Record<string, unknown>)[part];
+  if (Array.isArray(value)) {
+    for (const el of value) pruneExcept(el, parts, depth, keep);
+    return;
   }
-  const prune = (value: unknown, depth: number, branches: readonly (readonly string[])[]) => {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return;
-    const obj = value as Record<string, unknown>;
-    for (const key of Object.keys(obj)) {
-      const next = branches.filter((b) => b[depth] === key);
-      if (next.length === 0) delete obj[key];
-      else if (next.some((b) => b.length > depth + 1)) prune(obj[key], depth + 1, next);
-    }
-  };
+  if (!isObject(value)) return;
+  if (depth < parts.length) {
+    pruneExcept(value[parts[depth]], parts, depth + 1, keep);
+    return;
+  }
   prune(
-    node,
+    value,
     parts.length,
     keep.filter((k) => k.length > parts.length),
   );
+}
+
+function prune(value: unknown, depth: number, branches: readonly (readonly string[])[]): void {
+  if (Array.isArray(value)) {
+    for (const el of value) prune(el, depth, branches);
+    return;
+  }
+  if (!isObject(value)) return;
+  for (const key of Object.keys(value)) {
+    const next = branches.filter((b) => b[depth] === key);
+    if (next.length === 0) delete value[key];
+    else if (next.some((b) => b.length > depth + 1)) prune(value[key], depth + 1, next);
+  }
 }
 
 /** `true` when stripping `read` changes nothing — skip the post-hook step. */

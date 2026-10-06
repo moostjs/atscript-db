@@ -98,9 +98,11 @@ describe("DecorationPlanner: a client-selected descendant of a required path", (
     expect(stripped(["id", "d"]).out.address).toBeUndefined();
   });
 
-  it("an exclusion map of a descendant needs nothing stripped", () => {
+  it("an exclusion map of a descendant is un-excluded for the hook and only that descendant is stripped", () => {
     const { plan, out } = stripped({ "address.zip": 0 });
-    expect(plan.requiresOnly).toEqual([]);
-    expect(out.address).toEqual(row().address);
+    expect(plan.select).toBeUndefined();
+    expect(plan.requiresOnly).toEqual(["address.zip"]);
+    const { zip: _zip, ...rest } = row().address;
+    expect(out.address).toEqual(rest);
   });
 });
