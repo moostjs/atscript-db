@@ -106,3 +106,49 @@ describe("DecorationPlanner: a client-selected descendant of a required path", (
     expect(out.address).toEqual(rest);
   });
 });
+
+describe("stripDecorations through arrays", () => {
+  const read = (path: string[], selected: string[][] = [["id"]], keep: string[][] = []) =>
+    ({
+      served: new Set<string>(),
+      dropKeys: [],
+      dropPaths: [path],
+      keepPaths: [keep],
+      selectedPaths: selected,
+    }) as never;
+  const strip = (row: Record<string, unknown>, path: string[], selected?: string[][]) => {
+    stripDecorations([row], read(path, selected));
+    return row;
+  };
+
+  it("an array every element of which the strip emptied goes with its parent key", () => {
+    expect(strip({ id: 1, items: [{ qty: 1 }, { qty: 2 }] }, ["items", "qty"])).toEqual({ id: 1 });
+  });
+
+  it("an empty array is a hollow parent too", () => {
+    expect(strip({ id: 1, items: [] }, ["items", "qty"])).toEqual({ id: 1 });
+  });
+
+  it("a selected sibling keeps the elements (and their parent)", () => {
+    const out = strip(
+      { id: 1, items: [{ sku: "a", qty: 1 }] },
+      ["items", "qty"],
+      [["items", "sku"]],
+    );
+    expect(out.items).toEqual([{ sku: "a" }]);
+  });
+
+  it("an element the strip emptied leaves a mixed array", () => {
+    expect(strip({ id: 1, m: [1, { qty: 5 }] }, ["m", "qty"])).toEqual({ id: 1, m: [1] });
+  });
+
+  it("a nested array of emptied objects goes whole", () => {
+    expect(strip({ id: 1, m: [[{ qty: 5 }]] }, ["m", "qty"])).toEqual({ id: 1 });
+    expect(strip({ id: 1, m: [1, [{ qty: 5 }]] }, ["m", "qty"])).toEqual({ id: 1, m: [1] });
+  });
+
+  it("a client-selected parent keeps its emptied shape", () => {
+    const out = strip({ id: 1, items: [{ qty: 1 }] }, ["items", "qty"], [["items"]]);
+    expect(out.items).toEqual([{}]);
+  });
+});

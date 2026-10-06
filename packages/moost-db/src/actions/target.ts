@@ -5,7 +5,13 @@ import { ApplyDecorators, Resolve } from "moost";
 import { getAtscriptDbMate } from "../mate";
 import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
-import { dbActionIdsSlot, echoRequests, requestCount, requestCountOf } from "./id-cache";
+import {
+  dbActionIdsSlot,
+  dbActionRequestIdsKey,
+  echoRequests,
+  requestCount,
+  requestCountOf,
+} from "./id-cache";
 import {
   DEFAULT_QUERY_TARGET_BATCH_SIZE,
   dbActionSkippedKey,
@@ -17,7 +23,7 @@ import { asFetchTable, dbActionRowsSlot, seedActionFields } from "./row-cache";
 import { applyActionScope, dbActionOverlaySlot } from "./row-scope";
 import { errorMessage, errorStatus } from "./action-target-error";
 import { actionHandlerStarted } from "./handler-start";
-import { findRowsByIds, identityKey } from "./rows-by-id";
+import { findRowsByIds, identityKey, type TRequestedId } from "./rows-by-id";
 import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
 
 /**
@@ -105,6 +111,9 @@ class TargetBase {
   readonly skipped: TSkippedRow[] = [];
   readonly failed: { id: Record<string, unknown>; reason: string }[] = [];
   processed = 0;
+  /** Identities of every id handed to the handler so far. */
+  protected readonly handedKeys = new Set<string>();
+  private readonly failedKeys = new Set<string>();
 
   constructor(
     readonly kind: "ids" | "query",
@@ -113,7 +122,17 @@ class TargetBase {
     protected readonly ctx: EventContext,
   ) {}
 
+  /**
+   * One failure per id, whether or not `resolveRowIds` rewrote any id: a
+   * second `fail()` of the same identity is ignored (the first reason stands),
+   * so `failed` and `processed` agree in both modes.
+   */
   fail(id: Record<string, unknown>, reason: string): void {
+    const k = identityKey(id);
+    if (k !== undefined) {
+      if (this.failedKeys.has(k)) return;
+      this.failedKeys.add(k);
+    }
     this.failed.push({ id, reason });
   }
 
@@ -122,6 +141,10 @@ class TargetBase {
    * row count twice, like two distinct rows).
    */
   protected countProcessed(ids: readonly Record<string, unknown>[]): void {
+    for (const id of ids) {
+      const k = identityKey(id);
+      if (k !== undefined) this.handedKeys.add(k);
+    }
     this.processed += requestCountOf(this.ctx, ids);
   }
 
@@ -237,29 +260,56 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
   }
 
   /**
-   * The summary of a run the handler failed after it received a batch: the
-   * batch it held is uncertain (moved to `failed` with the error's message),
-   * the rows not reached are `failed` as `"not run"`, `aborted` set.
+   * The summary of a run the handler failed after it received a batch, judged
+   * per REQUEST id by its own request position — an alias after the abort
+   * point is "not run" even when its row was judged (run, skipped) earlier,
+   * exactly as the same request of distinct rows would be:
+   * - at or after the position the run stopped at: `failed` as `"not run"`;
+   * - before it, a row the handler failed itself: its reason;
+   * - before it, the batch the handler held (uncertain): the error's message;
+   * - before it, a row the gate skipped: `skipped`; a row that ran: `processed`.
+   * `aborted` is set.
    */
   abort(error: unknown): TDbActionTargetSummary {
     const message = errorMessage(error);
-    const holding = this.current ?? [];
-    const reported = new Set(this.failed.map((f) => identityKey(f.id)));
-    const uncertain = holding.filter((id) => !reported.has(identityKey(id)));
-    const failed = [
-      ...this.failed,
-      ...uncertain.map((id) => ({ id, reason: message })),
-      ...this.source.ids.slice(this.next).map((id) => ({ id, reason: "not run" })),
-    ];
-    const base = this.summaryOf(failed);
+    const ids = this.source.ids;
+    const requests: readonly TRequestedId[] = this.ctx.has(dbActionRequestIdsKey)
+      ? this.ctx.get(dbActionRequestIdsKey)
+      : ids.map((id, i) => ({ id, key: identityKey(id) ?? `#${i}` }));
+    let cutoff = requests.length;
+    if (this.next < ids.length) {
+      if (this.ctx.has(dbActionRequestIdsKey)) {
+        const at = identityKey(ids[this.next]!);
+        const first = requests.findIndex((r) => r.key === at);
+        if (first >= 0) cutoff = first;
+      } else {
+        cutoff = this.next;
+      }
+    }
+    const held = new Set((this.current ?? []).map((id) => identityKey(id)));
+    const failedBy = new Map(this.failed.map((f) => [identityKey(f.id), f]));
+    const skippedBy = new Map<string | undefined, TSkippedRow>();
+    for (const row of this.skipped) {
+      const k = identityKey(row.id);
+      if (!skippedBy.has(k)) skippedBy.set(k, row);
+    }
+    const failed: { id: Record<string, unknown>; reason: string }[] = [];
+    const skipped: TSkippedRow[] = [];
+    let processed = 0;
+    requests.forEach((r, i) => {
+      const own = failedBy.get(r.key);
+      const skip = skippedBy.get(r.key);
+      if (i >= cutoff) failed.push({ id: r.id, reason: "not run" });
+      else if (own) failed.push({ id: r.id, reason: own.reason });
+      else if (held.has(r.key)) failed.push({ id: r.id, reason: message });
+      else if (skip) skipped.push({ ...skip, id: r.id });
+      else if (this.handedKeys.has(r.key)) processed++;
+    });
     return {
-      ...base,
-      processed: Math.max(
-        0,
-        this.processed -
-          echoRequests(this.ctx, this.failed).length -
-          requestCountOf(this.ctx, uncertain),
-      ),
+      matched: this.matched,
+      processed,
+      skipped,
+      failed,
       aborted: { status: errorStatus(error), message },
     };
   }

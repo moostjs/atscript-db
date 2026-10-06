@@ -3163,14 +3163,20 @@ export class AsDbReadableController<
     const { own, id: resolved } = await this._availableResolved(idObj);
     if (!this._hasDelegations) return own;
     return this._delegatedAvailable(own, (d) =>
-      this._sourceIdOf(d, resolved, query, Object.keys(idObj)),
+      this._sourceIdOf(d, resolved, query, this._identificationFields()),
     );
+  }
+
+  /** Every field of every identification (primary key and unique indexes) the view addresses a row by. */
+  private _identificationFields(): string[] {
+    return [...new Set(this.idSource.identifications.flatMap((i) => i.fields))];
   }
 
   /**
    * A delegation's source id: each source id field from the row's mapped path
-   * of the RESOLVED `id`. A path the request's identification named
-   * (`consumed`) is NEVER taken from the raw `?` query: that value may be an
+   * of the RESOLVED `id`. A path of ANY of the view's identifications
+   * (`consumed` — not just the one the request matched: `?id=1&code=T-OLD` names
+   * `code` too) is NEVER taken from the raw `?` query: that value may be an
    * alias `resolveRowIds` rewrote, and the source would see (and answer for)
    * it. Paths outside the identification fall back to `fallback`'s (the raw
    * query's) value; `undefined` when a path has none.

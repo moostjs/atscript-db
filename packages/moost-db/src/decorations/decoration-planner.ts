@@ -303,10 +303,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** An object without keys, or an array holding nothing but such objects (what a strip left of a parent). */
+/** An object without keys, or an array (of any nesting) holding nothing but such values (what a strip left of a parent). */
 function isHollow(value: unknown): boolean {
-  if (Array.isArray(value))
-    return value.every((el) => isObject(el) && Object.keys(el).length === 0);
+  if (Array.isArray(value)) return value.every((el) => isHollow(el));
   return isObject(value) && Object.keys(value).length === 0;
 }
 
@@ -324,7 +323,17 @@ function deleteDescending(
   owned: (prefix: readonly string[]) => boolean,
 ): void {
   if (Array.isArray(value)) {
-    for (const el of value) deleteDescending(el, parts, depth, clean, owned);
+    // an element the strip emptied leaves the array (the array itself, once
+    // nothing but hollow elements remain, is dropped by its parent)
+    const dropEmptied = clean && depth > 0 && !owned(parts.slice(0, depth));
+    for (let i = value.length - 1; i >= 0; i--) {
+      const el = value[i];
+      const wasHollow = el !== null && typeof el === "object" && isHollow(el);
+      deleteDescending(el, parts, depth, clean, owned);
+      if (dropEmptied && !wasHollow && el !== null && typeof el === "object" && isHollow(el)) {
+        value.splice(i, 1);
+      }
+    }
     return;
   }
   if (!isObject(value)) return;
