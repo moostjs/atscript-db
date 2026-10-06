@@ -62,3 +62,12 @@ export interface IgSeq {
 
     label: string
 }
+
+@db.table 'ig_uuids'
+export interface IgUuid {
+    @meta.id
+    @db.pg.type 'UUID'
+    id: string
+
+    label: string
+}

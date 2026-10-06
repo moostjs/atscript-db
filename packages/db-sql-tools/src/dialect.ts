@@ -1,4 +1,4 @@
-import type { DbControls, TResolvedBucket, TViewJsonType } from "@atscript/db";
+import type { DbControls, TDbFieldMeta, TResolvedBucket, TViewJsonType } from "@atscript/db";
 
 export interface TSqlFragment {
   sql: string;
@@ -102,14 +102,17 @@ export interface SqlDialect {
    */
   booleanAggregates?: { min: string; max: string };
   /**
-   * Renders the type-agnostic "any value of the group" pick over an already
-   * rendered column — what a `first` / `last` derived column (constant within
-   * its group) aggregates through. `MIN` does not exist for every column type
-   * (PostgreSQL: uuid, bytea, point, …), so those dialects set it
-   * (PostgreSQL `(ARRAY_AGG(x))[1]`, MySQL `ANY_VALUE(x)`). Absent: `MIN(x)`.
+   * Renders the "any value of the group" pick over an already rendered column
+   * — what a `first` / `last` derived column (constant within its group)
+   * aggregates through — for the column's source `field` (`undefined` when
+   * unknown). The dialect picks the cheapest aggregate its engine has for the
+   * column's type: a streaming `MIN` where one exists, a type-agnostic form
+   * only where it does not (PostgreSQL: `MIN` for ordered types, `BOOL_AND`
+   * for a boolean, `(ARRAY_AGG(x))[1]` for uuid, bytea, point, json, …).
+   * Absent: `MIN(x)`.
    * @since 0.1.148
    */
-  anyValue?(expr: string): string;
+  anyValue?(expr: string, field: TDbFieldMeta | undefined): string;
   /**
    * Maps a driver error of a grouped query to the `DbError` it means — a
    * numeric overflow (`arithOverflowError` when the query has arithmetic

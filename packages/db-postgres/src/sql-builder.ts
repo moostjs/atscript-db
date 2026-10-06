@@ -154,8 +154,8 @@ export const pgDialect: SqlDialect = {
   calendarBucket: pgCalendarBucket,
   jsonExtract: pgJsonExtract,
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE PRECISION)`,
-  // `first` / `last` derived columns: no MIN over uuid / bytea / point / …
-  anyValue: (expr: string) => `(ARRAY_AGG(${expr}))[1]`,
+  // `first` / `last` derived columns: a streaming MIN where the type has one
+  anyValue: pgAnyValue,
   // No MIN / MAX over a boolean
   booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" },
   /**
@@ -457,6 +457,24 @@ function intTypeFromTags(tags: Set<string> | undefined): string {
     return "BIGINT";
   }
   return "INTEGER";
+}
+
+/** Physical types `MIN` aggregates (base name, lower-cased): the streaming pick applies. */
+const MIN_ORDERED_TYPE =
+  /^(smallint|int2|integer|int|int4|bigint|int8|real|float4|double precision|float8|numeric|decimal|money|text|varchar|character varying|char|character|bpchar|date|time|timetz|timestamp|timestamptz|interval|time (with|without) time zone|timestamp (with|without) time zone)\b/;
+
+/**
+ * The "any value of the group" pick of a `first` / `last` derived column
+ * (constant within its group) over a PostgreSQL column: `MIN` (streaming — one
+ * accumulator per group) for the ordered types, `BOOL_AND` for a boolean, and
+ * `(ARRAY_AGG(x))[1]` only where the physical type has no `MIN` (uuid, bytea,
+ * point, json / jsonb, citext, arrays, `@db.pg.type` overrides, …) or is unknown.
+ */
+export function pgAnyValue(expr: string, field: TDbFieldMeta | undefined): string {
+  const type = field ? pgTypeFromField(field).trim().toLowerCase() : "";
+  if (/^bool(ean)?\b/.test(type)) return `BOOL_AND(${expr})`;
+  if (!type.endsWith("[]") && MIN_ORDERED_TYPE.test(type)) return `MIN(${expr})`;
+  return `(ARRAY_AGG(${expr}))[1]`;
 }
 
 /**

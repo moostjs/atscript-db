@@ -67,7 +67,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
       { logger, onClose: () => driver.close() },
     );
     const result = await new SchemaSync(space).run(
-      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice, fx.IgSeq],
+      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgPrice, fx.IgSeq, fx.IgUuid],
       {
         force: true,
       },
@@ -86,6 +86,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
     await t(fx.IgAuto).deleteMany({});
     await t(fx.IgPrice).deleteMany({});
     await t(fx.IgSeq).deleteMany({});
+    await t(fx.IgUuid).deleteMany({});
     statements.length = 0;
   });
 
@@ -187,6 +188,26 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
     expect(result.insertedIds).toEqual([stored[0].id, stored[2].id]);
     // 1 batched statement + 3 single-row retries
     expect(statements.filter((s) => s.startsWith("INSERT"))).toHaveLength(4);
+  });
+
+  it("uuid keys written in another letter case: the stored row is the earlier one, the mapping never swaps", async () => {
+    const uuids = t(fx.IgUuid);
+    const upper = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const result = await uuids.insertMany(
+      [
+        { id: upper, label: "first" },
+        { id: upper.toLowerCase(), label: "second" },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", label: "other" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.inserted).toEqual([0, 2]);
+    expect(result.conflicts).toEqual([1]);
+    const first = (await uuids.findOne({
+      filter: { id: upper.toLowerCase() },
+      controls: {},
+    })) as any;
+    expect(first.label).toBe("first");
   });
 
   it("a mappable batch stays ONE statement", async () => {

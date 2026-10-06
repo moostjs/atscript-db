@@ -143,7 +143,12 @@ function aliasSqlMap(dialect: SqlDialect, controls: DbControls): Map<string, str
   (select?.firstLast ?? []).forEach((fl, i) => {
     // constant within its group: any value of it, whatever the column type
     const col = quote(firstLastColumn(i));
-    map.set(fl.alias, dialect.anyValue ? dialect.anyValue(col) : renderAggCall("min", col));
+    map.set(
+      fl.alias,
+      dialect.anyValue
+        ? dialect.anyValue(col, select?.sources.get(fl.column))
+        : renderAggCall("min", col),
+    );
   });
   for (const e of select?.exprs ?? []) {
     map.set(

@@ -211,6 +211,15 @@ describe("mapIgnoredBatch", () => {
     expect(mapIgnoredBatch([{ v: 5 }, { v: 7 }], [{ v: 7 }], [["v"]])).toEqual([-1, 0]);
   });
 
+  it("keys differing only in letter case (uuid output is lower-cased) are ambiguous, never swapped", () => {
+    // [AAA, aaa] on a uuid key: the first is inserted (returned as "aaa"), the second skipped
+    expect(mapIgnoredBatch([{ u: "AAA" }, { u: "aaa" }], [{ u: "aaa" }], [["u"]])).toBeUndefined();
+    // the written-lower-case row is the returned one: exact
+    expect(mapIgnoredBatch([{ u: "aaa" }, { u: "AAA" }], [{ u: "aaa" }], [["u"]])).toEqual([0, -1]);
+    // unrelated keys still map exactly
+    expect(mapIgnoredBatch([{ u: "AAA" }, { u: "bbb" }], [{ u: "bbb" }], [["u"]])).toEqual([-1, 0]);
+  });
+
   it("compares across Date / bigint / number representations", () => {
     const d = new Date("2026-01-01T00:00:00.000Z");
     expect(mapIgnoredBatch([{ id: 1n }, { id: 2n }], [{ id: 2 }], [["id"]])).toEqual([-1, 0]);
