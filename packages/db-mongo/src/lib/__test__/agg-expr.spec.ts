@@ -6,6 +6,7 @@ import {
   buildAggregatePipeline,
   buildCountPipeline,
   emptyGroupRow,
+  emptyGroupStages,
 } from "../../agg";
 
 // Pipeline shapes of query-time arithmetic and first / last on MongoDB
@@ -248,11 +249,20 @@ describe("emptyGroupRow — an ungrouped aggregate over no rows is one group", (
     expect(row).toEqual({ n: 0, d: 0, est: null, rev: null, t: null, n1: 1 });
   });
 
-  it("is undefined for a grouped query, a $having, a $skip, or nothing computed", () => {
+  it("is undefined for a grouped query or nothing computed; $having / $skip / $limit become stages over the row", () => {
     const select = [{ $fn: "count", $field: "*", $as: "n" }];
     expect(emptyGroupRow(query(select, {}))).toBeUndefined();
-    expect(emptyGroupRow(ungrouped(select, {}, { $having: { n: { $gt: 0 } } }))).toBeUndefined();
-    expect(emptyGroupRow(ungrouped(select, {}, { $skip: 1 }))).toBeUndefined();
     expect(emptyGroupRow(ungrouped([], {}))).toBeUndefined();
+    const having = ungrouped(select, {}, { $having: { n: { $gte: 0 } }, $skip: 1, $limit: 5 });
+    const row = emptyGroupRow(having)!;
+    expect(row).toEqual({ n: 0 });
+    expect(emptyGroupStages(having, row, false)!.slice(3)).toEqual([
+      { $match: { n: { $gte: 0 } } },
+      { $skip: 1 },
+      { $limit: 5 },
+    ]);
+    // a count ignores $skip / $limit, keeps $having
+    expect(emptyGroupStages(having, row, true)!.slice(3)).toEqual([{ $match: { n: { $gte: 0 } } }]);
+    expect(emptyGroupStages(ungrouped(select, {}), row, false)).toBeUndefined();
   });
 });

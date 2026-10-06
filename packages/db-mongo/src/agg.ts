@@ -286,14 +286,14 @@ export function buildAggregatePipeline(
  * The row an UNGROUPED aggregate yields over no input rows: a pipeline's
  * `$group` emits nothing there, while SQL (and the memory adapter) always
  * yield the one group — counts 0, every other aggregate, `first` / `last` and
- * the expressions over them `null`. `undefined` when the query is grouped,
- * has a `$having` (not evaluable here) or `$skip`, or computes nothing.
+ * the expressions over them `null`. `undefined` when the query is grouped or
+ * computes nothing. The row is BEFORE `$having` / `$skip` — see
+ * {@link emptyGroupStages}.
  */
 export function emptyGroupRow(query: DbQuery): Document | undefined {
   const controls = query.controls;
   const select = controls?.$select;
   if (!controls || (controls.$groupBy as string[] | undefined)?.length) return undefined;
-  if (controls.$having || controls.$skip) return undefined;
   if (!select?.computedAliases.length) return undefined;
   const row: Document = {};
   for (const expr of select.aggregates ?? []) {
@@ -305,6 +305,35 @@ export function emptyGroupRow(query: DbQuery): Document | undefined {
     row[e.alias] = evaluateExpr(e.expr, (name) => row[name]);
   }
   return row;
+}
+
+/**
+ * The pipeline that applies the query's `$having` (and, for the row query, `$skip`
+ * and `$limit`) to the {@link emptyGroupRow} — over a single synthetic document
+ * (a `$facet` emits exactly one document, even from an empty input), so the
+ * server evaluates `$having` exactly as it does for a real group. `undefined`
+ * when there is nothing to apply (the row stands). Its result is empty when the
+ * row is filtered out.
+ */
+export function emptyGroupStages(
+  query: DbQuery,
+  row: Document,
+  forCount: boolean,
+): Document[] | undefined {
+  const controls = query.controls;
+  const having = controls?.$having;
+  const skip = forCount ? 0 : (controls?.$skip ?? 0);
+  const limit = forCount ? 0 : (controls?.$limit ?? 0);
+  if (!having && !skip && !limit) return undefined;
+  const stages: Document[] = [
+    { $match: { _id: { $in: [] } } },
+    { $facet: { one: [] } },
+    { $replaceRoot: { newRoot: { $literal: row } } },
+  ];
+  if (having) stages.push({ $match: buildMongoFilter(having) });
+  if (skip) stages.push({ $skip: skip });
+  if (limit) stages.push({ $limit: limit });
+  return stages;
 }
 
 /**

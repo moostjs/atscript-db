@@ -337,8 +337,21 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   override async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    const { aggregateOptions, buildAggregatePipeline, buildCountPipeline, emptyGroupRow } =
-      await import("../agg");
+    const {
+      aggregateOptions,
+      buildAggregatePipeline,
+      buildCountPipeline,
+      emptyGroupRow,
+      emptyGroupStages,
+    } = await import("../agg");
+    // The one group of an ungrouped aggregate over no rows, after `$having` / `$skip` / `$limit`.
+    const emptyGroup = async (forCount: boolean) => {
+      const row = emptyGroupRow(query);
+      if (!row) return undefined;
+      const stages = emptyGroupStages(query, row, forCount);
+      if (!stages) return row;
+      return (await wrapInvalidQuery(() => this.aggregatePipeline(stages).toArray()))[0];
+    };
 
     // Grouped-search contract: see `resolveAggregateSearch`. Resolved here
     // because it needs the adapter's index map, and shared by both builders so
@@ -352,7 +365,7 @@ export class MongoAdapter extends BaseDbAdapter {
         this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
       );
       // An ungrouped aggregate over no rows is still one group (the row query's rule).
-      return result.length > 0 ? result : [{ count: emptyGroupRow(query) ? 1 : 0 }];
+      return result.length > 0 ? result : [{ count: (await emptyGroup(true)) ? 1 : 0 }];
     }
 
     const pipeline = buildAggregatePipeline(query, searchStage, this._predicateFilterOpts);
@@ -361,7 +374,7 @@ export class MongoAdapter extends BaseDbAdapter {
       this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
     );
     // An ungrouped aggregate over no rows is still one group (SQL's rule).
-    const empty = rows.length === 0 ? emptyGroupRow(query) : undefined;
+    const empty = rows.length === 0 ? await emptyGroup(false) : undefined;
     return empty ? [empty] : rows;
   }
 

@@ -203,6 +203,16 @@ describe("insertMany onConflict: ignore", () => {
     expect(itemsAdapter.ignoredBatches).toHaveLength(0);
   });
 
+  it('a key-only TO object and the row\'s own foreign key agree across representations (7 vs "7")', async () => {
+    const { items, orgs, itemsAdapter } = setup();
+    await orgs.insertOne({ id: 9, name: "o" } as any);
+    const result = await items.insertMany([row(1, "a", { org: { id: 9 }, orgId: "9" })] as any, {
+      onConflict: "ignore",
+    });
+    expect(result.conflicts).toEqual([]);
+    expect(itemsAdapter.ignoredBatches[0]!.map((r) => "org" in r)).toEqual([false]);
+  });
+
   it("a TO object with more than the key still creates a parent and is rejected", async () => {
     const { items } = setup();
     const err = await items

@@ -1601,7 +1601,7 @@ export class AtscriptDbTable<
         if (!byKey) continue;
         fk!.localFields.forEach((local, i) => {
           const value = (nav as Record<string, unknown>)[fk!.targetFields[i]!];
-          if (item[local] !== undefined && item[local] !== null && item[local] !== value) {
+          if (item[local] !== undefined && item[local] !== null && !sameKey(item[local], value)) {
             throw new DbError("INVALID_QUERY", [
               { path: navField, message: `"${navField}" and "${local}" name different parents` },
             ]);

@@ -537,6 +537,18 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
         ["a $having that holds", { $select: [count], $having: { n: { $gt: 0 } } }, {}, 1],
         ["a $having that fails", { $select: [count], $having: { n: { $gt: 100 } } }, {}, 0],
         [
+          "over no rows, a $having that holds",
+          { $select: [count], $having: { n: { $gte: 0 } } },
+          { status: "nope" },
+          1,
+        ],
+        [
+          "over no rows, a $having that fails",
+          { $select: [count], $having: { n: { $gt: 0 } } },
+          { status: "nope" },
+          0,
+        ],
+        [
           "a first() alias in $having",
           {
             $select: [{ $fn: "first", $field: "id", $as: "f" }],
@@ -555,6 +567,14 @@ export function defineAggregateExprCases(name: string, table: () => TAggregateEx
           expect(counted).toEqual([{ count: expected }]);
         });
       }
+    });
+
+    it("ungrouped, over no rows: the one group is paged like any other ($skip drops it, $limit keeps it)", async () => {
+      const grouped = { $groupBy: [], $select: [count] };
+      expect(await run({ ...grouped, $skip: 1 }, { status: "nope" })).toEqual([]);
+      expect(await run({ ...grouped, $skip: 1 })).toEqual([]);
+      expect(await run({ ...grouped, $limit: 1 }, { status: "nope" })).toEqual([{ n: 0 }]);
+      expect(await run({ ...grouped, $skip: 0 }, { status: "nope" })).toEqual([{ n: 0 }]);
     });
 
     it("ungrouped, over rows: one row of the whole table", async () => {
