@@ -320,7 +320,7 @@ The column list is the union of every row's fields, and a row that omits a colum
 
 ### Aggregate expressions {#aggregate-expressions}
 
-[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) run in SQL. A double overflow (SQLSTATE `22003`) is `INVALID_QUERY` (`Arithmetic overflow`), not a 500. `min` / `max` / `first` / `last` of a boolean field render as `BOOL_AND` / `BOOL_OR` (PostgreSQL has no `MIN(boolean)`). A `first` / `last` of a number, text, decimal or timestamp column is picked with a streaming `MIN` (one accumulator per group); only a column whose physical type has no `MIN` (`uuid`, `bytea`, `point`, `json` / `jsonb`, `citext`, arrays, a `@db.pg.type` override) uses `(ARRAY_AGG(x))[1]`, which holds one element per row of the group in memory — prefer an ordered type for `first` / `last` over huge groups.
+[Arithmetic and `first` / `last`](/api/aggregation#arithmetic-expressions) run in SQL. A double overflow (SQLSTATE `22003`) is `INVALID_QUERY` (`Arithmetic overflow`), not a 500. `min` / `max` / `first` / `last` of a boolean field render as `BOOL_AND` / `BOOL_OR` (PostgreSQL has no `MIN(boolean)`). A `first` / `last` of a number, text, decimal or timestamp column is picked with a streaming `MIN` (one accumulator per group); an array column (`@db.pg.type 'x[]'`) is picked with `MIN` over the array (its element type must be orderable); only a column whose physical type has no `MIN` (`uuid`, `bytea`, `point`, `json` / `jsonb`, `citext`, a `@db.pg.type` override) uses `(ARRAY_AGG(x))[1]`, which holds one element per row of the group in memory — prefer an ordered type for `first` / `last` over huge groups.
 
 ## Schema Support
 

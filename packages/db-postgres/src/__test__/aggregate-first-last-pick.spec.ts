@@ -64,12 +64,13 @@ describe("PostgreSQL first / last pick", () => {
     expect(pgAnyValue("x", f("string", "VARCHAR(20)"))).toBe("MIN(x)");
     expect(pgAnyValue("x", f("number", "NUMERIC(10,2)"))).toBe("MIN(x)");
     expect(pgAnyValue("x", f("string", "TIMESTAMP WITH TIME ZONE"))).toBe("MIN(x)");
-    for (const type of ["UUID", "BYTEA", "JSONB", "POINT", "CITEXT", "TEXT[]", "INET6"]) {
+    for (const type of ["UUID", "BYTEA", "JSONB", "POINT", "CITEXT", "INET6"]) {
       expect(pgAnyValue("x", f("string", type)), type).toBe("(ARRAY_AGG(x))[1]");
     }
-    // an array of booleans has no BOOL_AND (42883): the array check comes first
-    for (const type of ["boolean[]", "bool[]", "BOOLEAN[]"]) {
-      expect(pgAnyValue("x", f("array", type)), type).toBe("(ARRAY_AGG(x))[1]");
+    // an array column picks through MIN(anyarray): ARRAY_AGG over arrays builds a 2-D array
+    // (`[1]` is NULL) and rejects NULL / empty arrays; an array of booleans has no BOOL_AND (42883)
+    for (const type of ["TEXT[]", "boolean[]", "bool[]", "BOOLEAN[]", "integer[]", "UUID[]"]) {
+      expect(pgAnyValue("x", f("array", type)), type).toBe("MIN(x)");
     }
     expect(pgAnyValue("x", f("boolean", "BOOL"))).toBe("BOOL_AND(x)");
     expect(pgAnyValue("x", undefined)).toBe("(ARRAY_AGG(x))[1]");

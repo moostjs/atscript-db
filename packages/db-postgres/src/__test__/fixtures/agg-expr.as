@@ -41,3 +41,20 @@ export interface AeRef {
 
     at: number
 }
+
+// first / last over native array columns (externally populated)
+@db.table 'ae_arrays'
+export interface AeArray {
+    @meta.id
+    id: number
+
+    grp: number
+
+    @db.pg.type 'TEXT[]'
+    tags?: string
+
+    @db.pg.type 'BOOLEAN[]'
+    flags?: string
+
+    at: number
+}

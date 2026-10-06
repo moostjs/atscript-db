@@ -67,7 +67,7 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
     url.pathname = `/${DB}`;
     driver = new PgDriver({ connectionString: url.toString() });
     space = new DbSpace(() => new PostgresAdapter(driver));
-    const result = await syncSchema(space, [fx.AeIssue, fx.AeRef]);
+    const result = await syncSchema(space, [fx.AeIssue, fx.AeRef, fx.AeArray]);
     expect(result.status).toBe("synced");
     await (issues() as any).insertMany(AE_ROWS);
   });
@@ -105,6 +105,39 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
       expect(rows).toEqual([
         { grp: 1, firstRef: A, lastRef: B },
         { grp: 2, firstRef: B, lastRef: B },
+      ]);
+    });
+  });
+
+  describe("first / last over a native array column", () => {
+    it("picks a real array (not the 2-D ARRAY_AGG slice), skipping NULL and empty arrays", async () => {
+      const arrays = space.getTable(fx.AeArray) as any;
+      // the adapter's write path JSON-encodes arrays, so populate the way an external writer does
+      await driver.run(
+        `INSERT INTO "ae_arrays" ("id", "grp", "tags", "flags", "at") VALUES
+         (1, 1, ARRAY['b','c'], ARRAY[true,false], 2),
+         (2, 1, ARRAY['a'], ARRAY[false], 1),
+         (3, 1, NULL, NULL, 3),
+         (4, 1, '{}', '{}', 4),
+         (5, 2, ARRAY['z'], ARRAY[true], 1)`,
+      );
+      const rows = await arrays.aggregate({
+        filter: {},
+        controls: {
+          $groupBy: ["grp"],
+          $select: [
+            "grp",
+            { $fn: "first", $field: "tags", $as: "tag" },
+            { $fn: "first", $field: "flags", $as: "flag" },
+          ],
+          $rowOrder: { at: 1 },
+          $sort: { grp: 1 },
+        },
+      });
+      // the row-ordered first row's array; the NULL and empty rows of the group must not break the pick
+      expect(rows).toEqual([
+        { grp: 1, tag: ["a"], flag: [false] },
+        { grp: 2, tag: ["z"], flag: [true] },
       ]);
     });
   });

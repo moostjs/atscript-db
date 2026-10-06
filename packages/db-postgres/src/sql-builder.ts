@@ -466,14 +466,17 @@ const MIN_ORDERED_TYPE =
 /**
  * The "any value of the group" pick of a `first` / `last` derived column
  * (constant within its group) over a PostgreSQL column: `MIN` (streaming — one
- * accumulator per group) for the ordered types, `BOOL_AND` for a boolean, and
- * `(ARRAY_AGG(x))[1]` only where the physical type has no `MIN` (uuid, bytea,
- * point, json / jsonb, citext, arrays, `@db.pg.type` overrides, …) or is unknown.
+ * accumulator per group) for the ordered types and for every array column
+ * (`MIN(anyarray)`; `ARRAY_AGG` over arrays builds a 2-D array and rejects NULL /
+ * empty ones), `BOOL_AND` for a boolean, and `(ARRAY_AGG(x))[1]` only where the
+ * physical type has no `MIN` (uuid, bytea, point, json / jsonb, citext,
+ * `@db.pg.type` overrides, …) or is unknown.
  */
 export function pgAnyValue(expr: string, field: TDbFieldMeta | undefined): string {
   const type = field ? pgTypeFromField(field).trim().toLowerCase() : "";
-  if (!type.endsWith("[]") && /^bool(ean)?\b/.test(type)) return `BOOL_AND(${expr})`;
-  if (!type.endsWith("[]") && MIN_ORDERED_TYPE.test(type)) return `MIN(${expr})`;
+  if (type.endsWith("[]")) return `MIN(${expr})`;
+  if (/^bool(ean)?\b/.test(type)) return `BOOL_AND(${expr})`;
+  if (MIN_ORDERED_TYPE.test(type)) return `MIN(${expr})`;
   return `(ARRAY_AGG(${expr}))[1]`;
 }
 
