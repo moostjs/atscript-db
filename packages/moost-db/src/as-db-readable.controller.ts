@@ -340,7 +340,7 @@ export class AsDbReadableController<
     const index = new FieldCapabilityIndex(
       this.readable,
       this._writeOnlySet,
-      this._decorations?.requires,
+      this._decorations?.visibleOn,
     );
     this._capabilities = index;
     return index;
@@ -379,6 +379,8 @@ export class AsDbReadableController<
   private readonly _derivedSource: ReadonlyMap<string, readonly string[]>;
   /** `@db.writeOnly` paths of `$with` target readables, collected once per target. */
   private readonly _targetWriteOnly = new WeakMap<object, ReadonlySet<string>>();
+  /** Own leaf paths per readable (bound + `$with` targets), see {@link _leavesOf}. */
+  private readonly _targetLeaves = new WeakMap<object, readonly string[]>();
   private _indexFieldPathsCache?: readonly TDbIndexFieldPaths[];
   /** {@link _nativeSearch} per request, keyed by the request's parsed controls. */
   private readonly _nativeSearchByRequest = new WeakMap<object, boolean>();
@@ -961,11 +963,11 @@ export class AsDbReadableController<
       const sealed = vis.sealedFor(target, `${path}.`);
       if (sealed.size === 0) return undefined;
       const sub = (nested.$select ?? rel.$select) as UniqueryControls["$select"] | undefined;
-      return { ...nested, $select: this._sealSelect(sub, sealed) };
+      return { ...nested, $select: this._sealSelect(sub, sealed, target) };
     });
     const out: TSealedControls = {
       ...controls,
-      $select: this._sealSelect(select, vis.sealedFor(this.readable)),
+      $select: this._sealSelect(select, vis.sealedFor(this.readable), this.readable),
     };
     if ($with !== controls.$with) out.$with = $with;
     return out;
@@ -2063,11 +2065,14 @@ export class AsDbReadableController<
   /**
    * `select` without the `sealed` paths (see {@link _sealControls}); an
    * exclusion of them is forced when there is no projection, or when every
-   * requested path was sealed.
+   * requested path was sealed. An inclusion naming a PARENT of a sealed path
+   * (`secret` over a write-only `secret.hash`) is replaced by the parent's
+   * unsealed leaves, so a sealed descendant never rides along with it.
    */
   private _sealSelect(
     select: UniqueryControls["$select"] | undefined,
     writeOnly: ReadonlySet<string>,
+    readable: AtscriptDbReadable<any>,
   ): UniqueryControls["$select"] | undefined {
     if (writeOnly.size === 0) return select;
     const exclusion = (): UniqueryControls["$select"] => {
@@ -2076,12 +2081,28 @@ export class AsDbReadableController<
       return out as UniqueryControls["$select"];
     };
     if (select === undefined) return exclusion();
-    if (Array.isArray(select)) {
-      const kept = (select as unknown[]).filter((item) =>
-        typeof item === "string"
-          ? !writeOnly.has(item)
-          : !writeOnly.has((item as { $field?: string }).$field ?? ""),
+    // An inclusion path stays when unsealed; a parent of a sealed path becomes its unsealed leaves.
+    const expand = (path: string): string[] => {
+      if (writeOnly.has(path)) return [];
+      const prefix = `${path}.`;
+      let parent = false;
+      for (const sealed of writeOnly) {
+        if (sealed.startsWith(prefix)) {
+          parent = true;
+          break;
+        }
+      }
+      if (!parent) return [path];
+      return this._leavesOf(readable).filter(
+        (leaf) => leaf.startsWith(prefix) && selfOrAncestor(leaf, writeOnly) === undefined,
       );
+    };
+    if (Array.isArray(select)) {
+      const kept: unknown[] = [];
+      for (const item of select as unknown[]) {
+        if (typeof item === "string") kept.push(...expand(item));
+        else if (!writeOnly.has((item as { $field?: string }).$field ?? "")) kept.push(item);
+      }
       // Everything requested was sealed — an empty inclusion means "all
       // fields", so fall back to the exclusion form instead.
       return kept.length > 0 ? (kept as UniqueryControls["$select"]) : exclusion();
@@ -2089,12 +2110,37 @@ export class AsDbReadableController<
     const entries = Object.entries(select as Record<string, 0 | 1>);
     if (entries.length > 0 && (entries[0][1] === 1 || (entries[0][1] as unknown) === true)) {
       const out: Record<string, 0 | 1> = {};
-      for (const [k, v] of entries) if (!writeOnly.has(k)) out[k] = v;
+      for (const [k, v] of entries) for (const path of expand(k)) out[path] = v;
       return Object.keys(out).length > 0 ? (out as UniqueryControls["$select"]) : exclusion();
     }
     const out: Record<string, 0 | 1> = { ...(select as Record<string, 0 | 1>) };
     for (const f of writeOnly) out[f] = 0;
     return out as UniqueryControls["$select"];
+  }
+
+  /** Own leaf field paths (no navigation, no ignored field) of `readable`, once per readable. */
+  private _leavesOf(readable: AtscriptDbReadable<any>): readonly string[] {
+    let leaves = this._targetLeaves.get(readable);
+    if (!leaves) {
+      const paths = [...(readable.flatMap?.keys() ?? [])].filter((path) => path !== "");
+      const parents = new Set<string>();
+      for (const path of paths) {
+        for (let at = path.indexOf("."); at >= 0; at = path.indexOf(".", at + 1)) {
+          parents.add(path.slice(0, at));
+        }
+      }
+      const nav: ReadonlySet<string> = readable.navFields ?? new Set();
+      const ignored = new Set<string>();
+      for (const fd of readable.fieldDescriptors) if (fd.ignored) ignored.add(fd.path);
+      leaves = paths.filter(
+        (path) =>
+          !parents.has(path) &&
+          selfOrAncestor(path, nav) === undefined &&
+          selfOrAncestor(path, ignored) === undefined,
+      );
+      this._targetLeaves.set(readable, leaves);
+    }
+    return leaves;
   }
 
   /**

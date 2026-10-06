@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
 import { createAdapter as createMemory } from "@atscript/db-memory";
 import { createAdapter as createSqlite } from "@atscript/db-sqlite";
 import type { DbSpace } from "@atscript/db";
+import { HttpError } from "@moostjs/event-http";
 
 import { AsDbController } from "../as-db.controller";
 import type { TDbDecorateContext } from "../as-db-readable.controller";
@@ -48,7 +49,10 @@ describe.each([
     for (const space of spaces) await space.close();
   });
 
-  async function nested(requires: Record<string, string[]>) {
+  async function nested(
+    requires: Record<string, string[]>,
+    Base: new (...args: any[]) => AsDbController = AsDbController,
+  ) {
     const space = create();
     spaces.push(space);
     const table = space.getTable(DecoNested);
@@ -57,7 +61,7 @@ describe.each([
     const hookSaw: Array<Record<string, unknown>> = [];
 
     @DbDecorations(DecoNestedDecorations, { requires } as never)
-    class Ctrl extends AsDbController {}
+    class Ctrl extends Base {}
     (Ctrl.prototype as any).decorateRows = function (
       rows: Record<string, unknown>[],
       ctx: TDbDecorateContext,
@@ -138,6 +142,53 @@ describe.each([
       expect(row(rows).items).toEqual([{ sku: "a" }, { sku: "b" }]);
     },
   );
+
+  it("N4: a parent narrowed to its leaves by a projection policy still serves the decoration", async () => {
+    // what a permission layer's include-intersection does to `$select=secret`
+    class Narrowing extends AsDbController {
+      protected override transformProjection(p: any): any {
+        const keys = Array.isArray(p) ? p : Object.keys(p ?? { id: 1, title: 1, secret: 1 });
+        const out: Record<string, 1> = {};
+        for (const k of keys) {
+          if (k === "secret") Object.assign(out, { "secret.hash": 1, "secret.salt": 1 });
+          else out[k] = 1;
+        }
+        return out;
+      }
+    }
+    const { controller, hookSaw } = await nested({ digest: ["secret"] }, Narrowing);
+    const rows = await controller.query("?$select=title,digest");
+    expect(row(rows).digest).toBe("d");
+    expect(hookSaw[0].secret).toEqual({ hash: "h1", salt: "s1" });
+    // the policy dropping one leaf drops the decoration, as it drops a field
+    class Dropping extends AsDbController {
+      protected override transformProjection(p: any): any {
+        const keys: string[] = Array.isArray(p) ? p : Object.keys(p ?? {});
+        return Object.fromEntries(
+          keys
+            .flatMap((k) => (k === "secret" ? ["secret.salt"] : [k]))
+            .filter((k) => k !== "secret.hash")
+            .map((k) => [k, 1]),
+        );
+      }
+    }
+    const dropped = await (
+      await nested({ digest: ["secret"] }, Dropping)
+    ).controller.query("?$select=title,digest");
+    expect("digest" in row(dropped)).toBe(false);
+  });
+
+  it("N4: a hidden leaf of a required parent hides the decoration on every adapter", async () => {
+    class HidesLeaf extends AsDbController {
+      protected override hasField(path: string): boolean {
+        return path !== "secret.hash" && super.hasField(path);
+      }
+    }
+    const { controller } = await nested({ digest: ["secret"] }, HidesLeaf);
+    const res = await controller.query("?$select=title,digest");
+    expect(res).toBeInstanceOf(HttpError);
+    expect((res as HttpError).message).toContain('Unknown field "digest"');
+  });
 
   it("a path that is neither a field nor a parent of one is still refused at boot", async () => {
     await expect(nested({ digest: ["nope"] })).rejects.toThrow(

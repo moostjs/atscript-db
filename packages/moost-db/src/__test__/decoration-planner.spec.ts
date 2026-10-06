@@ -12,6 +12,8 @@ function planner(requires: Record<string, string[]>) {
     keys,
     keySet: new Set(keys),
     requires: new Map(Object.entries(requires)),
+    visibleOn: new Map(Object.entries(requires)),
+    leavesOf: new Map(),
     memo: { meta: new WeakMap() },
   };
   return new DecorationPlanner(index, {

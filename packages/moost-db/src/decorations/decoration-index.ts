@@ -16,6 +16,14 @@ export interface TDecorationIndex {
   readonly keySet: ReadonlySet<string>;
   /** Decoration key → the readable's field paths it reads. */
   readonly requires: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Decoration key → the paths its visibility depends on: its `requires` plus
+   * every own leaf below a parent object (a non-flattening adapter keeps the
+   * parent whole, but one hidden leaf of it hides the decoration, as on SQL).
+   */
+  readonly visibleOn: ReadonlyMap<string, readonly string[]>;
+  /** `requires` path → the own leaves below it, for a parent object only (what a narrowed projection must still carry). */
+  readonly leavesOf: ReadonlyMap<string, readonly string[]>;
   /** Per class (and readable) state the planner fills: the serialized type, the visible `/meta` envelopes. */
   readonly memo: {
     serialized?: TSerializedAnnotatedType;
@@ -82,6 +90,16 @@ export function buildDecorationIndex(
     }
   }
   const requires = new Map<string, readonly string[]>();
+  const leavesOf = new Map<string, readonly string[]>();
+  const nested = (path: string): string[] => {
+    const prefix = `${path}.`;
+    const below = [...(source.flatMap?.keys() ?? [])].filter((p) => p.startsWith(prefix));
+    return below.filter(
+      (p) =>
+        selfOrAncestor(p, source.navFields) === undefined &&
+        !below.some((other) => other.startsWith(`${p}.`)),
+    );
+  };
   for (const key of keys) requires.set(key, []);
   for (const [key, paths] of Object.entries(meta.requires)) {
     if (!requires.has(key)) fail(`\`requires\` names "${key}", which is not a declared decoration`);
@@ -92,15 +110,35 @@ export function buildDecorationIndex(
         fail(`"${key}" requires "${path}", which is not an own field of the bound readable`);
       }
       for (const leaf of leaves) {
-        if (selfOrAncestor(leaf, source.writeOnly) !== undefined) {
+        const sealedBelow = [...source.writeOnly].some((wo) => wo.startsWith(`${leaf}.`));
+        if (sealedBelow || selfOrAncestor(leaf, source.writeOnly) !== undefined) {
           fail(
             `"${key}" requires "${path}", which is @db.writeOnly (a sealed value cannot be read)`,
           );
         }
       }
+      for (const leaf of leaves) {
+        if (leavesOf.has(leaf)) continue;
+        const below = nested(leaf);
+        if (below.length > 0) leavesOf.set(leaf, below);
+      }
       resolved.push(...leaves);
     }
     requires.set(key, [...new Set(resolved)]);
   }
-  return { type, keys, keySet: new Set(keys), requires, memo: { meta: new WeakMap() } };
+  const visibleOn = new Map<string, readonly string[]>();
+  for (const [key, paths] of requires) {
+    const all = new Set(paths);
+    for (const path of paths) for (const leaf of leavesOf.get(path) ?? []) all.add(leaf);
+    visibleOn.set(key, [...all]);
+  }
+  return {
+    type,
+    keys,
+    keySet: new Set(keys),
+    requires,
+    visibleOn,
+    leavesOf,
+    memo: { meta: new WeakMap() },
+  };
 }

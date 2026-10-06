@@ -203,7 +203,12 @@ export class DecorationPlanner {
    * projection's paths (`null` = every field).
    */
   serve(plan: TDecorationPlan, kept: readonly string[] | null): TDecorationRead {
-    const { keys, requires } = this.index;
+    const { keys, requires, leavesOf } = this.index;
+    // A path survives when it, an ancestor, or — for a parent object a policy
+    // narrowed to leaves — every own leaf below it is in the projection.
+    const carried = (path: string, set: ReadonlySet<string>): boolean =>
+      selfOrAncestor(path, set) !== undefined ||
+      (leavesOf.get(path)?.every((leaf) => selfOrAncestor(leaf, set) !== undefined) ?? false);
     const dropPaths = plan.requiresOnly.map((path) => path.split("."));
     const keepPaths = plan.requiresOnly.map((path) =>
       (plan.selected ?? [])
@@ -218,8 +223,7 @@ export class DecorationPlanner {
     const served = new Set(
       plan.requested.filter(
         (key) =>
-          keptSet === undefined ||
-          requires.get(key)!.every((path) => selfOrAncestor(path, keptSet) !== undefined),
+          keptSet === undefined || requires.get(key)!.every((path) => carried(path, keptSet)),
       ),
     );
     return {
