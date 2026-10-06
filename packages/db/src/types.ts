@@ -437,7 +437,10 @@ export interface TDbInsertManyIgnoreResult extends TDbInsertManyResult {
   conflicts: number[];
 }
 
-/** One slot per input row of `BaseDbAdapter.insertManyIgnore`: the inserted id, or `null` for a skipped (conflicting) row. */
+/**
+ * One slot per input row of `BaseDbAdapter.insertManyIgnore`: the inserted id,
+ * or `null` for a skipped (conflicting) row.
+ */
 export type TDbInsertIgnoreSlot = { insertedId: unknown } | null;
 
 export interface TDbUpdateResult {

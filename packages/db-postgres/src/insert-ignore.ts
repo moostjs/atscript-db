@@ -50,12 +50,10 @@ function mayNormalize(value: unknown, col?: string, formCols?: ReadonlySet<strin
  * numbers / decimals), a key equal to the returned one only when written
  * differently (`5` / `"5.00"`, blank-padded CHAR, a `uuid` / `citext` in another
  * letter case — the server lower-cases a returned uuid, so `"AAA"` / `"aaa"` could
- * swap the mapping), or returned rows left
- * unaccounted for. The batched mapping also relies on `RETURNING` coming back in
- * `VALUES` order and in-order-subsequence of the input; when the counts or keys do
- * not line up it yields `undefined` instead of guessing. The caller must
- * then redo the chunk row by row. An empty `returned` (everything skipped) and
- * a fully-returned batch (everything inserted) are exact without any matching.
+ * swap the mapping), or returned rows left unaccounted for (counts or keys that
+ * do not line up with an in-order subsequence). The caller must then redo the
+ * chunk row by row. An empty `returned` (everything skipped) and a fully-returned
+ * batch (everything inserted) are exact without any matching.
  *
  * @param keySets Physical column names of the primary key and every unique index.
  * @param formCols Key columns whose physical type is not text (uuid, inet, cidr,
