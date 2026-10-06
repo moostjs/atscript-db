@@ -438,6 +438,22 @@ describe("@DbDecorations — nested sources through the controller", () => {
     expect(Object.keys(row(rows)).toSorted()).toEqual(["digest", "id", "title"]);
   });
 
+  it("a hook-only nested path whose parent is null removes the null parent husk", async () => {
+    const { controller } = await nested({ digest: ["contact.phone"] });
+    // a row whose optional parent came back null (the hook sees it, the strip must not leave it)
+    const hook = (controller as any).decorateRows.bind(controller);
+    (controller as any).decorateRows = (rs: Record<string, unknown>[], ctx: TDbDecorateContext) => {
+      for (const r of rs) r.contact = null;
+      return hook(rs, ctx);
+    };
+    const rows = await controller.query("?$select=title,digest");
+    expect(row(rows).digest).toBe("d");
+    expect("contact" in row(rows)).toBe(false);
+    // a null parent the client selected itself stays
+    const kept = await controller.query("?$select=title,contact,digest");
+    expect(row(kept).contact).toBeNull();
+  });
+
   it("NEW-6: a hook-only nested path leaves no empty parent behind", async () => {
     const { controller } = await nested({ digest: ["contact.phone"] });
     const rows = await controller.query("?$select=title,digest");

@@ -529,6 +529,7 @@ describe("every request id is judged on its own, in request order", () => {
   /** ALIAS-* all resolve to the out-of-scope T-B; every other id stays as is. */
   const aliasesToB: THook = (ids) =>
     ids.map((id) => ((id as any).code.startsWith("ALIAS") ? { code: "T-B" } : id));
+  const aliasHookPass: THook = (ids) => ids;
   const aliases = (ids: string[]) => ids.map((code) => ({ code }));
 
   it("two aliases of one unreachable row are indistinguishable from two distinct rows (order, count)", async () => {
@@ -571,6 +572,19 @@ describe("every request id is judged on its own, in request order", () => {
     expect(res.body.skipped).toEqual([{ id: { code: "MISS-X" } }]);
     // the handler runs the row once
     expect(open.handled.at(-1)).toEqual(["targeted", [{ code: "T-NEW" }, { code: "T-B" }]]);
+  });
+
+  it("the same literal id twice is judged twice: echoed and counted per request id", async () => {
+    const dup = aliases(["T-B", "T-B"]);
+    const open = await boot({ hook: aliasHookPass });
+    const ok = await open.send("POST", "actions/targeted", { ids: dup });
+    expect(ok.body.matched).toBe(2);
+    expect(ok.body.processed).toBe(2);
+    const refused = await (
+      await boot({ hook: aliasHookPass, overlay })
+    ).send("POST", "actions/manyStrict", { ids: dup });
+    expect(refused.status).toBe(409);
+    expect(refused.body.ids).toEqual(dup);
   });
 
   it("a streamed @DbActionTarget refusal lists every request id in request order", async () => {

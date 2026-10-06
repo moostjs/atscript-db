@@ -419,7 +419,7 @@ Gate verifies existence only when it has something to verify: row overlay, non-e
 
 ### `resolveRowIds` on action ids (0.1.148)
 
-When the controller overrides `resolveRowIds`, each action id goes through it once per request (`ctx.purpose: "action"`, `ctx.action`, `ctx.level`). Handlers (`@DbActionID(s)`, `useDbActionId(s)`, `@DbActionRow(s)`), `actionRowScope` `ctx.ids` and `target.batches()` get the RESOLVED ids; `ActionDisabledError.ids` / `id` and `summary().skipped` / `failed` echo the ids the CLIENT sent. Contract and safety rules: [moost-db.md § resolveRowIds](moost-db.md#resolverowids--stale--alias-ids-01148).
+When the controller overrides `resolveRowIds`, each action id goes through it once per request (`ctx.purpose: "action"`, `ctx.action`, `ctx.level`). Handlers (`@DbActionID(s)`, `useDbActionId(s)`, `@DbActionRow(s)`), `actionRowScope` `ctx.ids` and `target.batches()` get the RESOLVED ids; `ActionDisabledError.ids` / `id` and `summary().skipped` / `failed` echo the ids the CLIENT sent. A literal id repeated in one request (`[T-A, T-A]`) is judged per request id, so it is echoed and counted twice (`matched`, `ids`); only the handler sees it once. Contract and safety rules: [moost-db.md § resolveRowIds](moost-db.md#resolverowids--stale--alias-ids-01148).
 
 ### `actionRowScope` — per-action row scope (0.1.145)
 

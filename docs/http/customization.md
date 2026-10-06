@@ -434,6 +434,7 @@ It runs once per request, after [`prepareRequest`](#preparerequest) and the requ
 - Write bodies (`POST` / `PUT` / `PATCH`) are not resolved: in `PATCH { code: "T-OLD", … }`, "address the row by its former key" and "set the key" cannot be told apart, and the write addresses its row inside the table's transaction. Rewrite a body in [`onWrite`](#onwrite).
 - Value-help controllers do not have it: they implement `getOne(id)` themselves, which is already the resolution seam. `resolveRowFilter` is not one either — `/one` reads through `findOneByRow` on every real table and view.
 - On a `@DbActionsFrom` view, `GET /meta/actions` resolves the id by the view first, then the source's own `resolveRowIds` (`"available"`) resolves the source id: the source decides.
+- A literal id repeated in one request (`[T-A, T-A]`) is judged per request id, so it is echoed and counted twice (`matched`, `ids`); only the handler sees it once.
 
 **Resolving safely** — the resolved id is never trusted for access: every endpoint still reads or deletes it under the same row overlay and visible identifications. The remaining question is whether the _answers_ can tell an alias of an unreachable row from a missing id:
 
