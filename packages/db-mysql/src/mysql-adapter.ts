@@ -6,6 +6,7 @@ import {
   BaseDbAdapter,
   DbError,
   isConflict,
+  NoopLogger,
   uniqueKeyTuple,
   bucketTimeZoneUnavailable,
   containsRelationFilter,
@@ -148,6 +149,14 @@ const TZ_PROBE_SQL =
  * and share a driver). Positives only: a failed zone is probed again, so
  * loading the time zone tables fixes a running server without a restart.
  */
+const isZero = (v: unknown) => v === 0 || v === "0";
+
+/** The `sql_mode` text of a `SELECT @@SESSION.sql_mode AS mode` row. */
+const modeText = (row: { mode: unknown } | null | undefined): string =>
+  typeof row?.mode === "string" ? row.mode : "";
+
+const nonStrictChecked = new WeakSet<TMysqlDriver>();
+
 const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
 
 /**
@@ -156,6 +165,13 @@ const convertibleZones = new WeakMap<TMysqlDriver, Set<string>>();
  * it is per connection / session, and a transaction keeps one connection.
  */
 type TIncrementStep = () => Promise<number>;
+
+/**
+ * Whether the session `sql_mode` has `NO_AUTO_VALUE_ON_ZERO` (an explicit 0 PK
+ * is then a value, not a request for a generated id), read lazily — only when a
+ * row carries a 0 / "0" PK — and at most once per call, on the call's connection.
+ */
+type TZeroIsExplicit = () => Promise<boolean>;
 
 /** A run of consecutive rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
 interface TIdGroup {
@@ -578,10 +594,11 @@ export class MysqlAdapter extends BaseDbAdapter {
       const { columns, batches } = chunkInsertRows(data);
       const allIds: unknown[] = [];
       const step = this._incrementStep();
+      const zero = this._zeroIsExplicit();
 
       for (const batch of batches) {
         const ids: unknown[] = Array.from({ length: batch.length });
-        for (const group of this._idGroups(batch)) {
+        for (const group of await this._idGroups(batch, zero)) {
           const { sql, params } = buildInsertMany(tableName, group.rows, columns);
           this._log(sql, params);
           const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -613,13 +630,17 @@ export class MysqlAdapter extends BaseDbAdapter {
    * under a case-insensitive collation). A table without an AUTO_INCREMENT PK,
    * or a chunk of one kind, stays one group.
    */
-  private _idGroups(rows: Array<Record<string, unknown>>): TIdGroup[] {
+  private async _idGroups(
+    rows: Array<Record<string, unknown>>,
+    zeroIsExplicit: TZeroIsExplicit,
+  ): Promise<TIdGroup[]> {
     const col = this._autoIncrementPk();
     if (!col) return [{ rows, at: rows.map((_, i) => i), generated: false }];
+    const zeroExplicit = rows.some((r) => isZero(r[col])) && (await zeroIsExplicit());
     const groups: TIdGroup[] = [];
     rows.forEach((row, i) => {
       const v = row[col];
-      const generated = v === undefined || v === null || v === 0 || v === "0";
+      const generated = v === undefined || v === null || (isZero(v) && !zeroExplicit);
       let last = groups.at(-1);
       if (!last || last.generated !== generated) {
         last = { rows: [], at: [], generated };
@@ -629,6 +650,43 @@ export class MysqlAdapter extends BaseDbAdapter {
       last.at.push(i);
     });
     return groups;
+  }
+
+  /** The {@link TZeroIsExplicit} of one `insertMany` / `insertManyIgnore` call. */
+  private _zeroIsExplicit(): TZeroIsExplicit {
+    let mode: Promise<boolean> | undefined;
+    return () =>
+      (mode ??= (async () => {
+        const row = await this._exec().get<{ mode: unknown }>(
+          "SELECT @@SESSION.sql_mode AS mode",
+          [],
+        );
+        return modeText(row).includes("NO_AUTO_VALUE_ON_ZERO");
+      })());
+  }
+
+  /**
+   * Warns ONCE per driver when the session `sql_mode` is not strict: writes
+   * (insert-ignore included) assume `STRICT_TRANS_TABLES` / `STRICT_ALL_TABLES`
+   * (the MySQL 8 default); a non-strict mode coerces a NOT NULL violation to the
+   * column default instead of failing. Only probes when the adapter has a logger.
+   */
+  private async _warnNonStrictMode(): Promise<void> {
+    if (this.logger === NoopLogger || nonStrictChecked.has(this.driver)) return;
+    nonStrictChecked.add(this.driver);
+    try {
+      const row = await this._exec().get<{ mode: unknown }>(
+        "SELECT @@SESSION.sql_mode AS mode",
+        [],
+      );
+      if (row && !/STRICT_(TRANS|ALL)_TABLES/.test(modeText(row))) {
+        this.logger.warn(
+          `MySQL session sql_mode lacks STRICT_TRANS_TABLES / STRICT_ALL_TABLES (${modeText(row)}): writes assume a strict mode and a non-strict server silently coerces NOT NULL violations`,
+        );
+      }
+    } catch {
+      nonStrictChecked.delete(this.driver);
+    }
   }
 
   /** The {@link TIncrementStep} of one `insertMany` / `insertManyIgnore` call. */
@@ -690,14 +748,16 @@ export class MysqlAdapter extends BaseDbAdapter {
     data: Array<Record<string, unknown>>,
   ): Promise<TDbInsertIgnoreSlot[]> {
     if (data.length === 0) return [];
+    await this._warnNonStrictMode();
     return this.withTransaction(async () => {
       const tableName = this.resolveTableName();
       const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
       const step = this._incrementStep();
+      const zero = this._zeroIsExplicit();
       for (const batch of batches) {
         const out: TDbInsertIgnoreSlot[] = Array.from({ length: batch.length }, () => null);
-        for (const group of this._idGroups(batch)) {
+        for (const group of await this._idGroups(batch, zero)) {
           const groupSlots = await this._insertIgnoringGroup(tableName, columns, group, step);
           groupSlots.forEach((slot, k) => {
             out[group.at[k]!] = slot;
@@ -839,6 +899,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       }));
     } catch (error) {
       if (!isConflict(error)) throw error;
+      // A generated id colliding on PRIMARY (an exhausted AUTO_INCREMENT) is no
+      // row-level conflict: the row carried no key, so skipping it would lose data.
+      if (group.generated && error.errors.some((e) => e.path === "PRIMARY")) throw error;
       return undefined;
     }
   }
@@ -1124,6 +1187,7 @@ export class MysqlAdapter extends BaseDbAdapter {
   // ── Schema ────────────────────────────────────────────────────────────────
 
   async prepareTypeMapper(): Promise<void> {
+    await this._warnNonStrictMode();
     if (this._supportsVector === undefined && this._vectorFields.size > 0) {
       await this._detectVectorSupport();
     }

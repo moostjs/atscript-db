@@ -62,9 +62,12 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
       },
       { logger, onClose: () => driver.close() },
     );
-    const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto, fx.IgNote], {
-      force: true,
-    });
+    const result = await new SchemaSync(space).run(
+      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgRenamed],
+      {
+        force: true,
+      },
+    );
     expect(result.status).toBe("synced");
   });
 
@@ -77,7 +80,17 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
   beforeEach(async () => {
     await items().deleteMany({});
     await t(fx.IgAuto).deleteMany({});
+    await t(fx.IgRenamed).deleteMany({});
     statements.length = 0;
+  });
+
+  it("a renamed @db.default.increment PK is AUTO_INCREMENT: inserts without an id work", async () => {
+    const renamed = t(fx.IgRenamed);
+    const a = await renamed.insertOne({ label: "a" });
+    const b = await renamed.insertMany([{ label: "b" }, { label: "c" }]);
+    const c = await renamed.insertMany([{ label: "d" }], { onConflict: "ignore" });
+    expect(typeof a.insertedId).toBe("number");
+    expect(new Set([a.insertedId, ...b.insertedIds, ...c.insertedIds]).size).toBe(4);
   });
 
   it("all-new, mixed and all-conflict batches", async () => {

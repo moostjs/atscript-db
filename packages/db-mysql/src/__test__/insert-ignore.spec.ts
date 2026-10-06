@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll } from "vite-plus/test";
-import { AtscriptDbTable } from "@atscript/db";
+import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
+import { AtscriptDbTable, DbSpace } from "@atscript/db";
 
 import { MysqlAdapter } from "../mysql-adapter";
 import { createMockDriver, prepareFixtures } from "./test-utils";
@@ -327,5 +327,134 @@ describe("Mysql2Driver.close()", () => {
     const driver = new Mysql2Driver("mysql://u@127.0.0.1:1/none");
     await driver.close();
     await expect(driver.close()).resolves.toBeUndefined();
+  });
+});
+
+describe("renamed @db.default.increment primary key", () => {
+  it("DDL keeps AUTO_INCREMENT on the renamed column", async () => {
+    const driver = createMockDriver();
+    const table = new AtscriptDbTable(fx.IgRenamed, new MysqlAdapter(driver)) as any;
+    await table.ensureTable();
+    const create = driver.calls.find((c) => c.sql.startsWith("CREATE TABLE"))!.sql;
+    expect(create).toMatch(/`item_id` \w+ NOT NULL AUTO_INCREMENT|`item_id` [^,]*AUTO_INCREMENT/);
+  });
+});
+
+const pk = () =>
+  Object.assign(new Error("Duplicate entry '5' for key 'ig_auto.PRIMARY'"), { errno: 1062 });
+const modeReads = (driver: ReturnType<typeof createMockDriver>) =>
+  driver.calls.filter((c) => c.sql.includes("@@SESSION.sql_mode"));
+
+describe("generated ids, NO_AUTO_VALUE_ON_ZERO and strict mode", () => {
+  const auto = (
+    responder: (sql: string) => unknown,
+    get: Array<[string, unknown]> = [],
+    logger?: object,
+  ) => {
+    const driver = createMockDriver({ runResponder: responder as never, get });
+    const space = new DbSpace(
+      () => new MysqlAdapter(driver),
+      logger ? { logger: logger as never } : undefined,
+    );
+    return { driver, table: space.getTable(fx.IgAuto) as any };
+  };
+
+  it("a PRIMARY duplicate of a GENERATED id is rethrown, never skipped", async () => {
+    const { table } = auto((sql) => {
+      if (sql.startsWith("INSERT")) throw pk();
+      return undefined;
+    });
+    await expect(
+      table.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(
+      table.insertMany(
+        [
+          { sku: "a", label: "x" },
+          { sku: "b", label: "y" },
+        ],
+        { onConflict: "ignore" },
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("a unique-index duplicate of a generated-id row is still an ignorable conflict", async () => {
+    const { table } = auto((sql) => {
+      if (sql.startsWith("INSERT"))
+        throw Object.assign(new Error("Duplicate entry 'a' for key 'ig_auto.auto_sku_idx'"), {
+          errno: 1062,
+        });
+      return undefined;
+    });
+    const result = await table.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" });
+    expect(result.conflicts).toEqual([0]);
+  });
+
+  it("an explicit PRIMARY duplicate stays an ignorable conflict", async () => {
+    const { table } = auto((sql) => {
+      if (sql.startsWith("INSERT")) throw pk();
+      return undefined;
+    });
+    const result = await table.insertMany([{ id: 5, sku: "a", label: "x" }], {
+      onConflict: "ignore",
+    });
+    expect(result.conflicts).toEqual([0]);
+  });
+
+  it("NO_AUTO_VALUE_ON_ZERO: an explicit 0 PK is a value (one sql_mode read per call)", async () => {
+    const { driver, table } = auto(
+      () => ({ insertId: 99 }),
+      [["sql_mode", { mode: "STRICT_TRANS_TABLES,NO_AUTO_VALUE_ON_ZERO" }]],
+    );
+    const result = await table.insertMany(
+      [
+        { id: 0, sku: "a", label: "x" },
+        { id: 7, sku: "b", label: "y" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.insertedIds).toEqual([0, 7]);
+    expect(modeReads(driver)).toHaveLength(1);
+    const plain = await table.insertMany([{ id: 0, sku: "c", label: "z" }]);
+    expect(plain.insertedIds).toEqual([0]);
+  });
+
+  it("without NO_AUTO_VALUE_ON_ZERO an explicit 0 is generated (and rows without a 0 read no sql_mode)", async () => {
+    const { driver, table } = auto(
+      () => ({ insertId: 99 }),
+      [["sql_mode", { mode: "STRICT_TRANS_TABLES" }]],
+    );
+    const result = await table.insertMany([{ id: 0, sku: "a", label: "x" }], {
+      onConflict: "ignore",
+    });
+    expect(result.insertedIds).toEqual([99]);
+    await table.insertMany([{ sku: "b", label: "y" }]);
+    expect(modeReads(driver)).toHaveLength(1);
+  });
+
+  it("warns ONCE per driver when the session sql_mode is not strict", async () => {
+    const warn = vi.fn();
+    const logger = { error() {}, warn, log() {}, info() {}, debug() {} };
+    const { table } = auto(() => ({}), [["sql_mode", { mode: "NO_ENGINE_SUBSTITUTION" }]], logger);
+    await table.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" });
+    await table.insertMany([{ sku: "b", label: "x" }], { onConflict: "ignore" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("STRICT_TRANS_TABLES");
+  });
+
+  it("stays silent on a strict mode, and without a logger probes nothing", async () => {
+    const warn = vi.fn();
+    const strict = auto(() => ({}), [["sql_mode", { mode: "STRICT_TRANS_TABLES" }]], {
+      error() {},
+      warn,
+      log() {},
+      info() {},
+      debug() {},
+    });
+    await strict.table.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" });
+    expect(warn).not.toHaveBeenCalled();
+    const quiet = auto(() => ({}), [["sql_mode", { mode: "" }]]);
+    await quiet.table.insertMany([{ sku: "a", label: "x" }], { onConflict: "ignore" });
+    expect(modeReads(quiet.driver)).toHaveLength(0);
   });
 });

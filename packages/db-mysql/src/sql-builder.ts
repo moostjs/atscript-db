@@ -236,8 +236,7 @@ export function buildColumnDefinition(
     const def = `${qi(field.physicalName)} ${sqlType}${mysqlCollateClause(field)} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
     return { def, inventedDefault: false };
   }
-  const increment =
-    ctx.purpose !== "add" && (ctx.incrementFields?.has(field.physicalName) ?? false);
+  const increment = ctx.purpose !== "add" && (ctx.incrementFields?.has(field.path) ?? false);
   let def = `${qi(field.physicalName)} ${sqlType}`;
 
   if (increment) {

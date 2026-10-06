@@ -510,7 +510,7 @@ describe("buildCreateTable", () => {
   it("should add AUTO_INCREMENT for increment fields", () => {
     const sql = buildCreateTable(
       "users",
-      [field({ physicalName: "id", designType: "integer", isPrimaryKey: true })],
+      [field({ path: "id", physicalName: "id", designType: "integer", isPrimaryKey: true })],
       undefined,
       {
         incrementFields: new Set(["id"]),
@@ -522,7 +522,7 @@ describe("buildCreateTable", () => {
   it("should add AUTO_INCREMENT start value as table option", () => {
     const sql = buildCreateTable(
       "users",
-      [field({ physicalName: "id", designType: "integer", isPrimaryKey: true })],
+      [field({ path: "id", physicalName: "id", designType: "integer", isPrimaryKey: true })],
       undefined,
       {
         incrementFields: new Set(["id"]),

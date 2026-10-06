@@ -53,3 +53,13 @@ export interface IgPrice {
     @db.column.precision 10, 2
     price: number
 }
+
+@db.table 'ig_renamed'
+export interface IgRenamed {
+    @meta.id
+    @db.default.increment
+    @db.column 'item_id'
+    id: number
+
+    label: string
+}
