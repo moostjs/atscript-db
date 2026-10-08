@@ -207,7 +207,7 @@ A [computed view column](/views/computed-columns) (`@db.compute`) is marked `fie
 
 The `actions[]` entry shape is owned by [Actions](./actions) and the full `crud` whitelists by [Permissions](./permissions); from the browser, read this payload with [`client.meta()`](./client#meta).
 
-The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`.
+The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`. A reference carries the target model's canonical route in the serving app; the root of a controller's own `/meta` carries that controller's own mount (see [Several controllers over one model](./#several-controllers)). `/meta` is therefore resolved per app (async in the base controller since 0.1.150).
 
 #### FK ref shape in meta
 

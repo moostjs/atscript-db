@@ -28,6 +28,16 @@ import {
 import { discoverActions, getControllerFormType } from "./actions/discover";
 import { readRequestContext } from "./relation-predicates";
 import { applyTerminalRefs } from "./meta/terminal-ref";
+import {
+  addPublishHook,
+  ensurePublished,
+  httpPathOverrides,
+  httpPathScopeFor,
+  isParametricPath,
+  normalizeHttpPath,
+  recordBoundType,
+  type THttpPathScope,
+} from "./http-path";
 
 /**
  * Endpoint a {@link AsReadableController.prepareRequest} call serves. `/one`
@@ -128,8 +138,9 @@ export interface TDbParsedRequest {
  * Abstract base class for read-only HTTP controllers over an Atscript interface.
  *
  * Shared responsibilities (implemented here):
- * - Stamps `@db.http.path` on the bound interface's metadata at registration
- *   with the final public path (leading slash + Moost `globalPrefix`).
+ * - Publishes `@db.http.path` (the model's value-help URL) per app after
+ *   `app.init()`, derived from each controller's own bound route (see
+ *   `docs/http/index.md`); the constructor only records which model it serves.
  * - Lazily serializes the bound interface for the `/meta` endpoint
  *   (see {@link getSerializeOptions}).
  * - Provides DTO-backed validators for the Uniquery controls DTOs and the
@@ -167,6 +178,11 @@ export abstract class AsReadableController<
 
   /** Cached serialized type definition (lazy, computed on first access). */
   private _serializedType?: ReturnType<typeof serializeAnnotatedType>;
+  /** App scope every cache below was built for; a different scope drops them all ({@link enterScope}). */
+  private _cacheScope?: THttpPathScope;
+
+  /** Scope of the synchronous build in flight — instance-local, cleared in `finally`. */
+  protected _buildScope?: THttpPathScope;
 
   /** Cached full meta response (computed lazily on first meta() call). */
   private _metaResponse?: TMetaResponse;
@@ -176,13 +192,27 @@ export abstract class AsReadableController<
   /** Cached serialized form schemas keyed by `FormType.name` — populated lazily by {@link metaForm}. */
   private _formSchemas = new Map<string, TSerializedAnnotatedType>();
 
-  constructor(boundType: T, controllerName: string, app: Moost, kindTag = "readable") {
+  /**
+   * @param opts.canonical Multi-mount models only: marks (`true`) or excludes
+   *   (`false`) this controller as the model's published value-help route
+   *   (since 0.1.150). Decorator-bound controllers use the decorator option.
+   */
+  constructor(
+    boundType: T,
+    controllerName: string,
+    app: Moost,
+    kindTag = "readable",
+    opts?: { canonical?: boolean },
+  ) {
     this.boundType = boundType;
     this.controllerName = controllerName;
     this.app = app;
     this.logger = app.getLogger(`db [${controllerName}]`);
     this.logger.info(`Initializing ${kindTag} controller`);
-    this._resolveHttpPath();
+    // Bookkeeping only: the path is derived per app from this controller's own
+    // bound route once binding is complete (never from the ambient prefix).
+    recordBoundType(this.constructor, boundType, opts?.canonical);
+    addPublishHook(app);
     try {
       const p = this.init();
       if (p instanceof Promise) {
@@ -203,34 +233,43 @@ export abstract class AsReadableController<
    */
   protected abstract hasField(path: string): boolean;
 
-  /** Sets @db.http.path on the type metadata from the controller's computed prefix. */
-  private _resolveHttpPath() {
-    let prefix: string | undefined;
+  /**
+   * The app of the current event, through DI — never the one this
+   * (singleton) instance was constructed in, which may be gone (a re-booted
+   * app, a hot reload). Outside an event it is {@link app}.
+   *
+   * @since 0.1.150
+   */
+  protected async currentApp(): Promise<Moost> {
     try {
-      prefix = useControllerContext().getPrefix();
+      return (await useControllerContext().instantiate(Moost)) as Moost;
     } catch {
-      // No active event context (e.g. direct instantiation in tests).
-    }
-    if (!prefix) {
-      const overview = this.app
-        .getControllersOverview?.()
-        ?.find((o) => o.type === this.constructor);
-      prefix = overview?.computedPrefix;
-    }
-    if (prefix) {
-      if (!prefix.startsWith("/")) {
-        prefix = `/${prefix}`;
-      }
-      this.boundType.metadata.set("db.http.path", prefix);
+      return this.app;
     }
   }
 
-  /** Lazily serializes the bound type (after all controllers have set @db.http.path). */
+  /** Lazily serializes the bound type (dropped with the other caches on a scope change). */
   protected getSerializedType() {
-    if (!this._serializedType) {
-      this._serializedType = this.serializeForMeta(this.boundType);
+    return (this._serializedType ??= this.serializeForMeta(this.boundType));
+  }
+
+  /** Drops every scope-dependent cache when `scope` is not the one they were built for. */
+  private enterScope(scope: THttpPathScope | undefined): void {
+    if (scope === this._cacheScope) return;
+    this._cacheScope = scope;
+    this._serializedType = undefined;
+    this._metaResponse = undefined;
+    this._formSchemas.clear();
+  }
+
+  /** Runs a synchronous build with `scope`'s `db.http.path` overrides applied. */
+  private buildScoped<R>(scope: THttpPathScope | undefined, build: () => R): R {
+    this._buildScope = scope;
+    try {
+      return build();
+    } finally {
+      this._buildScope = undefined;
     }
-    return this._serializedType;
   }
 
   /**
@@ -241,8 +280,27 @@ export abstract class AsReadableController<
    * serialize exactly as before.
    */
   protected serializeForMeta(type: TAtscriptAnnotatedType): TSerializedAnnotatedType {
-    const options = this.getSerializeOptions();
+    const options = this._effectiveSerializeOptions();
     return applyTerminalRefs(serializeAnnotatedType(type, options), type, options);
+  }
+
+  /**
+   * {@link getSerializeOptions} plus the current build's per-app `db.http.path`
+   * overrides (a subclass's own `annotationOverrides` entry wins for the same key).
+   */
+  private _effectiveSerializeOptions(): TSerializeOptions {
+    const base = this.getSerializeOptions();
+    const scope = this._buildScope;
+    if (!scope) return base;
+    const own = base.annotationOverrides;
+    return {
+      ...base,
+      annotationOverrides: (t) => {
+        const ours = httpPathOverrides(scope, t);
+        const theirs = own?.(t);
+        return ours || theirs ? { ...ours, ...theirs } : undefined;
+      },
+    };
   }
 
   /**
@@ -585,7 +643,48 @@ export abstract class AsReadableController<
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
     await this.parseRequest("meta");
-    return this.resolveMeta();
+    return this._withOwnHttpPath(await this.resolveMeta());
+  }
+
+  /**
+   * The root of a controller's own `/meta` carries its own mount as
+   * `db.http.path` (a secondary mount answers with its own route; references to
+   * the model elsewhere carry the canonical one). Left alone for parametric
+   * mounts and when the serialize options strip the key. Never mutates the
+   * cached envelope.
+   */
+  private _withOwnHttpPath(meta: TMetaResponse): TMetaResponse {
+    const KEY = "db.http.path";
+    let prefix: string | undefined;
+    try {
+      prefix = useControllerContext().getPrefix();
+    } catch {
+      return meta;
+    }
+    if (prefix === undefined || prefix === null) return meta;
+    const own = normalizeHttpPath(prefix);
+    if (isParametricPath(own)) return meta;
+    const options = this.getSerializeOptions();
+    if (options.ignoreAnnotations?.includes(KEY)) return meta;
+    let key = KEY;
+    let value: unknown = own;
+    if (options.processAnnotation) {
+      const out = options.processAnnotation({
+        key: KEY,
+        value: own,
+        path: [],
+        kind: "object",
+      });
+      if (!out) return meta;
+      key = out.key;
+      value = out.value;
+    }
+    const type = meta.type as { metadata?: Record<string, unknown> } | undefined;
+    if (!type || type.metadata?.[key] === value) return meta;
+    return {
+      ...meta,
+      type: { ...meta.type, metadata: { ...type.metadata, [key]: value } },
+    } as TMetaResponse;
   }
 
   /**
@@ -598,12 +697,17 @@ export abstract class AsReadableController<
    * @since 0.1.143
    */
   protected resolveMeta(): TMetaResponse | Promise<TMetaResponse> {
-    const key = this.metaCacheKey();
-    if (!this._metaResponse || key !== this._metaResponseKey) {
-      this._metaResponse = this.buildMetaResponse();
-      this._metaResponseKey = key;
-    }
-    return this.applyMetaOverlay(this._metaResponse);
+    return this.currentApp().then((app) => {
+      ensurePublished(app);
+      const scope = httpPathScopeFor(app);
+      this.enterScope(scope);
+      const key = this.metaCacheKey();
+      if (!this._metaResponse || key !== this._metaResponseKey) {
+        this._metaResponse = this.buildScoped(scope, () => this.buildMetaResponse());
+        this._metaResponseKey = key;
+      }
+      return this.applyMetaOverlay(this._metaResponse);
+    });
   }
 
   /**
@@ -642,9 +746,13 @@ export abstract class AsReadableController<
     ) {
       throw new HttpError(404, `Unknown form "${name}"`);
     }
+    const app = await this.currentApp();
+    ensurePublished(app);
+    const scope = httpPathScopeFor(app);
+    this.enterScope(scope);
     let cached = this._formSchemas.get(name);
     if (!cached) {
-      cached = this.serializeForMeta(formType);
+      cached = this.buildScoped(scope, () => this.serializeForMeta(formType));
       this._formSchemas.set(name, cached);
     }
     return cached;

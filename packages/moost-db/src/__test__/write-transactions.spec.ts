@@ -454,8 +454,8 @@ describe("through a real table (guard inside the table's transaction)", () => {
   });
 
   // Each wire test binds the same fixture type under its own explicit prefix
-  // (`_resolveHttpPath` stamps `db.http.path` on the type, which would
-  // otherwise leak the first prefix into the second controller).
+  // (keeps the routes of the shared fixture apart; the mirrored `db.http.path`
+  // no longer feeds back into a later decoration).
   it("wire: a thrown guard HttpError(403) renders as 403 and the table rolled back", async () => {
     const { adapter, table } = realTable();
     const prefix = `guarded_wire_${++TABLE_SEQ}`;

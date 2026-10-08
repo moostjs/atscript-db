@@ -203,7 +203,9 @@ export const dbTableAnnotations: TAnnotationsTree = {
       description:
         "HTTP endpoint path where this table is served. " +
         "Used by the UI for value-help on FK fields. " +
-        "Gets overwritten by the final controller prefix at runtime." +
+        "After app.init() the app publishes the canonical controller route here at runtime; " +
+        "a model mounted on several routes needs `canonical: true` on one of its controllers " +
+        "(or declare this annotation and mount that controller without an explicit prefix)." +
         "\n\n**Example:**\n" +
         "```atscript\n" +
         '@db.table "authors"\n' +

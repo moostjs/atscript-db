@@ -77,8 +77,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
         "  relation loading with `@db.rel.to` / `@db.rel.from`, junction pairing with `@db.rel.via`, etc.\n" +
         "- On any other interface (value-help sources, WF forms, plain interfaces), `@db.rel.FK` " +
         "  acts purely as the value-help indicator: the client-side picker resolver uses it to " +
-        "  decide which fields render a value-help picker. The target's `@db.http.path` (stamped " +
-        "  by its readable controller) supplies the picker URL.\n" +
+        "  decide which fields render a value-help picker. The target's `@db.http.path` (published " +
+        "  by its canonical readable controller) supplies the picker URL.\n" +
         "- In `/meta` (and `/meta/form/:name`) the marker is inherited through reference chains: " +
         "  a field declared as `code: Issue.code` where `Issue.code: Dict.code` carries `@db.rel.FK` " +
         "  is served with `ref` pointing at the terminal field (`Dict.code`) and `db.rel.FK: true`, " +

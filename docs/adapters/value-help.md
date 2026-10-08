@@ -12,7 +12,7 @@ Value help is the dropdown/autocomplete/row-picker UI that renders on FK fields.
 
 Before this release, value help only fired for fields whose `.ref` resolved to a `@db.table` interface — anything else (static enums, external lookups, view-backed entities) had no path through. Now:
 
-- **Any interface can be a value-help source**, as long as it is bound to a controller that registers the shared `/query`, `/pages`, `/one(/:id)`, `/meta` surface and stamps `@db.http.path` on the interface metadata.
+- **Any interface can be a value-help source**, as long as it is bound to a controller that registers the shared `/query`, `/pages`, `/one(/:id)`, `/meta` surface and gets `@db.http.path` published for it after `app.init()`.
 - **`@db.rel.FK` is the explicit marker** on the field side. The client-side picker looks for this annotation to decide whether a field should render a value-help picker. See the [annotations page](annotations#db-rel-fk-dual-role) for the dual-role semantics. A field can also be bound **without** a foreign key by `@ui.valueHelp` (see [Constraint-free binding](#ui-value-help) below).
 - **Capability hints live on the bound interface** via `@ui.dict.filterable`, `@ui.dict.sortable`, and `@ui.dict.searchable` — the client picker reads these from `/meta` to decide which controls to render. They are **hints only**: the server accepts any filter/sort the client sends. `$search` uses `@ui.dict.searchable` to pick which fields to match (falling back to every string prop when absent).
 
@@ -20,7 +20,7 @@ Before this release, value help only fired for fields whose `.ref` resolved to a
 
 Three classes in `@atscript/moost-db`:
 
-- **`AsReadableController<T>`** — abstract base. Handles `@db.http.path` stamping, the shared `/meta` route, serialization options, Uniquery control validation, and the helper surface reused by every subclass.
+- **`AsReadableController<T>`** — abstract base. Handles the `@db.http.path` publication (derived from the route the controller is mounted on), the shared `/meta` route, serialization options, Uniquery control validation, and the helper surface reused by every subclass.
 - **`AsValueHelpController<T>`** — abstract subclass for read-only value-help sources. Adds `/query`, `/pages`, `/one(/:id)`, `/one` routes. Subclasses implement `query(controls)` and `getOne(id)`. Value-help controllers do not support actions. Since 0.1.143, `@DbAction` / `@DbActions*` on one is a hard error (see [Actions](../http/actions#value-help-controllers-are-excluded)).
 - **`AsJsonValueHelpController<T>`** — concrete subclass backed by a static in-memory array. Handy for enum-style dictionaries that ship with the application and don't warrant a DB table.
 
@@ -68,14 +68,15 @@ const STATUSES = [
 @Controller("/api/dicts/status")
 export class StatusDictController extends AsJsonValueHelpController<typeof StatusDict> {
   constructor(app: Moost) {
-    // `'status'` is the controller name — used for `db.http.path` stamping and
-    // diagnostics. Required unless the bound type carries a `@db.table` annotation.
+    // `'status'` is the controller name — used for logging and diagnostics only; the
+    // `db.http.path` comes from the route the controller is mounted on. Required
+    // unless the bound type carries a `@db.table` annotation.
     super(StatusDict, STATUSES, app, "status");
   }
 }
 ```
 
-`AsJsonValueHelpController` already carries an `@Inherit()` decorator on the base class, so subclasses **do not** need to repeat it. The constructor signature is `(boundType, rows, app, controllerName?)`. The fourth argument is optional — when omitted, the controller falls back to `boundType.metadata.get('db.table')` and finally to the literal `"value-help"`. If your bound interface is a plain dictionary (no `@db.table`), pass an explicit `controllerName` so the stamped `db.http.path` is meaningful.
+`AsJsonValueHelpController` already carries an `@Inherit()` decorator on the base class, so subclasses **do not** need to repeat it. The constructor signature is `(boundType, rows, app, controllerName?, opts?)`. The fourth argument is optional — when omitted, the controller falls back to `boundType.metadata.get('db.table')` and finally to the literal `"value-help"`; it only names the controller in logs (the published `db.http.path` comes from the route). If one dictionary is mounted on several routes, mark the one whose route pickers should use with `{ canonical: true }` as the trailing `opts` argument (`super(StatusDict, STATUSES, app, "status", { canonical: true })`); `AsValueHelpController` takes the same option as its fourth constructor argument. The full rules live in [Several controllers over one model](../http/index#several-controllers).
 
 On the Atscript side:
 
@@ -101,7 +102,7 @@ export interface InviteForm {
 }
 ```
 
-The picker resolves via `prop.ref.type().metadata.get('db.http.path')` (stamped by the controller at registration) → `/api/dicts/status`. It fetches `/api/dicts/status/meta` once, caches it app-wide, and uses the capability hints to drive its UI.
+The picker resolves via `prop.ref.type().metadata.get('db.http.path')` (published for the app after `app.init()`) → `/api/dicts/status`. It fetches `/api/dicts/status/meta` once, caches it app-wide, and uses the capability hints to drive its UI.
 
 ## Constraint-free binding with `@ui.valueHelp` {#ui-value-help}
 
@@ -117,7 +118,7 @@ export interface TicketOverview {
 }
 ```
 
-Arguments: the dictionary interface, the field the picker commits, and an optional static filter (literal comparisons on the dictionary's own fields). The binding creates no foreign key and no DDL; it travels through chain refs and `extends` like a value-domain annotation. The dictionary must be served by a controller (a DB controller or any value-help controller): `/meta` carries the binding as `{ target: { id, metadata: { "db.http.path": … } }, field, filter }`, with the path stamped by the controller. The binding wins over a `@db.rel.FK` on the same field. The server applies the usual row scope and field visibility of the dictionary controller to every picker query; the filter is applied by the client as a forced filter and is not a permission boundary.
+Arguments: the dictionary interface, the field the picker commits, and an optional static filter (literal comparisons on the dictionary's own fields). The binding creates no foreign key and no DDL; it travels through chain refs and `extends` like a value-domain annotation. The dictionary must be served by a controller (a DB controller or any value-help controller): `/meta` carries the binding as `{ target: { id, metadata: { "db.http.path": … } }, field, filter }`, with the path published for the app. The binding wins over a `@db.rel.FK` on the same field. The server applies the usual row scope and field visibility of the dictionary controller to every picker query; the filter is applied by the client as a forced filter and is not a permission boundary.
 
 ### Distinct values of a column {#distinct-values}
 

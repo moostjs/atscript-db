@@ -195,7 +195,34 @@ export class TodoController extends AsDbController<typeof Todo> {}
 
 **Precedence:** decorator prefix > `@db.http.path` annotation > table name.
 
-At runtime, the controller's final computed prefix (including any parent route nesting) is always written back to `@db.http.path` on the type metadata. This ensures FK references in serialized types carry the correct URL for value-help resolution in the UI.
+After `app.init()`, each app publishes the model's value-help URL — the controller's final computed route, including parent route nesting and `globalPrefix` — as `@db.http.path`. It is derived from the route the controller is actually mounted on, never from whichever controller happened to be binding when it was constructed, so registration order and constructor injection don't matter. FK references in serialized types (`/meta`, `/meta/form/:name`) carry that URL for value-help resolution in the UI. The prefix the decorators derive uses the value you wrote in the schema, not a path published earlier in the same process.
+
+### Several controllers over one model {#several-controllers}
+
+When one model is served on several routes in an app (a primary table plus an archive mount, a dictionary served by two controllers, …), exactly one route is its value-help URL. The app resolves it like this:
+
+1. **`canonical: true`** on a controller picks it. Set the option on the binding decorator (`@TableController(Model, { canonical: true })`, also `@ReadableController` / `@ViewController`) or, for a value-help controller, as the trailing constructor option (`super(Dict, rows, app, "dict", { canonical: true })`). `canonical: false` takes a mount out of consideration.
+2. Without a marker, a single mount wins.
+3. Otherwise the mount whose prefix came from the model's own `@db.http.path` (the decorator was used without an explicit prefix) wins.
+4. Otherwise the model is **ambiguous**: no URL is published (references render no picker) and the app logs one warning naming the controllers and routes. Nothing throws.
+
+```typescript
+@TableController(Ticket, { canonical: true })
+class TicketController extends AsDbController<typeof Ticket> {}
+
+@TableController(Ticket, "archive/tickets")
+class TicketArchiveController extends AsDbController<typeof Ticket> {}
+// references to Ticket use TicketController's route; the archive keeps its own route as the
+// root of its own /meta
+```
+
+- A route with a parameter or wildcard segment (`/db/:tenant/issues`) never publishes a URL.
+- The root of a controller's own `/meta` always carries that controller's own route, whichever mount is canonical.
+- Two `@ImportController` sites for the same class can only be told apart by subclassing one of them.
+- Two `canonical: true` mounts on different routes are a conflict (a warning and no URL).
+- A model no controller serves in the app keeps the value from the schema.
+
+The value on the model's runtime metadata (`type.metadata["db.http.path"]`) mirrors the last app that published it; the wire (`/meta`) is always resolved for the app serving the request. A FOR_EVENT controller is published together with the app's singletons; an app whose readable controllers are all FOR_EVENT publishes on the first request to any readable controller or `/meta`. If you used an app-side `@MoostInit` hook to repair `db.http.path`, delete it (see [Upgrading](/guide/upgrading#v0-1-150)).
 
 ### Multiple Controllers
 

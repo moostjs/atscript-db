@@ -8,8 +8,11 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ## 0.1.150 {#v0-1-150}
 
+**Requires `moost` 0.6.46 (`app.addInitHook`) and `@atscript/typescript` 0.1.101 (`annotationOverrides`).**
+
 ### New features
 
+- **`canonical` option for models served by several controllers** — `@TableController(Model, { canonical: true })` (or the trailing `{ canonical }` constructor option of the value-help controllers) marks the mount whose route becomes the model's value-help URL. See [Several controllers over one model](/http/#several-controllers).
 - **`@db.column.version.exempt`** — marks derived or reporting fields (scores, counters, caches): a patch that writes only exempt fields (`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged and adds no version check. See [Version-exempt fields](/api/versioning#version-exempt). `table.versionExemptFields` lists them; `isVersionExemptPatch` and `TDbUpdateOptions` are exported from `@atscript/db`. Nothing changes for tables that do not use it.
 - **Numeric search through the existing annotations.** `@db.column.searchable` (the `$search` fallback) and `@db.index.fulltext` (native search) now accept **integer** fields (`number.int` and its sizes, `number` + `@expect.int`, `@db.default.increment`). The fallback matches the term as a substring of the number's decimal text (`2946` finds `29461277`); a native index matches the whole number exactly, OR'd with the text match, and requires the integer member to be index-backed. Floats, decimals and timestamps are refused with a diagnostic. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match) and [Search fallback](/http/advanced#search-fallback).
 - **`$regex` on an integer field** is accepted on every adapter and matches the number's decimal text (also `~=` over HTTP). See [Value Types](/api/queries#value-types).
@@ -25,6 +28,14 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **SQLite: `$search` terms are quoted for FTS5.** `-2946`, `a AND`, `title:x` or a stray quote used to raise an FTS5 syntax error (a 500); they are now plain text. Words are still AND-ed, `"phrases"` and a trailing `*` (prefix) keep their meaning; `AND` / `OR` / `NOT` / `NEAR` and column filters are no longer operators.
 - **`$regex` on a float, decimal or timestamp field** still answers `INVALID_QUERY`; the message now reads `a pattern match needs a string or integer field`.
 - **`applySearchFallback` stays overridable**, but numeric IDs no longer need an override: declare the annotation on the integer field.
+- **`db.http.path` is derived from each controller's own route, per app, after `app.init()`.** The constructor no longer stamps it from whatever controller was being bound, so a controller constructed as another controller's dependency no longer publishes the wrong URL, and registration order no longer matters. `/meta` and `/meta/form/:name` carry the path resolved for the app serving the request; the model's runtime metadata mirrors the last app that published.
+- **A model served on several routes needs a marker.** Without one (and without a mount derived from the model's own `@db.http.path`), no URL is published for it and the app logs one warning naming the routes, so references to it render no picker (it used to be silently the last controller constructed). Mark the route pickers should use with `canonical: true` — `@TableController(Model, { canonical: true })` (also `@ReadableController` / `@ViewController`), or `{ canonical: true }` as the trailing constructor option of `AsValueHelpController` / `AsJsonValueHelpController` — or `canonical: false` on the others. See [Several controllers over one model](/http/#several-controllers).
+- **The root of a controller's own `/meta` carries that controller's own route**, so a secondary mount answers with its own URL while references use the canonical one.
+- Routes with parameters or wildcards (`/db/:tenant/issues`) are never published. Prefixes are normalized (no `//`, no trailing `/`).
+- Decorators and `assertExposed` read the schema's own `@db.http.path`, not a path published earlier in the process, so a re-imported controller (HMR, tests) no longer mounts at `/api/api/x` and `assertExposed` in default mode audits only models that declare the annotation.
+- `resolveMeta()` is async in the base controller (every in-repo caller awaits it); a synchronous third-party caller must await. A subclass that overrides `serializeForMeta` and calls `getSerializeOptions()` directly keeps the single-app behavior (it reads the mirror).
+- **Delete app-side repairs.** A `@MoostInit` hook that rewrites `db.http.path` (for example with `getHandlerPaths(…, "meta")` and `type.metadata.set(…)`) is no longer needed: remove it, and mark multi-mounted models with `canonical` instead.
+- An app whose readable controllers are all FOR_EVENT publishes on the first construction or first `/meta`; one SINGLETON readable publishes at init.
 
 ### For adapter authors
 

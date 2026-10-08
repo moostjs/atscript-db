@@ -7,13 +7,13 @@ import { TableController } from "../decorators";
 import { createMockReadable } from "./test-utils";
 
 /**
- * Integration coverage for the `db.http.path` metadata write done by
- * `AsDbReadableController._resolveHttpPath()`. These tests drive the full
+ * Integration coverage for the `db.http.path` metadata write mirrored by
+ * the per-app publish hook (`publishDbHttpPaths`, run during `app.init()`). These tests drive the full
  * Moost `bindController` flow so we actually exercise:
  *   - `createEventContext` + `setControllerContext({ prefix })`
  *   - SINGLETON instance creation via `infact.get()`
  *   - Nested `@ImportController` prefix composition
- * No HTTP adapter is needed: the metadata write happens during `app.init()`,
+ * No HTTP adapter is needed: the mirror is written during `app.init()`,
  * not per-request.
  */
 

@@ -56,10 +56,16 @@ export class AsJsonValueHelpController<
 
   private _pkIndex?: Map<string, DataType>;
 
-  constructor(boundType: T, rows: DataType[], app: Moost, controllerName?: string) {
+  constructor(
+    boundType: T,
+    rows: DataType[],
+    app: Moost,
+    controllerName?: string,
+    opts?: { canonical?: boolean },
+  ) {
     const name =
       controllerName || (boundType.metadata.get("db.table") as string | undefined) || "value-help";
-    super(boundType, name, app);
+    super(boundType, name, app, opts);
     this.rows = rows;
     if (this.primaryKey) {
       const pk = this.primaryKey;

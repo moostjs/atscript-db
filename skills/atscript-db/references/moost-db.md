@@ -90,7 +90,7 @@ After `init()`, warn for models with no bound controller:
 
 ```ts
 import { assertExposed } from "@atscript/moost-db";
-const missing = assertExposed(app, atscriptModels); // default: only @db.http.path models
+const missing = assertExposed(app, atscriptModels); // default: only models that declare @db.http.path in the schema
 // Prefix-bound repos (no @db.http.path anywhere): audit EVERY passed model
 assertExposed(app, atscriptModels, { all: true, exclude: [InternalCache] });
 ```
@@ -142,8 +142,12 @@ No DB connection or import-order dance — see [testing.md](testing.md).
 ## `@db.http.path` resolution
 
 - If an author writes `@db.http.path '/authors'`, `TableController` / `ReadableController` uses that as the controller prefix when no explicit `prefix` arg is passed.
-- At runtime the controller writes the final absolute path (Moost `globalPrefix` + computed prefix, leading `/`) back onto `type.metadata["db.http.path"]`.
-- The `/meta` endpoint exposes this value so FK references carry the correct URL for browser value-help pickers.
+- After `app.init()` (0.1.150) each app publishes the model's value-help URL — the controller's own bound route (Moost `globalPrefix` + computed prefix, leading `/`, no `//` or trailing `/`) — derived from `app.getControllersOverview()` in a moost `addInitHook` (needs moost >= 0.6.46, `@atscript/typescript` >= 0.1.101). Constructors never write it; registration order and constructor injection don't matter. The runtime `type.metadata["db.http.path"]` mirrors the last app that published; `/meta` and `/meta/form/:name` are resolved per serving app (`annotationOverrides`), so FK refs, terminal refs, `@ui.valueHelp` targets and decorations carry the model's canonical path.
+- Decorators and `assertExposed` read the schema's design-time value (`@db.http.path` as written), never a published path.
+- Own root: the root of a controller's own `/meta` carries that controller's own mount (a secondary mount answers with its route); references to the model elsewhere carry the canonical one.
+- **Several controllers over one model:** `canonical: true` on the binding decorator (`@TableController(Model, { canonical: true })`, also `@ReadableController` / `@ViewController`) or as the trailing `{ canonical }` constructor option of `AsValueHelpController` (4th arg) / `AsJsonValueHelpController` (5th arg) picks the published route; `canonical: false` excludes a mount. Without markers: one distinct mount wins; else the mount whose prefix came from the model's own `@db.http.path` (no explicit prefix) wins; else the model is ambiguous: no path is published and one deduped warning (`app.getLogger("moost-db")`) names the routes. Never throws. Two `canonical: true` mounts on different routes also warn. Parametric mounts (`:param`, `*`) never publish. The same class imported twice needs a subclass to be marked.
+- Delete app-side `@MoostInit` hooks that repair `db.http.path` (`getHandlerPaths` + `type.metadata.set`) — superseded.
+- FOR_EVENT readables publish with the app's singletons; an app with only FOR_EVENT readables publishes on first construction or first `/meta`. A subclass that overrides `serializeForMeta` and calls `getSerializeOptions()` directly loses the per-app overrides (falls back to the mirror); a subclass `annotationOverrides` is composed (its entry wins). `resolveMeta()` is async in the base since 0.1.150.
 
 ## Read-response baseline
 
@@ -403,7 +407,7 @@ Status-code mapping (`validation-interceptor.ts`):
 
 `AsReadableController`, `AsValueHelpController`, and `AsJsonValueHelpController` back non-DB `@db.rel.FK` sources (enums, static lists, JSON documents) so forms can resolve picker URLs from `@db.http.path` regardless of whether the target is a table.
 
-- Field-side binding: `@db.rel.FK` (constraint) OR `@ui.valueHelp Target, 'field', <static filter>` (atscript-ui, 0.1.148 — no FK, no DDL; `/meta` carries `{ target: { id, metadata: { "db.http.path" } }, field, filter }`; the controller stamps the path, the dictionary `.as` need not declare it). `@ui.valueHelp.distinct` on a column = distinct stored values via `$groupBy=f&$select=f`, offered only when `fields[f].filterable ∧ groupable`.
+- Field-side binding: `@db.rel.FK` (constraint) OR `@ui.valueHelp Target, 'field', <static filter>` (atscript-ui, 0.1.148 — no FK, no DDL; `/meta` carries `{ target: { id, metadata: { "db.http.path" } }, field, filter }`; the app publishes the path for the dictionary's controller (`canonical` if mounted more than once), the dictionary `.as` need not declare it). `@ui.valueHelp.distinct` on a column = distinct stored values via `$groupBy=f&$select=f`, offered only when `fields[f].filterable ∧ groupable`.
 - `AsValueHelpController` — **abstract**. `query()` and `getOne()` are abstract; subclass must implement them (`as-value-help.controller.ts:105,111`).
 - `AsJsonValueHelpController` — **the only concrete subclass shipped**. `new AsJsonValueHelpController(Type, rows, app)` — holds a static in-memory row set and serves `/query` `/pages` `/one` `/meta` over it. Filter/sort/projection delegate to the shared `@atscript/db-memory` engine (see § query engine below).
 
