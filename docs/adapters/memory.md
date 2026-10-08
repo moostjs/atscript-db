@@ -106,7 +106,7 @@ Dotted paths into `@db.json` objects and arrays are listed in `/meta.fields` and
 
 ### Optimistic Concurrency
 
-Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale version yields `matchedCount: 0` (no throw), and the version column auto-bumps on every versioned write — including the PK-only [versioned touch](/api/versioning#versioned-touch). See [Optimistic Concurrency](/api/versioning).
+Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale version yields `matchedCount: 0` (no throw), and the version column auto-bumps on every versioned write that touches a non-exempt field ([`@db.column.version.exempt`](/api/versioning#version-exempt)) — including the PK-only [versioned touch](/api/versioning#versioned-touch). See [Optimistic Concurrency](/api/versioning).
 
 ### Field Operations & Defaults
 

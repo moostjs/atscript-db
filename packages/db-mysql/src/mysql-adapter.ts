@@ -22,6 +22,7 @@ import type {
   TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
@@ -1072,15 +1073,17 @@ export class MysqlAdapter extends BaseDbAdapter {
     return hit;
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     // MySQL supports native UPDATE ... LIMIT 1
     const where = this._mutationWhere(filter);
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -1092,6 +1095,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
+    // `affectedRows` counts MATCHED rows (mysql2's default FOUND_ROWS flag); `changedRows`
+    // may be lower for a version-exempt patch writing unchanged values (no bump forces a change).
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
   }
 
@@ -1099,9 +1104,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const where = this._mutationWhere(filter);
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,

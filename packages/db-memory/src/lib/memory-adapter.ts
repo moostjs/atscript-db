@@ -20,6 +20,7 @@ import type {
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TDbDeleteResult,
 } from "@atscript/db";
 // `@atscript/db` does NOT re-export the annotated-type; it comes from the
@@ -749,18 +750,21 @@ export class MemoryAdapter extends BaseDbAdapter {
    * `row`), enforces unique indexes on the result EXCLUDING the row's own key (so
    * a row keeping/rewriting its own unique value never self-conflicts), then
    * commits. Nothing is written to the store until both the unique and PK checks
-   * pass, so a conflict leaves the store untouched.
+   * pass, so a conflict leaves the store untouched. `keepVersion` skips the
+   * bump (a version-exempt patch, since 0.1.150).
    */
+  // oxlint-disable-next-line max-params
   private _commitUpdate(
     state: MemoryTableState,
     oldKey: string,
     row: Record<string, unknown>,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    keepVersion = false,
   ): void {
     const next = structuredClone(row);
     this._applyUpdate(next, data, ops);
-    this._bumpVersion(next, row);
+    if (!keepVersion) this._bumpVersion(next, row);
     this._enforceUniqueIndexes(state, next, oldKey);
     this._commitRow(state.rows, oldKey, next);
   }
@@ -790,12 +794,15 @@ export class MemoryAdapter extends BaseDbAdapter {
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
+    const keepVersion = this._versionColumnFor(opts, expectedVersion) === undefined;
     this._assertWritable();
     const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     const state = this._peekState();
@@ -804,7 +811,7 @@ export class MemoryAdapter extends BaseDbAdapter {
       return { matchedCount: 0, modifiedCount: 0 };
     }
     const { key, row } = matched[0]!;
-    this._commitUpdate(state, key, row, data, ops);
+    this._commitUpdate(state, key, row, data, ops, keepVersion);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -982,11 +989,13 @@ export class MemoryAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     this._assertWritable();
     const sets = containsRelationFilter(filter) ? await this._relationSets(filter) : undefined;
     // updateMany never CAS-checks (locked decision row 2) — `expectedVersion` is
-    // never passed. Each matched row still auto-bumps its own version. Applied
+    // never passed. Each matched row still auto-bumps its own version (unless
+    // `opts.keepVersion` — a version-exempt patch). Applied
     // sequentially and NON-atomically (a mid-loop unique/PK conflict leaves the
     // earlier rows already updated), matching `insertMany`'s v1 contract.
     const state = this._peekState();
@@ -995,7 +1004,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     }
     const matched = this._selectForWrite(state, filter, undefined, true, sets);
     for (const { key, row } of matched) {
-      this._commitUpdate(state, key, row, data, ops);
+      this._commitUpdate(state, key, row, data, ops, opts?.keepVersion);
     }
     return { matchedCount: matched.length, modifiedCount: matched.length };
   }

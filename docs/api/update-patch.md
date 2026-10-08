@@ -117,6 +117,8 @@ if (ok.matchedCount === 0) {
 
 On a mismatch the call returns `{ matchedCount: 0, modifiedCount: 0 }` — no exception, no partial write. `$cas` composes atomically with `$inc` / `$dec` / `$mul` in the same payload (single statement on SQL, single `findOneAndUpdate` on Mongo). With no other fields at all it is the [versioned touch](./versioning#versioned-touch) — a conditional bump that fences the row.
 
+A patch that writes only [`@db.column.version.exempt`](./versioning#version-exempt) fields (and carries no `$cas`) skips the version bump; with `$cas` it still checks and bumps.
+
 `$cas` is **not** supported on `updateMany` (a single `expectedVersion` cannot sensibly match N rows). Per-row version locking goes through `bulkUpdate` where each payload carries its own `$cas`.
 
 See [Optimistic Concurrency (Row Versioning)](./versioning) for the full reference — annotation constraints, the `withOptimisticRetry` helper, `CasExhaustedError`, direct-write rejection, and the [HTTP wire contract](/http/crud#occ-over-http).

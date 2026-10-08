@@ -90,7 +90,7 @@ await tasks.updateOne({ id: 1, tenant: "other" }, { check: withCheck }); // thro
 
 ## Optimistic concurrency
 
-Tables annotated with `@db.column.version` get first-class OCC. The adapter auto-bumps the version on every successful write. Opt into conflict detection per call via the inline `$cas` operator on `updateOne` / `replaceOne` / `bulkUpdate`:
+Tables annotated with `@db.column.version` get first-class OCC. The adapter auto-bumps the version on every successful write (except [version-exempt](versioning.md) patches). Opt into conflict detection per call via the inline `$cas` operator on `updateOne` / `replaceOne` / `bulkUpdate`:
 
 ```ts
 const row = await users.findOne({ filter: { id } });
@@ -108,7 +108,7 @@ if (result.matchedCount === 0) {
 
 Locked behaviors:
 
-- **Auto-bump is mandatory.** Every write to a versioned table bumps the version column, whether or not `$cas` was supplied. The bump is not opt-in.
+- **Auto-bump is mandatory.** Every write to a versioned table bumps the version column, whether or not `$cas` was supplied. The bump is not opt-in — except [version-exempt](versioning.md) patches (0.1.150).
 - **CAS predicate is opt-in via `$cas`.** Without it, writes apply as last-write-wins (today's semantics).
 - **`matchedCount === 0` is the stale-detection signal.** No exception is thrown on mismatch. Treat "row missing" and "version mismatch" the same in retry loops, or follow up with `findOne` to disambiguate.
 - **`updateMany` never CAS-checks.** Passing `$cas` to `updateMany` throws. Use `bulkUpdate` with per-item `$cas` for per-row version locking.

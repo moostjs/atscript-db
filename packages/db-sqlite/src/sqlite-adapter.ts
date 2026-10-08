@@ -24,6 +24,7 @@ import type {
   TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TExistingColumn,
   TColumnDiff,
   TSyncColumnResult,
@@ -546,15 +547,17 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ───────────────────────────────────────────────────────────
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
       params: where.params,
@@ -578,9 +581,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
     const result = await this._stmt(() =>

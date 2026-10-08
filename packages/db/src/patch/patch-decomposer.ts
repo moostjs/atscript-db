@@ -4,6 +4,9 @@ import { DbError } from "../db-error";
 import type { AtscriptDbTable } from "../table/db-table";
 import { getKeyProps } from "./patch-types";
 
+/** Metadata tag the flattener puts on top-level array fields (shared with `isVersionExemptPatch`). */
+export const TOP_LEVEL_ARRAY_TAG = "db.__topLevelArray";
+
 /**
  * Decomposes a patch payload into a flat update object for adapters
  * that don't support native patch operations.
@@ -25,9 +28,7 @@ export function decomposePatch(
   table: AtscriptDbTable,
 ): Record<string, unknown> {
   const update: Record<string, unknown> = {};
-  const topLevelArrayTag = "db.__topLevelArray";
-
-  flattenPatchPayload(payload, "", update, table, topLevelArrayTag);
+  flattenPatchPayload(payload, "", update, table, TOP_LEVEL_ARRAY_TAG);
 
   return update;
 }

@@ -41,6 +41,7 @@ import type {
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TDbDeleteResult,
 } from "./types";
 import type { TFieldOps } from "./ops";
@@ -217,6 +218,23 @@ export abstract class BaseDbAdapter {
    */
   setVerbose(enabled: boolean): void {
     this._verbose = enabled;
+  }
+
+  /**
+   * Physical version column an UPDATE must bump, or `undefined` when it must
+   * not: no `@db.column.version`, or a version-exempt patch
+   * (`opts.keepVersion`, since 0.1.150 — the core never combines it with
+   * `expectedVersion`; a violation throws).
+   */
+  protected _versionColumnFor(
+    opts?: TDbUpdateOptions,
+    expectedVersion?: number,
+  ): string | undefined {
+    if (!opts?.keepVersion) return this._table.versionColumnPhysical;
+    if (expectedVersion !== undefined) {
+      throw new Error("keepVersion cannot combine with expectedVersion");
+    }
+    return undefined;
   }
 
   /**
@@ -623,13 +641,16 @@ export abstract class BaseDbAdapter {
    *
    * @param filter - Filter identifying the record to patch.
    * @param patch - The patch payload with array operations.
+   * @param opts - `keepVersion`: skip the version bump (see {@link TDbUpdateOptions}).
    * @returns Update result.
    */
+  // oxlint-disable-next-line max-params
   async nativePatch(
     _filter: FilterExpr,
     _patch: unknown,
     _ops?: TFieldOps,
     _expectedVersion?: number,
+    _opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     throw new Error("Native patch not supported by this adapter");
   }
@@ -1097,11 +1118,17 @@ export abstract class BaseDbAdapter {
     data: Record<string, unknown>,
     expectedVersion?: number,
   ): Promise<TDbUpdateResult>;
+  /**
+   * `opts.keepVersion` — skip the version bump (and never combine with
+   * `expectedVersion`); see {@link TDbUpdateOptions}.
+   */
+  // oxlint-disable-next-line max-params
   abstract updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult>;
   abstract deleteOne(filter: FilterExpr): Promise<TDbDeleteResult>;
   abstract findOne(query: DbQuery): Promise<Record<string, unknown> | null>;
@@ -1110,10 +1137,12 @@ export abstract class BaseDbAdapter {
 
   // ── Batch operations ──────────────────────────────────────────────────────
 
+  /** `opts.keepVersion` — skip the version bump; see {@link TDbUpdateOptions}. */
   abstract updateMany(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult>;
   abstract replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
   abstract deleteMany(filter: FilterExpr): Promise<TDbDeleteResult>;

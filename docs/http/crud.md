@@ -372,7 +372,7 @@ Tables that declare [`@db.column.version`](/api/versioning) get optimistic concu
 The controller intercepts every write payload on a table whose `/meta` exposes a `versionColumn`. The examples on this page call the field `version`; the controller keys on whatever field `versionColumn` names — its logical name, which a `@db.column` rename does not change (since 0.1.141; earlier releases exposed the renamed storage column, so a renamed version field got no conflict detection over HTTP):
 
 - **If `version` is present in the body:** it is **stripped** from the SET payload and lifted to `$cas: { version: N }`. The auto-bump still applies — the stored row ends up at `N + 1`, never at the value the client sent.
-- **If `version` is absent:** the write proceeds with no `$cas` — last-write-wins semantics (client opted out by stripping it).
+- **If `version` is absent:** the write proceeds with no `$cas` — last-write-wins semantics (client opted out by stripping it). The version still bumps, unless the body writes only [`@db.column.version.exempt`](/api/versioning#version-exempt) fields (since 0.1.150) — then it stays. With `version` present, an exempt-only body is still a `$cas` write: checked and bumped.
 - **A raw SDK-shaped `$cas: { version: N }` is accepted as sent** (since 0.1.128) and gets the same 404 / 409 disambiguation. Sending both `version` and `$cas` with **different** values is ambiguous → `400` with `errors: [{ path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' }]` (`[i].$cas` in an array body); identical values are accepted.
 
 Policy is **presence-based**, not enforced. There is no `428 Precondition Required` gate.
@@ -451,7 +451,7 @@ Each item in an array body carries its own optional `version`. Behavior:
 - Items with `version` get per-row CAS.
 - Items without `version` are last-write-wins.
 - Mismatches are **silently skipped**, not failed — never "fail all on first conflict".
-- Response is the aggregate shape: `{ matchedCount, modifiedCount }`. Detect partial failure via `matchedCount < items.length`.
+- Response is the aggregate shape: `{ matchedCount, modifiedCount }`. Detect partial failure via `matchedCount < items.length` — not via `modifiedCount`, which can be lower than `matchedCount` for unchanged values (a [version-exempt](/api/versioning#version-exempt) write on MySQL / MongoDB).
 
 ```bash
 curl -X PATCH http://localhost:3000/tasks/ \

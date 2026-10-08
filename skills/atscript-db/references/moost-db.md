@@ -279,7 +279,7 @@ Present only on versioned tables — see [§ Meta endpoint shape](#meta-endpoint
 ### Auto-lift on PATCH / PUT
 
 - `version` present in the body → stripped from SET, lifted to `$cas: { version: N }`, dispatched to `updateOne` / `replaceOne`.
-- `version` absent → write goes through with no `$cas` (last-write-wins; client opted out).
+- `version` absent → write goes through with no `$cas` (last-write-wins; client opted out). It still bumps, except for [version-exempt](versioning.md) bodies (0.1.150).
 - Raw `$cas: { version: N }` accepted as sent (since 0.1.128; same 404/409 disambiguation). `version` + DIFFERENT `$cas` → 400 at `$cas` / `[i].$cas`.
 - PK-only `PATCH { id, version }` = versioned touch: executes, bumps (409/404 on stale/missing). `PATCH { id }` → `{ 1|0, 0 }`, no write.
 
@@ -307,7 +307,7 @@ CAS-bearing PATCH / PUT on a row that doesn't exist returns `404 Not Found`, NOT
 
 ### Bulk PATCH / PUT
 
-Array bodies carry one optional `version` per item. Mismatches are silently skipped. The response is the aggregate shape:
+Array bodies carry one optional `version` per item. Mismatches are silently skipped. Detect partial application via `matchedCount < N` — `modifiedCount` can be lower for unchanged values (version-exempt writes on MySQL / Mongo). The response is the aggregate shape:
 
 ```
 PATCH /users/

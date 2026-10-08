@@ -263,7 +263,10 @@ export function fillReplacePayload(
  *   `<col> = <col> + 1` to the SET list. The bump is **mandatory** whenever
  *   `versionColumn` is set, regardless of whether `expectedVersion` is
  *   supplied. If the version column doesn't auto-increment on every write,
- *   OCC silently degrades to no protection.
+ *   OCC silently degrades to no protection. A caller that must not bump (a
+ *   version-exempt patch, `TDbUpdateOptions.keepVersion`) passes
+ *   `versionColumn: undefined`, which also drops the CAS predicate — callers
+ *   never combine that with `expectedVersion`.
  * - `expectedVersion` — when supplied, the builder appends
  *   `AND <col> = ?` to the WHERE clause and pushes the value. Requires
  *   `versionColumn` (CAS targets that column); supplying `expectedVersion`
