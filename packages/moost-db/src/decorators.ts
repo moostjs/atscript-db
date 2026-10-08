@@ -4,6 +4,7 @@ import { Controller, Provide, ApplyDecorators, Inherit } from "moost";
 
 import { getAtscriptDbMate, type TReadableBindingMeta } from "./mate";
 import { resolveDbSpace } from "./db-space-registry";
+import { designTimeHttpPath } from "./http-path-design-time";
 
 /**
  * DI token under which the {@link AtscriptDbReadable} instance
@@ -39,6 +40,18 @@ export interface TControllerBindingOptions {
    * annotation. Ignored for instance/factory bindings.
    */
   space?: string;
+  /**
+   * Marks (`true`) or excludes (`false`) this controller as the one whose route
+   * is published as the model's value-help path (`db.http.path`) when the same
+   * model is served by several controllers in one app. A single `canonical: true`
+   * mount wins; `canonical: false` mounts are never published; without a marker
+   * the model's own `@db.http.path`-derived mount breaks ties, and any remaining
+   * ambiguity leaves the path unset (with a boot warning). Parametric mounts
+   * (`:param` / `*` segments) are never published.
+   *
+   * @since 0.1.150
+   */
+  canonical?: boolean;
 }
 
 function normalizeOptions(
@@ -61,16 +74,21 @@ function buildBinding(
   options: TControllerBindingOptions,
   decoratorName: string,
 ): { meta: TReadableBindingMeta; prefix: string } {
+  const canonical = options.canonical;
   if (isAnnotatedType(binding)) {
     const model = binding;
     const space = options.space ?? (model.metadata.get("db.space") as string | undefined);
+    // The design-time hint: moost-db mirrors the published path into the same
+    // key at runtime, which must never feed back into a later decoration.
+    const hinted = designTimeHttpPath(model);
     const prefix =
       options.prefix ||
-      (model.metadata.get("db.http.path") as string | undefined) ||
+      hinted ||
       (model.metadata.get("db.table") as string | undefined) ||
       (model.metadata.get("db.view") as string | undefined) ||
       (model as { id?: string }).id ||
       "";
+    const prefixSource = options.prefix ? "option" : hinted ? "annotation" : "name";
     if (!prefix) {
       throw new Error(
         `[moost-db] @${decoratorName}: cannot derive a route prefix from the model token ` +
@@ -81,6 +99,9 @@ function buildBinding(
       meta: {
         model,
         resolve: () => resolveDbSpace(space).get(model),
+        prefix,
+        prefixSource,
+        canonical,
       },
       prefix,
     };
@@ -95,20 +116,26 @@ function buildBinding(
       );
     }
     return {
-      meta: { resolve: binding as () => AtscriptDbReadable },
+      meta: {
+        resolve: binding as () => AtscriptDbReadable,
+        prefix: options.prefix,
+        prefixSource: "option",
+        canonical,
+      },
       prefix: options.prefix,
     };
   }
 
   const readable = binding;
-  const prefix =
-    options.prefix ||
-    (readable.type.metadata.get("db.http.path") as string | undefined) ||
-    readable.tableName;
+  const hinted = designTimeHttpPath(readable.type as TAtscriptAnnotatedType);
+  const prefix = options.prefix || hinted || readable.tableName;
   return {
     meta: {
       model: readable.type as TAtscriptAnnotatedType,
       resolve: () => readable,
+      prefix,
+      prefixSource: options.prefix ? "option" : hinted ? "annotation" : "name",
+      canonical,
     },
     prefix,
   };

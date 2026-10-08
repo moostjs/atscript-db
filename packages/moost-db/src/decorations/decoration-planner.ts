@@ -277,9 +277,14 @@ export class DecorationPlanner {
     return out;
   }
 
-  /** The declared interface serialized for `/meta.decorations`, once per class. */
-  serialized(serialize: () => TSerializedAnnotatedType): TSerializedAnnotatedType {
-    return (this.index.memo.serialized ??= serialize());
+  /** The declared interface serialized for `/meta.decorations`, once per class and app scope. */
+  serialized(scope: unknown, serialize: () => TSerializedAnnotatedType): TSerializedAnnotatedType {
+    const { memo } = this.index;
+    if (!memo.serialized || memo.serializedScope !== scope) {
+      memo.serialized = serialize();
+      memo.serializedScope = scope;
+    }
+    return memo.serialized;
   }
 }
 

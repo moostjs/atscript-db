@@ -6,6 +6,21 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.150 {#v0-1-150}
+
+**Requires `moost` 0.6.46 (`app.addInitHook`) and `@atscript/typescript` 0.1.101 (`annotationOverrides`).**
+
+### Behavior changes {#v0-1-150-behavior}
+
+- **`db.http.path` is derived from each controller's own route, per app, after `app.init()`.** The constructor no longer stamps it from whatever controller was being bound, so a controller constructed as another controller's dependency no longer publishes the wrong URL, and registration order no longer matters. `/meta` and `/meta/form/:name` carry the path resolved for the app serving the request; the model's runtime metadata mirrors the last app that published.
+- **A model served on several routes needs a marker.** Without one (and without a mount derived from the model's own `@db.http.path`), no URL is published for it and the app logs one warning naming the routes, so references to it render no picker (it used to be silently the last controller constructed). Mark the route pickers should use with `canonical: true` — `@TableController(Model, { canonical: true })` (also `@ReadableController` / `@ViewController`), or `{ canonical: true }` as the trailing constructor option of `AsValueHelpController` / `AsJsonValueHelpController` — or `canonical: false` on the others. See [Several controllers over one model](/http/#several-controllers).
+- **The root of a controller's own `/meta` carries that controller's own route**, so a secondary mount answers with its own URL while references use the canonical one.
+- Routes with parameters or wildcards (`/db/:tenant/issues`) are never published. Prefixes are normalized (no `//`, no trailing `/`).
+- Decorators and `assertExposed` read the schema's own `@db.http.path`, not a path published earlier in the process, so a re-imported controller (HMR, tests) no longer mounts at `/api/api/x` and `assertExposed` in default mode audits only models that declare the annotation.
+- `resolveMeta()` is async in the base controller (every in-repo caller awaits it); a synchronous third-party caller must await. A subclass that overrides `serializeForMeta` and calls `getSerializeOptions()` directly keeps the single-app behavior (it reads the mirror).
+- **Delete app-side repairs.** A `@MoostInit` hook that rewrites `db.http.path` (for example with `getHandlerPaths(…, "meta")` and `type.metadata.set(…)`) is no longer needed: remove it, and mark multi-mounted models with `canonical` instead.
+- An app whose readable controllers are all FOR_EVENT publishes on the first construction or first `/meta`; one SINGLETON readable publishes at init.
+
 ## 0.1.149 {#v0-1-149}
 
 ### New features

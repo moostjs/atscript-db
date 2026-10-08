@@ -3,6 +3,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import type { Moost } from "moost";
 
 import { findReadableBinding } from "./decorators";
+import { designTimeHttpPath } from "./http-path-design-time";
 
 /** Options for {@link assertExposed}. */
 export interface TAssertExposedOptions {
@@ -71,7 +72,8 @@ export function assertExposed(
   for (const model of models) {
     // A @db.alias type is a join scope, not a model a controller could serve
     if (aliasTargetOf(model)) continue;
-    const httpPath = model.metadata.get("db.http.path") as string | undefined;
+    // The declared hint, not another app's mirrored path.
+    const httpPath = designTimeHttpPath(model);
     if (!auditAll && httpPath === undefined) continue;
     if (excluded.has(model) || exposed.has(model)) continue;
     missing.push(model);

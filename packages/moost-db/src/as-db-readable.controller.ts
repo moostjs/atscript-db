@@ -2568,22 +2568,13 @@ export class AsDbReadableController<
 
   // ── @DbActionsFrom (since 0.1.147) ─────────────────────────────────────
 
-  /**
-   * The app of the current event, through DI — never the one this
-   * (singleton) instance was constructed in, which may be gone (a re-booted
-   * app, a hot reload).
-   */
-  private _currentApp(): Promise<Moost> {
-    return useControllerContext().instantiate(Moost) as Promise<Moost>;
-  }
-
   /** The class's `@DbActionsFrom` delegations, validated on first use (per app). */
   private async _delegations(): Promise<readonly TDelegation[]> {
     if (!this._hasDelegations) return [];
     return discoverDelegations({
       ctor: this.constructor as Function,
       readable: this.readable,
-      app: await this._currentApp(),
+      app: await this.currentApp(),
       logger: this.logger,
       instantiate: (ctor) => useControllerContext().instantiate(ctor as never),
     });
@@ -3898,7 +3889,7 @@ export class AsDbReadableController<
       type: this.getSerializedType(),
       // Declared display-only fields (since 0.1.148) — not part of `type`.
       ...(this._decorations && {
-        decorations: this._planner!.serialized(() =>
+        decorations: this._planner!.serialized(this._buildScope, () =>
           this.serializeForMeta(this._decorations!.type),
         ),
       }),

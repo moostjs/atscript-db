@@ -28,6 +28,16 @@ export interface TReadableBindingMeta {
   model?: TAtscriptAnnotatedType;
   /** Resolves the readable — lazily for token/factory, identity for instance. */
   resolve: () => AtscriptDbReadable<any>;
+  /** The route prefix the decorator derived (`options.prefix`, `@db.http.path`, table name, …). @since 0.1.150 */
+  prefix?: string;
+  /**
+   * Where {@link prefix} came from: the decorator's `prefix` option (or the
+   * factory form), the model's own `@db.http.path`, or its table / view name.
+   * @since 0.1.150
+   */
+  prefixSource?: "option" | "annotation" | "name";
+  /** The decorator's `canonical` option. @since 0.1.150 */
+  canonical?: boolean;
 }
 
 /**

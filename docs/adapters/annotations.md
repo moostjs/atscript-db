@@ -119,9 +119,9 @@ Some adapter capabilities are known only after schema sync — PostgreSQL detect
 
 ## HTTP
 
-| Annotation      | Applies To | Arguments       | Description                                                                                                                           |
-| --------------- | ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.http.path` | Interface  | `path` (string) | HTTP endpoint path for this table. Used by UI for value-help on FK fields. Overwritten at runtime by the controller's computed prefix |
+| Annotation      | Applies To | Arguments       | Description                                                                                                                                                                         |
+| --------------- | ---------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.http.path` | Interface  | `path` (string) | HTTP endpoint path for this table. Used by UI for value-help on FK fields. Published at runtime from the controller's computed route (the canonical one when the model has several) |
 
 ```atscript
 @db.table 'authors'
@@ -133,14 +133,14 @@ interface Author {
 }
 ```
 
-When a controller is registered without an explicit prefix, `@db.http.path` is used as the route. At runtime, the final computed prefix (including parent routes) is written back to `@db.http.path` on the type metadata, so FK references always carry the correct URL.
+When a controller is registered without an explicit prefix, `@db.http.path` is used as the route. After `app.init()` the app publishes the final computed route (including parent routes) as `@db.http.path`, so FK references always carry the correct URL — see [Several controllers over one model](../http/index#several-controllers) when a model is mounted more than once.
 
 ### Normalization contract
 
 The value carried in `type.metadata["db.http.path"]` has distinct semantics for writers and readers:
 
-- **Writers** (annotation at compile time): the value is an optional path hint. The controller's computed prefix takes precedence at runtime, so the annotation may be omitted or overridden by the mount point.
-- **Readers** (UI / client code / custom consumers): the runtime value is always (a) prefixed with a leading `/`, (b) inclusive of the Moost `globalPrefix`, and (c) the final public URL — usable verbatim with `fetch()` or `new Client(url)`.
+- **Writers** (annotation at compile time): the value is an optional route hint, and it stays the hint — decorators and `assertExposed` read what you declared, never a path published later. The controller's computed route takes precedence at runtime, so the annotation may be omitted or overridden by the mount point.
+- **Readers** (UI / client code / custom consumers): the published value is always (a) prefixed with a leading `/`, with empty segments and a trailing `/` removed, (b) inclusive of the Moost `globalPrefix`, and (c) the final public URL — usable verbatim with `fetch()` or `new Client(url)`. In `/meta` it is resolved for the app serving the request: references carry the model's canonical route, the root of a controller's own `/meta` carries that controller's own route, and an ambiguous model carries none. The model's runtime metadata mirrors the last app that published.
 
 Example: an author writes `@db.http.path '/authors'`; a consumer reading `type.metadata["db.http.path"]` at runtime sees `/api/db/tables/authors` when the controller is mounted under `globalPrefix: '/api'` at `/db/tables/authors`.
 

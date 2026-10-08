@@ -27,6 +27,8 @@ export interface TDecorationIndex {
   /** Per class (and readable) state the planner fills: the serialized type, the visible `/meta` envelopes. */
   readonly memo: {
     serialized?: TSerializedAnnotatedType;
+    /** The app scope (`db.http.path` overrides) {@link serialized} was built for. */
+    serializedScope?: unknown;
     /** `/meta` envelopes through the decoration step, per input (while visibility is not request-scoped). */
     meta: WeakMap<TMetaResponse, TMetaResponse>;
   };

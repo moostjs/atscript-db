@@ -170,60 +170,58 @@ describe("AsDbController", () => {
 
   // ── HTTP path resolution (db.http.path metadata) ────────────────────
 
-  describe("_resolveHttpPath", () => {
-    it("writes db.http.path metadata from event context prefix (SINGLETON init)", () => {
-      // Reproduces the runtime path in Moost: during bindController(), the
-      // SINGLETON instance is created inside createEventContext AFTER
-      // setControllerContext(..., { prefix }) has been called — but BEFORE
-      // controllersOverview is populated. The controller must read the prefix
-      // from the event context, not the (empty) overview.
+  describe("db.http.path (per-app publish, not constructor stamping)", () => {
+    const withOverview = (ctor: Function, computedPrefix: string) => {
+      const app = createMockApp();
+      app.getControllersOverview = vi
+        .fn()
+        .mockReturnValue([{ type: ctor, computedPrefix, meta: {}, handlers: [] }]);
+      return app;
+    };
+
+    it("the constructor never writes db.http.path (not from the ambient prefix either)", () => {
       const app = createMockApp();
       const t = createMockTable();
       createEventContext({ logger: app.getLogger() }, () => {
-        // Mimics moost.ts: setControllerContext with the computed prefix, then
-        // the constructor runs synchronously within the same context.
         setControllerContext({} as Record<string, unknown>, "method", "", {
           prefix: "api/db/tables/test",
         });
         new AsDbController(app, t);
       });
-      expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/test");
+      expect(t.type.metadata.get("db.http.path")).toBeUndefined();
     });
 
-    it("falls back to controllersOverview when no event context prefix (FOR_EVENT scope)", () => {
-      // For FOR_EVENT controllers, the constructor fires per-request before
-      // setControllerContext(prefix). By that time controllersOverview is
-      // fully populated from init, so the overview lookup is the right fallback.
-      const app = createMockApp();
+    it("/meta carries the path of the controller's own overview entry", async () => {
       const t = createMockTable();
       class TestController extends AsDbController {}
-      app.getControllersOverview = vi
-        .fn()
-        .mockReturnValue([{ type: TestController, computedPrefix: "api/db/tables/from-overview" }]);
-      new TestController(app, t);
+      const app = withOverview(TestController, "api/db/tables/from-overview");
+      const ctrl = new TestController(app, t);
+      const meta = await ctrl.meta();
+      expect((meta.type as any).metadata["db.http.path"]).toBe("/api/db/tables/from-overview");
+      // The runtime metadata is the compat mirror (published for the app).
       expect(t.type.metadata.get("db.http.path")).toBe("/api/db/tables/from-overview");
     });
 
-    it("does not prepend a second slash when the prefix already has one", () => {
-      // Defensive: if a future Moost version ever emits a leading-slash prefix,
-      // we must not produce "//..." in the stored path.
-      const app = createMockApp();
+    it.each([
+      ["api/already/slashed", "/api/already/slashed"],
+      ["/api/already/slashed", "/api/already/slashed"],
+      ["//api//double/", "/api/double"],
+      ["api/trailing/", "/api/trailing"],
+    ])("normalizes %j to %j", async (prefix, expected) => {
       const t = createMockTable();
       class TestController extends AsDbController {}
-      app.getControllersOverview = vi
-        .fn()
-        .mockReturnValue([{ type: TestController, computedPrefix: "/api/already/slashed" }]);
-      new TestController(app, t);
-      expect(t.type.metadata.get("db.http.path")).toBe("/api/already/slashed");
+      const ctrl = new TestController(withOverview(TestController, prefix), t);
+      const meta = await ctrl.meta();
+      expect((meta.type as any).metadata["db.http.path"]).toBe(expected);
     });
 
-    it("leaves metadata unset when no context and no overview is available", () => {
-      // Direct instantiation (e.g. in unit tests) with neither context nor
-      // overview available must not throw and must not write bogus metadata.
+    it("leaves metadata unset when no overview is available", async () => {
       const app = createMockApp();
       const t = createMockTable();
-      new AsDbController(app, t);
+      const ctrl = new AsDbController(app, t);
+      const meta = await ctrl.meta();
       expect(t.type.metadata.get("db.http.path")).toBeUndefined();
+      expect((meta.type as any).metadata?.["db.http.path"]).toBeUndefined();
     });
   });
 

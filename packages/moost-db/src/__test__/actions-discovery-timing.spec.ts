@@ -91,8 +91,8 @@ describe("Action discovery timing (lazy on first /meta)", () => {
     ]);
     const ctrl = new C(ctx.app, makeTable() as never);
     // Replace getControllersOverview with a counter AFTER construction, so we
-    // measure only the discovery-pass calls (construction also touches it for
-    // db.http.path resolution).
+    // measure only the passes triggered by meta() (the first call also builds
+    // the per-app db.http.path scope from the overview).
     const overviewSpy = vi.fn().mockImplementation(() => [
       fakeOverview(C, [
         {
@@ -106,8 +106,10 @@ describe("Action discovery timing (lazy on first /meta)", () => {
     ]);
     ctx.app.getControllersOverview = overviewSpy;
     const first = await ctrl.meta();
+    const callsAfterFirst = overviewSpy.mock.calls.length;
     const second = await ctrl.meta();
     expect(first).toBe(second);
-    expect(overviewSpy).toHaveBeenCalledTimes(1);
+    // A cached second meta() does not poll the overview again (scope + discovery memoized).
+    expect(overviewSpy.mock.calls.length).toBe(callsAfterFirst);
   });
 });

@@ -91,8 +91,8 @@ export abstract class AsValueHelpController<
   /** The `@meta.id` field name on the bound interface, if any. */
   protected readonly primaryKey: string | undefined;
 
-  constructor(boundType: T, controllerName: string, app: Moost) {
-    super(boundType, controllerName, app, "value-help");
+  constructor(boundType: T, controllerName: string, app: Moost, opts?: { canonical?: boolean }) {
+    super(boundType, controllerName, app, "value-help", opts);
     assertNoValueHelpActions(this.constructor);
 
     const fieldMeta = new Map<string, Map<string, unknown>>();
