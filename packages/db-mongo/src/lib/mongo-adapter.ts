@@ -843,6 +843,22 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     this._pendingSearchFields = [];
 
+    // MongoDB allows ONE text index per collection: a second fulltext index
+    // name with TEXT members cannot exist physically, yet `$text` would search
+    // the first while the visibility gate checked the second's fields.
+    // (Integer-only fulltext indexes have no physical artifact and stay valid.)
+    const textBearing = [...this._table.indexes.values()].filter(
+      (i) => i.type === "fulltext" && i.fields.some((f) => !f.integer),
+    );
+    if (textBearing.length > 1) {
+      throw new Error(
+        `MongoDB allows one text index per collection: "${this._table.tableName}" declares ` +
+          `${textBearing.length} @db.index.fulltext names with text fields ` +
+          `(${textBearing.map((i) => `"${i.name}"`).join(", ")}). Merge them into one name; ` +
+          `integer-only fulltext indexes may be declared separately.`,
+      );
+    }
+
     // Integer fulltext members: every static Atlas text index maps them as
     // numbers so the `equals` clause can reach them (and `paths` — the
     // visibility gate — lists them). `dynamic_text` indexes numbers already.

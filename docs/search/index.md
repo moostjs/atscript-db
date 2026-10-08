@@ -54,7 +54,7 @@ export interface Ticket {
 
 | Term                                       | Numeric branch? | Notes                                         |
 | ------------------------------------------ | --------------- | --------------------------------------------- |
-| `2946`, `2946`                             | yes             | surrounding blanks are trimmed                |
+| `2946` (surrounding spaces are trimmed)    | yes             | surrounding blanks are trimmed                |
 | `-12`                                      | yes             | negative numbers are exact matches too        |
 | `02946`, `+5`, `-0`, `1.5`, `1e3`, `12 34` | no              | not a plain integer literal (text match only) |
 | `9007199254740993`                         | no              | beyond the safe-integer range                 |

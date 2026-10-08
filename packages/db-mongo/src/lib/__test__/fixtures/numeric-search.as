@@ -94,3 +94,28 @@ export interface NsIdsFirst {
     @db.index.fulltext 'ns_main2'
     title: string
 }
+
+@db.table 'ns_two_text'
+export interface NsTwoText {
+    @meta.id
+    id: number.int
+
+    @db.index.fulltext 'main_ft'
+    notes: string
+
+    @db.index.fulltext 'alt_ft'
+    title: string
+}
+
+@db.table 'ns_text_plus_int'
+export interface NsTextPlusInt {
+    @meta.id
+    id: number.int
+
+    @db.index.fulltext 'main_ft'
+    notes: string
+
+    @db.index.fulltext 'int_ft'
+    @db.index.plain
+    ref_no: number.int
+}

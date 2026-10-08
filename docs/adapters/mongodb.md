@@ -373,6 +373,8 @@ Query with `search()`:
 const results = await articles.search("mongodb tutorial");
 ```
 
+MongoDB keeps **one** text index per collection, so a table may declare only one `@db.index.fulltext` name with text (string) members: a second one throws when the table metadata is built. Extra fulltext names that hold only integer members are fine and are addressable with `$index=<name>`.
+
 The term is handed to `$text`, so MongoDB's operators apply natively: a plain list of words matches **any** of them, `"a phrase"` matches the phrase, and `-word` excludes a word (a term made only of negations matches nothing). Results are ranked by `textScore`.
 
 **Integer members** are not part of the text index (it ignores numbers); the text index and its weights cover the string members only. When the whole search term is a whole number the stage becomes
@@ -421,6 +423,10 @@ Arguments:
 2. **Fuzzy level** — typo tolerance (`0`, `1`, or `2`)
 
 All string fields are searchable immediately with no per-field annotations needed.
+
+::: warning Dynamic mapping and `@db.writeOnly` {#dynamic-write-only}
+A dynamic mapping indexes every string field, including a sealed `@db.writeOnly` one, so a hit would reveal the sealed value. moost-db therefore refuses `$search` (400) and reports `searchable: false` on a model that combines `@db.mongo.search.dynamic` with any `@db.writeOnly` field. Switch to a static `@db.mongo.search.text` mapping that omits the sealed fields.
+:::
 
 ### Static Atlas Search
 

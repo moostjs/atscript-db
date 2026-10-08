@@ -237,3 +237,20 @@ describe("[mongo] $integerRegex filter", () => {
     expect(f.$expr.$regexMatch.options).toBe("i");
   });
 });
+
+describe("[mongo] one text-bearing fulltext index per collection", () => {
+  it("refuses a second fulltext name with text members", async () => {
+    const fx = (await import("./fixtures/numeric-search.as")) as Record<string, any>;
+    const adapter = mongo.getAdapter(fx.NsTwoText) as unknown as MongoAdapter;
+    expect(() => adapter.getMongoSearchIndexes()).toThrow(
+      /one text index per collection.*"main_ft", "alt_ft"/,
+    );
+  });
+
+  it("keeps an additional integer-only fulltext index addressable by name", async () => {
+    const adapter = await adapterOf("NsTextPlusInt");
+    const indexes = adapter.getMongoSearchIndexes();
+    expect(indexes.has("int_ft")).toBe(true);
+    expect(adapter.getMongoSearchIndex()?.name).toBe("main_ft");
+  });
+});
