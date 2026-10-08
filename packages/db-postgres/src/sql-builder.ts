@@ -142,6 +142,7 @@ export const pgDialect: SqlDialect = {
     const op = flags.includes("i") ? "~*" : "~";
     return { sql: `${quotedCol} ${op} ?`, params: [pattern] };
   },
+  integerText: (expr: string) => `CAST(CAST(${expr} AS BIGINT) AS TEXT)`,
   // PostGIS circle search on a geography(Point,4326) column. Only reachable
   // when the adapter reports isGeoSearchable() (PostGIS present) — the core
   // query guards throw GEO_NOT_SUPPORTED before translation otherwise.

@@ -475,6 +475,13 @@ export interface TDbIndexField {
    * re-resolving the field type. Undefined when the field cannot be resolved.
    */
   designType?: string;
+  /**
+   * Fulltext member matched by exact whole-number equality, never part of the
+   * physical text index (integer field; since 0.1.150). Adapters exclude it
+   * from text DDL and OR `member = n` into their search predicate when the
+   * search term is a whole number (see `searchTermInteger`).
+   */
+  integer?: boolean;
 }
 
 export interface TDbIndex {

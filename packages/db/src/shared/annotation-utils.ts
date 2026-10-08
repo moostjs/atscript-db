@@ -12,6 +12,8 @@ import {
   type TMessages,
 } from "@atscript/core";
 
+import { searchKindOf } from "./search-fields";
+
 /** Asserts the field carrying this annotation does not also carry any of `others`. */
 export function validateExclusiveWith(
   token: Token,
@@ -44,6 +46,63 @@ function getPrimitiveBaseType(node: SemanticNode, doc: AtscriptDoc): string | un
   const def = node.getDefinition();
   if (!def || !isRef(def)) return undefined;
   return primitiveBaseType(doc.unwindType(def.id!, def.chain)?.def);
+}
+
+/**
+ * Whether a prop takes part in `$search` as text or as an integer, or why it
+ * cannot (compile-time mirror of the runtime `searchMemberKind`). Anything
+ * that is not a ref to a primitive (structures, arrays, unions, unresolved
+ * refs) is left alone.
+ */
+export function searchFieldVerdict(
+  field: SemanticNode,
+  doc: AtscriptDoc,
+): { kind: "string" | "integer" | "other" } | { problem: string } {
+  const def = field.getDefinition();
+  if (!def || !isRef(def)) return { kind: "other" };
+  const leaf = doc.unwindType(def.id!, def.chain)?.def;
+  const base = primitiveBaseType(leaf);
+  if (base === undefined) return { kind: "other" };
+  const kind = searchKindOf({
+    base,
+    tags: isPrimitive(leaf) ? leaf.tags : undefined,
+    expectInt: field.countAnnotations("expect.int") > 0,
+    increment: field.countAnnotations("db.default.increment") > 0,
+    now: field.countAnnotations("db.default.now") > 0,
+    precision: field.countAnnotations("db.column.precision") > 0,
+  });
+  if (typeof kind === "object") return kind;
+  return { kind: kind === "integer" ? "integer" : base === "string" ? "string" : "other" };
+}
+
+/**
+ * Why an integer fulltext member is not index-backed (its exact-number match
+ * would scan — or fail on MongoDB next to `$text`), or `undefined`. Backed:
+ * `_id`, the first `@meta.id` of the type, or the first field (in declaration
+ * order) of a `@db.index.plain` / `@db.index.unique` group.
+ */
+export function integerMemberIndexProblem(token: Token): string | undefined {
+  const field = token.parentNode!;
+  const struct = getParentStruct(token);
+  if (!struct) return undefined;
+  if (field.id === "_id") return undefined;
+  const props = [...struct.props.values()];
+  if (
+    field.countAnnotations("meta.id") > 0 &&
+    props.find((p) => p.countAnnotations("meta.id") > 0) === field
+  ) {
+    return undefined;
+  }
+  for (const ann of ["db.index.plain", "db.index.unique"]) {
+    for (const own of field.annotations?.filter((a) => a.name === ann) ?? []) {
+      const group = own.args[0]?.text ?? field.id;
+      const first = props.find((p) =>
+        p.annotations?.some((a) => a.name === ann && (a.args[0]?.text ?? p.id) === group),
+      );
+      if (first === field) return undefined;
+    }
+  }
+  return `@db.index.fulltext on the integer field "${field.id}" needs an index for its exact-number match — make it the primary key (first @meta.id) or the first field of a @db.index.plain / @db.index.unique`;
 }
 
 /** Asserts `args[0]` names a sibling property whose primitive base type is `string`. */

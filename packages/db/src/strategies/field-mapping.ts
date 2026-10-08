@@ -14,6 +14,8 @@ import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
+import { INTEGER_REGEX_OP } from "../shared/search-term";
+import { rewriteIntegerRegex } from "../query/integer-regex";
 import { arithToExprNode } from "../query/aggregate-expr";
 import { SOURCE_VALUE_FNS } from "../query/aggregate-fns";
 import {
@@ -450,6 +452,7 @@ export abstract class FieldMappingStrategy {
    * translate predicate operands at deeper levels).
    */
   translateFilter(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
+    filter = rewriteIntegerRegex(filter, meta);
     const has = containsRelationFilter(filter);
     const resolved = has ? resolveRelationFilterTree(filter, meta, depth) : filter;
     return this.noteTranslated(filter, this.translateResolvedFilter(resolved, meta), has);
@@ -674,7 +677,9 @@ export abstract class FieldMappingStrategy {
     const ops = value as Record<string, unknown>;
     const formatted: Record<string, unknown> = {};
     for (const [op, opVal] of Object.entries(ops)) {
-      if ((op === "$in" || op === "$nin") && Array.isArray(opVal)) {
+      if (op === INTEGER_REGEX_OP) {
+        formatted[op] = opVal; // a pattern over the decimal text, not a stored value
+      } else if ((op === "$in" || op === "$nin") && Array.isArray(opVal)) {
         formatted[op] = opVal.map((v) => (v === null || v === undefined ? v : fmt(v)));
       } else if (op.startsWith("$") && opVal !== null && opVal !== undefined) {
         formatted[op] = fmt(opVal);

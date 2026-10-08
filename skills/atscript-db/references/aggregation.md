@@ -94,7 +94,7 @@ Search narrows the ROWS, `$groupBy` shapes what is left — the adapter applies 
 
 - **No implicit relevance ordering.** Grouped results order by `$sort` or not at all.
 - **No implicit row cap.** (The leaf Mongo runner's 1000-row search cap is not applied before grouping.)
-- `$search` on a source with no search capability → `DbError("INVALID_QUERY", [{ path: "$search" }])`. Over HTTP the `@db.column.searchable` fallback rewrites the term into the filter first, so grouped queries are searched there too. `$vector` + `$groupBy` → 400.
+- `$search` on a source with no search capability → `DbError("INVALID_QUERY", [{ path: "$search" }])`. Over HTTP the `@db.column.searchable` fallback (string and integer fields) rewrites the term into the filter first, so grouped queries are searched there too. A native index's integer members are part of the same predicate (`= n` OR'd with the text match). `$vector` + `$groupBy` → 400.
 
 ## Key imports
 

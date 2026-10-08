@@ -179,7 +179,7 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 - **No transactions** — `withTransaction` runs the callback but nothing rolls back on a throw. Rollback behaviour (including `moost-db` write guards) is not observable on this adapter; assert it on SQLite `:memory:` or with adapter spies. See [Transactions](/api/transactions#adapter-behavior).
 - **Provider tables are read-only** — writes throw, and there is no cross-request pagination stability (page 1 and page 2 are separate requests over separate snapshots).
 - **Relations `$with`** — resolved by core's app-level batch loading (`supportsNativeRelations()` is `false`), not natively.
-- **No FTS / vector / geo / `$search`** — unsupported. No DB views.
+- **No FTS / vector / geo / `$search`** — unsupported natively. `$search` over HTTP falls back to the `@db.column.searchable` substring match, which includes integer fields (`$regex` on an integer matches its decimal text). `@db.index.fulltext` has no effect. No DB views.
 - **Table-level schema sync only** — sync creates and drops tables but does not diff columns: after a field is renamed, removed or changes type, stored rows keep their old shape and `plan()` reports the table `in-sync`. `@db.sync.method` has no effect. `@db.table.renamed` is not applied: the table is created empty under its new name, and the old rows are not moved.
 - **In-process only** — nothing is persisted or shared across processes. **Not a production datastore.**
 

@@ -4,6 +4,7 @@ import {
   containsRelationFilter,
   isResolvedRelationFilter,
   type ResolvedRelationFilter,
+  INTEGER_REGEX_OP,
 } from "@atscript/db";
 
 import type { SqlDialect, TGeoCircle, TSqlFragment } from "./dialect";
@@ -76,7 +77,7 @@ export function createFilterVisitor(
       const col = columnRef(field);
       const v = dialect.toParam(value);
 
-      switch (op) {
+      switch (op as string) {
         case "$eq": {
           if (v === null) {
             return { sql: `${col} IS NULL`, params: [] };
@@ -124,6 +125,13 @@ export function createFilterVisitor(
         }
         case "$regex": {
           return dialect.regex(col, value);
+        }
+        case INTEGER_REGEX_OP: {
+          // Regex over the decimal text of an integer column.
+          return dialect.regex(
+            dialect.integerText ? dialect.integerText(col) : `CAST(${col} AS TEXT)`,
+            value,
+          );
         }
         default: {
           throw new Error(`Unsupported filter operator: ${String(op)}`);

@@ -177,6 +177,9 @@ export const sqliteDialect: SqlDialect = {
     const collate = flags.includes("i") ? " COLLATE NOCASE" : "";
     return { sql: `${quotedCol} LIKE ? ESCAPE '\\'${collate}`, params: [likePattern] };
   },
+  // Integers live in REAL columns, so the inner cast is required: a stored
+  // 29461277 would otherwise print as "29461277.0".
+  integerText: (expr: string) => `CAST(CAST(${expr} AS INTEGER) AS TEXT)`,
   // Haversine circle search over the JSON-stored `[lng, lat]` tuple.
   // Requires SQLite built with math functions (default in better-sqlite3).
   geoWithin(quotedCol: string, circle: TGeoCircle): TSqlFragment {

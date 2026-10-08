@@ -2,6 +2,7 @@ export type { TSqlFragment, SqlDialect, TGeoCircle } from "./dialect";
 export {
   EMPTY_AND,
   EMPTY_OR,
+  orFragment,
   finalizeParams,
   mapQueryErrors,
   orderKeySql,

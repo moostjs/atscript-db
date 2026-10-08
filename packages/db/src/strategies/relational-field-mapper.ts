@@ -2,6 +2,7 @@ import type { FilterExpr, Uniquery, UniqueryControls } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { containsRelationFilter, resolveRelationFilterTree } from "../query/relation-filter";
+import { rewriteIntegerRegex } from "../query/integer-regex";
 import { UniquSelect } from "../query/uniqu-select";
 import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
@@ -74,7 +75,7 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
-    const logical = query.filter as FilterExpr;
+    const logical = rewriteIntegerRegex(query.filter as FilterExpr, meta);
     const has = containsRelationFilter(logical);
     const filter = has ? resolveRelationFilterTree(logical, meta, 0) : logical;
     if (!meta.requiresMappings) {

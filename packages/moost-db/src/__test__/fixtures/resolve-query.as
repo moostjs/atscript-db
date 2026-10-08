@@ -57,6 +57,19 @@ export interface ResolveNote {
     body: string
 }
 
+// A searchable integer column next to a searchable string (since 0.1.150).
+@db.table 'resolve_refs'
+export interface ResolveRef {
+    @meta.id
+    id: number
+
+    @db.column.searchable
+    title: string
+
+    @db.column.searchable
+    refNo: number.int
+}
+
 // A composite key.
 @db.table 'resolve_lines'
 export interface ResolveLine {

@@ -26,6 +26,7 @@ import {
   geoIndexNotFoundMessage,
   normalizeComputedSelect,
   searchIndexNotFoundMessage,
+  searchMemberKind,
   selfOrAncestor,
   unsupportedOperatorMessage,
   vectorIndexNotFoundMessage,
@@ -2306,6 +2307,8 @@ export class AsDbReadableController<
     for (const fd of this.readable.fieldDescriptors) {
       if (fd.ignored) continue;
       if (!fd.type?.metadata?.has?.("db.column.searchable")) continue;
+      // A float / decimal / timestamp is not searchable (the runtime metadata build refuses it).
+      if (typeof searchMemberKind(fd.type) === "object") continue;
       if (!this.capabilities.isPhysicallyFilterable(fd.path)) continue;
       out.push(fd.path);
     }
@@ -2403,6 +2406,14 @@ export class AsDbReadableController<
    * nothing can apply is ignored. Resolvers (query targets, `resolveQuery`)
    * refuse it — a subclass override that applies the term must return a new
    * filter object.
+   *
+   * A string field matches when the term is a substring of its text; an
+   * INTEGER field (`number.int` and its sizes, `@expect.int`,
+   * `@db.default.increment`) when it is a substring of the number's decimal
+   * text — `2946` finds `29461277` (since 0.1.150). To search numeric IDs
+   * declare `@db.column.searchable` (fallback) or `@db.index.fulltext`
+   * (native, exact number) on the integer field — override this hook only for
+   * search rules the annotations cannot express.
    */
   protected applySearchFallback(
     filter: FilterExpr | undefined,
@@ -2415,6 +2426,8 @@ export class AsDbReadableController<
     // term into a substring oracle over its values.
     const fields = this._searchFallbackFields.filter((f) => this.fieldVisibility.isVisible(f));
     if (fields.length === 0) return filter;
+    // An integer field matches when the term is a substring of its decimal
+    // text (`$regex` on an integer column, since 0.1.150).
     const rx = `/${term.replace(/[.*+?^${}()|[\]\\/]/g, String.raw`\$&`)}/i`;
     const fragment = {
       $or: fields.map((f) => ({ [f]: { $regex: rx } })),
@@ -2450,6 +2463,40 @@ export class AsDbReadableController<
     delete rest.$search;
     delete rest.$index;
     return rest;
+  }
+
+  /**
+   * `$count` of a native text / vector search: the adapter's own count, so it
+   * agrees with `/query` and `/pages`. A text search counts every match (the
+   * single returned row is discarded); a vector search counts the nearest
+   * neighbours up to `$limit` (default 1000), as `/query` returns them.
+   */
+  private async _countSearched(
+    strategy:
+      | { kind: "vector"; vector: number[]; vectorField: string }
+      | { kind: "search"; term: string; index?: string },
+    filter: FilterExpr | undefined,
+    controls: Record<string, unknown>,
+    select: unknown,
+  ): Promise<number> {
+    if (strategy.kind === "search") {
+      const q = { filter, controls: { $limit: 1, $select: select } } as Uniquery<any, any>;
+      const { count } = await this.readable.searchWithCount(strategy.term, q, strategy.index);
+      return count;
+    }
+    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
+    const q = {
+      filter,
+      controls: {
+        $limit: (controls.$limit as number | undefined) || 1000,
+        $select: select,
+        $threshold: threshold,
+      },
+    } as Uniquery<any, any>;
+    const { count } = await (strategy.vectorField
+      ? this.readable.vectorSearchWithCount(strategy.vectorField, strategy.vector, q)
+      : this.readable.vectorSearchWithCount(strategy.vector, q));
+    return count;
   }
 
   private async _resolveReadStrategy(
@@ -3070,10 +3117,16 @@ export class AsDbReadableController<
     const filter = this.applySearchFallback(transformedFilter, controls);
 
     if (controls.$count) {
-      return this.readable.count({
-        filter,
-        controls: { ...controls, $select: sealed.$select },
-      } as Uniquery<any, any>);
+      // `$count` counts the population the read returns: a native `$search` /
+      // `$vector` term narrows it, and `count()` (which ignores both) would not.
+      const strategy = await this._resolveReadStrategy(controls);
+      if (strategy.kind === "plain") {
+        return this.readable.count({
+          filter,
+          controls: { ...controls, $select: sealed.$select },
+        } as Uniquery<any, any>);
+      }
+      return this._countSearched(strategy, filter, controls, sealed.$select);
     }
 
     const projected = finish();

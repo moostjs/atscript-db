@@ -9,6 +9,7 @@ import {
   andFilters,
   containsRelationFilter,
   DbError,
+  INTEGER_REGEX_OP,
   isResolvedRelationFilter,
   walkFilter,
 } from "@atscript/db";
@@ -53,6 +54,26 @@ const mongoVisitor: FilterVisitor<Filter<any>> = {
       return flags
         ? { [field]: { $regex: pattern, $options: flags } }
         : { [field]: { $regex: pattern } };
+    }
+    if (op === INTEGER_REGEX_OP) {
+      // A pattern over the DECIMAL TEXT of an integer field. The inner
+      // `$convert` to long is required (a double prints as `1e+16`); a
+      // non-numeric / missing value converts to null → `$regexMatch` is false.
+      const { pattern, flags } = parseRegexString(value);
+      const options = flags.replace(/[^imsx]/g, "");
+      return {
+        $expr: {
+          $regexMatch: {
+            input: {
+              $toString: {
+                $convert: { input: `$${field}`, to: "long", onError: null, onNull: null },
+              },
+            },
+            regex: pattern,
+            ...(options ? { options } : {}),
+          },
+        },
+      };
     }
     if (op === "$geoWithin") {
       // Circle predicate (core-validated shape: { center: [lng, lat], radius: meters }).
@@ -187,7 +208,7 @@ function exactNocase(value: string): BSONRegExp {
 }
 
 /** Operators whose result never depends on a string collation. */
-const COLLATION_FREE_OPS = new Set(["$regex", "$exists", "$geoWithin"]);
+const COLLATION_FREE_OPS = new Set(["$regex", INTEGER_REGEX_OP, "$exists", "$geoWithin"]);
 
 const isStringOrHasString = (value: unknown): boolean =>
   typeof value === "string" || (Array.isArray(value) && value.some((v) => typeof v === "string"));

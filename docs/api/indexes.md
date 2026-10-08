@@ -49,6 +49,8 @@ body?: string
 
 The weight defaults to `1` when omitted. Weighted full-text search is supported by MongoDB and PostgreSQL. SQLite uses FTS5 virtual tables with auto-managed sync triggers — schema sync creates and maintains them automatically.
 
+A member may also be an **integer** field, matched by exact number instead of by the text index. Rules (index-backing, accepted types, term syntax): [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+
 ::: tip
 `@db.index.fulltext` sets up the index in the database. For search usage (querying against full-text indexes), see [Text Search](/search/).
 :::

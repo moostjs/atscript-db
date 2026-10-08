@@ -16,6 +16,7 @@ import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
+import { searchMemberKind } from "../shared/search-fields";
 import type {
   TDbCollation,
   TDbDefaultValue,
@@ -609,6 +610,21 @@ export class TableMetadata {
       const name =
         index === true ? fieldName : typeof index === "string" ? index : index?.name || fieldName;
       this._addIndexField("unique", name, fieldName);
+    }
+
+    // @db.column.searchable / @db.index.fulltext — string or integer members only
+    const searchKind = searchMemberKind(fieldType);
+    if (typeof searchKind === "object") {
+      if (metadata.has("db.index.fulltext")) {
+        throw new Error(
+          `@db.index.fulltext on "${fieldName}" ${searchKind.problem} — a fulltext member must be a string or an integer`,
+        );
+      }
+      if (metadata.has("db.column.searchable")) {
+        throw new Error(
+          `@db.column.searchable on "${fieldName}" ${searchKind.problem} — a searchable column must be a string or an integer`,
+        );
+      }
     }
 
     // @db.index.fulltext (args: name?, weight?)
@@ -1328,7 +1344,43 @@ export class TableMetadata {
 
   // ── Private: index finalization ──────────────────────────────────────────
 
+  /**
+   * Flags the integer members of fulltext indexes (matched by exact number,
+   * never part of the physical text index) and enforces that each is
+   * index-backed — the equality branch must not scan. Runs while index field
+   * names are still logical.
+   */
+  private _resolveIntegerFulltextMembers(): void {
+    for (const index of this.indexes.values()) {
+      if (index.type !== "fulltext") continue;
+      for (const field of index.fields) {
+        const ftype = this.flatMap.get(field.name);
+        if (!ftype || searchMemberKind(ftype) !== "integer") continue;
+        const where = `@db.index.fulltext on the integer field "${field.name}"`;
+        if (findAncestorInSet(field.name, this.jsonFields) !== undefined) {
+          throw new Error(`${where} inside a JSON value is not supported`);
+        }
+        const backed =
+          field.name === "_id" ||
+          this.originalMetaIdFields[0] === field.name ||
+          this.uniqueProps.has(field.name) ||
+          [...this.indexes.values()].some(
+            (other) =>
+              (other.type === "plain" || other.type === "unique") &&
+              other.fields[0]?.name === field.name,
+          );
+        if (!backed) {
+          throw new Error(
+            `${where} needs an index for its exact-number match — make it the primary key (first @meta.id) or the first field of a @db.index.plain / @db.index.unique`,
+          );
+        }
+        field.integer = true;
+      }
+    }
+  }
+
   private _finalizeIndexes(): void {
+    this._resolveIntegerFulltextMembers();
     for (const index of this.indexes.values()) {
       if (index.type === "unique" && index.fields.length === 1) {
         this.uniqueProps.add(index.fields[0].name);

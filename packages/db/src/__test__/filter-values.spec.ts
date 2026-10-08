@@ -194,8 +194,8 @@ describe("filter values — boolean, decimal, string, literal and union fields",
 
   it("$regex needs a string field and a string pattern", async () => {
     const { items } = tables();
-    await expectRejected(items, { n: { $regex: "^5" } }, "n", /needs a string field/);
-    await expectRejected(items, { n: /5/ }, "n", /needs a string field/);
+    await expectRejected(items, { n: { $regex: "^5" } }, "n", /needs a string or integer field/);
+    await expectRejected(items, { n: /5/ }, "n", /needs a string or integer field/);
     await expectRejected(items, { label: { $regex: 5 } }, "label", /expected a regular expression/);
   });
 
