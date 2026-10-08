@@ -6,6 +6,21 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.150 {#v0-1-150}
+
+### New features
+
+- **`@db.column.version.exempt`** — marks derived or reporting fields (scores, counters, caches): a patch that writes only exempt fields (`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged and adds no version check. See [Version-exempt fields](/api/versioning#version-exempt). `table.versionExemptFields` lists them; `isVersionExemptPatch` and `TDbUpdateOptions` are exported from `@atscript/db`. Nothing changes for tables that do not use it.
+
+### Behavior changes {#v0-1-150-behavior}
+
+- The version no longer moves on **every** write: with exempt fields declared, only writes that change a non-exempt column bump it. Code that uses the version as a whole-row change token must account for that.
+- On MySQL and MongoDB, an exempt-only write of unchanged values reports `modifiedCount: 0` (matched rows are still `matchedCount`). Detect a missing row via `matchedCount`.
+
+### For adapter authors
+
+- `updateOne`, `updateMany` and `nativePatch` take an optional trailing `opts?: TDbUpdateOptions`. With `keepVersion: true`, skip the version bump (never combined with `expectedVersion`). An adapter that ignores it keeps bumping. See [Versioned tables](/adapters/creating-adapters#versioned-tables).
+
 ## 0.1.149 {#v0-1-149}
 
 ### New features

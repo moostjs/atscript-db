@@ -18,6 +18,7 @@ import {
   type TDbInsertManyResult,
   type TDbInsertIgnoreSlot,
   type TDbUpdateResult,
+  type TDbUpdateOptions,
   type TDbDeleteResult,
   type TSearchIndexInfo,
   type TDbRelation,
@@ -629,17 +630,19 @@ export class MongoAdapter extends BaseDbAdapter {
 
   // ── Native patch ─────────────────────────────────────────────────────────
 
+  // oxlint-disable-next-line max-params
   override async nativePatch(
     filter: FilterExpr,
     patch: unknown,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "nativePatch");
     if (!mongoFilter) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
     // aggregation expression alongside any user-supplied $inc / $mul ops.
     const effectiveOps =
@@ -1394,17 +1397,20 @@ export class MongoAdapter extends BaseDbAdapter {
     });
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "updateOne");
     if (!mongoFilter) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumnPhysical);
+    // A keepVersion patch is never empty (exempt-only has >= 1 key), so no `{}` update doc.
+    const updateDoc = buildMongoUpdateDoc(data, ops, this._versionColumnFor(opts, expectedVersion));
     this._log("updateOne", mongoFilter, updateDoc);
     return this._wrapUpdate(() =>
       this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts()),
@@ -1457,9 +1463,11 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps.
-    const versionColumn = this._table.versionColumnPhysical;
+    // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps,
+    // unless `opts.keepVersion` (a version-exempt patch).
+    const versionColumn = this._versionColumnFor(opts);
     const updateDoc = buildMongoUpdateDoc(data, ops, versionColumn);
     return this._updateMatching(filter, (mongoFilter) => {
       this._log("updateMany", mongoFilter, updateDoc);

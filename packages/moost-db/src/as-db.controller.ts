@@ -295,7 +295,8 @@ export class AsDbController<
    * Bulk auto-lift: each item carries its own `version` → `$cas`.
    * NOTE: per-item conflict disambiguation in the response body is deferred
    * (§6.4) — the aggregate `{ matchedCount, modifiedCount }` surfaces partial
-   * application; callers can detect mismatches via `modifiedCount < N`.
+   * application; callers can detect mismatches via `matchedCount < N` (`modifiedCount` may
+   * be lower for unchanged values, e.g. a version-exempt patch on MySQL / Mongo).
    */
   private _resolveBulkCas(
     rows: Array<Record<string, unknown>>,

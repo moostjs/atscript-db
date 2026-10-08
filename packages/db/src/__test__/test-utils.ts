@@ -10,6 +10,7 @@ import type {
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TDbDeleteResult,
 } from "../types";
 
@@ -54,8 +55,10 @@ export class MockAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: any,
+    expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    this.record("updateOne", filter, data, ops);
+    this.record("updateOne", filter, data, ops, expectedVersion, opts);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -87,8 +90,9 @@ export class MockAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: any,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    this.record("updateMany", filter, data, ops);
+    this.record("updateMany", filter, data, ops, opts);
     return updateRowsWhere(this._rows(), filter, data);
   }
 

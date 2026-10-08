@@ -448,6 +448,19 @@ export interface TDbUpdateResult {
   modifiedCount: number;
 }
 
+/**
+ * Per-call options of an adapter UPDATE (since 0.1.150).
+ */
+export interface TDbUpdateOptions {
+  /**
+   * The patch writes only `@db.column.version.exempt` fields: leave the
+   * version column untouched (no `+1`). The core sets it only for CAS-free
+   * patches — never together with `expectedVersion`. An adapter that ignores
+   * the option keeps bumping (the pre-0.1.150 behaviour).
+   */
+  keepVersion?: boolean;
+}
+
 export interface TDbDeleteResult {
   deletedCount: number;
 }

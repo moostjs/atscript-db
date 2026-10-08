@@ -625,6 +625,18 @@ export class AtscriptDbReadable<
     return this._meta.columnMap.get(field) ?? field;
   }
 
+  /**
+   * Logical paths of the `@db.column.version.exempt` fields, including objects
+   * whose direct children are all exempt. A patch that writes only these (and
+   * no `$cas`) does not bump the version column. Empty when the table has no
+   * `@db.column.version`.
+   * @since 0.1.150
+   */
+  public get versionExemptFields(): ReadonlySet<string> {
+    this._ensureBuilt();
+    return this._meta.versionExemptPaths;
+  }
+
   /** Dimension fields from `@db.column.dimension`. */
   public get dimensions(): readonly string[] {
     this._ensureBuilt();

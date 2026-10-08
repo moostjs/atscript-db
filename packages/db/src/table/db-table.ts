@@ -16,6 +16,7 @@ import type { TGenericLogger } from "../logger";
 import { separateCas, separateFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
+import { isVersionExemptPatch } from "../patch/version-exempt";
 import { AtscriptDbReadable } from "./db-readable";
 import { enrichFkViolation, remapDeleteFkViolation } from "./error-utils";
 import {
@@ -57,6 +58,7 @@ import type {
   TInsertOptions,
   TDbInsertResult,
   TDbRemoveGuardContext,
+  TDbUpdateOptions,
   TDbUpdateResult,
   TDbWriteAction,
   TDbWriteCheck,
@@ -329,6 +331,9 @@ function concurrentChange(): DbError {
     { path: "", message: "The record changed during the write — nothing was written, retry" },
   ]);
 }
+
+/** Hand-off for a version-exempt patch (since 0.1.150) — shared, never mutated. */
+const KEEP_VERSION: TDbUpdateOptions = Object.freeze({ keepVersion: true });
 
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
 const TOUCH_MANY_CHUNK = 500;
@@ -958,6 +963,17 @@ export class AtscriptDbTable<
             continue;
           }
 
+          // Version-exempt patch (since 0.1.150): only `@db.column.version.exempt`
+          // fields are written and no `$cas` asked for → the adapter must not
+          // bump (nor check) the version. Decided on the logical patch, keys only.
+          // Passed as a trailing rest-arg only when set, so the common call shape is unchanged.
+          const updateOpts: [TDbUpdateOptions] | [] =
+            expectedVersion === undefined &&
+            versionColumn !== undefined &&
+            isVersionExemptPatch(data, this as AtscriptDbTable)
+              ? [KEEP_VERSION]
+              : [];
+
           let result: TDbUpdateResult;
           if (this.adapter.supportsNativePatch()) {
             // Native patch path: separate top-level ops; patcher handles nested ops internally
@@ -971,6 +987,7 @@ export class AtscriptDbTable<
               translatedData,
               translatedOps,
               expectedVersion,
+              ...updateOpts,
             );
           } else {
             // Decompose flattens nested objects into dot-paths, preserving field ops verbatim.
@@ -995,6 +1012,7 @@ export class AtscriptDbTable<
                 resolved,
                 translatedOps,
                 expectedVersion,
+                ...updateOpts,
               );
             } else {
               result = await this.adapter.updateOne(
@@ -1002,6 +1020,7 @@ export class AtscriptDbTable<
                 translatedUpdate,
                 translatedOps,
                 expectedVersion,
+                ...updateOpts,
               );
             }
           }
@@ -1135,6 +1154,7 @@ export class AtscriptDbTable<
         // Direct adapter call: an empty patch on a versioned table renders
         // exactly `SET version = version + 1` (Mongo: `$inc`); the table's
         // own `updateMany` short-circuits empty patches on purpose.
+        // No TDbUpdateOptions — a touch always bumps.
         const result = await this.adapter.updateMany({ $or: chunk }, {}, undefined);
         matchedCount += result.matchedCount;
         modifiedCount += result.modifiedCount;
@@ -1224,7 +1244,8 @@ export class AtscriptDbTable<
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still
-    // happens inside the adapter on every versioned UPDATE. Reject $cas
+    // happens inside the adapter on every versioned UPDATE, unless the patch
+    // writes only `@db.column.version.exempt` fields. Reject $cas
     // here so callers fail loud instead of silently losing the predicate.
     const versionColumn = this.versionColumn;
     if ("$cas" in dataCopy) {
@@ -1240,6 +1261,12 @@ export class AtscriptDbTable<
     if (versionColumn !== undefined) {
       assertNoVersionWrites(dataCopy, versionColumn);
     }
+    // Version-exempt patch (since 0.1.150): decided on the logical payload,
+    // before decomposition (keys only — encryption does not change them).
+    const updateOpts: [TDbUpdateOptions] | [] =
+      versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable)
+        ? [KEEP_VERSION]
+        : [];
     // Encrypt @db.encrypted fields BEFORE decomposition so the patch carries
     // envelope strings; operator objects on encrypted fields are rejected.
     await this._encryptItems([dataCopy], "patch");
@@ -1257,7 +1284,7 @@ export class AtscriptDbTable<
       return { matchedCount, modifiedCount: 0 };
     }
     return enrichFkViolation(this._meta, () =>
-      this.adapter.updateMany(translatedFilter, translatedUpdate, translatedOps),
+      this.adapter.updateMany(translatedFilter, translatedUpdate, translatedOps, ...updateOpts),
     );
   }
 

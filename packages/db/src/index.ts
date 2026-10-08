@@ -78,6 +78,7 @@ export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export type { TExprAggregate, TFirstLast, TRowOrderKey } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
+export { isVersionExemptPatch } from "./patch/version-exempt";
 export { translateQueryTree, isFieldRef, evaluateExpr } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
@@ -107,6 +108,7 @@ export type {
   TDbInsertIgnoreSlot,
   TInsertOptions,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TDbDeleteResult,
   TDbIndex,
   TDbIndexField,

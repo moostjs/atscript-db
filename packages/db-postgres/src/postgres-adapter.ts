@@ -24,6 +24,7 @@ import type {
   TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TExistingColumn,
   TColumnDiff,
   TSyncColumnResult,
@@ -721,11 +722,13 @@ export class PostgresAdapter extends BaseDbAdapter {
     return `${keyMatch} (SELECT ${colList} FROM ${quotedTable} WHERE ${whereSql} LIMIT 1)`;
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     // PostgreSQL does not support UPDATE ... LIMIT 1.
     // Re-key the outer UPDATE on the primary key (a stable column) via a subquery.
@@ -742,7 +745,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       sql: this._limitOnePredicate(quotedTable, where.sql),
       params: where.params,
     };
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     const { sql, params } = buildUpdate(
       tableName,
       data,
@@ -761,9 +764,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -794,6 +798,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
       this._table.versionColumnPhysical,
     );
+    // No `opts`: a replace touches every column, so it always bumps.
     return this.updateOne(filter, full, undefined, expectedVersion);
   }
 

@@ -247,6 +247,23 @@ describe("buildUpdate", () => {
     ).toThrow(/versionColumn/);
   });
 
+  // WHY: the documented contract of a version-exempt patch
+  // (`TDbUpdateOptions.keepVersion`, 0.1.150): the adapter passes
+  // `versionColumn: undefined` — no `+ 1` and no version predicate.
+  it("emits no bump and no version predicate when versionColumn is undefined", () => {
+    const result = buildUpdate(
+      mockDialect,
+      "users",
+      { score: 5 },
+      where,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(result.sql).toBe("UPDATE [users] SET [score] = ? WHERE [id] = ?");
+    expect(result.params).toEqual([5, 1]);
+  });
+
   // WHY: regression guard. Non-versioned tables must not see any new SQL —
   // every byte of the generated statement should match today's output when
   // neither OCC param is supplied.
