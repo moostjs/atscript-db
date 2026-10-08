@@ -13,6 +13,9 @@ import {
   forEachResolvedRelation,
   vectorIndexNotFoundMessage,
   fkColumns,
+  searchTermInteger,
+  describeFulltext,
+  splitFulltextFields,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -65,6 +68,8 @@ import {
   foreignKeySql,
   SEARCH_SOURCE_ALIAS,
   mapQueryErrors,
+  EMPTY_OR,
+  orFragment,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -1739,7 +1744,10 @@ export class MysqlAdapter extends BaseDbAdapter {
         // FULLTEXT indexes accept TEXT columns; others take a key-length
         // prefix only where the mapped type requires one (see mysqlIndexPrefix)
         const isFulltext = index.type === "fulltext";
-        const cols = index.fields
+        // Integer fulltext members are matched by exact number, never part of the FULLTEXT index
+        const members = isFulltext ? splitFulltextFields(index).text : index.fields;
+        if (members.length === 0) return;
+        const cols = members
           .map((f) => {
             const col = qi(f.name);
             const prefix = isFulltext ? undefined : desiredPrefix(f.name);
@@ -1844,7 +1852,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       if (index.type === "fulltext") {
         indexes.push({
           name: index.key,
-          description: `FULLTEXT index on ${index.fields.map((f) => f.name).join(", ")}`,
+          description: describeFulltext(index, (names) => `FULLTEXT index on ${names}`),
           type: "text",
           fields: this._indexLogicalPaths(index),
           isDefault: indexes.length === 0,
@@ -1911,13 +1919,54 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (!fulltextIndex) {
       throw new Error("No FULLTEXT index found for search");
     }
-    const matchCols = fulltextIndex.fields.map((f) => qi(f.name)).join(", ");
+    const { text: textFields, integer: integerFields } = splitFulltextFields(fulltextIndex);
     const where = buildWhere(query.filter);
+    const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
+    const matchCols = textFields.map((f) => qi(f.name)).join(", ");
     const matchClause = `MATCH(${matchCols}) AGAINST(? IN NATURAL LANGUAGE MODE)`;
-    return {
-      sql: where.sql === "1=1" ? matchClause : `${where.sql} AND ${matchClause}`,
-      params: [...where.params, text],
-    };
+    const withWhere = (clause: string, params: unknown[]) => ({
+      sql: where.sql === "1=1" ? clause : `${where.sql} AND ${clause}`,
+      params: [...where.params, ...params],
+    });
+
+    if (n === undefined) {
+      // Text only — keeps the FULLTEXT access path (and its relevance order).
+      // An integer-only index with a term that is not a whole number matches nothing.
+      return textFields.length === 0 ? withWhere(EMPTY_OR.sql, []) : withWhere(matchClause, [text]);
+    }
+
+    const keys = this._table.primaryKeys.map((key) => qi(this._table.physicalPath(key)));
+    if (keys.length === 0) {
+      // No primary key to correlate on — a plain OR (scans next to MATCH).
+      const parts = [
+        ...(textFields.length > 0 ? [matchClause] : []),
+        ...integerFields.map((f) => `${qi(f.name)} = ?`),
+      ];
+      const params = [...(textFields.length > 0 ? [text] : []), ...integerFields.map(() => n)];
+      const or = orFragment(parts, params);
+      return withWhere(or.sql, or.params);
+    }
+
+    // OR with MATCH defeats index merge (full scan), so each arm gets its own
+    // access path: MATCH → FULLTEXT index, `member = n` → the member's index,
+    // combined as a primary-key set.
+    const table = quoteTableName(this.resolveTableName());
+    const keyList = keys.join(", ");
+    const arms: string[] = [];
+    const params: unknown[] = [];
+    if (textFields.length > 0) {
+      arms.push(`SELECT ${keyList} FROM ${table} WHERE ${matchClause}`);
+      params.push(text);
+    }
+    for (const f of integerFields) {
+      arms.push(`SELECT ${keyList} FROM ${table} WHERE ${qi(f.name)} = ?`);
+      params.push(n);
+    }
+    const lhs = keys.length === 1 ? keyList : `(${keyList})`;
+    return withWhere(
+      `${lhs} IN (SELECT ${keyList} FROM (${arms.join(" UNION ")}) AS ${qi("_atscript_search")})`,
+      params,
+    );
   }
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {

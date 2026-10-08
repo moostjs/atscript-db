@@ -11,15 +11,25 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 ### New features
 
 - **`@db.column.version.exempt`** — marks derived or reporting fields (scores, counters, caches): a patch that writes only exempt fields (`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged and adds no version check. See [Version-exempt fields](/api/versioning#version-exempt). `table.versionExemptFields` lists them; `isVersionExemptPatch` and `TDbUpdateOptions` are exported from `@atscript/db`. Nothing changes for tables that do not use it.
+- **Numeric search through the existing annotations.** `@db.column.searchable` (the `$search` fallback) and `@db.index.fulltext` (native search) now accept **integer** fields (`number.int` and its sizes, `number` + `@expect.int`, `@db.default.increment`). The fallback matches the term as a substring of the number's decimal text (`2946` finds `29461277`); a native index matches the whole number exactly, OR'd with the text match, and requires the integer member to be index-backed. Floats, decimals and timestamps are refused with a diagnostic. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match) and [Search fallback](/http/advanced#search-fallback).
+- **`$regex` on an integer field** is accepted on every adapter and matches the number's decimal text (also `~=` over HTTP). See [Value Types](/api/queries#value-types).
+- Exports from `@atscript/db`: `searchTermInteger`, `splitFulltextFields`, `searchMemberKind`, `INTEGER_REGEX_OP`; `TDbIndexField.integer`; `SqlDialect.integerText` in `@atscript/db-sql-tools`.
 
 ### Behavior changes {#v0-1-150-behavior}
 
 - The version no longer moves on **every** write: with exempt fields declared, only writes that change a non-exempt column bump it. Code that uses the version as a whole-row change token must account for that.
 - On MySQL and MongoDB, an exempt-only write of unchanged values reports `modifiedCount: 0` (matched rows are still `matchedCount`). Detect a missing row via `matchedCount`.
+- **`$count` honours a native `$search` / `$vector` term.** `GET /query?$search=x&$count=true` used to count the whole filtered table on a natively searchable table; it now counts the matches (the `@db.column.searchable` fallback was already counted correctly).
+- **An integer member of an existing `@db.index.fulltext` is now handled instead of failing or indexing garbage.** PostgreSQL (`coalesce(int, '')`) and MySQL (FULLTEXT on INT) could not create the index, MongoDB's text index silently ignored the numbers and SQLite's FTS5 indexed the REAL rendering (`29461277.0`, so a term `0` matched every row). Integers are now left out of the text index and matched by exact number. The first schema sync after the upgrade recreates the affected SQLite FTS5 table and MongoDB text index (cost proportional to table size) and updates a static Atlas index once; tables without integer members are untouched. A fulltext integer member that is not index-backed now fails when the table metadata is built.
+- **A table whose fulltext index holds only integer members is natively searchable**, so its `@db.column.searchable` fields are no longer consulted (native search wins).
+- **SQLite: `$search` terms are quoted for FTS5.** `-2946`, `a AND`, `title:x` or a stray quote used to raise an FTS5 syntax error (a 500); they are now plain text. Words are still AND-ed, `"phrases"` and a trailing `*` (prefix) keep their meaning; `AND` / `OR` / `NOT` / `NEAR` and column filters are no longer operators.
+- **`$regex` on a float, decimal or timestamp field** still answers `INVALID_QUERY`; the message now reads `a pattern match needs a string or integer field`.
+- **`applySearchFallback` stays overridable**, but numeric IDs no longer need an override: declare the annotation on the integer field.
 
 ### For adapter authors
 
 - `updateOne`, `updateMany` and `nativePatch` take an optional trailing `opts?: TDbUpdateOptions`. With `keepVersion: true`, skip the version bump (never combined with `expectedVersion`). An adapter that ignores it keeps bumping. See [Versioned tables](/adapters/creating-adapters#versioned-tables).
+- Adapters that implement `search()` should honour `TDbIndexField.integer` ([Creating adapters](/adapters/creating-adapters)); until they do, an integer fulltext member is simply not matched by number.
 
 ## 0.1.149 {#v0-1-149}
 

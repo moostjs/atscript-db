@@ -230,6 +230,8 @@ async syncIndexes(): Promise<void> {
 
 Use `shouldSkipType` only for index types your adapter creates outside the standard `CREATE INDEX` path (e.g., a custom virtual table). Don't skip `'fulltext'` on SQLite/MySQL — both build it natively through this helper.
 
+Integer fulltext members (0.1.150): `TDbIndexField.integer === true` fields stay in `index.fields` but are never part of your text index (`splitFulltextFields(index)` → `{ text, integer }`); `syncIndexesWithDiff` skips a fulltext index with no text member. In `search`/`searchWithCount`/grouped `$search` OR `member = n` into the predicate when `searchTermInteger(text)` is a number (same predicate everywhere); an index of integers only + non-integer term matches nothing. `$regex` on integer columns arrives as the internal op `INTEGER_REGEX_OP` (`"$integerRegex"`): SQL adapters supply `SqlDialect.integerText(quotedExpr)` (default `CAST(<col> AS TEXT)`), non-SQL visitors implement it as a regex over the decimal text of an integral number.
+
 ## Relational predicates (0.1.147)
 
 With `supportsRelationFilters(mode) === true`, translated filters may hold `{ <nav>: { $some | $none: ResolvedRelationFilter } }` — already guarded and resolved by the core (physical names everywhere). Render only.

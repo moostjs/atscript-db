@@ -64,6 +64,16 @@ export {
   geoIndexNotFoundMessage,
 } from "./shared/index-messages";
 
+// ── Since 0.1.150 ────────────────────────────────────────────────────────────
+export {
+  INTEGER_REGEX_OP,
+  searchTermInteger,
+  splitFulltextFields,
+  describeFulltext,
+} from "./shared/search-term";
+export { searchMemberKind } from "./shared/search-fields";
+export type { TSearchMemberKind } from "./shared/search-fields";
+
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";

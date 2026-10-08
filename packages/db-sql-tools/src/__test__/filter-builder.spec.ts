@@ -115,6 +115,17 @@ describe("createFilterVisitor", () => {
       expect(result).toEqual({ sql: "[email] IS NULL", params: [] });
     });
 
+    it("renders $integerRegex over the dialect's integer text", () => {
+      const dialect: SqlDialect = { ...mockDialect, integerText: (c) => `TXT(${c})` };
+      const result = createFilterVisitor(dialect).comparison("n", "$integerRegex" as never, "^29");
+      expect(result).toEqual({ sql: "TXT([n]) LIKE ?", params: ["^29"] });
+    });
+
+    it("falls back to CAST(... AS TEXT) when the dialect has no integerText", () => {
+      const result = visitor.comparison("n", "$integerRegex" as never, "29");
+      expect(result).toEqual({ sql: "CAST([n] AS TEXT) LIKE ?", params: ["29"] });
+    });
+
     it("handles $regex by delegating to dialect", () => {
       const result = visitor.comparison("name", "$regex", "^A.*");
       expect(result).toEqual({ sql: "[name] LIKE ?", params: ["^A.*"] });

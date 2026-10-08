@@ -43,7 +43,7 @@ export interface TFieldSnapshot {
 interface TIndexSnapshot {
   key: string;
   type: string;
-  fields: Array<{ name: string; sort: string }>;
+  fields: Array<{ name: string; sort: string; integer?: true }>;
 }
 
 export interface TForeignKeySnapshot {
@@ -228,7 +228,11 @@ export function computeTableSnapshot(
     .map((idx) => ({
       key: idx.key,
       type: idx.type,
-      fields: idx.fields.map((f) => ({ name: f.name, sort: f.sort })),
+      fields: idx.fields.map((f) => ({
+        name: f.name,
+        sort: f.sort,
+        ...(f.integer ? { integer: true as const } : {}),
+      })),
     }))
     .toSorted((a, b) => a.key.localeCompare(b.key));
 

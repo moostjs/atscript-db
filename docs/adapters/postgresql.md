@@ -269,6 +269,8 @@ const results = await table.search("database optimization", {
 
 Multiple fields in the same fulltext index group are concatenated for combined search.
 
+**Integer members** are left out of the tsvector — `coalesce(int, '')` would not even be valid SQL — and matched by exact number instead. When the whole search term is a whole number, the predicate becomes `(<tsvector match> OR "ref_no" = CAST(? AS BIGINT))`; the `BIGINT` cast keeps a 10-digit term from overflowing an `INTEGER` column, and the member's btree index serves the equality next to the GIN index (a bitmap OR). An index of integer members only creates no DDL. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+
 ## Transactional DDL
 
 PostgreSQL DDL is fully transactional, unlike MySQL and SQLite. Schema sync changes are wrapped in `BEGIN`/`COMMIT` blocks — if any DDL statement fails, the entire sync rolls back atomically. This means:

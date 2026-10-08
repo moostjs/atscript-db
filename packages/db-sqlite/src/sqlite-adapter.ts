@@ -7,6 +7,9 @@ import {
   DbError,
   searchIndexNotFoundMessage,
   vectorIndexNotFoundMessage,
+  searchTermInteger,
+  describeFulltext,
+  splitFulltextFields,
 } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
@@ -43,6 +46,7 @@ import {
   type TGeoSearchControls,
   type TSqlFragment,
   EMPTY_AND,
+  orFragment,
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchCount,
@@ -86,6 +90,7 @@ import {
 } from "./tx-gate";
 import type { TSqliteDriver } from "./types";
 import { registerBucketFunction } from "./calendar-bucket";
+import { quoteFtsTerm } from "./fts-term";
 
 /**
  * SQLite adapter for {@link AtscriptDbTable}.
@@ -530,7 +535,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     // aggregate builders render their own unaliased FROM.
     const search = resolveAggregateSearch(query.controls);
     const where = search
-      ? andWhere(this._buildFtsMatchWhere(search.text, search.indexName), buildWhere(query.filter))
+      ? andWhere(
+          this._buildSearchPredicate(search.text, search.indexName),
+          buildWhere(query.filter),
+        )
       : buildWhere(query.filter);
 
     if (query.controls.$count) {
@@ -1130,7 +1138,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     for (const idx of this._getFulltextIndexes()) {
       indexes.push({
         name: idx.name,
-        description: `FTS5 index (${idx.fields.map((f) => f.name).join(", ")})`,
+        description: describeFulltext(idx, (names) => `FTS5 index (${names})`),
         type: "text",
         fields: this._indexLogicalPaths(idx),
         isDefault: indexes.length === 0,
@@ -1157,6 +1165,17 @@ export class SqliteAdapter extends BaseDbAdapter {
   ): Promise<Array<Record<string, unknown>>> {
     if (!text.trim()) {
       return [];
+    }
+    const plan = this._searchPlan(text, indexName);
+    if (!plan.join) {
+      // A numeric branch (or no text members): the predicate form through the shared builder.
+      const { sql, params } = buildSelect(
+        this.resolveTableName(),
+        andWhere(plan.predicate, buildWhere(query.filter)),
+        query.controls,
+      );
+      this._log(sql, params);
+      return this._stmt(() => this.driver.all(sql, params));
     }
     const base = this._buildFtsBase(text, query.filter, indexName);
     const controls = query.controls || {};
@@ -1209,10 +1228,20 @@ export class SqliteAdapter extends BaseDbAdapter {
     const data = await this.search(text, query, indexName);
 
     // Count query reuses the same FROM+WHERE base, without limit/skip
-    const base = this._buildFtsBase(text, query.filter, indexName);
-    const countSql = `SELECT COUNT(*) as cnt ${base.fromWhere}`;
-    this._log(countSql, base.params);
-    const row = await this._stmt(() => this.driver.get<{ cnt: number }>(countSql, base.params));
+    const plan = this._searchPlan(text, indexName);
+    let countSql: string;
+    let countParams: unknown[];
+    if (plan.join) {
+      const base = this._buildFtsBase(text, query.filter, indexName);
+      countSql = `SELECT COUNT(*) as cnt ${base.fromWhere}`;
+      countParams = base.params;
+    } else {
+      const where = andWhere(plan.predicate, buildWhere(query.filter));
+      countSql = `SELECT COUNT(*) as cnt FROM "${esc(this.resolveTableName())}" WHERE ${where.sql}`;
+      countParams = where.params;
+    }
+    this._log(countSql, countParams);
+    const row = await this._stmt(() => this.driver.get<{ cnt: number }>(countSql, countParams));
     return { data, count: row?.cnt ?? 0 };
   }
 
@@ -1251,24 +1280,55 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   /**
-   * The FTS5 match restated as a standalone WHERE fragment:
-   * `rowid IN (SELECT rowid FROM "<table>__fts__<idx>" WHERE "<table>__fts__<idx>" MATCH ?)`.
+   * The search restated as a standalone WHERE fragment: the FTS5 match
+   * `rowid IN (SELECT rowid FROM "<table>__fts__<idx>" WHERE "<table>__fts__<idx>" MATCH ?)`
+   * OR exact equality on each integer member when the whole term is a whole
+   * number (since 0.1.150).
    *
    * The external-content FTS5 tables this adapter creates carry
    * `content_rowid='rowid'`, so the virtual table's `rowid` IS the content
    * table's rowid, and the unqualified `rowid` outside the subquery resolves
    * against the aggregate's single FROM table. {@link _buildFtsBase} is the
    * leaf path's JOIN form, which the unaliased aggregate builders cannot take.
+   * SQLite's multi-index OR optimization serves each arm from its own index
+   * (the FTS5 rowid lookup and the member's btree).
    *
    * Index resolution goes through {@link _resolveFtsIndex}, as the leaf path
    * does, so a named `$index` and its "not found" error behave identically.
    */
-  private _buildFtsMatchWhere(text: string, indexName?: string): TSqlFragment {
-    const ftsTable = this._ftsTableName(this._resolveFtsIndex(indexName).name);
-    const quoted = `"${esc(ftsTable)}"`;
+  private _buildSearchPredicate(text: string, indexName?: string): TSqlFragment {
+    return this._searchPlan(text, indexName).predicate;
+  }
+
+  /**
+   * How a search runs: the standalone predicate, and whether the leaf path
+   * may keep its FTS5 JOIN form (text members and no numeric branch — zero
+   * behavior change for text-only searches).
+   */
+  private _searchPlan(
+    text: string,
+    indexName?: string,
+  ): { predicate: TSqlFragment; join: boolean } {
+    const index = this._resolveFtsIndex(indexName);
+    const { text: textFields, integer: integerFields } = splitFulltextFields(index);
+    const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
+    const parts: string[] = [];
+    const params: unknown[] = [];
+    if (textFields.length > 0) {
+      const quoted = `"${esc(this._ftsTableName(index.name))}"`;
+      parts.push(`rowid IN (SELECT rowid FROM ${quoted} WHERE ${quoted} MATCH ?)`);
+      params.push(quoteFtsTerm(text));
+    }
+    if (n !== undefined) {
+      for (const f of integerFields) {
+        parts.push(`"${esc(f.name)}" = ?`);
+        params.push(n);
+      }
+    }
+    // An integer-only index with a term that is not a whole number matches nothing.
     return {
-      sql: `rowid IN (SELECT rowid FROM ${quoted} WHERE ${quoted} MATCH ?)`,
-      params: [text],
+      predicate: orFragment(parts, params),
+      join: textFields.length > 0 && n === undefined,
     };
   }
 
@@ -1289,7 +1349,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     let fromWhere = `FROM "${esc(tableName)}" AS t`;
     fromWhere += ` JOIN "${esc(ftsTable)}" AS fts ON t.rowid = fts.rowid`;
     fromWhere += ` WHERE fts."${esc(ftsTable)}" MATCH ?`;
-    const params: unknown[] = [text];
+    const params: unknown[] = [quoteFtsTerm(text)];
 
     if (where.sql !== "1=1") {
       fromWhere += ` AND (${where.sql})`;
@@ -1303,7 +1363,10 @@ export class SqliteAdapter extends BaseDbAdapter {
    * Creates/drops FTS5 virtual tables and sync triggers to match desired fulltext indexes.
    */
   private _syncFtsIndexes(tableName: string): void {
-    const ftIndexes = this._getFulltextIndexes();
+    // Integer-only indexes have no FTS5 table (their members are matched by number)
+    const ftIndexes = this._getFulltextIndexes().filter(
+      (idx) => splitFulltextFields(idx).text.length > 0,
+    );
     const desiredFtsTables = new Set(ftIndexes.map((idx) => this._ftsTableName(idx.name)));
 
     // List existing FTS virtual tables for this content table (exclude shadow tables like _data, _idx)
@@ -1328,13 +1391,28 @@ export class SqliteAdapter extends BaseDbAdapter {
       const ftsTable = this._ftsTableName(index.name);
       if (!existingSet.has(ftsTable)) {
         this._createFtsTable(tableName, ftsTable, index);
+      } else if (!this._ftsColumnsMatch(ftsTable, index)) {
+        // Column drift (e.g. a table built when integer members were indexed as text)
+        this._dropFtsTable(ftsTable);
+        this._createFtsTable(tableName, ftsTable, index);
       }
     }
   }
 
+  /** Whether an existing FTS5 table has exactly the index's text columns, in order. */
+  private _ftsColumnsMatch(ftsTable: string, index: TDbIndex): boolean {
+    const live = this.driver
+      .all<{ name: string }>(`PRAGMA table_info("${esc(ftsTable)}")`)
+      .map((c) => c.name);
+    const desired = splitFulltextFields(index).text.map((f) => f.name);
+    return live.length === desired.length && live.every((name, i) => name === desired[i]);
+  }
+
   /** Creates an FTS5 virtual table with sync triggers and rebuilds the index. */
   private _createFtsTable(tableName: string, ftsTable: string, index: TDbIndex): void {
-    const fieldNames = index.fields.map((f) => `"${esc(f.name)}"`);
+    // Text members only — integer members are matched by exact number
+    const fields = splitFulltextFields(index).text;
+    const fieldNames = fields.map((f) => `"${esc(f.name)}"`);
     const fieldList = fieldNames.join(", ");
 
     // Create external-content FTS5 virtual table
@@ -1343,8 +1421,8 @@ export class SqliteAdapter extends BaseDbAdapter {
     this.driver.exec(createSql);
 
     // Create sync triggers
-    const newFields = index.fields.map((f) => `new."${esc(f.name)}"`).join(", ");
-    const oldFields = index.fields.map((f) => `old."${esc(f.name)}"`).join(", ");
+    const newFields = fields.map((f) => `new."${esc(f.name)}"`).join(", ");
+    const oldFields = fields.map((f) => `old."${esc(f.name)}"`).join(", ");
     const ef = esc(ftsTable);
 
     // AFTER INSERT

@@ -138,7 +138,7 @@ Check whether a value belongs (or does not belong) to a set:
 // MongoDB: WHERE name matches /^Al/
 ```
 
-`$regex` is available on `string` fields and accepts a `RegExp` or `string`.
+`$regex` is available on `string` fields and accepts a `RegExp` or `string`. On an **integer** field (`number.int` and its sizes, `number` + `@expect.int`, `@db.default.increment`) it matches the number's decimal text — `{ refNo: { $regex: "^29" } }` finds `29461277` — identically on every adapter (a full scan). Floats, decimals and timestamps are refused with `INVALID_QUERY`; filter them by range.
 
 ### Existence
 
@@ -217,7 +217,7 @@ await tasks.findMany({ filter: { priority: { $gte: "high" } } });
 - **Always accepted:** `null` (`{ f: null }`, `{ f: { $ne: null } }`) and class instances such as `Date` or a MongoDB `ObjectId`.
 - **Never checked:** `@db.json` fields and their contents, nested-object parents, `db.geoPoint` and `$exists` (a boolean, see [Existence](#existence)).
 - **Literal unions are checked by their primitive type**, not by membership: `{ status: "unknown" }` on `'open' | 'closed'` is valid and matches nothing.
-- **`$regex`** (and a bare `RegExp` value) needs a field that holds strings, and a string or `RegExp` pattern.
+- **`$regex`** (and a bare `RegExp` value) needs a field that holds strings — or an integer field, which matches the number's decimal text — and a string or `RegExp` pattern. A float, decimal or timestamp field is refused.
 - **Accepted values are passed on unchanged.** A numeric string compares as a number on the SQL adapters but matches nothing on MongoDB and memory, which compare types strictly — pass values of the declared type.
 
 The same check covers view columns (aggregates and [computed columns](/views/computed-columns), by their declared type), `$having` (aggregate aliases: numbers, counts: integers; `min` / `max`: the source field's type; [calendar-bucket](/api/calendar-buckets) labels: strings), the operands of [relational filters](#relational-filters) (the path is prefixed with the relation, `issues.severity`) and the filters of `updateMany` / `deleteMany`. An unknown or unfilterable field keeps its own error (see [Nested Field Filters](#nested-field-filters)).

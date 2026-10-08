@@ -4,6 +4,7 @@ import {
   DbError,
   geoIndexNotFoundMessage,
   searchIndexNotFoundMessage,
+  searchTermInteger,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
 import type { DbControls, DbQuery, TDbCollation, TDbIndex, TSearchIndexInfo } from "@atscript/db";
@@ -30,6 +31,11 @@ export interface TMongoSearchHost {
   _indexLogicalPaths(index: TDbIndex): string[];
   getMongoSearchIndex(name?: string): TMongoIndex | undefined;
   getMongoSearchIndexes(): Map<string, TMongoIndex>;
+  /**
+   * Stored paths of the integer members of the table's fulltext indexes —
+   * matched by exact number next to the text match (since 0.1.150).
+   */
+  getNumericSearchKeys(): readonly string[];
   getVectorThreshold(indexKey?: string): number | undefined;
   fieldCollation(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
@@ -392,7 +398,28 @@ function buildSearchStage(
   if (index.type === "text") {
     // Classic text index — relevance via { $meta: 'textScore' }. `$text` must be
     // the first pipeline stage, which the runners guarantee.
-    return { stage: { $match: { $text: { $search: text } } }, classicText: true };
+    const n = searchTermInteger(text);
+    const keys = n === undefined ? [] : host.getNumericSearchKeys();
+    const hasText = Object.keys(index.fields).length > 0;
+    // `$type` keeps the equality usable by the partial unique index of an
+    // optional member; every `$or` branch next to `$text` must be index-backed.
+    const equalities = keys.map((key) => ({ [key]: { $eq: n, $type: "number" } }));
+    if (!hasText) {
+      // Integer members only: no `$text` (so no textScore); a term that is not a
+      // whole number matches nothing.
+      const match =
+        equalities.length === 0
+          ? { _id: { $in: [] } }
+          : equalities.length === 1
+            ? equalities[0]!
+            : { $or: equalities };
+      return { stage: { $match: match }, classicText: false };
+    }
+    const textMatch = { $text: { $search: text } };
+    return {
+      stage: { $match: equalities.length > 0 ? { $or: [textMatch, ...equalities] } : textMatch },
+      classicText: true,
+    };
   }
   // Atlas Search (search_text / dynamic_text). The index's declared `strategy`
   // locks the query shape — there is no query-time mode switching.
@@ -455,6 +482,13 @@ function buildSearchStage(
 
   // Collapse a lone clause (e.g. a `text`-strategy index, or a `compound` index
   // that maps no autocomplete/array field) so it degrades to the prior shape.
+  // Exact whole-number equality on the integer members, next to the text match.
+  const n = searchTermInteger(text);
+  if (n !== undefined) {
+    for (const path of host.getNumericSearchKeys()) {
+      clauses.push({ equals: { path, value: n } });
+    }
+  }
   let body: Document;
   if (clauses.length <= 1) {
     body = clauses[0] ?? textClause();

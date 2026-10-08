@@ -16,16 +16,16 @@ interface Uniquery<Own, Nav> {
 
 All applied per-field unless inside `$and / $or / $not`. These ten are the whole set (`ComparisonOp` in `@uniqu/core`) — there is no `$like`, `$between`, `$contains` or `$startsWith`; use `$regex` for patterns and `$gte`+`$lte` for ranges. An unknown operator is rejected.
 
-| Operator            | Example                                        | Meaning                                          |
-| ------------------- | ---------------------------------------------- | ------------------------------------------------ |
-| equality (implicit) | `{ name: 'Alice' }`                            | `=`                                              |
-| `$eq`               | `{ id: { $eq: 1 } }`                           | `=`                                              |
-| `$ne`               | `{ status: { $ne: 'done' } }`                  | `<>`                                             |
-| `$gt / $gte`        | `{ age: { $gt: 18 } }`                         | `>` / `>=`                                       |
-| `$lt / $lte`        | `{ age: { $lte: 65 } }`                        | `<` / `<=`                                       |
-| `$in / $nin`        | `{ role: { $in: ['admin', 'editor'] } }`       | `IN` / `NOT IN`                                  |
-| `$regex`            | `{ name: { $regex: /^al/i } }` (or `'/^al/i'`) | Regex, `string` fields (per-adapter translation) |
-| `$exists`           | `{ deletedAt: { $exists: false } }`            | Holds a value (`null` ≡ absent) — below          |
+| Operator            | Example                                        | Meaning                                                                                                              |
+| ------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| equality (implicit) | `{ name: 'Alice' }`                            | `=`                                                                                                                  |
+| `$eq`               | `{ id: { $eq: 1 } }`                           | `=`                                                                                                                  |
+| `$ne`               | `{ status: { $ne: 'done' } }`                  | `<>`                                                                                                                 |
+| `$gt / $gte`        | `{ age: { $gt: 18 } }`                         | `>` / `>=`                                                                                                           |
+| `$lt / $lte`        | `{ age: { $lte: 65 } }`                        | `<` / `<=`                                                                                                           |
+| `$in / $nin`        | `{ role: { $in: ['admin', 'editor'] } }`       | `IN` / `NOT IN`                                                                                                      |
+| `$regex`            | `{ name: { $regex: /^al/i } }` (or `'/^al/i'`) | Regex, `string` fields (per-adapter translation); on an INTEGER field it matches the number's decimal text (0.1.150) |
+| `$exists`           | `{ deletedAt: { $exists: false } }`            | Holds a value (`null` ≡ absent) — below                                                                              |
 
 ## Logical composition
 
@@ -64,7 +64,7 @@ Every comparison value (bare, `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`, each `$in`/
 | array field (Mongo / memory)                                                                                        | element type; array operand → every element                                                                                 |
 | `@db.json` + contents, object parents, `db.geoPoint`                                                                | never checked                                                                                                               |
 
-`NaN` / `Infinity` / `-Infinity` (bare or in `$in`/`$nin`) on `number` / `decimal` → 400 `expected a number, got NaN` (since 0.1.148; integer fields always refused them). Always ok: `null` / `undefined`, class instances (`Date`, `ObjectId`). Literal unions checked by primitive type, not membership. `$regex` / bare `RegExp` → field must hold strings + pattern string/RegExp. Covers views (aggregate + `@db.compute` columns by declared type), `$having` (agg aliases number; `min`/`max` = source type; bucket alias string), `$some`/`$none` operands (path `issues.n`), `updateMany`/`deleteMany`. Runs after the path guard (unknown / unfilterable field keeps its error). Accepted values pass UNCHANGED — `"5"` on a number matches on SQL, not on Mongo / memory (strict types).
+`NaN` / `Infinity` / `-Infinity` (bare or in `$in`/`$nin`) on `number` / `decimal` → 400 `expected a number, got NaN` (since 0.1.148; integer fields always refused them). Always ok: `null` / `undefined`, class instances (`Date`, `ObjectId`). Literal unions checked by primitive type, not membership. `$regex` / bare `RegExp` → field must hold strings OR be an integer (`number.int` + sizes, `@expect.int`, `@db.default.increment`: matches the decimal text, 0.1.150) + pattern string/RegExp; float / decimal / timestamp → 400 `a pattern match needs a string or integer field`. Covers views (aggregate + `@db.compute` columns by declared type), `$having` (agg aliases number; `min`/`max` = source type; bucket alias string), `$some`/`$none` operands (path `issues.n`), `updateMany`/`deleteMany`. Runs after the path guard (unknown / unfilterable field keeps its error). Accepted values pass UNCHANGED — `"5"` on a number matches on SQL, not on Mongo / memory (strict types).
 
 ## `$exists` (since 0.1.132)
 

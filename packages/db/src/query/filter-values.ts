@@ -10,6 +10,8 @@ import { isPlainObject } from "../shared/object";
 import { hasRelationOp } from "./relation-filter";
 import { SOURCE_VALUE_FNS } from "./aggregate-fns";
 import { jsonValueAncestor } from "./buckets";
+import { INTEGER_REGEX_OP } from "../shared/search-term";
+import { searchMemberKind } from "../shared/search-fields";
 
 /**
  * Filter VALUE guard (since 0.1.147): every comparison operand must be able
@@ -36,7 +38,9 @@ import { jsonValueAncestor } from "./buckets";
  * element type (containment) and each element of an array operand. JSON
  * (`@db.json`), object, tuple (`db.geoPoint`) and other non-scalar types are
  * opaque — never checked. `$regex` (and a bare `RegExp`) needs a field that
- * holds strings, and a string / `RegExp` pattern. `$exists` / `$geoWithin`
+ * holds strings — or an integer search member (`number.int` and its sizes,
+ * `@expect.int`, `@db.default.increment`), which matches the number's decimal
+ * text — and a string / `RegExp` pattern. `$exists` / `$geoWithin`
  * are checked by `guardFilter`; relational predicates by the related table.
  */
 
@@ -48,6 +52,8 @@ interface TValueType {
   kinds: ReadonlySet<TScalarKind>;
   /** A `number.timestamp` member — the message names epoch milliseconds. */
   timestamp: boolean;
+  /** An integer search member — `$regex` matches its decimal text (since 0.1.150). */
+  integerText?: boolean;
 }
 
 const OPAQUE: TValueType = { kinds: new Set<TScalarKind>(["any"]), timestamp: false };
@@ -148,10 +154,22 @@ function valueTypeOf(meta: TableMetadata, fd: TDbFieldMeta): TValueType {
       metadata?.has?.("db.agg.count") === true ||
       metadata?.has?.("db.agg.countDistinct") === true;
     if (integral && kinds.delete("number")) kinds.add("integer");
-    vt = kinds.size === 0 ? OPAQUE : { kinds, timestamp: out.timestamp };
+    vt =
+      kinds.size === 0
+        ? OPAQUE
+        : {
+            kinds,
+            timestamp: out.timestamp,
+            integerText: searchMemberKind(fd.type) === "integer",
+          };
   }
   typeCache.set(fd, vt);
   return vt;
+}
+
+/** Whether `$regex` on `fd` matches the decimal text of an integer (since 0.1.150). */
+export function isIntegerTextField(meta: TableMetadata, fd: TDbFieldMeta): boolean {
+  return valueTypeOf(meta, fd).integerText === true;
 }
 
 /** A decimal literal (`5`, `-1.5`, `.5`, `1e3`), surrounding blanks allowed — no hex, no `Infinity`. */
@@ -241,7 +259,7 @@ function valueError(path: string, op: string | undefined, message: string): DbEr
 }
 
 function holdsStrings(vt: TValueType): boolean {
-  return vt.kinds.has("string") || vt.kinds.has("any");
+  return vt.kinds.has("string") || vt.kinds.has("any") || vt.integerText === true;
 }
 
 function checkRegex(path: string, vt: TValueType, op: string, pattern: unknown): void {
@@ -249,7 +267,7 @@ function checkRegex(path: string, vt: TValueType, op: string, pattern: unknown):
     throw valueError(
       path,
       op,
-      `a pattern match needs a string field, "${path}" holds ${expectedOf(vt)}`,
+      `a pattern match needs a string or integer field, "${path}" holds ${expectedOf(vt)}`,
     );
   }
   if (typeof pattern !== "string" && !(pattern instanceof RegExp)) {
@@ -305,6 +323,9 @@ function walkFilterValues(filter: unknown, typeOf: (key: string) => TValueType |
       continue;
     }
     if (key.startsWith("$") || hasRelationOp(value)) continue;
+    if (isPlainObject(value) && INTEGER_REGEX_OP in value) {
+      throw valueError(key, INTEGER_REGEX_OP, "is internal — use $regex");
+    }
     const vt = typeOf(key);
     if (vt) checkEntry(key, vt, value);
   }

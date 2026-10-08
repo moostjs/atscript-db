@@ -31,6 +31,7 @@ import { bootHttp, prepareFixtures } from "./test-utils";
 
 let ResolveIssue: any;
 let ResolveNote: any;
+let ResolveRef: any;
 let ResolveOwner: any;
 let ResolveIssueDecorations: any;
 let ResolveLine: any;
@@ -199,6 +200,7 @@ beforeAll(async () => {
   ({
     ResolveIssue,
     ResolveNote,
+    ResolveRef,
     ResolveOwner,
     ResolveIssueDecorations,
     ResolveLine,
@@ -344,6 +346,25 @@ describe("resolveQuery — $search follows the READ's visibility", () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("TARGET_INVALID");
     expect(ids(await (await boot()).run("$search=alpha"))).toEqual([1, 2]);
+  });
+
+  it("a searchable integer column is applied by decimal-text substring; a non-number matches nothing", async () => {
+    getMoostInfact()._cleanup();
+    const refs = createAdapter().getTable(ResolveRef);
+    const { run } = await boot({
+      table: refs,
+      rows: [
+        { id: 1, title: "login", refNo: 29461277 },
+        { id: 2, title: "payment 2946", refNo: 15 },
+        { id: 3, title: "settings", refNo: 4242 },
+      ],
+    });
+    expect(ids(await run("$search=2946"))).toEqual([1, 2]);
+    expect(ids(await run("$search=4242"))).toEqual([3]);
+    // the fragment is still applied (title is searchable): no row, not TARGET_INVALID
+    const none = await run("$search=abc");
+    expect(none.status).toBe(201);
+    expect(ids(none)).toEqual([]);
   });
 
   it("a table with neither native search nor searchable columns → TARGET_INVALID", async () => {

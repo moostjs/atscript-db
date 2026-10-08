@@ -805,6 +805,12 @@ export abstract class BaseDbAdapter {
         continue;
       }
 
+      // A fulltext index of integer members only has no physical artifact
+      // (they are matched by exact number) — never desired, a stale one drops.
+      if (index.type === "fulltext" && !index.fields.some((f) => !f.integer)) {
+        continue;
+      }
+
       desiredNames.add(index.key);
 
       if (!existingNames.has(index.key)) {
@@ -847,6 +853,13 @@ export abstract class BaseDbAdapter {
   /**
    * Returns available search indexes for this adapter.
    * UI uses this to show index picker. Override in adapters that support search.
+   *
+   * A fulltext index may carry integer members ({@link TDbIndexField.integer},
+   * since 0.1.150): list them in `fields`, keep them out of the physical text
+   * index, and OR `member = n` into the search predicate when
+   * `searchTermInteger(text)` is defined. An index of integer members only
+   * is still listed (it makes the table natively searchable); a term that is
+   * not a whole number then matches nothing.
    */
   getSearchIndexes(): TSearchIndexInfo[] {
     return [];
@@ -899,7 +912,9 @@ export abstract class BaseDbAdapter {
   // ── Search ──────────────────────────────────────────────────────────────
 
   /**
-   * Full-text search. Override in adapters that support search.
+   * Full-text search. Override in adapters that support search. The text
+   * match is OR'd with exact-number equality on the index's integer members
+   * when the whole term is a whole number (see `searchTermInteger`).
    *
    * @param text - Search text.
    * @param query - Filter, sort, limit, etc.

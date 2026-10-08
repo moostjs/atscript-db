@@ -328,6 +328,7 @@ export const mysqlDialect: SqlDialect = {
     const { pattern } = parseRegexString(value);
     return { sql: `${quotedCol} REGEXP ?`, params: [pattern] };
   },
+  integerText: (expr: string) => `CAST(CAST(${expr} AS SIGNED) AS CHAR)`,
   // No `anyValue`: MySQL's ANY_VALUE() is rejected by HAVING (`Unknown column` for the derived
   // column), and MIN works over every MySQL column type a first / last can read.
   // errno 1690 (`DOUBLE value is out of range`): an overflow in aggregate arithmetic

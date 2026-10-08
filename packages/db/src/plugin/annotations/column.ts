@@ -6,6 +6,7 @@ import {
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  searchFieldVerdict,
   validateFieldBaseType,
 } from "../../shared/annotation-utils";
 import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
@@ -399,7 +400,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "matches the `$search` term as a case-insensitive substring across all " +
         "`@db.column.searchable` fields (`$or`). Where adapter-native search IS available it " +
         "wins and this annotation is not consulted. The term is escaped literally — no " +
-        "user-supplied regex. String-typed columns only.\n\n" +
+        "user-supplied regex. String and integer columns only: an integer column " +
+        "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) matches when the " +
+        "term is a substring of the number's decimal text (`2946` finds `29461277`). " +
+        "Floats, decimals and timestamps are refused.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         '@db.table "jobs"\n' +
@@ -408,13 +412,23 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "  jobName: string\n" +
         "  @db.column.searchable\n" +
         "  description: string\n" +
+        "  @db.column.searchable\n" +
+        "  refNo: number.int\n" +
         "}\n" +
         "```\n",
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
-        return validateFieldBaseType(token, doc, "@db.column.searchable", ["string"]);
+        const verdict = searchFieldVerdict(token.parentNode!, doc);
+        if (!("problem" in verdict)) return [];
+        return [
+          {
+            message: `@db.column.searchable needs a string or an integer field — "${token.parentNode!.id}" ${verdict.problem}`,
+            severity: 1,
+            range: token.range,
+          },
+        ];
       },
     }),
 

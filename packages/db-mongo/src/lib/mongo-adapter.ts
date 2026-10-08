@@ -842,6 +842,24 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     this._pendingSearchFields = [];
 
+    // Integer fulltext members: every static Atlas text index maps them as
+    // numbers so the `equals` clause can reach them (and `paths` — the
+    // visibility gate — lists them). `dynamic_text` indexes numbers already.
+    for (const fulltext of this._table.indexes.values()) {
+      if (fulltext.type !== "fulltext" || !fulltext.fields.some((f) => f.integer)) continue;
+      const logical = this._indexLogicalPaths(fulltext);
+      for (const index of this._mongoIndexes.values()) {
+        if (index.type !== "search_text") continue;
+        fulltext.fields.forEach((f, i) => {
+          if (f.integer) {
+            this._addFieldToSearchIndex("search_text", index.name, logical[i]!, [
+              { type: "number" },
+            ]);
+          }
+        });
+      }
+    }
+
     // Associate vector filter fields with their vector indexes
     for (const [key, value] of this._vectorFilters.entries()) {
       const index = this._mongoIndexes.get(key);
@@ -889,9 +907,13 @@ export class MongoAdapter extends BaseDbAdapter {
             key: index.key,
             name: index.name,
             type: "text",
-            fields: Object.fromEntries(index.fields.map((f) => [f.name, "text" as const])),
+            // Integer members are matched by exact number (getNumericSearchKeys),
+            // never part of the text index.
+            fields: Object.fromEntries(
+              index.fields.filter((f) => !f.integer).map((f) => [f.name, "text" as const]),
+            ),
             weights: Object.fromEntries(
-              index.fields.filter((f) => f.weight).map((f) => [f.name, f.weight!]),
+              index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
             ),
           };
         }
@@ -929,6 +951,28 @@ export class MongoAdapter extends BaseDbAdapter {
       }
     }
     return this._searchIndexesMap;
+  }
+
+  private _numericSearchKeys?: readonly string[];
+
+  /**
+   * Stored paths of the integer members of the table's fulltext indexes
+   * (table-wide: MongoDB has one classic text index, and every Atlas text
+   * index maps them too). Since 0.1.150.
+   */
+  getNumericSearchKeys(): readonly string[] {
+    // Trigger flattening so the index list is built.
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- trigger lazy init
+    this._table.flatMap;
+    if (!this._numericSearchKeys) {
+      const keys = new Set<string>();
+      for (const index of this._table.indexes.values()) {
+        if (index.type !== "fulltext") continue;
+        for (const f of index.fields) if (f.integer) keys.add(f.name);
+      }
+      this._numericSearchKeys = [...keys];
+    }
+    return this._numericSearchKeys;
   }
 
   /** Returns a specific MongoDB search index by name. */

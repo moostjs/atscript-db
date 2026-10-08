@@ -70,6 +70,8 @@ curl "http://localhost:3000/todos/query?completed=true&\$count"
 5
 ```
 
+`$count` counts the same rows the query would return, including a `$search` term: with native search it counts the search matches (since 0.1.150 — it used to count the whole filtered table), with the `@db.column.searchable` fallback the fallback's matches, and with `$vector` the nearest neighbours (up to `$limit`, default 1000).
+
 See [URL Query Syntax](./query-syntax) for the full filter syntax and [Relations & Search](./advanced) for `$with`, `$search`, `$vector`, and `$groupBy`.
 
 ### GET /pages {#get-pages}
