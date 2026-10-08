@@ -211,7 +211,7 @@ export abstract class AsReadableController<
     this.logger.info(`Initializing ${kindTag} controller`);
     // Bookkeeping only: the path is derived per app from this controller's own
     // bound route once binding is complete (never from the ambient prefix).
-    recordBoundType(this.constructor, boundType, opts?.canonical);
+    recordBoundType(app, this.constructor, boundType, opts?.canonical);
     addPublishHook(app);
     try {
       const p = this.init();

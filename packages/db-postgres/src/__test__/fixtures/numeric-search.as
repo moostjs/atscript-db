@@ -25,3 +25,17 @@ export interface NsCode {
 
     label: string
 }
+
+// The integer-only index is declared FIRST: the default text index is still 'ns_main2'.
+@db.table 'ns_ids_first'
+export interface NsIdsFirst {
+    @meta.id
+    id: number.int
+
+    @db.index.fulltext 'ns_ids2'
+    @db.index.unique
+    internal_no: number.int
+
+    @db.index.fulltext 'ns_main2'
+    title: string
+}

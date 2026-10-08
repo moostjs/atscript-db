@@ -303,3 +303,50 @@ describe("native index with an integer member follows the index visibility gate 
     expect(table.search).toHaveBeenCalled();
   });
 });
+
+describe("native $count passes the request's search controls (same builder as /query)", () => {
+  it("forwards $fuzzy to the count exactly as /query does", async () => {
+    const table = makeMockTable({ fields: SEARCH_FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([{ name: "ft", type: "text", isDefault: true }]);
+    table.searchWithCount.mockResolvedValue({ data: [], count: 4 });
+    const controller = new AsDbController(makeApp(), table);
+    expect(await controller.query("?$search=helo&$fuzzy=1&$count=true")).toBe(4);
+    await controller.query("?$search=helo&$fuzzy=1");
+    const countControls = table.searchWithCount.mock.calls[0][1].controls;
+    const queryControls = table.search.mock.calls[0][1].controls;
+    expect(countControls.$fuzzy).toBe(queryControls.$fuzzy);
+    expect(String(countControls.$fuzzy)).toBe("1");
+    expect(countControls.$limit).toBe(1);
+    expect(countControls.$count).toBeUndefined();
+  });
+});
+
+describe("native index gate treats @db.writeOnly fields as not visible", () => {
+  const FIELDS = {
+    id: {},
+    title: { "db.column.searchable": true },
+    pin: { __type: "int", "db.writeOnly": true },
+  };
+
+  it("refuses a default index that reads a write-only member", async () => {
+    const table = makeMockTable({ fields: FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([
+      { name: "ft", type: "text", isDefault: true, fields: ["title", "pin"] },
+    ]);
+    const controller = new AsDbController(makeApp(), table);
+    const result = await controller.query("?$search=4711");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).body.statusCode).toBe(400);
+    expect(table.search).not.toHaveBeenCalled();
+  });
+
+  it("runs an index that reads no write-only member", async () => {
+    const table = makeMockTable({ fields: FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([
+      { name: "ft", type: "text", isDefault: true, fields: ["title"] },
+    ]);
+    const controller = new AsDbController(makeApp(), table);
+    await controller.query("?$search=hello");
+    expect(table.search).toHaveBeenCalled();
+  });
+});

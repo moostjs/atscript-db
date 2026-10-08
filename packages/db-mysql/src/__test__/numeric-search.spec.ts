@@ -136,3 +136,12 @@ describe("MysqlAdapter — integer fulltext members", () => {
     expect(call.sql).toContain("CAST(CAST(`ref_no` AS SIGNED) AS CHAR) REGEXP ?");
   });
 });
+
+describe("default text index", () => {
+  it("is the first index with a text member, not an integer-only one declared first", () => {
+    const { adapter } = setup(fx.NsIdsFirst);
+    const infos = adapter.getSearchIndexes().filter((i) => i.type === "text");
+    expect(infos).toHaveLength(2);
+    expect(infos.filter((i) => i.isDefault).map((i) => i.fields)).toEqual([["title"]]);
+  });
+});

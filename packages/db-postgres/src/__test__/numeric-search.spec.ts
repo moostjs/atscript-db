@@ -110,3 +110,12 @@ describe("PostgresAdapter — integer fulltext members", () => {
     expect(call.params).toEqual(["^29"]);
   });
 });
+
+describe("default text index", () => {
+  it("is the first index with a text member, not an integer-only one declared first", () => {
+    const { adapter } = setup(fx.NsIdsFirst);
+    const infos = adapter.getSearchIndexes().filter((i) => i.type === "text");
+    expect(infos).toHaveLength(2);
+    expect(infos.filter((i) => i.isDefault).map((i) => i.fields)).toEqual([["title"]]);
+  });
+});

@@ -51,3 +51,14 @@ export function describeFulltext(
   const exact = integer.map((f) => `exact number on ${f.name}`).join(" + ");
   return [base, exact].filter(Boolean).join(" + ");
 }
+
+/**
+ * The fulltext index that answers a search naming none (since 0.1.150): the
+ * first one with at least one TEXT member, else the first one (an index of
+ * integer members only answers exact-number terms).
+ */
+export function defaultFulltextIndex<T extends Pick<TDbIndex, "fields">>(
+  indexes: readonly T[],
+): T | undefined {
+  return indexes.find((i) => splitFulltextFields(i).text.length > 0) ?? indexes[0];
+}

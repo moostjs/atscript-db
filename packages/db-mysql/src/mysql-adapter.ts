@@ -15,6 +15,7 @@ import {
   fkColumns,
   searchTermInteger,
   describeFulltext,
+  defaultFulltextIndex,
   splitFulltextFields,
 } from "@atscript/db";
 import type {
@@ -1847,17 +1848,17 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   override getSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
-    // The first index of each type answers a request naming none.
-    for (const index of this._table.indexes.values()) {
-      if (index.type === "fulltext") {
-        indexes.push({
-          name: index.key,
-          description: describeFulltext(index, (names) => `FULLTEXT index on ${names}`),
-          type: "text",
-          fields: this._indexLogicalPaths(index),
-          isDefault: indexes.length === 0,
-        });
-      }
+    // The default text index is the first one with a TEXT member (else the first).
+    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
+    const ftDefault = defaultFulltextIndex(ftAll);
+    for (const index of ftAll) {
+      indexes.push({
+        name: index.key,
+        description: describeFulltext(index, (names) => `FULLTEXT index on ${names}`),
+        type: "text",
+        fields: this._indexLogicalPaths(index),
+        isDefault: index === ftDefault,
+      });
     }
     // Add vector indexes
     let firstVector = true;
@@ -1970,14 +1971,9 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {
-    for (const index of this._table.indexes.values()) {
-      if (index.type === "fulltext") {
-        if (!indexName || index.key === indexName) {
-          return index;
-        }
-      }
-    }
-    return undefined;
+    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
+    if (!indexName) return defaultFulltextIndex(ftAll);
+    return ftAll.find((index) => index.key === indexName);
   }
 
   // ── Vector search ──────────────────────────────────────────────────────

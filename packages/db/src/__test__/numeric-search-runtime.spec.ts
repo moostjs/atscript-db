@@ -282,4 +282,46 @@ describe("metadata build refuses unsupported members (pre-compiled types)", () =
     );
     expect(() => build(type)).toThrow(/"n" needs an index for its exact-number match/);
   });
+
+  it("an adapter-contributed unique field backs an integer fulltext member", () => {
+    class UniqueAdapter extends RelAdapter {
+      override getMetadataOverrides() {
+        return { addUniqueFields: ["n"] };
+      }
+    }
+    const type = model((t) =>
+      t.prop(
+        "n",
+        $()
+          .designType("number")
+          .tags("int", "number")
+          .annotate("db.index.fulltext", { name: "ft" }, true).$type,
+      ),
+    );
+    const meta = new DbSpace(() => new UniqueAdapter()).getTable(type as any).getMetadata();
+    const ft = [...meta.indexes.values()].find((i) => i.type === "fulltext")!;
+    expect(ft.fields.find((f) => f.name === "n")?.integer).toBe(true);
+  });
+
+  it.each(["db.index.fulltext", "db.column.searchable"])(
+    "throws for @db.writeOnly combined with %s",
+    (ann) => {
+      const type = model((t) =>
+        t.prop(
+          "secret",
+          $()
+            .designType("string")
+            .annotate("db.writeOnly", true)
+            .annotate(
+              ann as any,
+              ann === "db.index.fulltext" ? { name: "ft" } : true,
+              ann === "db.index.fulltext",
+            ).$type,
+        ),
+      );
+      expect(() => build(type)).toThrow(
+        /@db\.writeOnly cannot coexist with @db\.(index\.fulltext|column\.searchable) on "secret"/,
+      );
+    },
+  );
 });

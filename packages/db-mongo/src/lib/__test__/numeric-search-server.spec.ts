@@ -29,9 +29,12 @@ beforeAll(async () => {
   await client.connect();
   const db = client.db("numsearch");
   space = new DbSpace(() => new MongoAdapter(db, client));
-  const result = await new SchemaSync(space).run([fx.NsItem, fx.NsCode, fx.NsFallback], {
-    force: true,
-  });
+  const result = await new SchemaSync(space).run(
+    [fx.NsItem, fx.NsCode, fx.NsFallback, fx.NsTwoIdx],
+    {
+      force: true,
+    },
+  );
   expect(result.status).toBe("synced");
   await t(fx.NsItem).insertMany([
     { id: 1, title: "quokka login", ref_no: 29461277, alt_no: 700 },
@@ -99,6 +102,25 @@ describe("[mongo] integer fulltext members (real server)", () => {
     expect(await t(fx.NsCode).search("04", {})).toEqual([]);
     expect(await t(fx.NsCode).search("abc", {})).toEqual([]);
     expect((await t(fx.NsCode).searchWithCount("abc", {})).count).toBe(0);
+  });
+});
+
+describe("[mongo] integer members are per index (real server)", () => {
+  beforeAll(async () => {
+    await t(fx.NsTwoIdx).insertMany([
+      { id: 1, title: "alpha", internal_no: 48151623 },
+      { id: 2, title: "48151623 beta", internal_no: 7 },
+    ]);
+  });
+
+  it("the default index does not match a hidden integer in the other index", async () => {
+    // only the title token hits; internal_no (second index) is not matched
+    expect(ids(await t(fx.NsTwoIdx).search("48151623", {}))).toEqual([2]);
+  });
+
+  it("the integer-only index answers by number when named", async () => {
+    expect(ids(await t(fx.NsTwoIdx).search("48151623", {}, "ns_ids"))).toEqual([1]);
+    expect(await t(fx.NsTwoIdx).search("alpha", {}, "ns_ids")).toEqual([]);
   });
 });
 

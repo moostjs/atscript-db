@@ -714,7 +714,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       "still know its shape. The classic case is a sealed secret (pair with `@db.encrypted`): " +
       "writable via generic forms, unreadable by anyone.\n\n" +
       "Server-side code reading through `AtscriptDbTable` still sees the value — the seal is " +
-      "an HTTP-layer contract, not a storage one.\n\n" +
+      "an HTTP-layer contract, not a storage one. It cannot be combined with `@db.index.fulltext` " +
+      "or `@db.column.searchable`: a search hit would reveal the sealed value.\n\n" +
       "**Example:**\n" +
       "```atscript\n" +
       "@db.writeOnly\n" +
@@ -733,6 +734,15 @@ export const dbColumnAnnotations: TAnnotationsTree = {
           severity: 1,
           range: token.range,
         });
+      }
+      for (const name of ["db.index.fulltext", "db.column.searchable"]) {
+        if (field.countAnnotations(name) > 0) {
+          errors.push({
+            message: `@db.writeOnly cannot coexist with @${name} — search results would reveal the sealed value`,
+            severity: 1,
+            range: token.range,
+          });
+        }
       }
       return errors;
     },

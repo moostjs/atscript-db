@@ -32,10 +32,10 @@ export interface TMongoSearchHost {
   getMongoSearchIndex(name?: string): TMongoIndex | undefined;
   getMongoSearchIndexes(): Map<string, TMongoIndex>;
   /**
-   * Stored paths of the integer members of the table's fulltext indexes —
+   * Stored paths of the integer members of the given search index —
    * matched by exact number next to the text match (since 0.1.150).
    */
-  getNumericSearchKeys(): readonly string[];
+  getNumericSearchKeys(index: TMongoIndex): readonly string[];
   getVectorThreshold(indexKey?: string): number | undefined;
   fieldCollation(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
@@ -399,7 +399,7 @@ function buildSearchStage(
     // Classic text index — relevance via { $meta: 'textScore' }. `$text` must be
     // the first pipeline stage, which the runners guarantee.
     const n = searchTermInteger(text);
-    const keys = n === undefined ? [] : host.getNumericSearchKeys();
+    const keys = n === undefined ? [] : host.getNumericSearchKeys(index);
     const hasText = Object.keys(index.fields).length > 0;
     // `$type` keeps the equality usable by the partial unique index of an
     // optional member; every `$or` branch next to `$text` must be index-backed.
@@ -480,16 +480,16 @@ function buildSearchStage(
     }
   }
 
-  // Collapse a lone clause (e.g. a `text`-strategy index, or a `compound` index
-  // that maps no autocomplete/array field) so it degrades to the prior shape.
   // Exact whole-number equality on the integer members, next to the text match.
   const n = searchTermInteger(text);
   if (n !== undefined) {
-    for (const path of host.getNumericSearchKeys()) {
+    for (const path of host.getNumericSearchKeys(index)) {
       clauses.push({ equals: { path, value: n } });
     }
   }
   let body: Document;
+  // Collapse a lone clause (e.g. a `text`-strategy index, or a `compound` index
+  // that maps no autocomplete/array field) so it degrades to the prior shape.
   if (clauses.length <= 1) {
     body = clauses[0] ?? textClause();
   } else {

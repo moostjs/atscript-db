@@ -168,3 +168,25 @@ export interface NsaComposite {
     ]);
   });
 });
+
+describe("@db.writeOnly cannot be searchable", () => {
+  it("refuses @db.index.fulltext on a write-only field", async () => {
+    const out = await errors(
+      table("    @db.writeOnly\n    @db.index.fulltext 'ft'\n    s: string"),
+    );
+    expect(out.some((m) => /@db\.writeOnly cannot coexist with @db\.index\.fulltext/.test(m))).toBe(
+      true,
+    );
+  });
+
+  it("refuses @db.column.searchable on a write-only field", async () => {
+    const out = await errors(searchable("@db.writeOnly\n    s: string"));
+    expect(
+      out.some((m) => /@db\.writeOnly cannot coexist with @db\.column\.searchable/.test(m)),
+    ).toBe(true);
+  });
+
+  it("accepts a write-only field without search annotations", async () => {
+    expect(await errors(table("    @db.writeOnly\n    s: string"))).toEqual([]);
+  });
+});

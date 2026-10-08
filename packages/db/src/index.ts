@@ -70,6 +70,7 @@ export {
   searchTermInteger,
   splitFulltextFields,
   describeFulltext,
+  defaultFulltextIndex,
 } from "./shared/search-term";
 export { searchMemberKind } from "./shared/search-fields";
 export type { TSearchMemberKind } from "./shared/search-fields";

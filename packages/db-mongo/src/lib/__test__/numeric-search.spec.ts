@@ -75,7 +75,7 @@ describe("[mongo] classic text index with integer members", () => {
     const index = adapter.getMongoSearchIndex()!;
     expect(index.type).toBe("text");
     expect(Object.keys((index as any).fields)).toEqual(["title"]);
-    expect(adapter.getNumericSearchKeys()).toEqual(["ref_no", "alt_no"]);
+    expect(adapter.getNumericSearchKeys(index)).toEqual(["ref_no", "alt_no"]);
     // the logical field list (visibility gate) still names the integer members
     expect(adapter.getSearchIndexes()[0]!.fields).toEqual(["title", "ref_no", "alt_no"]);
   });
@@ -134,6 +134,42 @@ describe("[mongo] integer-only fulltext index", () => {
     );
     expect(created).toEqual([]);
     expect(col.dropIndex).toHaveBeenCalledWith("atscript__fulltext__ns_codes_ft");
+  });
+});
+
+describe("[mongo] integer members are per index", () => {
+  let adapter: MongoAdapter;
+  beforeEach(async () => {
+    adapter = await adapterOf("NsTwoIdx");
+    mockAggregate(adapter);
+  });
+
+  it("searching the default index ORs only ITS integer members", async () => {
+    await adapter.search("48151623", EMPTY_QUERY);
+    expect(firstStage()).toEqual({ $match: { $text: { $search: "48151623" } } });
+    // the gate sees exactly what the stage matches
+    const infos = adapter.getSearchIndexes();
+    expect(infos.find((i) => i.isDefault)!.fields).toEqual(["title"]);
+  });
+
+  it("the integer-only index is addressable by $index and reports its own fields", async () => {
+    await adapter.search("48151623", EMPTY_QUERY, "ns_ids");
+    expect(firstStage()).toEqual({
+      $match: { internal_no: { $eq: 48151623, $type: "number" } },
+    });
+    const ids = adapter.getSearchIndexes().find((i) => i.name === "ns_ids")!;
+    expect(ids.fields).toEqual(["internal_no"]);
+    expect(ids.isDefault).toBe(false);
+  });
+
+  it("an integer-only index declared first does not become the default", async () => {
+    const first = await adapterOf("NsIdsFirst");
+    mockAggregate(first);
+    const def = first.getMongoSearchIndex()!;
+    expect(Object.keys((def as any).fields)).toEqual(["title"]);
+    await first.search("quokka", EMPTY_QUERY);
+    expect(firstStage()).toEqual({ $match: { $text: { $search: "quokka" } } });
+    expect(first.getSearchIndexes().find((i) => i.isDefault)!.fields).toEqual(["title"]);
   });
 });
 

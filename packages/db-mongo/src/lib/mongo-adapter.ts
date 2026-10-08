@@ -36,6 +36,7 @@ import {
   type TDbFieldMeta,
   type TFieldOps,
   computeInsights,
+  defaultFulltextIndex,
   containsRelationFilter,
 } from "@atscript/db";
 import type {
@@ -899,23 +900,30 @@ export class MongoAdapter extends BaseDbAdapter {
       this._searchIndexesMap = new Map();
       let defaultIndex: TMongoIndex | undefined;
 
-      // Check generic text indexes from table.indexes
-      for (const index of this._table.indexes.values()) {
-        if (index.type === "fulltext" && !defaultIndex) {
-          // Convert generic fulltext to our TMongoIndex for search dispatch
-          defaultIndex = {
-            key: index.key,
-            name: index.name,
-            type: "text",
-            // Integer members are matched by exact number (getNumericSearchKeys),
-            // never part of the text index.
-            fields: Object.fromEntries(
-              index.fields.filter((f) => !f.integer).map((f) => [f.name, "text" as const]),
-            ),
-            weights: Object.fromEntries(
-              index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
-            ),
-          };
+      // Generic fulltext indexes from table.indexes. The default is the first
+      // one with a TEXT member (else the first); every other one is addressable
+      // by its name through `$index` (an integer-only index has no physical text
+      // artifact and answers exact-number terms only).
+      const fulltexts = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
+      const defaultFulltext = defaultFulltextIndex(fulltexts);
+      for (const index of fulltexts) {
+        // Integer members are matched by exact number (getNumericSearchKeys),
+        // never part of the text index.
+        const converted: TMongoIndex = {
+          key: index.key,
+          name: index.name,
+          type: "text",
+          fields: Object.fromEntries(
+            index.fields.filter((f) => !f.integer).map((f) => [f.name, "text" as const]),
+          ),
+          weights: Object.fromEntries(
+            index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
+          ),
+        };
+        if (index === defaultFulltext) {
+          defaultIndex = converted;
+        } else if (!this._searchIndexesMap.has(index.name)) {
+          this._searchIndexesMap.set(index.name, converted);
         }
       }
 
@@ -953,26 +961,30 @@ export class MongoAdapter extends BaseDbAdapter {
     return this._searchIndexesMap;
   }
 
-  private _numericSearchKeys?: readonly string[];
-
   /**
-   * Stored paths of the integer members of the table's fulltext indexes
-   * (table-wide: MongoDB has one classic text index, and every Atlas text
-   * index maps them too). Since 0.1.150.
+   * Stored paths of the integer members matched by exact number next to a
+   * text search on `index` (since 0.1.150). A classic text index contributes
+   * the integer members of its own `@db.index.fulltext` (per index, as on the
+   * SQL adapters); an Atlas index the integer members it maps (every fulltext
+   * integer member is mapped, so they are in its reported `paths`).
    */
-  getNumericSearchKeys(): readonly string[] {
+  getNumericSearchKeys(index: TMongoIndex): readonly string[] {
     // Trigger flattening so the index list is built.
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- trigger lazy init
     this._table.flatMap;
-    if (!this._numericSearchKeys) {
-      const keys = new Set<string>();
-      for (const index of this._table.indexes.values()) {
-        if (index.type !== "fulltext") continue;
-        for (const f of index.fields) if (f.integer) keys.add(f.name);
+    const keys = new Set<string>();
+    if (index.type === "text") {
+      const source = this._table.indexes.get(index.key);
+      if (source?.type === "fulltext") {
+        for (const f of source.fields) if (f.integer) keys.add(f.name);
       }
-      this._numericSearchKeys = [...keys];
+    } else {
+      for (const fulltext of this._table.indexes.values()) {
+        if (fulltext.type !== "fulltext") continue;
+        for (const f of fulltext.fields) if (f.integer) keys.add(f.name);
+      }
     }
-    return this._numericSearchKeys;
+    return [...keys];
   }
 
   /** Returns a specific MongoDB search index by name. */

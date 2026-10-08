@@ -629,6 +629,17 @@ export class TableMetadata {
     }
 
     // @db.column.searchable / @db.index.fulltext — string or integer members only
+    if (
+      metadata.has("db.writeOnly") &&
+      (metadata.has("db.index.fulltext") || metadata.has("db.column.searchable"))
+    ) {
+      const which = metadata.has("db.index.fulltext")
+        ? "@db.index.fulltext"
+        : "@db.column.searchable";
+      throw new Error(
+        `@db.writeOnly cannot coexist with ${which} on "${fieldName}" — search results would reveal the sealed value`,
+      );
+    }
     const searchKind = searchMemberKind(fieldType);
     if (typeof searchKind === "object") {
       if (metadata.has("db.index.fulltext")) {
@@ -1473,12 +1484,13 @@ export class TableMetadata {
   }
 
   private _finalizeIndexes(): void {
-    this._resolveIntegerFulltextMembers();
     for (const index of this.indexes.values()) {
       if (index.type === "unique" && index.fields.length === 1) {
         this.uniqueProps.add(index.fields[0].name);
       }
     }
+    // After uniqueProps is populated, so the unique-prop backing check is live.
+    this._resolveIntegerFulltextMembers();
 
     for (const index of this.indexes.values()) {
       for (const field of index.fields) {

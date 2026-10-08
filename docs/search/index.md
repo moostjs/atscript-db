@@ -63,6 +63,8 @@ export interface Ticket {
 Rules:
 
 - The integer member must be **index-backed**, so the equality does not scan: the primary key (the first `@meta.id`), `_id`, or the first field of a `@db.index.plain` / `@db.index.unique`. A schema that breaks this is a compile error in the editor and a throw when the table metadata is built.
+- Integer members belong to **one index each**: a search ORs only the integer members of the index it searches (on every adapter, MongoDB included). A search naming no index uses the first `@db.index.fulltext` that has at least one **text** member (the first index when none has), so an integer-only index declared first is not the default; name it with `$index` to search it alone.
+- `@db.writeOnly` cannot be combined with `@db.index.fulltext` or `@db.column.searchable` (compile error; a search hit would reveal the sealed value).
 - Floats (`number`, `number.double`), decimals, timestamps and `@db.column.precision` fields are refused with a diagnostic — filter those by range instead.
 - A `weight` on an integer member is ignored (the editor warns).
 - An index of **integer members only** needs no engine artifact (no DDL) but still exists: it is listed by `getSearchIndexes()`, makes the table natively searchable, and a term that is not a whole number matches nothing. Because the table is then natively searchable, `@db.column.searchable` fields are no longer consulted (native search wins).

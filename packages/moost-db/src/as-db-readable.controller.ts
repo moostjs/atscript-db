@@ -1074,9 +1074,21 @@ export class AsDbReadableController<
     return out;
   }
 
+  /**
+   * The index visibility gate applies: {@link hasField} is overridden, or the
+   * model has `@db.writeOnly` fields (never readable through a search hit).
+   */
+  private get _indexGateActive(): boolean {
+    return this._hasFieldOverridden || this._writeOnlySet.size > 0;
+  }
+
   /** Every path `entry` reads is visible to this request. */
   private _indexVisible(entry: TDbIndexFieldPaths): boolean {
-    return entry.fields.every(this.fieldVisibility.isVisible);
+    return entry.fields.every(
+      (path) =>
+        this.fieldVisibility.isVisible(path) &&
+        selfOrAncestor(path, this._writeOnlySet) === undefined,
+    );
   }
 
   /**
@@ -1097,7 +1109,7 @@ export class AsDbReadableController<
 
   private _resolveNativeSearch(controls: Record<string, unknown>): boolean {
     if (!this.readable.isSearchable()) return false;
-    if (!this._hasFieldOverridden) return true;
+    if (!this._indexGateActive) return true;
     if (typeof controls.$index === "string" && controls.$index) return true;
     const def = this.indexFieldPaths().find((e) => e.type === "text" && e.isDefault);
     return def === undefined || this._indexVisible(def);
@@ -1112,7 +1124,7 @@ export class AsDbReadableController<
    * nonexistent index (the core's wording).
    */
   private _checkIndexGate(controls: Record<string, unknown>): HttpError | undefined {
-    if (!this._hasFieldOverridden) return undefined;
+    if (!this._indexGateActive) return undefined;
     const name = typeof controls.$index === "string" ? controls.$index : undefined;
     // `$center` marks a geo search (`/geo` requires it; the other endpoints'
     // controls DTOs reject it). The text / vector gate below still runs.
@@ -1163,7 +1175,7 @@ export class AsDbReadableController<
    * `@db.column.searchable` fallback when any of its fields is visible).
    */
   private _applyIndexVisibility(meta: TMetaResponse): TMetaResponse {
-    if (!this._hasFieldOverridden) return meta;
+    if (!this._indexGateActive) return meta;
     const entries = this.indexFieldPaths();
     const visibleDefault = (type: "text" | "vector" | "geo") => {
       const def = entries.find((e) => e.type === type && e.isDefault);
@@ -2477,26 +2489,49 @@ export class AsDbReadableController<
       | { kind: "search"; term: string; index?: string },
     filter: FilterExpr | undefined,
     controls: Record<string, unknown>,
-    select: unknown,
+    sealedControls: TSealedControls,
   ): Promise<number> {
+    // A count query carries no `$count` of its own (that would turn the read into an aggregate).
+    const { $count: _count, ...sealed } = sealedControls;
     if (strategy.kind === "search") {
-      const q = { filter, controls: { $limit: 1, $select: select } } as Uniquery<any, any>;
+      const q = {
+        filter,
+        controls: this._searchReadControls(controls, sealed, sealed.$select, {
+          $skip: undefined,
+          $limit: 1,
+        }),
+      } as Uniquery<any, any>;
       const { count } = await this.readable.searchWithCount(strategy.term, q, strategy.index);
       return count;
     }
-    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
     const q = {
       filter,
-      controls: {
+      controls: this._searchReadControls(controls, sealed, sealed.$select, {
+        $skip: undefined,
         $limit: (controls.$limit as number | undefined) || 1000,
-        $select: select,
-        $threshold: threshold,
-      },
+      }),
     } as Uniquery<any, any>;
     const { count } = await (strategy.vectorField
       ? this.readable.vectorSearchWithCount(strategy.vectorField, strategy.vector, q)
       : this.readable.vectorSearchWithCount(strategy.vector, q));
     return count;
+  }
+
+  /**
+   * The controls a native search / vector read is run with: the request's
+   * sealed controls (so every search control — `$fuzzy`, … — reaches the
+   * adapter) plus the select, the threshold and the caller's paging. ONE
+   * builder for `/query`, `/pages` and the native `$count`, so they can't
+   * disagree about what a search matches.
+   */
+  private _searchReadControls(
+    controls: Record<string, unknown>,
+    sealed: TSealedControls,
+    select: unknown,
+    paging: { $skip?: number; $limit: number },
+  ): Record<string, unknown> {
+    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
+    return { ...sealed, $select: select, ...paging, $threshold: threshold };
   }
 
   private async _resolveReadStrategy(
@@ -3117,7 +3152,7 @@ export class AsDbReadableController<
           controls: { ...controls, $select: sealed.$select },
         } as Uniquery<any, any>);
       }
-      return this._countSearched(strategy, filter, controls, sealed.$select);
+      return this._countSearched(strategy, filter, controls, sealed);
     }
 
     const projected = finish();
@@ -3125,16 +3160,11 @@ export class AsDbReadableController<
       return projected;
     }
 
-    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
-
     const queryObj = {
       filter,
-      controls: {
-        ...sealed,
-        $select: projected.select,
+      controls: this._searchReadControls(controls, sealed, projected.select, {
         $limit: (controls.$limit as number | undefined) || 1000,
-        $threshold: threshold,
-      },
+      }),
     } as Uniquery<any, any>;
 
     const wrapped = await this._runReadWithActions(
@@ -3202,17 +3232,12 @@ export class AsDbReadableController<
       return projected;
     }
 
-    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
-
     const query = {
       filter,
-      controls: {
-        ...sealed,
-        $select: projected.select,
+      controls: this._searchReadControls(controls, sealed, projected.select, {
         $skip: skip,
         $limit: size,
-        $threshold: threshold,
-      },
+      }),
     };
 
     const result = await this._runReadWithActions(

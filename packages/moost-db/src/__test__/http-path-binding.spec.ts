@@ -307,6 +307,29 @@ describe("several controllers over one model", () => {
   });
 });
 
+describe("ctor → model records are per app", () => {
+  it("another app constructing the same controller class for a different model does not unpublish this app's path", async () => {
+    let model: any = HpTag;
+    @Controller("dicts/x")
+    class Dict extends AsJsonValueHelpController {
+      constructor(app: Moost) {
+        super(model, [], app, "dict-x");
+      }
+    }
+    const { app, warnings } = await boot([Dict]);
+    expect(HpTag.metadata.get(KEY)).toBe("/dicts/x");
+
+    // a second app builds the SAME class for another model
+    model = HpPath;
+    const other = new Moost();
+    new Dict(other);
+
+    publishDbHttpPaths(app);
+    expect(HpTag.metadata.get(KEY)).toBe("/dicts/x");
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe("a controller's own /meta root", () => {
   it("is its own mount; references use the canonical path; the canonical response is stable", async () => {
     @TableController(HpTicket, { canonical: true })

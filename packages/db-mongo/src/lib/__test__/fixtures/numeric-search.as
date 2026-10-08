@@ -66,3 +66,31 @@ export interface NsFallback {
     @db.column.searchable
     ref_no: number.int
 }
+
+// Two fulltext indexes: text 'ns_main' + an integer-only 'ns_ids' (per-index integer members).
+@db.table 'ns_two_idx'
+export interface NsTwoIdx {
+    @meta.id
+    id: number.int
+
+    @db.index.fulltext 'ns_main'
+    title: string
+
+    @db.index.fulltext 'ns_ids'
+    @db.index.unique
+    internal_no: number.int
+}
+
+// The integer-only index is declared FIRST: the default is still the text one.
+@db.table 'ns_ids_first'
+export interface NsIdsFirst {
+    @meta.id
+    id: number.int
+
+    @db.index.fulltext 'ns_ids2'
+    @db.index.unique
+    internal_no: number.int
+
+    @db.index.fulltext 'ns_main2'
+    title: string
+}

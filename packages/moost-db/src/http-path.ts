@@ -23,24 +23,46 @@ export function isParametricPath(path: string): boolean {
 
 // ── Constructor-recorded ctor → model pairs ─────────────────────────────
 
-const bound = new WeakMap<Function, Map<TAtscriptAnnotatedType, boolean | undefined>>();
+/** Per app (the constructor's `app` argument): another app's construction never alters this app's records. */
+const bound = new WeakMap<
+  object,
+  WeakMap<Function, Map<TAtscriptAnnotatedType, boolean | undefined>>
+>();
+/**
+ * Process-wide records per ctor: the fallback for an app that never
+ * constructed the class itself (a DI singleton reused across apps), read only
+ * when it holds exactly one model.
+ */
+const boundAny = new WeakMap<Function, Map<TAtscriptAnnotatedType, boolean | undefined>>();
 let boundVersion = 0;
 
 /**
- * Records that `ctor` serves `type` (called by the readable base constructor).
+ * Records that `ctor` serves `type` inside `app` (called by the readable base constructor).
  * Pure bookkeeping — nothing is written to the model. Only a NEW pair bumps
  * the version that invalidates per-app scopes.
  */
 export function recordBoundType(
+  app: object,
   ctor: Function,
   type: TAtscriptAnnotatedType,
   canonical?: boolean,
 ): void {
-  let models = bound.get(ctor);
+  let ofApp = bound.get(app);
+  if (!ofApp) {
+    ofApp = new WeakMap();
+    bound.set(app, ofApp);
+  }
+  let models = ofApp.get(ctor);
   if (!models) {
     models = new Map();
-    bound.set(ctor, models);
+    ofApp.set(ctor, models);
   }
+  let any = boundAny.get(ctor);
+  if (!any) {
+    any = new Map();
+    boundAny.set(ctor, any);
+  }
+  any.set(type, canonical);
   if (!models.has(type) || models.get(type) !== canonical) {
     models.set(type, canonical);
     boundVersion++;
@@ -110,7 +132,11 @@ function buildScope(app: Moost, s: TAppState): THttpPathScope {
     if (typeof o.computedPrefix !== "string") continue;
     const ctor = o.type as Function;
     const binding = findReadableBinding(ctor);
-    const recorded = bound.get(ctor);
+    let recorded = bound.get(app)?.get(ctor);
+    if (!recorded) {
+      const any = boundAny.get(ctor);
+      if (any?.size === 1) recorded = any;
+    }
     const models: [TAtscriptAnnotatedType, boolean | undefined][] = recorded?.size
       ? [...recorded]
       : binding?.model

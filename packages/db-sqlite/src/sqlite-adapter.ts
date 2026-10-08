@@ -10,6 +10,7 @@ import {
   searchTermInteger,
   describeFulltext,
   splitFulltextFields,
+  defaultFulltextIndex,
 } from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import type {
@@ -1135,13 +1136,15 @@ export class SqliteAdapter extends BaseDbAdapter {
   override getSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
     // The first index of each type answers a request naming none.
-    for (const idx of this._getFulltextIndexes()) {
+    const ftAll = this._getFulltextIndexes();
+    const ftDefault = defaultFulltextIndex(ftAll);
+    for (const idx of ftAll) {
       indexes.push({
         name: idx.name,
         description: describeFulltext(idx, (names) => `FTS5 index (${names})`),
         type: "text",
         fields: this._indexLogicalPaths(idx),
-        isDefault: indexes.length === 0,
+        isDefault: idx === ftDefault,
       });
     }
     let firstVector = true;
@@ -1276,7 +1279,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       }
       return found;
     }
-    return ftIndexes[0];
+    return defaultFulltextIndex(ftIndexes)!;
   }
 
   /**
