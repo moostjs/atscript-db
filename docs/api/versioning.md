@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-Atscript DB supports first-class **optimistic concurrency control (OCC)** via a server-managed integer version column. A single annotation makes the column auto-bump on every write; the inline `$cas` operator turns any write into a conditional one that rejects stale read-modify-write submissions.
+Atscript DB supports first-class **optimistic concurrency control (OCC)** via a server-managed integer version column. A single annotation makes the column auto-bump on every write that changes a non-exempt column (see [version-exempt fields](#version-exempt)); the inline `$cas` operator turns any write into a conditional one that rejects stale read-modify-write submissions.
 
 ## When You Need This
 
@@ -41,10 +41,12 @@ Constraints (enforced at compile time):
 - **At most one** version column per table — composite versioning makes no semantic sense.
 - The field must resolve to a SQL `INTEGER` (or Mongo `Number`). String / timestamp versioning is not supported.
 - The annotation takes no arguments. To store the field under another column name, add [`@db.column`](/api/tables#custom-column-names) as for any field (`@db.column 'row_version'`). The rename changes only the storage column: `$cas`, write bodies, rows read back and `/meta`'s `versionColumn` keep using the field name (`version`). Renamed version fields are supported since 0.1.141.
-- The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update. See [defaults](./defaults#version-defaults).
+- The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update that writes a non-exempt field (see [Version-exempt fields](#version-exempt)). See [defaults](./defaults#version-defaults).
 
 ::: tip Auto-bump is mandatory
 Every successful write to a versioned row increments `version` by 1, whether or not `$cas` was supplied. This is the property that makes OCC actually work — if the version column did not auto-increment, opting in to `$cas` would silently degrade to no protection.
+
+The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150).
 :::
 
 Callers MAY read the version (and SHOULD, in order to pass `$cas`) but **MUST NOT** write it directly. See [Direct-write rejection](#direct-write-rejection).
@@ -139,7 +141,7 @@ Up to 0.1.127 an empty `updateMany(orFilter, {})` bumped the matched versions, a
 
 ### `$cas` is NOT supported on `updateMany`
 
-`updateMany(filter, data)` always writes through, auto-bumping the version but never checking it. A single `expectedVersion` cannot sensibly match N rows with different versions. Per-row version locking is the job of `bulkUpdate` (see above).
+`updateMany(filter, data)` always writes through, auto-bumping the version (unless the patch writes only [version-exempt fields](#version-exempt)) but never checking it. A single `expectedVersion` cannot sensibly match N rows with different versions. Per-row version locking is the job of `bulkUpdate` (see above).
 
 ```typescript
 // ✅ Auto-bumps every matched row's version
@@ -164,6 +166,66 @@ await tasks.updateOne({
 // Both the counter increment AND the version bump happen atomically,
 // gated by the version predicate.
 ```
+
+## Version-exempt fields (`@db.column.version.exempt`) {#version-exempt}
+
+Since 0.1.150. Some columns are derived or reporting data refreshed in the background — scores, view counters, caches. Writing them should not invalidate the versions held by editors who are mid-way through a form. Mark such a field as version-exempt:
+
+```atscript
+interface Task {
+    @meta.id @db.default.increment id: int
+    title: string
+
+    @db.column.version
+    version: int
+
+    @db.column.version.exempt
+    score: number
+
+    @db.column.version.exempt
+    hits: number
+}
+```
+
+A patch that writes **only** exempt fields neither bumps the version nor adds a version predicate. Any non-exempt field in the patch makes it a normal versioned write. The decision depends only on the schema and the payload's keys — it needs no row read and no per-call flag, so a client cannot bypass or force it.
+
+| Operation                                          | Payload                    | `$cas` | Version bump                                    |
+| -------------------------------------------------- | -------------------------- | ------ | ----------------------------------------------- |
+| `updateOne` / `bulkUpdate` item                    | every written field exempt | no     | **no**                                          |
+| `updateOne` / `bulkUpdate` item                    | every written field exempt | yes    | yes — check and bump, as without the annotation |
+| `updateOne` / `bulkUpdate` item                    | any non-exempt field       | either | yes                                             |
+| `updateMany`                                       | every written field exempt | n/a    | **no** (every matched row)                      |
+| `updateMany`                                       | any non-exempt field       | n/a    | yes                                             |
+| `replaceOne` / `bulkReplace` / `replaceMany` / PUT | full row                   | either | always                                          |
+| `touchMany`, PK-only `$cas` touch                  | none                       | yes    | always                                          |
+| empty patch without `$cas`                         | none                       | no     | no statement (unchanged)                        |
+
+Where it applies:
+
+- **Field ops** on an exempt column (`{ hits: $inc(1) }`) and **array ops** on an exempt array (`$insert`, `$update`, `$remove`, `$upsert`, `$replace`) are exempt writes.
+- **Objects.** Marking an object field covers every nested field. An object whose fields are _all_ exempt counts as exempt itself, so a [replace-strategy](./update-patch) write of that object stays exempt. In a [`merge`-strategy](./update-patch) object, only the supplied children count: `{ mixed: { cached: 1 } }` is exempt when `cached` is, `{ mixed: { label: "x" } }` is not. A replace-strategy object that is only partly exempt bumps, because the write null-fills its optional siblings.
+- **Allowed on** scalars, `@db.encrypted` fields, `@db.json` fields (the whole JSON column), array fields (the whole array), foreign-key columns, fields with `@db.default*` and nested object fields.
+- **Rejected** (compile error, mirrored at runtime): on the `@db.column.version` field itself, on a `@meta.id` field, on a navigation field (`@db.rel.*`), below a `@db.json` field or inside an array of objects (mark the JSON / array field itself), and together with `@db.column.derived`.
+- **Warned** (compile time): the annotation on a table that declares no `@db.column.version`, or on a `@db.ignore` field — it has no effect there.
+- Nested writes through `@db.rel.*` follow the **related table's** own schema; the parent is bumped only by its own non-exempt columns.
+- It is not part of the schema snapshot or hash: adding or removing the annotation causes no sync.
+- `table.versionExemptFields` lists the exempt logical paths, including objects covered by the all-children rule.
+
+### `$cas` still checks and bumps
+
+`$cas` is the caller's explicit request for a versioned write, so `updateOne({ id, score: 3, $cas: { version: N } })` is checked against `N` and bumps the version, exactly as before. Over HTTP the [auto-lift](/http/crud#occ-over-http) of a body `version` into `$cas` works the same way: a UI form that sends `version` stays a conflict-checked edit; a background job that omits it does not bump.
+
+### The version is no longer a whole-row change token
+
+With exempt fields declared, the version moves on every write that changes a **non-exempt** column, not on every write. Do not use it as a cache key or ETag for the _whole_ row if exempt columns matter to the cache: an exempt-only refresh keeps the same version.
+
+### `modifiedCount` for unchanged exempt writes
+
+Without a bump nothing forces a change. On MySQL and MongoDB, an exempt write that stores values equal to the current ones reports `{ matchedCount: 1, modifiedCount: 0 }` (before 0.1.150 a versioned table always reported `modifiedCount ≥ 1` on a hit). SQLite, PostgreSQL and the memory adapter report matched rows as modified. Use `matchedCount` to tell whether the row was found; do not read `modifiedCount === 0` as a stale version.
+
+### Concurrent exempt array writers
+
+Array ops on the generic (SQL, memory) path are a read-modify-write. Like any array patch without `$cas`, two concurrent writers of the same exempt array can lose an update.
 
 ## `withOptimisticRetry` — The Retry Helper
 
@@ -303,7 +365,7 @@ This is a [locked design decision](#alternatives-considered). A single `expected
 
 ### Empty patches
 
-`updateOne({ id })` (identifying fields only, no `$cas`) executes nothing and reports the row's existence; `updateMany(filter, {})` likewise counts the matches and writes nothing — neither bumps a version. Add `$cas` to turn the single-row form into a [versioned touch](#versioned-touch); for a keyed batch use [`touchMany`](#touch-many).
+`updateOne({ id })` (identifying fields only, no `$cas`) executes nothing and reports the row's existence; `updateMany(filter, {})` likewise counts the matches and writes nothing — neither bumps a version (and a patch of only [version-exempt fields](#version-exempt) does not either). Add `$cas` to turn the single-row form into a [versioned touch](#versioned-touch); for a keyed batch use [`touchMany`](#touch-many).
 
 ### External writers do not auto-bump
 
@@ -317,7 +379,7 @@ This is a known limitation of the application-layer approach. Consumers that nee
 
 ### JSON columns
 
-[`@db.json`](./update-patch#json-fields) columns are independent of CAS. Version operates at the row level; the JSON sub-document is replaced wholesale on update, and the version bump applies to the row regardless of which fields changed.
+[`@db.json`](./update-patch#json-fields) columns are independent of CAS. Version operates at the row level; the JSON sub-document is replaced wholesale on update, and the version bump applies to the row regardless of which fields changed (unless the JSON field is [`@db.column.version.exempt`](#version-exempt) and is the only thing written).
 
 ## End-to-End Example: Consuming a Backup Code
 

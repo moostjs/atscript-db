@@ -64,6 +64,16 @@ export {
   geoIndexNotFoundMessage,
 } from "./shared/index-messages";
 
+// ── Since 0.1.150 ────────────────────────────────────────────────────────────
+export {
+  INTEGER_REGEX_OP,
+  searchTermInteger,
+  splitFulltextFields,
+  describeFulltext,
+} from "./shared/search-term";
+export { searchMemberKind } from "./shared/search-fields";
+export type { TSearchMemberKind } from "./shared/search-fields";
+
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";
@@ -78,6 +88,7 @@ export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
 export { UniquSelect } from "./query/uniqu-select";
 export type { TExprAggregate, TFirstLast, TRowOrderKey } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
+export { isVersionExemptPatch } from "./patch/version-exempt";
 export { translateQueryTree, isFieldRef, evaluateExpr } from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
@@ -107,6 +118,7 @@ export type {
   TDbInsertIgnoreSlot,
   TInsertOptions,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TDbDeleteResult,
   TDbIndex,
   TDbIndexField,

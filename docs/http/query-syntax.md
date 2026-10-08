@@ -82,7 +82,7 @@ Match a field against a regular expression:
 curl "http://localhost:3000/todos/query?name~=/^Al/i"
 ```
 
-The pattern follows `/pattern/flags` format. Common flags include `i` (case-insensitive).
+The pattern follows `/pattern/flags` format. Common flags include `i` (case-insensitive). On an integer field `~=` matches the number's decimal text (`refNo~=/^29/` finds `29461277`); floats, decimals and timestamps are rejected with 400.
 
 ::: info Adapter differences
 MongoDB supports full PCRE regex. SQLite uses `LIKE`-based approximation for simple patterns.

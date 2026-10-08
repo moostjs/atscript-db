@@ -364,3 +364,21 @@ describe("mixed comparison + logical nodes — predicate isolation", () => {
     expect(match(mixed, { id: 101, nextRefreshAt: 3, a: 0, b: 2 })).toBe(true);
   });
 });
+
+describe("$integerRegex (regex over the decimal text of an integer field)", () => {
+  const p = (pattern: string) => buildMemoryPredicate({ n: { $integerRegex: pattern } } as never);
+
+  it("matches the canonical decimal text of integral numbers and bigints", () => {
+    expect(p("2946")({ n: 29461277 })).toBe(true);
+    expect(p("^-29")({ n: -2946 })).toBe(true);
+    expect(p("^0$")({ n: 0 })).toBe(true);
+    expect(p("^10{16}$")({ n: 10000000000000000 })).toBe(true);
+    expect(p("^9007199254740993$")({ n: 9007199254740993n })).toBe(true);
+  });
+
+  it("never matches a missing, null, fractional or non-numeric value", () => {
+    for (const row of [{}, { n: null }, { n: 1.5 }, { n: "2946" }, { n: true }]) {
+      expect(p(".*")(row as never)).toBe(false);
+    }
+  });
+});

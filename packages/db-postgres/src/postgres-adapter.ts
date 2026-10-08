@@ -8,6 +8,9 @@ import {
   isColumnTypeChanged,
   vectorIndexNotFoundMessage,
   fkColumns,
+  searchTermInteger,
+  describeFulltext,
+  splitFulltextFields,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
@@ -24,6 +27,7 @@ import type {
   TDbInsertIgnoreSlot,
   TDbInsertResult,
   TDbUpdateResult,
+  TDbUpdateOptions,
   TExistingColumn,
   TColumnDiff,
   TSyncColumnResult,
@@ -59,6 +63,7 @@ import {
   foreignKeySql,
   SEARCH_SOURCE_ALIAS,
   mapQueryErrors,
+  orFragment,
 } from "@atscript/db-sql-tools";
 
 import { mapIgnoredBatch } from "./insert-ignore";
@@ -721,11 +726,13 @@ export class PostgresAdapter extends BaseDbAdapter {
     return `${keyMatch} (SELECT ${colList} FROM ${quotedTable} WHERE ${whereSql} LIMIT 1)`;
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     // PostgreSQL does not support UPDATE ... LIMIT 1.
     // Re-key the outer UPDATE on the primary key (a stable column) via a subquery.
@@ -742,7 +749,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       sql: this._limitOnePredicate(quotedTable, where.sql),
       params: where.params,
     };
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     const { sql, params } = buildUpdate(
       tableName,
       data,
@@ -761,9 +768,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const where = buildWhere(filter);
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
@@ -794,6 +802,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
       this._table.versionColumnPhysical,
     );
+    // No `opts`: a replace touches every column, so it always bumps.
     return this.updateOne(filter, full, undefined, expectedVersion);
   }
 
@@ -1632,8 +1641,11 @@ export class PostgresAdapter extends BaseDbAdapter {
       },
       createIndex: async (index: TDbIndex) => {
         if (index.type === "fulltext") {
-          // GIN index on tsvector expression
-          const tsvectorExpr = this._buildTsvectorExpr(index.fields);
+          // GIN index on tsvector expression (text members only — integer
+          // members are matched by exact number, never part of the index)
+          const textFields = splitFulltextFields(index).text;
+          if (textFields.length === 0) return;
+          const tsvectorExpr = this._buildTsvectorExpr(textFields);
           const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gin(to_tsvector('english', ${tsvectorExpr}))`;
           this._log(sql);
           await this._exec().exec(sql);
@@ -1769,7 +1781,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       if (index.type === "fulltext") {
         indexes.push({
           name: index.key,
-          description: `GIN tsvector index on ${index.fields.map((f) => f.name).join(", ")}`,
+          description: describeFulltext(index, (names) => `GIN tsvector index on ${names}`),
           type: "text",
           fields: this._indexLogicalPaths(index),
           isDefault: indexes.length === 0,
@@ -1846,12 +1858,31 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (!fulltextIndex) {
       throw new Error("No fulltext index found for search");
     }
-    const tsvectorExpr = this._buildTsvectorExpr(fulltextIndex.fields);
+    const { text: textFields, integer: integerFields } = splitFulltextFields(fulltextIndex);
     const where = buildWhere(query.filter);
-    const tsqueryClause = `to_tsvector('english', ${tsvectorExpr}) @@ plainto_tsquery('english', ?)`;
+    const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
+
+    // Text match OR exact number on each integer member (the term must be a
+    // whole number). BIGINT keeps a 10-digit term from overflowing an INTEGER
+    // column; int4 = int8 is a btree cross-type operator, so the index stays usable.
+    const parts: string[] = [];
+    const params: unknown[] = [];
+    if (textFields.length > 0) {
+      const tsvectorExpr = this._buildTsvectorExpr(textFields);
+      parts.push(`to_tsvector('english', ${tsvectorExpr}) @@ plainto_tsquery('english', ?)`);
+      params.push(text);
+    }
+    if (n !== undefined) {
+      for (const f of integerFields) {
+        parts.push(`${qi(f.name)} = CAST(? AS BIGINT)`);
+        params.push(n);
+      }
+    }
+    // An integer-only index with a term that is not a whole number matches nothing.
+    const clause = orFragment(parts, params);
     return {
-      sql: where.sql === "1=1" ? tsqueryClause : `${where.sql} AND ${tsqueryClause}`,
-      params: [...where.params, text],
+      sql: where.sql === "1=1" ? clause.sql : `${where.sql} AND ${clause.sql}`,
+      params: [...where.params, ...clause.params],
     };
   }
 

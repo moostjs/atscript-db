@@ -146,6 +146,21 @@ export interface Job {
 
 The term is escaped by the framework (no user-supplied regex), merged into the request filter with `$and`, and applied uniformly on `query` (including `$count`), `pages`, and aggregate reads. Where native search **is** configured it wins and the annotation is not consulted. `/meta` reports `searchable: true` either way, so UI search boxes appear without overrides. Encrypted, adapter-unfilterable, and `@db.writeOnly` fields never participate.
 
+**Integer fields.** `@db.column.searchable` also works on integer fields (`number.int` and its sizes, `number` + `@expect.int`, `@db.default.increment`). The term matches when it is a substring of the number's decimal text — `2946` finds `29461277`, `2946` and `-2946`; `-29` finds `-2946`; `abc` matches no integer row. Like the string match it is a full scan. Floats, decimals and timestamps are refused at compile time.
+
+```atscript
+export interface Ticket {
+    @db.column.searchable
+    title: string
+    @db.column.searchable
+    refNo: number.int
+}
+```
+
+A field the request cannot see (`hasField`) never participates, integer or not. For exact whole-number matching use [`@db.index.fulltext`](/search/#integer-fields-exact-number-match) instead; numeric IDs need no `applySearchFallback` override.
+
+`$count` follows the same population as the rows: `GET /query?$search=x&$count=true` counts the native search matches (and a `$vector` search counts its nearest neighbours up to `$limit`), not the whole table.
+
 ### Basic Search
 
 Search across all fulltext-indexed fields:

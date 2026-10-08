@@ -261,6 +261,9 @@ export interface DaPlain {
     );
   });
 
+  it("the incompatible list carries @db.column.version.exempt", () => {
+    expect(DERIVED_INCOMPATIBLE.map(([name]) => name)).toContain("db.column.version.exempt");
+  });
   // D8 — one case per entry of the shared list (the runtime mirror in
   // TableMetadata reads the same list, so neither can drift from the other)
   const D8_ARGS: Record<string, string> = { "db.default": " 'x'", "db.search.vector": " 3" };

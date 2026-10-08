@@ -25,6 +25,13 @@ export interface SqlDialect {
   /** Handle $regex filter */
   regex(quotedCol: string, value: unknown): TSqlFragment;
   /**
+   * The canonical decimal text of an integer column (`29461277`, `-12` — no
+   * `.0`, no exponent), as an SQL expression over the quoted column. Backs
+   * `$regex` on integer fields. Defaults to `CAST(<col> AS TEXT)`.
+   * @since 0.1.150
+   */
+  integerText?(quotedExpr: string): string;
+  /**
    * Handle `$geoWithin` filter — circle search on a `db.geoPoint` column.
    * The circle is pre-validated by the core layer (`center` is a `[lng, lat]`
    * tuple, `radius` a positive number of meters). Dialects without native geo
@@ -223,3 +230,9 @@ export function quotedJsonPathSegments(path: readonly string[]): string[] {
 
 export const EMPTY_AND: TSqlFragment = { sql: "1=1", params: [] };
 export const EMPTY_OR: TSqlFragment = { sql: "0=1", params: [] };
+
+/** ORs predicate parts (parenthesized when several); no parts matches nothing. */
+export function orFragment(parts: string[], params: unknown[]): TSqlFragment {
+  if (parts.length === 0) return EMPTY_OR;
+  return { sql: parts.length === 1 ? parts[0]! : `(${parts.join(" OR ")})`, params };
+}

@@ -85,7 +85,7 @@ For vector fields, use the core `db.vector` primitive (registered by `dbPlugin()
 
 - `@db.column` renames TOP-LEVEL document keys only (still costs the key-remapping perf price); on a nested field it — and `@db.column.renamed` — is ignored (since 0.1.137), the field stays at its logical path. See [adapters-mongo.md](./adapters-mongo.md) § Known limits.
 - `@db.rel.onDelete` / `@db.rel.onUpdate` have no native enforcement; the generic layer emulates cascades (see [relations.md](relations.md)).
-- `@db.index.fulltext` maps to a legacy `text` index; for Atlas Search prefer `@db.mongo.search.static` + `@db.mongo.search.text`.
+- `@db.index.fulltext` maps to a legacy `text` index (string members only; an index-backed integer member is matched by exact number next to `$text`, and in Atlas by an `equals` clause with a `number` mapping); for Atlas Search prefer `@db.mongo.search.static` + `@db.mongo.search.text`.
 - Native FK constraints are not supported (`supportsNativeForeignKeys(): false`) → FK validation + cascades run in the application integrity strategy.
 - MongoDB is the one adapter where `supportsNestedObjects(): true` (override at `packages/db-mongo/src/lib/mongo-adapter.ts`) — nested objects are stored as-is, and patches become aggregation pipelines.
 

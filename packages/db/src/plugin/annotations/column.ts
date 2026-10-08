@@ -1,15 +1,98 @@
 import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
-import { isArray, isInterface, isRef, isStructure, isPrimitive } from "@atscript/core";
-import type { SemanticRefNode, TMessages } from "@atscript/core";
+import { isArray, isInterface, isProp, isRef, isStructure, isPrimitive } from "@atscript/core";
+import type { SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
 import {
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  searchFieldVerdict,
   validateFieldBaseType,
 } from "../../shared/annotation-utils";
 import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
 import { jsonChainInfo } from "../../shared/view-validation";
+
+/** Nav-field annotations: a navigation field has no column on this table. */
+const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
+
+/**
+ * Compile-time placement rules of `@db.column.version.exempt` (E1–E5, W1, W2).
+ * E6 (derived) lives in `DERIVED_INCOMPATIBLE`. The runtime mirror is
+ * `TableMetadata._finalizeVersionExempt`.
+ * @since 0.1.150
+ */
+function validateVersionExempt(token: Token): TMessages {
+  const errors = [] as TMessages;
+  const field = token.parentNode!;
+  const fail = (message: string, severity: 1 | 2 = 1) => {
+    errors.push({ message, severity, range: token.range });
+  };
+  const tag = "@db.column.version.exempt";
+
+  if (field.countAnnotations("db.column.version") > 0) {
+    fail(`${tag} cannot mark the version column itself`);
+  }
+  if (field.countAnnotations("meta.id") > 0) {
+    fail(`${tag} cannot mark a primary key — it identifies the row and is never patched`);
+  }
+  if (NAV_ANNOTATIONS.some((n) => field.countAnnotations(n) > 0)) {
+    fail(
+      `${tag} cannot mark a navigation field — related rows follow their own table's versioning`,
+    );
+  }
+  if (field.countAnnotations("db.ignore") > 0) {
+    fail(`${tag} has no effect on an ignored field`, 2);
+  }
+
+  // Ancestor walk: prop → structure → (prop | array → prop | interface)
+  let node: SemanticNode = field;
+  let tableOwner: SemanticNode | undefined;
+  let reported = false;
+  while (node.ownerNode && isStructure(node.ownerNode)) {
+    let up: SemanticNode | undefined = node.ownerNode.ownerNode;
+    let viaArray = false;
+    while (up && isArray(up)) {
+      viaArray = true;
+      up = up.ownerNode;
+    }
+    if (!up) break;
+    if (isInterface(up)) {
+      tableOwner = up;
+      break;
+    }
+    if (!isProp(up)) break;
+    if (!reported && viaArray) {
+      fail(
+        `${tag} cannot sit inside an array — mark the array field '${up.id ?? ""}' itself; array elements are not separate columns`,
+      );
+      reported = true;
+    } else if (!reported && up.countAnnotations("db.json") > 0) {
+      fail(
+        `${tag} cannot sit inside a @db.json field — mark the @db.json field '${up.id ?? ""}' itself; a JSON column is written as one value`,
+      );
+      reported = true;
+    }
+    node = up;
+  }
+
+  // W1: the enclosing top-level table declares no version column
+  if (tableOwner && isInterface(tableOwner) && tableOwner.countAnnotations("db.table") > 0) {
+    const struct = tableOwner.getDefinition();
+    let hasVersion = false;
+    if (struct && isStructure(struct)) {
+      for (const [, prop] of struct.props) {
+        if (prop.countAnnotations("db.column.version") > 0) hasVersion = true;
+      }
+    }
+    if (!hasVersion) {
+      fail(
+        `${tag} has no effect — table '${tableOwner.id ?? ""}' declares no @db.column.version`,
+        2,
+      );
+    }
+  }
+  return errors;
+}
 
 export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
@@ -317,7 +400,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "matches the `$search` term as a case-insensitive substring across all " +
         "`@db.column.searchable` fields (`$or`). Where adapter-native search IS available it " +
         "wins and this annotation is not consulted. The term is escaped literally — no " +
-        "user-supplied regex. String-typed columns only.\n\n" +
+        "user-supplied regex. String and integer columns only: an integer column " +
+        "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) matches when the " +
+        "term is a substring of the number's decimal text (`2946` finds `29461277`). " +
+        "Floats, decimals and timestamps are refused.\n\n" +
         "**Example:**\n" +
         "```atscript\n" +
         '@db.table "jobs"\n' +
@@ -326,67 +412,103 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "  jobName: string\n" +
         "  @db.column.searchable\n" +
         "  description: string\n" +
+        "  @db.column.searchable\n" +
+        "  refNo: number.int\n" +
         "}\n" +
         "```\n",
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
-        return validateFieldBaseType(token, doc, "@db.column.searchable", ["string"]);
+        const verdict = searchFieldVerdict(token.parentNode!, doc);
+        if (!("problem" in verdict)) return [];
+        return [
+          {
+            message: `@db.column.searchable needs a string or an integer field — "${token.parentNode!.id}" ${verdict.problem}`,
+            severity: 1,
+            range: token.range,
+          },
+        ];
       },
     }),
 
-    version: new AnnotationSpec({
-      description:
-        "Marks a numeric column as the row's version for optimistic concurrency control (OCC). " +
-        "The adapter auto-increments this column on every UPDATE, and callers may pass " +
-        "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
-        "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected." +
-        "\n\n**Constraints:**\n" +
-        "- At most one version column per table.\n" +
-        "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
-        "- Default value on insert is `0`.\n" +
-        "\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.column.version\n" +
-        "version: int\n" +
-        "```\n",
-      nodeType: ["prop"],
-      passedWhenReferred: false,
-      validate(token, _args, doc) {
-        const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
+    version: {
+      $self: new AnnotationSpec({
+        description:
+          "Marks a numeric column as the row's version for optimistic concurrency control (OCC). " +
+          "The adapter auto-increments this column on every UPDATE, and callers may pass " +
+          "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
+          "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected. " +
+          "Fields marked `@db.column.version.exempt` do not bump it." +
+          "\n\n**Constraints:**\n" +
+          "- At most one version column per table.\n" +
+          "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
+          "- Default value on insert is `0`.\n" +
+          "\n**Example:**\n" +
+          "```atscript\n" +
+          "@db.column.version\n" +
+          "version: int\n" +
+          "```\n",
+        nodeType: ["prop"],
+        passedWhenReferred: false,
+        validate(token, _args, doc) {
+          const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
 
-        // Reject optional version fields — the column is server-managed and
-        // always populated (DEFAULT 0); a nullable version column would let
-        // `NULL + 1` produce `NULL` and silently break the auto-bump invariant.
-        const field = token.parentNode!;
-        if (field.has("optional")) {
-          errors.push({
-            message:
-              "@db.column.version requires a non-optional field — version columns are always populated (default 0)",
-            severity: 1,
-            range: token.range,
-          });
-        }
-
-        // Cross-field uniqueness: at most one @db.column.version per struct.
-        const struct = getParentStruct(token);
-        if (struct) {
-          let count = 0;
-          for (const [, prop] of struct.props) {
-            if (prop.countAnnotations("db.column.version") > 0) count++;
-          }
-          if (count > 1) {
+          // Reject optional version fields — the column is server-managed and
+          // always populated (DEFAULT 0); a nullable version column would let
+          // `NULL + 1` produce `NULL` and silently break the auto-bump invariant.
+          const field = token.parentNode!;
+          if (field.has("optional")) {
             errors.push({
-              message: "At most one @db.column.version per table",
+              message:
+                "@db.column.version requires a non-optional field — version columns are always populated (default 0)",
               severity: 1,
               range: token.range,
             });
           }
-        }
-        return errors;
-      },
-    }),
+
+          // Cross-field uniqueness: at most one @db.column.version per struct.
+          const struct = getParentStruct(token);
+          if (struct) {
+            let count = 0;
+            for (const [, prop] of struct.props) {
+              if (prop.countAnnotations("db.column.version") > 0) count++;
+            }
+            if (count > 1) {
+              errors.push({
+                message: "At most one @db.column.version per table",
+                severity: 1,
+                range: token.range,
+              });
+            }
+          }
+          return errors;
+        },
+      }),
+
+      exempt: new AnnotationSpec({
+        description:
+          "Marks a field as **version-exempt**: a patch that writes ONLY exempt fields " +
+          "(`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged " +
+          "and adds no version check. A patch touching any other field bumps as usual; `$cas`, replace and " +
+          "`touchMany` always bump. Use it for derived/reporting columns refreshed in the background " +
+          "(scores, counters, caches) so they do not invalidate versions held by editors. " +
+          "On an object field it covers every nested field." +
+          "\n\n**Example:**\n" +
+          "```atscript\n" +
+          "@db.column.version\n" +
+          "version: number.int\n" +
+          "@db.column.version.exempt\n" +
+          "score: number\n" +
+          "```\n",
+        nodeType: ["prop"],
+        passedWhenReferred: false,
+        multiple: false,
+        validate(token) {
+          return validateVersionExempt(token);
+        },
+      }),
+    },
   },
 
   default: {

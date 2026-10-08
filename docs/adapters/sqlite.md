@@ -140,9 +140,13 @@ The adapter creates a companion `articles__fts__<indexName>` virtual table and t
 const results = await articles.search("database optimization", {});
 ```
 
-::: info FTS5 Query Syntax
-FTS5 uses its own match syntax (e.g., `"exact phrase"`, `term1 AND term2`, `prefix*`). This differs from the simple text search APIs of PostgreSQL or MongoDB. See the [SQLite FTS5 documentation](https://www.sqlite.org/fts5.html) for query syntax details.
+::: info Search term syntax
+The `$search` text is quoted before it reaches FTS5's `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are searched as plain text). Words are AND-ed; a `"quoted phrase"` stays a phrase; a trailing `*` is a prefix match (`quok*`). FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, column filters) are not available through `$search`.
 :::
+
+**Integer members** are left out of the FTS5 table (SQLite stores integers in `REAL` columns, so FTS5 would index `29461277.0` and a term `0` would match every row). They are matched by exact number instead: `(rowid IN (SELECT rowid FROM <fts> WHERE <fts> MATCH ?) OR "ref_no" = ?)`, which SQLite serves from the FTS5 lookup and the member's btree. A text-only search keeps the JOIN form. An index of integer members only creates no FTS5 table. Schema sync compares an existing FTS5 table's columns with the index's text members and recreates it on drift (for example, a table built before integers were excluded). See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+
+`$regex` on an integer column compares the number's decimal text (`CAST(CAST(col AS INTEGER) AS TEXT) LIKE …`; the inner cast is needed because the column stores a `REAL`).
 
 ### Vector Search
 

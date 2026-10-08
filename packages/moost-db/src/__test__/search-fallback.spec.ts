@@ -11,16 +11,24 @@ import { AsDbController } from "../as-db.controller";
  * (term dropped).
  */
 
-function makeFieldEntry(annotations: Partial<AtscriptMetadata> = {}) {
+function makeFieldEntry(annotations: Record<string, unknown> = {}) {
+  // `__type` (test-only key): "int" = number.int, "number" = a plain float
+  const { __type, ...rest } = annotations as Record<string, unknown>;
+  const type =
+    __type === "int"
+      ? { kind: "", designType: "number", tags: new Set(["number", "int"]) }
+      : __type === "number"
+        ? { kind: "", designType: "number", tags: new Set(["number"]) }
+        : { kind: "", designType: "string", tags: new Set() };
   return {
     __is_atscript_annotated_type: true,
-    type: { kind: "", designType: "string", tags: new Set() },
-    metadata: new Map(Object.entries(annotations)),
+    type,
+    metadata: new Map(Object.entries(rest)),
   } as any;
 }
 
 function makeMockTable({
-  fields = {} as Record<string, Partial<AtscriptMetadata>>,
+  fields = {} as Record<string, Record<string, unknown>>,
   searchable = false,
 }) {
   const flatMap = new Map<string, unknown>();
@@ -159,5 +167,139 @@ describe("AsDbReadableController — @db.column.searchable $search fallback", ()
     await controller.query("?$search=hello");
     const filter = table.findMany.mock.calls[0][0].filter;
     expect(filter.$or).toEqual([{ jobName: { $regex: "/hello/i" } }]);
+  });
+});
+
+describe("integer @db.column.searchable fields (since 0.1.150)", () => {
+  const FIELDS = {
+    id: {},
+    title: { "db.column.searchable": true },
+    refNo: { "db.column.searchable": true, __type: "int" },
+    altRefNo: { "db.column.searchable": true, __type: "int" },
+    amount: { "db.column.searchable": true, __type: "number" },
+  };
+
+  it("an integer field joins the escaped $regex fragment (decimal-text substring)", async () => {
+    const table = makeMockTable({ fields: FIELDS });
+    const controller = new AsDbController(makeApp(), table);
+    await controller.query("?$search=2946");
+    const filter = table.findMany.mock.calls[0][0].filter;
+    expect(filter.$or).toEqual([
+      { title: { $regex: "/2946/i" } },
+      { refNo: { $regex: "/2946/i" } },
+      { altRefNo: { $regex: "/2946/i" } },
+    ]);
+  });
+
+  it("a float field is never part of the fragment", async () => {
+    const table = makeMockTable({ fields: FIELDS });
+    const controller = new AsDbController(makeApp(), table);
+    await controller.query("?$search=1");
+    const filter = table.findMany.mock.calls[0][0].filter;
+    expect(JSON.stringify(filter)).not.toContain("amount");
+  });
+
+  it("a hidden integer field never participates", async () => {
+    class Hiding extends AsDbController {
+      protected override hasField(path: string): boolean {
+        return super.hasField(path) && path !== "altRefNo";
+      }
+    }
+    const table = makeMockTable({ fields: FIELDS });
+    const controller = new Hiding(makeApp(), table);
+    await controller.query("?$search=2946");
+    const filter = table.findMany.mock.calls[0][0].filter;
+    expect(filter.$or.map((c: Record<string, unknown>) => Object.keys(c)[0])).toEqual([
+      "title",
+      "refNo",
+    ]);
+  });
+});
+
+describe("$count honours a native $search / $vector term (since 0.1.150)", () => {
+  it("counts through searchWithCount when the adapter searches natively", async () => {
+    const table = makeMockTable({ fields: SEARCH_FIELDS, searchable: true });
+    table.searchWithCount.mockResolvedValue({ data: [], count: 7 });
+    const controller = new AsDbController(makeApp(), table);
+    const result = await controller.query("?status=ACTIVE&$search=hello&$count=true");
+    expect(result).toBe(7);
+    expect(table.count).not.toHaveBeenCalled();
+    const [term, query, index] = table.searchWithCount.mock.calls[0];
+    expect(term).toBe("hello");
+    expect(query.filter).toEqual({ status: "ACTIVE" });
+    expect(query.controls.$limit).toBe(1);
+    expect(index).toBeUndefined();
+  });
+
+  it("forwards $index", async () => {
+    const table = makeMockTable({ fields: SEARCH_FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([{ name: "ft", type: "text", isDefault: true }]);
+    table.searchWithCount.mockResolvedValue({ data: [], count: 2 });
+    const controller = new AsDbController(makeApp(), table);
+    expect(await controller.query("?$search=hello&$index=ft&$count=true")).toBe(2);
+    expect(table.searchWithCount.mock.calls[0][2]).toBe("ft");
+  });
+
+  it("still counts plainly without a term, and through the fallback filter", async () => {
+    const table = makeMockTable({ fields: SEARCH_FIELDS, searchable: true });
+    table.count.mockResolvedValue(3);
+    const controller = new AsDbController(makeApp(), table);
+    expect(await controller.query("?status=ACTIVE&$count=true")).toBe(3);
+    expect(table.searchWithCount).not.toHaveBeenCalled();
+  });
+
+  it("counts a $vector search through vectorSearchWithCount", async () => {
+    class Embedding extends AsDbController {
+      protected override computeEmbedding(): Promise<number[]> {
+        return Promise.resolve([1, 2, 3]);
+      }
+    }
+    const table = makeMockTable({ fields: SEARCH_FIELDS });
+    table.isVectorSearchable.mockReturnValue(true);
+    table.vectorSearchWithCount = vi.fn().mockResolvedValue({ data: [], count: 5 });
+    const controller = new Embedding(makeApp(), table);
+    const result = await controller.query("?$search=hello&$vector=embedding&$count=true");
+    expect(result).toBe(5);
+    expect(table.count).not.toHaveBeenCalled();
+    const [field, vector, query] = table.vectorSearchWithCount.mock.calls[0];
+    expect(field).toBe("embedding");
+    expect(vector).toEqual([1, 2, 3]);
+    expect(query.controls.$limit).toBe(1000);
+  });
+});
+
+describe("native index with an integer member follows the index visibility gate (since 0.1.150)", () => {
+  const FIELDS = {
+    id: {},
+    title: { "db.column.searchable": true },
+    refNo: { __type: "int" },
+  };
+
+  class HidingRefNo extends AsDbController {
+    protected override hasField(path: string): boolean {
+      return super.hasField(path) && path !== "refNo";
+    }
+  }
+
+  it("refuses a default index that reads a hidden integer member, as for a hidden string", async () => {
+    const table = makeMockTable({ fields: FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([
+      { name: "ft", type: "text", isDefault: true, fields: ["title", "refNo"] },
+    ]);
+    const controller = new HidingRefNo(makeApp(), table);
+    const result = await controller.query("?$search=2946");
+    expect(result).toBeInstanceOf(HttpError);
+    expect((result as HttpError).body.statusCode).toBe(400);
+    expect(table.search).not.toHaveBeenCalled();
+  });
+
+  it("runs the same index when the integer member is visible", async () => {
+    const table = makeMockTable({ fields: FIELDS, searchable: true });
+    table.getSearchIndexes.mockReturnValue([
+      { name: "ft", type: "text", isDefault: true, fields: ["title", "refNo"] },
+    ]);
+    const controller = new AsDbController(makeApp(), table);
+    await controller.query("?$search=2946");
+    expect(table.search).toHaveBeenCalled();
   });
 });

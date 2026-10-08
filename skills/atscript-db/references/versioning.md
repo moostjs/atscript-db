@@ -37,6 +37,36 @@ Constraints:
 
 The field appears in `findOne` / `findMany` results like any other column. Clients are expected to round-trip it back on writes.
 
+## Version-exempt fields (since 0.1.150)
+
+`@db.column.version.exempt` marks derived / reporting fields (scores, counters, caches) so background refreshes do not invalidate versions held by editors:
+
+```atscript
+@db.column.version
+version: int
+@db.column.version.exempt
+score: number
+```
+
+Rule (decided in core from the schema + the payload keys, never per call): a patch that writes ONLY exempt fields and carries no `$cas` leaves the version unchanged and adds no version predicate; any non-exempt field in it bumps as usual.
+
+| Operation                                                      | Bump                          |
+| -------------------------------------------------------------- | ----------------------------- |
+| `updateOne` / `bulkUpdate` item, only exempt fields, no `$cas` | no                            |
+| same, WITH `$cas`                                              | yes (check + bump, as before) |
+| `updateMany`, only exempt fields                               | no (every matched row)        |
+| any non-exempt field                                           | yes                           |
+| `replaceOne` / `bulkReplace` / `replaceMany` / PUT             | always                        |
+| `touchMany`, PK-only `$cas` touch                              | always                        |
+| empty patch, no `$cas`                                         | no statement (unchanged)      |
+
+- Field ops (`{ hits: $inc(1) }`) and array ops on an exempt array are exempt writes. Marking an object covers every nested field; an object whose fields are all exempt counts as exempt (keeps a replace-strategy write exempt). In a `merge` object only the supplied children count; a partly exempt replace-strategy object bumps (null-fill of siblings).
+- Allowed on scalars, `@db.encrypted`, `@db.json` (whole column), arrays (whole array), FK columns, `@db.default*`, objects. Compile errors (mirrored at runtime): on the version field, `@meta.id`, nav fields, below `@db.json` / inside an array of objects, with `@db.column.derived`. Warnings: table without `@db.column.version`, `@db.ignore` field.
+- HTTP: PATCH without `version` and only exempt fields → no bump; with `version` → `$cas` (check + bump); PUT always bumps. Not exposed in `/meta`.
+- The version is then NOT a whole-row change token (exempt-only refreshes keep it) — do not use it as a whole-row cache key / ETag.
+- `modifiedCount` can be `0` (MySQL / Mongo) for an exempt write of unchanged values; use `matchedCount` to see whether the row was found.
+- `table.versionExemptFields` lists exempt paths. Not part of the schema hash (no sync). Concurrent array ops on the generic path are read-modify-write (can lose an update without `$cas`).
+
 ## SDK — `$cas` operator
 
 `$cas` is a top-level payload operator (sibling to plain SET fields and `$inc` / `$mul`):
@@ -56,7 +86,7 @@ if (result.matchedCount === 0) {
 }
 ```
 
-**Auto-bump is mandatory.** Every successful write to a versioned table bumps the version column, whether or not `$cas` was supplied. The CAS predicate is what's opt-in — the bump is not.
+**Auto-bump is mandatory.** Every successful write to a versioned table bumps the version column, whether or not `$cas` was supplied. The CAS predicate is what's opt-in — the bump is not. The one exception is a CAS-free patch that writes only `@db.column.version.exempt` fields (see [Version-exempt fields](#version-exempt-fields-since-01150)).
 
 **Mismatch contract.** `matchedCount === 0` is the only signal. No exception is thrown. `updateOne` / `replaceOne` / `bulkUpdate` follow the same shape.
 

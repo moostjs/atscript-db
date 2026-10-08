@@ -16,6 +16,7 @@ import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
+import { searchMemberKind } from "../shared/search-fields";
 import type {
   TDbCollation,
   TDbDefaultValue,
@@ -123,6 +124,11 @@ export function isGeoIndexableType(fieldType: TAtscriptAnnotatedType): boolean {
 /** A referenced type's flattened field map, memoized per metadata build. */
 type TFlatOf = (type: TAtscriptAnnotatedType) => Map<string, TAtscriptAnnotatedType>;
 
+/** Runtime mirror of the `@db.column.version.exempt` placement errors. */
+function rejectVersionExempt(path: string, why: string): never {
+  throw new Error(`@db.column.version.exempt on "${path}": ${why}`);
+}
+
 /**
  * Computed metadata for a database table or view.
  *
@@ -175,6 +181,15 @@ export class TableMetadata {
   measures: string[] = [];
   /** Logical field name annotated with `@db.column.version`, if any. */
   versionField?: string;
+  /** Paths annotated with `@db.column.version.exempt`, as declared (since 0.1.150). */
+  private _versionExemptDeclared = new Set<string>();
+  /**
+   * Version-exempt paths (since 0.1.150): the declared ones plus every object
+   * whose direct children are all exempt (upward closure). A path is exempt
+   * when it, or an ancestor, is in this set — see {@link isVersionExemptPath}.
+   * Empty when the table declares no `@db.column.version`.
+   */
+  versionExemptPaths: ReadonlySet<string> = new Set();
   /** path → sibling-ref path for `@db.amount.currency.ref` / `@db.unit.ref`. */
   quantityRefByField = new Map<string, string>();
   /** Logical paths annotated with `@db.encrypted` — stored as one opaque ciphertext column. */
@@ -415,6 +430,8 @@ export class TableMetadata {
     ]);
     this._finalizeIndexes();
 
+    this._finalizeVersionExempt();
+
     // Release intermediate build-time maps
     this._collateMap.clear();
     this._columnFromMap.clear();
@@ -611,6 +628,21 @@ export class TableMetadata {
       this._addIndexField("unique", name, fieldName);
     }
 
+    // @db.column.searchable / @db.index.fulltext — string or integer members only
+    const searchKind = searchMemberKind(fieldType);
+    if (typeof searchKind === "object") {
+      if (metadata.has("db.index.fulltext")) {
+        throw new Error(
+          `@db.index.fulltext on "${fieldName}" ${searchKind.problem} — a fulltext member must be a string or an integer`,
+        );
+      }
+      if (metadata.has("db.column.searchable")) {
+        throw new Error(
+          `@db.column.searchable on "${fieldName}" ${searchKind.problem} — a searchable column must be a string or an integer`,
+        );
+      }
+    }
+
     // @db.index.fulltext (args: name?, weight?)
     for (const index of (metadata.get("db.index.fulltext") as any[]) || []) {
       const name =
@@ -669,6 +701,11 @@ export class TableMetadata {
       this.measures.push(fieldName);
     }
 
+    // @db.column.version.exempt → declared; validated in _finalizeVersionExempt
+    if (metadata.has("db.column.version.exempt")) {
+      this._versionExemptDeclared.add(fieldName);
+    }
+
     // @db.column.version → version column for OCC (at most one per table)
     if (metadata.has("db.column.version")) {
       if (this.versionField !== undefined) {
@@ -686,6 +723,78 @@ export class TableMetadata {
         }
       }
     }
+  }
+
+  // ── Private: version-exempt fields ───────────────────────────────────────
+
+  /**
+   * Validates the `@db.column.version.exempt` placements (E1–E5, the runtime
+   * mirror of the compile-time check, so pre-compiled models fail fast) and
+   * computes {@link versionExemptPaths} with its upward closure. Runs after
+   * `_applyOverrides` (the primary keys are final) and before `jsonFields` is
+   * released. A table without a version column ignores the annotation.
+   */
+  private _finalizeVersionExempt(): void {
+    if (this._versionExemptDeclared.size === 0) return;
+    for (const path of this._versionExemptDeclared) {
+      if (path === this.versionField)
+        rejectVersionExempt(path, "cannot mark the version column itself");
+      if (this.primaryKeys.includes(path)) {
+        rejectVersionExempt(path, "a primary key identifies the row and is never patched");
+      }
+      if (this.navFields.has(path)) {
+        rejectVersionExempt(path, "a navigation field has no column here");
+      }
+      let pos = path.length;
+      while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
+        const ancestor = path.slice(0, pos);
+        const node = this.flatMap.get(ancestor);
+        if (node?.metadata.has("db.json")) {
+          rejectVersionExempt(
+            path,
+            `mark the @db.json field "${ancestor}" itself — a JSON column is written as one value`,
+          );
+        }
+        if (node?.type.kind === "array") {
+          rejectVersionExempt(
+            path,
+            `mark the array field "${ancestor}" itself — array elements are not separate columns`,
+          );
+        }
+      }
+    }
+    if (this.versionField === undefined) return;
+
+    const exempt = new Set(this._versionExemptDeclared);
+    // Upward closure: an object whose direct children are all exempt is exempt.
+    const objects = [...this.flatMap.keys()]
+      .filter((p) => {
+        const node = this.flatMap.get(p)!;
+        return node.type.kind === "object" && !node.metadata.has("db.json");
+      })
+      .toSorted((a, b) => b.split(".").length - a.split(".").length);
+    for (const obj of objects) {
+      if (exempt.has(obj)) continue;
+      const prefix = `${obj}.`;
+      let children = 0;
+      let all = true;
+      for (const key of this.flatMap.keys()) {
+        if (!key.startsWith(prefix) || key.indexOf(".", prefix.length) !== -1) continue;
+        if (this.navFields.has(key) || this.ignoredFields.has(key)) continue;
+        children++;
+        if (!exempt.has(key)) {
+          all = false;
+          break;
+        }
+      }
+      if (children > 0 && all) exempt.add(obj);
+    }
+    this.versionExemptPaths = exempt;
+  }
+
+  /** Whether `path` — or an ancestor of it — is version-exempt (since 0.1.150). */
+  isVersionExemptPath(path: string): boolean {
+    return selfOrAncestor(path, this.versionExemptPaths) !== undefined;
   }
 
   // ── Private: encrypted / geo build-time constraints ──────────────────────
@@ -1328,7 +1437,43 @@ export class TableMetadata {
 
   // ── Private: index finalization ──────────────────────────────────────────
 
+  /**
+   * Flags the integer members of fulltext indexes (matched by exact number,
+   * never part of the physical text index) and enforces that each is
+   * index-backed — the equality branch must not scan. Runs while index field
+   * names are still logical.
+   */
+  private _resolveIntegerFulltextMembers(): void {
+    for (const index of this.indexes.values()) {
+      if (index.type !== "fulltext") continue;
+      for (const field of index.fields) {
+        const ftype = this.flatMap.get(field.name);
+        if (!ftype || searchMemberKind(ftype) !== "integer") continue;
+        const where = `@db.index.fulltext on the integer field "${field.name}"`;
+        if (findAncestorInSet(field.name, this.jsonFields) !== undefined) {
+          throw new Error(`${where} inside a JSON value is not supported`);
+        }
+        const backed =
+          field.name === "_id" ||
+          this.originalMetaIdFields[0] === field.name ||
+          this.uniqueProps.has(field.name) ||
+          [...this.indexes.values()].some(
+            (other) =>
+              (other.type === "plain" || other.type === "unique") &&
+              other.fields[0]?.name === field.name,
+          );
+        if (!backed) {
+          throw new Error(
+            `${where} needs an index for its exact-number match — make it the primary key (first @meta.id) or the first field of a @db.index.plain / @db.index.unique`,
+          );
+        }
+        field.integer = true;
+      }
+    }
+  }
+
   private _finalizeIndexes(): void {
+    this._resolveIntegerFulltextMembers();
     for (const index of this.indexes.values()) {
       if (index.type === "unique" && index.fields.length === 1) {
         this.uniqueProps.add(index.fields[0].name);

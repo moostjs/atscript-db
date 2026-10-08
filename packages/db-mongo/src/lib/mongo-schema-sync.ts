@@ -39,6 +39,7 @@ export interface TMongoSchemaSyncHost {
           weight?: number;
           optional?: boolean;
           designType?: string;
+          integer?: boolean;
         }>;
       }
     >;
@@ -435,7 +436,11 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
     let mongoType: TPlainIndex["type"];
     if (index.type === "fulltext") {
       mongoType = "text";
-      for (const f of index.fields) {
+      // Integer members are matched by exact number, never part of the text
+      // index; an index of integer members only has no physical artifact.
+      const textFields = index.fields.filter((f) => !f.integer);
+      if (textFields.length === 0) continue;
+      for (const f of textFields) {
         fields[f.name] = "text";
         // Default every field's weight to 1 (MongoDB's implicit default). This
         // keeps re-sync idempotent: listIndexes() reports unweighted fields as

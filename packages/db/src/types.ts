@@ -448,6 +448,19 @@ export interface TDbUpdateResult {
   modifiedCount: number;
 }
 
+/**
+ * Per-call options of an adapter UPDATE (since 0.1.150).
+ */
+export interface TDbUpdateOptions {
+  /**
+   * The patch writes only `@db.column.version.exempt` fields: leave the
+   * version column untouched (no `+1`). The core sets it only for CAS-free
+   * patches — never together with `expectedVersion`. An adapter that ignores
+   * the option keeps bumping (the pre-0.1.150 behaviour).
+   */
+  keepVersion?: boolean;
+}
+
 export interface TDbDeleteResult {
   deletedCount: number;
 }
@@ -475,6 +488,13 @@ export interface TDbIndexField {
    * re-resolving the field type. Undefined when the field cannot be resolved.
    */
   designType?: string;
+  /**
+   * Fulltext member matched by exact whole-number equality, never part of the
+   * physical text index (integer field; since 0.1.150). Adapters exclude it
+   * from text DDL and OR `member = n` into their search predicate when the
+   * search term is a whole number (see `searchTermInteger`).
+   */
+  integer?: boolean;
 }
 
 export interface TDbIndex {

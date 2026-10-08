@@ -231,6 +231,18 @@ SELECT * FROM `articles`
 WHERE `published` = ? AND MATCH(`title`, `body`) AGAINST(? IN NATURAL LANGUAGE MODE)
 ```
 
+**Integer members** cannot live in a FULLTEXT index (MySQL error 1283) and are left out of it; they are matched by exact number instead. A text-only search keeps the shape above (MySQL's relevance order applies). When the whole search term is a whole number and the table has a primary key, the adapter combines each arm's access path as a primary-key set, because an `OR` next to `MATCH` would force a full scan:
+
+```sql
+SELECT * FROM `tickets`
+WHERE `id` IN (SELECT `id` FROM (
+  SELECT `id` FROM `tickets` WHERE MATCH(`title`) AGAINST(? IN NATURAL LANGUAGE MODE)
+  UNION SELECT `id` FROM `tickets` WHERE `ref_no` = ?
+) AS `_atscript_search`)
+```
+
+A composite key uses a row-value `IN`; a table without a primary key falls back to a plain `OR`. A mixed text + number result has no relevance order — pass `$sort`. An index of integer members only creates no FULLTEXT index. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+
 ::: info FULLTEXT column ordering
 MySQL FULLTEXT indexes do not support explicit column ordering. Atscript omits the ASC/DESC modifiers for FULLTEXT index fields automatically.
 :::

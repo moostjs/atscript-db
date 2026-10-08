@@ -6,6 +6,7 @@ import {
   containsRelationFilter,
   forEachResolvedRelation,
   isResolvedRelationFilter,
+  INTEGER_REGEX_OP,
   type ResolvedRelationFilter,
 } from "@atscript/db";
 
@@ -221,6 +222,20 @@ const memoryVisitor: FilterVisitor<Predicate> = {
   },
 
   comparison(field, op, value): Predicate {
+    if ((op as string) === INTEGER_REGEX_OP) {
+      // Regex over the DECIMAL TEXT of an integer field (the core rewrites `$regex`
+      // on integer fields into this). Only integral numbers / bigints have such a
+      // text — a missing, null or non-numeric value never matches.
+      const { pattern, flags } = parseRegexString(value);
+      const regex = new RegExp(pattern, flags);
+      return (row) => {
+        const fieldValue = getPath(row, field);
+        const integral =
+          typeof fieldValue === "bigint" ||
+          (typeof fieldValue === "number" && Number.isInteger(fieldValue));
+        return integral && regex.test(String(fieldValue));
+      };
+    }
     switch (op) {
       // Equality. Mongo-like null model: `$eq: null` matches a field that is
       // `null` OR absent/undefined (missing). For a concrete (non-null) value a

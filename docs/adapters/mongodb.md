@@ -373,11 +373,31 @@ Query with `search()`:
 const results = await articles.search("mongodb tutorial");
 ```
 
+The term is handed to `$text`, so MongoDB's operators apply natively: a plain list of words matches **any** of them, `"a phrase"` matches the phrase, and `-word` excludes a word (a term made only of negations matches nothing). Results are ranked by `textScore`.
+
+**Integer members** are not part of the text index (it ignores numbers); the text index and its weights cover the string members only. When the whole search term is a whole number the stage becomes
+
+```js
+{
+  $match: {
+    $or: [{ $text: { $search: "2946" } }, { refNo: { $eq: 2946, $type: "number" } }];
+  }
+}
+```
+
+MongoDB requires **every** `$or` branch next to `$text` to be index-backed (otherwise error 291), so an integer member must be [index-backed](/search/#integer-fields-exact-number-match) — schema validation enforces it. The `$type` guard lets an **optional** unique member's partial index (`{ f: { $type: "number" } }`) serve the equality. Equality-only rows carry no text score and sort after the text hits. An index of integer members only has no text index; a term that is not a whole number then matches nothing.
+
+`$regex` on an integer field renders `$expr` / `$regexMatch` over `$toString` of `$convert`ed long (so `10^16` prints as `10000000000000000`, not `1e+16`).
+
 See [Text Search](/search/) for the full guide.
 
 ## Atlas Search
 
 Atlas Search brings full-text search powered by **Apache Lucene** to your MongoDB collections. It supports fuzzy matching, language-aware analyzers, and custom scoring — but requires a **MongoDB Atlas** deployment.
+
+### Integer members in Atlas
+
+An integer member of an `@db.index.fulltext` is searched with an Atlas `equals` clause OR'd (compound `should`, `minimumShouldMatch: 1`) with the text clause when the whole term is a whole number. A static `@db.mongo.search.static` index gets a `{ type: "number" }` mapping for every integer member automatically (schema sync updates the index once); a dynamic index already indexes numbers.
 
 ### Dynamic Atlas Search
 

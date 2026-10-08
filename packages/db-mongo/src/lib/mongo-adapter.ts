@@ -18,6 +18,7 @@ import {
   type TDbInsertManyResult,
   type TDbInsertIgnoreSlot,
   type TDbUpdateResult,
+  type TDbUpdateOptions,
   type TDbDeleteResult,
   type TSearchIndexInfo,
   type TDbRelation,
@@ -629,17 +630,19 @@ export class MongoAdapter extends BaseDbAdapter {
 
   // ── Native patch ─────────────────────────────────────────────────────────
 
+  // oxlint-disable-next-line max-params
   override async nativePatch(
     filter: FilterExpr,
     patch: unknown,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "nativePatch");
     if (!mongoFilter) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const versionColumn = this._table.versionColumnPhysical;
+    const versionColumn = this._versionColumnFor(opts, expectedVersion);
     // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
     // aggregation expression alongside any user-supplied $inc / $mul ops.
     const effectiveOps =
@@ -839,6 +842,24 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     this._pendingSearchFields = [];
 
+    // Integer fulltext members: every static Atlas text index maps them as
+    // numbers so the `equals` clause can reach them (and `paths` — the
+    // visibility gate — lists them). `dynamic_text` indexes numbers already.
+    for (const fulltext of this._table.indexes.values()) {
+      if (fulltext.type !== "fulltext" || !fulltext.fields.some((f) => f.integer)) continue;
+      const logical = this._indexLogicalPaths(fulltext);
+      for (const index of this._mongoIndexes.values()) {
+        if (index.type !== "search_text") continue;
+        fulltext.fields.forEach((f, i) => {
+          if (f.integer) {
+            this._addFieldToSearchIndex("search_text", index.name, logical[i]!, [
+              { type: "number" },
+            ]);
+          }
+        });
+      }
+    }
+
     // Associate vector filter fields with their vector indexes
     for (const [key, value] of this._vectorFilters.entries()) {
       const index = this._mongoIndexes.get(key);
@@ -886,9 +907,13 @@ export class MongoAdapter extends BaseDbAdapter {
             key: index.key,
             name: index.name,
             type: "text",
-            fields: Object.fromEntries(index.fields.map((f) => [f.name, "text" as const])),
+            // Integer members are matched by exact number (getNumericSearchKeys),
+            // never part of the text index.
+            fields: Object.fromEntries(
+              index.fields.filter((f) => !f.integer).map((f) => [f.name, "text" as const]),
+            ),
             weights: Object.fromEntries(
-              index.fields.filter((f) => f.weight).map((f) => [f.name, f.weight!]),
+              index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
             ),
           };
         }
@@ -926,6 +951,28 @@ export class MongoAdapter extends BaseDbAdapter {
       }
     }
     return this._searchIndexesMap;
+  }
+
+  private _numericSearchKeys?: readonly string[];
+
+  /**
+   * Stored paths of the integer members of the table's fulltext indexes
+   * (table-wide: MongoDB has one classic text index, and every Atlas text
+   * index maps them too). Since 0.1.150.
+   */
+  getNumericSearchKeys(): readonly string[] {
+    // Trigger flattening so the index list is built.
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- trigger lazy init
+    this._table.flatMap;
+    if (!this._numericSearchKeys) {
+      const keys = new Set<string>();
+      for (const index of this._table.indexes.values()) {
+        if (index.type !== "fulltext") continue;
+        for (const f of index.fields) if (f.integer) keys.add(f.name);
+      }
+      this._numericSearchKeys = [...keys];
+    }
+    return this._numericSearchKeys;
   }
 
   /** Returns a specific MongoDB search index by name. */
@@ -1394,17 +1441,20 @@ export class MongoAdapter extends BaseDbAdapter {
     });
   }
 
+  // oxlint-disable-next-line max-params
   async updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     expectedVersion?: number,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     const mongoFilter = await this._buildCasFilter(filter, expectedVersion, "updateOne");
     if (!mongoFilter) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const updateDoc = buildMongoUpdateDoc(data, ops, this._table.versionColumnPhysical);
+    // A keepVersion patch is never empty (exempt-only has >= 1 key), so no `{}` update doc.
+    const updateDoc = buildMongoUpdateDoc(data, ops, this._versionColumnFor(opts, expectedVersion));
     this._log("updateOne", mongoFilter, updateDoc);
     return this._wrapUpdate(() =>
       this.collection.updateOne(mongoFilter, updateDoc, this._getSessionOpts()),
@@ -1457,9 +1507,11 @@ export class MongoAdapter extends BaseDbAdapter {
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps.
-    const versionColumn = this._table.versionColumnPhysical;
+    // Locked decision row 2 — updateMany never CAS-checks. Still auto-bumps,
+    // unless `opts.keepVersion` (a version-exempt patch).
+    const versionColumn = this._versionColumnFor(opts);
     const updateDoc = buildMongoUpdateDoc(data, ops, versionColumn);
     return this._updateMatching(filter, (mongoFilter) => {
       this._log("updateMany", mongoFilter, updateDoc);
