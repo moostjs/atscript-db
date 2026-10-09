@@ -16,9 +16,14 @@ export type { SqliteAdapterOptions, SqliteTxWaitOptions } from "./tx-gate";
 export type TCreateSqliteAdapterOptions = TBetterSqlite3DriverOptions & SqliteAdapterOptions;
 
 export function createAdapter(connection: string, options?: TCreateSqliteAdapterOptions): DbSpace {
-  const { transactionWaitTimeoutMs, transactionWaitWarnMs, ...driverOptions } = options ?? {};
+  const { transactionWaitTimeoutMs, transactionWaitWarnMs, viewJoinPruning, ...driverOptions } =
+    options ?? {};
   const driver = new BetterSqlite3Driver(connection, driverOptions);
-  const adapterOptions: SqliteAdapterOptions = { transactionWaitTimeoutMs, transactionWaitWarnMs };
+  const adapterOptions: SqliteAdapterOptions = {
+    transactionWaitTimeoutMs,
+    transactionWaitWarnMs,
+    viewJoinPruning,
+  };
   return new DbSpace(() => new SqliteAdapter(driver, adapterOptions), {
     onClose: () => driver.close(),
   });

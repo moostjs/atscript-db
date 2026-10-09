@@ -38,6 +38,8 @@ import {
   computeInsights,
   defaultFulltextIndex,
   containsRelationFilter,
+  type AtscriptDbView,
+  type TReadColumnsKind,
 } from "@atscript/db";
 import type {
   AggregateOptions,
@@ -75,6 +77,7 @@ import {
   type TMongoSearchIndexDefinition,
   type TSearchFieldMapping,
 } from "./mongo-types";
+import { mongoViewRead, stagesReadAny } from "./mongo-view-read";
 import type { TMongoRelationHost } from "./mongo-relations";
 import { loadRelationsImpl } from "./mongo-relations";
 import type { TMongoGeoHost, TMongoSearchHost } from "./mongo-search";
@@ -198,6 +201,14 @@ export interface TMongoAdapterOptions {
    * Default: exact counts.
    */
   estimatedCount?: boolean | readonly string[];
+  /**
+   * Read a managed view through its own pipeline on the entry collection,
+   * without the `$lookup` + `$unwind` stages of the joins the read does not
+   * need (default `true`) — see the views guide, "Performance". `false`
+   * always reads the stored view.
+   * @since 0.1.153
+   */
+  viewJoinPruning?: boolean;
 }
 
 export class MongoAdapter extends BaseDbAdapter {
@@ -249,6 +260,7 @@ export class MongoAdapter extends BaseDbAdapter {
     protected readonly options: TMongoAdapterOptions = {},
   ) {
     super();
+    this.viewJoinPruning = options.viewJoinPruning !== false;
   }
 
   // ── Transaction support ──────────────────────────────────────────────────
@@ -399,21 +411,27 @@ export class MongoAdapter extends BaseDbAdapter {
     // rows and count can never describe different populations.
     const searchStage = buildAggregateSearchStage(this as any as TMongoSearchHost, query.controls);
 
-    if (query.controls?.$count) {
-      const pipeline = buildCountPipeline(query, searchStage, this._predicateFilterOpts);
-      this._log("aggregate (count)", pipeline);
-      const result = await wrapInvalidQuery(() =>
+    // A pruned view read (no search: a `$search` stage must come first)
+    const run = (pipeline: Document[], label: string) => {
+      const pruned = searchStage ? undefined : this._viewRead(query, "aggregate", pipeline);
+      if (pruned) {
+        return this._readPipeline(query, pipeline, label, pruned, aggregateOptions(pipeline));
+      }
+      this._log(label, pipeline);
+      return wrapInvalidQuery(() =>
         this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
       );
+    };
+
+    if (query.controls?.$count) {
+      const pipeline = buildCountPipeline(query, searchStage, this._predicateFilterOpts);
+      const result = await run(pipeline, "aggregate (count)");
       // An ungrouped aggregate over no rows is still one group (the row query's rule).
       return result.length > 0 ? result : [{ count: (await emptyGroup(true)) ? 1 : 0 }];
     }
 
     const pipeline = buildAggregatePipeline(query, searchStage, this._predicateFilterOpts);
-    this._log("aggregate", pipeline);
-    const rows = await wrapInvalidQuery(() =>
-      this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
-    );
+    const rows = await run(pipeline, "aggregate");
     // An ungrouped aggregate over no rows is still one group (SQL's rule).
     const empty = rows.length === 0 ? await emptyGroup(false) : undefined;
     return empty ? [empty] : rows;
@@ -1109,9 +1127,12 @@ export class MongoAdapter extends BaseDbAdapter {
       { $facet: { data: pageStages(query.controls), meta: [{ $count: "count" }] } },
     ];
 
-    this._log("aggregate (findManyWithCount)", pipeline);
-    const result = await wrapInvalidQuery(() =>
-      this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
+    const pruned = this._viewRead(query, "rows", pipeline);
+    const result = await this._readPipeline(
+      query,
+      pipeline,
+      "aggregate (findManyWithCount)",
+      pruned,
     );
     return {
       data: result[0]?.data || [],
@@ -1471,6 +1492,11 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
+    const pruned = this._prunedFind(query, "findOne", 1);
+    if (pruned) {
+      const [row] = await pruned;
+      return row ?? null;
+    }
     if (containsRelationFilter(query.filter)) {
       const [row] = await this._aggregateFind(query, "findOne", 1);
       return row ?? null;
@@ -1488,6 +1514,8 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
+    const pruned = this._prunedFind(query, "findMany");
+    if (pruned) return pruned;
     if (containsRelationFilter(query.filter)) {
       return this._aggregateFind(query, "findMany");
     }
@@ -1503,17 +1531,20 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async count(query: DbQuery): Promise<number> {
-    if (containsRelationFilter(query.filter)) {
-      // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a filter only).
+    const relational = containsRelationFilter(query.filter);
+    const view = this.viewJoinPruning && this._table?.isView;
+    if (relational || view) {
+      // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a
+      // filter only); so is a pruned view read.
       const pipeline = [
         ...mongoFilterStages(query.filter, this._predicateFilterOpts),
         { $count: "count" },
       ];
-      this._log("aggregate (count)", pipeline);
-      const result = await wrapInvalidQuery(() =>
-        this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
-      );
-      return (result[0]?.count as number | undefined) ?? 0;
+      const pruned = view ? this._viewRead(query, "count", pipeline) : undefined;
+      if (relational || pruned) {
+        const result = await this._readPipeline(query, pipeline, "aggregate (count)", pruned);
+        return (result[0]?.count as number | undefined) ?? 0;
+      }
     }
     const filter = buildMongoFilter(query.filter);
     if (this._estimatesCount() && Object.keys(filter).length === 0) {
@@ -1823,6 +1854,73 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   // ── Internal helpers ─────────────────────────────────────────────────────
+
+  /**
+   * The pruned read of this adapter's managed view for `query` followed by
+   * `stages` (`mongoViewRead`, since 0.1.153): the view pipeline without the
+   * joins the read does not need, on the entry collection — or `undefined`
+   * to read the stored view: pruning off, not a view, nothing droppable, an
+   * operation-wide collation (it would govern the view's join keys too), or
+   * stages that may read a dropped column ({@link stagesReadAny}).
+   */
+  private _viewRead(
+    query: DbQuery,
+    kind: TReadColumnsKind,
+    stages: Document[] | (() => Document[]),
+  ): { collection: Collection<any>; pipeline: Document[] } | undefined {
+    if (!this.viewJoinPruning || !this._table?.isView) return undefined;
+    if (!containsRelationFilter(query.filter) && this._getCollationOpts(query)) return undefined;
+    const read = mongoViewRead(this._table as unknown as AtscriptDbView, query, kind);
+    if (!read) return undefined;
+    const own = typeof stages === "function" ? stages() : stages;
+    if (stagesReadAny(own, read.dropped)) return undefined;
+    return { collection: this.db.collection(read.entry), pipeline: [...read.prefix, ...own] };
+  }
+
+  /**
+   * Runs a read pipeline — through the pruned view read `pruned` when there
+   * is one, on the bound collection otherwise. A view's own default
+   * collation is the simple one, so the pruned read pins it: the entry
+   * collection's default must not apply.
+   */
+  // oxlint-disable-next-line max-params
+  private _readPipeline(
+    query: DbQuery,
+    stages: Document[],
+    label: string,
+    pruned: ReturnType<MongoAdapter["_viewRead"]>,
+    options?: AggregateOptions,
+  ): Promise<Document[]> {
+    if (pruned) {
+      this._log(`${label} (pruned view)`, pruned.pipeline);
+      return wrapInvalidQuery(() =>
+        pruned.collection
+          .aggregate(pruned.pipeline, {
+            ...options,
+            collation: { locale: "simple" },
+            ...this._getSessionOpts(),
+          })
+          .toArray(),
+      );
+    }
+    this._log(label, stages);
+    return wrapInvalidQuery(() =>
+      this.collection.aggregate(stages, { ...options, ...this._readOpts(query) }).toArray(),
+    );
+  }
+
+  /** A find over the pruned view read, or `undefined` when the stored view is read. */
+  private _prunedFind(
+    query: DbQuery,
+    label: string,
+    limit?: number,
+  ): Promise<Array<Record<string, unknown>>> | undefined {
+    const pruned = this._viewRead(query, "rows", () => [
+      ...mongoFilterStages(query.filter, this._predicateFilterOpts),
+      ...pageStages(limit ? { ...query.controls, $limit: limit } : query.controls),
+    ]);
+    return pruned && this._readPipeline(query, pruned.pipeline, `aggregate (${label})`, pruned);
+  }
 
   /** A find whose filter holds relational predicates, as an aggregation pipeline. */
   private async _aggregateFind(

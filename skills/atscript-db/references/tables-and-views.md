@@ -197,6 +197,20 @@ Hash: join `order` + column `expr` are snapshot keys emitted only when set → e
 
 Sync detail: a view's definition = entry table + joins WITH their ON conditions and kind + each column's physical source + aggregate + filter + having + materialized flag + fields; a physical table already sitting under a managed view's name is a pre-flight refusal, not a silent skip. See `schema-sync.md § View sync`.
 
+### Skipped joins on view reads (0.1.153)
+
+MySQL / SQLite / MongoDB read a managed view WITHOUT the `left` joins a read does not need (inline copy of the definition, `(<select>) AS \`view\``+ MySQL`/_+ MERGE _/`; Mongo: the view pipeline on the entry collection minus `$lookup`/`$unwind`). PostgreSQL reads by name — its planner removes such joins itself (verified: COUNT, composite / literal-pinned keys, first-row joins). Results always equal the stored view's.
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Skipped only if UNUSED: no `$select`ed column (no `$select` = every column), filter / `$sort` / `$groupBy` / aggregate / `$having` key, computed column operand, kept join's ON, or `@db.view.filter` reads it.                                                                                                                     |
+| 2   | …AND at most one match: `left` join to a TABLE that is a first-row join, or whose ON is a pure `and` of `=` covering EVERY field of the PK or of one `@db.index.unique` (other side: same design type + same collation / type overrides / table charset, or a literal of the type).                                                 |
+| 3   | Never skipped: `inner`, `or`/`not` ON, non-unique or partial-key join, join to a view; grouped (`@db.agg.*`), materialized, external views; views with `@db.schema`; search / vector / geo reads. Mongo: a unique key over an OPTIONAL field doesn't count (partial index); a read with an op-wide collation reads the stored view. |
+| 4   | Uniqueness comes from the MODEL — declare `@db.index.unique` (and sync it) for lookups you want skipped.                                                                                                                                                                                                                            |
+| 5   | Reads use the definition generated from the `.as` model; a view altered by hand in the DB is honoured only by reads that skip nothing.                                                                                                                                                                                              |
+| 6   | Opt out: `viewJoinPruning: false` in `createAdapter` / `new MysqlAdapter(driver, opts)` / `new SqliteAdapter(driver, opts)` / `new MongoAdapter(db, client, opts)`; per view: `db.getAdapter(View).viewJoinPruning = false`.                                                                                                        |
+| 7   | Custom adapters: `view.readPlan(neededColumns)` (+ `queryReadColumns(query, kind)` from `@atscript/db`) gives the pruned plan/columns; SQL: `viewReadSource(dialect, readable, name, query, kind)` from `@atscript/db-sql-tools` returns a FROM source for `buildSelect` / aggregate builders.                                      |
+
 ### Read seals (0.1.143)
 
 A view column inherits the read seals of the source field it reads — no annotation on the view field; travels through views over views.

@@ -237,6 +237,20 @@ export function sourceFieldSeals(
 }
 
 /**
+ * The annotations of one LOGICAL path of a source table (`undefined` for a
+ * path the type does not declare).
+ * @since 0.1.153
+ */
+export function sourceFieldMetadata(
+  sourceType: TAtscriptAnnotatedType,
+  logicalPath: string,
+): TMetadataMap<AtscriptMetadata> | undefined {
+  return sourceIndex(sourceType).flatMap.get(logicalPath)?.metadata as
+    | TMetadataMap<AtscriptMetadata>
+    | undefined;
+}
+
+/**
  * Resolves a LOGICAL path of a source table (a view field's chain ref, an
  * aggregate's field, a predicate operand) to where it is physically stored.
  * Internal — `AtscriptDbView.resolveRefSource` is the public entry.

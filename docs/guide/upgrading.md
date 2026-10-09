@@ -6,6 +6,16 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.153 {#v0-1-153}
+
+### Behavior change: view reads skip unused joins {#v0-1-153-view-join-pruning}
+
+On MySQL, SQLite and MongoDB a read of a managed view now skips the `left` joins it does not need — a provably at-most-one-row join that nothing in the read uses. Results are unchanged; the SQL / pipeline differs (an inline copy of the view definition instead of `FROM <view>`), and a `COUNT(*)` or a narrow page no longer probes every joined table. PostgreSQL is unchanged (it removes such joins itself).
+
+- Reads that skip a join use the definition generated from your `.as` model, not the one stored in the database — a view altered by hand is honoured only by reads that skip nothing.
+- Opt out with `viewJoinPruning: false` (adapter option, or `db.getAdapter(View).viewJoinPruning = false` for one view).
+- See [Unused joins are skipped](/views/querying-views#performance-unused-joins-are-skipped).
+
 ## 0.1.151 {#v0-1-151}
 
 **Requires `moost` / `@moostjs/event-http` 0.6.48** (`prerenderJson`, used by `/meta` HTTP caching).

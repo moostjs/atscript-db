@@ -66,3 +66,7 @@ export {
 } from "./common";
 export { AGG_FN_SQL, buildAggregateSelect, buildAggregateCount, groupKeySql } from "./agg";
 export { parseRegexString } from "./regex";
+export { buildViewSelect } from "./view-builder";
+export { viewReadSource } from "./view-read";
+export { fromSourceSql, fromSourceHint } from "./from-source";
+export type { TSqlFromSource, TSqlDerivedSource } from "./from-source";

@@ -18,6 +18,14 @@ export interface SqlDialect {
   quoteTable(name: string): string;
   /** SQL literal for unlimited LIMIT (SQLite: '-1', MySQL: '18446744073709551615') */
   unlimitedLimit: string;
+  /**
+   * The optimizer hint asking the engine to MERGE the derived table `alias`
+   * into the SELECT reading it (MySQL: `/*+ MERGE(\`alias\`) *\/`) — carried
+   * by pruned view reads (`viewReadSource`), so the inline definition merges
+   * even in a session with `derived_merge=off`. Omitted: no hint.
+   * @since 0.1.153
+   */
+  derivedMergeHint?(alias: string): string;
   /** Convert JS value to SQL-bindable param for DML */
   toValue(value: unknown): unknown;
   /** Convert JS value to SQL-bindable param for filters (lighter) */

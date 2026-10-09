@@ -499,6 +499,19 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether reads of a managed view drop the LEFT joins the query does not
+   * need (`AtscriptDbView.readPlan`) — reading through an inline, pruned
+   * definition instead of the stored view. Only adapters that implement it
+   * honour it; each sets its own default from its constructor options (the
+   * bundled MySQL, SQLite and MongoDB adapters: on; PostgreSQL removes such
+   * joins itself). Set it to `false` on one view's adapter
+   * (`space.getAdapter(View)`) to read that view by name again.
+   *
+   * @since 0.1.153
+   */
+  viewJoinPruning = false;
+
+  /**
    * Whether this adapter enforces foreign key constraints natively.
    * When `true`, the generic layer skips application-level cascade/setNull
    * on delete — the DB engine handles it (e.g. SQLite `ON DELETE CASCADE`).

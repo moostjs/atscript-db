@@ -3,6 +3,7 @@ import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
+import { fromSourceHint, fromSourceSql, type TSqlFromSource } from "./from-source";
 
 /**
  * Builds an INSERT statement.
@@ -143,15 +144,16 @@ export function buildInsertMany(
 
 /**
  * Builds a SELECT statement with optional sort, limit, offset, projection.
+ * `table` may be a derived source (a pruned view read, since 0.1.153).
  */
 export function buildSelect(
   dialect: SqlDialect,
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls?: DbControls,
 ): TSqlFragment {
   const cols = buildProjection(dialect, controls?.$select);
-  let sql = `SELECT ${cols} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+  let sql = `SELECT ${fromSourceHint(table)}${cols} FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
   const params = [...where.params];
 
   const orderBy = orderByList(dialect, controls?.$sort);
@@ -206,7 +208,7 @@ export const PARTITION_ROW_NUMBER_ALIAS = "__atscript_rn";
  */
 export function buildPartitionedSelect(
   dialect: SqlDialect,
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
   partitionBy: readonly string[],
@@ -217,8 +219,8 @@ export function buildPartitionedSelect(
     `PARTITION BY ${partitionBy.map((col) => dialect.quoteIdentifier(col)).join(", ")}` +
     (orderBy ? ` ORDER BY ${orderBy}` : "");
   const inner =
-    `SELECT ${buildProjection(dialect, controls.$select)}, ROW_NUMBER() OVER (${window}) AS ${rn}` +
-    ` FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+    `SELECT ${fromSourceHint(table)}${buildProjection(dialect, controls.$select)}, ROW_NUMBER() OVER (${window}) AS ${rn}` +
+    ` FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
   const skip = (controls.$skip as number | undefined) ?? 0;
   const limit = controls.$limit as number | undefined;
   const params = [...where.params, skip];

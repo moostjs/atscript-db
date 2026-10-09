@@ -7,7 +7,7 @@ import type {
   TViewPlan,
 } from "@atscript/db";
 import { fkColumns } from "@atscript/db";
-import type { SqlDialect, TGeoCircle, TSqlFragment } from "@atscript/db-sql-tools";
+import type { SqlDialect, TGeoCircle, TSqlFragment, TSqlFromSource } from "@atscript/db-sql-tools";
 
 import { sqliteCalendarBucket } from "./calendar-bucket";
 import {
@@ -266,7 +266,7 @@ export function buildInsert(table: string, data: Record<string, unknown>): TSqlF
  * Builds a SELECT statement with optional sort, limit, offset, projection.
  */
 export function buildSelect(
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls?: DbControls,
 ): TSqlFragment {
@@ -324,7 +324,7 @@ export function buildCreateView(
  * Builds a SELECT ... GROUP BY statement with aggregate functions.
  */
 export function buildAggregateSelect(
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
@@ -335,7 +335,7 @@ export function buildAggregateSelect(
  * Builds a COUNT query for the number of distinct groups.
  */
 export function buildAggregateCount(
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {

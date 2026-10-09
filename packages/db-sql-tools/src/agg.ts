@@ -7,6 +7,7 @@ import type { SqlDialect, TSqlFragment } from "./dialect";
 import { EMPTY_AND, finalizeParams, havingGroupRef, orderKeySql } from "./dialect";
 import { renderArith } from "./arith";
 import { createFilterVisitor } from "./filter-builder";
+import { fromSourceHint, fromSourceSql, type TSqlFromSource } from "./from-source";
 
 /**
  * SQL function name of each single-name aggregate. `countDistinct` is not a
@@ -269,16 +270,16 @@ function rowColumns(controls: DbControls): string[] {
  */
 function aggSource(
   dialect: SqlDialect,
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
   withRows: boolean,
-): string {
-  const quotedTable = dialect.quoteTable(table);
+): { hint: string; sql: string } {
+  const quotedTable = fromSourceSql(dialect, table);
   const firstLast = controls.$select?.firstLast;
   const rowOrder = controls.$select?.rowOrder;
   if (!withRows || !firstLast?.length || !rowOrder?.length) {
-    return `FROM ${quotedTable} WHERE ${where.sql}`;
+    return { hint: fromSourceHint(table), sql: `FROM ${quotedTable} WHERE ${where.sql}` };
   }
   const groupBy = controls.$groupBy as string[] | undefined;
   const partition = groupBy?.length
@@ -295,7 +296,10 @@ function aggSource(
       return `FIRST_VALUE(${dialect.quoteIdentifier(fl.column)}) OVER (${partition}ORDER BY ${order(fl.fn === "last")}) AS ${col}`;
     }),
   ];
-  return `FROM (SELECT ${columns.join(", ")} FROM ${quotedTable} WHERE ${where.sql}) AS ${dialect.quoteIdentifier(ROWS_ALIAS)}`;
+  return {
+    hint: "",
+    sql: `FROM (SELECT ${fromSourceHint(table)}${columns.join(", ")} FROM ${quotedTable} WHERE ${where.sql}) AS ${dialect.quoteIdentifier(ROWS_ALIAS)}`,
+  };
 }
 
 /**
@@ -310,7 +314,7 @@ function aggSource(
  */
 export function buildAggregateSelect(
   dialect: SqlDialect,
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
@@ -344,7 +348,8 @@ export function buildAggregateSelect(
 
   const cols = selectParts.length > 0 ? selectParts.join(", ") : "*";
 
-  let sql = `SELECT ${cols} ${aggSource(dialect, table, where, controls, true)}${groupByClause(dialect, controls)}`;
+  const source = aggSource(dialect, table, where, controls, true);
+  let sql = `SELECT ${source.hint}${cols} ${source.sql}${groupByClause(dialect, controls)}`;
   const params = [...where.params];
 
   // HAVING
@@ -393,7 +398,7 @@ export function buildAggregateSelect(
  */
 export function buildAggregateCount(
   dialect: SqlDialect,
-  table: string,
+  table: TSqlFromSource,
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
@@ -410,7 +415,7 @@ export function buildAggregateCount(
       });
     }
     // No aggregates at all — just count all matching rows
-    const sql = `SELECT ${countCol} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+    const sql = `SELECT ${fromSourceHint(table)}${countCol} FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
     return finalizeParams(dialect, { sql, params: where.params });
   }
   const from = aggSource(
@@ -434,6 +439,6 @@ export function buildAggregateCount(
   if (groupBy) {
     inner = bucketSelectParts(dialect, controls).join(", ") || "1";
   }
-  const sql = `SELECT ${countCol} FROM (SELECT ${inner} ${from}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
+  const sql = `SELECT ${countCol} FROM (SELECT ${from.hint}${inner} ${from.sql}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
   return finalizeParams(dialect, { sql, params: [...where.params, ...(having?.params ?? [])] });
 }

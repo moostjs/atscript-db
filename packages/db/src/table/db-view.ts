@@ -24,7 +24,14 @@ import {
   type TViewJoin,
 } from "../query/query-tree";
 import { AGG_ANNOTATIONS, type TDbAggregateFn } from "../query/aggregate-fns";
-import { resolveViewSource, sourceFieldSeals, viewSourceOf, type TViewSource } from "./view-source";
+import {
+  resolveViewSource,
+  sourceFieldMetadata,
+  sourceFieldSeals,
+  viewSourceOf,
+  type TViewSource,
+} from "./view-source";
+import { ViewReadPlanner, type TViewReadPlan } from "./view-read-plan";
 import { isJsonLeafType } from "../shared/derived-rules";
 import { tableNameOf } from "../rel/relation-helpers";
 import type { TViewJsonType } from "../types";
@@ -175,6 +182,23 @@ function viewFieldSource(
   };
 }
 
+/**
+ * Field annotations that change how a column compares (`=`): its collation
+ * and engine-type overrides. Two columns of a join condition must agree on
+ * them (and on {@link COMPARE_TABLE_KEYS}) for the condition to prove a
+ * unique-key match (`AtscriptDbView.readPlan`).
+ */
+const COMPARE_FIELD_KEYS = [
+  "db.column.collate",
+  "db.mysql.type",
+  "db.mysql.collate",
+  "db.mysql.charset",
+  "db.pg.type",
+  "db.pg.collate",
+] as const;
+/** Table annotations that set its columns' default charset / collation. */
+const COMPARE_TABLE_KEYS = ["db.mysql.charset", "db.mysql.collate"] as const;
+
 /** View types whose fields already carry their inherited seals. */
 const sealedViews = new WeakSet<TAtscriptAnnotatedType>();
 
@@ -278,6 +302,7 @@ export class AtscriptDbView<
 > extends AtscriptDbReadable<T, DataType, FlatType, A, IdType, OwnProps, NavType> {
   private _viewPlan?: TViewPlan;
   private _columnMappings?: TViewColumnMapping[];
+  private _readPlanner?: ViewReadPlanner;
 
   override get isView(): boolean {
     return true;
@@ -472,6 +497,60 @@ export class AtscriptDbView<
   getViewColumnMappings(): TViewColumnMapping[] {
     this._columnMappings ??= this._buildColumnMappings();
     return this._columnMappings;
+  }
+
+  /**
+   * The read variant of this managed view for a query that reads only the
+   * `needed` PHYSICAL view columns (`undefined`: every column) — the view
+   * plan with every LEFT join removed that (a) matches at most one row per
+   * input row and (b) feeds no needed column, no other kept join's ON clause
+   * and no `@db.view.filter`. Dropping such a join leaves every row of the
+   * view in place, so a query over the variant returns exactly what it
+   * returns over the view. `undefined` when nothing can be dropped.
+   *
+   * At most one match is proven from the model: a first-row join, or an ON
+   * clause whose `=` conjuncts pin every column of one of the target's unique
+   * keys (primary key included) — see the views guide. Inner joins, joins to
+   * a view, grouped (`@db.agg.*`), materialized and external views are never
+   * pruned. A variant's {@link TViewReadPlan.columns} omit the columns of the
+   * dropped joins, so a column reference the caller failed to declare fails
+   * loudly instead of reading wrong data.
+   *
+   * Memoised per dropped-join set. Adapters use it to read through an
+   * inline, pruned definition instead of the stored view.
+   * @since 0.1.153
+   */
+  readPlan(needed: Iterable<string> | undefined): TViewReadPlan | undefined {
+    if (this.isExternal) return undefined;
+    this._readPlanner ??= new ViewReadPlanner({
+      tableName: this.tableName,
+      viewPlan: this.viewPlan,
+      nested: this._nested,
+      getViewColumnMappings: () => this.getViewColumnMappings(),
+      resolveRefSource: (ref) => this.resolveRefSource(ref),
+      uniqueKeySets: (targetType) => {
+        const source = viewSourceOf(targetType).type;
+        if (isViewType(source) || !this._tableResolver) return undefined;
+        const target = this._tableResolver(source) as unknown as
+          | AtscriptDbReadable<any, any, any, any, any, any, any>
+          | undefined;
+        return target && !target.isView ? target.uniqueKeySets : undefined;
+      },
+      fieldTraits: (ref) => {
+        const source = viewSourceOf(ref.type ? ref.type() : this.viewPlan.entryType()).type;
+        const field = sourceFieldMetadata(source, ref.field);
+        const table = source.metadata as unknown as ReadonlyMap<string, unknown>;
+        const column = field as unknown as ReadonlyMap<string, unknown> | undefined;
+        return {
+          compare: JSON.stringify([
+            ...COMPARE_FIELD_KEYS.map((key) => column?.get(key) ?? null),
+            ...COMPARE_TABLE_KEYS.map((key) => table.get(key) ?? null),
+          ]),
+          encrypted: field?.has("db.encrypted") === true,
+        };
+      },
+    });
+    return this._readPlanner.plan(needed);
   }
 
   /**

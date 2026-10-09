@@ -45,6 +45,7 @@ import type {
   AggregateFn,
   BucketUnit,
   DbQuery,
+  TReadColumnsKind,
   FilterExpr,
   TSearchIndexInfo,
   TViewCapability,
@@ -71,6 +72,10 @@ import {
   mapQueryErrors,
   EMPTY_OR,
   orFragment,
+  fromSourceHint,
+  fromSourceSql,
+  viewReadSource,
+  type TSqlFromSource,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -103,7 +108,7 @@ import {
   type TMysqlColumnContext,
   type TMysqlTableOptions,
 } from "./sql-builder";
-import type { TMysqlConnection, TMysqlDriver } from "./types";
+import type { TMysqlAdapterOptions, TMysqlConnection, TMysqlDriver } from "./types";
 
 /**
  * Parses a MySQL UTC datetime string (`'YYYY-MM-DD HH:MM:SS[.ffffff]'`) to
@@ -270,8 +275,30 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._table?.schema ?? null;
   }
 
-  constructor(protected readonly driver: TMysqlDriver) {
+  constructor(
+    protected readonly driver: TMysqlDriver,
+    options?: TMysqlAdapterOptions,
+  ) {
     super();
+    this.viewJoinPruning = options?.viewJoinPruning !== false;
+  }
+
+  /**
+   * The FROM source of a read of this adapter's table or view: a managed
+   * view read that needs only some of its LEFT joins reads an inline,
+   * pruned definition (`viewReadSource`, since 0.1.153) — MySQL has no
+   * outer-join elimination, so every LEFT JOIN of a view is otherwise probed
+   * per row, even for a `COUNT(*)`. Off with `viewJoinPruning: false`.
+   */
+  private _readSource(
+    query: DbQuery,
+    kind: TReadColumnsKind,
+    partitionBy?: readonly string[],
+  ): TSqlFromSource {
+    const name = this.resolveTableName();
+    return this.viewJoinPruning
+      ? viewReadSource(mysqlDialect, this._table, name, query, kind, partitionBy)
+      : name;
   }
 
   // ── Transaction primitives ──────────────────────────────────────────────
@@ -1030,14 +1057,14 @@ export class MysqlAdapter extends BaseDbAdapter {
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
     const where = buildWhere(query.filter);
     const controls = { ...query.controls, $limit: 1 };
-    const { sql, params } = buildSelect(this.resolveTableName(), where, controls);
+    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, controls);
     this._log(sql, params);
     return this._exec().get(sql, params);
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
-    const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
+    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, query.controls);
     this._log(sql, params);
     return this._exec().all(sql, params);
   }
@@ -1053,7 +1080,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     const where = buildWhere(query.filter);
     const { sql, params } = buildPartitionedSelect(
       mysqlDialect,
-      this.resolveTableName(),
+      this._readSource(query, "rows", partitionBy),
       where,
       query.controls,
       partitionBy,
@@ -1064,8 +1091,8 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async count(query: DbQuery): Promise<number> {
     const where = buildWhere(query.filter);
-    const tableName = this.resolveTableName();
-    const sql = `SELECT COUNT(*) as cnt FROM ${quoteTableName(tableName)} WHERE ${where.sql}`;
+    const source = this._readSource(query, "count");
+    const sql = `SELECT ${fromSourceHint(source)}COUNT(*) as cnt FROM ${fromSourceSql(mysqlDialect, source)} WHERE ${where.sql}`;
     this._log(sql, where.params);
     const row = await this._exec().get<{ cnt: number }>(sql, where.params);
     return row?.cnt ?? 0;
@@ -1079,7 +1106,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     const where = search
       ? this._buildSearchWhere(search.text, query, search.indexName)
       : buildWhere(query.filter);
-    const tableName = this.resolveTableName();
+    // A grouped search reads the search index of the view's own name
+    const tableName = search ? this.resolveTableName() : this._readSource(query, "aggregate");
     for (const bucket of query.controls.$select?.buckets ?? []) {
       await this._ensureBucketZone(bucket.tz);
     }
