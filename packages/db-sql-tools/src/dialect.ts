@@ -147,14 +147,136 @@ export interface SqlDialect {
 /**
  * Replaces positional `?` placeholders with dialect-specific numbered placeholders
  * (e.g. `$1, $2, ...` for PostgreSQL). No-op when `dialect.paramPlaceholder` is not set.
+ *
+ * Only a `?` in plain SQL text is a placeholder: one inside a string literal
+ * (`'…'`, `E'…'`, `$tag$…$tag$`), a quoted identifier (`"…"`) or a comment
+ * (`-- …`, `/* … *\/`) is left alone, and so are PostgreSQL's jsonb operators
+ * `?|` / `?&` (a placeholder directly followed by `|` / `&` is only ever
+ * `?||`, the concatenation). `??` is an escaped literal `?` — how a builder
+ * writes the bare jsonb `?` operator.
  */
 export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSqlFragment {
-  if (!dialect.paramPlaceholder) {
+  const placeholder = dialect.paramPlaceholder;
+  if (!placeholder) {
     return fragment;
   }
+  const s = fragment.sql;
+  // Fast exit: no `?` at all — nothing to number.
+  if (s.indexOf("?") === -1) {
+    return fragment;
+  }
+  let out = "";
+  let last = 0;
   let idx = 0;
-  const sql = fragment.sql.replace(/\?/g, () => dialect.paramPlaceholder!(++idx));
-  return { sql, params: fragment.params };
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (c === QMARK) {
+      const next = s.charCodeAt(i + 1);
+      if (next === QMARK) {
+        // `??` → a literal `?` (escaped jsonb operator).
+        out += s.slice(last, i + 1);
+        last = i + 2;
+        i += 2;
+      } else if ((next === PIPE && s.charCodeAt(i + 2) !== PIPE) || next === AMP) {
+        i += 2; // jsonb `?|` / `?&` operator — kept as is
+      } else {
+        out += s.slice(last, i) + placeholder(++idx);
+        last = ++i;
+      }
+    } else if (c === DQUOTE) {
+      i = skipQuotedIdentifier(s, i);
+    } else if (c === SQUOTE) {
+      i = skipStringLiteral(s, i);
+    } else if (c === DASH && s.charCodeAt(i + 1) === DASH) {
+      const end = s.indexOf("\n", i + 2);
+      i = end === -1 ? n : end + 1;
+    } else if (c === SLASH && s.charCodeAt(i + 1) === STAR) {
+      const end = s.indexOf("*/", i + 2);
+      i = end === -1 ? n : end + 2;
+    } else if (c === DOLLAR) {
+      i = skipDollarQuoted(s, i);
+    } else {
+      i++;
+    }
+  }
+  return { sql: last === 0 ? s : out + s.slice(last), params: fragment.params };
+}
+
+const QMARK = 63; // ?
+const PIPE = 124; // |
+const AMP = 38; // &
+const BACKSLASH = 92;
+const SQUOTE = 39;
+const DQUOTE = 34;
+const DASH = 45;
+const SLASH = 47;
+const STAR = 42;
+const DOLLAR = 36;
+
+/** Index just past the `"…"` identifier opening at `at` (`""` escapes a quote). */
+function skipQuotedIdentifier(s: string, at: number): number {
+  let i = at + 1;
+  for (;;) {
+    const end = s.indexOf('"', i);
+    if (end === -1) return s.length;
+    if (s.charCodeAt(end + 1) !== DQUOTE) return end + 1;
+    i = end + 2;
+  }
+}
+
+/**
+ * Index just past the `'…'` literal opening at `at` (`''` escapes a quote; in
+ * a PostgreSQL `E'…'` escape string a backslash escapes the next char too).
+ */
+function skipStringLiteral(s: string, at: number): number {
+  const prev = at > 0 ? s.charCodeAt(at - 1) : 0;
+  const escapes = (prev === 69 || prev === 101) && (at < 2 || !isIdentChar(s.charCodeAt(at - 2)));
+  let i = at + 1;
+  for (;;) {
+    const end = s.indexOf("'", i);
+    if (end === -1) return s.length;
+    if (escapes) {
+      // Count the backslashes right before the quote: an odd run escapes it.
+      let k = end - 1;
+      while (k > at && s.charCodeAt(k) === BACKSLASH) k--;
+      if ((end - 1 - k) % 2 === 1) {
+        i = end + 1;
+        continue;
+      }
+    }
+    if (s.charCodeAt(end + 1) !== SQUOTE) return end + 1;
+    i = end + 2;
+  }
+}
+
+/**
+ * Index just past the dollar-quoted string (`$$…$$`, `$tag$…$tag$`) opening at
+ * `at`, or `at + 1` when the `$` opens none (a `$1` placeholder, a `$` inside
+ * an identifier).
+ */
+function skipDollarQuoted(s: string, at: number): number {
+  if (at > 0 && isIdentChar(s.charCodeAt(at - 1))) return at + 1;
+  let j = at + 1;
+  const first = s.charCodeAt(j);
+  if (first !== DOLLAR) {
+    // A tag starts with a letter or `_` (never a digit — that is `$1`).
+    if (!((first >= 65 && first <= 90) || (first >= 97 && first <= 122) || first === 95)) {
+      return at + 1;
+    }
+    while (j < s.length && isIdentChar(s.charCodeAt(j)) && s.charCodeAt(j) !== DOLLAR) j++;
+    if (s.charCodeAt(j) !== DOLLAR) return at + 1;
+  }
+  const tag = s.slice(at, j + 1);
+  const end = s.indexOf(tag, j + 1);
+  return end === -1 ? s.length : end + tag.length;
+}
+
+function isIdentChar(c: number): boolean {
+  return (
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36
+  );
 }
 
 /**

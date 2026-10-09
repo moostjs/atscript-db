@@ -73,7 +73,7 @@ import type {
   TWriteTableResolver,
   NullableOptional,
 } from "../types";
-import { pkTupleKey, rowMatchesKey, sameKey, uniqueKeyTuple } from "../shared/keys";
+import { findRowsByKeys, pkTupleKey, sameKey, uniqueKeyTuple } from "../shared/keys";
 import { isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
@@ -269,8 +269,8 @@ class WriteGuardContext<Row> implements TDbWriteGuardContext<Row> {
       controls: {},
     } as never)) as Array<Record<string, unknown>>;
     const used = new Set<Record<string, unknown>>();
-    const out = filters.map((filter) => {
-      const row = rows.find((r) => rowMatchesKey(r, filter as Record<string, unknown>));
+    const found = findRowsByKeys(rows, filters as Array<Record<string, unknown>>);
+    const out = found.map((row) => {
       if (row) used.add(row);
       return (row ?? null) as Row | null;
     });
@@ -502,8 +502,9 @@ export class AtscriptDbTable<
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
     }
 
+    const singleStatement = !ignore && this._isSingleStatementWrite(payloads, depth, guard, check);
     return enrichFkViolation(this._meta, () =>
-      this.adapter.withTransaction(async () => {
+      this._inWriteTransaction(singleStatement, async () => {
         // Clone (dropping `undefined` props — deep at the root call only, the
         // nested re-entries receive already-pruned subtrees) + apply defaults.
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
@@ -659,8 +660,9 @@ export class AtscriptDbTable<
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
     }
 
+    const singleStatement = this._isSingleStatementWrite(payloads, depth, guard, check);
     return enrichFkViolation(this._meta, () =>
-      this.adapter.withTransaction(async () => {
+      this._inWriteTransaction(singleStatement, async () => {
         // Phase 0: Setup — clone (dropping `undefined` props), extract $cas FIRST
         // so OCC state never leaks into _applyDefaults, then apply defaults, then
         // validate. Hoist versionColumn — constant per table; one lookup serves
@@ -838,8 +840,9 @@ export class AtscriptDbTable<
       checkDepthOverflow(payloads as Array<Record<string, unknown>>, maxDepth, this._meta);
     }
 
+    const singleStatement = this._isSingleStatementWrite(payloads, depth, guard, check);
     return enrichFkViolation(this._meta, () =>
-      this.adapter.withTransaction(async () => {
+      this._inWriteTransaction(singleStatement, async () => {
         // OCC: extract $cas from each payload BEFORE validation. The strict
         // validator would otherwise reject $cas as an unknown top-level key
         // (it's not part of the schema). Hoist versionColumn once — constant
@@ -1002,18 +1005,27 @@ export class AtscriptDbTable<
             // Resolve array ops via read-modify-write if any __$ keys present
             const arrayOpsFields = getArrayOpsFields(translatedUpdate);
             if (arrayOpsFields.size > 0) {
-              const current = (await this.adapter.findOne({
-                filter: translatedFilter,
-                controls: {},
-              })) as Record<string, unknown> | null;
-              const resolved = resolveArrayOps(translatedUpdate, current, this as AtscriptDbTable);
-              result = await this.adapter.updateOne(
-                translatedFilter,
-                resolved,
-                translatedOps,
-                expectedVersion,
-                ...updateOpts,
-              );
+              // Read-modify-write: two statements — always transactional (this
+              // joins the write's own transaction; a single-statement write
+              // opened none, so the pair gets one of its own).
+              result = await this.adapter.withTransaction(async () => {
+                const current = (await this.adapter.findOne({
+                  filter: translatedFilter,
+                  controls: {},
+                })) as Record<string, unknown> | null;
+                const resolved = resolveArrayOps(
+                  translatedUpdate,
+                  current,
+                  this as AtscriptDbTable,
+                );
+                return this.adapter.updateOne(
+                  translatedFilter,
+                  resolved,
+                  translatedOps,
+                  expectedVersion,
+                  ...updateOpts,
+                );
+              });
             } else {
               result = await this.adapter.updateOne(
                 translatedFilter,
@@ -1194,7 +1206,7 @@ export class AtscriptDbTable<
       return { deletedCount: 0 };
     }
     const guard = opts?.guard;
-    const needsCascade = this._integrity.needsCascade(this._cascadeResolver);
+    const needsCascade = this._integrity.needsCascade(this._cascadeResolver, this.tableName);
     const run = async (): Promise<TDbDeleteResult> => {
       const pinned = (await this._pinIdCandidates(candidates, opts?.scope))!;
       const filter = this._andScope(pinned, opts?.scope);
@@ -1313,7 +1325,7 @@ export class AtscriptDbTable<
   public async deleteMany(filter: FilterExpr<FlatType>): Promise<TDbDeleteResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
-    if (this._integrity.needsCascade(this._cascadeResolver)) {
+    if (this._integrity.needsCascade(this._cascadeResolver, this.tableName)) {
       return remapDeleteFkViolation(this.tableName, () =>
         this.adapter.withTransaction(async () => {
           const pin = await this._integrity.cascadeBeforeDelete(
@@ -1456,6 +1468,40 @@ export class AtscriptDbTable<
     });
   }
 
+  /**
+   * Whether a `*One` / `bulk*` write of `payloads` is a single statement that
+   * needs no wrapping transaction (since 0.1.151): one root-level row, no
+   * `guard` / `check` (their reads and the write must share one snapshot),
+   * no nested navigation data (multi-table phases), and FK integrity enforced
+   * by the database (application-level FK checks read before writing). The
+   * write then calls the adapter outside any transaction of its own — one
+   * `insertMany([row])` / `replaceOne` / `updateOne` / `nativePatch`, or a
+   * read-only `count` for an empty patch; the array-operator read-modify-write
+   * still opens a transaction for its pair. Adapters may rely on it: a
+   * single-row `insertMany` reached this way runs outside a transaction.
+   */
+  private _isSingleStatementWrite(
+    payloads: readonly unknown[],
+    depth: number,
+    guard: unknown,
+    check: unknown,
+  ): boolean {
+    if (payloads.length !== 1 || depth !== 0 || guard || check) return false;
+    if (this._meta.foreignKeys.size > 0 && !this.adapter.supportsNativeForeignKeys()) return false;
+    const payload = payloads[0];
+    if (!payload || typeof payload !== "object") return false;
+    for (const navField of this._meta.navFields) {
+      const value = (payload as Record<string, unknown>)[navField];
+      if (value !== undefined && value !== null) return false;
+    }
+    return true;
+  }
+
+  /** Runs a write body inside the adapter transaction — or directly for a single-statement write. */
+  private _inWriteTransaction<R>(singleStatement: boolean, fn: () => Promise<R>): Promise<R> {
+    return singleStatement ? fn() : this.adapter.withTransaction(fn);
+  }
+
   /** Whether `filter` names every primary-key field (so it IS the row's exact key). */
   private _isPkFilter(filter: FilterExpr): boolean {
     const pkFields = this.primaryKeys;
@@ -1536,11 +1582,12 @@ export class AtscriptDbTable<
       controls,
     } as never)) as Array<Record<string, unknown>>;
     const used = new Set<Record<string, unknown>>();
-    for (const i of pending) {
-      const row = rows.find((r) => rowMatchesKey(r, rowFilters[i] as Record<string, unknown>));
+    const found = findRowsByKeys(rows, filters as Array<Record<string, unknown>>);
+    pending.forEach((i, k) => {
+      const row = found[k];
       targets[i] = row ?? null;
       if (row) used.add(row);
-    }
+    });
     // A row the keys did not match in memory (the store compares them
     // differently, e.g. a case-insensitive collation) — read those one by one.
     if (used.size < rows.length) {
@@ -1796,7 +1843,7 @@ export class AtscriptDbTable<
       if (field === versionField) continue;
       if (data[field] === undefined) {
         if (def.kind === "value") {
-          data[field] = this._parseValueDefault(field, def.value);
+          data[field] = this._valueDefault(field, def.value);
         } else if (def.kind === "fn" && !nativeFns.has(def.fn)) {
           switch (def.fn) {
             case "now": {
@@ -1813,6 +1860,21 @@ export class AtscriptDbTable<
       }
     }
     return data;
+  }
+
+  /**
+   * Parsed `@db.default 'literal'` values that are primitives — reused for
+   * every row (an object / array default is parsed per row: each row gets
+   * its own instance).
+   */
+  private _primitiveDefaults?: Map<string, unknown>;
+
+  private _valueDefault(field: string, literal: string): unknown {
+    const cache = (this._primitiveDefaults ??= new Map());
+    if (cache.has(field)) return cache.get(field);
+    const value = this._parseValueDefault(field, literal);
+    if (value === null || typeof value !== "object") cache.set(field, value);
+    return value;
   }
 
   /**

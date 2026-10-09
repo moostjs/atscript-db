@@ -15,10 +15,11 @@ const db = new DbSpace(() => new SqliteAdapter(new BetterSqlite3Driver("./app.db
 const db2 = createAdapter(":memory:", { verbose: console.log });
 ```
 
-`BetterSqlite3Driver` accepts a path or a pre-created `Database` instance. Options: destructures `vector` / `loadExtensions`; everything else forwards to the `better-sqlite3` constructor.
+`BetterSqlite3Driver` accepts a path or a pre-created `Database` instance. Options: destructures `vector` / `loadExtensions` / `statementCacheSize`; everything else forwards to the `better-sqlite3` constructor.
 
 - `vector: true` — load `sqlite-vec` on connect. Required for `@db.search.vector` to use a real `vec0` index (else falls back to JSON `TEXT`). Install peer: `pnpm add sqlite-vec`.
 - `loadExtensions: string[]` — paths to loadable SQLite extensions.
+- `statementCacheSize: number` (0.1.151) — prepared statements reused per connection (LRU by SQL text, default 256, `0` disables). Safe across schema changes; `PRAGMA`s are never cached.
 
 ```ts
 const db = createAdapter("./app.db", { vector: true });

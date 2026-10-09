@@ -1398,7 +1398,29 @@ describe("AtscriptDbTable — Relations", () => {
       const adapter = (authorTable as any).adapter as TxAdapter;
       adapter.seed([{ id: 1, name: "Alice", createdAt: 1000 }]);
 
-      await authorTable.replaceOne({ id: 1, name: "Alice V2", createdAt: 1000 } as any);
+      await authorTable.bulkReplace([
+        { id: 1, name: "Alice V2", createdAt: 1000 },
+        { id: 2, name: "Bob", createdAt: 1000 },
+      ] as any);
+      expect(txLog).toEqual(["begin", "commit"]);
+
+      // A single-row replace without nested data is one statement — no
+      // wrapping transaction (since 0.1.151); with nested data it keeps one.
+      txLog.length = 0;
+      await authorTable.replaceOne({ id: 1, name: "Alice V3", createdAt: 1000 } as any);
+      expect(txLog).toEqual([]);
+      await authorTable.replaceOne({
+        id: 1,
+        name: "Alice V4",
+        createdAt: 1000,
+        posts: [],
+      } as any);
+      expect(txLog).toEqual(["begin", "commit"]);
+
+      // Application-level FK checks read before writing → transaction kept.
+      txLog.length = 0;
+      const postTable = space.getTable(Post) as AtscriptDbTable;
+      await postTable.insertOne({ title: "P", authorId: 1 } as any);
       expect(txLog).toEqual(["begin", "commit"]);
     });
 

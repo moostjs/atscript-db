@@ -2,6 +2,7 @@ import type { TAtscriptAnnotatedType, TAtscriptTypeArray } from "@atscript/types
 
 import { DbError } from "../db-error";
 import type { AtscriptDbTable } from "../table/db-table";
+import type { TableMetadata } from "../table/table-metadata";
 import { getKeyProps } from "./patch-types";
 
 /** Metadata tag the flattener puts on top-level array fields (shared with `isVersionExemptPatch`). */
@@ -28,7 +29,8 @@ export function decomposePatch(
   table: AtscriptDbTable,
 ): Record<string, unknown> {
   const update: Record<string, unknown> = {};
-  flattenPatchPayload(payload, "", update, table, TOP_LEVEL_ARRAY_TAG);
+  // Table metadata read once per patch, not per key.
+  flattenPatchPayload(payload, "", update, table.getMetadata(), table);
 
   return update;
 }
@@ -37,32 +39,39 @@ function flattenPatchPayload(
   payload: Record<string, unknown>,
   prefix: string,
   update: Record<string, unknown>,
+  meta: TableMetadata,
   table: AtscriptDbTable,
-  topLevelArrayTag: string,
 ): void {
-  const meta = table.getMetadata();
-  for (const [_key, value] of Object.entries(payload)) {
+  const primaryKeys = meta.primaryKeys;
+  const flatMap = meta.flatMap;
+  for (const _key of Object.keys(payload)) {
+    const value = payload[_key];
     const key = prefix ? `${prefix}.${_key}` : _key;
 
     // Skip primary key fields in updates
-    if (table.primaryKeys.includes(key)) {
+    if (primaryKeys.includes(key)) {
       continue;
     }
 
-    const flatType = table.flatMap.get(key);
-    const isTopLevelArray = flatType?.metadata?.get(topLevelArrayTag) as boolean | undefined;
     const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
+    if (!isObjectValue) {
+      // Simple field set
+      update[key] = value;
+      continue;
+    }
+    const flatType = flatMap.get(key);
+    const isTopLevelArray = flatType?.metadata?.get(TOP_LEVEL_ARRAY_TAG) as boolean | undefined;
 
-    if (isObjectValue && isTopLevelArray && !flatType?.metadata?.has("db.json")) {
+    if (isTopLevelArray && !flatType?.metadata?.has("db.json")) {
       // Top-level array with patch operators (@db.json fields are excluded; plain arrays fall through as $replace)
       decomposeArrayPatch(key, value as Record<string, unknown>, flatType!, update, table);
-    } else if (isObjectValue && flatType?.metadata?.get("db.patch.strategy") === "merge") {
+    } else if (flatType?.metadata?.get("db.patch.strategy") === "merge") {
       // Merge: omitted siblings preserved.
-      flattenPatchPayload(value as Record<string, unknown>, key, update, table, topLevelArrayTag);
-    } else if (isObjectValue && meta.flattenedParents.has(key)) {
+      flattenPatchPayload(value as Record<string, unknown>, key, update, meta, table);
+    } else if (meta.flattenedParents.has(key)) {
       // Replace: required-missing leaves are caught earlier by the strict validator;
       // null-fill the optional ones so the omission isn't silently lost.
-      flattenPatchPayload(value as Record<string, unknown>, key, update, table, topLevelArrayTag);
+      flattenPatchPayload(value as Record<string, unknown>, key, update, meta, table);
       const optLeaves = meta.optionalLeavesByLogicalParent.get(key);
       if (optLeaves) {
         for (const lp of optLeaves) {

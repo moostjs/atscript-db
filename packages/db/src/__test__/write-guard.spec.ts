@@ -122,7 +122,9 @@ describe("table write guards", () => {
       const validate = vi.spyOn(table.getValidator("insert"), "validate");
       await table.insertOne({ name: "a" } as any);
       expect(validate).toHaveBeenCalledTimes(1);
-      expect(adapter.order).toEqual(["begin", "insertMany", "commit"]);
+      // A single-row write without guard / check / nested data is one statement:
+      // no wrapping transaction (since 0.1.151).
+      expect(adapter.order).toEqual(["insertMany"]);
     });
 
     it("an enrichment that makes a row invalid fails the re-validation → rollback, adapter never called", async () => {

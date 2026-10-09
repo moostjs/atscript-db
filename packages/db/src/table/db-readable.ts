@@ -533,6 +533,14 @@ export class AtscriptDbReadable<
    */
   public get uniqueKeySets(): string[][] {
     this._ensureBuilt();
+    // Computed once per table (metadata is immutable once built) — frozen, shared.
+    this._uniqueKeySets ??= this._computeUniqueKeySets();
+    return this._uniqueKeySets;
+  }
+
+  private _uniqueKeySets?: string[][];
+
+  private _computeUniqueKeySets(): string[][] {
     const sets: string[][] = [];
     if (this._meta.primaryKeys.length > 0) {
       sets.push(this._meta.primaryKeys.map((f) => this._meta.physicalPath(f)));
@@ -546,7 +554,8 @@ export class AtscriptDbReadable<
       const column = this._meta.physicalPath(prop);
       if (!sets.some((s) => s.length === 1 && s[0] === column)) sets.push([column]);
     }
-    return sets;
+    for (const set of sets) Object.freeze(set);
+    return Object.freeze(sets) as string[][];
   }
 
   /** Preferred row identifier field names. Defaults to primary keys. */

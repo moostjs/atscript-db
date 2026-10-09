@@ -22,6 +22,61 @@ export function buildInsert(
 }
 
 /**
+ * Single-row INSERT builder that reuses the statement text per column
+ * signature — the same SQL {@link buildInsert} renders, built once per
+ * distinct key list (in order) of the rows of one table instead of per row.
+ * Bounded: once `max` signatures are held the cache starts over.
+ * @since 0.1.151
+ */
+export class InsertSqlCache {
+  private readonly _sql = new Map<string, string>();
+  private _table?: string;
+  /** The previous row's keys and SQL — a batch of one shape skips the signature. */
+  private _lastKeys?: string[];
+  private _lastSql = "";
+
+  constructor(
+    private readonly _dialect: SqlDialect,
+    private readonly _max = 64,
+  ) {}
+
+  build(table: string, data: Record<string, unknown>): TSqlFragment {
+    if (table !== this._table) {
+      this._sql.clear();
+      this._table = table;
+      this._lastKeys = undefined;
+    }
+    const keys = Object.keys(data);
+    let sql: string | undefined;
+    if (this._lastKeys !== undefined && sameKeys(this._lastKeys, keys)) {
+      sql = this._lastSql;
+    } else {
+      const signature = keys.join("\0");
+      sql = this._sql.get(signature);
+      if (sql === undefined) {
+        sql = buildInsert(this._dialect, table, data).sql;
+        if (this._sql.size >= this._max) this._sql.clear();
+        this._sql.set(signature, sql);
+      }
+      this._lastKeys = keys;
+      this._lastSql = sql;
+    }
+    const dialect = this._dialect;
+    const params: unknown[] = [];
+    for (const key of keys) params.push(dialect.toValue(data[key]));
+    return { sql, params };
+  }
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
  * The columns of a multi-row INSERT: the union of the rows' keys, in
  * first-seen order (rows may differ in shape — an optional field omitted on
  * some).

@@ -317,8 +317,14 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     return pin;
   }
 
-  needsCascade(cascadeResolver: TCascadeResolver | undefined): boolean {
-    return !!cascadeResolver;
+  /**
+   * A resolver is set and — when `tableName` is given (since 0.1.151) — some
+   * table references `tableName` with an `onDelete` action: a delete from a
+   * table nothing references needs no cascade pass (nor its transaction).
+   */
+  needsCascade(cascadeResolver: TCascadeResolver | undefined, tableName?: string): boolean {
+    if (!cascadeResolver) return false;
+    return tableName === undefined || cascadeResolver(tableName).length > 0;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────

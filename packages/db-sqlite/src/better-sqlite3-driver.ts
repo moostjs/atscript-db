@@ -6,7 +6,24 @@ export interface TBetterSqlite3DriverOptions extends Record<string, unknown> {
   vector?: boolean;
   /** Absolute paths to SQLite loadable extensions, passed to `Database.loadExtension`. */
   loadExtensions?: string[];
+  /**
+   * Max prepared statements kept per connection (least-recently-used evicted).
+   * `run` / `all` / `get` reuse the statement prepared for the same SQL text
+   * instead of preparing it on every call. Default: 256; `0` disables the cache.
+   * @since 0.1.151
+   */
+  statementCacheSize?: number;
 }
+
+type TStatement = import("better-sqlite3").Statement;
+
+const DEFAULT_STATEMENT_CACHE_SIZE = 256;
+/** SQL longer than this is prepared per call (long `$in` lists, multi-row inserts). */
+const MAX_CACHED_SQL_LENGTH = 8192;
+/** Schema introspection (`PRAGMA …`) is never cached: it is cold, and a pragma may bake schema state in at prepare time. */
+const PRAGMA_RE = /^\s*pragma\b/i;
+/** Transaction-control statements `exec` runs through a statement prepared once. */
+const TX_CONTROL_SQL = new Set(["BEGIN", "BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"]);
 
 /**
  * {@link TSqliteDriver} implementation backed by `better-sqlite3`.
@@ -47,11 +64,17 @@ export class BetterSqlite3Driver implements TSqliteDriver {
 
   readonly hasVectorExt: boolean = false;
 
+  /** LRU of prepared statements by SQL text (Map insertion order = recency). */
+  private readonly _stmts = new Map<string, TStatement>();
+  private readonly _txStmts = new Map<string, TStatement>();
+  private readonly _maxStmts: number;
+
   constructor(
     pathOrDb: string | import("better-sqlite3").Database,
     options?: TBetterSqlite3DriverOptions,
   ) {
-    const { vector, loadExtensions, ...nativeOptions } = options ?? {};
+    const { vector, loadExtensions, statementCacheSize, ...nativeOptions } = options ?? {};
+    this._maxStmts = Math.max(0, statementCacheSize ?? DEFAULT_STATEMENT_CACHE_SIZE);
     const req = createRequire(import.meta.url);
 
     if (typeof pathOrDb === "string") {
@@ -72,8 +95,32 @@ export class BetterSqlite3Driver implements TSqliteDriver {
     }
   }
 
-  run(sql: string, params?: unknown[]): TSqliteRunResult {
+  /**
+   * The prepared statement for `sql` — reused from the LRU cache when present.
+   * A cached statement stays valid across schema changes: SQLite re-prepares
+   * it transparently on its next step (and `exec` — the DDL path — clears the
+   * cache anyway).
+   */
+  private _prepare(sql: string): TStatement {
+    const cached = this._stmts.get(sql);
+    if (cached !== undefined) {
+      // Refresh recency (re-insert at the tail).
+      this._stmts.delete(sql);
+      this._stmts.set(sql, cached);
+      return cached;
+    }
     const stmt = this.db.prepare(sql);
+    if (this._maxStmts > 0 && sql.length <= MAX_CACHED_SQL_LENGTH && !PRAGMA_RE.test(sql)) {
+      this._stmts.set(sql, stmt);
+      if (this._stmts.size > this._maxStmts) {
+        this._stmts.delete(this._stmts.keys().next().value as string);
+      }
+    }
+    return stmt;
+  }
+
+  run(sql: string, params?: unknown[]): TSqliteRunResult {
+    const stmt = this._prepare(sql);
     const result = params ? stmt.run(...params) : stmt.run();
     return {
       changes: result.changes,
@@ -82,17 +129,29 @@ export class BetterSqlite3Driver implements TSqliteDriver {
   }
 
   all<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {
-    const stmt = this.db.prepare(sql);
+    const stmt = this._prepare(sql);
     return (params ? stmt.all(...params) : stmt.all()) as T[];
   }
 
   get<T = Record<string, unknown>>(sql: string, params?: unknown[]): T | null {
-    const stmt = this.db.prepare(sql);
+    const stmt = this._prepare(sql);
     return ((params ? stmt.get(...params) : stmt.get()) as T) ?? null;
   }
 
   exec(sql: string): void {
+    if (TX_CONTROL_SQL.has(sql)) {
+      let stmt = this._txStmts.get(sql);
+      if (stmt === undefined) {
+        stmt = this.db.prepare(sql);
+        this._txStmts.set(sql, stmt);
+      }
+      stmt.run();
+      return;
+    }
     this.db.exec(sql);
+    // `exec` carries DDL / PRAGMAs: drop the cached statements (SQLite would
+    // re-prepare them anyway; this releases the ones over dropped tables).
+    this._stmts.clear();
   }
 
   registerFunction(
@@ -105,6 +164,8 @@ export class BetterSqlite3Driver implements TSqliteDriver {
 
   /** Idempotent: closing an already closed database is a no-op. */
   close(): void {
+    this._stmts.clear();
+    this._txStmts.clear();
     if (!this.db.open) return;
     this.db.close();
   }

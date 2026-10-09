@@ -108,6 +108,48 @@ describe("Cascade Delete", () => {
     expect(sharedStore.get("comments")!.map((c) => c.id)).toEqual([300]);
   });
 
+  it("re-resolves cascade targets once a referencing table is registered (memo invalidation)", async () => {
+    const space = createSpace();
+    const posts = space.getTable(PostType);
+    seedData();
+
+    // No table references "posts" yet: a plain delete, comments untouched.
+    await posts.deleteOne(30);
+    expect(sharedStore.get("comments")!.map((c) => c.id)).toEqual([100, 101, 200, 300]);
+
+    // Registering the child table invalidates the memoised (empty) targets.
+    space.getTable(CommentType);
+    space.getTable(AuthorType);
+    await posts.deleteOne(10);
+    expect(sharedStore.get("posts")!.map((p) => p.id)).toEqual([20]);
+    expect(sharedStore.get("comments")!.map((c) => c.id)).toEqual([200, 300]);
+  });
+
+  it("a delete from a table nothing references runs no cascade transaction", async () => {
+    const txLog: string[] = [];
+    const space = new DbSpace(() => {
+      const adapter = new MockAdapter();
+      adapter.store = sharedStore;
+      const begin = adapter.withTransaction.bind(adapter);
+      adapter.withTransaction = (fn) => {
+        txLog.push("tx");
+        return begin(fn);
+      };
+      return adapter;
+    });
+    const comments = space.getTable(CommentType);
+    const posts = space.getTable(PostType);
+    space.getTable(AuthorType);
+    seedData();
+
+    await comments.deleteOne(300);
+    await comments.deleteMany({ postId: 20 });
+    expect(txLog).toEqual([]);
+    await posts.deleteOne(10); // referenced by comments → cascade pass in a transaction
+    expect(txLog.length).toBeGreaterThan(0);
+    expect(sharedStore.get("comments")!.map((c) => c.id)).toEqual([]);
+  });
+
   it("should not cascade when no children exist", async () => {
     const space = createSpace();
     const posts = space.getTable(PostType);

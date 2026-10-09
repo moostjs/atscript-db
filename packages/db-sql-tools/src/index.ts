@@ -38,6 +38,7 @@ export {
   buildInsert,
   buildInsertMany,
   insertManyColumns,
+  InsertSqlCache,
   chunkInsertRows,
   buildSelect,
   buildPartitionedSelect,

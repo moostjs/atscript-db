@@ -210,6 +210,8 @@ The `state` value you return from `_beginTransaction` is passed to commit and ro
 
 Transaction context is tracked via `AsyncLocalStorage` — nested `withTransaction()` calls within the same async chain automatically reuse the existing transaction. Inside any method, call `this._getTransactionState()` to retrieve the current transaction state.
 
+Since 0.1.151 a single-row write that is one statement — one row, no `guard` / `check`, no nested navigation data, and foreign keys enforced by the database (or none) — calls your adapter **outside** any transaction: `insertMany([row])`, `replaceOne`, `updateOne` / `nativePatch` (or `count` for an empty patch). A batch, a guarded or checked write, a nested write, an array-operator read-modify-write and an application-level FK check still run inside `withTransaction`. If your `insertMany` opens its own transaction, a one-row call reached this way can skip it when that row is a single atomic statement.
+
 ### Advanced: Custom Transaction Flow
 
 If your database has a specialized transaction API (e.g., MongoDB's `session.withTransaction()`), override `withTransaction()` directly and use `_runInTransactionContext(state, fn)` to set up the shared context. This ensures that nested adapters within the same async chain see the same transaction state. If a context already exists (nesting), it is reused.

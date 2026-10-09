@@ -169,6 +169,8 @@ protected async _rollbackTransaction(state: unknown): Promise<void> { /* ... */ 
 
 Adapters using session-style APIs (MongoDB) can override `withTransaction()` directly and use `_runInTransactionContext(state, fn)` to propagate the session.
 
+Single-statement writes (0.1.151): one row + no `guard`/`check` + no nested nav data + native FKs (or no FKs) → the core calls `insertMany([row])` / `replaceOne` / `updateOne` / `nativePatch` (or `count` for an empty patch) OUTSIDE any transaction. Batches, guarded/checked/nested writes, array-op read-modify-write and app-level FK checks stay inside `withTransaction`. A one-row `insertMany` that is one atomic statement may skip its own transaction.
+
 `isInTransaction()` (0.1.143) = a REAL transaction is open in this async context (`false` for a pass-through `withTransaction` — no primitives, standalone Mongo). It feeds the post-write check's `ctx.transactional`; don't fake transaction state in a pass-through.
 
 ## Schema sync hooks (all optional)

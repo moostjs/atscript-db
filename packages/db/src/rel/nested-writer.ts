@@ -406,12 +406,22 @@ export async function batchReplaceNestedFrom(
     if (!target) {
       continue;
     }
-    for (const original of originals) {
-      const children = original[navField];
+    const replacing = originals.filter(
+      (original) => Array.isArray(original[navField]) && original[parentPKField] !== undefined,
+    );
+    const current = await currentChildrenOf(
+      target,
+      replacing.map((original) => original[parentPKField]),
+      replacing.flatMap((original) => original[navField] as unknown[]),
+    );
+    for (const original of replacing) {
       const parentPK = original[parentPKField];
-      if (Array.isArray(children) && parentPK !== undefined) {
-        await fromReplace(target, children, parentPK);
-      }
+      await fromReplace(
+        target,
+        original[navField] as unknown[],
+        parentPK,
+        current?.get(keyString(parentPK)),
+      );
     }
   }
 }
@@ -691,17 +701,30 @@ export async function batchPatchNestedFrom(
     }
     const { targetTable, fkField, childPKs } = target;
 
+    const patching: Array<{ parentPK: unknown; ops: ReturnType<typeof extractNavPatchOps> }> = [];
     for (const original of originals) {
       const navValue = original[navField];
       const parentPK = original[parentPKField];
       if (navValue === undefined || navValue === null || parentPK === undefined) {
         continue;
       }
-      const ops = extractNavPatchOps(navValue);
+      patching.push({ parentPK, ops: extractNavPatchOps(navValue) });
+    }
+    const current = await currentChildrenOf(
+      target,
+      patching.filter(({ ops }) => ops.replace).map(({ parentPK }) => parentPK),
+      patching.flatMap(({ ops }) => [
+        ...(ops.replace ?? []),
+        ...(ops.update ?? []),
+        ...(ops.upsert ?? []),
+        ...(ops.insert ?? []),
+      ]),
+    );
 
+    for (const { parentPK, ops } of patching) {
       // $replace
       if (ops.replace) {
-        await fromReplace(target, ops.replace, parentPK);
+        await fromReplace(target, ops.replace, parentPK, current?.get(keyString(parentPK)));
       }
 
       // $remove
@@ -1128,6 +1151,7 @@ async function fromReplace(
   target: TFromWriteTarget,
   children: unknown[],
   parentPK: unknown,
+  current?: Array<Record<string, unknown>>,
 ): Promise<void> {
   const { targetTable, navField, fkField, childPKs, maxDepth, depth } = target;
   const toReplace: Array<Record<string, unknown>> = [];
@@ -1143,10 +1167,12 @@ async function fromReplace(
     }
   }
 
-  const existing = await targetTable.findMany({
-    filter: { [fkField]: parentPK },
-    controls: childPKs.length > 0 ? { $select: [...childPKs] } : {},
-  });
+  const existing =
+    current ??
+    (await targetTable.findMany({
+      filter: { [fkField]: parentPK },
+      controls: childPKs.length > 0 ? { $select: [...childPKs] } : {},
+    }));
   const orphanFilters: Array<Record<string, unknown>> = [];
   for (const row of existing) {
     if (!keep.has(pkTupleKey(row, childPKs))) {
@@ -1167,6 +1193,61 @@ async function fromReplace(
       targetTable.insertMany(toInsert, { maxDepth, _depth: depth + 1 }),
     );
   }
+}
+
+/**
+ * The current (keyed) children of several parents in ONE read — what
+ * {@link fromReplace} reads per parent, grouped by parent key (since 0.1.151).
+ * The writes stay per parent and in order; only this read is shared, which is
+ * safe because each parent's writes are pinned to its own children (the
+ * foreign key is filtered on and never SET) and no child entry of the batch
+ * (`entries`) carries nested navigation data (no nested write of a child can
+ * reach another parent's children); a row removed meanwhile by a delete cascade is a no-op orphan
+ * delete or the same `CONFLICT` either way. Done only where grouping cannot
+ * differ from the store's own matching: two or more DISTINCT integer parent
+ * keys (no collation can merge two of them) and a child table with a primary
+ * key; a fetched row that maps to no parent key (a representation the
+ * grouping does not know) also falls back. `undefined` → read per parent.
+ */
+async function currentChildrenOf(
+  target: TFromWriteTarget,
+  parentPKs: unknown[],
+  entries: unknown[],
+): Promise<Map<string, Array<Record<string, unknown>>> | undefined> {
+  const { targetTable, fkField, childPKs } = target;
+  if (parentPKs.length < 2 || childPKs.length === 0) return undefined;
+  // A child entry carrying nested navigation data could, through its own
+  // nested writes (a self-referencing tree), add children to a parent later
+  // in the batch.
+  const childNav = targetTable.getMetadata().navFields;
+  if (childNav.size > 0) {
+    for (const entry of entries) {
+      for (const navField of childNav) {
+        const value = (entry as Record<string, unknown> | null)?.[navField];
+        if (value !== undefined && value !== null) return undefined;
+      }
+    }
+  }
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  for (const pk of parentPKs) {
+    if (!(typeof pk === "number" && Number.isInteger(pk)) && typeof pk !== "bigint") {
+      return undefined;
+    }
+    const key = keyString(pk);
+    if (groups.has(key)) return undefined; // the same parent twice: its writes change its children
+    groups.set(key, []);
+  }
+  const rows = await targetTable.findMany({
+    filter: { [fkField]: { $in: parentPKs } },
+    controls: { $select: [...new Set([...childPKs, fkField])] },
+  });
+  for (const row of rows) {
+    const value = row[fkField];
+    const group = value === null || value === undefined ? undefined : groups.get(keyString(value));
+    if (!group) return undefined;
+    group.push(row);
+  }
+  return groups;
 }
 
 /**

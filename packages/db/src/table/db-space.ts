@@ -79,6 +79,13 @@ export class DbSpace implements AsyncDisposable {
   /** All tables created in this space — used for reverse FK lookup during cascade. */
   private _allTables = new Set<AtscriptDbTable>();
 
+  /**
+   * Per-table-name memo of {@link _getCascadeTargets} / {@link _getFkLookupTarget}
+   * (since 0.1.151) — both scan every table; cleared whenever a table is added.
+   */
+  private _cascadeTargets = new Map<string, TCascadeTarget[]>();
+  private _fkLookupTargets = new Map<string, TFkLookupTarget | undefined>();
+
   /** Every table / view handle the space created — flagged closed on {@link close}. */
   private _handles = new Set<AtscriptDbReadable>();
 
@@ -150,6 +157,8 @@ export class DbSpace implements AsyncDisposable {
         },
       );
       this._allTables.add(readable as AtscriptDbTable);
+      this._cascadeTargets.clear();
+      this._fkLookupTargets.clear();
       readable.setCascadeResolver((tableName) => this._getCascadeTargets(tableName));
       readable.setFkLookupResolver((tableName) => this._getFkLookupTarget(tableName));
       readable.setEncryption(this._encryption);
@@ -305,6 +314,15 @@ export class DbSpace implements AsyncDisposable {
    * Accesses `table.foreignKeys` which triggers `_flatten()` if needed.
    */
   private _getCascadeTargets(tableName: string): TCascadeTarget[] {
+    let targets = this._cascadeTargets.get(tableName);
+    if (targets === undefined) {
+      targets = this._scanCascadeTargets(tableName);
+      this._cascadeTargets.set(tableName, targets);
+    }
+    return targets;
+  }
+
+  private _scanCascadeTargets(tableName: string): TCascadeTarget[] {
     const targets: TCascadeTarget[] = [];
     for (const table of this._allTables) {
       for (const fk of table.foreignKeys.values()) {
@@ -327,6 +345,15 @@ export class DbSpace implements AsyncDisposable {
    * Searches all registered tables for one with the matching table name.
    */
   private _getFkLookupTarget(tableName: string): TFkLookupTarget | undefined {
+    if (this._fkLookupTargets.has(tableName)) {
+      return this._fkLookupTargets.get(tableName);
+    }
+    const target = this._scanFkLookupTarget(tableName);
+    this._fkLookupTargets.set(tableName, target);
+    return target;
+  }
+
+  private _scanFkLookupTarget(tableName: string): TFkLookupTarget | undefined {
     for (const table of this._allTables) {
       if (table.tableName === tableName) {
         return {

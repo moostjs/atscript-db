@@ -345,9 +345,12 @@ The second constructor argument accepts a few extra options on top of the standa
 new BetterSqlite3Driver("./data.db", {
   vector: true, // load the optional `sqlite-vec` extension
   loadExtensions: ["/path/to/ext1.so"], // pass each path to `Database.loadExtension`
+  statementCacheSize: 256, // prepared statements kept for reuse (LRU); 0 disables
   // any other `better-sqlite3` Database options are forwarded
 });
 ```
+
+Since 0.1.151 the driver keeps the statements it prepares in a bounded least-recently-used cache keyed by SQL text (default 256 per connection), so a repeated query or insert is not re-prepared. Cached statements stay valid across schema changes (SQLite re-prepares them on their next run); `PRAGMA` statements are never cached.
 
 The driver uses `createRequire` internally, so `better-sqlite3` (and `sqlite-vec`) remain optional dependencies — they are only loaded when `BetterSqlite3Driver` is instantiated with the corresponding option.
 

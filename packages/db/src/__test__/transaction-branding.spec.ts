@@ -107,7 +107,12 @@ describe("transaction-state branding by owner", () => {
     await b1.withTransaction(async () => {
       await tableA1.findOne({ filter: { id: 1 }, controls: {} }); // A has no transaction here
       await a1.withTransaction(async () => tableA1.insertOne({ id: 2, name: "y" } as any));
-      await tableA1.insertOne({ id: 3, name: "z" } as any); // the table's own withTransaction → A's second transaction
+      // the table's own withTransaction → A's second transaction (a batch —
+      // a single-row insert is one statement and opens none since 0.1.151)
+      await tableA1.insertMany([
+        { id: 3, name: "z" },
+        { id: 5, name: "q" },
+      ] as any);
       await tableB1.insertOne({ id: 4, name: "w" } as any);
     });
     expect(a1.seen).toEqual(["autocommit", "A1", "A2"]);

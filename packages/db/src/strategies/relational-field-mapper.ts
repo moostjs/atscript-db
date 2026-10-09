@@ -35,40 +35,53 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
       return row;
     }
 
+    const plan = readPlanFor(meta);
+    const cols = plan.columns;
     const result: Record<string, unknown> = {};
-    const fromFmts = meta.fromStorageFormatters;
 
     for (const physical of Object.keys(row)) {
-      const fd = meta.leafByPhysical.get(physical);
-      if (!fd) {
+      const col = cols.get(physical);
+      if (col === undefined) {
         result[physical] = row[physical];
         continue;
       }
 
-      let raw = row[physical];
-      const fromFmt = fromFmts?.get(physical);
-      if (fromFmt && raw !== null && raw !== undefined) {
-        raw = fromFmt(raw);
+      let value = row[physical];
+      if (col.fromFmt !== undefined && value !== null && value !== undefined) {
+        value = col.fromFmt(value);
       }
-      const value =
-        fd.designType === "boolean"
-          ? toBool(raw)
-          : fd.designType === "decimal"
-            ? toDecimalString(raw)
-            : raw;
+      if (col.coerce !== undefined) {
+        value = col.coerce(value);
+      }
+      if (col.json && typeof value === "string") {
+        value = JSON.parse(value);
+      }
 
-      if (fd.storage === "json") {
-        this.setNestedValue(result, fd.path, typeof value === "string" ? JSON.parse(value) : value);
-      } else if (fd.storage === "flattened") {
-        this.setNestedValue(result, fd.path, value);
-      } else {
-        result[fd.path] = value;
+      const parents = col.parents;
+      if (parents === undefined) {
+        result[col.path] = value;
+        continue;
       }
+      // Nested leaf: walk / create the parent objects (what `setNestedValue` does).
+      let current = result;
+      for (let i = 0; i < parents.length; i++) {
+        const part = parents[i]!;
+        const next = current[part];
+        if (next === undefined || next === null) {
+          const created: Record<string, unknown> = {};
+          current[part] = created;
+          current = created;
+        } else {
+          current = next as Record<string, unknown>;
+        }
+      }
+      current[col.last] = value;
     }
 
-    // Collapse null parent objects
-    for (const parentPath of meta.flattenedParents) {
-      this.reconstructNullParent(result, parentPath, meta);
+    // Collapse null parent objects (same order as `flattenedParents` — a
+    // deeper parent collapsed first lets its ancestor collapse too).
+    for (const parent of plan.parents) {
+      collapseNullParent(result, parent);
     }
 
     return result;
@@ -158,13 +171,15 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     meta: TableMetadata,
     adapter: BaseDbAdapter,
   ): Record<string, unknown> {
+    // Full flatten: the output is a new object, so the payload is read as is
+    // (no private copy) — `prepareCommon`'s key preparation and stripping are
+    // applied per key while flattening.
+    if (meta.requiresMappings && !meta.onlyColumnRenames) {
+      return this.formatWriteValues(this.flattenWritePayload(payload, meta, adapter), meta);
+    }
+
     const data = { ...payload };
     this.prepareCommon(data, meta, adapter);
-
-    // Fast path: no mappings needed at all
-    if (!meta.requiresMappings) {
-      return this.formatWriteValues(data, meta);
-    }
 
     // Column-rename-only: apply renames without full flatten
     if (meta.onlyColumnRenames) {
@@ -174,11 +189,8 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
           delete data[logical];
         }
       }
-      return this.formatWriteValues(data, meta);
     }
-
-    // Flatten nested objects and apply physical names
-    return this.formatWriteValues(this.flattenPayload(data, meta), meta);
+    return this.formatWriteValues(data, meta);
   }
 
   translatePatchKeys(
@@ -284,67 +296,241 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   /**
-   * Flattens nested object fields into __-separated keys and
-   * JSON-stringifies @db.json / array fields.
+   * Flattens nested objects into __-separated keys and JSON-stringifies
+   * @db.json / array fields — with `prepareCommon` folded in: primary-key
+   * values prepared (`adapter.prepareId`), top-level ignored fields (skipped
+   * by {@link writeFlattenedField}) and derived fields left out. `payload`
+   * itself is not modified.
    */
-  private flattenPayload(
-    data: Record<string, unknown>,
+  private flattenWritePayload(
+    payload: Record<string, unknown>,
     meta: TableMetadata,
+    adapter: BaseDbAdapter,
   ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
-    for (const key of Object.keys(data)) {
-      this.writeFlattenedField(key, data[key], result, meta);
+    const primaryKeys = meta.primaryKeys;
+    const root = writePlanFor(meta);
+    for (const key of Object.keys(payload)) {
+      if (meta.derivedFields.has(key)) {
+        continue;
+      }
+      let value = payload[key];
+      if (value !== undefined && primaryKeys.includes(key)) {
+        const fieldType = meta.flatMap?.get(key);
+        if (fieldType) {
+          value = adapter.prepareId(value, fieldType);
+        }
+      }
+      writeFlattenedField(root, "", key, value, result, meta);
     }
     return result;
   }
+}
 
-  /**
-   * Classifies and writes a single field to the result object.
-   * Recurses into nested objects that should be flattened.
-   */
-  private writeFlattenedField(
-    path: string,
-    value: unknown,
-    result: Record<string, unknown>,
-    meta: TableMetadata,
-  ): void {
-    if (meta.ignoredFields.has(path)) {
+// ── Compiled read plan ──────────────────────────────────────────────────────
+
+/** One stored column of the read plan (see {@link readPlanFor}). */
+interface TReadColumn {
+  /** Logical dot-path. */
+  path: string;
+  /** Parent segments of a nested (flattened / dotted json) leaf; `undefined` = set `path` directly. */
+  parents?: string[];
+  /** Last segment of a nested leaf. */
+  last: string;
+  json: boolean;
+  coerce?: (value: unknown) => unknown;
+  fromFmt?: (value: unknown) => unknown;
+}
+
+/** A flattened parent collapsed to `null` / `{}` when every child read null. */
+interface TReadParent {
+  /** Segments leading to the parent's container. */
+  ancestors: string[];
+  last: string;
+  optional: boolean;
+}
+
+interface TReadPlan {
+  columns: Map<string, TReadColumn>;
+  parents: TReadParent[];
+}
+
+/**
+ * Per-table read plan of {@link RelationalFieldMapper.reconstructFromRead}:
+ * the per-column decisions (coercion, JSON, nesting — the dot-path pre-split)
+ * and the parent-collapse list, compiled once per built metadata instead of
+ * per row. Metadata is immutable after `build()`, which precedes any read.
+ */
+const readPlans = new WeakMap<TableMetadata, TReadPlan>();
+
+function readPlanFor(meta: TableMetadata): TReadPlan {
+  let plan = readPlans.get(meta);
+  if (plan === undefined) {
+    plan = compileReadPlan(meta);
+    readPlans.set(meta, plan);
+  }
+  return plan;
+}
+
+function compileReadPlan(meta: TableMetadata): TReadPlan {
+  const fromFmts = meta.fromStorageFormatters;
+  const columns = new Map<string, TReadColumn>();
+  for (const [physical, fd] of meta.leafByPhysical) {
+    const nested = (fd.storage === "json" || fd.storage === "flattened") && fd.path.includes(".");
+    const segs = nested ? fd.path.split(".") : undefined;
+    columns.set(physical, {
+      path: fd.path,
+      parents: segs?.slice(0, -1),
+      last: segs ? segs[segs.length - 1]! : fd.path,
+      json: fd.storage === "json",
+      coerce:
+        fd.designType === "boolean"
+          ? toBool
+          : fd.designType === "decimal"
+            ? toDecimalString
+            : undefined,
+      fromFmt: fromFmts?.get(physical),
+    });
+  }
+  const parents: TReadParent[] = [];
+  for (const parentPath of meta.flattenedParents) {
+    const segs = parentPath.split(".");
+    parents.push({
+      ancestors: segs.slice(0, -1),
+      last: segs[segs.length - 1]!,
+      optional: !!meta.flatMap?.get(parentPath)?.optional,
+    });
+  }
+  return { columns, parents };
+}
+
+/** If every child of a flattened parent is null / undefined, collapse it (`null` when optional, else `{}`). */
+function collapseNullParent(obj: Record<string, unknown>, parent: TReadParent): void {
+  let current = obj;
+  const ancestors = parent.ancestors;
+  for (let i = 0; i < ancestors.length; i++) {
+    const next = current[ancestors[i]!];
+    if (next === undefined || next === null) {
       return;
     }
-
-    if (meta.flattenedParents.has(path)) {
-      if (value === null || value === undefined) {
-        this.setFlattenedChildrenNull(path, result, meta);
-      } else if (typeof value === "object" && !Array.isArray(value)) {
-        const obj = value as Record<string, unknown>;
-        for (const key of Object.keys(obj)) {
-          this.writeFlattenedField(`${path}.${key}`, obj[key], result, meta);
-        }
-      }
-    } else {
-      const fd = meta.leafByLogical.get(path);
-      const physical = fd?.physicalName ?? path.replace(/\./g, "__");
-      if (fd?.storage === "json") {
-        result[physical] = value !== undefined && value !== null ? JSON.stringify(value) : value;
-      } else {
-        result[physical] = value;
-      }
+    current = next as Record<string, unknown>;
+  }
+  const parentObj = current[parent.last];
+  if (typeof parentObj !== "object" || parentObj === null) {
+    return;
+  }
+  for (const k of Object.keys(parentObj)) {
+    const v = (parentObj as Record<string, unknown>)[k];
+    if (v !== null && v !== undefined) {
+      return;
     }
   }
+  current[parent.last] = parent.optional ? null : {};
+}
 
-  /**
-   * When a parent object is null/undefined, set all its flattened children to null.
-   */
-  private setFlattenedChildrenNull(
-    parentPath: string,
-    result: Record<string, unknown>,
-    meta: TableMetadata,
-  ): void {
-    const children = meta.childrenByParent.get(parentPath);
-    if (children) {
-      for (const physical of children) {
-        result[physical] = null;
+// ── Compiled write plan ─────────────────────────────────────────────────────
+
+/** How one logical path is written (see {@link writePlanFor}). */
+interface TWriteNode {
+  kind: "ignored" | "parent" | "json" | "leaf";
+  /** Logical dot-path. */
+  path: string;
+  /** Physical column of a leaf / json node. */
+  physical: string;
+  /** Child nodes of a flattened parent, by key (filled on first use). */
+  children?: Map<string, TWriteNode>;
+  /** Columns a `null` / `undefined` parent sets to `null`. */
+  nullChildren?: readonly string[];
+}
+
+/**
+ * Per-table write plan of the relational flatten: each logical path's
+ * classification (ignored / flattened parent / json / plain column) and
+ * physical column, resolved once per path instead of per row (no per-key
+ * path concatenation and map lookups). Only schema paths are memoised — a
+ * key the metadata does not know is resolved per call, so arbitrary payload
+ * keys cannot grow the plan.
+ */
+const writePlans = new WeakMap<TableMetadata, Map<string, TWriteNode>>();
+
+function writePlanFor(meta: TableMetadata): Map<string, TWriteNode> {
+  let root = writePlans.get(meta);
+  if (root === undefined) {
+    root = new Map();
+    writePlans.set(meta, root);
+  }
+  return root;
+}
+
+function resolveWriteNode(path: string, meta: TableMetadata): { node: TWriteNode; known: boolean } {
+  if (meta.ignoredFields.has(path)) {
+    return { node: { kind: "ignored", path, physical: "" }, known: true };
+  }
+  if (meta.flattenedParents.has(path)) {
+    return {
+      node: {
+        kind: "parent",
+        path,
+        physical: "",
+        children: new Map(),
+        nullChildren: meta.childrenByParent.get(path) ?? [],
+      },
+      known: true,
+    };
+  }
+  const fd = meta.leafByLogical.get(path);
+  return {
+    node: {
+      kind: fd?.storage === "json" ? "json" : "leaf",
+      path,
+      physical: fd?.physicalName ?? path.replace(/\./g, "__"),
+    },
+    known: fd !== undefined,
+  };
+}
+
+/**
+ * Classifies and writes a single field to the result object — recursing into
+ * nested objects that are flattened; JSON-stringifies @db.json / array fields.
+ */
+function writeFlattenedField(
+  level: Map<string, TWriteNode>,
+  prefix: string,
+  key: string,
+  value: unknown,
+  result: Record<string, unknown>,
+  meta: TableMetadata,
+): void {
+  let node = level.get(key);
+  if (node === undefined) {
+    const resolved = resolveWriteNode(prefix ? `${prefix}.${key}` : key, meta);
+    node = resolved.node;
+    if (resolved.known) level.set(key, node);
+  }
+  switch (node.kind) {
+    case "ignored": {
+      return;
+    }
+    case "parent": {
+      if (value === null || value === undefined) {
+        // A null parent nulls all its flattened children.
+        for (const physical of node.nullChildren!) {
+          result[physical] = null;
+        }
+      } else if (typeof value === "object" && !Array.isArray(value)) {
+        const obj = value as Record<string, unknown>;
+        for (const childKey of Object.keys(obj)) {
+          writeFlattenedField(node.children!, node.path, childKey, obj[childKey], result, meta);
+        }
       }
+      return;
+    }
+    case "json": {
+      result[node.physical] = value !== undefined && value !== null ? JSON.stringify(value) : value;
+      return;
+    }
+    default: {
+      result[node.physical] = value;
     }
   }
 }

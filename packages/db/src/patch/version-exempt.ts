@@ -21,17 +21,20 @@ export function isVersionExemptPatch(
 ): boolean {
   const meta = table.getMetadata();
   if (meta.versionExemptPaths.size === 0) return false;
+  // Metadata read once per patch, not per key.
+  const primaryKeys = meta.primaryKeys;
+  const flatMap = meta.flatMap;
 
   const walk = (obj: Record<string, unknown>, prefix: string): TWalk => {
     let result: TWalk = "none";
     for (const [k, value] of Object.entries(obj)) {
       const key = prefix ? `${prefix}.${k}` : k;
-      if (table.primaryKeys.includes(key)) continue;
+      if (primaryKeys.includes(key)) continue;
       if (meta.isVersionExemptPath(key)) {
         result = "exempt";
         continue;
       }
-      const flatType = table.flatMap.get(key);
+      const flatType = flatMap.get(key);
       const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
       if (
         isObjectValue &&

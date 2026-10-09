@@ -41,7 +41,12 @@ export abstract class IntegrityStrategy {
     adapter: BaseDbAdapter,
   ): Promise<TCascadePin>;
 
-  abstract needsCascade(cascadeResolver: TCascadeResolver | undefined): boolean;
+  /**
+   * Whether a delete must run the application-level cascade pass. `tableName`
+   * (optional, since 0.1.151) lets the strategy answer `false` for a table
+   * nothing references.
+   */
+  abstract needsCascade(cascadeResolver: TCascadeResolver | undefined, tableName?: string): boolean;
 }
 
 /**

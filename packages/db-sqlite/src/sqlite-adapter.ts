@@ -56,6 +56,7 @@ import {
   buildVectorSearchSelect,
   fillReplacePayload,
   geoWindowFromControls,
+  InsertSqlCache,
   renameGeoDistance,
   replaceColumnsFor,
   SEARCH_SOURCE_ALIAS,
@@ -68,7 +69,6 @@ import {
   buildCreateTable,
   buildCreateView,
   buildDelete,
-  buildInsert,
   buildSelect,
   buildUpdate,
   defaultValueForType,
@@ -136,6 +136,9 @@ export class SqliteAdapter extends BaseDbAdapter {
   override viewCapabilities(): ReadonlySet<TViewCapability> {
     return ALL_VIEW_CAPABILITIES;
   }
+
+  /** INSERT text per column signature (rows of one table share a handful of shapes). */
+  private readonly _insertSql = new InsertSqlCache(sqliteDialect);
 
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the SQLite connection has the sqlite-vec extension loaded. */
@@ -427,7 +430,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   // ── CRUD: Insert ───────────────────────────────────────────────────────────
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
-    const { sql, params } = buildInsert(this.resolveTableName(), data);
+    const { sql, params } = this._insertSql.build(this.resolveTableName(), data);
     this._log(sql, params);
     const result = await this._stmt(() =>
       this._wrapConstraintError(() => this.driver.run(sql, params)),
@@ -436,16 +439,26 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
+    // One row is one statement — atomic on its own, no transaction needed.
+    if (data.length === 1) {
+      const { insertedId } = await this.insertOne(data[0]!);
+      return { insertedCount: 1, insertedIds: [insertedId] };
+    }
     return this.withTransaction(async () => {
-      const ids: unknown[] = [];
-      for (const row of data) {
-        const { sql, params } = buildInsert(this.resolveTableName(), row);
-        this._log(sql, params);
-        const result = await this._stmt(() =>
-          this._wrapConstraintError(() => this.driver.run(sql, params)),
-        );
-        ids.push(this._resolveInsertedId(row, result.lastInsertRowid));
-      }
+      const tableName = this.resolveTableName();
+      // Inside the transaction the connection is ours: one synchronous run
+      // inserts every row (single-row INSERTs — RETURNING order of a
+      // multi-row INSERT is unspecified, and it is not faster here).
+      const ids = await this._stmt(() => {
+        const out: unknown[] = [];
+        for (const row of data) {
+          const { sql, params } = this._insertSql.build(tableName, row);
+          this._log(sql, params);
+          const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+          out.push(this._resolveInsertedId(row, result.lastInsertRowid));
+        }
+        return out;
+      });
       return { insertedCount: ids.length, insertedIds: ids };
     });
   }
@@ -466,7 +479,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       const slots: TDbInsertIgnoreSlot[] = [];
       const tableName = this.resolveTableName();
       for (const row of data) {
-        const built = buildInsert(tableName, row);
+        const built = this._insertSql.build(tableName, row);
         const sql = `${built.sql} ON CONFLICT DO NOTHING`;
         const params = built.params;
         this._log(sql, params);
@@ -518,6 +531,25 @@ export class SqliteAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     return stripPartitionRowNumber(await this._stmt(() => this.driver.all(sql, params)));
+  }
+
+  /**
+   * Page + total in one synchronous segment: the filter's WHERE is built once
+   * for both statements, and both read the same snapshot.
+   */
+  override async findManyWithCount(
+    query: DbQuery,
+  ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    const where = buildWhere(query.filter);
+    const tableName = this.resolveTableName();
+    const { sql, params } = buildSelect(tableName, where, query.controls);
+    const countSql = `SELECT COUNT(*) as cnt FROM "${esc(tableName)}" WHERE ${where.sql}`;
+    this._log(sql, params);
+    this._log(countSql, where.params);
+    return this._stmt(() => ({
+      data: this.driver.all(sql, params),
+      count: this.driver.get<{ cnt: number }>(countSql, where.params)?.cnt ?? 0,
+    }));
   }
 
   async count(query: DbQuery): Promise<number> {
