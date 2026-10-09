@@ -129,6 +129,43 @@ function rejectVersionExempt(path: string, why: string): never {
   throw new Error(`@db.column.version.exempt on "${path}": ${why}`);
 }
 
+/** One `flattenAnnotatedType` `onField` call, in firing order. */
+interface TCollectedField {
+  path: string;
+  type: TAtscriptAnnotatedType;
+  metadata: TMetadataMap<AtscriptMetadata>;
+  /** A union / tuple / intersection member fired at its prop's path. */
+  member?: boolean;
+}
+
+/**
+ * When `fieldType` is a union / tuple / intersection, marks the entries its
+ * items already fired at the same `path` (onField is post-order) as members.
+ */
+function markComplexMembers(
+  collected: TCollectedField[],
+  path: string,
+  fieldType: TAtscriptAnnotatedType,
+): void {
+  const kind = fieldType.type.kind;
+  if (kind !== "union" && kind !== "tuple" && kind !== "intersection") return;
+  const items = new Set((fieldType.type as { items: TAtscriptAnnotatedType[] }).items);
+  const childPrefix = `${path}.`;
+  for (let i = collected.length - 1; i >= 0; i--) {
+    const entry = collected[i]!;
+    if (entry.path === path) {
+      if (items.has(entry.type)) entry.member = true;
+    } else if (!entry.path.startsWith(childPrefix)) {
+      break;
+    }
+  }
+}
+
+/** A built-in primitive inlined as a member (`number.int | null`), not a named alias. */
+function isInlinePrimitive(type: TAtscriptAnnotatedType): boolean {
+  return type.type.kind === "" && type.ref === undefined;
+}
+
 /**
  * Computed metadata for a database table or view.
  *
@@ -344,26 +381,25 @@ export class TableMetadata {
 
     adapter.onBeforeFlatten?.(type);
 
-    // Phase 1: Collect field tuples. Detect nav fields eagerly so
-    // Phase 2 can skip their descendants (flattenAnnotatedType fires
-    // onField post-order — children before parent — so we can't filter
-    // during the callback itself).
-    const collected: Array<{
-      path: string;
-      type: TAtscriptAnnotatedType;
-      metadata: TMetadataMap<AtscriptMetadata>;
-    }> = [];
+    // Phase 1: Collect field tuples. flattenAnnotatedType fires onField
+    // post-order — children before parent — so nav fields (whose descendants
+    // Phase 2 skips) and union / tuple members are known only afterwards.
+    const collected: TCollectedField[] = [];
 
     this.flatMap = flattenAnnotatedType(type, {
       topLevelArrayTag: adapter.getTopLevelArrayTag?.() ?? "db.__topLevelArray",
       excludePhantomTypes: true,
       onField: (path, fieldType, metadata) => {
-        if (isNavRelation(metadata)) {
-          this.navFields.add(path);
-        }
+        markComplexMembers(collected, path, fieldType);
         collected.push({ path, type: fieldType, metadata });
       },
     });
+    for (const entry of collected) {
+      if (!entry.member && isNavRelation(entry.metadata)) {
+        this.navFields.add(entry.path);
+      }
+    }
+    this._dropMemberMetadata(collected);
 
     // Phase 2: Scan only non-nav-descendant fields into metadata maps.
     // Nav descendants remain in flatMap (validation needs them) but never
@@ -375,6 +411,11 @@ export class TableMetadata {
     for (const entry of collected) {
       if (findAncestorInSet(entry.path, this.navFields) !== undefined) {
         this.ignoredFields.add(entry.path);
+        continue;
+      }
+      // A union / tuple member shares its prop's path but is no column of its
+      // own: only the prop's annotations describe the column.
+      if (entry.member) {
         continue;
       }
       this._scanGenericAnnotations(entry.path, entry.type, entry.metadata, logger);
@@ -462,6 +503,44 @@ export class TableMetadata {
         if (findAncestorInSet(path, this.navFields) !== undefined) continue;
         this.allPhysicalFields.push(physical);
       }
+    }
+  }
+
+  // ── Private: union / tuple member metadata ──────────────────────────────
+
+  /**
+   * `flattenAnnotatedType` merges the metadata of every union / tuple member
+   * into the synthetic flat entry of the prop's path, so a member's
+   * annotations would reach the column (DDL type, size, default). Since
+   * atscript 0.1.103 a built-in primitive member carries its built-in
+   * annotations (`number.timestamp.created | null` → `@db.default.now`,
+   * `string.char` → `@expect.maxLength 1`). Rebuild such an entry from the
+   * prop's own annotations plus the non-`db.*` annotations of named members
+   * (aliases, interfaces), so the column is described as before 0.1.103.
+   */
+  private _dropMemberMetadata(collected: readonly TCollectedField[]): void {
+    const byPath = new Map<string, TCollectedField[]>();
+    for (const entry of collected) {
+      const list = byPath.get(entry.path);
+      if (list) list.push(entry);
+      else byPath.set(entry.path, [entry]);
+    }
+    for (const [path, entries] of byPath) {
+      if (!entries.some((e) => e.member)) continue;
+      const flat = this.flatMap.get(path) as
+        | (TAtscriptAnnotatedType & { __flat_union?: boolean })
+        | undefined;
+      if (!flat?.__flat_union) continue;
+      const metadata = new Map<string, unknown>();
+      for (const entry of entries) {
+        if (entry.member && isInlinePrimitive(entry.type)) continue;
+        for (const [key, value] of entry.metadata) {
+          if (!entry.member || !key.startsWith("db.")) metadata.set(key, value);
+        }
+      }
+      const target = flat.metadata as Map<string, unknown>;
+      target.clear();
+      for (const [key, value] of metadata) target.set(key, value);
     }
   }
 

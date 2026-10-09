@@ -91,13 +91,13 @@ declare global {
     "db.search.vector": { dimensions: number, similarity?: string, indexName?: string }
     "db.search.vector.threshold": number
     "db.search.filter": (string)[]
+    "db.sort.nulls": string
     "db.amount.currency": string
     "db.amount.currency.ref": string
     "db.unit": string
     "db.unit.ref": string
     "db.mysql.type": string
     "db.mysql.onUpdate": string
-    "db.sort.nulls": string
     "db.mysql.unsigned": boolean
     "db.mysql.engine": string
     "db.mysql.charset": string

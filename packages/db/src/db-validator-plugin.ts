@@ -49,6 +49,22 @@ function isPatchOperatorObject(value: unknown): value is Record<string, unknown>
 }
 
 /**
+ * Items of union / tuple / intersection types the plugin has visited. The
+ * validator visits a complex type before its items, so an item is known here
+ * by the time it is validated.
+ */
+const complexItems = new WeakSet<TAtscriptAnnotatedType>();
+
+function markComplexItems(def: TAtscriptAnnotatedType): void {
+  const kind = def.type.kind;
+  if (kind === "union" || kind === "tuple" || kind === "intersection") {
+    for (const item of (def.type as { items: TAtscriptAnnotatedType[] }).items) {
+      complexItems.add(item);
+    }
+  }
+}
+
+/**
  * Validator plugin for database operations.
  *
  * Handles navigation field constraints and delegates to the standard validator
@@ -65,6 +81,7 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     if (!dbCtx) {
       return undefined;
     }
+    markComplexItems(def);
 
     // ── db.geoPoint range validation ─────────────────────────────────────────
     // [lng, lat] in GeoJSON order: longitude first. Enforced on every write.
@@ -102,7 +119,14 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     }
 
     // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─
-    if (value === undefined && (dbCtx.mode === "insert" || dbCtx.mode === "replace")) {
+    // A union / tuple member is not the field: its annotations (a
+    // `number.timestamp.created` member's `@db.default.now`) do not make the
+    // field server-managed — only the prop's own do.
+    if (
+      value === undefined &&
+      (dbCtx.mode === "insert" || dbCtx.mode === "replace") &&
+      !complexItems.has(def)
+    ) {
       const meta = def.metadata;
       // Server-managed fields: defaulted columns, the OCC version column
       // (adapter-initialised to 0 on insert, auto-bumped on every write) and

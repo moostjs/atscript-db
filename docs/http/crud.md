@@ -354,7 +354,7 @@ Nested relation data is supported per item — each record goes through the [dee
 
 ### PATCH / {#patch-update}
 
-Partial update by primary key. Only the provided fields are changed: send `null` to clear an optional column, omit the key to keep its value (an empty string is a value, not a clear). Since 0.1.128 the read-side filter types admit `null` for optional columns as well, so `?description=null` and `{ description: { $ne: null } }` are typed like the runtime.
+Partial update by primary key. Only the provided fields are changed: send `null` to clear an optional column, omit the key to keep its value (an empty string is a value, not a clear). An optional field marked `@meta.required` rejects `null` with a 400 (since atscript 0.1.103) — such a field cannot be cleared; omit it, or type it `string | null` to accept `null`. Since 0.1.128 the read-side filter types admit `null` for optional columns as well, so `?description=null` and `{ description: { $ne: null } }` are typed like the runtime.
 
 **Single update:**
 

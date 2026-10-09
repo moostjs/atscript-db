@@ -249,7 +249,7 @@ const result = await users.updateOne({
 
 `matchedCount` is what the identifying filter (plus `$cas`, when present) matched at execution time — never assumed. A payload with only the identifying fields writes nothing and reports `{ 1, 0 }` when the row exists or `{ 0, 0 }` when it does not; an `undefined` value is treated as absent (since 0.1.128). See [Update & Patch](/api/update-patch#simple-updates).
 
-`null` clears an optional column (`updateOne({ id, note: null })` → `NULL`), an omitted key keeps it. Since 0.1.128 the readable's filter types admit `null` for optional columns too (`findMany({ filter: { note: null } })`, `{ note: { $ne: null } }`) — see [Queries — Null Values](/api/queries#null-values).
+`null` clears an optional column (`updateOne({ id, note: null })` → `NULL`), an omitted key keeps it. An optional field marked `@meta.required` (`@meta.required note?: string`) rejects `null` (since atscript 0.1.103): it can be left unset but not cleared — omit the key, or type the field `string | null` to make `null` a valid value. Since 0.1.128 the readable's filter types admit `null` for optional columns too (`findMany({ filter: { note: null } })`, `{ note: { $ne: null } }`) — see [Queries — Null Values](/api/queries#null-values).
 
 ::: info Patch Operators & Field Operations
 For atomic increments/decrements (`$inc`, `$dec`, `$mul`) and embedded array patch operators (`$insert`, `$remove`, etc.), see [Update & Patch](/api/update-patch).

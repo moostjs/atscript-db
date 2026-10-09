@@ -47,6 +47,8 @@ await tasks.updateOne({ id: 1, note: null }); // clears (omit the key to keep)
 // { title: null } on a REQUIRED prop is a type error
 ```
 
+An optional `@meta.required` field (`@meta.required note?: string`) rejects `null` at validation (atscript 0.1.103+): it cannot be cleared — omit the key, or type it `string | null`.
+
 `$in: [null]` never matches on SQL (`IN (NULL)`) — use the bare form. Optional columns read back as `null` (SQL) or absent (Mongo): compare with `== null`. `NullableOptional` is exported from `@atscript/db`.
 
 ## Value types (since 0.1.147)
