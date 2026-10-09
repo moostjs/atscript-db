@@ -5,6 +5,7 @@ import { buildViewSelect } from "@atscript/db-sql-tools";
 
 import {
   defineViewPruneCases,
+  defineViewPruneSortCases,
   randomRead,
   seedViewPrune,
   vpRandom,
@@ -39,6 +40,7 @@ beforeAll(async () => {
       fx.VpOrderView,
       fx.VpEuView,
       fx.VpPartialView,
+      fx.VpOrderIdView,
     ],
     { force: true },
   );
@@ -151,4 +153,38 @@ describe("SQLite view read pruning — differential coverage", () => {
   });
 });
 
+describe("SQLite view read pruning × NULL placement × tie-breaker", () => {
+  it("a placed sort key keeps its join; ORDER BY places NULL and ends with the primary key", async () => {
+    const [sql] = await statementsOf(() =>
+      view(fx.VpOrderIdView).findMany({
+        filter: {},
+        controls: {
+          $select: ["id"],
+          $sort: { regionName: 1 },
+          $nulls: { regionName: "last" },
+          $limit: 3,
+        },
+      } as never),
+    );
+    expect(sql).toContain(') AS "vp_order_id_view"');
+    expect(sql).toContain('LEFT JOIN "vp_customers"');
+    expect(sql).toContain('LEFT JOIN "vp_regions"');
+    expect(sql).not.toContain('AS "VpShipRegion"');
+    expect(sql).toMatch(/ORDER BY "regionName" ASC NULLS LAST, "id" ASC LIMIT/);
+  });
+
+  it("the @db.sort.nulls default keeps the join of an unselected sort key", async () => {
+    const [sql] = await statementsOf(() =>
+      view(fx.VpOrderIdView).findMany({
+        filter: {},
+        controls: { $select: ["amount"], $sort: { shipRegion: 1 } },
+      } as never),
+    );
+    expect(sql).toContain('AS "VpShipRegion"');
+    expect(sql).not.toContain("vp_customers");
+    expect(sql).toMatch(/ORDER BY "shipRegion" ASC NULLS LAST, "id" ASC$/);
+  });
+});
+
 defineViewPruneCases("SQLite", () => ({ fx, pruned, plain }));
+defineViewPruneSortCases("SQLite", () => ({ fx, pruned, plain }));

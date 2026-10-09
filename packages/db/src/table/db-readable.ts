@@ -182,6 +182,22 @@ export function resolveDefaultFromMetadata(
 }
 
 /**
+ * `query` with `$groupBy` defaulted to `[]` — an aggregate without one is the
+ * ungrouped query (one group), as `$groupBy: []` documents it.
+ * @throws DbError `INVALID_QUERY` when `$groupBy` is present but not an array.
+ */
+function withGroupBy(query: AggregateQuery): AggregateQuery {
+  const controls = (query.controls ?? {}) as Partial<AggregateQuery["controls"]>;
+  if (Array.isArray(controls.$groupBy)) return query;
+  if (controls.$groupBy !== undefined && controls.$groupBy !== null) {
+    throw new DbError("INVALID_QUERY", [
+      { path: "$groupBy", message: "$groupBy must be an array of field names" },
+    ]);
+  }
+  return { ...query, controls: { ...controls, $groupBy: [] } } as AggregateQuery;
+}
+
+/**
  * Checks whether an id value is type-compatible with a field's design type.
  * Used by `findById` to skip primary-key lookup when the id clearly can't match,
  * falling through to unique-property search instead.
@@ -1258,6 +1274,7 @@ export class AtscriptDbReadable<
    */
   public async aggregate(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
     this._ensureBuilt();
+    query = withGroupBy(query);
     const { $groupBy, $select } = query.controls;
 
     // Computed-entry shapes + calendar buckets, before any rule reads `$select`

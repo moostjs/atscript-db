@@ -75,7 +75,10 @@ export function queryReadColumns(
   if (kind === "count") return out;
 
   const controls = query.controls ?? {};
+  // `$sort` arrives with the primary-key tie-breaker appended and `$nulls`
+  // resolved (`@db.sort.nulls` defaults included): both name sort keys.
   for (const key of Object.keys(controls.$sort ?? {})) out.add(key);
+  for (const key of Object.keys(controls.$nulls ?? {})) out.add(key);
   for (const column of partitionBy ?? []) out.add(column);
   const select = controls.$select;
   const fields = select?.asArray;

@@ -97,6 +97,7 @@ declare global {
     "db.unit.ref": string
     "db.mysql.type": string
     "db.mysql.onUpdate": string
+    "db.sort.nulls": string
     "db.mysql.unsigned": boolean
     "db.mysql.engine": string
     "db.mysql.charset": string

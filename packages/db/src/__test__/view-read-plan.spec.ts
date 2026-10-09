@@ -137,6 +137,20 @@ describe("queryReadColumns", () => {
     expect(queryReadColumns(q({}, { $select: new UniquSelect([]) }), "rows")).toBeUndefined();
   });
 
+  it("rows and aggregate: `$nulls` keys are sort keys", () => {
+    const select = new UniquSelect(["c"]);
+    expect(
+      queryReadColumns(q({}, { $select: select, $sort: { d: 1 }, $nulls: { e: "last" } }), "rows"),
+    ).toEqual(new Set(["c", "d", "e"]));
+    const agg = new UniquSelect(["g", { $fn: "count", $field: "*", $as: "n" }]);
+    expect(
+      queryReadColumns(
+        q({}, { $select: agg, $groupBy: ["g"], $sort: { g: 1 }, $nulls: { g: "last" } }),
+        "aggregate",
+      ),
+    ).toEqual(new Set(["g"]));
+  });
+
   it("count: the filter only", () => {
     expect(queryReadColumns(q({ a: 1 }, { $sort: { d: 1 } }), "count")).toEqual(new Set(["a"]));
   });

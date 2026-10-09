@@ -25,7 +25,7 @@ await orders.aggregate({
 
 | Control             | Rule                                                                                                                                                                                          |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$groupBy`          | Required `string[]`: field paths or bucket aliases from `$select`.                                                                                                                            |
+| `$groupBy`          | `string[]`: field paths or bucket aliases from `$select`. `[]` or omitted = ungrouped (one group).                                                                                            |
 | `$select`           | Plain fields (each also in `$groupBy`), `{ $fn, $field, $as? }` aggregates, `{ $fn, $expr, $as }` / `{ $expr, $as }` expressions (0.1.148), `{ $bucket, $field, … }` buckets. Always pass it. |
 | `$rowOrder`         | `{ field: 1 \| -1 }` — order of the rows INSIDE each group for `first` / `last` (0.1.148). Required with them, rejected without.                                                              |
 | `$having`           | Keys = aggregate aliases, bucket aliases or `$groupBy` fields ONLY.                                                                                                                           |

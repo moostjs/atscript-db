@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vite-plus/test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vite-plus/test";
 import { AtscriptDbTable, DbSpace } from "@atscript/db";
 import { SchemaSync } from "@atscript/db/sync";
 
@@ -69,6 +69,11 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
       },
     );
     expect(result.status).toBe("synced");
+  });
+
+  afterAll(async () => {
+    await space?.close();
+    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
   });
 
   const items = () => t(fx.IgItem);

@@ -2,7 +2,12 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vite-plus/test";
 import { DbSpace, UniquSelect, type DbQuery } from "@atscript/db";
 import { syncSchema } from "@atscript/db/sync";
 
-import { defineViewPruneCases, seedViewPrune, vpData } from "../../../db/test-kit/view-prune-cases";
+import {
+  defineViewPruneCases,
+  defineViewPruneSortCases,
+  seedViewPrune,
+  vpData,
+} from "../../../db/test-kit/view-prune-cases";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
@@ -99,6 +104,7 @@ describe.skipIf(!reachable)("[mysql live] view read pruning", () => {
       fx.VpOrderView,
       fx.VpEuView,
       fx.VpPartialView,
+      fx.VpOrderIdView,
     ]);
     expect(result.status).toBe("synced");
     await seedViewPrune(pruned, fx, vpData());
@@ -182,5 +188,46 @@ describe.skipIf(!reachable)("[mysql live] view read pruning", () => {
     });
   });
 
+  describe("plans × NULL placement", () => {
+    it("a placed sort key renders the IS NULL key and still merges under derived_merge=off", async () => {
+      const { sql, params } = await lastRead(() =>
+        pruned.getView(fx.VpOrderIdView as never).findMany({
+          filter: {},
+          controls: {
+            $select: ["id"],
+            $sort: { regionName: 1 },
+            $nulls: { regionName: "last" },
+            $limit: 5,
+          },
+        } as never),
+      );
+      expect(sql).toContain("/*+ MERGE(`vp_order_id_view`) */");
+      expect(sql).toContain("ORDER BY (`regionName` IS NULL) ASC, `regionName` ASC, `id` ASC");
+      const tables = await explainTables(sql, params, true);
+      expect(tables.some((t) => t.startsWith("<derived"))).toBe(false);
+      expect(tables).toContain("vp_regions");
+      expect(tables).not.toContain("VpShipRegion");
+    });
+
+    it("a grouped placed sort tests the group key inside the merged definition", async () => {
+      const { sql, params } = await lastRead(() =>
+        pruned.getView(fx.VpOrderIdView as never).aggregate({
+          filter: {},
+          controls: {
+            $groupBy: ["shipRegion"],
+            $select: ["shipRegion", { $fn: "count", $field: "*", $as: "n" }],
+            $sort: { shipRegion: -1 },
+            $nulls: { shipRegion: "first" },
+          },
+        }),
+      );
+      expect(sql).toContain("(`shipRegion` IS NULL) DESC, `shipRegion` DESC");
+      const tables = await explainTables(sql, params, true);
+      expect(tables.some((t) => t.startsWith("<derived"))).toBe(false);
+      expect(tables).not.toContain("vp_customers");
+    });
+  });
+
   defineViewPruneCases("MySQL", () => ({ fx, pruned, plain }));
+  defineViewPruneSortCases("MySQL", () => ({ fx, pruned, plain }));
 });

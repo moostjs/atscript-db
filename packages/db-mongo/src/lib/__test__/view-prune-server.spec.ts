@@ -1,10 +1,16 @@
 import { DbSpace, UniquSelect, type AtscriptDbView, type DbQuery } from "@atscript/db";
 import { SchemaSync } from "@atscript/db/sync";
 import type { Db, MongoClient } from "mongodb";
-import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
+import { Collection } from "mongodb";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vite-plus/test";
 
-import { defineViewPruneCases, seedViewPrune } from "../../../../db/test-kit/view-prune-cases";
+import {
+  defineViewPruneCases,
+  defineViewPruneSortCases,
+  seedViewPrune,
+} from "../../../../db/test-kit/view-prune-cases";
 import { MongoAdapter } from "../mongo-adapter";
+import { NULLS_FLAG_PREFIX } from "../mongo-sort";
 import { mongoViewRead, stagesReadAny } from "../mongo-view-read";
 import { prepareFixtures } from "./test-utils";
 
@@ -49,6 +55,7 @@ beforeAll(async () => {
       fx.VpOrderView,
       fx.VpEuView,
       fx.VpPartialView,
+      fx.VpOrderIdView,
     ],
     { force: true },
   );
@@ -125,4 +132,73 @@ describe("MongoDB view read pruning — pipelines", () => {
   });
 });
 
+describe("MongoDB view read pruning × NULL placement × tie-breaker", () => {
+  const idView = () => pruned.getView(fx.VpOrderIdView as never) as AtscriptDbView;
+
+  it("a placed sort on a joined key keeps that lookup only; flags sort, then drop after the page", async () => {
+    const spy = vi.spyOn(Collection.prototype, "aggregate");
+    try {
+      const { label, pipeline } = await pipelineOf(() =>
+        idView().findMany({
+          filter: {},
+          controls: {
+            $select: ["id"],
+            $sort: { customerName: -1 },
+            $nulls: { customerName: "first" },
+            $skip: 2,
+            $limit: 5,
+          },
+        } as never),
+      );
+      expect(label).toBe("aggregate (findMany) (pruned view)");
+      expect(lookups(pipeline)).toEqual(["vp_customers"]);
+      const tail = (pipeline as Array<Record<string, any>>)
+        .slice(-6)
+        .map((st) => Object.keys(st)[0]);
+      expect(tail).toEqual(["$addFields", "$sort", "$skip", "$limit", "$project", "$project"]);
+      const sort = (pipeline as Array<Record<string, any>>).find((st) => st.$sort)!.$sort;
+      // flag, key, then the primary-key tie-breaker in the last key's direction
+      expect(sort).toEqual({ [`${NULLS_FLAG_PREFIX}0`]: -1, customerName: -1, id: -1 });
+      expect(spy.mock.calls.at(-1)![1]).toMatchObject({ allowDiskUse: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("the @db.sort.nulls default flags the pruned read too", async () => {
+    const { label, pipeline } = await pipelineOf(() =>
+      idView().findMany({
+        filter: {},
+        controls: { $select: ["id"], $sort: { shipRegion: 1 } },
+      } as never),
+    );
+    expect(label).toBe("aggregate (findMany) (pruned view)");
+    expect(lookups(pipeline)).toEqual(["vp_regions"]);
+    expect((pipeline as Array<Record<string, any>>).some((st) => st.$addFields)).toBe(true);
+  });
+
+  it("the null flags never trip the dropped-column scan", () => {
+    const query = {
+      filter: {},
+      controls: {
+        $select: new UniquSelect(["id"]),
+        $sort: { amount: 1, id: 1 },
+        $nulls: { amount: "last" },
+      },
+    } as unknown as DbQuery;
+    const read = mongoViewRead(idView(), query, "rows")!;
+    expect(read.dropped).toEqual(
+      expect.arrayContaining(["customerName", "regionName", "shipRegion"]),
+    );
+    const flag = `${NULLS_FLAG_PREFIX}0`;
+    const stages = [
+      { $addFields: { [flag]: { $lte: ["$amount", null] } } },
+      { $sort: { [flag]: 1, amount: 1, id: 1 } },
+      { $project: { [flag]: 0 } },
+    ];
+    expect(stagesReadAny(stages, read.dropped)).toBe(false);
+  });
+});
+
 defineViewPruneCases("MongoDB", () => ({ fx, pruned, plain }));
+defineViewPruneSortCases("MongoDB", () => ({ fx, pruned, plain }));

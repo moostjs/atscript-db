@@ -68,7 +68,7 @@ async function boot() {
     return res;
   });
   let fail = false;
-  const client = (tenant: string, opts: { metaStore: MetaStore; metaKey?: string }) =>
+  const client = (tenant: string, opts: { metaStore: MetaStore | false; metaKey?: string }) =>
     new Client(`/tenant/${tenant}/accounts`, {
       baseUrl,
       fetch: fetchSpy as unknown as typeof globalThis.fetch,
@@ -100,6 +100,27 @@ describe("db-client meta store against moost-db /meta", () => {
       etag: first!.etag,
     });
     expect(exchanges).toHaveLength(2);
+  });
+
+  it("metaEtag() is the prerendered /meta ETag on a download and on a 304", async () => {
+    const { client, exchanges } = await boot();
+    const metaStore = new MetaStore();
+    const metaKey = "/tenant/:tenantId/accounts";
+    const a = client("acme", { metaStore, metaKey });
+    expect(a.metaEtag()).toBeUndefined();
+    await a.meta();
+    const b = client("globex", { metaStore, metaKey });
+    await b.meta();
+    const [first, second] = exchanges;
+    expect(second!.status).toBe(304);
+    expect(a.metaEtag()).toBe(first!.etag);
+    expect(b.metaEtag()).toBe(first!.etag);
+    a.invalidateMeta();
+    expect(a.metaEtag()).toBeUndefined();
+    // without a store the ETag of the plain download
+    const c = client("initech", { metaStore: false });
+    await c.meta();
+    expect(c.metaEtag()).toBe(exchanges.at(-1)!.etag);
   });
 
   it("without metaKey: the same URL revalidates after invalidateMeta(); another URL downloads", async () => {

@@ -548,3 +548,221 @@ export function defineViewPruneAdvCases(
     );
   });
 }
+
+// ── Sort interplay (`VpOrderIdView`): tie-breaker + NULL placement ─────────
+
+type TPlacement = "first" | "last";
+const ID_VIEW_COLS = ["id", "status", "amount", "customerName", "regionName", "shipRegion"];
+const ID_VIEW_NULLABLE = new Set(["customerName", "regionName", "shipRegion"]);
+
+/**
+ * Sorted reads of `VpOrderIdView` (a view with `@meta.id` and a
+ * `@db.sort.nulls 'last'` default on `shipRegion`): the core appends the
+ * `id` tie-breaker and resolves `$nulls` BEFORE the adapter plans the pruned
+ * read, so the needed columns include both — pruned and stored reads return
+ * the same rows in the same order (a total order: compared as arrays).
+ */
+export const SORT_READS: Array<{ op: string; query: Record<string, any> }> = [
+  // the tie-breaker key is not selected
+  {
+    op: "findMany",
+    query: { filter: {}, controls: { $select: ["amount"], $sort: { amount: 1 } } },
+  },
+  {
+    op: "findMany",
+    query: {
+      filter: {},
+      controls: { $select: ["id", "amount"], $sort: { amount: -1 }, $skip: 3, $limit: 15 },
+    },
+  },
+  // the `@db.sort.nulls` default on a joined, unselected sort key
+  {
+    op: "findMany",
+    query: { filter: {}, controls: { $select: ["id"], $sort: { shipRegion: 1 } } },
+  },
+  {
+    op: "findMany",
+    query: {
+      filter: {},
+      controls: {
+        $select: ["id", "customerName"],
+        $sort: { customerName: -1 },
+        $nulls: { customerName: "first" },
+        $limit: 12,
+      },
+    },
+  },
+  // a chained join (region through customer) only as a placed sort key
+  {
+    op: "findMany",
+    query: {
+      filter: { amount: { $gt: 100 } },
+      controls: {
+        $select: ["id"],
+        $sort: { regionName: 1, amount: -1 },
+        $nulls: { regionName: "last" },
+        $skip: 5,
+        $limit: 20,
+      },
+    },
+  },
+  {
+    op: "findOne",
+    query: {
+      filter: {},
+      controls: { $select: ["id"], $sort: { shipRegion: -1 }, $nulls: { shipRegion: "first" } },
+    },
+  },
+  {
+    op: "findManyWithCount",
+    query: {
+      filter: { amount: { $gt: 100 } },
+      controls: {
+        $select: ["id", "status"],
+        $sort: { shipRegion: -1 },
+        $nulls: { shipRegion: "first" },
+        $limit: 7,
+      },
+    },
+  },
+  {
+    op: "aggregate",
+    query: {
+      filter: {},
+      controls: {
+        $groupBy: ["regionName"],
+        $select: ["regionName", { $fn: "count", $field: "*", $as: "n" }],
+        $sort: { regionName: 1 },
+        $nulls: { regionName: "last" },
+      },
+    },
+  },
+  {
+    op: "aggregate",
+    query: {
+      filter: {},
+      controls: {
+        $groupBy: ["status"],
+        $select: [
+          "status",
+          { $fn: "first", $field: "id", $as: "firstId" },
+          { $fn: "last", $field: "id", $as: "lastId" },
+        ],
+        $rowOrder: { customerName: 1 },
+        $nulls: { customerName: "last" },
+        $sort: { status: 1 },
+      },
+    },
+  },
+];
+
+/** A random sorted read of `VpOrderIdView` with random `$nulls` placements. */
+export function randomSortRead(rnd: () => number): { op: string; query: Record<string, any> } {
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(rnd() * items.length)];
+  const $select = Array.from(
+    new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(ID_VIEW_COLS))),
+  );
+  const $sort: Record<string, 1 | -1> = {};
+  const $nulls: Record<string, TPlacement> = {};
+  for (let i = 0, n = 1 + Math.floor(rnd() * 2); i < n; i++) {
+    const col = pick(ID_VIEW_COLS);
+    $sort[col] = rnd() < 0.5 ? 1 : -1;
+    if (ID_VIEW_NULLABLE.has(col) && rnd() < 0.7) $nulls[col] = pick(["first", "last"] as const);
+  }
+  const controls: Record<string, unknown> = { $select, $sort };
+  if (Object.keys($nulls).length > 0) controls.$nulls = $nulls;
+  if (rnd() < 0.7) controls.$limit = 1 + Math.floor(rnd() * 15);
+  if (rnd() < 0.4) controls.$skip = Math.floor(rnd() * 30);
+  const filters = [
+    { amount: { $gt: Math.floor(rnd() * 1000) } },
+    { customerName: null },
+    { regionName: { $ne: null } },
+    { status: "paid" },
+  ];
+  const filter = rnd() < 0.3 ? pick(filters) : {};
+  return { op: rnd() < 0.8 ? "findMany" : "findManyWithCount", query: { filter, controls } };
+}
+
+async function runOrderedRead(
+  view: TReadable & { findOne(q: unknown): Promise<unknown> },
+  op: string,
+  query: Record<string, unknown>,
+): Promise<unknown> {
+  if (op === "findOne") return view.findOne(query);
+  if (op === "aggregate") return view.aggregate(query);
+  if (op === "findManyWithCount") return view.findManyWithCount(query);
+  return view.findMany(query);
+}
+
+/** Whether `rows` place NULL of `col` as asked (a block at the start / end). */
+function placesNulls(
+  rows: Array<Record<string, unknown>>,
+  col: string,
+  nulls: TPlacement,
+): boolean {
+  const flags = rows.map((r) => r[col] === null || r[col] === undefined);
+  const firstValue = flags.indexOf(false);
+  const lastNull = flags.lastIndexOf(true);
+  if (firstValue === -1 || lastNull === -1) return true;
+  return nulls === "first" ? lastNull < firstValue : flags.indexOf(true) > flags.lastIndexOf(false);
+}
+
+export function defineViewPruneSortCases(label: string, kit: () => TViewPruneKit): void {
+  const same = async (op: string, query: Record<string, unknown>) => {
+    const { fx, pruned, plain } = kit();
+    const on = pruned.getView(fx.VpOrderIdView) as Parameters<typeof runOrderedRead>[0];
+    const off = plain.getView(fx.VpOrderIdView) as Parameters<typeof runOrderedRead>[0];
+    const [a, b] = await Promise.all([
+      runOrderedRead(on, op, query),
+      runOrderedRead(off, op, query),
+    ]);
+    expect(a, `${op} ${JSON.stringify(query)}`).toEqual(b);
+    return a;
+  };
+
+  describe(`${label}: view read pruning × tie-breaker × NULL placement`, () => {
+    it("pruned reads keep the order of the stored view", async () => {
+      for (const { op, query } of SORT_READS) await same(op, query);
+    });
+
+    it("the placement holds on the pruned read", async () => {
+      const rows = (await same("findMany", {
+        filter: {},
+        controls: { $select: ["id", "shipRegion"], $sort: { shipRegion: 1 } },
+      })) as Array<Record<string, unknown>>;
+      expect(rows.some((r) => r.shipRegion === null || r.shipRegion === undefined)).toBe(true);
+      // the `@db.sort.nulls 'last'` default, ascending (NULL is natively first there)
+      expect(placesNulls(rows, "shipRegion", "last")).toBe(true);
+      const firsts = (await same("findMany", {
+        filter: {},
+        controls: {
+          $select: ["id", "customerName"],
+          $sort: { customerName: 1 },
+          $nulls: { customerName: "last" },
+        },
+      })) as Array<Record<string, unknown>>;
+      expect(placesNulls(firsts, "customerName", "last")).toBe(true);
+      // ties broken by id, in the last key's direction
+      const tied = firsts.filter((r) => r.customerName === firsts[0]!.customerName);
+      expect(tied.map((r) => r.id)).toEqual(
+        tied.map((r) => r.id).toSorted((x, y) => (x as number) - (y as number)),
+      );
+    });
+
+    it("an ungrouped aggregate without $groupBy", async () => {
+      const [row] = (await same("aggregate", {
+        filter: {},
+        controls: { $select: [{ $fn: "count", $field: "*", $as: "n" }] },
+      })) as Array<Record<string, unknown>>;
+      expect(Number(row!.n)).toBeGreaterThan(0);
+    });
+
+    it("randomized differential with $nulls (seeded)", async () => {
+      const rnd = vpRandom(53);
+      for (let i = 0; i < 120; i++) {
+        const { op, query } = randomSortRead(rnd);
+        await same(op, query);
+      }
+    }, 120_000);
+  });
+}

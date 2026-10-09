@@ -313,6 +313,32 @@ describe("aggregate() loose mode (no annotations)", () => {
     expect(result).toBeDefined();
   });
 
+  it("a missing $groupBy is the ungrouped query ($groupBy: [])", async () => {
+    const strict = new AtscriptDbTable(AggOrders, adapter);
+    for (const [t, field] of [
+      [table, "value"],
+      [strict, "amount"],
+    ] as const) {
+      await expect(
+        t.aggregate({
+          filter: {},
+          controls: { $select: [{ $fn: "sum", $field: field, $as: "total" }] },
+        } as unknown as AggregateQuery),
+      ).resolves.toBeDefined();
+      const call = adapter.calls.findLast((c) => c.method === "aggregate")!;
+      expect(call.args[0].controls.$groupBy).toEqual([]);
+    }
+  });
+
+  it("a $groupBy that is not an array is rejected", async () => {
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: "category", $select: ["category"] },
+      } as unknown as AggregateQuery),
+    ).rejects.toMatchObject({ code: "INVALID_QUERY", errors: [{ path: "$groupBy" }] });
+  });
+
   it("allows any field as aggregate $field", async () => {
     const query: AggregateQuery = {
       filter: {},

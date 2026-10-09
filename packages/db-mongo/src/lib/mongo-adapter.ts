@@ -1145,6 +1145,7 @@ export class MongoAdapter extends BaseDbAdapter {
       pipeline,
       "aggregate (findManyWithCount)",
       pruned,
+      placedSortOptions(query.controls),
     );
     return {
       data: result[0]?.data || [],
@@ -1935,7 +1936,7 @@ export class MongoAdapter extends BaseDbAdapter {
         pruned.pipeline,
         `aggregate (${label})`,
         pruned,
-        hasNullsPlacement(query.controls) ? { allowDiskUse: true } : undefined,
+        placedSortOptions(query.controls),
       )
     );
   }
@@ -1955,9 +1956,7 @@ export class MongoAdapter extends BaseDbAdapter {
       ...pageStages(limit ? { ...query.controls, $limit: limit } : query.controls),
     ];
     this._log(`aggregate (${label})`, pipeline);
-    const opts = hasNullsPlacement(query.controls)
-      ? { allowDiskUse: true, ...this._readOpts(query) }
-      : this._readOpts(query);
+    const opts = { ...placedSortOptions(query.controls), ...this._readOpts(query) };
     return wrapInvalidQuery(() => this.collection.aggregate(pipeline, opts).toArray());
   }
 
@@ -2136,6 +2135,14 @@ export class MongoAdapter extends BaseDbAdapter {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * `allowDiskUse` for a read whose `$sort` places NULL (`$nulls`): the null
+ * flags make it a blocking sort no index serves, so it may need to spill.
+ */
+function placedSortOptions(controls: DbQuery["controls"]): AggregateOptions | undefined {
+  return hasNullsPlacement(controls) ? { allowDiskUse: true } : undefined;
+}
 
 /**
  * `$sort` → `$skip` → `$limit` → `$project` stages of a read's controls (a

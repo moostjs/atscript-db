@@ -215,6 +215,52 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
     expect(((await slugs.findMany({ filter: {}, controls: {} })) as any[]).length).toBe(2);
   });
 
+  it("a composite @meta.id beside _id inside a transaction with lockConflicts: pairs only", async () => {
+    const pairs = space.getTable(fx.IgPair) as any;
+    await pairs.insertOne({ a: 1, b: 1, label: "stored" });
+    await pairs.dbAdapter.withTransaction(async () => {
+      const result = await pairs.insertMany(
+        [
+          { a: 1, b: 2, label: "same a" },
+          { a: 2, b: 1, label: "same b" },
+          { a: 1, b: 1, label: "dup of stored" },
+          { a: 1, b: 2, label: "dup in batch" },
+        ],
+        { onConflict: "ignore", lockConflicts: true },
+      );
+      expect(result.conflicts).toEqual([2, 3]);
+      expect(result.inserted).toEqual([0, 1]);
+      // the colliding row is updated next, in the same transaction
+      await pairs.updateOne({ a: 1, b: 1, label: "updated" });
+    });
+    const stored = (await pairs.findMany({
+      filter: {},
+      controls: { $sort: { a: 1, b: 1 } },
+    })) as any[];
+    expect(stored.map((r) => [r.a, r.b, r.label])).toEqual([
+      [1, 1, "updated"],
+      [1, 2, "same a"],
+      [2, 1, "same b"],
+    ]);
+  });
+
+  it("a NULL-placed read (aggregate + allowDiskUse) runs inside the transaction and sees its writes", async () => {
+    await items().insertMany([item(1, "a", { pairA: "x" }), item(2, "b")]);
+    await items().dbAdapter.withTransaction(async () => {
+      await items().insertOne(item(3, "c", { pairA: "w" }));
+      const rows = (await items().findMany({
+        filter: {},
+        controls: { $sort: { pairA: 1 }, $nulls: { pairA: "last" }, $select: ["id"] },
+      })) as any[];
+      expect(rows.map((r) => r.id)).toEqual([3, 1, 2]);
+      const one = await items().findOne({
+        filter: {},
+        controls: { $sort: { pairA: -1 }, $nulls: { pairA: "first" } },
+      });
+      expect(one.id).toBe(2);
+    });
+  });
+
   describe("a bulk-write failure that is not a duplicate key", () => {
     const run = () => items().insertMany([item(1, "a"), item(2, "b")], { onConflict: "ignore" });
 

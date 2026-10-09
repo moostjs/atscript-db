@@ -26,7 +26,12 @@ const DB = "aggexpr_live";
 async function adminQuery(sql: string): Promise<boolean> {
   try {
     const { Client } = (await import("pg")).default;
-    const client = new Client({ connectionString: SERVER_URL, connectionTimeoutMillis: 1500 });
+    // a short connect timeout only for the reachability probe — a slow (remote) server must
+    // not make a setup statement fail silently
+    const client = new Client({
+      connectionString: SERVER_URL,
+      connectionTimeoutMillis: sql === "SELECT 1" ? 5000 : 15_000,
+    });
     await client.connect();
     try {
       await client.query(sql);

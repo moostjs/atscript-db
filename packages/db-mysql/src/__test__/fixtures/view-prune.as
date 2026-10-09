@@ -115,3 +115,22 @@ export interface VpPartialView {
     id: VpOrder.id
     title?: VpProduct.title
 }
+
+// A view with a primary key — a sorted read gets the `id` tie-breaker — and
+// a `@db.sort.nulls` default on a joined column: NULL placement and the
+// tie-breaker read through a pruned definition.
+@db.view 'vp_order_id_view'
+@db.view.for VpOrder
+@db.view.joins VpCustomer, `VpCustomer.id = VpOrder.customerId`, 'left'
+@db.view.joins VpRegion, `VpRegion.id = VpCustomer.regionId`, 'left'
+@db.view.joins VpShipRegion, `VpShipRegion.id = VpOrder.shipRegionId`, 'left'
+export interface VpOrderIdView {
+    @meta.id
+    id: VpOrder.id
+    status: VpOrder.status
+    amount: VpOrder.amount
+    customerName?: VpCustomer.name
+    regionName?: VpRegion.name
+    @db.sort.nulls 'last'
+    shipRegion?: VpShipRegion.name
+}

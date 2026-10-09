@@ -166,7 +166,7 @@ const oldest = await issues.aggregate({
 
 How it runs, for index planning: SQL adapters render a `FIRST_VALUE(col) OVER (PARTITION BY <group keys> ORDER BY <$rowOrder, key>)` derived table (`last` over the reversed order) that carries only the columns the query reads, then aggregate its columns per group — SQLite 3.25+, MySQL 8.0+, any PostgreSQL; MongoDB sorts the matching rows by `$rowOrder` before `$group` and takes `$first` / `$last`; the memory adapter keeps the best row per group. An index on `(group key, $rowOrder fields…, primary key)` serves them.
 
-An ungrouped query (`$groupBy: []`) is one group on every adapter, so over no matching row it returns **one row**: counts `0`, every other aggregate, `first` / `last` and the expressions over them `null`. With `$count: true` such a query answers `{ count: 1 }` (the one aggregated row), or `{ count: 0 }` when a `$having` filters it out — the number of rows the data query returns.
+An ungrouped query (`$groupBy: []`, or no `$groupBy` at all) is one group on every adapter, so over no matching row it returns **one row**: counts `0`, every other aggregate, `first` / `last` and the expressions over them `null`. With `$count: true` such a query answers `{ count: 1 }` (the one aggregated row), or `{ count: 0 }` when a `$having` filters it out — the number of rows the data query returns.
 
 ## Result rows
 
