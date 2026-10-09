@@ -1,18 +1,54 @@
 import type { TPgConnection, TPgDriver, TPgRunResult } from "./types";
 
-/** pg rejects `undefined` in bind arrays — coerce to `null`. */
-function sanitizeParams(params?: unknown[]): unknown[] {
+const NO_PARAMS: unknown[] = [];
+
+/**
+ * pg rejects `undefined` in bind arrays — coerce to `null`. Copies only when
+ * there is one (an array hole counts): the common case binds `params` as is
+ * (pg never mutates the bind array).
+ */
+export function sanitizeParams(params?: unknown[]): unknown[] {
   if (!params) {
-    return [];
+    return NO_PARAMS;
   }
-  return params.map((v) => (v === undefined ? null : v));
+  return params.includes(undefined)
+    ? Array.from(params, (v) => (v === undefined ? null : v))
+    : params;
 }
 
 // ── Per-pool type parsers ──────────────────────────────────────────────────
 
-/** Parses TIMESTAMP/TIMESTAMPTZ to epoch milliseconds. */
+/** Parses TIMESTAMPTZ (its text carries the UTC offset) to epoch milliseconds. */
 function parseTimestamp(val: string): number | string {
   const ms = new Date(val).getTime();
+  return Number.isNaN(ms) ? val : ms;
+}
+
+/** PostgreSQL's text form of a `timestamp without time zone` (AD, finite): `YYYY-MM-DD HH:MM:SS[.ffffff]`. */
+const TIMESTAMP_TEXT = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(?:\.(\d{1,6}))?$/;
+
+/**
+ * Parses TIMESTAMP (without time zone) to epoch milliseconds, reading the
+ * wall time as UTC — the same instant whatever the process time zone (since
+ * 0.1.151; it used to be the process's local time). Matches the MySQL
+ * adapter's DATETIME reading. Sub-millisecond digits are truncated; other
+ * forms (`infinity`, BC dates) keep the previous parse.
+ */
+export function parseTimestampUtc(val: string): number | string {
+  const m = TIMESTAMP_TEXT.exec(val);
+  if (!m) {
+    return parseTimestamp(val);
+  }
+  const d = new Date(0);
+  // setUTCFullYear: years 0–99 stay literal (Date.UTC would map them to 19xx)
+  d.setUTCFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  d.setUTCHours(
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6]),
+    m[7] ? Number(m[7].padEnd(3, "0").slice(0, 3)) : 0,
+  );
+  const ms = d.getTime();
   return Number.isNaN(ms) ? val : ms;
 }
 
@@ -38,13 +74,14 @@ const INT8_OID = 20;
  * Creates a per-pool custom types config that overrides specific parsers
  * without mutating the global `pg.types`.
  *
- * - TIMESTAMP/TIMESTAMPTZ → epoch milliseconds (number)
+ * - TIMESTAMPTZ → epoch milliseconds (number); TIMESTAMP → epoch ms of its
+ *   wall time read as UTC (independent of the process time zone)
  * - NUMERIC → number (not string)
  * - INT8/BIGINT → number (for JS-safe range)
  */
 function createCustomTypes(pgTypes: typeof import("pg").types): import("pg").CustomTypesConfig {
   const overrides = new Map<number, (val: string) => unknown>([
-    [TIMESTAMP_OID, parseTimestamp],
+    [TIMESTAMP_OID, parseTimestampUtc],
     [TIMESTAMPTZ_OID, parseTimestamp],
     [NUMERIC_OID, parseNumeric],
     [INT8_OID, parseBigInt],

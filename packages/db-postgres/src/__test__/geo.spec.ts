@@ -169,3 +169,86 @@ describe("[postgres] geo support", () => {
     expect(result.count).toBe(2);
   });
 });
+
+// Schema sync never ran in this process (tables provisioned elsewhere): the
+// adapter learns PostGIS presence from a read-only probe before its first
+// statement, so geo values formatted meanwhile still reach a geography column
+// as EWKT (since 0.1.151 — they used to go out as JSONB text and fail).
+describe("[postgres] geo without schema sync in this process", () => {
+  beforeAll(async () => {
+    await prepareFixtures();
+    ({ GeoPlace } = await import("./fixtures/geo-table.as"));
+  });
+
+  const isProbe = (c: { sql: string }) => c.sql.includes("pg_extension");
+  const postgis = (present: boolean) => ({
+    getResult: (sql: string) => (sql.includes("pg_extension") ? { present } : null),
+  });
+
+  it("probes PostGIS once (no DDL), then writes EWKT", async () => {
+    const { driver, adapter, table } = makeTable(GeoPlace, postgis(true));
+    await table.insertOne({ id: "sf", name: "SF", geo: SF });
+    const probeAt = driver.calls.findIndex(isProbe);
+    const insertAt = driver.calls.findIndex((c) => c.sql.startsWith("INSERT INTO"));
+    expect(probeAt).toBeGreaterThanOrEqual(0);
+    expect(insertAt).toBeGreaterThan(probeAt);
+    expect(driver.calls[insertAt]!.params).toContain("SRID=4326;POINT(-122.42 37.77)");
+    expect(driver.calls.some((c) => c.sql.includes("CREATE EXTENSION"))).toBe(false);
+    expect(adapter.isGeoSearchable()).toBe(true);
+
+    await table.insertOne({ id: "la", name: "LA", geo: [-118.24, 34.05] });
+    expect(driver.calls.filter(isProbe)).toHaveLength(1);
+    expect(driver.calls.findLast((c) => c.sql.startsWith("INSERT INTO"))!.params).toContain(
+      "SRID=4326;POINT(-118.24 34.05)",
+    );
+  });
+
+  it("without PostGIS the JSONB form goes out, as with a synced JSONB table", async () => {
+    const { driver, adapter, table } = makeTable(GeoPlace, postgis(false));
+    await table.insertOne({ id: "sf", name: "SF", geo: SF });
+    const insert = driver.calls.find((c) => c.sql.startsWith("INSERT INTO"))!;
+    expect(insert.params).toContain(JSON.stringify(SF));
+    expect(adapter.isGeoSearchable()).toBe(false);
+  });
+
+  it("a failed probe is not cached: the next statement probes again", async () => {
+    let fail = true;
+    const { driver, table } = makeTable(GeoPlace, {
+      getResult: (sql: string) => {
+        if (!sql.includes("pg_extension")) return null;
+        if (fail) {
+          fail = false;
+          throw new Error("connection reset");
+        }
+        return { present: true };
+      },
+    });
+    await expect(table.insertOne({ id: "sf", name: "SF", geo: SF })).rejects.toThrow(
+      "connection reset",
+    );
+    await table.insertOne({ id: "sf", name: "SF", geo: SF });
+    expect(driver.calls.filter(isProbe)).toHaveLength(2);
+    expect(driver.calls.findLast((c) => c.sql.startsWith("INSERT INTO"))!.params).toContain(
+      "SRID=4326;POINT(-122.42 37.77)",
+    );
+  });
+
+  it("schema sync after a negative probe still installs PostGIS and maps geography", async () => {
+    const { driver, table } = makeTable(GeoPlace, postgis(false));
+    await table.insertOne({ id: "sf", name: "SF", geo: SF });
+    await table.ensureTable();
+    expect(driver.calls.some((c) => c.sql.includes("CREATE EXTENSION IF NOT EXISTS postgis"))).toBe(
+      true,
+    );
+    expect(driver.calls.find((c) => c.sql.includes("CREATE TABLE"))!.sql).toContain(
+      '"geo" geography(Point,4326)',
+    );
+  });
+
+  it("a table without geo fields never probes", async () => {
+    const { UsersTable } = await import("./fixtures/test-table.as");
+    const { driver, table } = makeTable(UsersTable);
+    await table.findMany({ filter: { name: "a" }, controls: {} });
+    expect(driver.calls.some(isProbe)).toBe(false);
+  });
+});

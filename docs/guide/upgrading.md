@@ -6,6 +6,23 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.151 {#v0-1-151}
+
+### New features
+
+- **`Client.invalidateMeta()`** (`@atscript/db-client`) drops the client's cached `/meta`, the validator built from it and the loaded action forms. Call it on a reused client when the viewer's identity changes (login, logout, role change): `/meta` is projected per user. See [Metadata](/http/client#meta).
+
+### Behavior changes {#v0-1-151-behavior}
+
+- **PostgreSQL: a `TIMESTAMP` (without time zone) column is read as UTC.** `PgDriver` used to read its wall time in the process's time zone, so the same row came back as a different instant under a different `TZ`. It now returns the same epoch ms everywhere, matching how the MySQL adapter reads `DATETIME`. `TIMESTAMPTZ` and the `BIGINT` columns of `@db.default.now` are unchanged. If a non-UTC process wrote local wall times into such a column, those rows now read shifted by that offset. See [Custom Type Parsers](/adapters/postgresql#custom-type-parsers).
+- **MySQL: fractional seconds round-trip on `TIMESTAMP(n)` / `DATETIME(n)` columns.** A `number` field with `@db.mysql.type "TIMESTAMP(3)"` (or `DATETIME(n)`) is written with its milliseconds and read back with them; both used to be cut to whole seconds. Such a field without `@db.default.now` is now converted to a datetime string too (the raw number used to be sent and rejected). With `@db.default.now`, `DEFAULT` and `@db.mysql.onUpdate` render as `CURRENT_TIMESTAMP(n)`, which MySQL requires for such a column (the bare form failed the `CREATE TABLE`). Plain `@db.default.now` columns stay `TIMESTAMP` with whole seconds, so no migration runs. `@db.default.now` with a non-date `@db.mysql.type` (such as `BIGINT`) now keeps the epoch ms number instead of sending a datetime string. See [Fractional seconds](/adapters/mysql#fractional-seconds).
+- **PostgreSQL geo without schema sync in the process.** A process that never runs sync (tables provisioned by another one) used to send `db.geoPoint` values as JSONB text even to a `geography` column. It now checks `pg_extension` once, read-only, before its first statement on a geo table, and writes EWKT or JSONB to match. `isGeoSearchable()` stays `false` until that first statement. See [Geo Search](/search/geo-search).
+- **Fewer statements per write on PostgreSQL and MySQL.** These show up in statement logs and in tests that count statements:
+  - An `insertMany` or `insertManyIgnore` that is a single statement (one chunk, plus one row for MySQL ignore mode) no longer opens its own transaction.
+  - On PostgreSQL, a one-row `insertManyIgnore` chunk skips the `SAVEPOINT`.
+  - On PostgreSQL, `updateOne` / `deleteOne` / `replaceOne` by an exact primary key run as `… WHERE "id" = $1`, without the `LIMIT 1` subquery.
+  - On MySQL, a multi-row insert of generated ids reads `@@auto_increment_increment` on the insert's own connection, without `START TRANSACTION` / `COMMIT`.
+
 ## 0.1.150 {#v0-1-150}
 
 **Requires `moost` 0.6.46 (`app.addInitHook`) and `@atscript/typescript` 0.1.101 (`annotationOverrides`).**

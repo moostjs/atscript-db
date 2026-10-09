@@ -88,7 +88,7 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   geoPointToMysqlInternal,
-  isMysqlTimestampColumn,
+  mysqlTemporalFsp,
   mysqlBytesPerChar,
   mysqlCharLength,
   mysqlDefaultLiteral,
@@ -105,7 +105,12 @@ import {
 } from "./sql-builder";
 import type { TMysqlConnection, TMysqlDriver } from "./types";
 
-/** Parses a MySQL UTC datetime string ('YYYY-MM-DD HH:MM:SS') to epoch ms. Returns the original value if parsing fails. */
+/**
+ * Parses a MySQL UTC datetime string (`'YYYY-MM-DD HH:MM:SS[.ffffff]'`) to
+ * epoch ms — fractional seconds included (truncated to milliseconds; since
+ * 0.1.151, earlier versions dropped them). Returns the original value if
+ * parsing fails.
+ */
 export function utcDatetimeToEpochMs(value: unknown): unknown {
   if (typeof value === "number") {
     return value;
@@ -121,16 +126,25 @@ export function utcDatetimeToEpochMs(value: unknown): unknown {
       +value.slice(11, 13),
       +value.slice(14, 16),
       +value.slice(17, 19),
+      value.charCodeAt(19) === 46 /* . */ ? +value.slice(20, 23).padEnd(3, "0") : 0,
     );
     return Number.isNaN(ms) ? value : ms;
   }
   return value;
 }
 
-/** Formats epoch ms as 'YYYY-MM-DD HH:MM:SS' in UTC for MySQL TIMESTAMP columns. */
-function epochMsToUtcDatetime(ms: number): string {
+/**
+ * Formats epoch ms as `'YYYY-MM-DD HH:MM:SS'` in UTC for MySQL TIMESTAMP /
+ * DATETIME columns — with `.f…` milliseconds (cut to `fsp` digits) for a
+ * column of fractional precision `fsp` > 0. A whole-second column gets no
+ * fraction (truncated, never rounded up by the server).
+ */
+export function epochMsToUtcDatetime(ms: number, fsp = 0): string {
   const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
+  const text = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")} ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
+  return fsp > 0
+    ? `${text}.${String(d.getUTCMilliseconds()).padStart(3, "0").slice(0, Math.min(fsp, 3))}`
+    : text;
 }
 
 // ── Calendar-bucket time zone probe ──────────────────────────────────────────
@@ -176,6 +190,9 @@ type TIncrementStep = () => Promise<number>;
  * row carries a 0 / "0" PK — and at most once per call, on the call's connection.
  */
 type TZeroIsExplicit = () => Promise<boolean>;
+
+/** The statement surface the adapter runs CRUD through (pool or a dedicated connection). */
+type TMysqlExecutor = Pick<TMysqlDriver, "run" | "all" | "get" | "exec">;
 
 /** A run of consecutive rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
 interface TIdGroup {
@@ -230,6 +247,18 @@ export class MysqlAdapter extends BaseDbAdapter {
   >();
   /** Default similarity thresholds per vector field (from @db.search.vector.threshold). */
   private _vectorThresholds = new Map<string, number>();
+
+  // ── Per-table memos (the table metadata is built once per readable) ────
+  private _replaceColumnsMemo?: {
+    src: readonly TDbFieldMeta[];
+    cols: ReturnType<typeof replaceColumnsFor>;
+  };
+  private _fulltextMemo?: {
+    src: Map<string, TDbIndex>;
+    all: TDbIndex[];
+    def: TDbIndex | undefined;
+  };
+  private _searchIndexesMemo?: { src: Map<string, TDbIndex>; list: TSearchIndexInfo[] };
 
   /**
    * Schema name for INFORMATION_SCHEMA queries — `@db.schema` of the bound
@@ -288,7 +317,7 @@ export class MysqlAdapter extends BaseDbAdapter {
    * Returns the active executor: dedicated connection if inside a transaction,
    * otherwise the pool-based driver.
    */
-  private _exec(): Pick<TMysqlDriver, "run" | "all" | "get" | "exec"> {
+  private _exec(): TMysqlExecutor {
     return this._txConnection() ?? this.driver;
   }
 
@@ -497,17 +526,20 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Returns a value formatter for TIMESTAMP-mapped fields.
-   * Number fields with @db.default.now map to MySQL TIMESTAMP — the formatter
-   * converts epoch ms to a UTC datetime string for the wire protocol.
+   * Returns a value formatter for TIMESTAMP / DATETIME-mapped fields.
+   * Number fields with @db.default.now map to MySQL TIMESTAMP (or the
+   * `@db.mysql.type` TIMESTAMP / DATETIME override) — the formatter converts
+   * epoch ms to a UTC datetime string for the wire protocol, with
+   * milliseconds when the column has fractional seconds.
    */
   override formatValue(
     field: TDbFieldMeta,
   ): TValueFormatterPair | ((value: unknown) => unknown) | undefined {
-    if (isMysqlTimestampColumn(field)) {
+    const fsp = mysqlTemporalFsp(field);
+    if (fsp !== undefined) {
       return {
         toStorage: (value: unknown) =>
-          typeof value === "number" ? epochMsToUtcDatetime(value) : value,
+          typeof value === "number" ? epochMsToUtcDatetime(value, fsp) : value,
         fromStorage: utcDatetimeToEpochMs,
       };
     }
@@ -592,12 +624,31 @@ export class MysqlAdapter extends BaseDbAdapter {
       return { insertedCount: 0, insertedIds: [] };
     }
 
-    return this.withTransaction(async () => {
-      const tableName = this.resolveTableName();
+    // Batch rows into multi-row INSERT statements over the column union of
+    // ALL rows, to reduce round-trips; chunked to stay under max packet size.
+    const { columns, batches } = chunkInsertRows(data);
+    const tableName = this.resolveTableName();
 
-      // Batch rows into multi-row INSERT statements over the column union of
-      // ALL rows, to reduce round-trips; chunked to stay under max packet size.
-      const { columns, batches } = chunkInsertRows(data);
+    // One chunk of one id kind, outside a transaction, is ONE statement —
+    // atomic on its own: no START TRANSACTION / COMMIT round trips. Generated
+    // ids of several rows also need the session's `@@auto_increment_increment`:
+    // read on a dedicated connection BEFORE the INSERT runs there (a failed
+    // read then inserts nothing; still no BEGIN).
+    const single =
+      batches.length === 1 && !this._txConnection() ? this._uniformIdGroup(batches[0]!) : undefined;
+    if (single) {
+      const ids =
+        single.generated && single.rows.length > 1
+          ? await this._onDedicatedConnection(async (conn) => {
+              const step = this._incrementStep(conn);
+              await step();
+              return this._insertGroup(conn, tableName, columns, single, step);
+            })
+          : await this._insertGroup(this.driver, tableName, columns, single, this._incrementStep());
+      return { insertedCount: ids.length, insertedIds: ids };
+    }
+
+    return this.withTransaction(async () => {
       const allIds: unknown[] = [];
       const step = this._incrementStep();
       const zero = this._zeroIsExplicit();
@@ -605,10 +656,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       for (const batch of batches) {
         const ids: unknown[] = Array.from({ length: batch.length });
         for (const group of await this._idGroups(batch, zero)) {
-          const { sql, params } = buildInsertMany(tableName, group.rows, columns);
-          this._log(sql, params);
-          const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-          (await this._groupInsertedIds(group, result.insertId, step)).forEach((id, k) => {
+          const groupIds = await this._insertGroup(this._exec(), tableName, columns, group, step);
+          groupIds.forEach((id, k) => {
             ids[group.at[k]!] = id;
           });
         }
@@ -617,6 +666,52 @@ export class MysqlAdapter extends BaseDbAdapter {
 
       return { insertedCount: allIds.length, insertedIds: allIds };
     });
+  }
+
+  /** ONE multi-row INSERT of a homogeneous id group on `exec`; the rows' ids in group order. */
+  // oxlint-disable-next-line max-params
+  private async _insertGroup(
+    exec: TMysqlExecutor,
+    tableName: string,
+    columns: string[],
+    group: TIdGroup,
+    step: TIncrementStep,
+  ): Promise<unknown[]> {
+    const { sql, params } = buildInsertMany(tableName, group.rows, columns);
+    this._log(sql, params);
+    const result = await this._wrapConstraintError(() => exec.run(sql, params));
+    return this._groupInsertedIds(group, result.insertId, step);
+  }
+
+  /** Runs `fn` on a dedicated pool connection (one session, autocommit), released after. */
+  private async _onDedicatedConnection<T>(fn: (conn: TMysqlConnection) => Promise<T>): Promise<T> {
+    const conn = await this.driver.getConnection();
+    try {
+      return await fn(conn);
+    } finally {
+      conn.release();
+    }
+  }
+
+  /**
+   * `rows` as ONE {@link _idGroups} group when that needs no session read:
+   * no AUTO_INCREMENT primary key, or every row's key of one kind (all
+   * generated — absent / null — or all explicit). `undefined` for a mixed
+   * chunk or a `0` key (`NO_AUTO_VALUE_ON_ZERO` decides it — a session read).
+   */
+  private _uniformIdGroup(rows: Array<Record<string, unknown>>): TIdGroup | undefined {
+    const col = this._autoIncrementPk();
+    let generated = false;
+    if (col) {
+      for (let i = 0; i < rows.length; i++) {
+        const v = rows[i]![col];
+        if (isZero(v)) return undefined;
+        const g = v === undefined || v === null;
+        if (i === 0) generated = g;
+        else if (g !== generated) return undefined;
+      }
+    }
+    return { rows, at: rows.map((_, i) => i), generated };
   }
 
   /** Physical column of the single-column AUTO_INCREMENT primary key, if the table has one. */
@@ -695,12 +790,18 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
   }
 
-  /** The {@link TIncrementStep} of one `insertMany` / `insertManyIgnore` call. */
-  private _incrementStep(): TIncrementStep {
+  /**
+   * The {@link TIncrementStep} of one `insertMany` / `insertManyIgnore` call,
+   * read on `exec` (default: the call's executor). Not cached across calls:
+   * the value is per session and can change at runtime (`SET SESSION`, Galera
+   * `wsrep_auto_increment_control`, Group Replication multi-primary), and a
+   * pool hands out arbitrary connections.
+   */
+  private _incrementStep(exec?: TMysqlExecutor): TIncrementStep {
     let step: Promise<number> | undefined;
     return () =>
       (step ??= (async () => {
-        const row = await this._exec().get<{ step: unknown }>(
+        const row = await (exec ?? this._exec()).get<{ step: unknown }>(
           "SELECT @@auto_increment_increment AS step",
           [],
         );
@@ -755,9 +856,21 @@ export class MysqlAdapter extends BaseDbAdapter {
   ): Promise<TDbInsertIgnoreSlot[]> {
     if (data.length === 0) return [];
     await this._warnNonStrictMode();
+    const { columns, batches } = chunkInsertRows(data);
+    // One row outside a transaction is ONE statement (a duplicate just skips
+    // it): no START TRANSACTION / COMMIT around it.
+    const single =
+      data.length === 1 && !this._txConnection() ? this._uniformIdGroup(data) : undefined;
+    if (single) {
+      return this._insertIgnoringGroup(
+        this.resolveTableName(),
+        columns,
+        single,
+        this._incrementStep(),
+      );
+    }
     return this.withTransaction(async () => {
       const tableName = this.resolveTableName();
-      const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
       const step = this._incrementStep();
       const zero = this._zeroIsExplicit();
@@ -1141,11 +1254,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     // instead of silently merging with the old row.
     const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
-    const full = fillReplacePayload(
-      data,
-      replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
-      versionColumn,
-    );
+    const full = fillReplacePayload(data, this._replaceColumns(), versionColumn);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       full,
@@ -1158,6 +1267,19 @@ export class MysqlAdapter extends BaseDbAdapter {
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
+  }
+
+  /** The columns a full replace assigns (`replaceColumnsFor`), built once per table. */
+  private _replaceColumns(): ReturnType<typeof replaceColumnsFor> {
+    const src = this._table.fieldDescriptors;
+    let memo = this._replaceColumnsMemo;
+    if (memo?.src !== src) {
+      memo = this._replaceColumnsMemo = {
+        src,
+        cols: replaceColumnsFor(src, this.nativeDefaultFns()),
+      };
+    }
+    return memo.cols;
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
@@ -1847,10 +1969,19 @@ export class MysqlAdapter extends BaseDbAdapter {
   // ── Fulltext search ───────────────────────────────────────────────────────
 
   override getSearchIndexes(): TSearchIndexInfo[] {
+    // Built once per table (the index set is fixed); callers get their own array.
+    const src = this._table.indexes;
+    let memo = this._searchIndexesMemo;
+    if (memo?.src !== src) {
+      memo = this._searchIndexesMemo = { src, list: this._buildSearchIndexes() };
+    }
+    return [...memo.list];
+  }
+
+  private _buildSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
     // The default text index is the first one with a TEXT member (else the first).
-    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
-    const ftDefault = defaultFulltextIndex(ftAll);
+    const { all: ftAll, def: ftDefault } = this._fulltextIndexes();
     for (const index of ftAll) {
       indexes.push({
         name: index.key,
@@ -1971,9 +2102,20 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {
-    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
-    if (!indexName) return defaultFulltextIndex(ftAll);
-    return ftAll.find((index) => index.key === indexName);
+    const { all, def } = this._fulltextIndexes();
+    if (!indexName) return def;
+    return all.find((index) => index.key === indexName);
+  }
+
+  /** The table's fulltext indexes and the default one, built once per table. */
+  private _fulltextIndexes(): { all: TDbIndex[]; def: TDbIndex | undefined } {
+    const src = this._table.indexes;
+    let memo = this._fulltextMemo;
+    if (memo?.src !== src) {
+      const all = [...src.values()].filter((i) => i.type === "fulltext");
+      memo = this._fulltextMemo = { src, all, def: defaultFulltextIndex(all) };
+    }
+    return memo;
   }
 
   // ── Vector search ──────────────────────────────────────────────────────
@@ -2015,7 +2157,9 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires MySQL 9.0+");
     }
-    const { sql, params } = this._buildVectorSearchQuery(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(
+      this._prepareVectorSearch(vector, query, indexName),
+    );
     this._log(sql, params);
     return this._exec().all(sql, params);
   }
@@ -2029,12 +2173,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires MySQL 9.0+");
     }
-    const { sql, params } = this._buildVectorSearchQuery(vector, query, indexName);
-    const { sql: countSql, params: countParams } = this._buildVectorSearchCountQuery(
-      vector,
-      query,
-      indexName,
-    );
+    // One context (field, filter, threshold) for both statements.
+    const ctx = this._prepareVectorSearch(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(ctx);
+    const { sql: countSql, params: countParams } = this._buildVectorSearchCountQuery(ctx);
     this._log(sql, params);
     this._log(countSql, countParams);
     const [data, countRow] = await Promise.all([
@@ -2112,12 +2254,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     };
   }
 
-  private _buildVectorSearchQuery(
-    vector: number[],
-    query: DbQuery,
-    indexName?: string,
-  ): { sql: string; params: unknown[] } {
-    const ctx = this._prepareVectorSearch(vector, query, indexName);
+  private _buildVectorSearchQuery(ctx: ReturnType<MysqlAdapter["_prepareVectorSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
     const { source, maxDistance } = this._vectorSearchSource(ctx, true);
     const skip = Number(ctx.controls.$skip) || 0;
     return buildVectorSearchSelect(mysqlDialect, source, {
@@ -2128,15 +2268,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     });
   }
 
-  private _buildVectorSearchCountQuery(
-    vector: number[],
-    query: DbQuery,
-    indexName?: string,
-  ): { sql: string; params: unknown[] } {
-    const { source, maxDistance } = this._vectorSearchSource(
-      this._prepareVectorSearch(vector, query, indexName),
-      false,
-    );
+  private _buildVectorSearchCountQuery(ctx: ReturnType<MysqlAdapter["_prepareVectorSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
+    const { source, maxDistance } = this._vectorSearchSource(ctx, false);
     return buildVectorSearchCount(mysqlDialect, source, { maxDistance });
   }
 
@@ -2270,8 +2406,8 @@ function normalizeMysqlDefault(value: string | null): string | undefined {
     return undefined;
   }
   const lower = value.toLowerCase();
-  // DEFAULT CURRENT_TIMESTAMP / current_timestamp() → fn:now
-  if (lower === "current_timestamp" || lower === "current_timestamp()") {
+  // DEFAULT CURRENT_TIMESTAMP / current_timestamp() / CURRENT_TIMESTAMP(3) → fn:now
+  if (/^current_timestamp(?:\(\d?\))?$/.test(lower)) {
     return "fn:now";
   }
   // DEFAULT uuid() — MySQL 8.0 stores as "uuid()"

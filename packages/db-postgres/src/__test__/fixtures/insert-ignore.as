@@ -92,3 +92,10 @@ export interface IgInet {
     @db.pg.type 'INET'
     addr: string
 }
+
+@db.table 'ig_log'
+export interface IgLog {
+    text: string
+
+    qty: number
+}

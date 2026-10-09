@@ -151,7 +151,7 @@ export interface User {
 | `number` with `@db.mysql.unsigned`    | `INT UNSIGNED` / `BIGINT UNSIGNED` / etc. | Appends `UNSIGNED` to the integer type                                                        |
 | `number` with `@db.column.precision`  | `DECIMAL(p,s)`                            |                                                                                               |
 | `number` with `@db.default.increment` | `BIGINT`                                  | `AUTO_INCREMENT`                                                                              |
-| `number` with `@db.default.now`       | `TIMESTAMP`                               | `DEFAULT CURRENT_TIMESTAMP`                                                                   |
+| `number` with `@db.default.now`       | `TIMESTAMP`                               | `DEFAULT CURRENT_TIMESTAMP`; whole seconds — see [Fractional seconds](#fractional-seconds)    |
 | `boolean`                             | `TINYINT(1)`                              | Stored as `0` / `1`                                                                           |
 | `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                   |
 | Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                        |
@@ -328,7 +328,7 @@ Under `explicit_defaults_for_timestamp = OFF` a required `TIMESTAMP` column with
 
 `Mysql2Driver` installs a custom `typeCast` and a few pool defaults so query results are predictable JS values, not driver-default strings:
 
-- **`TIMESTAMP` / `DATETIME` → `number`** (epoch milliseconds). Reads parse the UTC datetime string back to a number; writes accept epoch ms and emit `'YYYY-MM-DD HH:MM:SS'`.
+- **`TIMESTAMP` / `DATETIME` → `number`** (epoch milliseconds). Reads parse the UTC datetime string back to a number, fractional seconds included; writes accept epoch ms and emit `'YYYY-MM-DD HH:MM:SS'`, plus `.fff` on a column with fractional seconds (see below).
 - **`DECIMAL` / `NEWDECIMAL` → `number`** instead of `string`. Be aware that values outside JS safe-number range may lose precision — keep `decimal` columns within `~15` significant digits if you rely on this.
 - **`timezone: '+00:00'`** is set on the pool so all timestamp operations are UTC.
 - **`supportBigNumbers: true`**, **`bigNumberStrings: false`** — `BIGINT` values within `Number.MAX_SAFE_INTEGER` come back as `number`; out-of-range values come back as **`string`** (preserves full precision without truncation). Coerce to `BigInt` yourself if you need arithmetic on those values.
@@ -345,6 +345,21 @@ createdAt: number.timestamp
 @db.mysql.onUpdate "CURRENT_TIMESTAMP"
 updatedAt: number.timestamp
 ```
+
+### Fractional seconds {#fractional-seconds}
+
+A `number` with `@db.default.now` is a plain `TIMESTAMP`: whole seconds, and the milliseconds of a value you write are dropped (truncated, never rounded up). For millisecond precision declare the column type:
+
+```atscript
+@db.default.now
+@db.mysql.type "TIMESTAMP(3)"
+createdAt: number.timestamp
+
+@db.mysql.type "DATETIME(3)"
+seenAt?: number
+```
+
+A `number` field whose `@db.mysql.type` is `TIMESTAMP(n)` / `DATETIME(n)` (with or without `@db.default.now`) is written as a UTC datetime string with `n` fractional digits (up to milliseconds) and read back as epoch ms with its milliseconds. `DEFAULT` and `ON UPDATE` render as `CURRENT_TIMESTAMP(n)`, which MySQL requires for such a column. A `@db.mysql.type` that is not a date type (say `BIGINT`) keeps the number as is, `@db.default.now` included.
 
 ## Foreign Key Sync
 

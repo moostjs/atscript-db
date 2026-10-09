@@ -105,6 +105,20 @@ export function quoteTableName(name: string): string {
 
 // ── PostgreSQL dialect ───────────────────────────────────────────────────────
 
+/**
+ * A `db.geoPoint` value written or filtered on before the adapter knows
+ * whether PostGIS backs the column (`geography`) or the JSONB fallback does —
+ * schema sync never ran in this process. The adapter resolves it right before
+ * the statement executes, once PostGIS presence is probed: EWKT for a
+ * geography column, `raw` (what the JSONB path binds) otherwise.
+ */
+export class PendingGeoPoint {
+  constructor(
+    readonly point: [number, number],
+    readonly raw: unknown,
+  ) {}
+}
+
 /** Converts JS values to SQL-bindable params, keeping booleans native. */
 function toPgValue(value: unknown): unknown {
   if (value === undefined) {
@@ -112,6 +126,10 @@ function toPgValue(value: unknown): unknown {
   }
   if (value === null) {
     return null;
+  }
+  if (value instanceof PendingGeoPoint) {
+    // Resolved before execution; the JSONB form gets the conversion now.
+    return new PendingGeoPoint(value.point, toPgValue(value.raw));
   }
   if (value instanceof Date) {
     return value.toISOString();

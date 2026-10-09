@@ -414,6 +414,37 @@ describe("Client", () => {
     expect(result2).toBe(result1);
   });
 
+  it("invalidateMeta drops the cached /meta and validator: the next call refetches", async () => {
+    fetchFn = mockFetch([]);
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const metaCalls = () =>
+      fetchFn.mock.calls.filter((c: string[]) => (c[0] as string).endsWith("/meta")).length;
+
+    const first = await client.meta();
+    const validator = await client.getValidator();
+    client.invalidateMeta();
+    expect(await client.meta()).toEqual(first);
+    expect(metaCalls()).toBe(2);
+    expect(await client.getValidator()).not.toBe(validator);
+    expect(metaCalls()).toBe(2);
+  });
+
+  it("a /meta request invalidated in flight never clears its successor's cache", async () => {
+    let fail!: (err: Error) => void;
+    fetchFn = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => (fail = reject)));
+    fetchFn.mockImplementation(mockFetch([]));
+    const client = new Client("/api/users", { fetch: fetchFn });
+    const stale = client.meta();
+    client.invalidateMeta();
+    const fresh = await client.meta();
+    fail(new Error("network"));
+    await expect(stale).rejects.toThrow();
+    expect(await client.meta()).toBe(fresh);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
   // ── Error Handling ─────────────────────────────────────────────────────
 
   it("throws ClientError on non-2xx response", async () => {

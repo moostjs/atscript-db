@@ -78,7 +78,7 @@ The adapter sets `charset=utf8mb4` on connection and uses it for new tables unle
 
 ## Value formatters
 
-MySQL `DATETIME`/`TIMESTAMP` columns are handled via `BaseDbAdapter.formatValue()` — epoch-ms numbers are converted to `YYYY-MM-DD HH:MM:SS` strings on write and back to numbers on read. Attribute `number.timestamp` types get this automatically when the generated SQL column type is a date type.
+MySQL `DATETIME`/`TIMESTAMP` columns are handled via `BaseDbAdapter.formatValue()` — epoch-ms numbers are converted to `YYYY-MM-DD HH:MM:SS` strings on write and back to numbers on read. Applies to a `number` with `@db.default.now` (→ `TIMESTAMP`, whole seconds, ms truncated) or with `@db.mysql.type "TIMESTAMP(n)" / "DATETIME(n)"` (since 0.1.151: `.fff` written and read back at precision `n`; `DEFAULT` / `ON UPDATE` render `CURRENT_TIMESTAMP(n)`). A non-date `@db.mysql.type` (e.g. `BIGINT`) keeps raw epoch ms even with `@db.default.now`. Millisecond precision → declare `@db.mysql.type "TIMESTAMP(3)"`.
 
 ## Known limits
 

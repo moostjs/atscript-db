@@ -227,7 +227,8 @@ describe("mysqlTypeDefault", () => {
     expect(mysqlTypeDefault("JSON", f)).toBe("('{}')");
     expect(mysqlTypeDefault("POINT SRID 4326", f)).toBe("(ST_SRID(POINT(0, 0), 4326))");
     expect(mysqlTypeDefault("TIMESTAMP", f)).toBe("CURRENT_TIMESTAMP");
-    expect(mysqlTypeDefault("DATETIME(3)", f)).toBe("CURRENT_TIMESTAMP");
+    // a fractional-seconds column needs CURRENT_TIMESTAMP at its own precision (ER 1067 otherwise)
+    expect(mysqlTypeDefault("DATETIME(3)", f)).toBe("CURRENT_TIMESTAMP(3)");
     expect(mysqlTypeDefault("MEDIUMTEXT", f)).toBe("('')");
     expect(mysqlTypeDefault("BLOB", f)).toBe("('')");
     expect(mysqlTypeDefault("VARCHAR(255)", f)).toBe("''");
