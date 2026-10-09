@@ -30,13 +30,13 @@ Three classes in `@atscript/moost-db`:
 
 Every value-help controller exposes the same four routes:
 
-| Route       | Method | Purpose                                                                              |
-| ----------- | ------ | ------------------------------------------------------------------------------------ |
-| `/query`    | GET    | Filter + sort + search + (optionally skip) a window of rows. Returns `T[]`.          |
-| `/pages`    | GET    | Same query surface, plus `$page` / `$size` pagination. Returns `{ data, count, … }`. |
-| `/one/:id`  | GET    | Look up a single row by primary key. 404 on miss.                                    |
-| `/one?pk=…` | GET    | Look up by primary-key query param (falls back when the PK is not URL-safe).         |
-| `/meta`     | GET    | Returns the bound interface's serialized type plus capability hints (see below).     |
+| Route       | Method | Purpose                                                                                                                                                              |
+| ----------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/query`    | GET    | Filter + sort + search + (optionally skip) a window of rows. Returns `T[]`.                                                                                          |
+| `/pages`    | GET    | Same query surface, plus `$page` / `$size` pagination. Returns `{ data, count, … }`. Without `$sort` (and `$search`) rows come in primary-key order (since 0.1.153). |
+| `/one/:id`  | GET    | Look up a single row by primary key. 404 on miss.                                                                                                                    |
+| `/one?pk=…` | GET    | Look up by primary-key query param (falls back when the PK is not URL-safe).                                                                                         |
+| `/meta`     | GET    | Returns the bound interface's serialized type plus capability hints (see below).                                                                                     |
 
 Clients rely on the `/meta` response for both the field contract (label, description, attribute projection) and the **capability hints** (`fields[path].filterable`, `.sortable`, and the top-level `.searchable`). The client picker uses these to decide which controls to render.
 
@@ -167,7 +167,7 @@ The built-in `AsJsonValueHelpController.query` implementation iterates the const
 
 1. **Filter** — MongoDB-style comparison operators (`$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte`, `$regex`, `$exists`) and logical combinators (`$and`, `$or`, `$not`, `$nor`), over **dot-path** access into nested objects. `$regex` honors inline flags (`/foo/i`). The [MongoDB-like null model](./memory#comparison-semantics) applies: `$eq: null` matches an explicit `null` **or** a missing field; `$ne: null` matches only a concrete present value. Any field can be filtered — no gate.
 2. **Search** — case-insensitive substring match, applied by the controller itself (the engine has no `$search`). Fields to match come from `@ui.dict.searchable`: field-level annotation narrows to those props; absent or interface-level defaults to every `string`-typed prop. A field [`hasField`](#scoping) hides is skipped.
-3. **Sort** — stable, multi-key. Accepts the flexible value-help grammar: a leading `-`, `"field:asc,-other"` strings, arrays, or the `{ [field]: 'asc' \| 'desc' }` form. Any field can be sorted — no gate.
+3. **Sort** — stable, multi-key. Accepts the flexible value-help grammar: a leading `-`, `"field:asc,-other"` strings, arrays, or the `{ [field]: 'asc' \| 'desc' }` form. Any field can be sorted — no gate. Since 0.1.153 the URL suffix `:first` / `:last` (`$sort=-label:last`) places `null` / missing values ([NULL placement](/api/queries#nulls)), and `/pages` without `$sort` or `$search` sorts by the primary key so pages never overlap. A custom `AsValueHelpController` receives that default as `controls.$sort = { [pk]: 1 }` and the placement as `controls.$nulls`.
 4. **Projection** — `$select` resolves nested dot-paths.
 5. **Pagination** — `$skip` + `$limit` applied after filter/search/sort. `/pages` returns the full total count.
 

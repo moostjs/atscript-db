@@ -5,6 +5,13 @@ export interface MetaStoreOptions {
    * first). Default `50`.
    */
   maxEntries?: number;
+  /**
+   * After a conditional `/meta` request fails at the transport level (e.g. a
+   * CORS preflight refusing `If-None-Match`) while the plain retry succeeds,
+   * how long (ms) that store key is loaded without `If-None-Match` before a
+   * conditional request is tried again. Default `300000` (5 minutes).
+   */
+  unconditionalMs?: number;
 }
 
 /** ETags remembered per store key (most recent first). */
@@ -13,8 +20,12 @@ const CANDIDATES_PER_KEY = 4;
 interface KeyEntry {
   /** ETags seen for this key, most recent first. */
   etags: string[];
-  /** A conditional request for this key failed at the transport level (e.g. a CORS preflight refusing `If-None-Match`). */
-  unconditional?: boolean;
+  /**
+   * Until when (epoch ms) this key is loaded without `If-None-Match`: a
+   * conditional request for it failed at the transport level (e.g. a CORS
+   * preflight refusing `If-None-Match`).
+   */
+  unconditionalUntil?: number;
 }
 
 /**
@@ -36,12 +47,14 @@ interface KeyEntry {
  */
 export class MetaStore {
   private readonly _maxEntries: number;
+  private readonly _unconditionalMs: number;
   /** Raw JSON body by opaque ETag (`W/` stripped — `If-None-Match` compares weakly). */
   private readonly _bodies = new Map<string, string>();
   private readonly _keys = new Map<string, KeyEntry>();
 
   constructor(options?: MetaStoreOptions) {
     this._maxEntries = Math.max(1, options?.maxEntries ?? 50);
+    this._unconditionalMs = Math.max(0, options?.unconditionalMs ?? 300_000);
   }
 
   /** Number of stored `/meta` bodies. */
@@ -96,14 +109,24 @@ export class MetaStore {
     this._remember(key, etag);
   }
 
-  /** @internal used by `Client` */
+  /**
+   * Whether `key` is in its no-`If-None-Match` window; an expired window is
+   * cleared, so the next request is conditional again.
+   *
+   * @internal used by `Client`
+   */
   _isUnconditional(key: string): boolean {
-    return this._keys.get(key)?.unconditional === true;
+    const entry = this._keys.get(key);
+    const until = entry?.unconditionalUntil;
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    delete entry!.unconditionalUntil;
+    return false;
   }
 
   /** @internal used by `Client` */
   _markUnconditional(key: string): void {
-    this._touchKey(key).unconditional = true;
+    this._touchKey(key).unconditionalUntil = Date.now() + this._unconditionalMs;
   }
 
   private _remember(key: string, etag: string): void {

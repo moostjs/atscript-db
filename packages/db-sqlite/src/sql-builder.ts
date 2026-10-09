@@ -193,6 +193,8 @@ export const sqliteDialect: SqlDialect = {
   calendarBucket: sqliteCalendarBucket,
   jsonExtract: sqliteJsonExtract,
   castDouble: (expr: string) => `CAST(${expr} AS REAL)`,
+  // `NULLS FIRST` / `NULLS LAST` — SQLite ≥ 3.30 (better-sqlite3 bundles a newer one).
+  nullsPlacementSyntax: true,
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
 

@@ -8,10 +8,11 @@ import {
 } from "@atscript/db";
 import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/db/agg";
 import { bucketer } from "@uniqu/core";
+import type { NullsPlacement } from "@uniqu/core";
 
 import { buildMemoryPredicate, pathReader } from "./memory-filter";
 import { cloneValue } from "./memory-clone";
-import { compareLeaves, paginate, setPath, sortRows } from "./memory-engine";
+import { compareLeaves, compareSortKey, paginate, setPath, sortRows } from "./memory-engine";
 
 type TRow = Record<string, unknown>;
 
@@ -125,7 +126,13 @@ export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow
 
   // ── $sort (stable: ties keep first-seen group order) → $skip / $limit ────
   const paged = paginate(
-    sortRows(out, controls.$sort as Partial<Record<string, 1 | -1>> | undefined),
+    sortRows(
+      out,
+      controls.$sort as Partial<Record<string, 1 | -1>> | undefined,
+      undefined,
+      undefined,
+      controls.$nulls as Partial<Record<string, NullsPlacement>> | undefined,
+    ),
     controls.$skip as number | undefined,
     controls.$limit as number | undefined,
   );
@@ -248,15 +255,15 @@ function exprAccumulatorFactory(e: TExprAggregate): () => TAccumulator {
 /**
  * `first` / `last`: the value of `fl.column` on the group's representative
  * row — the least (`first`) or greatest (`last`) row by `rowOrder` (NULL
- * smallest; the primary key is the final key, so the pick is deterministic).
+ * smallest unless the key carries a `nulls` placement; the primary key is the final key, so the pick is deterministic).
  */
 function firstLastFactory(fl: TFirstLast, rowOrder: readonly TRowOrderKey[]): () => TAccumulator {
-  const keys = rowOrder.map((k) => ({ read: pathReader(k.column), sign: k.desc ? -1 : 1 }));
+  const keys = rowOrder.map((k) => ({ read: pathReader(k.column), desc: k.desc, nulls: k.nulls }));
   const read = pathReader(fl.column);
   const sign = fl.fn === "first" ? -1 : 1;
   const compare = (a: TRow, b: TRow) => {
     for (const k of keys) {
-      const c = compareLeaves(k.read(a), k.read(b)) * k.sign;
+      const c = compareSortKey(k.read(a), k.read(b), k.desc, k.nulls);
       if (c !== 0) return c;
     }
     return 0;

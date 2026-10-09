@@ -180,6 +180,80 @@ describe("meta store", () => {
     expect(sent.map((s) => s.ifNoneMatch)).toEqual([undefined, '"e1"', undefined, undefined]);
   });
 
+  it("the no-If-None-Match window after a refused conditional request expires", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      const metaStore = new MetaStore({ unconditionalMs: 60_000 });
+      const { fetch, sent } = serverMock(
+        { status: 200, etag: '"e1"', body: META_A },
+        new TypeError("Failed to fetch"),
+        { status: 200, etag: '"e1"', body: META_A },
+        { status: 200, etag: '"e1"', body: META_A },
+        { status: 304, etag: '"e1"' },
+      );
+      await new Client("/api/todos", { fetch, metaStore }).meta();
+      await new Client("/api/todos", { fetch, metaStore }).meta(); // refused → plain retry
+      now.mockReturnValue(1_000_000 + 59_999);
+      await new Client("/api/todos", { fetch, metaStore }).meta(); // still in the window
+      now.mockReturnValue(1_000_000 + 60_000);
+      expect(await new Client("/api/todos", { fetch, metaStore }).meta()).toEqual(META_A);
+      expect(sent.map((s) => s.ifNoneMatch)).toEqual([
+        undefined,
+        '"e1"',
+        undefined,
+        undefined,
+        '"e1"',
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("the default window is five minutes", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const metaStore = new MetaStore();
+      metaStore._markUnconditional("k");
+      now.mockReturnValue(299_999);
+      expect(metaStore._isUnconditional("k")).toBe(true);
+      now.mockReturnValue(300_000);
+      expect(metaStore._isUnconditional("k")).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("metaEtag() is the ETag of the body meta() resolved to", async () => {
+    const metaStore = new MetaStore();
+    const { fetch } = serverMock(
+      { status: 200, etag: 'W/"e1"', body: META_A },
+      { status: 304, etag: 'W/"e1"' },
+      { status: 200, etag: '"e2"', body: META_B },
+    );
+    const first = new Client("/api/todos", { fetch, metaStore });
+    expect(first.metaEtag()).toBeUndefined();
+    await first.meta();
+    expect(first.metaEtag()).toBe('W/"e1"');
+    const second = new Client("/api/todos", { fetch, metaStore });
+    await second.meta(); // 304 → same body, same tag
+    expect(second.metaEtag()).toBe('W/"e1"');
+    second.invalidateMeta();
+    expect(second.metaEtag()).toBeUndefined();
+    expect(await second.meta()).toEqual(META_B);
+    expect(second.metaEtag()).toBe('"e2"');
+  });
+
+  it("metaEtag() works without a store and is undefined without a readable ETag", async () => {
+    const tagged = serverMock({ status: 200, etag: '"e9"', body: META_A });
+    const client = new Client("/api/todos", { fetch: tagged.fetch, metaStore: false });
+    await client.meta();
+    expect(client.metaEtag()).toBe('"e9"');
+    const untagged = serverMock({ status: 200, body: META_A });
+    const plain = new Client("/api/todos", { fetch: untagged.fetch, metaStore: new MetaStore() });
+    await plain.meta();
+    expect(plain.metaEtag()).toBeUndefined();
+  });
+
   it("a network error on both attempts is a TransportError and nothing is marked", async () => {
     const metaStore = new MetaStore();
     const { fetch, sent } = serverMock(

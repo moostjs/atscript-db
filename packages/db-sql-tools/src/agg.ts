@@ -4,7 +4,13 @@ import { assertAggregateFn, resolveAlias, type TDbAggregateFn } from "@atscript/
 
 import { sqlTimeZoneLiteral } from "./common";
 import type { SqlDialect, TSqlFragment } from "./dialect";
-import { EMPTY_AND, finalizeParams, havingGroupRef, orderKeySql } from "./dialect";
+import {
+  EMPTY_AND,
+  finalizeParams,
+  havingGroupRef,
+  nullsPlacementOf,
+  orderKeySql,
+} from "./dialect";
 import { renderArith } from "./arith";
 import { createFilterVisitor } from "./filter-builder";
 
@@ -286,7 +292,15 @@ function aggSource(
     : "";
   const order = (reverse: boolean) =>
     rowOrder
-      .map((k) => orderKeySql(dialect, dialect.quoteIdentifier(k.column), k.desc !== reverse))
+      .map((k) =>
+        // `last` reads the forward order reversed — its NULL placement too.
+        orderKeySql(
+          dialect,
+          dialect.quoteIdentifier(k.column),
+          k.desc !== reverse,
+          k.nulls && reverse ? (k.nulls === "first" ? "last" : "first") : k.nulls,
+        ),
+      )
       .join(", ");
   const columns = [
     ...rowColumns(controls).map((column) => dialect.quoteIdentifier(column)),
@@ -355,11 +369,27 @@ export function buildAggregateSelect(
   }
 
   // ORDER BY — bare names: output aliases (aggregate or bucket) are legal here on every dialect.
-  // NULL is the smallest value everywhere (`orderKeySql`: NULLS FIRST / LAST where the engine differs).
+  // NULL is the smallest value everywhere (`orderKeySql`: NULLS FIRST / LAST where the engine
+  // differs) unless `$nulls` places it. Without NULLS FIRST / LAST syntax (MySQL) the extra
+  // `(… IS NULL)` key tests a computed alias's own expression: inside an expression MySQL
+  // resolves a name to a table column before an alias, and an aggregate alias may be named like
+  // a column (a bucket or expression alias may not — uniqu rejects that).
   if (controls.$sort) {
+    const nullTest = (col: string) => () => {
+      aliasSql ??= aliasSqlMap(dialect, controls);
+      return aliasSql.get(col) ?? dialect.quoteIdentifier(col);
+    };
     const orderParts: string[] = [];
     for (const [col, dir] of Object.entries(controls.$sort)) {
-      orderParts.push(orderKeySql(dialect, dialect.quoteIdentifier(col), dir === -1));
+      orderParts.push(
+        orderKeySql(
+          dialect,
+          dialect.quoteIdentifier(col),
+          dir === -1,
+          nullsPlacementOf(controls.$nulls, col),
+          nullTest(col),
+        ),
+      );
     }
     if (orderParts.length > 0) {
       sql += ` ORDER BY ${orderParts.join(", ")}`;

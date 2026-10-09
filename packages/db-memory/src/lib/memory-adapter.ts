@@ -41,7 +41,13 @@ import {
   type RecordedUniqueIndex,
 } from "./memory-unique";
 import { aggregateRows } from "./memory-aggregate";
-import type { AggregateFn, BucketUnit, TViewCapability, UniquSelect } from "@atscript/db";
+import type {
+  AggregateFn,
+  BucketUnit,
+  NullsPlacement,
+  TViewCapability,
+  UniquSelect,
+} from "@atscript/db";
 
 /**
  * Provider (read-through) backing closure. Recomputes and returns the table's
@@ -902,10 +908,11 @@ export class MemoryAdapter extends BaseDbAdapter {
    */
   private _sortRows(
     rows: Record<string, unknown>[],
-    $sort?: Partial<Record<string, 1 | -1>>,
+    $sort: Partial<Record<string, 1 | -1>> | undefined,
+    $nulls: Partial<Record<string, NullsPlacement>> | undefined,
     topK?: number,
   ): Record<string, unknown>[] {
-    return sortRows(rows, this._withPkTieBreak($sort), undefined, topK);
+    return sortRows(rows, this._withPkTieBreak($sort), undefined, topK, $nulls);
   }
 
   /** `$sort` plus the primary-key fields it leaves out, in its last key's direction. */
@@ -954,12 +961,14 @@ export class MemoryAdapter extends BaseDbAdapter {
    */
   private _readControls(controls: DbControls): {
     $sort?: Partial<Record<string, 1 | -1>>;
+    $nulls?: Partial<Record<string, NullsPlacement>>;
     $skip?: number;
     $limit?: number;
     $select?: UniquSelect;
   } {
     return {
       $sort: controls.$sort as Partial<Record<string, 1 | -1>> | undefined,
+      $nulls: controls.$nulls as Partial<Record<string, NullsPlacement>> | undefined,
       $skip: controls.$skip as number | undefined,
       $limit: controls.$limit as number | undefined,
       $select: controls.$select,
@@ -1005,10 +1014,10 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
-    const { $sort, $skip, $select } = this._readControls(query.controls ?? {});
+    const { $sort, $nulls, $skip, $select } = this._readControls(query.controls ?? {});
     const index = $skip ?? 0;
     const sorted = hasSort($sort)
-      ? this._sortRows(await this._filteredRows(query), $sort, index + 1)
+      ? this._sortRows(await this._filteredRows(query), $sort, $nulls, index + 1)
       : await this._filteredRows(query, index + 1);
     const row = sorted[index];
     return row ? this._projector($select)(row) : null;
@@ -1035,9 +1044,9 @@ export class MemoryAdapter extends BaseDbAdapter {
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
     const filtered = await this._filteredRows(query);
-    const { $sort, $skip, $limit, $select } = this._readControls(query.controls ?? {});
+    const { $sort, $nulls, $skip, $limit, $select } = this._readControls(query.controls ?? {});
     const topK = $limit === undefined ? undefined : ($skip ?? 0) + $limit;
-    const sorted = this._sortRows(filtered, $sort, topK);
+    const sorted = this._sortRows(filtered, $sort, $nulls, topK);
     const paged = paginate(sorted, $skip, $limit);
     const data = paged.map(this._projector($select));
     return { data, count: filtered.length };
@@ -1074,6 +1083,11 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
   override supportsAggregateExpressions(): boolean {
+    return true;
+  }
+
+  /** NULL placement (`$nulls`, `@db.sort.nulls`) — `sortRows` honours it per key. */
+  override supportsNullsPlacement(): boolean {
     return true;
   }
 

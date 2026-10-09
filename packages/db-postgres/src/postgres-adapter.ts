@@ -498,6 +498,11 @@ export class PostgresAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** `$nulls` / `@db.sort.nulls` NULL placement — `NULLS FIRST` / `NULLS LAST`. */
+  override supportsNullsPlacement(): boolean {
+    return true;
+  }
+
   /** Computed view columns and first-row joins. */
   override viewCapabilities(): ReadonlySet<TViewCapability> {
     return ALL_VIEW_CAPABILITIES;

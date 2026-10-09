@@ -1,4 +1,5 @@
 import { deletePath } from "@atscript/db";
+import type { NullsPlacement } from "@uniqu/core";
 
 import { cloneValue } from "./memory-clone";
 import { pathReader } from "./memory-filter";
@@ -48,6 +49,30 @@ export function compareLeaves(a: unknown, b: unknown): number {
 }
 
 /**
+ * {@link compareLeaves} with a NULL placement: `'first'` / `'last'` put
+ * `null`/`undefined` before / after every value, and `desc` reverses only the
+ * comparison of two values (since 0.1.153). Without `nulls`, nil is the
+ * smallest value and `desc` reverses everything, as before.
+ */
+export function compareSortKey(
+  a: unknown,
+  b: unknown,
+  desc: boolean,
+  nulls: NullsPlacement | undefined,
+): number {
+  if (nulls) {
+    const aNil = a === null || a === undefined;
+    const bNil = b === null || b === undefined;
+    if (aNil || bNil) {
+      if (aNil && bNil) return 0;
+      return (aNil ? -1 : 1) * (nulls === "first" ? 1 : -1);
+    }
+  }
+  const cmp = compareLeaves(a, b);
+  return desc ? -cmp : cmp;
+}
+
+/**
  * Dot-path setter used by inclusion projection. Creates intermediate plain
  * objects as needed; overwrites a non-object intermediate. Top-level keys and
  * nested dot-paths both work.
@@ -88,6 +113,9 @@ export { deletePath };
  *   of that order (e.g. `$skip + $limit`): a small one is selected in one pass
  *   instead of sorting everything. The rows returned are exactly the head of
  *   the full sort — same comparator, same stable tie handling.
+ * - `nulls` (since 0.1.153) — the `$nulls` control: a `$sort` key with an
+ *   entry puts `null`/missing values `'first'` or `'last'` in either
+ *   direction; a key without one keeps them smallest.
  *
  * NEVER mutates the input array. Each row's sort keys are read ONCE (O(n)) and
  * its `tieBreak` only when two rows tie on every key — not inside the
@@ -98,6 +126,7 @@ export function sortRows(
   $sort?: Partial<Record<string, 1 | -1>>,
   tieBreak?: (row: Record<string, unknown>) => string | number,
   topK?: number,
+  nulls?: Partial<Record<string, NullsPlacement>>,
 ): Record<string, unknown>[] {
   const keys = $sort ? Object.entries($sort) : [];
   if (keys.length === 0) {
@@ -105,6 +134,9 @@ export function sortRows(
   }
   const readers = keys.map(([field]) => pathReader(field));
   const desc = keys.map(([, dir]) => dir === -1);
+  const placement = nulls
+    ? keys.map(([field]) => (Object.hasOwn(nulls, field) ? nulls[field] : undefined))
+    : [];
   const decorated: SortEntry[] = rows.map((row, index) => ({
     row,
     index,
@@ -117,9 +149,9 @@ export function sortRows(
   }));
   const compare = (a: SortEntry, b: SortEntry): number => {
     for (let i = 0; i < desc.length; i++) {
-      const cmp = compareLeaves(a.keys[i], b.keys[i]);
+      const cmp = compareSortKey(a.keys[i], b.keys[i], desc[i]!, placement[i]);
       if (cmp !== 0) {
-        return desc[i] ? -cmp : cmp;
+        return cmp;
       }
     }
     // Deterministic tie-break: the injected key (when given) for

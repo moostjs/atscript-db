@@ -1,4 +1,4 @@
-import type { AggregateExpr, UniqueryControls } from "@uniqu/core";
+import type { AggregateExpr, NullsPlacement, UniqueryControls } from "@uniqu/core";
 import { isAggregateExpr, resolveAlias } from "@uniqu/core";
 import type { AtscriptExprNode } from "@atscript/typescript/utils";
 
@@ -34,6 +34,13 @@ export interface TFirstLast {
 export interface TRowOrderKey {
   column: string;
   desc: boolean;
+  /**
+   * Requested NULL placement (`$nulls`, or the field's `@db.sort.nulls`);
+   * absent: the uniform "NULL is the smallest value" order. Only set on
+   * adapters whose `supportsNullsPlacement()` is `true`.
+   * @since 0.1.153
+   */
+  nulls?: NullsPlacement;
 }
 
 /** The arithmetic and representative-row parts of an aggregate `$select`, as the field mapper resolves them. */

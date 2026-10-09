@@ -154,6 +154,18 @@ Return `true` to handle `$with` relation loading natively via database features 
 
 Return `true` to receive [relational predicates](/api/queries#relational-filters) (`$some` / `$none`) in `mode`: `'read'` for the filters of find, count, search and `aggregate()`, `'write'` for mutation filters (`updateMany`, `replaceMany`, `deleteMany`, row scopes). Default `false`: the core rejects such a filter with `REL_FILTER_NOT_SUPPORTED` (`… in mutation filters` for writes) before your adapter sees it. All bundled adapters return `true` for both modes. What you receive is described in [Relational Predicates](#relational-predicates).
 
+### `supportsNullsPlacement()` — since 0.1.153 {#nulls-placement}
+
+Return `true` when your reads honour a requested [NULL placement](/api/queries#nulls). Default `false`: the core then rejects an explicit `$nulls` with `INVALID_QUERY` before your adapter sees it, and drops `@db.sort.nulls` defaults. moost-db advertises the flag as `/meta.nullsPlacement`.
+
+When `true`, the core hands you only entries that matter:
+
+- **Reads taking a `DbQuery`** (`findMany`, `findOne`, `findManyWithCount`, `search`, `vectorSearch`, a native `$with` load): `controls.$nulls` maps a key of `controls.$sort` (physical name, like the `$sort` key) to `'first'` or `'last'`. It is present only for keys that can be `null`. Put `null` (and a missing value) before or after every value, in both directions; a `$sort` key without an entry keeps your engine's native order.
+- **`aggregate()`**: `controls.$nulls` keys are `$sort` keys (group columns or computed aliases), and `controls.$select.rowOrder[i].nulls` places the `first` / `last` row order. A key without an entry keeps the "NULL is the smallest value" order.
+- The primary-key tie-breaker the core appends never has an entry.
+
+SQL adapters get the rendering from `db-sql-tools` (`orderKeySql` with a placement, driven by the dialect's `nullsSortLargest` / `nullsPlacementSyntax`).
+
 ### `supportsNativeValueDefaults()` (deprecated)
 
 Deprecated since 0.1.128 and no longer consulted by the generic layer: static `@db.default "value"` values are filled SDK-side on every adapter before validation (so validators and write guards see the full row), and the SQL adapters emit their DDL `DEFAULT` clauses regardless of this flag. The built-in SQL adapters still return `true` as a capability hint for tooling; a new adapter can leave the default `false`.
@@ -649,7 +661,7 @@ For an adapter that returns `true`, `controls.$select` (a `UniquSelect`, physica
 
 - `exprAggregates` — `{ fn: 'sum' | 'avg' | 'min' | 'max', alias, expr, names }`: aggregate `fn` over the per-row expression `expr` (`names`: the columns it reads);
 - `exprs` — `{ alias, expr, names }` in dependency order: expressions evaluated after grouping, whose field leaves name an alias defined earlier (an aggregate, `first` / `last`, another expression) or a grouped column;
-- `firstLast` — `{ fn: 'first' | 'last', column, alias }`, kept out of `aggregates`, with `rowOrder` — `{ column, desc }[]` with the primary key already appended — giving the order of the rows within each group;
+- `firstLast` — `{ fn: 'first' | 'last', column, alias }`, kept out of `aggregates`, with `rowOrder` — `{ column, desc, nulls? }[]` with the primary key already appended (`nulls`: see [`supportsNullsPlacement()`](#nulls-placement)) — giving the order of the rows within each group;
 - `computedAliases` — every output alias but the calendar buckets', in emit order (aggregates, `exprAggregates`, `firstLast`, `exprs`), and `sources` — the field descriptors of the columns a `min` / `max` / `first` / `last` reads, for an engine that cannot aggregate a type directly.
 
 `expr` is the `@db.compute` tree (`AtscriptExprNode`: a number, `{ field }`, or `{ op, args }` with `+ - * /`, `neg`, `coalesce`). Keep its semantics: IEEE double, a `null` operand gives `null`, division by zero is `null`. `NULL` order keys sort smallest, and the pick is deterministic because `rowOrder` ends with the primary key. A `sum` over no non-null value is `null`, and an ungrouped query is [one group](/api/aggregation#representative-row-first-last) even over no rows. SQL adapters get all of it from `buildAggregateSelect` / `buildAggregateCount` (`renderArith` is the shared expression renderer, `orderKeySql` the NULL-smallest order key); a dialect opts into `booleanAggregates` (the stand-ins for `MIN` / `MAX` over a boolean) and `mapQueryError` (a driver error → `DbError`, run by `mapQueryErrors`, e.g. `arithOverflowError()` for a double overflow). In process, `evaluateExpr(expr, leaf)` from `@atscript/db` evaluates a tree with the shared semantics.

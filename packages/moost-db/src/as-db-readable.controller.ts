@@ -913,7 +913,10 @@ export class AsDbReadableController<
           if (sealed.size === 0) return undefined;
           const refs = collectQueryPaths({
             filter: rel.filter,
-            controls: { $sort: nested.$sort ?? rel.$sort },
+            controls: {
+              $sort: nested.$sort ?? rel.$sort,
+              $nulls: nested.$nulls ?? rel.$nulls,
+            },
           });
           const filtered = refs.filter.find(
             (ref) => selfOrAncestor(ref.path, sealed) !== undefined,
@@ -4155,6 +4158,10 @@ export class AsDbReadableController<
       aggregateFns: [...capabilities.aggregateFns],
       // Arithmetic in an aggregate `$select`; operands are `fields[P].numeric`.
       aggregateExpressions: capabilities.aggregateExpressions,
+      // NULL placement in `$sort` / `$rowOrder` (`$nulls`, `:first` / `:last`); omitted when unsupported.
+      // (guarded like `hasField`: partial-mock readables in specs omit the method)
+      ...(typeof this.readable.supportsNullsPlacement === "function" &&
+        this.readable.supportsNullsPlacement() && { nullsPlacement: true }),
     };
   }
 

@@ -208,6 +208,7 @@ export const pgDialect: SqlDialect = {
   },
   // PostgreSQL sorts NULL as the largest value — first-row joins render NULLS FIRST / LAST
   nullsSortLargest: true,
+  nullsPlacementSyntax: true,
   createViewPrefix: "CREATE OR REPLACE VIEW",
   paramPlaceholder(index: number) {
     return `$${index}`;

@@ -2,7 +2,7 @@ import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
 import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
-import { finalizeParams } from "./dialect";
+import { finalizeParams, nullsOrderSql, nullsPlacementOf } from "./dialect";
 
 /**
  * Builds an INSERT statement.
@@ -154,7 +154,7 @@ export function buildSelect(
   let sql = `SELECT ${cols} FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
   const params = [...where.params];
 
-  const orderBy = orderByList(dialect, controls?.$sort);
+  const orderBy = orderByList(dialect, controls?.$sort, controls?.$nulls);
   if (orderBy) {
     sql += ` ORDER BY ${orderBy}`;
   }
@@ -175,14 +175,32 @@ export function buildSelect(
   return finalizeParams(dialect, { sql, params });
 }
 
-/** `"col" ASC, "other" DESC` of a physical `$sort` — `""` when it orders nothing. */
-function orderByList(dialect: SqlDialect, sort: DbControls["$sort"]): string {
+/**
+ * `"col" ASC, "other" DESC` of a physical `$sort` — `""` when it orders
+ * nothing. A key with a `$nulls` entry places NULL as asked
+ * ({@link nullsOrderSql}); `prefix` is prepended verbatim to each quoted
+ * column (`t.` → `t."col"`).
+ * @since 0.1.153 (exported)
+ */
+export function orderByList(
+  dialect: SqlDialect,
+  sort: DbControls["$sort"],
+  nulls?: DbControls["$nulls"],
+  prefix = "",
+): string {
   if (!sort) {
     return "";
   }
   const parts: string[] = [];
   for (const [col, dir] of Object.entries(sort)) {
-    parts.push(`${dialect.quoteIdentifier(col)} ${dir === -1 ? "DESC" : "ASC"}`);
+    parts.push(
+      nullsOrderSql(
+        dialect,
+        prefix + dialect.quoteIdentifier(col),
+        dir === -1,
+        nullsPlacementOf(nulls, col),
+      ),
+    );
   }
   return parts.join(", ");
 }
@@ -212,7 +230,7 @@ export function buildPartitionedSelect(
   partitionBy: readonly string[],
 ): TSqlFragment {
   const rn = dialect.quoteIdentifier(PARTITION_ROW_NUMBER_ALIAS);
-  const orderBy = orderByList(dialect, controls.$sort);
+  const orderBy = orderByList(dialect, controls.$sort, controls.$nulls);
   const window =
     `PARTITION BY ${partitionBy.map((col) => dialect.quoteIdentifier(col)).join(", ")}` +
     (orderBy ? ` ORDER BY ${orderBy}` : "");

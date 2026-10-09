@@ -410,6 +410,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** `$nulls` / `@db.sort.nulls` NULL placement — a leading `(col IS NULL)` key where the native order differs. */
+  override supportsNullsPlacement(): boolean {
+    return true;
+  }
+
   /** Computed view columns and first-row joins. */
   override viewCapabilities(): ReadonlySet<TViewCapability> {
     return ALL_VIEW_CAPABILITIES;

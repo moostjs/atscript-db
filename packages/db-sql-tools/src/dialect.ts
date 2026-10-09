@@ -1,4 +1,5 @@
 import type { DbControls, TDbFieldMeta, TResolvedBucket, TViewJsonType } from "@atscript/db";
+import type { NullsPlacement } from "@uniqu/core";
 
 export interface TSqlFragment {
   sql: string;
@@ -138,6 +139,14 @@ export interface SqlDialect {
    * @since 0.1.147
    */
   nullsSortLargest?: boolean;
+  /**
+   * `true` when the engine accepts `NULLS FIRST` / `NULLS LAST` on an
+   * `ORDER BY` key (PostgreSQL, SQLite ≥ 3.30). Without it a requested NULL
+   * placement that differs from the native one renders as an extra
+   * `(<expr> IS NULL)` key ({@link nullsOrderSql}).
+   * @since 0.1.153
+   */
+  nullsPlacementSyntax?: boolean;
   /** e.g. 'CREATE VIEW IF NOT EXISTS' or 'CREATE OR REPLACE VIEW' */
   createViewPrefix: string;
   /** Returns a parameter placeholder for the given 1-based index. When absent, '?' is used. */
@@ -332,15 +341,73 @@ export async function mapQueryErrors<R>(
 }
 
 /**
- * One `ORDER BY` key with the uniform "NULL is the smallest value" ordering:
- * `<expr> ASC` / `<expr> DESC`, plus `NULLS FIRST` / `NULLS LAST` on a
- * dialect where NULL sorts largest ({@link SqlDialect.nullsSortLargest}).
- * Shared by first-row joins and `first` / `last` aggregates.
- * @since 0.1.148
+ * The `$nulls` entry of one `ORDER BY` key (`controls.$nulls` is keyed like
+ * `controls.$sort`), or `undefined`.
+ * @since 0.1.153
  */
-export function orderKeySql(dialect: SqlDialect, expr: string, desc: boolean): string {
-  const nulls = dialect.nullsSortLargest ? (desc ? " NULLS LAST" : " NULLS FIRST") : "";
-  return `${expr} ${desc ? "DESC" : "ASC"}${nulls}`;
+export function nullsPlacementOf(
+  nulls: DbControls["$nulls"],
+  key: string,
+): NullsPlacement | undefined {
+  if (!nulls) return undefined;
+  const map = nulls as Record<string, NullsPlacement | undefined>;
+  return Object.hasOwn(map, key) ? map[key] : undefined;
+}
+
+/**
+ * One `ORDER BY` key with a requested NULL placement. Without `nulls`, the
+ * plain `<expr> ASC|DESC` (the engine's native placement). With it:
+ *
+ * - the engine's native placement already matches (NULL is the smallest
+ *   value — `ASC` → first, `DESC` → last — unless
+ *   {@link SqlDialect.nullsSortLargest}, where it is the opposite) → the plain
+ *   key, so an index on `expr` still serves the order;
+ * - else `<expr> ASC|DESC NULLS FIRST|LAST` on a dialect with
+ *   {@link SqlDialect.nullsPlacementSyntax} (or `nullsSortLargest`);
+ * - else (MySQL) a leading NULL-ness key: `(<expr> IS NULL) DESC, <expr> DIR`
+ *   for `first`, `(<expr> IS NULL) ASC, <expr> DIR` for `last`.
+ *
+ * May render two comma-separated keys — only valid inside an `ORDER BY` list.
+ * `nullTest` renders the `IS NULL` operand when it must differ from `expr`
+ * (MySQL resolves a name inside an expression to a table column before a
+ * SELECT alias, so a grouped `ORDER BY` tests the alias's own expression).
+ * @since 0.1.153
+ */
+export function nullsOrderSql(
+  dialect: SqlDialect,
+  expr: string,
+  desc: boolean,
+  nulls?: NullsPlacement,
+  nullTest?: () => string,
+): string {
+  const key = `${expr} ${desc ? "DESC" : "ASC"}`;
+  if (!nulls) return key;
+  const nativeFirst = desc === (dialect.nullsSortLargest === true);
+  if ((nulls === "first") === nativeFirst) return key;
+  // `nullsSortLargest` dialects always rendered NULLS FIRST / LAST (first-row joins).
+  if (dialect.nullsPlacementSyntax || dialect.nullsSortLargest) {
+    return `${key} NULLS ${nulls === "first" ? "FIRST" : "LAST"}`;
+  }
+  return `(${nullTest ? nullTest() : expr} IS NULL) ${nulls === "first" ? "DESC" : "ASC"}, ${key}`;
+}
+
+/**
+ * One `ORDER BY` key with the uniform "NULL is the smallest value" ordering
+ * (`ASC` → NULL first, `DESC` → NULL last) unless `nulls` asks for another
+ * placement — {@link nullsOrderSql}. Without `nulls`: `<expr> ASC` /
+ * `<expr> DESC`, plus `NULLS FIRST` / `NULLS LAST` on a dialect where NULL
+ * sorts largest ({@link SqlDialect.nullsSortLargest}). Shared by first-row
+ * joins, `first` / `last` aggregates and the grouped `ORDER BY`.
+ * @since 0.1.148 (`nulls` since 0.1.153)
+ */
+export function orderKeySql(
+  dialect: SqlDialect,
+  expr: string,
+  desc: boolean,
+  nulls?: NullsPlacement,
+  nullTest?: () => string,
+): string {
+  return nullsOrderSql(dialect, expr, desc, nulls ?? (desc ? "last" : "first"), nullTest);
 }
 
 /**

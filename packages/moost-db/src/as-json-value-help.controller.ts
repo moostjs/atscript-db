@@ -120,10 +120,17 @@ export class AsJsonValueHelpController<
     }
 
     // 3. Sort — normalize the flexible value-help `$sort` grammar to an ordered
-    //    `{ field: 1 | -1 }` map, then hand comparison/ordering to the engine.
+    //    `{ field: 1 | -1 }` map, then hand comparison/ordering to the engine
+    //    (with the `$nulls` placement of its keys, since 0.1.153).
     const sort = this.normalizeSort(controls.controls.$sort);
     if (sort) {
-      rows = sortRows(rows as Record<string, unknown>[], sort) as DataType[];
+      rows = sortRows(
+        rows as Record<string, unknown>[],
+        sort,
+        undefined,
+        undefined,
+        controls.controls.$nulls,
+      ) as DataType[];
     }
 
     // 4. Paginate — total is the matched count BEFORE the window is applied.

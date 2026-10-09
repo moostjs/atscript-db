@@ -19,11 +19,11 @@ catalogs:
       specifier: ^24
       version: 24.12.0
     '@uniqu/core':
-      specifier: ^0.1.14
-      version: 0.1.14
+      specifier: ^0.1.15
+      version: 0.1.15
     '@uniqu/url':
-      specifier: ^0.1.14
-      version: 0.1.14
+      specifier: ^0.1.15
+      version: 0.1.15
     '@wooksjs/event-core':
       specifier: ^0.7.27
       version: 0.7.27
@@ -91,7 +91,7 @@ importers:
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/typescript@0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27))
@@ -100,10 +100,10 @@ importers:
     dependencies:
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
@@ -132,7 +132,7 @@ importers:
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/typescript@0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27))
@@ -151,7 +151,7 @@ importers:
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       mongodb:
         specifier: ^6.17.0
         version: 6.21.0
@@ -179,7 +179,7 @@ importers:
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       mysql2:
         specifier: ^3.11.0
         version: 3.20.0(@types/node@25.5.0)
@@ -207,7 +207,7 @@ importers:
         version: 8.20.0
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       pg:
         specifier: ^8.13.0
         version: 8.20.0
@@ -223,7 +223,7 @@ importers:
     devDependencies:
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       unplugin-atscript:
         specifier: 'catalog:'
         version: 0.1.102(@atscript/core@0.1.102)(@atscript/typescript@0.1.102(@atscript/core@0.1.102)(@atscript/db@packages+db)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(wooks@0.7.27))
@@ -248,7 +248,7 @@ importers:
         version: 7.6.13
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       better-sqlite3:
         specifier: ^12.6.2
         version: 12.8.0
@@ -270,7 +270,7 @@ importers:
         version: link:../db-memory
       '@uniqu/url':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
     devDependencies:
       '@atscript/core':
         specifier: 'catalog:'
@@ -286,7 +286,7 @@ importers:
         version: 0.6.48(@prostojs/infact@0.6.1)(@prostojs/logger@0.4.3)(@prostojs/router@0.3.5)(@wooksjs/event-core@0.7.27)(moost@0.6.48)(wooks@0.7.27)
       '@uniqu/core':
         specifier: 'catalog:'
-        version: 0.1.14
+        version: 0.1.15
       '@wooksjs/event-core':
         specifier: 'catalog:'
         version: 0.7.27
@@ -1318,11 +1318,11 @@ packages:
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
     deprecated: Potential CWE-502 - Update to 1.3.1 or higher
 
-  '@uniqu/core@0.1.14':
-    resolution: {integrity: sha512-KazvoTJyTjV8/lXlTe6KBP6kDJuNvCqu4qhTWvNiAk/epGqyrfttgAhcNsgg51cGz+pqVwdQx46+zZ1MX2omFw==}
+  '@uniqu/core@0.1.15':
+    resolution: {integrity: sha512-b3Z57lDVZvAh+AWfn3HeJj4aX6Vj+HvLO9eMWegWs/GRplwJTb+7QKJydIsNMSjh4wPZP9FZoSIj7fpSWip1hg==}
 
-  '@uniqu/url@0.1.14':
-    resolution: {integrity: sha512-MZDmQZCCp+xSKfJQvaNRBRXzM5xKc1DM8tygbxzCZKJ/cIRzCXkBZ2ioqy+WZ0rB0bSoRpUgi3WXhXyPGVaNYw==}
+  '@uniqu/url@0.1.15':
+    resolution: {integrity: sha512-CS8FKBhyVtDZIZ/fDEYPtlITTNik6XS5dBdKVlf76FRzBPJZAzSdljIa9N2FNVSabpw078kO2oIcAsChsXrz2w==}
 
   '@vitejs/plugin-vue@6.0.5':
     resolution: {integrity: sha512-bL3AxKuQySfk1iGcBsQnoRVexTPJq0Z/ixFVM8OhVJAP6ZXXXLtM7NFKWhLl30Kg7uTBqIaPXbh+nuQCuBDedg==}
@@ -3227,11 +3227,11 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@uniqu/core@0.1.14': {}
+  '@uniqu/core@0.1.15': {}
 
-  '@uniqu/url@0.1.14':
+  '@uniqu/url@0.1.15':
     dependencies:
-      '@uniqu/core': 0.1.14
+      '@uniqu/core': 0.1.15
 
   '@vitejs/plugin-vue@6.0.5(vite@7.3.1(@types/node@25.5.0)(lightningcss@1.32.0))(vue@3.5.30(typescript@5.9.3))':
     dependencies:

@@ -223,7 +223,18 @@ curl "http://localhost:3000/todos/query?\$sort=-createdAt"           # descendin
 curl "http://localhost:3000/todos/query?\$sort=status,-priority"     # multi-field
 ```
 
-Prefix a field with `-` for descending order. Where `null` values land depends on the engine — see [Sorting](/api/queries#sorting). Rows that tie on every `$sort` field come back in primary-key order, in the direction of the last field, so pages never overlap. See [Ties and the primary-key tie-breaker](/api/queries#tie-breaker).
+Prefix a field with `-` for descending order. Rows that tie on every `$sort` field come back in primary-key order, in the direction of the last field, so pages never overlap. See [Ties and the primary-key tie-breaker](/api/queries#tie-breaker).
+
+#### NULL placement (`:first`, `:last`) {#sort-nulls}
+
+Since 0.1.153, a `:first` or `:last` suffix on a sort field places `null` / missing values before or after every value, in either direction:
+
+```bash
+curl "http://localhost:3000/tickets/query?\$sort=-closedAt:last,title"   # open tickets at the end
+curl "http://localhost:3000/tickets/pages?\$sort=assignee:first&\$size=20"
+```
+
+The suffix becomes the `$nulls` control ([NULL placement](/api/queries#nulls)); without it, placement follows the field's `@db.sort.nulls` default, else the engine. It works in `$sort`, `$order`, `$rowOrder` and in `$with` sub-queries (`$with=comments($sort=-editedAt:last)`). `$nulls` is not a URL parameter of its own (`$nulls=…` is a 400), and any other suffix is a 400. The field must be sortable like any `$sort` field. `/meta.nullsPlacement` is `true` when the adapter supports it.
 
 ### Offset Pagination ($limit, $skip)
 
@@ -295,7 +306,7 @@ curl "http://localhost:3000/issues/query?status=open&\$groupBy=ticketId&\$select
 ```
 
 - `<arith>` is `+ - * /`, unary `-`, parentheses, number literals, names and `coalesce(a,b,…)`. **Write `+` as `%2B`** (`expr(n%2B1):m`): an unescaped `+` that a proxy or framework decodes to a space becomes `n 1`, which is rejected (`missing operator`) rather than read as something else. A raw `+` that reaches moost-db is accepted too.
-- `$rowOrder=raisedAt,-id` is parsed like `$sort` and orders the rows inside each group for `first` / `last`; it is rejected without them. See [Representative row](/api/aggregation#representative-row-first-last).
+- `$rowOrder=raisedAt,-id` is parsed like `$sort` (`:first` / `:last` included) and orders the rows inside each group for `first` / `last`; it is rejected without them. See [Representative row](/api/aggregation#representative-row-first-last).
 - A computed `$select` item that matches none of these forms is now a malformed query string (400); older versions silently dropped it.
 
 `bucket()` grammar:
@@ -318,23 +329,23 @@ Returns a plain number (e.g., `5`) instead of an array.
 
 ## Complete Parameter Reference
 
-| Parameter    | Type    | Endpoints         | Default | Example                    |
-| ------------ | ------- | ----------------- | ------- | -------------------------- |
-| `$sort`      | string  | query, pages      | —       | `$sort=-createdAt,title`   |
-| `$skip`      | number  | query             | `0`     | `$skip=20`                 |
-| `$limit`     | number  | query             | `1000`  | `$limit=50`                |
-| `$page`      | number  | pages             | `1`     | `$page=3`                  |
-| `$size`      | number  | pages             | `10`    | `$size=25`                 |
-| `$select`    | string  | query, pages, one | —       | `$select=id,title`         |
-| `$count`     | boolean | query             | —       | `$count`                   |
-| `$search`    | string  | query, pages      | —       | `$search=mongodb tutorial` |
-| `$index`     | string  | query, pages      | —       | `$index=product_search`    |
-| `$fuzzy`     | string  | query, pages      | —       | `$fuzzy=1`                 |
-| `$vector`    | string  | query, pages      | —       | `$vector=embedding`        |
-| `$threshold` | string  | query, pages      | —       | `$threshold=0.8`           |
-| `$with`      | string  | query, pages, one | —       | `$with=author,comments`    |
-| `$groupBy`   | string  | query             | —       | `$groupBy=status`          |
-| `$having`    | string  | query             | —       | `$having=total>100`        |
+| Parameter    | Type    | Endpoints         | Default | Example                       |
+| ------------ | ------- | ----------------- | ------- | ----------------------------- |
+| `$sort`      | string  | query, pages      | —       | `$sort=-createdAt:last,title` |
+| `$skip`      | number  | query             | `0`     | `$skip=20`                    |
+| `$limit`     | number  | query             | `1000`  | `$limit=50`                   |
+| `$page`      | number  | pages             | `1`     | `$page=3`                     |
+| `$size`      | number  | pages             | `10`    | `$size=25`                    |
+| `$select`    | string  | query, pages, one | —       | `$select=id,title`            |
+| `$count`     | boolean | query             | —       | `$count`                      |
+| `$search`    | string  | query, pages      | —       | `$search=mongodb tutorial`    |
+| `$index`     | string  | query, pages      | —       | `$index=product_search`       |
+| `$fuzzy`     | string  | query, pages      | —       | `$fuzzy=1`                    |
+| `$vector`    | string  | query, pages      | —       | `$vector=embedding`           |
+| `$threshold` | string  | query, pages      | —       | `$threshold=0.8`              |
+| `$with`      | string  | query, pages, one | —       | `$with=author,comments`       |
+| `$groupBy`   | string  | query             | —       | `$groupBy=status`             |
+| `$having`    | string  | query             | —       | `$having=total>100`           |
 
 See [Relations & Search in URLs](./advanced) for details on `$with`, `$search`, `$fuzzy`, `$vector`, and `$groupBy`.
 

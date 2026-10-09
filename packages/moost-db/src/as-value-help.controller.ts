@@ -3,8 +3,8 @@ import type {
   TAtscriptDataType,
   TAtscriptTypeObject,
 } from "@atscript/typescript/utils";
-import type { FilterExpr, TCrudPermissions, TMetaResponse } from "@atscript/db";
-import { isEmptyObject } from "@atscript/db";
+import type { FilterExpr, NullsPlacement, TCrudPermissions, TMetaResponse } from "@atscript/db";
+import { isEmptyObject, isPlainObject } from "@atscript/db";
 import { buildMemoryPredicate, projectRow } from "@atscript/db-memory";
 import { Get, HttpError, Query, Url } from "@moostjs/event-http";
 import { Inherit, Moost, Param } from "moost";
@@ -37,6 +37,8 @@ export interface ValueHelpQuery<T> {
     $search?: string;
     $select?: (keyof T | string)[];
     $sort?: unknown;
+    /** NULL placement per `$sort` key (URL `$sort=-name:last`; since 0.1.153). */
+    $nulls?: Partial<Record<string, NullsPlacement>>;
     [key: string]: unknown;
   };
 }
@@ -258,7 +260,27 @@ export abstract class AsValueHelpController<
   }
 
   /**
-   * **GET /pages** — paginated row window plus total count.
+   * `/pages` controls without a `$sort` (since 0.1.153): ordered by the
+   * primary key, ascending, so consecutive pages neither overlap nor skip
+   * rows — like the DB controllers' `/pages`. A request with `$sort` or
+   * `$search` keeps its order; a source without a primary key stays as is.
+   */
+  private _pagesOrder(
+    controls: ValueHelpQuery<DataType>["controls"],
+  ): ValueHelpQuery<DataType>["controls"] {
+    const sort = controls.$sort;
+    const sorted = Array.isArray(sort)
+      ? sort.length > 0
+      : isPlainObject(sort)
+        ? !isEmptyObject(sort)
+        : !!sort;
+    if (sorted || controls.$search || !this.primaryKey) return controls;
+    return { ...controls, $sort: { [this.primaryKey]: 1 } };
+  }
+
+  /**
+   * **GET /pages** — paginated row window plus total count. Without a
+   * `$sort` the rows come in primary-key order (since 0.1.153).
    */
   @Get("pages")
   async runPages(@Url() url: string): Promise<
@@ -280,11 +302,14 @@ export abstract class AsValueHelpController<
     const size = Math.max(Number(controls.$size || 10), 1);
     const skip = (page - 1) * size;
     const result = await this.query(
-      await this._scopedQuery(parsed.filter, {
-        ...controls,
-        $skip: skip,
-        $limit: size,
-      } as ValueHelpQuery<DataType>["controls"]),
+      await this._scopedQuery(
+        parsed.filter,
+        this._pagesOrder({
+          ...controls,
+          $skip: skip,
+          $limit: size,
+        } as ValueHelpQuery<DataType>["controls"]),
+      ),
     );
     return {
       data: result.data,

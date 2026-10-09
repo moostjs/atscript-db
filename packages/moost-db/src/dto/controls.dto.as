@@ -3,6 +3,7 @@ export interface QueryControlsDto {
     $limit?: number.int.positive
     $count?: boolean
     $sort?: SortControlDto
+    $nulls?: NullsControlDto
     $select?: SelectControlDto | string[]
     $search?: string
     $index?: string
@@ -19,6 +20,7 @@ export interface PagesControlsDto {
     @expect.pattern "^\d+$", "u", "Expected positive number"
     $size?: string
     $sort?: SortControlDto
+    $nulls?: NullsControlDto
     $select?: SelectControlDto | string[]
     $search?: string
     $index?: string
@@ -65,6 +67,7 @@ interface WithRelationControlsDto {
     $skip?: number.int.positive
     $limit?: number.int.positive
     $sort?: SortControlDto
+    $nulls?: NullsControlDto
     $select?: SelectControlDto | string[]
     $with?: WithRelationDto[]
 }
@@ -75,6 +78,11 @@ interface WithFilterDto {
 
 interface SortControlDto {
     [*]: 1 | -1
+}
+
+// NULL placement per `$sort` / `$rowOrder` key (URL suffix `$sort=-amount:last`; since 0.1.153)
+interface NullsControlDto {
+    [*]: 'first' | 'last'
 }
 
 interface SelectControlDto {

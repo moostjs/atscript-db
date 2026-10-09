@@ -49,6 +49,7 @@ import {
   EMPTY_AND,
   orFragment,
   buildPartitionedSelect,
+  orderByList,
   stripPartitionRowNumber,
   buildGeoSearchCount,
   buildGeoSearchSelect,
@@ -129,6 +130,11 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
   override supportsAggregateExpressions(): boolean {
+    return true;
+  }
+
+  /** `$nulls` / `@db.sort.nulls` NULL placement — `NULLS FIRST` / `NULLS LAST`. */
+  override supportsNullsPlacement(): boolean {
     return true;
   }
 
@@ -1232,14 +1238,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const params = [...base.params];
 
     // Sort
-    if (controls.$sort) {
-      const orderParts: string[] = [];
-      for (const [col, dir] of Object.entries(controls.$sort)) {
-        orderParts.push(`t."${esc(col)}" ${dir === -1 ? "DESC" : "ASC"}`);
-      }
-      if (orderParts.length > 0) {
-        sql += ` ORDER BY ${orderParts.join(", ")}`;
-      }
+    const orderBy = orderByList(sqliteDialect, controls.$sort, controls.$nulls, "t.");
+    if (orderBy) {
+      sql += ` ORDER BY ${orderBy}`;
     }
 
     // Limit / Offset

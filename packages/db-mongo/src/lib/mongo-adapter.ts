@@ -54,6 +54,7 @@ import { MongoBulkWriteError, MongoServerError, ObjectId } from "mongodb";
 import type { AggregateFn, BucketUnit } from "@uniqu/core";
 import type { TViewCapability } from "@atscript/db";
 import { dedupeProjection } from "./projection-dedupe";
+import { hasNullsPlacement, sortStages } from "./mongo-sort";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
@@ -491,6 +492,15 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
   override supportsAggregateExpressions(): boolean {
+    return true;
+  }
+
+  /**
+   * `$nulls` placement (since 0.1.153): a placed `$sort` / `$rowOrder` key
+   * gets a null-or-missing flag ordered before it (`mongo-sort.ts`) — reads
+   * then run as a pipeline with a blocking sort instead of `find().sort()`.
+   */
+  override supportsNullsPlacement(): boolean {
     return true;
   }
 
@@ -1471,7 +1481,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
-    if (containsRelationFilter(query.filter)) {
+    if (containsRelationFilter(query.filter) || hasNullsPlacement(query.controls)) {
       const [row] = await this._aggregateFind(query, "findOne", 1);
       return row ?? null;
     }
@@ -1488,7 +1498,7 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    if (containsRelationFilter(query.filter)) {
+    if (containsRelationFilter(query.filter) || hasNullsPlacement(query.controls)) {
       return this._aggregateFind(query, "findMany");
     }
     const filter = buildMongoFilter(query.filter);
@@ -1824,7 +1834,11 @@ export class MongoAdapter extends BaseDbAdapter {
 
   // ── Internal helpers ─────────────────────────────────────────────────────
 
-  /** A find whose filter holds relational predicates, as an aggregation pipeline. */
+  /**
+   * A find as an aggregation pipeline: its filter holds relational
+   * predicates, or its `$sort` places NULL (`$nulls` — `find().sort()` cannot
+   * express it; the placed sort is a blocking sort, so it may spill to disk).
+   */
   private async _aggregateFind(
     query: DbQuery,
     label: string,
@@ -1835,9 +1849,10 @@ export class MongoAdapter extends BaseDbAdapter {
       ...pageStages(limit ? { ...query.controls, $limit: limit } : query.controls),
     ];
     this._log(`aggregate (${label})`, pipeline);
-    return wrapInvalidQuery(() =>
-      this.collection.aggregate(pipeline, this._readOpts(query)).toArray(),
-    );
+    const opts = hasNullsPlacement(query.controls)
+      ? { allowDiskUse: true, ...this._readOpts(query) }
+      : this._readOpts(query);
+    return wrapInvalidQuery(() => this.collection.aggregate(pipeline, opts).toArray());
   }
 
   private _buildFindOptions(controls?: DbQuery["controls"]) {
@@ -2016,21 +2031,23 @@ export class MongoAdapter extends BaseDbAdapter {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** `$sort` → `$skip` → `$limit` → `$project` stages of a read's controls. */
+/**
+ * `$sort` → `$skip` → `$limit` → `$project` stages of a read's controls (a
+ * `$nulls` placement adds its flags before the `$sort` and drops them after
+ * `$limit` — see {@link sortStages}).
+ */
 function pageStages(controls: DbQuery["controls"]): Document[] {
-  const stages: Document[] = [];
   if (!controls) {
-    return stages;
+    return [];
   }
-  if (controls.$sort) {
-    stages.push({ $sort: controls.$sort });
-  }
+  const { stages, cleanup } = sortStages(controls);
   if (controls.$skip) {
     stages.push({ $skip: controls.$skip });
   }
   if (controls.$limit) {
     stages.push({ $limit: controls.$limit });
   }
+  if (cleanup) stages.push(cleanup);
   if (controls.$select) {
     const projection = controls.$select.asProjection;
     if (projection) stages.push({ $project: dedupeProjection(projection) });

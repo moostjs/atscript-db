@@ -124,6 +124,9 @@ export async function loadRelationsImpl(
     if (flatRel.$sort && !controls.$sort) {
       controls.$sort = flatRel.$sort;
     }
+    if (flatRel.$nulls && !controls.$nulls) {
+      controls.$nulls = flatRel.$nulls;
+    }
     if (
       flatRel.$limit !== null &&
       flatRel.$limit !== undefined &&

@@ -140,6 +140,17 @@ describe("Client", () => {
     expect(url).toContain("$skip=20");
   });
 
+  it("query / pages carry $nulls as the :first / :last suffix of the $sort key", async () => {
+    fetchFn = mockFetch([]);
+    const client = new Client("/api/users", { fetch: fetchFn });
+    await client.query({ controls: { $sort: { name: -1, id: 1 }, $nulls: { name: "last" } } });
+    expect(decodeURIComponent(fetchFn.mock.calls[0][0] as string)).toContain("$sort=-name:last,id");
+    fetchFn = mockFetch({ data: [], page: 1, itemsPerPage: 10, pages: 0, count: 0 });
+    const pager = new Client("/api/users", { fetch: fetchFn });
+    await pager.pages({ controls: { $sort: { name: 1 }, $nulls: { name: "first" } } }, 1, 10);
+    expect(decodeURIComponent(fetchFn.mock.calls[0][0] as string)).toContain("$sort=name:first");
+  });
+
   it("query with $search passes control through", async () => {
     fetchFn = mockFetch([{ id: 1, title: "matching" }]);
     const client = new Client("/api/posts", { fetch: fetchFn });

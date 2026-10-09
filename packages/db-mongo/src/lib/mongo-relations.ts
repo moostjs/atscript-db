@@ -18,6 +18,7 @@ import {
 import { correlate } from "./lookup-join";
 import { buildMongoFilter, collationOfAdapter, mongoFilterStages } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
+import { sortStages } from "./mongo-sort";
 
 // ── Host interface ───────────────────────────────────────────────────────────
 
@@ -463,6 +464,7 @@ function buildLookupInnerPipeline(
   const flatRel = withRel as Record<string, unknown>;
   const nested = (withRel.controls || {}) as Record<string, unknown>;
   const sort = (nested.$sort || flatRel.$sort) as Record<string, 1 | -1> | undefined;
+  const nulls = (nested.$nulls || flatRel.$nulls) as UniqueryControls["$nulls"] | undefined;
   const limit = (nested.$limit ?? flatRel.$limit) as number | undefined;
   const skip = (nested.$skip ?? flatRel.$skip) as number | undefined;
   const select = (nested.$select || flatRel.$select) as UniqueryControls["$select"] | undefined;
@@ -470,22 +472,22 @@ function buildLookupInnerPipeline(
   const statics = relationStaticFilter(relation, withRel.name);
   const controls: Record<string, unknown> = {};
   if (sort) controls.$sort = sort;
+  if (nulls) controls.$nulls = nulls;
   if (select) controls.$select = select;
   const translated = target._translateForAdapter({
     filter: andFilters(statics.target, withRel.filter as FilterExpr | undefined),
     controls: controls as UniqueryControls,
   });
 
-  const page: Document[] = [];
-  if (translated.controls?.$sort) {
-    page.push({ $sort: translated.controls.$sort });
-  }
+  // `$nulls` (resolved by the target: request entries + `@db.sort.nulls`) flags the sort
+  const { stages: page, cleanup } = sortStages(translated.controls);
   if (skip) {
     page.push({ $skip: skip });
   }
   if (limit !== null && limit !== undefined) {
     page.push({ $limit: limit });
   }
+  if (cleanup) page.push(cleanup);
 
   // Array, inclusion-map and exclusion-map forms — the same projection the
   // top-level `$select` renders (`UniquSelect.asProjection`), physical.

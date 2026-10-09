@@ -19,6 +19,21 @@ import type { TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 import { isJsonValueField } from "./buckets";
 
+/**
+ * Output aliases of the computed `$select` entries of a grouped query —
+ * aggregates, expressions and calendar buckets (`$as`, else uniqu's
+ * `resolveAlias`).
+ */
+export function computedAliases(select: unknown): Set<string> {
+  const aliases = new Set<string>();
+  if (!Array.isArray(select)) return aliases;
+  for (const item of select as unknown[]) {
+    if (isAggregateExpr(item) || isBucketExpr(item)) aliases.add(resolveAlias(item));
+    else if (isAggregateOfExpr(item) || isSelectArithExpr(item)) aliases.add(item.$as);
+  }
+  return aliases;
+}
+
 /** Most nodes a group-level expression may have once the aliases it names are inlined (SQL repeats them). */
 const EXPANDED_MAX_NODES = 4 * ARITH_MAX_NODES;
 

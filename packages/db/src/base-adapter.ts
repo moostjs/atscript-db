@@ -473,6 +473,25 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter honours a requested NULL placement: `controls.$nulls`
+   * (PHYSICAL `$sort` keys → `'first'` / `'last'`, or computed aliases on a
+   * grouped read) and `TRowOrderKey.nulls` on the `first` / `last` row
+   * order. NULL (and, on document stores, a missing value) goes before or
+   * after every non-null value whatever the sort direction. The core only
+   * forwards entries for keys that can be NULL; a key without an entry keeps
+   * the adapter's native order (`$sort`) or "NULL is the smallest value"
+   * (grouped / row order). Default `false` (fail-closed): the core refuses a
+   * request naming a placement with `INVALID_QUERY` and drops
+   * `@db.sort.nulls` defaults. moost-db advertises it as
+   * `/meta.nullsPlacement`.
+   *
+   * @since 0.1.153
+   */
+  supportsNullsPlacement(): boolean {
+    return false;
+  }
+
+  /**
    * Revision of how this adapter renders a managed view (its SQL / pipeline)
    * from an unchanged view definition. Stored in each managed view's sync
    * snapshot when defined, so bumping it recreates every managed view of the

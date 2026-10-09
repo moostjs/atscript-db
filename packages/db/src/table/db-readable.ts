@@ -17,6 +17,7 @@ import type {
   AggregateQuery,
   BucketUnit,
   FilterExpr,
+  ResolvedRowOrderKey,
   UniqueryControls,
   Uniquery,
   WithRelation,
@@ -76,6 +77,8 @@ import {
   type TRelGuardState,
 } from "../query/relation-filter";
 import { resolveComputedSelect } from "../query/buckets";
+import { computedAliases } from "../query/aggregate-expr";
+import { NullsSource } from "../query/nulls";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
 import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
 import { rowMatchesKey } from "../shared/keys";
@@ -859,11 +862,37 @@ export class AtscriptDbReadable<
     return rows;
   }
 
-  /** `query` with {@link _withPkTieBreak} applied — a copy when the `$sort` changes. */
+  /**
+   * `query` with {@link _withPkTieBreak} applied and its `$nulls` resolved
+   * ({@link NullsSource.resolveSort}) — a copy when either changes.
+   */
   private _withStableSort(query: Uniquery): Uniquery {
     const controls = query.controls as UniqueryControls | undefined;
+    const raw = controls?.$nulls;
+    const source = this._nulls;
+    const nulls =
+      raw !== undefined || source.hasDefaults()
+        ? source.resolveSort(controls?.$sort, raw)
+        : undefined;
     const sort = this._withPkTieBreak(controls);
-    return sort ? ({ ...query, controls: { ...controls, $sort: sort } } as Uniquery) : query;
+    if (!sort && nulls === raw) return query;
+    const next: Record<string, unknown> = { ...controls };
+    if (sort) next.$sort = sort;
+    if (nulls) next.$nulls = nulls;
+    else delete next.$nulls;
+    return { ...query, controls: next } as Uniquery;
+  }
+
+  private _nullsCache?: NullsSource;
+
+  /** NULL-placement resolution for this table (`$nulls`, `@db.sort.nulls`; since 0.1.153). */
+  private get _nulls(): NullsSource {
+    return (this._nullsCache ??= new NullsSource({
+      meta: this._meta,
+      tableName: this.tableName,
+      isView: this.isView,
+      supported: this.adapter.supportsNullsPlacement(),
+    }));
   }
 
   /**
@@ -1326,13 +1355,16 @@ export class AtscriptDbReadable<
     // then the path guard and the adapter's calendar-bucket units.
     guardAggregate(this._meta, this.adapter, query, computed);
 
+    // NULL placement of `$sort` / `$rowOrder` keys (since 0.1.153)
+    const ordered = this._aggregateNulls(query, computed.rowOrder);
+
     // Translate and delegate
     const dbQuery = this._fieldMapper.translateAggregateQuery(
-      query,
+      ordered.query,
       this._meta,
       buckets,
       computed.exprs,
-      computed.rowOrder,
+      ordered.rowOrder,
     );
     const results = await this.adapter.aggregate(dbQuery);
 
@@ -1349,6 +1381,29 @@ export class AtscriptDbReadable<
     // grouped derived field on a document adapter is filled from its source
     // path (the grouped dimension) and the source pruned (since 0.1.141).
     return this._fromRead(results, query.controls, this._aliasFields($select));
+  }
+
+  /**
+   * A grouped read's `$nulls` resolved for its `$sort` keys (computed aliases
+   * take a request entry only) and its `$rowOrder` keys — see
+   * {@link NullsSource}.
+   */
+  private _aggregateNulls(
+    query: AggregateQuery,
+    rowOrder: ResolvedRowOrderKey[] | undefined,
+  ): { query: AggregateQuery; rowOrder: ResolvedRowOrderKey[] | undefined } {
+    const controls = query.controls;
+    const source = this._nulls;
+    if (controls.$nulls === undefined && !source.hasDefaults()) return { query, rowOrder };
+    const nulls = source.resolveSort(
+      controls.$sort,
+      controls.$nulls,
+      computedAliases(controls.$select),
+    );
+    const next: AggregateQuery["controls"] = { ...controls };
+    if (nulls) next.$nulls = nulls;
+    else delete next.$nulls;
+    return { query: { ...query, controls: next }, rowOrder: source.resolveRowOrder(rowOrder) };
   }
 
   /**
@@ -1393,6 +1448,15 @@ export class AtscriptDbReadable<
   /** Aggregate functions the adapter renders (proxies adapter capability). @since 0.1.136 */
   public aggregateFns(): ReadonlySet<AggregateFn> {
     return this.adapter.aggregateFns();
+  }
+
+  /**
+   * Whether the adapter honours a requested NULL placement (`$nulls`,
+   * `@db.sort.nulls`) — proxies adapter capability.
+   * @since 0.1.153
+   */
+  public supportsNullsPlacement(): boolean {
+    return this.adapter.supportsNullsPlacement();
   }
 
   /** Whether the adapter can sort by a given field (proxies adapter capability). */

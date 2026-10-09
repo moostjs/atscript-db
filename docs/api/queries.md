@@ -496,9 +496,40 @@ controls: { $sort: { status: 1, name: -1 } }
 // ORDER BY status ASC, name DESC
 ```
 
-::: info NULL position
-Where `null` / missing values land follows the engine: SQLite, MySQL, MongoDB and the memory adapter put them **first** in ascending order (last in descending); PostgreSQL puts them **last** in ascending order (first in descending). When the position must be the same on every engine, filter `null` out (or query it separately) instead of relying on the sort.
+#### NULL placement {#nulls}
+
+Without a placement, where `null` / missing values land follows the engine: SQLite, MySQL, MongoDB and the memory adapter put them **first** in ascending order (last in descending); PostgreSQL puts them **last** in ascending order (first in descending).
+
+Since 0.1.153, `$nulls` pins them per sort key. `'first'` puts them before every value and `'last'` after every value, in both directions and on every adapter:
+
+```typescript
+await tickets.findMany({
+  controls: { $sort: { closedAt: -1, title: 1 }, $nulls: { closedAt: "last" } },
+});
+// newest closed first, open tickets (closedAt = null) at the end
+```
+
+- **One map for every ordered key.** An entry applies to the `$sort` key of the same name, and in [grouped queries](/api/aggregation) also to a computed alias in `$sort` and to the `$rowOrder` key of `first()` / `last()`. Entries for keys the query does not order by are ignored. Values other than `'first'` / `'last'` fail with `INVALID_QUERY`.
+- **Field default.** [`@db.sort.nulls 'first' | 'last'`](/adapters/annotations#db-sort-nulls) on a field applies whenever a query sorts by it without a `$nulls` entry. An explicit entry overrides it.
+- **Required fields are skipped.** A table field that cannot be `null` (required, and no optional parent object) has nothing to place, so its entry is dropped and the plain `ORDER BY` keeps using the index. Views keep every entry, because a left join or an aggregate can make any view column `null`.
+- **Keys without an entry are unchanged.** `$nulls` is opt-in: a query without it sorts exactly as before. Grouped `$sort` and `$rowOrder` keep their existing "NULL is the smallest value" order unless an entry overrides it.
+- **Over HTTP**, write the placement as a suffix on the sort key: `$sort=-closedAt:last,title`. See [URL query syntax](/http/query-syntax#sort-nulls).
+
+::: warning Index use
+A placement equal to the engine's own (for example `'first'` ascending on SQLite, MySQL, MongoDB; `'last'` ascending on PostgreSQL) costs nothing. The other placement may not follow the index order:
+
+| Engine     | Non-native placement                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------ |
+| PostgreSQL | `NULLS FIRST` / `NULLS LAST`: a sort step unless an index is built with the same NULLS order           |
+| SQLite     | `NULLS FIRST` / `NULLS LAST`: the bundled SQLite (3.51) still reads the index in order — no extra cost |
+| MySQL      | `(col IS NULL) ASC` / `DESC` in front of the key: always a filesort                                    |
+| MongoDB    | the read runs as an aggregation pipeline with a computed null flag: a blocking sort, no index          |
+| Memory     | no difference                                                                                          |
+
+On large PostgreSQL, MySQL and MongoDB tables, prefer the native placement for hot sort keys (or narrow the rows with a filter first). On PostgreSQL an index built with the matching `NULLS FIRST` / `NULLS LAST` order also serves it.
 :::
+
+Adapters that do not implement NULL placement (third-party adapters without `supportsNullsPlacement()`, see [Creating adapters](/adapters/creating-adapters#nulls-placement)) reject an explicit `$nulls` with `INVALID_QUERY` and ignore `@db.sort.nulls` defaults.
 
 #### Ties and the primary-key tie-breaker {#tie-breaker}
 

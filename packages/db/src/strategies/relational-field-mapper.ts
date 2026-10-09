@@ -258,6 +258,10 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
       result.$sort = translated as UniqueryControls["$sort"];
     }
 
+    if (controls.$nulls) {
+      result.$nulls = this.physicalNulls(controls.$nulls, meta);
+    }
+
     if (controls.$select) {
       let translatedRaw: UniqueryControls["$select"];
       if (Array.isArray(controls.$select)) {

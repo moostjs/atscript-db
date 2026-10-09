@@ -6,6 +6,8 @@ export {
   finalizeParams,
   mapQueryErrors,
   orderKeySql,
+  nullsOrderSql,
+  nullsPlacementOf,
   quotedJsonPathSegments,
 } from "./dialect";
 export {
@@ -42,6 +44,7 @@ export {
   chunkInsertRows,
   buildSelect,
   buildPartitionedSelect,
+  orderByList,
   stripPartitionRowNumber,
   PARTITION_ROW_NUMBER_ALIAS,
   buildUpdate,

@@ -12,6 +12,7 @@ import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
 import { buildMongoFilter, mongoFilterStages, type TMongoFilterOptions } from "./lib/mongo-filter";
+import { rowOrderStages, sortStages } from "./lib/mongo-sort";
 import { exprToMongo, notNullExpr, orNull } from "./lib/mongo-view-expr";
 
 /** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
@@ -188,11 +189,12 @@ function buildGroupedStages(
 
   // `first` / `last`: order the rows BEFORE grouping (the portable `$sort` +
   // `$first` / `$last`, MongoDB 3.6+); BSON order puts null / missing first,
-  // like the SQL adapters. The key list ends with the primary key.
+  // like the SQL adapters, unless a key places NULL (`nulls`, since 0.1.153 —
+  // `$last` reads the same forward order). The key list ends with the primary key.
   const firstLast = controls.$select?.firstLast ?? [];
   const rowOrder = controls.$select?.rowOrder ?? [];
   if (firstLast.length > 0 && rowOrder.length > 0) {
-    pipeline.push({ $sort: Object.fromEntries(rowOrder.map((k) => [k.column, k.desc ? -1 : 1])) });
+    pipeline.push(...rowOrderStages(rowOrder));
   }
 
   // Build $group accumulators and $project in a single pass over groupBy + aggregates
@@ -269,15 +271,16 @@ export function buildAggregatePipeline(
     filterOptions,
   });
 
-  if (controls.$sort) {
-    pipeline.push({ $sort: controls.$sort });
-  }
+  // Group keys / aliases are top-level after `$project`; `$nulls` places NULL among them.
+  const { stages, cleanup } = sortStages(controls);
+  pipeline.push(...stages);
   if (controls.$skip) {
     pipeline.push({ $skip: controls.$skip });
   }
   if (controls.$limit) {
     pipeline.push({ $limit: controls.$limit });
   }
+  if (cleanup) pipeline.push(cleanup);
 
   return pipeline;
 }

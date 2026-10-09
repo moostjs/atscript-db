@@ -21,6 +21,7 @@ export type { FlatOf, PrimaryKeyOf, OwnPropsOf, NavPropsOf } from "@atscript/typ
 export type {
   FilterExpr,
   FieldOpsFor,
+  NullsPlacement,
   UniqueryControls,
   Uniquery,
   WithRelation,
@@ -232,6 +233,15 @@ export interface TMetaResponse {
    * @since 0.1.148
    */
   aggregateExpressions?: boolean;
+  /**
+   * Present (true) when the adapter honours a requested NULL placement in
+   * sorts: the `$nulls` control (URL suffix `$sort=-amount:last`) and the
+   * fields' `@db.sort.nulls` defaults (serialized in {@link type} as the
+   * `db.sort.nulls` annotation) — see `BaseDbAdapter.supportsNullsPlacement()`.
+   *
+   * @since 0.1.153
+   */
+  nullsPlacement?: true;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────

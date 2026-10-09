@@ -277,6 +277,8 @@ address: {
 
 ## Grouped Queries and Calendar Buckets {#calendar-buckets}
 
+A read whose `$sort` carries a [NULL placement](/api/queries#nulls) (since 0.1.153) runs as an aggregation pipeline instead of `find()`: a computed null flag per placed key, then `$sort`, then the flags are removed (`allowDiskUse` is set). The sort cannot use an index; a `$limit` keeps it a top-k sort. Reads without `$nulls`, or whose entries were dropped (required fields), still use `find()`.
+
 [Grouped queries](/api/aggregation) compile to a `$group` pipeline. Since 0.1.132 a `null` and a missing grouped value form one `null` group, as on the SQL adapters (earlier versions returned two groups). `sum` over a group with no non-null value is `null` here too (since 0.1.148; it was `0`).
 
 [Calendar buckets](/api/calendar-buckets) use `$dateToString`, `$dateToParts` and `$dateFromParts`, so they need **MongoDB 4.0 or later**. Zones come from the server's bundled time zone database; a zone it does not know fails with `BUCKET_TZ_UNAVAILABLE` (HTTP 501) — upgrade the server to get newer zone data.

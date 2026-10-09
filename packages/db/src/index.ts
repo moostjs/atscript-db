@@ -111,6 +111,7 @@ export type {
   DbControls,
   FilterExpr,
   FieldOpsFor,
+  NullsPlacement,
   UniqueryControls,
   Uniquery,
   TDbInsertResult,

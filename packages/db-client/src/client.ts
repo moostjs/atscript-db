@@ -110,6 +110,8 @@ export class Client<
   private readonly _metaStore: MetaStore | undefined;
   private readonly _metaKey?: string;
   private _metaPromise?: Promise<MetaResponse>;
+  /** The `ETag` of the `/meta` body {@link _metaPromise} resolved to. */
+  private _metaEtag?: string;
   private _validatorPromise?: Promise<ClientValidator>;
   /** Cached deserialized form schemas keyed by resolved URL. */
   private _formCache = new Map<string, Promise<TAtscriptAnnotatedType>>();
@@ -347,13 +349,33 @@ export class Client<
    */
   async meta(): Promise<MetaResponse> {
     if (!this._metaPromise) {
-      const p: Promise<MetaResponse> = this._loadMeta().catch((err) => {
-        if (this._metaPromise === p) this._metaPromise = undefined;
-        throw err;
-      });
+      const p: Promise<MetaResponse> = this._loadMeta().then(
+        ({ body, etag }) => {
+          if (this._metaPromise === p) this._metaEtag = etag;
+          return body;
+        },
+        (err) => {
+          if (this._metaPromise === p) this._metaPromise = undefined;
+          throw err;
+        },
+      );
       this._metaPromise = p;
     }
     return this._metaPromise;
+  }
+
+  /**
+   * The `ETag` of the `/meta` body {@link meta} resolved to — `undefined`
+   * before it resolves, after {@link invalidateMeta}, or when the server sent
+   * no readable `ETag` (cross-origin without `Access-Control-Expose-Headers:
+   * ETag`). Equal ETags mean byte-identical `/meta` bodies, so it can key
+   * anything derived from them (deserialized types, validators, column
+   * definitions) across clients and route params.
+   *
+   * @since 0.1.153
+   */
+  metaEtag(): string | undefined {
+    return this._metaEtag;
   }
 
   /**
@@ -372,6 +394,7 @@ export class Client<
    */
   invalidateMeta(): void {
     this._metaPromise = undefined;
+    this._metaEtag = undefined;
     this._validatorPromise = undefined;
     this._formCache.clear();
   }
@@ -724,10 +747,17 @@ export class Client<
    * bodies for this key, falling back to a plain request whenever the
    * conditional one cannot be answered from the store.
    */
-  private async _loadMeta(): Promise<MetaResponse> {
+  private async _loadMeta(): Promise<{ body: MetaResponse; etag?: string }> {
     const url = this._endpointUrl("meta");
     const store = this._metaStore;
-    if (!store) return this._requestUrl("GET", url) as Promise<MetaResponse>;
+    if (!store) {
+      const res = await this._fetchUrl(url, {
+        method: "GET",
+        headers: await this._resolveHeaders(),
+      });
+      const body = (await this._readResponse(res, url, "GET", false)) as MetaResponse;
+      return { body, etag: res.ok ? readEtag(res) : undefined };
+    }
     const key = this._metaKey ?? url;
     const headers = await this._resolveHeaders();
     const candidates = store._isUnconditional(key) ? [] : store.candidates(key);
@@ -747,7 +777,7 @@ export class Client<
       if (res && res.status === 304) {
         const etag = readEtag(res);
         const text = etag === undefined ? undefined : store._reuse(key, etag);
-        if (text !== undefined) return JSON.parse(text) as MetaResponse;
+        if (text !== undefined) return { body: JSON.parse(text) as MetaResponse, etag };
         // No (readable) ETag or one this store no longer holds: refetch.
       } else if (res) {
         return this._storeMeta(store, key, url, res);
@@ -767,10 +797,10 @@ export class Client<
     key: string,
     url: string,
     res: Awaited<ReturnType<typeof globalThis.fetch>>,
-  ): Promise<MetaResponse> {
+  ): Promise<{ body: MetaResponse; etag?: string }> {
     const etag = res.ok ? readEtag(res) : undefined;
     if (etag === undefined || typeof res.text !== "function") {
-      return this._readResponse(res, url, "GET", false) as Promise<MetaResponse>;
+      return { body: (await this._readResponse(res, url, "GET", false)) as MetaResponse, etag };
     }
     let body: MetaResponse;
     let text: string;
@@ -786,7 +816,7 @@ export class Client<
       );
     }
     store._put(key, etag, text);
-    return body;
+    return { body, etag };
   }
 
   private _request(method: THttpMethod, endpoint: string, body?: unknown): Promise<unknown> {

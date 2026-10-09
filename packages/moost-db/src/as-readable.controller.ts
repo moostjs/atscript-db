@@ -360,7 +360,7 @@ export abstract class AsReadableController<
    * keys the shared db validator plugin reads in db-client (`db.json`,
    * `db.patch.strategy`, `db.default*`, `db.column.version`,
    * `db.column.derived`) and the client-facing `db.http.path` /
-   * `db.writeOnly`; strips every other `db.*` (table, column, index, etc.).
+   * `db.writeOnly` / `db.sort.nulls`; strips every other `db.*` (table, column, index, etc.).
    * Override in subclass to customise — keep the validator keys, or client
    * preflight diverges from the server.
    */
@@ -383,7 +383,9 @@ export abstract class AsReadableController<
           // them (and rejects $inc/$dec/$mul on a derived one) only when it
           // can see the annotation.
           key === "db.column.version" ||
-          key === "db.column.derived"
+          key === "db.column.derived" ||
+          // A field's default NULL placement in sorts: UIs show it next to the sort.
+          key === "db.sort.nulls"
         ) {
           return { key, value };
         }

@@ -239,6 +239,7 @@ export interface TGuardedQuery {
     $groupBy?: unknown;
     $having?: unknown;
     $rowOrder?: unknown;
+    $nulls?: unknown;
   };
 }
 
@@ -668,6 +669,13 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
   }
   // `$rowOrder` keys are columns (never aliases) ordered like `$sort` keys.
   if (refs.aggregateMode) refs.sort.push(...rowOrderKeys(controls.$rowOrder));
+  // `$nulls` keys (since 0.1.153) are gated like the `$sort` keys they place.
+  const nulls = controls.$nulls;
+  if (isPlainObject(nulls)) {
+    for (const name of Object.keys(nulls)) {
+      if (!aliases.has(name) && !refs.sort.includes(name)) refs.sort.push(name);
+    }
+  }
   if (refs.aggregateMode) {
     collectFilterKeys(controls.$having, (path) => refs.having.push(path), aliases, refs);
   }

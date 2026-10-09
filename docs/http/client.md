@@ -30,7 +30,7 @@ const users = new Client<typeof User>("/api/users");
 When you provide `<typeof User>`, all methods become fully typed:
 
 - **Filters** check field names against the model's own properties
-- **`$sort`** keys are constrained to valid field names
+- **`$sort`** keys are constrained to valid field names, and so are [`$nulls`](/api/queries#nulls) keys (since 0.1.153; sent as the URL suffix, `$sort=-closedAt:last`)
 - **`$with`** entries are constrained to declared navigation properties
 - **Primary key** type flows through `one()` and `remove()`
 - **Insert/update data** is checked against the model's field types
@@ -454,6 +454,19 @@ await todosFor("globex").meta(); // If-None-Match → 304, body reused
 
 A shared key is safe even when the server's `/meta` does depend on the param. The server answers `304` only when the bytes it would send match a stored ETag, and a different `/meta` comes back as a `200` and is stored next to the first one.
 
+#### Keying derived data by ETag — `metaEtag()` {#meta-etag}
+
+`client.metaEtag()` returns the `ETag` of the `/meta` body `meta()` resolved to (since 0.1.153). Equal ETags mean byte-identical bodies, so it is a safe cache key for anything you derive from `/meta` once — deserialized types, validators, column definitions — and share across clients and route params:
+
+```typescript
+const meta = await todos.meta();
+const key = todos.metaEtag(); // e.g. 'W/"5f2c…"', or undefined
+const type = (key && typeCache.get(key)) ?? deserializeAnnotatedType(meta.type);
+if (key) typeCache.set(key, type);
+```
+
+It is `undefined` before `meta()` resolves, after `invalidateMeta()`, and when the response has no readable `ETag` (cross-origin without `Access-Control-Expose-Headers: ETag`); fall back to per-client caching then. It works with `metaStore: false` too.
+
 #### Identity changes — clearing the store {#meta-store-clear}
 
 On sign-out, or any change of the signed-in user, clear the store along with the clients' own copies:
@@ -483,17 +496,17 @@ metaStore.clear(); // forget everything in this store
 const audit = new Client<typeof Audit>("/api/audit", { metaStore: false });
 ```
 
-| Export                           | Description                                                                         |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| `new MetaStore({ maxEntries? })` | A store; `maxEntries` bounds the kept bodies (default `50`)                         |
-| `metaStore.clear()`              | Drops every stored body and remembered ETag                                         |
-| `metaStore.candidates(key)`      | The ETags that would be sent as `If-None-Match` for a store key (most recent first) |
-| `metaStore.size`                 | Number of stored bodies                                                             |
-| `clearMetaStore()`               | Clears the shared default store                                                     |
+| Export                                             | Description                                                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `new MetaStore({ maxEntries?, unconditionalMs? })` | A store; `maxEntries` bounds the kept bodies (default `50`); `unconditionalMs` is how long a store key skips `If-None-Match` after a refused conditional request (default 5 minutes) |
+| `metaStore.clear()`                                | Drops every stored body and remembered ETag                                                                                                                                          |
+| `metaStore.candidates(key)`                        | The ETags that would be sent as `If-None-Match` for a store key (most recent first)                                                                                                  |
+| `metaStore.size`                                   | Number of stored bodies                                                                                                                                                              |
+| `clearMetaStore()`                                 | Clears the shared default store                                                                                                                                                      |
 
 #### Cross-origin servers {#meta-store-cors}
 
-When the API is on another origin, the browser hides the `ETag` header unless the server sends `Access-Control-Expose-Headers: ETag`, and `If-None-Match` needs the preflight to allow it (`Access-Control-Allow-Headers: If-None-Match`, plus any auth headers you already send). Without the exposed ETag the client stores nothing and behaves as before: one full `/meta` per client. If the preflight rejects `If-None-Match`, the client retries that request without it and stops sending it for that store key. `meta()` does not fail because of the store.
+When the API is on another origin, the browser hides the `ETag` header unless the server sends `Access-Control-Expose-Headers: ETag`, and `If-None-Match` needs the preflight to allow it (`Access-Control-Allow-Headers: If-None-Match`, plus any auth headers you already send). Without the exposed ETag the client stores nothing and behaves as before: one full `/meta` per client. If the preflight rejects `If-None-Match`, the client retries that request without it and stops sending it for that store key for 5 minutes (`unconditionalMs`), then tries a conditional request again. `meta()` does not fail because of the store.
 
 ## Actions {#actions}
 

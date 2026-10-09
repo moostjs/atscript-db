@@ -2,13 +2,14 @@ import type {
   AggregateControls,
   AggregateQuery,
   FilterExpr,
+  NullsPlacement,
   ResolvedBucket,
   ResolvedRowOrderKey,
   ResolvedSelectExpr,
   Uniquery,
   UniqueryControls,
 } from "@uniqu/core";
-import { isAggregateExpr, isAggregateOfExpr, isBucketExpr, isSelectArithExpr } from "@uniqu/core";
+import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
 
 import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
@@ -16,7 +17,7 @@ import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { INTEGER_REGEX_OP } from "../shared/search-term";
 import { rewriteIntegerRegex } from "../query/integer-regex";
-import { arithToExprNode } from "../query/aggregate-expr";
+import { arithToExprNode, computedAliases } from "../query/aggregate-expr";
 import { SOURCE_VALUE_FNS } from "../query/aggregate-fns";
 import {
   UniquSelect,
@@ -278,7 +279,7 @@ export abstract class FieldMappingStrategy {
     rowOrder?: readonly ResolvedRowOrderKey[],
   ): DbQuery {
     const controls = query.controls;
-    const aliases = this.computedAliasSet(controls.$select);
+    const aliases = computedAliases(controls.$select);
     const physicalBuckets: TResolvedBucket[] = buckets.map((b) => ({
       ...b,
       field: this.physicalPath(b.field, meta),
@@ -299,6 +300,7 @@ export abstract class FieldMappingStrategy {
           ? new UniquSelect(select, meta.allPhysicalFields, physicalBuckets, computed)
           : undefined,
         $sort: controls.$sort && this.physicalSort(controls.$sort, meta, aliases),
+        $nulls: controls.$nulls && this.physicalNulls(controls.$nulls, meta, aliases),
         $having: controls.$having
           ? this.translateHaving(controls.$having, meta, aliases)
           : undefined,
@@ -336,16 +338,6 @@ export abstract class FieldMappingStrategy {
     return Object.keys(fields).length > 0
       ? { ...out, ...(this.translateFilter(fields as FilterExpr, meta) as object) }
       : (out as FilterExpr);
-  }
-
-  /** Output aliases of the computed `$select` entries (aggregates, expressions and calendar buckets). */
-  private computedAliasSet(select: AggregateControls["$select"]): Set<string> {
-    const aliases = new Set<string>();
-    for (const item of select ?? []) {
-      if (isAggregateExpr(item) || isBucketExpr(item)) aliases.add(resolveAlias(item));
-      else if (isAggregateOfExpr(item) || isSelectArithExpr(item)) aliases.add(item.$as);
-    }
-    return aliases;
   }
 
   /**
@@ -387,7 +379,11 @@ export abstract class FieldMappingStrategy {
     }
     let order: TRowOrderKey[] | undefined;
     if (rowOrder?.length) {
-      order = rowOrder.map((k) => ({ column: this.physicalPath(k.field, meta), desc: k.desc }));
+      order = rowOrder.map((k) => ({
+        column: this.physicalPath(k.field, meta),
+        desc: k.desc,
+        ...(k.nulls && { nulls: k.nulls }),
+      }));
       for (const pk of meta.primaryKeys) {
         const column = this.physicalPath(pk, meta);
         if (!order.some((k) => k.column === column)) order.push({ column, desc: false });
@@ -436,10 +432,31 @@ export abstract class FieldMappingStrategy {
     meta: TableMetadata,
     aliases?: ReadonlySet<string>,
   ): DbControls["$sort"] {
-    if (!this.renamesPaths(meta)) return sort;
-    const translated: Record<string, 1 | -1> = {};
-    for (const [key, dir] of Object.entries(sort)) {
-      translated[aliases?.has(key) ? key : this.physicalPath(key, meta)] = dir as 1 | -1;
+    return this.physicalKeys(sort as Record<string, 1 | -1>, meta, aliases);
+  }
+
+  /**
+   * `$nulls` with physical keys, like {@link physicalSort}. The core hands
+   * over only the resolved entries (since 0.1.153).
+   */
+  protected physicalNulls(
+    nulls: NonNullable<DbControls["$nulls"]>,
+    meta: TableMetadata,
+    aliases?: ReadonlySet<string>,
+  ): DbControls["$nulls"] {
+    return this.physicalKeys(nulls as Record<string, NullsPlacement>, meta, aliases);
+  }
+
+  /** `map` with its field-path keys made physical; computed `aliases` pass through. */
+  private physicalKeys<V>(
+    map: Record<string, V>,
+    meta: TableMetadata,
+    aliases?: ReadonlySet<string>,
+  ): Record<string, V> {
+    if (!this.renamesPaths(meta)) return map;
+    const translated: Record<string, V> = {};
+    for (const [key, value] of Object.entries(map)) {
+      translated[aliases?.has(key) ? key : this.physicalPath(key, meta)] = value;
     }
     return translated;
   }
@@ -896,6 +913,7 @@ export class DocumentFieldMapper extends FieldMappingStrategy {
         $with: undefined,
         $select: select ? new UniquSelect(select, meta.allPhysicalFields) : undefined,
         $sort: controls?.$sort && this.physicalSort(controls.$sort, meta),
+        $nulls: controls?.$nulls && this.physicalNulls(controls.$nulls, meta),
       },
       insights: query.insights,
     };

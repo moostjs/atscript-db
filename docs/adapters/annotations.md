@@ -39,6 +39,7 @@ Practically: declaring `@db.index.unique` on `User.id` never creates an index on
 | `@db.column.version`        | Field      | —                                      | Mark a non-optional `int` field as the row's OCC version. Auto-bumped on every write that changes a non-exempt column; combine with inline `$cas` for conflict detection. See [Optimistic Concurrency](/api/versioning)                                                                              |
 | `@db.column.version.exempt` | Field      | —                                      | Mark a field as version-exempt: a patch writing only exempt fields does not bump the version (and adds no version check). Nested fields are covered by an exempt object; `$cas`, replace and `touchMany` still bump (since 0.1.150). See [Version-exempt fields](/api/versioning#version-exempt)     |
 | `@db.table.filterable`      | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Filter-gating mode. `'auto'` (default) keeps all columns filterable; `'manual'` requires `@db.column.filterable` on each filterable field                                                                                                                                                            |
+| `@db.sort.nulls`            | Field      | `placement` (`'first'` \| `'last'`)    | Default NULL placement when a query sorts by this field without a `$nulls` entry (since 0.1.153, see below)                                                                                                                                                                                          |
 | `@db.table.sortable`        | Interface  | `mode?` (`'auto'` \| `'manual'`)       | Sort-gating mode. `'auto'` (default) keeps all columns sortable; `'manual'` requires `@db.column.sortable` on each sortable field                                                                                                                                                                    |
 | `@db.json`                  | Field      | —                                      | Store as a single JSON column instead of flattening                                                                                                                                                                                                                                                  |
 | `@db.ignore`                | Field      | —                                      | Exclude field from the database schema entirely                                                                                                                                                                                                                                                      |
@@ -117,6 +118,27 @@ Adapter capability is a hard gate over the annotation policy: `@db.json` and arr
 ::: info Adapter capabilities are re-read (since 0.1.132)
 Some adapter capabilities are known only after schema sync — PostgreSQL detects PostGIS during sync. The capability index behind `/meta` and the request gate is rebuilt when those capabilities change. Up to 0.1.131 it was fixed when the controller was constructed, so a controller created before `syncSchema()` kept advertising and enforcing the pre-sync answer (for example, geo search unsupported) until restart.
 :::
+
+### `@db.sort.nulls` {#db-sort-nulls}
+
+Since 0.1.153. Where `null` / missing values of this field go when a query sorts by it and names no [`$nulls`](/api/queries#nulls) entry for it: `'first'` before every value, `'last'` after every value, in both sort directions.
+
+```atscript
+@db.table 'tickets'
+interface Ticket {
+  @meta.id
+  id: number
+
+  @db.sort.nulls 'last'
+  closedAt?: number.timestamp   // open tickets sort after closed ones, asc or desc
+}
+```
+
+- An explicit `$nulls` entry (URL `$sort=closedAt:first`) overrides it. It also applies to the `$rowOrder` of `first()` / `last()` and to a grouped `$sort` on the field.
+- **Optional fields only.** On a required top-level table field the compiler warns and the default has no effect (the field is never `null`). A required leaf inside an optional object, and every view field, can be `null` and are honoured.
+- An object, array, `@db.json` or `@db.encrypted` field is a compile error: it is not sortable.
+- The non-native placement costs the index its ORDER BY — see [Index use](/api/queries#nulls).
+- `/meta` keeps the annotation in the serialized `type` (`metadata["db.sort.nulls"]`) so a UI can show the placement next to the sort control. On an adapter without NULL placement support (`/meta.nullsPlacement` absent) the default is ignored.
 
 ## HTTP
 

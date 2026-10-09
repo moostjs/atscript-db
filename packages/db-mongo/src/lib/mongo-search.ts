@@ -29,6 +29,7 @@ import {
   type TMongoFilterOptions,
 } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
+import { sortStages } from "./mongo-sort";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { joinPath } from "./path-utils";
 
@@ -812,8 +813,10 @@ async function runSearchPipeline(
     pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
   pipeline.push(...(filterStages ?? mongoFilterStages(query.filter, filterOptionsOf(host))));
-  if (controls.$sort) {
-    pipeline.push({ $sort: controls.$sort });
+  // An explicit `$sort` (with its `$nulls` placement flags) replaces relevance order.
+  const { stages: sorted, cleanup } = sortStages(controls);
+  if (sorted.length > 0) {
+    pipeline.push(...sorted);
   } else if (classicText) {
     // Default to relevance order, mirroring Atlas $search's implicit ordering.
     pipeline.push({ $sort: { _score: -1 } });
@@ -826,6 +829,7 @@ async function runSearchPipeline(
   } else {
     pipeline.push({ $limit: 1000 });
   }
+  if (cleanup) pipeline.push(cleanup);
   if (controls.$select) {
     const projection = controls.$select.asProjection;
     if (projection) pipeline.push({ $project: dedupeProjection(projection) });
@@ -866,10 +870,8 @@ async function runSearchWithCountPipeline(
     preStages.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
 
-  const dataStages: Document[] = [];
-  if (controls.$sort) {
-    dataStages.push({ $sort: controls.$sort });
-  } else if (classicText) {
+  const { stages: dataStages, cleanup } = sortStages(controls);
+  if (dataStages.length === 0 && classicText) {
     dataStages.push({ $sort: { _score: -1 } });
   }
   if (controls.$skip) {
@@ -878,6 +880,7 @@ async function runSearchWithCountPipeline(
   if (controls.$limit) {
     dataStages.push({ $limit: controls.$limit });
   }
+  if (cleanup) dataStages.push(cleanup);
   if (controls.$select) {
     const projection = controls.$select.asProjection;
     if (projection) dataStages.push({ $project: dedupeProjection(projection) });
