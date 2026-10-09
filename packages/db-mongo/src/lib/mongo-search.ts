@@ -333,7 +333,13 @@ function resolveGeoKeyPath(host: TMongoGeoHost, indexName?: string): string {
   return field;
 }
 
-/** Appends a `$project` stage, keeping the computed distance in inclusion mode. */
+/**
+ * Appends a `$project` stage, keeping the computed distance in inclusion mode.
+ * The distance key goes on a COPY: `asProjection` (and `dedupeProjection`)
+ * hand back the caller's own `$select` map when nothing needs rewriting — an
+ * object the caller may share across queries (moost-db memoizes, and in dev /
+ * test deep-freezes, the projection of a read without `$select`).
+ */
 function pushGeoProjection(stages: Document[], controls: DbControls | undefined): void {
   const projection = controls?.$select?.asProjection;
   if (!projection) {
@@ -341,10 +347,7 @@ function pushGeoProjection(stages: Document[], controls: DbControls | undefined)
   }
   const deduped = dedupeProjection(projection) as Record<string, 0 | 1>;
   const isInclusion = Object.values(deduped).some((v) => v === 1);
-  if (isInclusion) {
-    deduped[DISTANCE_FIELD] = 1;
-  }
-  stages.push({ $project: deduped });
+  stages.push({ $project: isInclusion ? { ...deduped, [DISTANCE_FIELD]: 1 } : deduped });
 }
 
 /** Renames the internal distance field to the public `$distance` pseudo-field. */

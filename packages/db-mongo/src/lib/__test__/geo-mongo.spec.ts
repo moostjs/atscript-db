@@ -119,6 +119,29 @@ describe("[mongo] geoSearch pipeline ($geoNear first)", () => {
     expect(project.status).toBe(1);
   });
 
+  it("adds the distance field to a COPY of the caller's inclusion map (frozen / shared $select)", async () => {
+    // `asProjection` hands back the raw `$select` map — moost-db memoizes (and
+    // in dev / test deep-freezes) the projection of a read without `$select`.
+    mockCollection({ rows: [{ data: [], meta: [] }] });
+    const { UniquSelect } = await import("@atscript/db");
+    const raw = Object.freeze({ id: 1, status: 1 }) as Record<string, 0 | 1>;
+    const query: DbQuery = {
+      filter: {},
+      controls: { $select: new UniquSelect(raw, ["id", "status", "geo", "name"]) },
+    };
+    await adapter.geoSearch([0, 0], query);
+    expect(lastPipeline().find((s) => "$project" in s)!.$project).toEqual({
+      id: 1,
+      status: 1,
+      __atscript_distance: 1,
+    });
+    await adapter.geoSearchWithCount([0, 0], query);
+    expect(lastPipeline()[1]!.$facet.data.at(-1)).toEqual({
+      $project: { id: 1, status: 1, __atscript_distance: 1 },
+    });
+    expect(raw).toEqual({ id: 1, status: 1 });
+  });
+
   it("geoSearchWithCount runs a $facet after $geoNear", async () => {
     mockCollection({
       rows: [{ data: [{ id: "a", __atscript_distance: 5 }], meta: [{ count: 7 }] }],
