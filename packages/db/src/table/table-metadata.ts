@@ -174,6 +174,8 @@ export class TableMetadata {
   navFields = new Set<string>();
   ignoredFields = new Set<string>();
   uniqueProps = new Set<string>();
+  /** Adapter-contributed multi-field unique keys (logical paths) — see `TMetadataOverrides.addUniqueKeys`. */
+  uniqueKeys: string[][] = [];
   defaults = new Map<string, TDbDefaultValue>();
   /** Logical path → `@db.column` override (top-level keys only on document storage). */
   columnMap = new Map<string, string>();
@@ -497,6 +499,10 @@ export class TableMetadata {
       for (const field of overrides.addUniqueFields) {
         this.uniqueProps.add(field);
       }
+    }
+
+    if (overrides.addUniqueKeys) {
+      this.uniqueKeys.push(...overrides.addUniqueKeys.map((key) => [...key]));
     }
   }
 
@@ -1200,7 +1206,11 @@ export class TableMetadata {
     // them — so seed them in too, otherwise `isIndexed` is factually wrong for
     // those fields and consumers (e.g. the `/meta` sortable hint) mis-report a
     // PK/unique column as non-sortable.
-    const indexedFields = new Set<string>([...this.primaryKeys, ...this.uniqueProps]);
+    const indexedFields = new Set<string>([
+      ...this.primaryKeys,
+      ...this.uniqueProps,
+      ...this.uniqueKeys.flat(),
+    ]);
     for (const index of this.indexes.values()) {
       for (const f of index.fields) {
         indexedFields.add(f.name);
@@ -1525,6 +1535,8 @@ export class TableMetadata {
    *   overrides (`addUniqueFields`); these aren't reflected in
    *   `this.indexes` but still legitimate addressing identifications.
    *   Deduped against any single-field unique index already captured.
+   * - `this.uniqueKeys` — multi-field uniques contributed by adapter
+   *   overrides (`addUniqueKeys`).
    */
   private _buildIdentifications(): void {
     const out: TIdentification[] = [];
@@ -1546,6 +1558,9 @@ export class TableMetadata {
       if (seenSingleFields.has(field)) continue;
       if (this.primaryKeys.length === 1 && this.primaryKeys[0] === field) continue;
       out.push({ fields: [field], source: `unique:${field}` });
+    }
+    for (const key of this.uniqueKeys) {
+      out.push({ fields: [...key], source: `unique:${key.join("+")}` });
     }
     this._identifications = out;
   }

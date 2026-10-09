@@ -523,7 +523,6 @@ export class AtscriptDbView<
   readPlan(needed: Iterable<string> | undefined): TViewReadPlan | undefined {
     if (this.isExternal) return undefined;
     this._readPlanner ??= new ViewReadPlanner({
-      tableName: this.tableName,
       viewPlan: this.viewPlan,
       nested: this._nested,
       getViewColumnMappings: () => this.getViewColumnMappings(),

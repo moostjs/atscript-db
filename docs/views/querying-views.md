@@ -143,6 +143,8 @@ db.getAdapter(OrderView).viewJoinPruning = false; // just this view
 
 ::: warning Reads use the definition in your model
 A skipped-join read runs the view definition generated from the `.as` model, not the one stored in the database. A view altered by hand in the database (outside schema sync) is honoured only by reads that skip nothing — keep views managed by [schema sync](/sync/), or turn pruning off for that view.
+
+Such a read also reads the entry and joined tables (collections) directly: a database user granted access to the view but not to its tables needs `viewJoinPruning: false`.
 :::
 
 **DOs and DON'Ts**

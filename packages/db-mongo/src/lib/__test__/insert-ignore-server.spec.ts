@@ -69,9 +69,12 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
     db = client.db(`ig_${kind === "MongoMemoryServer" ? "sa" : "rs"}`);
     await db.dropDatabase();
     space = new DbSpace(() => new MongoAdapter(db, client));
-    const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgSlug], {
-      force: true,
-    });
+    const result = await new SchemaSync(space).run(
+      [fx.IgItem, fx.IgAuto, fx.IgNote, fx.IgSlug, fx.IgPair],
+      {
+        force: true,
+      },
+    );
     expect(result.status).toBe("synced");
   });
 
@@ -115,6 +118,21 @@ describe.each(MODES)("MongoDB insert onConflict: ignore — %s", (_label, kind) 
     );
     expect(result.conflicts).toEqual([0]);
     expect(result.insertedIds).toEqual([3, 4]);
+  });
+
+  it("a composite @meta.id beside _id collides as a pair, never per field", async () => {
+    const pairs = space.getTable(fx.IgPair) as any;
+    await pairs.insertOne({ a: 1, b: 1, label: "stored" });
+    const result = await pairs.insertMany(
+      [
+        { a: 1, b: 2, label: "same a" },
+        { a: 2, b: 1, label: "same b" },
+        { a: 1, b: 1, label: "dup" },
+      ],
+      { onConflict: "ignore" },
+    );
+    expect(result.conflicts).toEqual([2]);
+    expect(await pairs.count({ filter: {} })).toBe(3);
   });
 
   it("generated ids come back for inserted rows only", async () => {

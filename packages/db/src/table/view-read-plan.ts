@@ -28,7 +28,6 @@ export interface TViewReadPlan {
 
 /** What the planner needs from the view (kept narrow for unit tests). */
 export interface TViewPrunerHost {
-  readonly tableName: string;
   readonly viewPlan: TViewPlan;
   getViewColumnMappings(): TViewColumnMapping[];
   resolveRefSource(ref: AtscriptQueryFieldRef): { table: string; source: TViewSource };

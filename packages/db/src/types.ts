@@ -859,6 +859,13 @@ export interface TMetadataOverrides {
   removePrimaryKeys?: string[];
   /** Fields to register as having a unique constraint. */
   addUniqueFields?: string[];
+  /**
+   * Multi-field unique keys (logical paths) the adapter enforces with an index
+   * of its own — no field of one is unique alone (MongoDB: a composite
+   * `@meta.id` beside an explicit `_id`, indexed as one `__pk` key).
+   * @since 0.1.153
+   */
+  addUniqueKeys?: string[][];
   /** Synthetic fields to inject into flatMap (e.g. MongoDB's `_id`). */
   injectFields?: Array<{ path: string; type: TAtscriptAnnotatedType }>;
 }

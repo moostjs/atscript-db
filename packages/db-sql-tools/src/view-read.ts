@@ -17,7 +17,6 @@ const rendered = new WeakMap<TViewReadPlan, Map<SqlDialect, TSqlDerivedSource>>(
 interface TReadableLike {
   readonly isView: boolean;
   readonly tableName: string;
-  readonly schema?: string;
 }
 
 /**
@@ -31,9 +30,11 @@ interface TReadableLike {
  * from the derived table, so a reference the collector missed fails with
  * "unknown column" rather than reading wrong data.
  *
- * Never pruned: a table, an external view, a view in a schema (its
- * definition's unqualified names resolve against that schema, the derived
- * table's against the connection's), or anything `readPlan` keeps whole.
+ * Never pruned: a table, an external view, a view read under another name
+ * than its own (`tableName` schema-qualified — its definition's unqualified
+ * names resolve against that schema, the derived table's against the
+ * connection's — or renamed by an adapter subclass), or anything `readPlan`
+ * keeps whole.
  * @since 0.1.153
  */
 export function viewReadSource(
@@ -44,9 +45,8 @@ export function viewReadSource(
   kind: TReadColumnsKind,
   partitionBy?: readonly string[],
 ): TSqlFromSource {
-  if (!readable.isView || readable.schema) return tableName;
+  if (!readable.isView || tableName !== readable.tableName) return tableName;
   const view = readable as unknown as AtscriptDbView;
-  if (view.isExternal) return tableName;
   const variant = view.readPlan(queryReadColumns(query, kind, partitionBy));
   if (!variant) return tableName;
   let byDialect = rendered.get(variant);

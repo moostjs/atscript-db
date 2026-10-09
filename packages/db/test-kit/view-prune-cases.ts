@@ -149,6 +149,11 @@ function canonical(rows: Array<Record<string, unknown>>): string[] {
     .toSorted();
 }
 
+/** {@link canonical} for row sets; a scalar result (an aggregate `$count`) as is. */
+function canonicalOrValue(result: unknown): unknown {
+  return Array.isArray(result) ? canonical(result) : result;
+}
+
 function randomPredicate(rnd: () => number): Record<string, unknown> {
   const pick = <T>(items: readonly T[]): T => items[Math.floor(rnd() * items.length)];
   if (rnd() < 0.5) {
@@ -227,7 +232,7 @@ async function runRead(
       return { data: ordered ? data : canonical(data), count };
     }
     case "aggregate":
-      return canonical(await view.aggregate(query));
+      return canonicalOrValue(await view.aggregate(query));
     default: {
       const rows = await view.findMany(query);
       const ordered = !!(query.controls as { $sort?: unknown } | undefined)?.$sort;
@@ -350,5 +355,196 @@ export function defineViewPruneCases(label: string, kit: () => TViewPruneKit): v
         }
       }
     }, 120_000);
+  });
+}
+
+// ── Adversarial shapes (`fixtures/view-prune-adv.as`) ──────────────────────
+
+/** Rows for `view-prune-adv.as`: case variants of unique codes, NULL / dangling keys, boss chains. */
+export function vaData(seed = 11) {
+  const rnd = vpRandom(seed);
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(rnd() * items.length)];
+  const codes = [
+    { id: 1, code: "paid", label: "Paid" },
+    { id: 2, code: "new", label: "New" },
+    { id: 3, code: "Done", label: "Done" },
+  ];
+  const binCodes = [
+    { id: 1, code: "a", label: "lower" },
+    { id: 2, code: "A", label: "upper" },
+    { id: 3, code: "b", label: "b" },
+  ];
+  const tiers = [
+    { id: 1, kind: "gold", premium: true, title: "Gold+" },
+    { id: 2, kind: "gold", premium: false, title: "Gold" },
+    { id: 3, kind: "silver", premium: false, title: "Silver" },
+    { id: 4, kind: "silver", premium: true, title: "Silver+" },
+    { id: 5, kind: "bronze", premium: false, title: "Bronze" },
+  ];
+  const owners = Array.from({ length: 8 }, (_, i) => {
+    const row: Record<string, unknown> = { id: i + 1, name: `o${i + 1}` };
+    const tier = pick([undefined, "gold", "silver", "bronze", "tin"]);
+    if (tier !== undefined) row.tierKind = tier;
+    const boss = pick([undefined, 1, 2, 3, 5, 8, 99]);
+    if (boss !== undefined) row.bossId = boss;
+    const level = pick([undefined, 1, 2, 3]);
+    if (level !== undefined) row.meta = { level };
+    return row;
+  });
+  const events: Array<Record<string, unknown>> = [];
+  for (const owner of owners) {
+    const n = Math.floor(rnd() * 4);
+    for (let k = 0; k < n; k++) {
+      events.push({
+        id: events.length + 1,
+        ownerId: owner.id,
+        at: Math.floor(rnd() * 3),
+        text: `e${String(owner.id)}.${k}`,
+      });
+    }
+  }
+  const items = Array.from({ length: 50 }, (_, i) => {
+    const row: Record<string, unknown> = { id: i + 1, qty: 1 + Math.floor(rnd() * 9) };
+    const code = pick([undefined, "paid", "PAID", "New", "done", "zzz", "a", "A", "b", "B"]);
+    if (code !== undefined) row.code = code;
+    const owner = pick([undefined, 1, 2, 3, 4, 5, 6, 7, 8, 42]);
+    if (owner !== undefined) row.ownerId = owner;
+    return row;
+  });
+  return { codes, binCodes, tiers, owners, events, items };
+}
+
+/** Inserts {@link vaData} through `space`. */
+export async function seedViewPruneAdv(space: TSpace, fx: Record<string, any>): Promise<void> {
+  const data = vaData();
+  const ins = (type: unknown, rows: unknown[]) =>
+    (space.getTable(type) as { insertMany(r: unknown[]): Promise<unknown> }).insertMany(rows);
+  await ins(fx.VaCode, data.codes);
+  await ins(fx.VaBinCode, data.binCodes);
+  await ins(fx.VaTier, data.tiers);
+  await ins(fx.VaOwner, data.owners);
+  await ins(fx.VaEvent, data.events);
+  await ins(fx.VaItem, data.items);
+}
+
+const BY_ID = { id: 1 } as const;
+
+/** Reads of `VaItemView` aimed at the collector: nested logic, `$exists`, field operands, exclusions. */
+const ADV_READS: Array<{ op: string; query: Record<string, unknown> }> = [
+  { op: "count", query: { filter: {} } },
+  { op: "count", query: { filter: { $not: { ownerName: null } } } },
+  {
+    op: "count",
+    query: { filter: { $not: { $or: [{ codeLabel: "Paid" }, { tierTitle: null }] } } },
+  },
+  { op: "count", query: { filter: { bossName: { $exists: true } } } },
+  { op: "count", query: { filter: { $or: [{ qty: { $gt: 5 } }, { lastEvent: null }] } } },
+  { op: "count", query: { filter: { ownerLevel: { $gte: 2 } } } },
+  {
+    op: "count",
+    query: { filter: { $and: [{ qty: { $gt: 2 } }, { $not: { weight: { $lt: 6 } } }] } },
+  },
+  {
+    op: "findMany",
+    query: { filter: {}, controls: { $select: ["id"], $sort: { bossName: -1, id: 1 } } },
+  },
+  {
+    op: "findMany",
+    query: { filter: {}, controls: { $select: ["id", "weight"], $sort: { weight: 1, id: 1 } } },
+  },
+  { op: "findMany", query: { filter: {}, controls: { $select: { codeLabel: 0 }, $sort: BY_ID } } },
+  {
+    op: "findMany",
+    query: {
+      filter: {},
+      controls: { $select: { tierTitle: 0, lastEvent: 0, bossName: 0 }, $sort: BY_ID },
+    },
+  },
+  {
+    op: "findMany",
+    query: {
+      filter: { tierTitle: { $in: ["Gold+", "Silver+"] } },
+      controls: { $select: ["id", "lastEvent"], $sort: BY_ID },
+    },
+  },
+  {
+    op: "findManyWithCount",
+    query: {
+      filter: {
+        $and: [{ qty: { $lte: 7 } }, { $or: [{ ownerName: "o1" }, { codeLabel: { $ne: null } }] }],
+      },
+      controls: { $select: ["id"], $sort: BY_ID, $limit: 5, $skip: 2 },
+    },
+  },
+  {
+    op: "aggregate",
+    query: {
+      filter: {},
+      controls: {
+        $groupBy: ["tierTitle"],
+        $select: ["tierTitle", { $fn: "sum", $field: "qty", $as: "s" }],
+        $having: { s: { $gt: 3 } },
+      },
+    },
+  },
+  {
+    op: "aggregate",
+    query: {
+      filter: { codeLabel: { $ne: null } },
+      controls: {
+        $groupBy: ["ownerLevel"],
+        $select: ["ownerLevel", { $fn: "count", $field: "*", $as: "n" }],
+      },
+    },
+  },
+  {
+    op: "aggregate",
+    query: {
+      filter: {},
+      controls: {
+        $groupBy: ["bossName"],
+        $select: ["bossName", { $fn: "max", $field: "weight", $as: "w" }],
+        $count: true,
+      },
+    },
+  },
+];
+
+export function defineViewPruneAdvCases(
+  label: string,
+  kit: () => TViewPruneKit,
+  opts: { binView?: boolean } = {},
+): void {
+  const same = async (type: string, op: string, query: Record<string, unknown>) => {
+    const { fx, pruned, plain } = kit();
+    const on = pruned.getView(fx[type]) as TReadable;
+    const off = plain.getView(fx[type]) as TReadable;
+    const [a, b] = await Promise.all([runRead(on, op, query), runRead(off, op, query)]);
+    expect(a, `${type} ${op} ${JSON.stringify(query)}`).toEqual(b);
+  };
+
+  describe(`${label}: view read pruning — adversarial shapes`, () => {
+    it("collector edge cases over collations, a boolean key pin, alias chains", async () => {
+      for (const { op, query } of ADV_READS) await same("VaItemView", op, query);
+    });
+
+    it("an inner join reading a left join keeps both", async () => {
+      await same("VaInnerChainView", "count", { filter: {} });
+      await same("VaInnerChainView", "findMany", {
+        filter: {},
+        controls: { $select: ["id"], $sort: BY_ID },
+      });
+    });
+
+    it.runIf(opts.binView !== false)(
+      "a binary-unique target under a nocase comparison",
+      async () => {
+        await same("VaBinView", "count", { filter: {} });
+        await same("VaBinView", "findMany", {
+          filter: {},
+          controls: { $select: ["id"], $sort: BY_ID },
+        });
+      },
+    );
   });
 }

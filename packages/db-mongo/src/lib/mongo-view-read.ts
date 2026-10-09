@@ -38,17 +38,14 @@ export function mongoViewRead(
   query: DbQuery,
   kind: TReadColumnsKind,
 ): TMongoViewRead | undefined {
-  if (view.isExternal) return undefined;
-  const plan = view.viewPlan;
-  if (isViewType(plan.entryType())) return undefined;
   const variant = view.readPlan(queryReadColumns(query, kind));
-  if (!variant) return undefined;
+  if (!variant || isViewType(variant.plan.entryType())) return undefined;
   let prefix = prefixes.get(variant);
   if (!prefix) {
     prefix = buildViewPipeline(view, variant);
     prefixes.set(variant, prefix);
   }
-  return { entry: plan.entryTable, prefix, dropped: variant.droppedColumns };
+  return { entry: variant.plan.entryTable, prefix, dropped: variant.droppedColumns };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

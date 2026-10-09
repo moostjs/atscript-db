@@ -80,8 +80,7 @@ export { AtscriptDbTable } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";
 export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 // ── Since 0.1.153: view read pruning ─────────────────────────────────────────
-export { ViewReadPlanner } from "./table/view-read-plan";
-export type { TViewReadPlan, TViewPrunerHost } from "./table/view-read-plan";
+export type { TViewReadPlan } from "./table/view-read-plan";
 export { queryReadColumns } from "./query/read-columns";
 export type { TReadColumnsKind } from "./query/read-columns";
 export { BaseDbAdapter, ALL_BUCKET_UNITS, ALL_VIEW_CAPABILITIES } from "./base-adapter";

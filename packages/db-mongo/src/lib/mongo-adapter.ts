@@ -843,11 +843,13 @@ export class MongoAdapter extends BaseDbAdapter {
 
     if (this._hasExplicitId) {
       // Schema defines _id explicitly (via @db.mongo.collection or manual field).
-      // _id is the primary key; remove non-_id @meta.id fields from PKs (they become unique indexes).
+      // _id is the primary key; remove non-_id @meta.id fields from PKs (they become
+      // one `__pk` unique index — a composite one is unique as a whole, no field alone).
       return {
         addPrimaryKeys: ["_id"],
         removePrimaryKeys: meta.originalMetaIdFields.filter((f) => f !== "_id"),
-        addUniqueFields: uniqueFields.length > 0 ? uniqueFields : undefined,
+        addUniqueFields: uniqueFields.length === 1 ? uniqueFields : undefined,
+        addUniqueKeys: uniqueFields.length > 1 ? [[...uniqueFields]] : undefined,
       };
     }
 
@@ -1531,20 +1533,17 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   async count(query: DbQuery): Promise<number> {
-    const relational = containsRelationFilter(query.filter);
-    const view = this.viewJoinPruning && this._table?.isView;
-    if (relational || view) {
-      // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a
-      // filter only); so is a pruned view read.
-      const pipeline = [
-        ...mongoFilterStages(query.filter, this._predicateFilterOpts),
-        { $count: "count" },
-      ];
-      const pruned = view ? this._viewRead(query, "count", pipeline) : undefined;
-      if (relational || pruned) {
-        const result = await this._readPipeline(query, pipeline, "aggregate (count)", pruned);
-        return (result[0]?.count as number | undefined) ?? 0;
-      }
+    // Predicates need `$lookup` — counted in a pipeline (`countDocuments` takes a
+    // filter only); so is a pruned view read.
+    const stages = () => [
+      ...mongoFilterStages(query.filter, this._predicateFilterOpts),
+      { $count: "count" },
+    ];
+    const pruned = this._viewRead(query, "count", stages);
+    if (pruned || containsRelationFilter(query.filter)) {
+      const pipeline = pruned?.pipeline ?? stages();
+      const result = await this._readPipeline(query, pipeline, "aggregate (count)", pruned);
+      return (result[0]?.count as number | undefined) ?? 0;
     }
     const filter = buildMongoFilter(query.filter);
     if (this._estimatesCount() && Object.keys(filter).length === 0) {

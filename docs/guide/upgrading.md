@@ -14,7 +14,12 @@ On MySQL, SQLite and MongoDB a read of a managed view now skips the `left` joins
 
 - Reads that skip a join use the definition generated from your `.as` model, not the one stored in the database — a view altered by hand is honoured only by reads that skip nothing.
 - Opt out with `viewJoinPruning: false` (adapter option, or `db.getAdapter(View).viewJoinPruning = false` for one view).
+- Such a read needs read access to the view's tables, not only to the view.
 - See [Unused joins are skipped](/views/querying-views#performance-unused-joins-are-skipped).
+
+### Fix: MongoDB composite `@meta.id` beside an explicit `_id` {#v0-1-153-mongo-composite-meta-id}
+
+With an explicit `_id` (`@db.mongo.collection`), a composite `@meta.id` is one `__pk` unique index — unique as a whole. Each of its fields used to count as unique on its own, so a conflict-ignoring insert inside a transaction skipped rows that shared just one of them. `uniqueKeySets` now lists the pair instead.
 
 ## 0.1.151 {#v0-1-151}
 
