@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect } from "vite-plus/test";
+import { afterEach, describe, it, expect, vi } from "vite-plus/test";
 
 import { PgDriver, parseTimestampUtc, sanitizeParams } from "../pg-driver";
 
@@ -66,5 +66,75 @@ describe("[postgres] sanitizeParams", () => {
 
   it("no params: an empty bind array", () => {
     expect(sanitizeParams(undefined)).toEqual([]);
+  });
+});
+
+describe("[postgres] idle pool client errors (since 0.1.154)", () => {
+  type TPool = import("pg").Pool;
+  const idleError = () =>
+    Object.assign(new Error("terminating connection due to administrator command"), {
+      code: "57P01",
+    });
+
+  it("an owned pool logs an idle client's error instead of throwing", async () => {
+    const warn = vi.fn();
+    const driver = new PgDriver("postgresql://u@127.0.0.1:1/none", { logger: { warn } });
+    const pool = (await (driver as any).getPool()) as TPool;
+    expect(pool.listenerCount("error")).toBe(1);
+    expect(() => pool.emit("error", idleError(), {} as never)).not.toThrow();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("57P01");
+    expect(warn.mock.calls[0][0]).toContain("terminating connection");
+    await driver.close();
+  });
+
+  it("defaults to console.warn (pool config form too)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const driver = new PgDriver({ connectionString: "postgresql://u@127.0.0.1:1/none" });
+      const pool = (await (driver as any).getPool()) as TPool;
+      pool.emit("error", idleError(), {} as never);
+      expect(warn).toHaveBeenCalledOnce();
+      await driver.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a checked-out client's connection error is logged, and release() discards the client", async () => {
+    const { EventEmitter } = await import("node:events");
+    const client = Object.assign(new EventEmitter(), { release: vi.fn(), query: vi.fn() });
+    const pool = { query: vi.fn(), connect: async () => client, end: async () => {} };
+    const warn = vi.fn();
+    const driver = new PgDriver(pool as never, { logger: { warn } });
+    const conn = await driver.getConnection();
+    expect(client.listenerCount("error")).toBe(1);
+    const err = idleError();
+    expect(() => client.emit("error", err)).not.toThrow();
+    // pg follows the server's error with "Connection terminated unexpectedly"
+    client.emit("error", new Error("Connection terminated unexpectedly"));
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("57P01");
+    conn.release();
+    expect(client.listenerCount("error")).toBe(0);
+    expect(client.release).toHaveBeenCalledWith(err);
+  });
+
+  it("a healthy checked-out client is released normally", async () => {
+    const { EventEmitter } = await import("node:events");
+    const client = Object.assign(new EventEmitter(), { release: vi.fn(), query: vi.fn() });
+    const pool = { query: vi.fn(), connect: async () => client, end: async () => {} };
+    const conn = await new PgDriver(pool as never).getConnection();
+    conn.release();
+    expect(client.listenerCount("error")).toBe(0);
+    expect(client.release).toHaveBeenCalledWith(undefined);
+  });
+
+  it("leaves a caller's pre-created pool alone", async () => {
+    const { Pool } = (await import("pg")).default;
+    const pool = new Pool({ connectionString: "postgresql://u@127.0.0.1:1/none" });
+    const driver = new PgDriver(pool);
+    expect(pool.listenerCount("error")).toBe(0);
+    await driver.close();
   });
 });

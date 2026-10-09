@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.154 {#v0-1-154}
+
+### Fixes
+
+- **A broken PostgreSQL connection no longer crashes the process.** A pool connection killed while idle — a server restart, `pg_terminate_backend`, `DROP DATABASE … WITH (FORCE)`, a failover or a network reset — made `pg.Pool` emit an unhandled `'error'`. A pool `PgDriver` creates now logs it as a warning (to `console`, or a `logger` passed as the second argument: `new PgDriver(uri, { logger })`) and drops the connection; the next query reconnects. A connection checked out for a transaction is covered too. **A `pg.Pool` you pass in gets no listener** — add `pool.on("error", …)` yourself. See [Broken connections](/adapters/postgresql#broken-connections).
+
 ## 0.1.153 {#v0-1-153}
 
 **Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.103.** That release keeps the built-in annotations of a primitive extension used as a union / tuple member or an array element (`number.int | null`, `string.email[]`, `[number.timestamp.created, string]`); see the validation and member-annotation entries under [Behavior changes](#v0-1-153-behavior).

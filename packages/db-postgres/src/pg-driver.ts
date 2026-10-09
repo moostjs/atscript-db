@@ -1,3 +1,5 @@
+import type { TGenericLogger } from "@atscript/db";
+
 import type { TPgConnection, TPgDriver, TPgRunResult } from "./types";
 
 const NO_PARAMS: unknown[] = [];
@@ -97,6 +99,21 @@ function createCustomTypes(pgTypes: typeof import("pg").types): import("pg").Cus
   };
 }
 
+/** Options of {@link PgDriver}. */
+export interface TPgDriverOptions {
+  /**
+   * Receives a warning when a pool connection breaks — a terminated backend,
+   * failover or network reset (default `console`). See {@link PgDriver}.
+   */
+  logger?: Pick<TGenericLogger, "warn">;
+}
+
+/** The warning logged for a pool client whose connection broke (`57P01`, `ECONNRESET`, …). */
+function lostConnectionMessage(err: Error, where: string): string {
+  const code = (err as { code?: string }).code ?? err.name;
+  return `[atscript/db-postgres] ${where} pool connection lost (${code}): ${err.message}`;
+}
+
 /**
  * {@link TPgDriver} implementation backed by `pg` (node-postgres).
  *
@@ -123,6 +140,12 @@ function createCustomTypes(pgTypes: typeof import("pg").types): import("pg").Cus
  * const driver = new PgDriver(pool)
  * ```
  *
+ * A broken pool connection (a terminated backend, failover, network reset) is
+ * logged through `options.logger` instead of crashing the process (since
+ * 0.1.154): idle clients of a pool the driver creates, and clients checked out
+ * for a transaction. A pre-created `pg.Pool` is the caller's — attach your own
+ * `pool.on('error', …)` listener, or an idle client's error crashes the process.
+ *
  * Requires `pg` to be installed:
  * ```bash
  * pnpm add pg
@@ -131,11 +154,17 @@ function createCustomTypes(pgTypes: typeof import("pg").types): import("pg").Cus
 export class PgDriver implements TPgDriver {
   private pool: import("pg").Pool | undefined;
   private poolInit: Promise<import("pg").Pool> | undefined;
+  private readonly logger: Pick<TGenericLogger, "warn">;
 
-  constructor(poolOrConfig: string | import("pg").Pool | import("pg").PoolConfig) {
+  constructor(
+    poolOrConfig: string | import("pg").Pool | import("pg").PoolConfig,
+    options: TPgDriverOptions = {},
+  ) {
+    this.logger = options.logger ?? console;
     if (typeof poolOrConfig === "object" && typeof (poolOrConfig as any).query === "function") {
       // Pre-created Pool instance — use as-is.
-      // Note: type parsing is the caller's responsibility for pre-created pools.
+      // Note: type parsing and the pool's 'error' listener are the caller's
+      // responsibility for pre-created pools.
       this.pool = poolOrConfig as import("pg").Pool;
     } else {
       // Dynamic import to keep pg optional and support both CJS and ESM
@@ -151,6 +180,10 @@ export class PgDriver implements TPgDriver {
             types: customTypes,
           });
         }
+        // An idle client's error (terminated backend, failover, network reset)
+        // is re-emitted on the pool, which throws with no listener. The pool
+        // has already discarded the client; the next query opens a fresh one.
+        this.pool.on("error", (err) => this.logger.warn(lostConnectionMessage(err, "idle")));
         return this.pool;
       });
     }
@@ -189,6 +222,18 @@ export class PgDriver implements TPgDriver {
   async getConnection(): Promise<TPgConnection> {
     const pool = await this.getPool();
     const client = await pool.connect();
+    // A checked-out client emits its connection errors itself (pg-pool only
+    // listens while it is idle): without a listener, a backend terminated
+    // between two statements of a transaction would crash the process. Its
+    // later statements reject; release() hands the error back so the pool
+    // discards the client.
+    let lost: Error | undefined;
+    const onError = (err: Error): void => {
+      if (lost) return;
+      lost = err;
+      this.logger.warn(lostConnectionMessage(err, "checked-out"));
+    };
+    client.on("error", onError);
     return {
       async run(sql: string, params?: unknown[]): Promise<TPgRunResult> {
         const result = await client.query(sql, sanitizeParams(params));
@@ -209,7 +254,8 @@ export class PgDriver implements TPgDriver {
         await client.query(sql);
       },
       release() {
-        client.release();
+        client.removeListener("error", onError);
+        client.release(lost);
       },
     };
   }

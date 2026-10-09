@@ -374,6 +374,27 @@ The pool is initialized lazily — the `pg` module is dynamically imported on fi
 
 To shut down cleanly, close the space — see [Closing the space](/guide/setup#closing). `driver.close()` is idempotent.
 
+### Broken connections
+
+A pool connection can break while nobody is using it: a server restart, `pg_terminate_backend`, a failover or a network reset. `pg.Pool` reports it as an `'error'` event, which crashes the process when nothing listens. Since 0.1.154, a pool that `PgDriver` creates (from a URI or a config object) listens for it: the error is logged as a warning and the pool drops the connection — the next query opens a fresh one. A connection checked out for a transaction is covered the same way: its remaining statements reject, and it is discarded when released.
+
+Warnings go to `console` by default. Pass a `logger` (anything with a `warn` method) as the second argument to route them elsewhere:
+
+```typescript
+const driver = new PgDriver("postgresql://user:pass@localhost:5432/mydb", { logger: myLogger });
+```
+
+::: warning Pre-created pools
+`PgDriver` does not attach a listener to a `pg.Pool` you pass in — the pool is yours. Add one yourself, or an idle connection's error crashes the process:
+
+```typescript
+const pool = new pg.Pool({ connectionString: "..." });
+pool.on("error", (err) => console.warn("idle postgres connection lost:", err.message));
+const driver = new PgDriver(pool);
+```
+
+:::
+
 ### SSL for managed Postgres
 
 Most managed providers (Neon, Supabase, RDS, Heroku, etc.) require TLS. SSL options are passed straight through to `pg.Pool` — see the [node-postgres SSL docs](https://node-postgres.com/features/ssl) for the full option set:

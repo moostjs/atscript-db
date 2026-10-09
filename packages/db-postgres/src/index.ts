@@ -5,6 +5,7 @@ import { PgDriver } from "./pg-driver";
 
 export { PostgresAdapter } from "./postgres-adapter";
 export { PgDriver } from "./pg-driver";
+export type { TPgDriverOptions } from "./pg-driver";
 // NOTE: the build-time plugin (PostgresPlugin) is deliberately NOT re-exported here.
 // It lives on the dedicated './plugin' subpath only: the plugin imports
 // @atscript/core (the compiler, which carries rolldown + its native binding),

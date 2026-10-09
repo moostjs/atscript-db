@@ -13,7 +13,10 @@ const driver = new PgDriver("postgresql://user@localhost:5432/app");
 // PoolConfig object
 const driver2 = new PgDriver({ host: "localhost", database: "app", max: 10 });
 
-// Pre-created pg.Pool (type parsers become the caller's responsibility)
+// Driver options (second arg): { logger } receives broken-connection warnings (default console)
+const driverWithLogger = new PgDriver("postgresql://user@localhost:5432/app", { logger });
+
+// Pre-created pg.Pool (type parsers AND pool.on('error', …) become the caller's responsibility)
 import pg from "pg";
 const pool = new pg.Pool({ connectionString: "..." });
 const driver3 = new PgDriver(pool);
@@ -33,6 +36,10 @@ const db2 = createAdapter("postgresql://user@localhost:5432/app", { max: 20 });
 - `INT8` / `BIGINT` → `number` when in safe-integer range, else `string`
 
 Cross-adapter consistency: epoch-ms numbers, `number` decimals. When you pass a pre-created `pg.Pool`, install equivalents yourself.
+
+### Broken connections
+
+A connection killed while idle (server restart, `pg_terminate_backend`, failover, network reset) makes `pg.Pool` emit `'error'` — fatal with no listener. A pool `PgDriver` creates logs it via `logger.warn` and drops the connection; the next query reconnects (0.1.154; earlier: process crash). A client checked out for a transaction is covered too: its remaining statements reject, release discards it. A pre-created `pg.Pool` gets **no** listener — add `pool.on('error', …)` yourself.
 
 ## Register the plugin
 
