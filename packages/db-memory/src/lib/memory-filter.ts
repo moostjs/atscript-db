@@ -103,9 +103,8 @@ function stringifyLeaf(v: unknown): string {
   return String(v);
 }
 
-/** `$eq` semantics, factored out so `$ne` can be its exact negation. */
-function evalEq(row: Record<string, unknown>, field: string, value: unknown): boolean {
-  const fieldValue = getPath(row, field);
+/** `$eq` semantics over the field's value, factored out so `$ne` can be its exact negation. */
+function evalEq(fieldValue: unknown, value: unknown): boolean {
   // Mongo-like null model: `{field: null}` / `{field: {$eq: null}}` matches a
   // row whose field is `null` OR absent/undefined (missing). Loose `==` catches
   // both null and undefined in one test. This is handled BEFORE the strict
@@ -141,13 +140,56 @@ function matchesScalar(fieldValue: unknown, value: unknown): boolean {
   return valuesEqual(fieldValue, value);
 }
 
-/** `$in` membership, factored out so `$nin` can be its exact negation. */
-function evalIn(row: Record<string, unknown>, field: string, value: unknown): boolean {
+/**
+ * `$in` membership compiled once per filter leaf, factored out so `$nin` can be
+ * its exact negation: true iff the field value {@link matchesScalar matches}
+ * SOME element. Primitive elements (and `Date`s, by instant) are looked up in a
+ * `Set` instead of scanned per row — `NaN` is left out of it (it equals
+ * nothing, while a `Set` would find it), `-0`/`0` collapse as under `===`.
+ * Any other element (an object / array — reference equality) keeps the scan.
+ */
+function compileIn(value: unknown): (fieldValue: unknown) => boolean {
   if (!Array.isArray(value)) {
-    return false;
+    return () => false;
   }
-  const fieldValue = getPath(row, field);
-  return value.some((element) => matchesScalar(fieldValue, element));
+  const primitives = new Set<unknown>();
+  const instants = new Set<number>();
+  const rest: unknown[] = [];
+  let hasNull = false;
+  for (const element of value as unknown[]) {
+    if (element === null) {
+      hasNull = true;
+    } else if (element instanceof Date) {
+      const time = element.getTime();
+      if (!Number.isNaN(time)) instants.add(time);
+    } else if (typeof element === "object") {
+      rest.push(element);
+    } else if (!(typeof element === "number" && Number.isNaN(element))) {
+      primitives.add(element);
+    }
+  }
+  const one = (v: unknown): boolean =>
+    v instanceof Date
+      ? instants.has(v.getTime())
+      : (v === null || typeof v !== "object") && primitives.has(v);
+  return (fieldValue) => {
+    if (Array.isArray(fieldValue)) {
+      if (hasNull && fieldValue.includes(null)) return true;
+      for (const el of fieldValue) {
+        if (one(el)) return true;
+      }
+      // An array element compares by reference with the whole field; any other
+      // element with each item (`matchesScalar`'s containment rule).
+      return rest.some((el) => (Array.isArray(el) ? el === fieldValue : fieldValue.includes(el)));
+    }
+    if (fieldValue === null) {
+      return hasNull;
+    }
+    if (fieldValue === undefined) {
+      return hasNull || primitives.has(undefined);
+    }
+    return one(fieldValue) || rest.includes(fieldValue);
+  };
 }
 
 /**
@@ -167,13 +209,7 @@ function toOrdinal(v: unknown): number {
  * lexicographically) — NO collation or locale awareness. This intentionally
  * differs from SQL engines' collated ordering.
  */
-function evalRelational(
-  row: Record<string, unknown>,
-  field: string,
-  op: string,
-  value: unknown,
-): boolean {
-  const fieldValue = getPath(row, field);
+function evalRelational(fieldValue: unknown, op: string, value: unknown): boolean {
   if (fieldValue === undefined || fieldValue === null) {
     return false;
   }
@@ -222,6 +258,8 @@ const memoryVisitor: FilterVisitor<Predicate> = {
   },
 
   comparison(field, op, value): Predicate {
+    // The dot-path is split once per filter leaf, not once per row.
+    const read = pathReader(field);
     if ((op as string) === INTEGER_REGEX_OP) {
       // Regex over the DECIMAL TEXT of an integer field (the core rewrites `$regex`
       // on integer fields into this). Only integral numbers / bigints have such a
@@ -229,7 +267,7 @@ const memoryVisitor: FilterVisitor<Predicate> = {
       const { pattern, flags } = parseRegexString(value);
       const regex = new RegExp(pattern, flags);
       return (row) => {
-        const fieldValue = getPath(row, field);
+        const fieldValue = read(row);
         const integral =
           typeof fieldValue === "bigint" ||
           (typeof fieldValue === "number" && Number.isInteger(fieldValue));
@@ -241,28 +279,32 @@ const memoryVisitor: FilterVisitor<Predicate> = {
       // `null` OR absent/undefined (missing). For a concrete (non-null) value a
       // missing field reads as `undefined` and never matches.
       case "$eq":
-        return (row) => evalEq(row, field, value);
+        return (row) => evalEq(read(row), value);
 
       // Strict negation of `$eq`. For a concrete value, a MISSING field is "not
       // equal" so `$ne` matches it (→ true). For `$ne: null` the null model
       // flips this: since `$eq: null` matches null AND missing, `$ne: null`
       // matches ONLY a field with a concrete, present, non-null value.
       case "$ne":
-        return (row) => !evalEq(row, field, value);
+        return (row) => !evalEq(read(row), value);
 
       case "$gt":
       case "$gte":
       case "$lt":
       case "$lte":
-        return (row) => evalRelational(row, field, op, value);
+        return (row) => evalRelational(read(row), op, value);
 
       // Membership: true iff the field equals some array element.
-      case "$in":
-        return (row) => evalIn(row, field, value);
+      case "$in": {
+        const isIn = compileIn(value);
+        return (row) => isIn(read(row));
+      }
 
       // Negated membership: true when the field is absent or matches nothing.
-      case "$nin":
-        return (row) => !evalIn(row, field, value);
+      case "$nin": {
+        const isIn = compileIn(value);
+        return (row) => !isIn(read(row));
+      }
 
       // Regex match. Built once; a missing/`null` field never matches, exactly
       // like the `$eq`-with-RegExp shorthand above.
@@ -270,7 +312,7 @@ const memoryVisitor: FilterVisitor<Predicate> = {
         const { pattern, flags } = parseRegexString(value);
         const regex = new RegExp(pattern, flags);
         return (row) => {
-          const fieldValue = getPath(row, field);
+          const fieldValue = read(row);
           return fieldValue != null && regex.test(stringifyLeaf(fieldValue));
         };
       }
@@ -278,7 +320,7 @@ const memoryVisitor: FilterVisitor<Predicate> = {
       // `$exists` = "holds a value" (a stored null counts as absent, as in SQL):
       // `true` ⇔ `$ne: null`, `false` ⇔ `$eq: null`. See docs/api/queries.md.
       case "$exists":
-        return (row) => value === !evalEq(row, field, null);
+        return (row) => value === !evalEq(read(row), null);
 
       // Any operator outside the ComparisonOp union (e.g. `$geoWithin`) is not
       // representable by an in-memory scan — surface it as an invalid query

@@ -10,6 +10,7 @@ import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/d
 import { bucketer } from "@uniqu/core";
 
 import { buildMemoryPredicate, pathReader } from "./memory-filter";
+import { cloneValue } from "./memory-clone";
 import { compareLeaves, paginate, setPath, sortRows } from "./memory-engine";
 
 type TRow = Record<string, unknown>;
@@ -151,7 +152,7 @@ export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow
 
 /** Group values and min / max results may be store-owned objects (JSON values): hand back copies. */
 function copyValue(value: unknown): unknown {
-  return value !== null && typeof value === "object" ? structuredClone(value) : value;
+  return value !== null && typeof value === "object" ? cloneValue(value) : value;
 }
 
 // ── Group keys ────────────────────────────────────────────────────────────────

@@ -16,6 +16,8 @@ const db = new DbSpace(() => new MongoAdapter(client.db(), client));
 
 Second `MongoAdapter` arg (the client) is only required for transactions — `session.withTransaction()` needs the client handle, not just the `Db`.
 
+Third arg = options (0.1.151; `createAdapter(uri, options)` takes the same): `estimatedCount: true | string[]` (collection names) — opt-in: an UNFILTERED `count()` / `findManyWithCount()` total uses `estimatedDocumentCount` (metadata; can drift after an unclean shutdown, includes sharded orphans). Filtered counts, views and counts inside a transaction stay exact. Default: exact.
+
 > The `mongodb` driver has optional peer deps (e.g. `aws4` for `MONGODB-AWS`, `kerberos`, `mongodb-client-encryption`) that pnpm won't install. If you hit `MongoMissingDependencyError` only in prod, see the [mongodb optional dependencies docs](https://www.mongodb.com/docs/drivers/node/current/get-started/installation/) — this is not an atscript-db concern.
 
 ## Register the plugin
@@ -63,6 +65,10 @@ await db.collection("inventory").aggregate([{ $search: { index: indexName /* …
 ## Unique indexes on optional fields are partial
 
 A `@db.index.unique` that includes an optional field is emitted with a `partialFilterExpression` restricting it to documents where the optional field is present — many docs may lack the field while present values stay unique (matches SQL `NULLS DISTINCT`). Composite unique: a doc is exempt as soon as any optional indexed field is missing. Changing a field's optionality changes the filter → index drop+recreate on next sync.
+
+## Indexes carry the fields' collation (0.1.151, breaking)
+
+A plain/unique index over a `@db.column.collate 'nocase'` field is built with `{ locale: "en", strength: 2 }` (`'unicode'` → `strength: 1`, wins in a compound index) — the collation a read filtering that field passes, so collated reads are index-backed. A collated UNIQUE index is case-insensitive (`'nocase'`: `"Ann@x"` and `"ann@x"` CONFLICT). Sync compares the existing index's collation → drop+recreate on drift (fails like any unique index over duplicates already stored). Text / 2dsphere indexes stay byte-wise. A field's non-binary collate is part of the schema hash (every adapter re-syncs such tables once after the upgrade).
 
 ## `@db.mongo.*` annotations
 
@@ -126,6 +132,11 @@ embedding: db.vector
 ```
 
 `vectorSearch(vec, query, 'doc_vec')` uses `$vectorSearch`.
+
+- Pre-filter (0.1.151): top-level filter conjuncts on the index's `@db.search.filter` fields move into `$vectorSearch.filter` when the value is a string / number / boolean / `Date` / ObjectId under `$eq` (or bare), `$ne`, `$gt(e)`, `$lt(e)`, `$in`, `$nin` (non-empty) → full pages. Everything else (other fields, `null`, `$regex`, `$exists`, `$or`, predicates) filters the top-k AFTER the stage → page can be short. Several filter fields per index are all declared (≤ 0.1.150 kept only the last).
+- `$vectorSearch.limit` = `$skip + $limit` (≤ 0.1.150 a skipped page came back empty).
+- `searchWithCount` on Atlas `$search` with NO filter: page read directly + total from `$searchMeta` (`count: total`); filtered / classic `$text` / vector keep the `$facet`.
+- `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction). `$with` single-field TO/FROM joins on MongoDB 5.0+ add `localField`/`foreignField` (same rows; pipeline-only before 5.0 / unknown version).
 
 ## Patch / CollectionPatcher
 

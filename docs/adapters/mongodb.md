@@ -45,6 +45,12 @@ const db = new DbSpace(() => new MongoAdapter(mongoDb, client));
 
 The second constructor argument (`client`) enables transaction support. If you do not need transactions, `new MongoAdapter(mongoDb)` without the client is sufficient.
 
+The third argument takes adapter options (since 0.1.151); `createAdapter(uri, options)` accepts the same:
+
+| Option           | Default | Effect                                                                          |
+| ---------------- | ------- | ------------------------------------------------------------------------------- |
+| `estimatedCount` | `false` | `true` or a list of collection names — see [Estimated counts](#estimated-count) |
+
 ::: tip Optional `mongodb` peer deps
 The `mongodb` driver declares several optional peers (e.g. `aws4` for `MONGODB-AWS`, `kerberos`, `mongodb-client-encryption`) that pnpm won't install for you. If you hit `MongoMissingDependencyError` in production but not locally, see the [mongodb optional dependencies docs](https://www.mongodb.com/docs/drivers/node/current/get-started/installation/) — this is upstream, not an atscript-db concern.
 :::
@@ -58,6 +64,19 @@ const db = createAdapter("mongodb://localhost:27017/myapp");
 ```
 
 `createAdapter` creates a `MongoClient` (connection is lazy — established on first query), extracts the database from the connection string, and returns a ready-to-use `DbSpace`.
+
+### Estimated counts {#estimated-count}
+
+An unfiltered count — `count()` with an empty filter, and the total of `findManyWithCount()` (e.g. an unfiltered `GET /pages` over HTTP) — counts every document of the collection, which takes time on a large one. Opt in to read it from the collection metadata (`estimatedDocumentCount`) instead:
+
+```typescript
+new MongoAdapter(mongoDb, client, { estimatedCount: ["events", "audit_log"] });
+// or every collection:
+createAdapter("mongodb://localhost:27017/myapp", { estimatedCount: true });
+```
+
+- Only **unfiltered** counts of **collections** are estimated. A filtered count, a count over a view, and any count inside a transaction stay exact.
+- The estimate is the collection's document count from its metadata. It can differ from the exact count after an unclean shutdown, and on a sharded cluster it includes orphaned documents.
 
 Once you have a `DbSpace`, get a table handle for any `.as` type:
 
@@ -187,6 +206,7 @@ The adapter uses an `__atscript_counters` collection for atomic sequence allocat
 
 - On `insertOne`, the counter is atomically incremented by 1 and the value is assigned.
 - On `insertMany`, the counter is incremented by the batch size to pre-allocate a range. Values are assigned in order.
+- Inside a transaction the allocation runs on its session (since 0.1.151): a rollback returns the values, and two transactions allocating for the same field conflict and are retried like any write conflict. Before 0.1.151 the counter moved outside the transaction.
 - If a document already has an explicit value for the field, that value is used as-is and no counter allocation occurs. Note: this does **not** advance the counter, so subsequent auto-incremented values may collide with manually provided ones. Pair with `@db.index.unique` to catch duplicates.
 
 ::: warning
@@ -289,7 +309,7 @@ The adapter uses MongoDB `$lookup` aggregation stages for TO, FROM, and VIA rela
 - **FROM relations** — Reverse `$lookup` from the related collection on its foreign key
 - **VIA relations** — Two-stage `$lookup` through the junction collection
 
-Each lookup joins with an `$expr` `$eq` per key field, so an index on the related collection's key fields is used — see [Indexes](#relational-predicate-indexes).
+Each lookup joins with an `$expr` `$eq` per key field, so an index on the related collection's key fields is used — see [Indexes](#relational-predicate-indexes). Since 0.1.151 a single-field TO / FROM join on MongoDB 5.0+ also names the pair as `localField` / `foreignField`, so the server finds the related documents with an equality lookup on the foreign field; the `$expr` stages stay, so the loaded rows are the same. The server version is read from the driver's connection state; before the first round trip, or with any reached server older than 5.0, the pipeline-only form is used.
 
 A `$with` entry's `filter` and its controls (`$sort`, `$skip`, `$limit` — per parent row) are applied as pipeline stages within the `$lookup`. Nested lookups (relations of relations) are supported.
 
@@ -309,7 +329,7 @@ See [Relations](/relations/) for details.
 
 - The predicate-free top-level conditions are `$match`ed **before** the lookups, so lookups run only for rows that survive them. Each lookup stops at the first related document.
 - `count` with a predicate is an aggregation with `$count` — slower than `countDocuments`.
-- Text and vector search: the predicate stages follow the leading `$search` / `$text` / `$vectorSearch` stage. A vector search applies the filter after its own top-k cut, as for any filter. Geo: the predicate-free part stays in the `$geoNear` query and the predicates follow it, so the result is exact.
+- Text and vector search: the predicate stages follow the leading `$search` / `$text` / `$vectorSearch` stage. A vector search applies them after its own top-k cut (only [pre-filter](/search/vector-search#pre-filtering) conditions move into `$vectorSearch`). Geo: the predicate-free part stays in the `$geoNear` query and the predicates follow it, so the result is exact.
 - A `null` or missing foreign key (any part of a composite one) never relates — `$some` false, `$none` true — even against related documents whose key is `null` or missing.
 
 **Writes.** `updateMany`, `replaceMany`, `deleteMany` and single-row writes scoped by a predicate first resolve the matching `_id`s through the pipeline, then write by `_id` in batches of 1,000, re-checking the predicate-free conditions at write time; the counts are summed across batches. The ids are read from the cursor batch by batch (sorted by `_id`, with `allowDiskUse` so a large match can spill to disk on servers before 6.0), never all at once, and they compare [collated fields](#relational-predicate-collation) like a read does.
@@ -577,6 +597,8 @@ const { data, count } = await table.searchWithCount("query", {
 const results = await table.search("query", {}, "product_search");
 ```
 
+`searchWithCount` on an Atlas Search index with **no filter** reads the page directly and takes the total from the search metadata (`$searchMeta` with `count: { type: "total" }`), so only the page's documents are fetched (since 0.1.151). With a filter, a classic text index or a vector index, the rows and the total come from one `$facet` over every match. A plain `findManyWithCount` without relational predicates runs a `find` plus a `countDocuments` (concurrently; one after the other inside a transaction).
+
 Running your own `$search` pipeline with the raw MongoDB driver instead of `table.search()`? You must pass the **physical** index name (`atscript__search_text__product_search`), not the logical annotation name — see [Physical index names (raw-driver `$search`)](#physical-index-names-raw-driver-search).
 
 ## Vector Search
@@ -639,6 +661,7 @@ MongoDB uses **snapshot-based** schema sync (Path B — no column introspection)
 - Collections are created on demand when first accessed
 - Schema sync creates and manages **indexes only** — there are no column-level migrations
 - Capped collection option drift (size/max changes) is detected and flagged
+- **Indexes follow the fields' collation** (since 0.1.151). A plain or unique index over a `@db.column.collate 'nocase'` field is built with collation `{ locale: "en", strength: 2 }`, over a `'unicode'` field with `strength: 1` (`'unicode'` wins in a compound index) — the collation a read filtering on that field passes, so the read uses the index. A collated **unique** index enforces uniqueness under that collation: with `'nocase'`, `"Ann@x"` and `"ann@x"` conflict. Sync compares the existing index's collation and drops and recreates the index when it differs. Text and `2dsphere` indexes stay byte-wise.
 - Standard indexes use the `atscript__` prefix so sync only touches managed indexes
 - Atlas Search indexes are managed separately from standard MongoDB indexes
 - **Unique indexes over optional fields are partial.** A `@db.index.unique` that includes an optional field gets a `partialFilterExpression` restricting it to documents where the optional field is present — so many documents may lack the field while present values stay unique, matching SQL's `NULLS DISTINCT` behavior. Changing a field's optionality changes the filter, which drops and recreates the index on the next sync.

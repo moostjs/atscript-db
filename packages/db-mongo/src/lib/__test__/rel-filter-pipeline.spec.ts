@@ -446,9 +446,9 @@ describe("read paths switch to a pipeline only with predicates", () => {
     expect(stageNames(lastPipeline())).toEqual(["$match", "$lookup", "$match", "$unset", "$count"]);
   });
 
-  it("findManyWithCount: filter stages before $facet", async () => {
+  it("findManyWithCount: find + countDocuments without, filter stages before $facet with", async () => {
     await issues().findManyWithCount({ filter: { title: "t" } });
-    expect(stageNames(lastPipeline())).toEqual(["$match", "$facet"]);
+    expect(calls.map((c) => c.method)).toEqual(["find", "countDocuments"]);
     await issues().findManyWithCount({ filter: PREDICATE });
     expect(stageNames(lastPipeline())).toEqual(["$match", "$lookup", "$match", "$unset", "$facet"]);
   });

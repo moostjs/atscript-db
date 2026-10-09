@@ -6,6 +6,7 @@ import {
   type AtscriptDbView,
   type TColumnDiff,
   type TSyncColumnResult,
+  type TDbCollation,
   type TDbFieldMeta,
   type TDbObjectKind,
   type TExistingTableOption,
@@ -13,6 +14,8 @@ import {
 import {
   INDEX_PREFIX,
   isPlainIndex,
+  mongoCollationOf,
+  type TMongoCollation,
   type TMongoIndex,
   type TPlainIndex,
   type TMongoSearchIndexDefinition,
@@ -48,6 +51,8 @@ export interface TMongoSchemaSyncHost {
     getMetadata(): { documentPath(path: string): string };
   };
   readonly _mongoIndexes: ReadonlyMap<string, TMongoIndex>;
+  /** A field's `@db.column.collate` (physical or logical path); see {@link indexCollation}. */
+  fieldCollation?(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
   resolveTableName(includeSchema?: boolean): string;
@@ -78,6 +83,8 @@ interface TRemoteMongoIndex {
   unique?: boolean;
   /** Surfaced from listIndexes() so a plain→present-only change is migrated. */
   partialFilterExpression?: Record<string, unknown>;
+  /** Surfaced from listIndexes() so a collation change is migrated (since 0.1.151). */
+  collation?: { locale?: string; strength?: number };
 }
 
 interface TRemoteMongoSearchIndex {
@@ -520,7 +527,8 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         const optionsMatch =
           local.type === "text" ||
           ((local.type === "unique") === (remote.unique === true) &&
-            partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression));
+            partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression) &&
+            collationEqual(indexCollation(host, local), remote.collation));
         if (fieldsMatch && weightsMatch && optionsMatch) {
           indexesToCreate.delete(remote.name);
         } else {
@@ -543,15 +551,22 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
     }
     let label: string;
     let indexOptions: CreateIndexesOptions;
+    const collation = indexCollation(host, value);
     switch (value.type) {
       case "plain": {
-        host._log("createIndex", key, value.fields);
+        host._log("createIndex", key, value.fields, collation);
         label = `create index "${key}"`;
-        indexOptions = { name: key };
+        indexOptions = { name: key, ...(collation ? { collation } : {}) };
         break;
       }
       case "unique": {
-        host._log("createIndex (unique)", key, value.fields, value.partialFilterExpression);
+        host._log(
+          "createIndex (unique)",
+          key,
+          value.fields,
+          value.partialFilterExpression,
+          collation,
+        );
         label = `create unique index "${key}"`;
         indexOptions = {
           name: key,
@@ -559,6 +574,7 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
           ...(value.partialFilterExpression
             ? { partialFilterExpression: value.partialFilterExpression }
             : {}),
+          ...(collation ? { collation } : {}),
         };
         break;
       }
@@ -654,6 +670,34 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────
+
+/**
+ * The collation a plain / unique index is built with (since 0.1.151): the
+ * one a query filtering its fields runs with (`mongoCollationOf` over the
+ * fields' `@db.column.collate`), so collated queries can use it — `undefined`
+ * (byte-wise) when no field is collated. A collated UNIQUE index enforces
+ * uniqueness under that collation (`'nocase'`: `"A"` and `"a"` collide).
+ * Text and 2dsphere indexes stay byte-wise.
+ */
+function indexCollation(
+  host: TMongoSchemaSyncHost,
+  index: TPlainIndex,
+): TMongoCollation | undefined {
+  if ((index.type !== "plain" && index.type !== "unique") || !host.fieldCollation) {
+    return undefined;
+  }
+  return mongoCollationOf(Object.keys(index.fields).map((field) => host.fieldCollation!(field)));
+}
+
+/** Whether an index's existing collation is the wanted one (locale + strength). */
+function collationEqual(
+  local: TMongoCollation | undefined,
+  remote: TRemoteMongoIndex["collation"],
+): boolean {
+  const remoteLocale = remote?.locale === "simple" ? undefined : remote?.locale;
+  if (!local) return remoteLocale === undefined;
+  return remoteLocale === local.locale && remote?.strength === local.strength;
+}
 
 /**
  * Maps an engine-agnostic design type to the MongoDB BSON `$type` alias(es)

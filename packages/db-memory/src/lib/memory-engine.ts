@@ -1,4 +1,7 @@
-import { deletePath, getPath } from "@atscript/db";
+import { deletePath } from "@atscript/db";
+
+import { cloneValue } from "./memory-clone";
+import { pathReader } from "./memory-filter";
 
 /**
  * Pure, store-agnostic core of the in-memory query engine: the `$sort`
@@ -50,7 +53,11 @@ export function compareLeaves(a: unknown, b: unknown): number {
  * nested dot-paths both work.
  */
 export function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
-  const segments = path.split(".");
+  setSegments(target, path.split("."), value);
+}
+
+/** {@link setPath} over an already-split path. */
+function setSegments(target: Record<string, unknown>, segments: string[], value: unknown): void {
   let current = target;
   for (let i = 0; i < segments.length - 1; i++) {
     const seg = segments[i]!;
@@ -76,40 +83,135 @@ export { deletePath };
  *   rows with equal sort keys still order deterministically. When ABSENT the
  *   sort falls back to preserving input order among equal keys (via each row's
  *   original index), so a consumer with no primary key keeps insertion order.
+ * - `topK` (since 0.1.151), when supplied, asks for only the first `topK` rows
+ *   of that order (e.g. `$skip + $limit`): a small one is selected in one pass
+ *   instead of sorting everything. The rows returned are exactly the head of
+ *   the full sort — same comparator, same stable tie handling.
  *
- * NEVER mutates the input array: `.map` decorates into a fresh array and
- * `.toSorted` returns another new sorted array (unlike `.sort`, which reorders
- * in place). The `tieBreak`/index is computed ONCE per row (O(n)), not inside
- * the O(n log n) comparator.
+ * NEVER mutates the input array. Each row's sort keys are read ONCE (O(n)) and
+ * its `tieBreak` only when two rows tie on every key — not inside the
+ * O(n log n) comparator.
  */
 export function sortRows(
   rows: Record<string, unknown>[],
   $sort?: Partial<Record<string, 1 | -1>>,
   tieBreak?: (row: Record<string, unknown>) => string | number,
+  topK?: number,
 ): Record<string, unknown>[] {
   const keys = $sort ? Object.entries($sort) : [];
   if (keys.length === 0) {
     return rows;
   }
-  return rows
-    .map((row, index) => ({ row, index, tie: tieBreak?.(row) }))
-    .toSorted((a, b) => {
-      for (const [field, dir] of keys) {
-        const cmp = compareLeaves(getPath(a.row, field), getPath(b.row, field));
-        if (cmp !== 0) {
-          return dir === -1 ? -cmp : cmp;
-        }
+  const readers = keys.map(([field]) => pathReader(field));
+  const desc = keys.map(([, dir]) => dir === -1);
+  const decorated: SortEntry[] = rows.map((row, index) => ({
+    row,
+    index,
+    // `Date`s become their instant once here, as `compareLeaves` would per compare.
+    keys: readers.map((read) => {
+      const value = read(row);
+      return value instanceof Date ? value.getTime() : value;
+    }),
+    tie: undefined,
+  }));
+  const compare = (a: SortEntry, b: SortEntry): number => {
+    for (let i = 0; i < desc.length; i++) {
+      const cmp = compareLeaves(a.keys[i], b.keys[i]);
+      if (cmp !== 0) {
+        return desc[i] ? -cmp : cmp;
       }
-      // Deterministic tie-break: the injected key (e.g. the adapter's pkKey) for
-      // a TOTAL order; otherwise the original index, preserving insertion order.
-      if (tieBreak) {
-        const at = a.tie!;
-        const bt = b.tie!;
-        return at < bt ? -1 : at > bt ? 1 : 0;
+    }
+    // Deterministic tie-break: the injected key (e.g. the adapter's pkKey) for
+    // a TOTAL order; otherwise the original index, preserving insertion order.
+    if (tieBreak) {
+      const at = (a.tie ??= tieBreak(a.row));
+      const bt = (b.tie ??= tieBreak(b.row));
+      return at < bt ? -1 : at > bt ? 1 : 0;
+    }
+    return a.index - b.index;
+  };
+  const head =
+    topK !== undefined &&
+    topK <= TOP_K_MAX &&
+    topK * 4 < decorated.length &&
+    totallyOrdered(decorated, desc.length)
+      ? selectTop(decorated, topK, compare)
+      : decorated.toSorted(compare);
+  return head.map((entry) => entry.row);
+}
+
+interface SortEntry {
+  row: Record<string, unknown>;
+  index: number;
+  keys: unknown[];
+  tie: string | number | undefined;
+}
+
+/**
+ * Whether every sort key holds values of ONE ordered kind — numbers (`Date`s
+ * included) without `NaN`, strings, or booleans — besides `null`/missing.
+ * Only then is the comparator a total order, so selecting the head gives
+ * exactly the rows the full (stable) sort puts first; mixed kinds compare
+ * inconsistently (`"a" < 1` and `"a" > 1` are both false), and their full
+ * sort order depends on the algorithm, so it keeps the full sort.
+ */
+function totallyOrdered(entries: SortEntry[], keyCount: number): boolean {
+  for (let i = 0; i < keyCount; i++) {
+    let kind: string | undefined;
+    for (const entry of entries) {
+      const value = entry.keys[i];
+      if (value === null || value === undefined) continue;
+      const type = typeof value;
+      if (type === "number" ? Number.isNaN(value) : type !== "string" && type !== "boolean") {
+        return false;
       }
-      return a.index - b.index;
-    })
-    .map((decorated) => decorated.row);
+      if (kind === undefined) {
+        kind = type;
+      } else if (kind !== type) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** Largest `topK` {@link sortRows} selects in one pass instead of sorting. */
+const TOP_K_MAX = 128;
+
+/**
+ * The first `k` entries of the stable sort by `compare`, in order: a bounded
+ * sorted buffer, each entry inserted AFTER its equals (entries arrive in input
+ * order, so ties keep it — exactly as the stable full sort does).
+ */
+function selectTop(
+  entries: SortEntry[],
+  k: number,
+  compare: (a: SortEntry, b: SortEntry) => number,
+): SortEntry[] {
+  const top: SortEntry[] = [];
+  if (k <= 0) {
+    return top;
+  }
+  for (const entry of entries) {
+    if (top.length === k && compare(entry, top[k - 1]!) >= 0) {
+      continue;
+    }
+    let lo = 0;
+    let hi = top.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (compare(entry, top[mid]!) < 0) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    top.splice(lo, 0, entry);
+    if (top.length > k) {
+      top.pop();
+    }
+  }
+  return top;
 }
 
 /**
@@ -161,18 +263,32 @@ export interface ProjectRowOptions {
  *
  * Top-level and nested dot-paths are supported; exotic Mongo projection quirks
  * (array positional, `$slice`, etc.) are intentionally NOT replicated.
+ *
+ * Clones are `structuredClone`-equivalent. To project many rows the same way,
+ * compile once with {@link compileProjection}.
  */
 export function projectRow(
   row: Record<string, unknown>,
   projection?: Record<string, 0 | 1>,
   opts?: ProjectRowOptions,
 ): Record<string, unknown> {
+  return compileProjection(projection, opts)(row);
+}
+
+/**
+ * {@link projectRow} compiled for one projection: the projection map is read
+ * and every dot-path split once, then applied to each row.
+ */
+export function compileProjection(
+  projection?: Record<string, 0 | 1>,
+  opts?: ProjectRowOptions,
+): (row: Record<string, unknown>) => Record<string, unknown> {
   const clone = opts?.clone ?? false;
   // No projection (undefined) or an empty map → the whole row (cloned per opts),
   // collapsed into one guard the same way `sortRows` normalizes an absent `$sort`.
   const entries = projection ? Object.entries(projection) : [];
   if (entries.length === 0) {
-    return clone ? structuredClone(row) : row;
+    return clone ? cloneValue : (row) => row;
   }
 
   // Inclusion vs exclusion is decided by the first entry (matches UniquSelect).
@@ -181,26 +297,30 @@ export function projectRow(
     for (const pk of opts?.pkFields ?? []) {
       paths.add(pk);
     }
-    const out: Record<string, unknown> = {};
-    for (const path of paths) {
-      const value = getPath(row, path);
-      // Absent fields are omitted; present-`null` (value === null) is kept.
-      if (value !== undefined) {
-        setPath(out, path, value);
+    const plan = [...paths].map((path) => ({ read: pathReader(path), segments: path.split(".") }));
+    return (row) => {
+      const out: Record<string, unknown> = {};
+      for (const { read, segments } of plan) {
+        const value = read(row);
+        // Absent fields are omitted; present-`null` (value === null) is kept.
+        if (value !== undefined) {
+          setSegments(out, segments, value);
+        }
       }
-    }
-    // `out` still references nested subtrees of the source row → deep-clone when
-    // the caller wants an independent copy.
-    return clone ? structuredClone(out) : out;
+      // `out` still references nested subtrees of the source row → deep-clone when
+      // the caller wants an independent copy.
+      return clone ? cloneValue(out) : out;
+    };
   }
 
   // Exclusion: clone the row (that IS the output copy), then drop paths. Always
   // clones — dropping paths in place would mutate the caller's input.
-  const out = structuredClone(row);
-  for (const [path, v] of entries) {
-    if (v === 0) {
-      deletePath(out, path);
+  const dropped = entries.filter(([, v]) => v === 0).map(([path]) => path.split("."));
+  return (row) => {
+    const out = cloneValue(row);
+    for (const segments of dropped) {
+      deletePath(out, segments);
     }
-  }
-  return out;
+    return out;
+  };
 }

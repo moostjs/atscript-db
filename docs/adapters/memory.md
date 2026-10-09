@@ -188,7 +188,7 @@ Deliberate v1 trade-offs — matching a real engine here is hard or unnecessary 
 The package exports its query engine as three pure functions — the same engine the adapter runs internally, so a raw-driver or custom controller can apply identical filter/sort/projection semantics outside the standard CRUD flow:
 
 - `buildMemoryPredicate(filter)` — compiles a `FilterExpr` into a JS-native `(row) => boolean` predicate. A filter with [relational predicates](#relational-predicates) needs the adapter (it reads the related tables) — the function throws `REL_FILTER_NOT_SUPPORTED` on one.
-- `sortRows(rows, $sort, tieBreak?)` — stable multi-key `$sort` with the adapter's leaf ordering (null-low, `Date`-by-instant, no collation); an optional `tieBreak` yields a deterministic total order.
+- `sortRows(rows, $sort, tieBreak?, topK?)` — stable multi-key `$sort` with the adapter's leaf ordering (null-low, `Date`-by-instant, no collation); an optional `tieBreak` yields a deterministic total order. `topK` (since 0.1.151) asks for the first `topK` rows of that order only (e.g. `$skip + $limit`) — the same rows the full sort puts first, picked without sorting everything when `topK` is small.
 - `projectRow(row, projection, opts?)` — dot-path `$select` inclusion/exclusion projection over one row, with an optional deep-clone. `opts.pkFields` adds the named fields to an inclusion projection. The adapter itself does not pass it: since 0.1.145 an inclusion `$select` returns exactly the selected fields, as on the SQL adapters. Earlier versions also returned the primary key.
 
 ```typescript

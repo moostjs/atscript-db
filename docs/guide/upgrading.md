@@ -6,6 +6,27 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.151 {#v0-1-151}
+
+### Breaking: MongoDB indexes follow `@db.column.collate` {#v0-1-151-mongo-collation}
+
+A plain or unique index over a `@db.column.collate 'nocase'` / `'unicode'` field is now built with the collation a read filtering that field runs with (`{ locale: "en", strength: 2 }` / `strength: 1`), so collated reads use it. Before, every index was byte-wise and a collated read scanned the collection.
+
+- **A collated unique index is case-insensitive** (`'nocase'`) or case- and accent-insensitive (`'unicode'`): `"Ann@x"` and `"ann@x"` now conflict. Stored values that differ only by case make the recreated index fail to build — the sync reports the failure and keeps the other indexes. Deduplicate them before upgrading.
+- The first schema sync after the upgrade drops and recreates the affected MongoDB indexes (cost proportional to collection size). A field's non-binary collation is now part of the schema hash, so tables with a collated field re-sync once on every adapter; on the SQL adapters and the in-memory one that pass changes nothing.
+- See [MongoDB — Schema Sync Notes](/adapters/mongodb#schema-sync-notes).
+
+### New features
+
+- **`estimatedCount` option for MongoDB** — `new MongoAdapter(db, client, { estimatedCount: true | ["events"] })` (or `createAdapter(uri, { estimatedCount })`) answers unfiltered counts from collection metadata. Off by default. See [Estimated counts](/adapters/mongodb#estimated-count).
+- `sortRows(rows, $sort, tieBreak?, topK?)` in `@atscript/db-memory` takes an optional `topK`.
+
+### Behavior changes {#v0-1-151-behavior}
+
+- **MongoDB vector search pre-filters.** Conditions on `@db.search.filter` fields now go into the `$vectorSearch` stage's `filter` (they were applied after the top-k cut, so a filtered page could come back short). Conditions a pre-filter cannot express still filter afterwards. A vector index with several `@db.search.filter` fields now declares all of them (only the last one was), so the first sync updates the Atlas index once. `$skip` is now part of the top-k — a page after the first used to come back empty. See [Pre-Filtering](/search/vector-search#pre-filtering).
+- **MongoDB `@db.default.increment` inside a transaction** allocates on the transaction's session: a rollback no longer burns values.
+- **MongoDB `findManyWithCount`** (no relational predicate) runs a `find` and a `countDocuments` instead of one `$facet` aggregation — outside a transaction the two are separate reads, so a write landing between them can make the page and the total disagree, as on the SQL adapters. An unfiltered Atlas `searchWithCount` takes its total from `$searchMeta`.
+
 ## 0.1.150 {#v0-1-150}
 
 **Requires `moost` 0.6.46 (`app.addInitHook`) and `@atscript/typescript` 0.1.101 (`annotationOverrides`).**

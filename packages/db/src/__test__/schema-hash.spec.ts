@@ -560,6 +560,35 @@ describe("computeViewSnapshot — adapter render revision (since 0.1.137)", () =
   });
 });
 
+// ── Collation (since 0.1.151) ───────────────────────────────────────────────
+
+describe("computeTableSnapshot — collated fields", () => {
+  const field = (collate?: string) => ({
+    path: "email",
+    physicalName: "email",
+    designType: "string",
+    optional: false,
+    isPrimaryKey: false,
+    ignored: false,
+    storage: "column",
+    ...(collate ? { collate } : {}),
+  });
+
+  it("emits `collate` for a non-binary collation only, so other snapshots are byte-identical", () => {
+    const plain = mockReadable();
+    const snap = (collate?: string) =>
+      computeTableSnapshot(
+        mockReadable({ fieldDescriptors: [...plain.fieldDescriptors, field(collate)] }),
+      );
+    const byteWise = snap();
+    expect(snap("binary")).toEqual(byteWise);
+    const nocase = snap("nocase");
+    expect(nocase.fields.find((f) => f.physicalName === "email")!.collate).toBe("nocase");
+    expect(computeTableHash(nocase)).not.toBe(computeTableHash(byteWise));
+    expect(computeTableHash(snap("unicode"))).not.toBe(computeTableHash(nocase));
+  });
+});
+
 // ── Derived columns (since 0.1.141) ────────────────────────────────────────
 
 describe("computeTableSnapshot — derived fields", () => {
