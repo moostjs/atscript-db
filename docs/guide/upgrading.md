@@ -8,12 +8,24 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ## 0.1.151 {#v0-1-151}
 
+### Breaking: MongoDB indexes follow `@db.column.collate` {#v0-1-151-mongo-collation}
+
+A plain or unique index over a `@db.column.collate 'nocase'` / `'unicode'` field is now built with the collation a read filtering that field runs with (`{ locale: "en", strength: 2 }` / `strength: 1`), so collated reads use it. Before, every index was byte-wise and a collated read scanned the collection.
+
+- **A collated unique index is case-insensitive** (`'nocase'`) or case- and accent-insensitive (`'unicode'`): `"Ann@x"` and `"ann@x"` now conflict. Stored values that differ only by case make the recreated index fail to build — the sync reports the failure and keeps the other indexes. Deduplicate them before upgrading.
+- The first schema sync after the upgrade drops and recreates the affected MongoDB indexes (cost proportional to collection size). A field's non-binary collation is now part of the schema hash, so tables with a collated field re-sync once on every adapter; on the SQL adapters and the in-memory one that pass changes nothing.
+- See [MongoDB — Schema Sync Notes](/adapters/mongodb#schema-sync-notes).
+
 ### New features
 
+- **SQLite statement cache** — the better-sqlite3 driver reuses prepared statements (bounded LRU, default 256; `statementCacheSize` option, `0` disables). DDL and `close()` clear it.
 - **`Client.invalidateMeta()`** (`@atscript/db-client`) drops the client's cached `/meta`, the validator built from it and the loaded action forms. Call it on a reused client when the viewer's identity changes (login, logout, role change): `/meta` is projected per user. See [Metadata](/http/client#meta).
+- **`estimatedCount` option for MongoDB** — `new MongoAdapter(db, client, { estimatedCount: true | ["events"] })` (or `createAdapter(uri, { estimatedCount })`) answers unfiltered counts from collection metadata. Off by default. See [Estimated counts](/adapters/mongodb#estimated-count).
+- `sortRows(rows, $sort, tieBreak?, topK?)` in `@atscript/db-memory` takes an optional `topK`.
 
 ### Behavior changes {#v0-1-151-behavior}
 
+- **Single-row writes no longer open a wrapping transaction** when the write is one atomic statement: one root-level row, no guard/check, no nested navigation data, and native (or no) foreign keys. Statement logs and tests that count transactions see fewer `BEGIN`/`COMMIT`; MongoDB no longer opens a replica-set session for these writes. Multi-statement writes keep their transaction.
 - **PostgreSQL: a `TIMESTAMP` (without time zone) column is read as UTC.** `PgDriver` used to read its wall time in the process's time zone, so the same row came back as a different instant under a different `TZ`. It now returns the same epoch ms everywhere, matching how the MySQL adapter reads `DATETIME`. `TIMESTAMPTZ` and the `BIGINT` columns of `@db.default.now` are unchanged. If a non-UTC process wrote local wall times into such a column, those rows now read shifted by that offset. See [Custom Type Parsers](/adapters/postgresql#custom-type-parsers).
 - **MySQL: fractional seconds round-trip on `TIMESTAMP(n)` / `DATETIME(n)` columns.** A `number` field with `@db.mysql.type "TIMESTAMP(3)"` (or `DATETIME(n)`) is written with its milliseconds and read back with them; both used to be cut to whole seconds. Such a field without `@db.default.now` is now converted to a datetime string too (the raw number used to be sent and rejected). With `@db.default.now`, `DEFAULT` and `@db.mysql.onUpdate` render as `CURRENT_TIMESTAMP(n)`, which MySQL requires for such a column (the bare form failed the `CREATE TABLE`). Plain `@db.default.now` columns stay `TIMESTAMP` with whole seconds, so no migration runs. `@db.default.now` with a non-date `@db.mysql.type` (such as `BIGINT`) now keeps the epoch ms number instead of sending a datetime string. See [Fractional seconds](/adapters/mysql#fractional-seconds).
 - **PostgreSQL geo without schema sync in the process.** A process that never runs sync (tables provisioned by another one) used to send `db.geoPoint` values as JSONB text even to a `geography` column. It now checks `pg_extension` once, read-only, before its first statement on a geo table, and writes EWKT or JSONB to match. `isGeoSearchable()` stays `false` until that first statement. See [Geo Search](/search/geo-search).
@@ -22,6 +34,15 @@ Changes that need action or attention when you upgrade. Each entry links to the 
   - On PostgreSQL, a one-row `insertManyIgnore` chunk skips the `SAVEPOINT`.
   - On PostgreSQL, `updateOne` / `deleteOne` / `replaceOne` by an exact primary key run as `… WHERE "id" = $1`, without the `LIMIT 1` subquery.
   - On MySQL, a multi-row insert of generated ids reads `@@auto_increment_increment` on the insert's own connection, without `START TRANSACTION` / `COMMIT`.
+- **MongoDB vector search pre-filters.** Conditions on `@db.search.filter` fields now go into the `$vectorSearch` stage's `filter` (they were applied after the top-k cut, so a filtered page could come back short). Conditions a pre-filter cannot express still filter afterwards. A vector index with several `@db.search.filter` fields now declares all of them (only the last one was), so the first sync updates the Atlas index once. `$skip` is now part of the top-k — a page after the first used to come back empty. See [Pre-Filtering](/search/vector-search#pre-filtering).
+- **MongoDB `@db.default.increment` inside a transaction** allocates on the transaction's session: a rollback no longer burns values.
+- **MongoDB `findManyWithCount`** (no relational predicate) runs a `find` and a `countDocuments` instead of one `$facet` aggregation — outside a transaction the two are separate reads, so a write landing between them can make the page and the total disagree, as on the SQL adapters. An unfiltered Atlas `searchWithCount` takes its total from `$searchMeta`.
+
+### For adapter authors
+
+- The core may now call `insertMany([row])`, `replaceOne`, `updateOne` / `nativePatch` outside a transaction for qualifying single-row writes; keep each of these a single atomic statement.
+- `IntegrityStrategy.needsCascade(resolver, tableName?)` takes an optional table name; cascade targets are cached per table and cleared when a table registers.
+- `finalizeParams` (`@atscript/db-sql-tools`) now leaves `?` untouched inside string literals, quoted identifiers, comments and dollar-quoted bodies, and keeps the jsonb `?|` / `?&` operators. Write the bare jsonb `?` operator as `??`. `InsertSqlCache` is exported for adapters that build single-row INSERTs.
 
 ## 0.1.150 {#v0-1-150}
 

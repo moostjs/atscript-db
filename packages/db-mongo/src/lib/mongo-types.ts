@@ -1,3 +1,5 @@
+import type { TDbCollation } from "@atscript/db";
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 export const INDEX_PREFIX = "atscript__";
@@ -52,6 +54,32 @@ export interface TSearchIndex {
 }
 
 export type TMongoIndex = TPlainIndex | TSearchIndex;
+
+/** The MongoDB collation a non-binary `@db.column.collate` compares with. */
+export interface TMongoCollation {
+  locale: "en";
+  /** `1` — `'unicode'` (case- and accent-insensitive), `2` — `'nocase'` (case-insensitive). */
+  strength: 1 | 2;
+}
+
+/**
+ * The collation of an operation (or index) over fields with these
+ * `@db.column.collate` values: `'unicode'` wins over `'nocase'`; `undefined`
+ * when every one is byte-wise. Queries and the indexes schema sync builds
+ * share this rule, so a collated query can use the matching index.
+ *
+ * @since 0.1.151
+ */
+export function mongoCollationOf(
+  collations: Iterable<TDbCollation | undefined>,
+): TMongoCollation | undefined {
+  let strength: 1 | 2 | undefined;
+  for (const collation of collations) {
+    if (collation === "unicode") return { locale: "en", strength: 1 };
+    if (collation === "nocase") strength = 2;
+  }
+  return strength ? { locale: "en", strength } : undefined;
+}
 
 export function isPlainIndex(index: TMongoIndex): index is TPlainIndex {
   return (

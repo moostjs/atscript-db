@@ -124,7 +124,7 @@ username: string
 | `'nocase'`  | Case-insensitive comparison            |
 | `'unicode'` | Full Unicode-aware sorting             |
 
-Each adapter translates these to its native collation. For example, PostgreSQL maps `'nocase'` to the `CITEXT` type, while SQLite uses the `NOCASE` collation. See [Adapters](/adapters/) for adapter-specific collation details.
+Each adapter translates these to its native collation. For example, PostgreSQL maps `'nocase'` to the `CITEXT` type, while SQLite uses the `NOCASE` collation; MongoDB builds the field's plain and unique indexes with the matching collation (since 0.1.151 — a `'nocase'` unique field then rejects case variants; see [MongoDB](/adapters/mongodb#schema-sync-notes)). See [Adapters](/adapters/) for adapter-specific collation details.
 
 ## Complete Example
 

@@ -67,6 +67,7 @@ import {
 } from "./mongo-filter";
 import {
   DEFAULT_INDEX_NAME,
+  mongoCollationOf,
   mongoIndexKey,
   type TPlainIndex,
   type TSearchIndex,
@@ -180,14 +181,33 @@ function hasWriteConcernError(error: MongoBulkWriteError): boolean {
   );
 }
 
+/**
+ * Options of a {@link MongoAdapter} (and of `createAdapter`).
+ *
+ * @since 0.1.151
+ */
+export interface TMongoAdapterOptions {
+  /**
+   * Opt-in: answer the count of an UNFILTERED read (`count()` and the total
+   * of `findManyWithCount()` with an empty filter) from the collection's
+   * metadata (`estimatedDocumentCount`) instead of counting every document.
+   * `true` applies to every table, a list to the named tables (collection
+   * names). Views, filtered counts and counts inside a transaction always
+   * count exactly. The estimate can drift from the exact count after an
+   * unclean shutdown, and on a sharded cluster it includes orphaned documents.
+   * Default: exact counts.
+   */
+  estimatedCount?: boolean | readonly string[];
+}
+
 export class MongoAdapter extends BaseDbAdapter {
   private _collection?: Collection<any>;
 
   /** MongoDB-specific indexes (search, vector) — separate from table.indexes. */
   protected _mongoIndexes = new Map<string, TMongoIndex>();
 
-  /** Vector search filter associations built during flattening. */
-  protected _vectorFilters = new Map<string, string>();
+  /** Vector search filter associations built during flattening (index key → filter fields). */
+  protected _vectorFilters = new Map<string, Set<string>>();
 
   /** Default similarity thresholds per vector index (from @db.search.vector.threshold). */
   protected _vectorThresholds = new Map<string, number>();
@@ -226,6 +246,7 @@ export class MongoAdapter extends BaseDbAdapter {
   constructor(
     protected readonly db: Db,
     protected readonly client?: MongoClient,
+    protected readonly options: TMongoAdapterOptions = {},
   ) {
     super();
   }
@@ -353,13 +374,24 @@ export class MongoAdapter extends BaseDbAdapter {
     const emptyGroup = async (forCount: boolean) => {
       const row = emptyGroupRow(query);
       if (!row) return undefined;
-      const probe = buildMatchedProbe(query, searchStage, this._predicateFilterOpts);
-      if ((await wrapInvalidQuery(() => this.aggregatePipeline(probe).toArray())).length > 0) {
-        return undefined;
+      if (!query.controls?.$having) {
+        // An ungrouped `$group` over ANY input row emits its one group, which
+        // only `$skip` can then drop — and `$skip` drops the empty group the
+        // same way. So an empty result alone tells: no round trip.
+        return !forCount && query.controls?.$skip ? undefined : row;
       }
       const stages = emptyGroupStages(query, row, forCount);
+      const probe = buildMatchedProbe(query, searchStage, this._predicateFilterOpts);
+      const run = (pipeline: Document[]) =>
+        wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+      // `$having` is evaluated by the server on the empty group — alongside
+      // the probe (one round trip), or after it inside a transaction.
+      const [matched, applied] = this.isInTransaction()
+        ? [await run(probe), undefined]
+        : await Promise.all([run(probe), stages ? run(stages) : undefined]);
+      if (matched.length > 0) return undefined;
       if (!stages) return row;
-      return (await wrapInvalidQuery(() => this.aggregatePipeline(stages).toArray()))[0];
+      return (applied ?? (await run(stages)))[0];
     };
 
     // Grouped-search contract: see `resolveAggregateSearch`. Resolved here
@@ -619,6 +651,30 @@ export class MongoAdapter extends BaseDbAdapter {
     );
   }
 
+  /**
+   * Whether every reached server of the deployment runs MongoDB 5.0+ (wire
+   * version 13), so a `$with` `$lookup` may name its join pair as `localField` /
+   * `foreignField` next to its pipeline. Read from the driver's topology
+   * description (no round trip); `false` while it is unknown.
+   *
+   * @since 0.1.151
+   */
+  lookupJoinsByField(): boolean {
+    const client = this.client ?? (this.db as { client?: MongoClient }).client;
+    const servers = (
+      client as
+        | { topology?: { description?: { servers?: Map<string, { maxWireVersion: number }> } } }
+        | undefined
+    )?.topology?.description?.servers;
+    let known = false;
+    for (const server of servers?.values() ?? []) {
+      if (server.maxWireVersion === 0) continue; // not reached yet
+      if (server.maxWireVersion < 13) return false;
+      known = true;
+    }
+    return known;
+  }
+
   /** Returns the context object used by CollectionPatcher. */
   getPatcherContext(): TCollectionPatcherContext {
     return {
@@ -776,8 +832,15 @@ export class MongoAdapter extends BaseDbAdapter {
       }
     }
     // @db.search.filter (generic) — each entry is a plain string (the index name)
+    // A vector index may have several filter fields (and a field filter several indexes).
     for (const indexName of metadata.get("db.search.filter") || []) {
-      this._vectorFilters.set(mongoIndexKey("vector", indexName), field);
+      const key = mongoIndexKey("vector", indexName);
+      let fields = this._vectorFilters.get(key);
+      if (!fields) {
+        fields = new Set();
+        this._vectorFilters.set(key, fields);
+      }
+      fields.add(field);
     }
   }
 
@@ -878,13 +941,12 @@ export class MongoAdapter extends BaseDbAdapter {
     }
 
     // Associate vector filter fields with their vector indexes
-    for (const [key, value] of this._vectorFilters.entries()) {
+    for (const [key, fields] of this._vectorFilters.entries()) {
       const index = this._mongoIndexes.get(key);
       if (index && index.type === "vector") {
-        index.definition.fields?.push({
-          type: "filter",
-          path: value,
-        });
+        for (const path of fields) {
+          index.definition.fields?.push({ type: "filter", path });
+        }
       }
     }
 
@@ -1047,9 +1109,25 @@ export class MongoAdapter extends BaseDbAdapter {
     return geoSearchWithCountImpl(this as any as TMongoGeoHost, point, query, indexName);
   }
 
+  /**
+   * A page and the total count. A predicate-free filter runs as a `find` plus
+   * a `countDocuments` (each index-backed, no `$facet` holding every matching
+   * document) — concurrently, or one after the other inside a transaction
+   * (a session runs one operation at a time). Relational predicates need the
+   * `$lookup` pipeline, so they keep the single `$facet` aggregation.
+   */
   override async findManyWithCount(
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    if (!containsRelationFilter(query.filter)) {
+      const counted = () => wrapInvalidQuery(() => this.count(query));
+      if (this.isInTransaction()) {
+        const data = await this.findMany(query);
+        return { data, count: await counted() };
+      }
+      const [data, count] = await Promise.all([this.findMany(query), counted()]);
+      return { data, count };
+    }
     const pipeline: Document[] = [
       ...mongoFilterStages(query.filter, this._predicateFilterOpts),
       { $facet: { data: pageStages(query.controls), meta: [{ $count: "count" }] } },
@@ -1462,6 +1540,10 @@ export class MongoAdapter extends BaseDbAdapter {
       return (result[0]?.count as number | undefined) ?? 0;
     }
     const filter = buildMongoFilter(query.filter);
+    if (this._estimatesCount() && Object.keys(filter).length === 0) {
+      this._log("estimatedDocumentCount");
+      return this.collection.estimatedDocumentCount();
+    }
     this._log("countDocuments", filter);
     return this.collection.countDocuments(filter, {
       ...this._getCollationOpts(query),
@@ -1630,6 +1712,20 @@ export class MongoAdapter extends BaseDbAdapter {
     return DESTRUCTIVE_OPTION_KEYS;
   }
 
+  /**
+   * Whether an unfiltered count of this table may be answered from metadata
+   * ({@link TMongoAdapterOptions.estimatedCount}): opted in, a collection (not
+   * a view), and not inside a transaction (`estimatedDocumentCount` cannot
+   * run in one).
+   */
+  private _estimatesCount(): boolean {
+    const opt = this.options.estimatedCount;
+    if (!opt || this._table.isView || this.isInTransaction()) {
+      return false;
+    }
+    return opt === true || opt.includes(this._table.tableName);
+  }
+
   // ── Auto-increment helpers ────────────────────────────────────────────────
 
   /** Returns the counters collection used for atomic auto-increment. */
@@ -1663,10 +1759,12 @@ export class MongoAdapter extends BaseDbAdapter {
     for (const field of physicalFields) {
       const counterId = `${collectionName}.${field}`;
       const startValue = this._incrementFields.get(field);
+      // Inside a transaction the allocation joins it: a rollback returns
+      // the values, and the counter is read and written under its snapshot.
       const doc = await counters.findOneAndUpdate(
         { _id: counterId },
         { $inc: { seq: count } },
-        { upsert: true, returnDocument: "after" },
+        { upsert: true, returnDocument: "after", ...this._getSessionOpts() },
       );
       const seq = doc?.seq ?? count;
       // If this was a fresh counter (upserted), check if collection already has data
@@ -1678,7 +1776,11 @@ export class MongoAdapter extends BaseDbAdapter {
         const effectiveBase = Math.max(minStart, currentMax + 1);
         if (effectiveBase > seq) {
           const adjusted = effectiveBase + count - 1;
-          await counters.updateOne({ _id: counterId }, { $max: { seq: adjusted } });
+          await counters.updateOne(
+            { _id: counterId },
+            { $max: { seq: adjusted } },
+            this._getSessionOpts(),
+          );
           result.set(field, effectiveBase);
           continue;
         }
@@ -1693,7 +1795,10 @@ export class MongoAdapter extends BaseDbAdapter {
   private async _getCurrentFieldMax(field: string): Promise<number> {
     const alias = `max__${field.replace(/\./g, "__")}`;
     const agg = await this.collection
-      .aggregate([{ $group: { _id: null, [alias]: { $max: `$${field}` } } }])
+      .aggregate(
+        [{ $group: { _id: null, [alias]: { $max: `$${field}` } } }],
+        this._getSessionOpts(),
+      )
       .toArray();
     if (agg.length > 0) {
       const val = agg[0][alias];
@@ -1794,17 +1899,9 @@ export class MongoAdapter extends BaseDbAdapter {
       return undefined;
     }
     const insights = query.insights ?? computeInsights(query.filter);
-    let strength: 1 | 2 | undefined;
-    for (const field of insights.keys()) {
-      const collation = this._collateFields.get(field);
-      if (collation === "unicode") {
-        return { collation: { locale: "en", strength: 1 } };
-      }
-      if (collation === "nocase") {
-        strength = 2;
-      }
-    }
-    return strength ? { collation: { locale: "en", strength } } : undefined;
+    const collate = this._collateFields;
+    const collation = mongoCollationOf([...insights.keys()].map((field) => collate.get(field)));
+    return collation ? { collation } : undefined;
   }
 
   protected _addMongoIndexField(

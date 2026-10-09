@@ -27,9 +27,18 @@ import type {
 // atscript compiler's utils entry (same import `db-space.ts` uses).
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
-import { buildMemoryPredicate, getPath, prepareRelationSets, valuesEqual } from "./memory-filter";
+import { cloneValue } from "./memory-clone";
+import { buildMemoryPredicate, getPath, pathReader, prepareRelationSets } from "./memory-filter";
 import type { MemoryRowLoader, RelationSets } from "./memory-filter";
-import { paginate, projectRow, setPath, sortRows } from "./memory-engine";
+import { compileProjection, paginate, setPath, sortRows } from "./memory-engine";
+import {
+  indexRow,
+  recordUniqueIndex,
+  tupleTaken,
+  unindexRow,
+  uniqueTupleKey,
+  type RecordedUniqueIndex,
+} from "./memory-unique";
 import { aggregateRows } from "./memory-aggregate";
 import type { AggregateFn, BucketUnit, TViewCapability, UniquSelect } from "@atscript/db";
 
@@ -42,17 +51,7 @@ export type MemoryProviderFn = () =>
   | Array<Record<string, unknown>>
   | Promise<Array<Record<string, unknown>>>;
 
-/**
- * A unique index recorded by {@link MemoryAdapter.syncIndexes}. `fields` holds
- * the ordered PHYSICAL field names (dot-paths); `optionalFields` are the subset
- * declared `field?:` in the model — a present-only (partial) index skips a row
- * whose optional member is absent/`null`, matching SQL's `NULLS DISTINCT`.
- */
-interface RecordedUniqueIndex {
-  name: string;
-  fields: string[];
-  optionalFields: Set<string>;
-}
+type TRow = Record<string, unknown>;
 
 /**
  * One table (or view) of an in-memory database. Its presence in the
@@ -63,8 +62,14 @@ interface MemoryTableState {
   kind: Exclude<TDbObjectKind, "materialized">;
   /** Stored rows keyed by `pkKey`, in nested physical shape. */
   rows: Map<string, Record<string, unknown>>;
-  /** Unique indexes recorded by `syncIndexes`, enforced on insert. */
+  /** Unique indexes recorded by `syncIndexes`, enforced on every write. */
   uniqueIndexes: RecordedUniqueIndex[];
+  /**
+   * Set once a stored row's primary key holds an object other than a `Date`
+   * (e.g. an array): such a key can match a filter value it does not encode,
+   * so reads stop resolving pinned primary keys by direct lookup.
+   */
+  opaquePk: boolean;
   /** Per-field `@db.default.increment` counters (physical name → last value). */
   incrementCounters: Map<string, number>;
 }
@@ -105,6 +110,9 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   /** Memoized physical PK field names — stable for the adapter's lifetime. */
   private _pkFieldsCache?: string[];
+
+  /** Memoized compiled readers of {@link _physicalPkFields}. */
+  private _pkReadersCache?: Array<(row: TRow) => unknown>;
 
   /**
    * Memoized map of PHYSICAL field name → optional `start` for every field
@@ -235,6 +243,7 @@ export class MemoryAdapter extends BaseDbAdapter {
         kind: this._table.isView ? "view" : "table",
         rows: new Map(),
         uniqueIndexes: [],
+        opaquePk: false,
         incrementCounters: new Map(),
       };
       db.set(name, state);
@@ -259,6 +268,11 @@ export class MemoryAdapter extends BaseDbAdapter {
       : this._table.primaryKeys.map((pk) => this._table.physicalPath(pk));
     this._pkFieldsCache = fields;
     return fields;
+  }
+
+  /** Compiled readers of {@link _physicalPkFields} (memoized like it). */
+  private _pkReaders(): Array<(row: TRow) => unknown> {
+    return (this._pkReadersCache ??= this._physicalPkFields().map((field) => pathReader(field)));
   }
 
   /**
@@ -353,8 +367,30 @@ export class MemoryAdapter extends BaseDbAdapter {
    * `['a:b','c']` differ, and `1` differs from `'1'`.
    */
   private pkKey(row: Record<string, unknown>): string {
-    const values = this._physicalPkFields().map((field) => getPath(row, field));
-    return JSON.stringify(values);
+    const readers = this._pkReaders();
+    return JSON.stringify(readers.length === 1 ? [readers[0]!(row)] : readers.map((r) => r(row)));
+  }
+
+  /**
+   * The storage key a filter pins by exact equality on EVERY primary-key field
+   * — `{ id: v }`, `{ id: { $eq: v } }`, also inside (nested) `$and` — or
+   * `undefined`. Only a string / number / boolean / `Date` value pins: for
+   * those, a row the filter matches is stored exactly under this key (strict
+   * equality ⇒ equal `JSON.stringify`), so a read can look the row up and
+   * still run the full predicate on it. Unavailable once the table holds an
+   * {@link MemoryTableState.opaquePk opaque} key.
+   */
+  private _pinnedKey(state: MemoryTableState, filter: FilterExpr): string | undefined {
+    if (state.opaquePk) {
+      return undefined;
+    }
+    const fields = this._physicalPkFields();
+    const pinned = new Map<string, unknown>();
+    collectPins(filter, fields, pinned);
+    if (pinned.size !== fields.length) {
+      return undefined;
+    }
+    return JSON.stringify(fields.map((field) => pinned.get(field)));
   }
 
   /**
@@ -492,13 +528,14 @@ export class MemoryAdapter extends BaseDbAdapter {
   /**
    * Clones the payload in, applies the version default, generates any
    * `@db.default.increment` values, enforces PK + unique constraints, stores
-   * the row, and returns the resolved inserted id. Clone-in (`structuredClone`)
-   * is what makes post-insert mutation of the caller's object never leak into
+   * the row, and returns the resolved inserted id. Clone-in ({@link cloneValue},
+   * `structuredClone`-equivalent) is what makes post-insert mutation of the
+   * caller's object never leak into
    * the store. Called once per item by both `insertOne` and `insertMany`, so
    * increment values advance sequentially across a batch.
    */
   private _insertRow(state: MemoryTableState, data: Record<string, unknown>): unknown {
-    const row = structuredClone(data);
+    const row = cloneValue(data);
 
     // Memory has no DDL DEFAULT; fill version=0 at insert when missing so OCC
     // stays consistent with the SQL/Mongo adapters.
@@ -517,8 +554,8 @@ export class MemoryAdapter extends BaseDbAdapter {
       throw this._pkConflict();
     }
 
-    this._enforceUniqueIndexes(state, row);
-    state.rows.set(key, row);
+    const tuples = this._enforceUniqueIndexes(state, row);
+    this._storeRow(state, key, row, tuples);
     // Single-`@meta.id` tables resolve their scalar id from `row[metaIdPhysical]`
     // and keep an `undefined` fallback (unchanged). A composite (or single
     // non-meta) PK has no single meta id, so supply a DEFINED fallback built from
@@ -532,7 +569,8 @@ export class MemoryAdapter extends BaseDbAdapter {
    * Enforces every recorded unique index against the current store. A row is
    * exempted from an index (present-only semantics) when ANY of that index's
    * optional fields is absent/`null`. Otherwise a stored row with an equal
-   * tuple → `CONFLICT`.
+   * tuple → `CONFLICT`. Returns the row's tuple key per index (for
+   * {@link _storeRow}).
    *
    * `excludeKey` (when given) skips the row stored under that {@link pkKey} — so
    * a row updating its own unique value does not false-conflict with itself.
@@ -541,42 +579,48 @@ export class MemoryAdapter extends BaseDbAdapter {
     state: MemoryTableState,
     row: Record<string, unknown>,
     excludeKey?: string,
+  ): Array<string | undefined> {
+    return state.uniqueIndexes.map((index) => {
+      const tuple = uniqueTupleKey(index, row);
+      if (tuple !== undefined && tupleTaken(index, tuple, excludeKey)) {
+        throw new DbError("CONFLICT", [
+          {
+            path: index.fields[0] ?? index.name,
+            message: `Duplicate value for unique index "${index.name}"`,
+          },
+        ]);
+      }
+      return tuple;
+    });
+  }
+
+  /**
+   * Stores `row` under `key` and records it in the unique indexes (`tuples`:
+   * its precomputed tuple keys). The ONLY way a row enters the store, so the
+   * indexes and {@link MemoryTableState.opaquePk} never drift from it.
+   */
+  private _storeRow(
+    state: MemoryTableState,
+    key: string,
+    row: Record<string, unknown>,
+    tuples?: ReadonlyArray<string | undefined>,
   ): void {
-    for (const index of state.uniqueIndexes) {
-      const tuple: unknown[] = [];
-      let skip = false;
-      for (const field of index.fields) {
-        const value = getPath(row, field);
-        if (index.optionalFields.has(field) && (value === null || value === undefined)) {
-          skip = true;
-          break;
-        }
-        tuple.push(value);
-      }
-      if (skip) {
-        continue;
-      }
-      for (const [existingKey, existing] of state.rows) {
-        if (excludeKey !== undefined && existingKey === excludeKey) {
-          continue;
-        }
-        let equal = true;
-        for (let i = 0; i < index.fields.length; i++) {
-          if (!valuesEqual(getPath(existing, index.fields[i]!), tuple[i])) {
-            equal = false;
-            break;
-          }
-        }
-        if (equal) {
-          throw new DbError("CONFLICT", [
-            {
-              path: index.fields[0] ?? index.name,
-              message: `Duplicate value for unique index "${index.name}"`,
-            },
-          ]);
+    state.rows.set(key, row);
+    indexRow(state.uniqueIndexes, key, row, tuples);
+    if (!state.opaquePk) {
+      for (const read of this._pkReaders()) {
+        const value = read(row);
+        if (value !== null && typeof value === "object" && !(value instanceof Date)) {
+          state.opaquePk = true;
         }
       }
     }
+  }
+
+  /** Removes the row stored under `key` (and its unique-index entries). */
+  private _removeRow(state: MemoryTableState, key: string, row: Record<string, unknown>): void {
+    state.rows.delete(key);
+    unindexRow(state.uniqueIndexes, key, row);
   }
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
@@ -649,7 +693,17 @@ export class MemoryAdapter extends BaseDbAdapter {
     }
     const match = buildMemoryPredicate(filter, relationSets);
     const matched: Array<{ key: string; row: Record<string, unknown> }> = [];
-    for (const [key, row] of state?.rows ?? []) {
+    if (!state) {
+      return matched;
+    }
+    // A filter pinning the whole primary key can match only the row stored under it.
+    const pinned = this._pinnedKey(state, filter);
+    let candidates: Iterable<[string, Record<string, unknown>]> = state.rows;
+    if (pinned !== undefined) {
+      const row = state.rows.get(pinned);
+      candidates = row ? [[pinned, row]] : [];
+    }
+    for (const [key, row] of candidates) {
       if (!match(row)) {
         continue;
       }
@@ -691,7 +745,7 @@ export class MemoryAdapter extends BaseDbAdapter {
    *   because this adapter reports no {@link supportsNativePatch}), so they must
    *   nest into the stored document — MERGING siblings — exactly like Mongo's
    *   `$set: { "profile.city": v }`, not create a literal dotted key. Top-level
-   *   (dot-free) keys behave as a plain assignment. `data` is `structuredClone`d
+   *   (dot-free) keys behave as a plain assignment. `data` is deep-cloned
    *   first so nested subtrees from the caller never alias into the store.
    * - `ops.inc` / `ops.mul`: numeric increment / multiply on the (dot-path)
    *   target, coercing a missing or non-numeric current value to `0` (parity with
@@ -706,7 +760,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     data: Record<string, unknown>,
     ops?: TFieldOps,
   ): void {
-    const patch = structuredClone(data);
+    const patch = cloneValue(data);
     for (const k of Object.keys(patch)) {
       setPath(row, k, patch[k]);
     }
@@ -724,24 +778,30 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Places `next` into the store under its (possibly changed) {@link pkKey},
-   * re-keying when a mutation/replace moved the primary key. A collision on the
-   * NEW key (some other row already owns it) throws `CONFLICT`. Throws BEFORE
-   * touching the Map so a failed re-key leaves the store unchanged.
+   * Places `next` into the store under its (possibly changed) {@link pkKey} in
+   * place of `oldRow` (stored under `oldKey`), re-keying when a mutation/replace
+   * moved the primary key. A collision on the NEW key (some other row already
+   * owns it) throws `CONFLICT`. Throws BEFORE touching the Map so a failed
+   * re-key leaves the store unchanged. `tuples` are `next`'s unique-index keys.
    */
+  // oxlint-disable-next-line max-params
   private _commitRow(
-    rows: Map<string, Record<string, unknown>>,
+    state: MemoryTableState,
     oldKey: string,
+    oldRow: Record<string, unknown>,
     next: Record<string, unknown>,
+    tuples: ReadonlyArray<string | undefined>,
   ): void {
     const newKey = this.pkKey(next);
-    if (newKey !== oldKey && rows.has(newKey)) {
+    if (newKey !== oldKey && state.rows.has(newKey)) {
       throw this._pkConflict();
     }
+    unindexRow(state.uniqueIndexes, oldKey, oldRow);
     if (newKey !== oldKey) {
-      rows.delete(oldKey);
+      state.rows.delete(oldKey);
     }
-    rows.set(newKey, next);
+    // Same key → `Map.set` replaces in place, keeping the row's position.
+    this._storeRow(state, newKey, next, tuples);
   }
 
   /**
@@ -762,11 +822,11 @@ export class MemoryAdapter extends BaseDbAdapter {
     ops?: TFieldOps,
     keepVersion = false,
   ): void {
-    const next = structuredClone(row);
+    const next = cloneValue(row);
     this._applyUpdate(next, data, ops);
     if (!keepVersion) this._bumpVersion(next, row);
-    this._enforceUniqueIndexes(state, next, oldKey);
-    this._commitRow(state.rows, oldKey, next);
+    const tuples = this._enforceUniqueIndexes(state, next, oldKey);
+    this._commitRow(state, oldKey, row, next, tuples);
   }
 
   async replaceOne(
@@ -786,11 +846,11 @@ export class MemoryAdapter extends BaseDbAdapter {
     // FULL replace: `next` is the payload verbatim, so every field absent from
     // `data` is dropped — only the version is derived, bumped from the old row's
     // value (mirrors Mongo's `$replaceWith` with `version: $version + 1`).
-    const next = structuredClone(data);
+    const next = cloneValue(data);
     this._bumpVersion(next, row);
 
-    this._enforceUniqueIndexes(state, next, key);
-    this._commitRow(state.rows, key, next);
+    const tuples = this._enforceUniqueIndexes(state, next, key);
+    this._commitRow(state, key, row, next, tuples);
     return { matchedCount: 1, modifiedCount: 1 };
   }
 
@@ -823,7 +883,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     if (!state || matched.length === 0) {
       return { deletedCount: 0 };
     }
-    state.rows.delete(matched[0]!.key);
+    this._removeRow(state, matched[0]!.key, matched[0]!.row);
     return { deletedCount: 1 };
   }
 
@@ -833,18 +893,20 @@ export class MemoryAdapter extends BaseDbAdapter {
    * Stable multi-key comparator from `$sort`, with a final tie-break on
    * {@link pkKey} for a deterministic total order. Returns the input unchanged
    * (insertion order) when there is no `$sort`. Delegates to the shared pure
-   * {@link sortRows}, injecting {@link pkKey} as the total-order tie-break.
+   * {@link sortRows}, injecting {@link pkKey} as the total-order tie-break;
+   * `topK` asks for the head of that order only (`$skip + $limit`).
    */
   private _sortRows(
     rows: Record<string, unknown>[],
     $sort?: Partial<Record<string, 1 | -1>>,
+    topK?: number,
   ): Record<string, unknown>[] {
-    return sortRows(rows, $sort, (r) => this.pkKey(r));
+    return sortRows(rows, $sort, (r) => this.pkKey(r), topK);
   }
 
   /**
-   * Projects a stored row per `$select` and returns a fresh, deep-cloned object
-   * so the store can never be mutated through a returned value.
+   * Compiles the `$select` projection of one read: each returned row is a
+   * fresh, deep-cloned object so the store can never be mutated through it.
    *
    * - No projection → a full clone.
    * - INCLUSION form (`{ field: 1 }`) → a new object with exactly the selected
@@ -855,14 +917,10 @@ export class MemoryAdapter extends BaseDbAdapter {
    * Top-level and nested dot-paths are supported; exotic Mongo projection
    * quirks (array positional, `$slice`, etc.) are intentionally NOT replicated.
    */
-  private _projectAndClone(
-    row: Record<string, unknown>,
+  private _projector(
     $select?: UniquSelect,
-  ): Record<string, unknown> {
-    // Delegate to the shared pure {@link projectRow} with the resolved
-    // projection map, and force `clone: true` so a returned value can never
-    // mutate the store.
-    return projectRow(row, $select?.asProjection, { clone: true });
+  ): (row: Record<string, unknown>) => Record<string, unknown> {
+    return compileProjection($select?.asProjection, { clone: true });
   }
 
   /**
@@ -891,11 +949,27 @@ export class MemoryAdapter extends BaseDbAdapter {
    * shares. Goes through the {@link _loadRows} seam exactly ONCE per call, so a
    * reader (and provider read-through mode) has one place that materializes the
    * working set — one provider invocation per logical read.
+   *
+   * Stored mode reads the table's Map in place (no snapshot copy), resolves a
+   * filter pinning the whole primary key by direct lookup, and stops after
+   * `limit` matches when given (an unsorted `findOne`).
    */
-  private async _filteredRows(query: DbQuery): Promise<Record<string, unknown>[]> {
+  private async _filteredRows(query: DbQuery, limit?: number): Promise<Record<string, unknown>[]> {
     if (!containsRelationFilter(query.filter)) {
       const match = buildMemoryPredicate(query.filter);
-      return (await this._loadRows()).filter(match);
+      if (!this._provider && this._loadRows === MemoryAdapter.prototype._loadRows) {
+        const state = this._peekState();
+        if (!state) {
+          return [];
+        }
+        const pinned = this._pinnedKey(state, query.filter);
+        if (pinned !== undefined) {
+          const row = state.rows.get(pinned);
+          return row && match(row) ? [row] : [];
+        }
+        return collectMatches(state.rows.values(), match, limit);
+      }
+      return collectMatches(await this._loadRows(), match, limit);
     }
     // Relational predicates: this table's snapshot is taken first and shared
     // with the predicates (a self relation reads the same rows).
@@ -909,11 +983,13 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
-    const filtered = await this._filteredRows(query);
     const { $sort, $skip, $select } = this._readControls(query.controls ?? {});
-    const sorted = this._sortRows(filtered, $sort);
-    const row = sorted[$skip ?? 0];
-    return row ? this._projectAndClone(row, $select) : null;
+    const index = $skip ?? 0;
+    const sorted = hasSort($sort)
+      ? this._sortRows(await this._filteredRows(query), $sort, index + 1)
+      : await this._filteredRows(query, index + 1);
+    const row = sorted[index];
+    return row ? this._projector($select)(row) : null;
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
@@ -938,9 +1014,10 @@ export class MemoryAdapter extends BaseDbAdapter {
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
     const filtered = await this._filteredRows(query);
     const { $sort, $skip, $limit, $select } = this._readControls(query.controls ?? {});
-    const sorted = this._sortRows(filtered, $sort);
+    const topK = $limit === undefined ? undefined : ($skip ?? 0) + $limit;
+    const sorted = this._sortRows(filtered, $sort, topK);
     const paged = paginate(sorted, $skip, $limit);
-    const data = paged.map((row) => this._projectAndClone(row, $select));
+    const data = paged.map(this._projector($select));
     return { data, count: filtered.length };
   }
 
@@ -1035,8 +1112,8 @@ export class MemoryAdapter extends BaseDbAdapter {
       return { deletedCount: 0 };
     }
     const matched = this._selectForWrite(state, filter, undefined, true, sets);
-    for (const { key } of matched) {
-      state.rows.delete(key);
+    for (const { key, row } of matched) {
+      this._removeRow(state, key, row);
     }
     return { deletedCount: matched.length };
   }
@@ -1054,13 +1131,19 @@ export class MemoryAdapter extends BaseDbAdapter {
       if (index.type !== "unique") {
         continue;
       }
-      uniqueIndexes.push({
-        name: index.name,
-        fields: index.fields.map((f) => f.name),
-        optionalFields: new Set(index.fields.filter((f) => f.optional).map((f) => f.name)),
-      });
+      uniqueIndexes.push(
+        recordUniqueIndex(
+          index.name,
+          index.fields.map((f) => f.name),
+          new Set(index.fields.filter((f) => f.optional).map((f) => f.name)),
+        ),
+      );
     }
-    this._state().uniqueIndexes = uniqueIndexes;
+    const state = this._state();
+    state.uniqueIndexes = uniqueIndexes;
+    for (const [key, row] of state.rows) {
+      indexRow(uniqueIndexes, key, row);
+    }
   }
 
   /** Creates the table's (empty) state when it does not exist. Idempotent. */
@@ -1118,6 +1201,78 @@ export class MemoryAdapter extends BaseDbAdapter {
     }
     this._db.delete(name);
   }
+}
+
+/** Whether a `$sort` control orders by at least one key. */
+function hasSort($sort: Partial<Record<string, 1 | -1>> | undefined): boolean {
+  return $sort !== undefined && Object.keys($sort).length > 0;
+}
+
+/** The rows of `rows` matching `match`, in order — at most `limit` when given. */
+function collectMatches(
+  rows: Iterable<Record<string, unknown>>,
+  match: (row: Record<string, unknown>) => boolean,
+  limit?: number,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  if (limit !== undefined && limit <= 0) {
+    return out;
+  }
+  for (const row of rows) {
+    if (match(row)) {
+      out.push(row);
+      if (out.length === limit) {
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Collects into `pinned` the primary-key fields `filter` pins by exact equality
+ * on a string / number / boolean / `Date` value — at its top level and inside
+ * (nested) `$and`s, which `walkFilter` conjoins the same way. The first pin of
+ * a field wins: a contradicting second one is still checked by the predicate.
+ */
+function collectPins(
+  filter: unknown,
+  fields: readonly string[],
+  pinned: Map<string, unknown>,
+): void {
+  if (filter === null || typeof filter !== "object" || Array.isArray(filter)) {
+    return;
+  }
+  for (const [key, value] of Object.entries(filter as Record<string, unknown>)) {
+    if (key === "$and") {
+      if (Array.isArray(value)) {
+        for (const child of value) collectPins(child, fields, pinned);
+      }
+      continue;
+    }
+    if (pinned.has(key) || !fields.includes(key)) {
+      continue;
+    }
+    const operand = isOperatorObject(value) ? value.$eq : value;
+    if (
+      typeof operand === "string" ||
+      typeof operand === "number" ||
+      typeof operand === "boolean" ||
+      operand instanceof Date
+    ) {
+      pinned.set(key, operand);
+    }
+  }
+}
+
+/** A plain object (an operator map such as `{ $eq: v }`), as `walkFilter` reads one. */
+function isOperatorObject(value: unknown): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  );
 }
 
 /**

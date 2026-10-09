@@ -1,5 +1,6 @@
-import type { Collection, Document } from "mongodb";
+import { ObjectId, type Collection, type Document } from "mongodb";
 import {
+  andFilters,
   containsRelationFilter,
   DbError,
   geoIndexNotFoundMessage,
@@ -7,7 +8,14 @@ import {
   searchTermInteger,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
-import type { DbControls, DbQuery, TDbCollation, TDbIndex, TSearchIndexInfo } from "@atscript/db";
+import type {
+  DbControls,
+  DbQuery,
+  FilterExpr,
+  TDbCollation,
+  TDbIndex,
+  TSearchIndexInfo,
+} from "@atscript/db";
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import { DEFAULT_INDEX_NAME } from "./mongo-types";
 import type { TMongoIndex, TSearchFieldMapping, TSearchIndex } from "./mongo-types";
@@ -40,6 +48,11 @@ export interface TMongoSearchHost {
   fieldCollation(field: string): TDbCollation | undefined;
   _getSessionOpts(): Record<string, unknown>;
   _log(...args: unknown[]): void;
+}
+
+/** Whether the host runs inside a transaction (a session runs one operation at a time). */
+function inSession(host: TMongoSearchHost): boolean {
+  return "session" in host._getSessionOpts();
 }
 
 /** Host interface for geo search — needs the table's generic index map. */
@@ -150,7 +163,7 @@ export async function searchImpl(
   indexName?: string,
 ): Promise<Array<Record<string, unknown>>> {
   const plan = requireSearchStage(host, text, indexName, query.controls);
-  return runSearchPipeline(host, plan.stage, query, "search", undefined, plan.classicText);
+  return runSearchPipeline(host, plan.stage, query, "search", { classicText: plan.classicText });
 }
 
 /** Text search with faceted count. */
@@ -161,14 +174,9 @@ export async function searchWithCountImpl(
   indexName?: string,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const plan = requireSearchStage(host, text, indexName, query.controls);
-  return runSearchWithCountPipeline(
-    host,
-    plan.stage,
-    query,
-    "searchWithCount",
-    undefined,
-    plan.classicText,
-  );
+  return runSearchWithCountPipeline(host, plan.stage, query, "searchWithCount", {
+    classicText: plan.classicText,
+  });
 }
 
 /** Vector search via $vectorSearch aggregation stage. */
@@ -179,14 +187,12 @@ export async function vectorSearchImpl(
   indexName?: string,
 ): Promise<Array<Record<string, unknown>>> {
   const controls = query.controls || {};
-  const stage = buildVectorSearchStage(
-    host,
-    vector,
-    indexName,
-    controls.$limit as number | undefined,
-  );
+  const plan = buildVectorSearchPlan(host, vector, query, indexName);
   const threshold = resolveThreshold(host, controls, indexName);
-  return runSearchPipeline(host, stage, query, "vectorSearch", threshold);
+  return runSearchPipeline(host, plan.stage, query, "vectorSearch", {
+    threshold,
+    filterStages: plan.filterStages,
+  });
 }
 
 /** Vector search with faceted count. */
@@ -197,14 +203,12 @@ export async function vectorSearchWithCountImpl(
   indexName?: string,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const controls = query.controls || {};
-  const stage = buildVectorSearchStage(
-    host,
-    vector,
-    indexName,
-    controls.$limit as number | undefined,
-  );
+  const plan = buildVectorSearchPlan(host, vector, query, indexName);
   const threshold = resolveThreshold(host, controls, indexName);
-  return runSearchWithCountPipeline(host, stage, query, "vectorSearchWithCount", threshold);
+  return runSearchWithCountPipeline(host, plan.stage, query, "vectorSearchWithCount", {
+    threshold,
+    filterStages: plan.filterStages,
+  });
 }
 
 // ── Geo search ($geoNear) ────────────────────────────────────────────────────
@@ -600,13 +604,139 @@ function collectSearchPaths(
   return out;
 }
 
+/**
+ * The `$vectorSearch` stage of a vector search and the filter stages that
+ * follow it.
+ *
+ * Pre-filtering: the request filter's top-level conjuncts (keys, `$and`
+ * members) on the index's `@db.search.filter` fields move into the stage's
+ * `filter`, so the top-k is taken among matching documents and a page comes
+ * back full. A conjunct moves only when `$vectorSearch.filter` evaluates it
+ * as a `$match` would: a string / number / boolean / `Date` / `ObjectId`
+ * value under `$eq` (or a bare value), `$ne`, `$gt`, `$gte`, `$lt`, `$lte`,
+ * `$in`, `$nin` (non-empty lists of such values). Every other conjunct —
+ * other fields, `null`, `$regex`, `$or`, relational predicates — still
+ * filters AFTER the top-k cut, so such a filter can return a short page.
+ *
+ * The stage's `limit` covers `$skip` too (the page is cut from its results).
+ */
+function buildVectorSearchPlan(
+  host: TMongoSearchHost,
+  vector: number[],
+  query: DbQuery,
+  indexName?: string,
+): { stage: Document; filterStages: Document[] } {
+  const controls = query.controls || {};
+  const { stage, index } = buildVectorSearchStage(
+    host,
+    vector,
+    indexName,
+    controls.$limit as number | undefined,
+    controls.$skip as number | undefined,
+  );
+  const filterPaths = new Set(
+    (index.definition.fields ?? []).filter((f) => f.type === "filter").map((f) => f.path),
+  );
+  const { pre, rest } = splitVectorPreFilter(query.filter, filterPaths);
+  if (pre) {
+    (stage.$vectorSearch as Document).filter = pre;
+  }
+  return { stage, filterStages: mongoFilterStages(rest, filterOptionsOf(host)) };
+}
+
+/** Comparison operators `$vectorSearch.filter` evaluates like `$match`. */
+const VECTOR_FILTER_OPS = new Set(["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin"]);
+
+/** A value `$vectorSearch.filter` compares like `$match` (no `null`, arrays, regexes). */
+function isVectorFilterValue(value: unknown): boolean {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return true;
+    case "number":
+      return Number.isFinite(value);
+    case "object":
+      return (value instanceof Date && !Number.isNaN(value.getTime())) || value instanceof ObjectId;
+    default:
+      return false;
+  }
+}
+
+/** A plain operator map (`{ $gt: 1 }`) — what `walkFilter` reads as operators, not a value. */
+function isOperatorMap(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** The `$vectorSearch.filter` form of one field condition, or `undefined` when it cannot move. */
+function vectorFilterCondition(value: unknown): Document | undefined {
+  if (!isOperatorMap(value)) {
+    return isVectorFilterValue(value) ? { $eq: value } : undefined;
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 0) return undefined;
+  for (const [op, operand] of entries) {
+    if (!VECTOR_FILTER_OPS.has(op)) return undefined;
+    const ok =
+      op === "$in" || op === "$nin"
+        ? Array.isArray(operand) && operand.length > 0 && operand.every(isVectorFilterValue)
+        : isVectorFilterValue(operand);
+    if (!ok) return undefined;
+  }
+  return value;
+}
+
+/**
+ * Splits a (predicate-free part of a) filter into the conjuncts that become
+ * the `$vectorSearch` pre-filter (on `filterPaths`) and the rest. Exported
+ * for tests.
+ *
+ * @internal
+ */
+export function splitVectorPreFilter(
+  filter: FilterExpr | undefined,
+  filterPaths: ReadonlySet<string>,
+): { pre?: Document; rest: FilterExpr } {
+  if (!filter || filterPaths.size === 0) {
+    return { rest: filter ?? {} };
+  }
+  const pre: Document[] = [];
+  const rest: FilterExpr[] = [];
+  const visit = (node: FilterExpr) => {
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (key === "$and" && Array.isArray(value)) {
+        for (const child of value as FilterExpr[]) visit(child);
+        continue;
+      }
+      const part = { [key]: value } as FilterExpr;
+      const condition =
+        !key.startsWith("$") && filterPaths.has(key) && !containsRelationFilter(part)
+          ? vectorFilterCondition(value)
+          : undefined;
+      if (condition) {
+        pre.push({ [key]: condition });
+      } else {
+        rest.push(part);
+      }
+    }
+  };
+  visit(filter);
+  if (pre.length === 0) {
+    return { rest: filter };
+  }
+  return { pre: pre.length === 1 ? pre[0] : { $and: pre }, rest: andFilters(...rest) };
+}
+
 /** Builds a $vectorSearch aggregation stage from a pre-computed vector. */
+// oxlint-disable-next-line max-params
 function buildVectorSearchStage(
   host: TMongoSearchHost,
   vector: number[],
   indexName?: string,
   limit?: number,
-): Document {
+  skip?: number,
+): { stage: Document; index: TSearchIndex } {
   let index: TSearchIndex | undefined;
   if (indexName) {
     const found = host.getMongoSearchIndex(indexName);
@@ -639,18 +769,33 @@ function buildVectorSearchStage(
     throw new Error(`Vector index "${index.name}" has no vector field`);
   }
 
+  // The page is `$skip` + `$limit` into the top-k, so the top-k must cover both.
+  const topK = (skip || 0) + (limit || 20);
   return {
-    $vectorSearch: {
-      index: index.key,
-      path: vectorField.path,
-      queryVector: vector,
-      numCandidates: Math.max((limit || 20) * 10, 100),
-      limit: limit || 20,
+    stage: {
+      $vectorSearch: {
+        index: index.key,
+        path: vectorField.path,
+        queryVector: vector,
+        numCandidates: Math.max(topK * 10, 100),
+        limit: topK,
+      },
     },
+    index,
   };
 }
 
 // ── Shared pipeline runners ──────────────────────────────────────────────────
+
+/** How a search runner treats the leading stage's results. */
+interface TSearchRunOptions {
+  /** Vector similarity threshold (`_score` from `vectorSearchScore`). */
+  threshold?: number;
+  /** A classic `$text` match (relevance from `textScore`). */
+  classicText?: boolean;
+  /** The filter stages after the leading stage (default: the whole request filter). */
+  filterStages?: Document[];
+}
 
 /** Runs a search/vector pipeline and returns results. Shared by search + vectorSearch. */
 async function runSearchPipeline(
@@ -658,8 +803,7 @@ async function runSearchPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  threshold?: number,
-  classicText = false,
+  { threshold, classicText = false, filterStages }: TSearchRunOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
   const controls = query.controls || {};
   const pipeline: Document[] = [stage];
@@ -669,7 +813,7 @@ async function runSearchPipeline(
   } else if (classicText) {
     pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
-  pipeline.push(...mongoFilterStages(query.filter, filterOptionsOf(host)));
+  pipeline.push(...(filterStages ?? mongoFilterStages(query.filter, filterOptionsOf(host))));
   if (controls.$sort) {
     pipeline.push({ $sort: controls.$sort });
   } else if (classicText) {
@@ -695,14 +839,22 @@ async function runSearchPipeline(
   );
 }
 
-/** Runs a search/vector pipeline with $facet for count. Shared by searchWithCount + vectorSearchWithCount. */
+/**
+ * Runs a search/vector pipeline with its total count. Shared by searchWithCount + vectorSearchWithCount.
+ *
+ * The rows and the count come from one `$facet` over the filtered results —
+ * except for an Atlas `$search` with no filter after it: the page is read
+ * directly (cut by `$skip` / `$limit` instead of fetching every hit into a
+ * `$facet`) and the total comes from the search metadata (`$searchMeta`,
+ * `count: total` — the same counts `$$SEARCH_META` reports), concurrently
+ * outside a transaction.
+ */
 async function runSearchWithCountPipeline(
   host: TMongoSearchHost,
   stage: Document,
   query: DbQuery,
   label: string,
-  threshold?: number,
-  classicText = false,
+  { threshold, classicText = false, filterStages }: TSearchRunOptions = {},
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const controls = query.controls || {};
 
@@ -733,10 +885,15 @@ async function runSearchWithCountPipeline(
     if (projection) dataStages.push({ $project: dedupeProjection(projection) });
   }
 
+  const stages = filterStages ?? mongoFilterStages(query.filter, filterOptionsOf(host));
+  if ("$search" in stage && preStages.length === 0 && stages.every(isNoopMatch)) {
+    return runSearchWithMeta(host, stage, dataStages, label);
+  }
+
   const pipeline: Document[] = [
     stage,
     ...preStages,
-    ...mongoFilterStages(query.filter, filterOptionsOf(host)),
+    ...stages,
     {
       $facet: {
         data: dataStages,
@@ -753,4 +910,36 @@ async function runSearchWithCountPipeline(
     data: result[0]?.data || [],
     count: result[0]?.meta[0]?.count || 0,
   };
+}
+
+/** A `{ $match: {} }` stage (what an empty filter renders as). */
+function isNoopMatch(stage: Document): boolean {
+  const match = (stage as { $match?: Document }).$match;
+  return match !== undefined && Object.keys(stage).length === 1 && Object.keys(match).length === 0;
+}
+
+/** Search-with-count of an unfiltered Atlas `$search`: the page plus `$searchMeta`'s total. */
+async function runSearchWithMeta(
+  host: TMongoSearchHost,
+  stage: Document,
+  dataStages: Document[],
+  label: string,
+): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+  const pipeline: Document[] = [stage, ...dataStages];
+  const meta: Document[] = [
+    { $searchMeta: { ...(stage.$search as Document), count: { type: "total" } } },
+  ];
+  host._log(`aggregate (${label})`, pipeline, meta);
+  const run = (p: Document[]) =>
+    wrapInvalidQuery(() => host.collection.aggregate(p, host._getSessionOpts()).toArray());
+  let data: Document[];
+  let metaRows: Document[];
+  if (inSession(host)) {
+    data = await run(pipeline);
+    metaRows = await run(meta);
+  } else {
+    [data, metaRows] = await Promise.all([run(pipeline), run(meta)]);
+  }
+  const total = (metaRows[0]?.count as { total?: unknown } | undefined)?.total;
+  return { data, count: Number(total ?? 0) };
 }

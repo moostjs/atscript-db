@@ -110,13 +110,13 @@ describe("MysqlAdapter — transaction state is branded by pool (since 0.1.128)"
     expect(sqls()).not.toContain("START TRANSACTION");
   });
 
-  it("a table write inside a foreign-outer transaction opens its own transaction (the table wraps writes), never on the foreign state", async () => {
+  it("a single-row table write inside a foreign-outer transaction runs autocommit through its own pool (one atomic statement, no wrapping transaction since 0.1.151), never on the foreign state", async () => {
     await foreign.withTransaction(async () => {
       await table.insertOne({ id: 1, name: "a" } as any);
     });
     expect(foreign.trap.used).toEqual([]);
     const tx = sqls().filter((s) => /^(START TRANSACTION|COMMIT|ROLLBACK)$/.test(s));
-    expect(tx).toEqual(["START TRANSACTION", "COMMIT"]);
+    expect(tx).toEqual([]);
     expect(sqls().some((s) => s.startsWith("INSERT"))).toBe(true);
   });
 
@@ -151,10 +151,12 @@ describe("MysqlAdapter — transaction state is branded by pool (since 0.1.128)"
     });
     const tx = sqls().filter((s) => /^(START TRANSACTION|COMMIT)$/.test(s));
     expect(tx).toEqual(["START TRANSACTION", "COMMIT"]); // one transaction for both tables
-    // The other pool is a different owner: its table write opened its OWN transaction there.
+    // The other pool is a different owner: its single-row write never joins this transaction —
+    // it runs as one autocommit statement on its own pool (no wrapping transaction since 0.1.151).
     const otherTx = otherDriver.calls
       .map((c) => c.sql)
       .filter((s) => /^(START TRANSACTION|COMMIT)$/.test(s));
-    expect(otherTx).toEqual(["START TRANSACTION", "COMMIT"]);
+    expect(otherTx).toEqual([]);
+    expect(otherDriver.calls.some((c) => c.sql.startsWith("INSERT"))).toBe(true);
   });
 });

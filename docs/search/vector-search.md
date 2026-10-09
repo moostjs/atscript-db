@@ -83,7 +83,9 @@ export interface Document {
 }
 ```
 
-The `indexName` argument in `@db.search.filter` must match the name of a `@db.search.vector` index (the field name or explicit `indexName`). A field can be a pre-filter for multiple vector indexes.
+The `indexName` argument in `@db.search.filter` must match the name of a `@db.search.vector` index (the field name or explicit `indexName`). A field can be a pre-filter for multiple vector indexes, and an index can have several pre-filter fields.
+
+On MongoDB (since 0.1.151), the top-level conditions of the query filter on pre-filter fields move into the `$vectorSearch` stage's `filter`, so the nearest neighbours are taken among the matching documents and a page comes back full. A condition moves when it compares a string, number, boolean, `Date` or ObjectId with `$eq` (or a bare value), `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in` or `$nin` (a non-empty list of such values). Every other condition — on other fields, against `null`, `$regex`, `$exists`, `$or`, relational predicates — filters the top-k results afterwards, so such a query can return fewer rows than `$limit`. `$skip` is part of the top-k: `{ $skip: 20, $limit: 10 }` asks `$vectorSearch` for 30 results and returns the last 10.
 
 ## Programmatic API
 
@@ -164,13 +166,13 @@ const results = await docs.vectorSearch(queryVector, {
 
 ### Post-filters
 
-Additional filter conditions that are not declared as `@db.search.filter` apply **after** vector search as standard query filters:
+Additional filter conditions that are not declared as `@db.search.filter` (or that a pre-filter cannot express — see [Pre-Filtering](#pre-filtering)) apply **after** vector search as standard query filters, to the top-k results — they can shorten the page:
 
 ```typescript
 const results = await docs.vectorSearch(queryVector, {
   filter: {
     category: "tutorials", // pre-filter (declared with @db.search.filter)
-    status: "published", // pre-filter (declared with @db.search.filter)
+    title: { $regex: "^Intro" }, // post-filter (title is not a pre-filter field)
   },
   controls: { $limit: 10 },
 });

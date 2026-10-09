@@ -8,6 +8,7 @@ import type {
 import { findAncestorInSet } from "../shared/object";
 import { fkColumns } from "./fk-diff";
 import type {
+  TDbCollation,
   TDbDefaultValue,
   TDbFieldMeta,
   TDbStorageType,
@@ -38,6 +39,13 @@ export interface TFieldSnapshot {
    * @since 0.1.141
    */
   derived?: Omit<TDerivedColumn, "sourcePath">;
+  /**
+   * A non-binary `@db.column.collate` — changing it changes the snapshot hash
+   * on every adapter (MongoDB builds the field's indexes with its collation).
+   * Absent for byte-wise fields, so a table without one hashes as before.
+   * @since 0.1.151
+   */
+  collate?: TDbCollation;
 }
 
 interface TIndexSnapshot {
@@ -200,6 +208,9 @@ function extractFieldSnapshots(
           jsonPath: [...f.derived.jsonPath],
           type: f.derived.type,
         };
+      }
+      if (f.collate && f.collate !== "binary") {
+        snap.collate = f.collate;
       }
       return snap;
     })
