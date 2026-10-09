@@ -54,3 +54,14 @@ export interface IgSlug {
 
     note: string
 }
+
+// A composite `@meta.id` beside an explicit `_id`: unique as a pair only
+@db.table 'ig_pairs'
+@db.mongo.collection
+export interface IgPair {
+    @meta.id
+    a: number
+    @meta.id
+    b: number
+    label: string
+}

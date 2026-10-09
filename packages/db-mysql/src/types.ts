@@ -74,3 +74,16 @@ export interface TMysqlConnection {
   /** Release this connection back to the pool. */
   release(): void;
 }
+
+/**
+ * `MysqlAdapter` options.
+ * @since 0.1.153
+ */
+export interface TMysqlAdapterOptions {
+  /**
+   * Read a managed view through an inline definition without the LEFT joins
+   * the query does not need (default `true`) — see the views guide,
+   * "Performance". `false` always reads the stored view by name.
+   */
+  viewJoinPruning?: boolean;
+}

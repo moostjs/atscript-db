@@ -97,6 +97,63 @@ const topCategories = await stats.findMany({
 
 For the full query syntax, see [Queries & Filters](/api/queries).
 
+## Performance: Unused Joins Are Skipped
+
+Since 0.1.153, a read of a managed view on MySQL, SQLite and MongoDB skips every `left` join it does not need. A `count()`, or a page that selects only entry-table columns, reads the entry table alone instead of probing every joined table for every row:
+
+```typescript
+// vp_order_view joins customers, regions, products, notes, … — all `left`
+await orders.count({ filter: { amount: { $gt: 100 } } });
+// MySQL: SELECT COUNT(*) FROM (SELECT … FROM `vp_orders`) AS `vp_order_view` WHERE `amount` > ?
+
+await orders.findMany({ filter: {}, controls: { $select: ["id", "customerName"], $limit: 20 } });
+// keeps the customers join (and any join its ON clause reads), skips the rest
+```
+
+The result is always the same as reading the stored view. A join is skipped only when **both** hold:
+
+1. **Nothing in the read uses it.** The read's `$select` (no `$select` = every column), filter, `$sort`, `$groupBy`, aggregates and `$having` name none of its columns — nor of a [computed column](./computed-columns) built on them, nor the ON clause of another join the read keeps, nor the view's `@db.view.filter`.
+2. **It can never add or remove rows.** It is a `left` join to a table (not a view) that matches at most one row:
+   - a [first-row join](./#first-row-joins), or
+   - an ON clause that is a plain `and` of `=` comparisons covering **every** field of the target's primary key or of one of its unique indexes (`@db.index.unique`). Each such field must be compared with a field of the same type and collation, or with a literal of its type. Extra conditions are fine — they only narrow the match.
+
+So these joins are **never** skipped: `inner` joins, joins whose ON uses `or` / `not`, joins on a non-unique column (or on part of a composite unique key), joins to a view. Grouped views (`@db.agg.*`), materialized views and external views are always read as stored. On MongoDB a unique key over an **optional** field does not count (its index is partial — a missing value would match many documents).
+
+Model the uniqueness you rely on. The decision is taken from the `.as` model, not from the database: a join on `code` is skippable only when `code` is declared `@db.index.unique` (and the index exists — run schema sync).
+
+### Per adapter
+
+| Adapter    | Default | How                                                                                                                                 |
+| ---------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL      | on      | Reads an inline copy of the view's definition without the skipped joins, with a `MERGE` hint (merged even with `derived_merge=off`) |
+| SQLite     | on      | Same inline definition (SQLite skips unused joins itself only outside `COUNT(*)` and aggregates)                                    |
+| MongoDB    | on      | Runs the view's pipeline on the entry collection without the skipped joins' `$lookup` + `$unwind`                                   |
+| PostgreSQL | —       | Not needed: PostgreSQL removes such joins itself, through views, `COUNT(*)` and first-row joins included                            |
+
+To read a view by name again, pass `viewJoinPruning: false` to the adapter (for a whole space), or set it on one view's adapter:
+
+```typescript
+createAdapter(uri, { viewJoinPruning: false }); // MySQL, SQLite, MongoDB
+new MysqlAdapter(driver, { viewJoinPruning: false });
+new SqliteAdapter(driver, { viewJoinPruning: false });
+new MongoAdapter(db, client, { viewJoinPruning: false });
+
+db.getAdapter(OrderView).viewJoinPruning = false; // just this view
+```
+
+::: warning Reads use the definition in your model
+A skipped-join read runs the view definition generated from the `.as` model, not the one stored in the database. A view altered by hand in the database (outside schema sync) is honoured only by reads that skip nothing — keep views managed by [schema sync](/sync/), or turn pruning off for that view.
+
+Such a read also reads the entry and joined tables (collections) directly: a database user granted access to the view but not to its tables needs `viewJoinPruning: false`.
+:::
+
+**DOs and DON'Ts**
+
+- Do declare the unique index a lookup join relies on — without it the join is always read.
+- Do pass `$select` on hot list endpoints: without it every column (and so every join that feeds one) is read.
+- Don't expect a join used only to **filter** rows (an `inner` join, or one the view filter reads) to be skipped — dropping it would change the rows.
+- MongoDB: a read that carries an operation-wide collation (a filter on a `@db.column.collate` field) reads the stored view.
+
 ## HTTP Access
 
 Use `AsDbReadableController` to expose a view as a read-only HTTP endpoint:

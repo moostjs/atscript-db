@@ -47,9 +47,10 @@ The second constructor argument (`client`) enables transaction support. If you d
 
 The third argument takes adapter options (since 0.1.151); `createAdapter(uri, options)` accepts the same:
 
-| Option           | Default | Effect                                                                          |
-| ---------------- | ------- | ------------------------------------------------------------------------------- |
-| `estimatedCount` | `false` | `true` or a list of collection names — see [Estimated counts](#estimated-count) |
+| Option            | Default | Effect                                                                                                                                             |
+| ----------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `estimatedCount`  | `false` | `true` or a list of collection names — see [Estimated counts](#estimated-count)                                                                    |
+| `viewJoinPruning` | `true`  | `false` reads managed views as stored — see [unused joins are skipped](/views/querying-views#performance-unused-joins-are-skipped) (since 0.1.153) |
 
 ::: tip Optional `mongodb` peer deps
 The `mongodb` driver declares several optional peers (e.g. `aws4` for `MONGODB-AWS`, `kerberos`, `mongodb-client-encryption`) that pnpm won't install for you. If you hit `MongoMissingDependencyError` in production but not locally, see the [mongodb optional dependencies docs](https://www.mongodb.com/docs/drivers/node/current/get-started/installation/) — this is upstream, not an atscript-db concern.

@@ -427,6 +427,8 @@ These parsers are applied per-pool (not globally), so they don't affect other `p
 
 Managed [views](/views/) are created with `CREATE OR REPLACE VIEW`.
 
+Views are always read by name: PostgreSQL itself removes a `left` join whose target is unique on the join condition and unused by the query — through the view, in `COUNT(*)`, for first-row joins too — so the adapter needs no [join skipping](/views/querying-views#performance-unused-joins-are-skipped) of its own.
+
 Since 0.1.147 a [first-row join](/views/#first-row-joins) renders as a correlated scalar subquery in the join's `ON` (no window functions):
 
 ```sql

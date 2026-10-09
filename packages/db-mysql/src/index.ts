@@ -14,20 +14,30 @@ export type { TMysql2DriverOptions } from "./mysql2-driver";
 // platform-specific @rolldown/binding-* package at runtime.
 export { buildWhere } from "./filter-builder";
 export type { TSqlFragment } from "./filter-builder";
-export type { TMysqlDriver, TMysqlRunResult, TMysqlConnection } from "./types";
+export type {
+  TMysqlDriver,
+  TMysqlRunResult,
+  TMysqlConnection,
+  TMysqlAdapterOptions,
+} from "./types";
 
 /**
  * Creates a {@link DbSpace} backed by a MySQL connection pool.
  *
  * @param uri - MySQL connection URI (e.g., `mysql://root@localhost:3306/mydb`)
  * @param options - Additional pool options passed to mysql2. `strictMode: false`
- *   (not a pool option) opts out of the per-session `STRICT_TRANS_TABLES` ({@link Mysql2Driver}).
+ *   (not a pool option) opts out of the per-session `STRICT_TRANS_TABLES` ({@link Mysql2Driver});
+ *   `viewJoinPruning: false` (not a pool option, since 0.1.153) reads managed views by name
+ *   ({@link TMysqlAdapterOptions}).
  * @returns A `DbSpace` that creates `MysqlAdapter` instances per table.
  */
 export function createAdapter(uri: string, options?: Record<string, unknown>): DbSpace {
-  const { strictMode, ...pool } = options ?? {};
+  const { strictMode, viewJoinPruning, ...pool } = options ?? {};
   const driver = new Mysql2Driver({ uri, ...pool } as any, {
     strictMode: strictMode as boolean | undefined,
   });
-  return new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
+  const adapterOptions = { viewJoinPruning: viewJoinPruning as boolean | undefined };
+  return new DbSpace(() => new MysqlAdapter(driver, adapterOptions), {
+    onClose: () => driver.close(),
+  });
 }

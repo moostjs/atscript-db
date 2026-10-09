@@ -389,6 +389,8 @@ const db = createAdapter("./data.db", {
 // or: new SqliteAdapter(driver, { transactionWaitTimeoutMs, transactionWaitWarnMs })
 ```
 
+The same options object takes `viewJoinPruning: false` (since 0.1.153) to read managed views as stored instead of [skipping their unused joins](/views/querying-views#performance-unused-joins-are-skipped).
+
 A waiter that exceeds `transactionWaitTimeoutMs` rejects with `DbError("TX_WAIT_TIMEOUT")`, which `@atscript/moost-db` maps to **503**. The timeout bounds the waiter's _total_ wait, however many transactions run ahead of it. The default is unbounded (like the mysql2 / pg pool defaults): a slow bulk import then delays concurrent requests instead of failing them. `transactionWaitTimeoutMs: 0` is a fail-fast mode — a statement or transaction that finds the connection busy rejects immediately instead of queueing.
 
 **DO / DON'T**

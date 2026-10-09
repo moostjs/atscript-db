@@ -57,6 +57,10 @@ const pool = mysql.createPool({ host: "localhost", database: "mydb" });
 const driver = new Mysql2Driver(pool);
 ```
 
+### View reads skip unused joins {#view-join-pruning}
+
+Since 0.1.153 a read of a managed view skips the `left` joins it does not need — MySQL never removes an unused outer join on its own, so a view's `COUNT(*)` otherwise probes every joined table per row. See [Unused joins are skipped](/views/querying-views#performance-unused-joins-are-skipped) for the rules; opt out with `new MysqlAdapter(driver, { viewJoinPruning: false })` or `createAdapter(uri, { viewJoinPruning: false })`.
+
 ### Strict mode per session {#strict-mode}
 
 Since 0.1.148 the driver appends `STRICT_TRANS_TABLES` to the session `sql_mode` of every connection its pool opens (the server's own modes stay; a session that already has `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` is left alone). A server with a non-strict default — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — therefore rejects a missing `NOT NULL` value, an out-of-range number and an over-long string, in plain inserts and in [ignore mode](#insert-ignore) alike, instead of storing a coerced default. Pass `strictMode: false` as the second argument to keep the server's `sql_mode`:

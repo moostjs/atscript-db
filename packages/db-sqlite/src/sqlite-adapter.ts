@@ -40,6 +40,7 @@ import type {
   BucketUnit,
   DbQuery,
   FilterExpr,
+  TReadColumnsKind,
   TViewCapability,
   UniquSelect,
 } from "@atscript/db";
@@ -61,6 +62,9 @@ import {
   renameGeoDistance,
   replaceColumnsFor,
   SEARCH_SOURCE_ALIAS,
+  fromSourceSql,
+  viewReadSource,
+  type TSqlFromSource,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
@@ -173,7 +177,9 @@ export class SqliteAdapter extends BaseDbAdapter {
   ) {
     super();
     this._gate = getSqliteTxGate(driver);
-    this._txOptions = { ...options };
+    const { viewJoinPruning, ...txOptions } = options ?? {};
+    this._txOptions = txOptions;
+    this.viewJoinPruning = viewJoinPruning !== false;
     this.driver.exec("PRAGMA foreign_keys = ON");
     // Eager and once per driver: tables sharing a driver may be created and
     // queried in any order, so the UDF (and the capability answer) must not
@@ -388,6 +394,24 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   /**
+   * The FROM source of a read of this adapter's table or view: a managed
+   * view read that needs only some of its LEFT joins reads an inline,
+   * pruned definition (`viewReadSource`, since 0.1.153) — SQLite omits an
+   * unused LEFT JOIN only in a non-aggregate query, so a view's `COUNT(*)`
+   * and aggregates otherwise probe every join. Off with `viewJoinPruning: false`.
+   */
+  private _readSource(
+    query: DbQuery,
+    kind: TReadColumnsKind,
+    partitionBy?: readonly string[],
+  ): TSqlFromSource {
+    const name = this.resolveTableName();
+    return this.viewJoinPruning
+      ? viewReadSource(sqliteDialect, this._table, name, query, kind, partitionBy)
+      : name;
+  }
+
+  /**
    * Relational predicates (`$some` / `$none`) render as correlated
    * `[NOT] EXISTS` subqueries — in reads and in mutation filters alike.
    *
@@ -507,14 +531,14 @@ export class SqliteAdapter extends BaseDbAdapter {
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
     const where = buildWhere(query.filter);
     const controls = { ...query.controls, $limit: 1 };
-    const { sql, params } = buildSelect(this.resolveTableName(), where, controls);
+    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, controls);
     this._log(sql, params);
     return this._stmt(() => this.driver.get(sql, params));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
-    const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
+    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, query.controls);
     this._log(sql, params);
     return this._stmt(() => this.driver.all(sql, params));
   }
@@ -530,7 +554,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const where = buildWhere(query.filter);
     const { sql, params } = buildPartitionedSelect(
       sqliteDialect,
-      this.resolveTableName(),
+      this._readSource(query, "rows", partitionBy),
       where,
       query.controls,
       partitionBy,
@@ -554,9 +578,8 @@ export class SqliteAdapter extends BaseDbAdapter {
       return super.findManyWithCount(query);
     }
     const where = buildWhere(query.filter);
-    const tableName = this.resolveTableName();
-    const { sql, params } = buildSelect(tableName, where, query.controls);
-    const countSql = `SELECT COUNT(*) as cnt FROM "${esc(tableName)}" WHERE ${where.sql}`;
+    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, query.controls);
+    const countSql = this._countSql(query, where);
     this._log(sql, params);
     this._log(countSql, where.params);
     return this._stmt(() => ({
@@ -565,21 +588,29 @@ export class SqliteAdapter extends BaseDbAdapter {
     }));
   }
 
+  /** `SELECT COUNT(*) as cnt FROM <source> WHERE <where>` of a count read. */
+  private _countSql(query: DbQuery, where: TSqlFragment): string {
+    const source = fromSourceSql(sqliteDialect, this._readSource(query, "count"));
+    return `SELECT COUNT(*) as cnt FROM ${source} WHERE ${where.sql}`;
+  }
+
   async count(query: DbQuery): Promise<number> {
     const where = buildWhere(query.filter);
-    const tableName = this.resolveTableName();
-    const sql = `SELECT COUNT(*) as cnt FROM "${esc(tableName)}" WHERE ${where.sql}`;
+    const sql = this._countSql(query, where);
     this._log(sql, where.params);
     const row = await this._stmt(() => this.driver.get<{ cnt: number }>(sql, where.params));
     return row?.cnt ?? 0;
   }
 
   async aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    const tableName = this.resolveTableName();
     // Grouped-search contract: see `resolveAggregateSearch`. The FTS5 predicate
     // goes in the pre-aggregation WHERE rather than a JOIN, because the
     // aggregate builders render their own unaliased FROM.
     const search = resolveAggregateSearch(query.controls);
+    // A grouped search correlates its FTS rows with the view's own name
+    const tableName: TSqlFromSource = search
+      ? this.resolveTableName()
+      : this._readSource(query, "aggregate");
     const where = search
       ? andWhere(
           this._buildSearchPredicate(search.text, search.indexName),

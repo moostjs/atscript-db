@@ -6,6 +6,7 @@ import {
   type AtscriptQueryNode,
   type TViewColumnMapping,
   type TViewJoin,
+  type TViewReadPlan,
 } from "@atscript/db";
 import type { Document } from "mongodb";
 
@@ -35,14 +36,19 @@ function joinedAs(table: string): string {
  * tables live under `__joined_<scope>` — the physical collection, or the
  * `@db.alias` type name for an aliased join (`__joined_Manager`), whose
  * `$lookup.from` stays the physical collection (since 0.1.141).
+ * `variant` (since 0.1.153) renders a pruned read variant of the view
+ * (`AtscriptDbView.readPlan`) instead of its full definition.
  * The entry collection and a `$lookup.from` may be views. A column whose source may be missing
  * (`nullable` mapping) reads as null; every other column is a plain path, so
  * a `$match` / `$sort` on the view can still push down to an index.
  * @since 0.1.136
  */
-export function buildViewPipeline(view: AtscriptDbView): Document[] {
-  const plan = view.viewPlan;
-  const columns = view.getViewColumnMappings();
+export function buildViewPipeline(
+  view: AtscriptDbView,
+  variant?: Pick<TViewReadPlan, "plan" | "columns">,
+): Document[] {
+  const plan = variant?.plan ?? view.viewPlan;
+  const columns = variant?.columns ?? view.getViewColumnMappings();
   const pipeline: Document[] = [];
 
   // Path prefix of each table's fields in the pipeline document: `""` for

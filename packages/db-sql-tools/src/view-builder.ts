@@ -144,7 +144,24 @@ function firstRowOn(
 }
 
 /**
- * Builds a CREATE VIEW statement from a view plan and column mappings.
+ * Builds a CREATE VIEW statement from a view plan and column mappings:
+ * `<dialect.createViewPrefix> <view> AS <buildViewSelect(…)>`.
+ */
+export function buildCreateView(
+  dialect: SqlDialect,
+  viewName: string,
+  plan: TViewPlan,
+  columns: TViewColumnMapping[],
+  resolveFieldRef: (ref: AtscriptQueryFieldRef) => string,
+): string {
+  return `${dialect.createViewPrefix} ${dialect.quoteTable(viewName)} AS ${buildViewSelect(dialect, plan, columns, resolveFieldRef)}`;
+}
+
+/**
+ * The SELECT of a managed view — the body of its CREATE VIEW, and (since
+ * 0.1.153) the inline definition a pruned view read selects from (with a
+ * `AtscriptDbView.readPlan` variant's plan and columns), so the two can never
+ * drift. Parameter-free: predicate literals are inlined.
  *
  * Joins render in declaration order — `JOIN` (inner, the default) or
  * `LEFT JOIN` for `kind: "left"`; a `@db.alias` target renders as
@@ -153,10 +170,10 @@ function firstRowOn(
  * name for an aliased join); `resolveFieldRef` renders predicate refs (join
  * ON, WHERE, HAVING fallbacks) as `"table"."column"`. The entry table and a
  * join target may be views.
+ * @since 0.1.153
  */
-export function buildCreateView(
+export function buildViewSelect(
   dialect: SqlDialect,
-  viewName: string,
   plan: TViewPlan,
   columns: TViewColumnMapping[],
   resolveFieldRef: (ref: AtscriptQueryFieldRef) => string,
@@ -179,7 +196,7 @@ export function buildCreateView(
     .join(", ");
 
   // FROM entry table
-  let sql = `${dialect.createViewPrefix} ${dialect.quoteTable(viewName)} AS SELECT ${selectCols} FROM ${dialect.quoteIdentifier(plan.entryTable)}`;
+  let sql = `SELECT ${selectCols} FROM ${dialect.quoteIdentifier(plan.entryTable)}`;
 
   // JOINs — declaration order; a later join may reference an earlier one
   for (const join of plan.joins) {

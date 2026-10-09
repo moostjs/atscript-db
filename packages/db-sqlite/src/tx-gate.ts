@@ -25,11 +25,19 @@ export interface SqliteTxWaitOptions {
   logger?: TGenericLogger;
 }
 
-/** Options accepted by `SqliteAdapter` / `createAdapter` for the transaction gate. */
+/** Options accepted by `SqliteAdapter` / `createAdapter`: the transaction gate's, plus `viewJoinPruning`. */
 export type SqliteAdapterOptions = Pick<
   SqliteTxWaitOptions,
   "transactionWaitTimeoutMs" | "transactionWaitWarnMs"
->;
+> & {
+  /**
+   * Read a managed view through an inline definition without the LEFT joins
+   * the query does not need (default `true`) — see the views guide,
+   * "Performance". `false` always reads the stored view by name.
+   * @since 0.1.153
+   */
+  viewJoinPruning?: boolean;
+};
 
 const DEFAULT_WARN_MS = 5000;
 
