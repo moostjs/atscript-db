@@ -13,10 +13,12 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let UnionMembers: any;
 let UnionAliasMembers: any;
+let UnionAliasProps: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ UnionMembers, UnionAliasMembers } = await import("./fixtures/union-members.as"));
+  ({ UnionMembers, UnionAliasMembers, UnionAliasProps } =
+    await import("./fixtures/union-members.as"));
 });
 
 function field(table: AtscriptDbTable, path: string): TDbFieldMeta {
@@ -83,5 +85,16 @@ describe("union / tuple member annotations", () => {
       /pair\.0/,
     );
     await expect(table.insertOne({ id: 3, x: 5, ...row, n: 1.5 } as any)).rejects.toThrow(/n/);
+  });
+
+  it("a union alias prop and members inside nested objects get no member default", async () => {
+    const table = new AtscriptDbTable(UnionAliasProps, new MockAdapter());
+    for (const path of ["maybe", "stamped.at", "group.at"]) {
+      expect(field(table, path).defaultValue, path).toBeUndefined();
+    }
+    expect(field(table, "maybeDef").defaultValue).toEqual({ kind: "fn", fn: "now" });
+    const payload = { id: 1, stamped: null, group: { at: null } };
+    await expect(table.insertOne(payload as any)).rejects.toThrow(/maybe/);
+    await expect(table.insertOne({ ...payload, maybe: null } as any)).resolves.toBeDefined();
   });
 });

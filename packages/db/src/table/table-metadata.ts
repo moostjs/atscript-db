@@ -531,16 +531,15 @@ export class TableMetadata {
         | (TAtscriptAnnotatedType & { __flat_union?: boolean })
         | undefined;
       if (!flat?.__flat_union) continue;
-      const metadata = new Map<string, unknown>();
+      // The synthetic entry's map is its own (no member shares it): refill in place.
+      const target = flat.metadata as Map<string, unknown>;
+      target.clear();
       for (const entry of entries) {
         if (entry.member && isInlinePrimitive(entry.type)) continue;
         for (const [key, value] of entry.metadata) {
-          if (!entry.member || !key.startsWith("db.")) metadata.set(key, value);
+          if (!entry.member || !key.startsWith("db.")) target.set(key, value);
         }
       }
-      const target = flat.metadata as Map<string, unknown>;
-      target.clear();
-      for (const [key, value] of metadata) target.set(key, value);
     }
   }
 

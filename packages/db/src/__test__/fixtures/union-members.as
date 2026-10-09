@@ -38,3 +38,28 @@ export interface UnionAliasMembers {
 
     tsPair?: [number.timestamp.created, number.timestamp.created]
 }
+
+export type MaybeCreated = number.timestamp.created | null
+
+export interface Stamped {
+    label: string
+    at: number.timestamp.created | null
+}
+
+// A prop typed by a union alias, and members inside nested objects.
+@db.table 'union_alias_props'
+export interface UnionAliasProps {
+    @meta.id
+    id: number
+
+    maybe: MaybeCreated
+
+    @db.default.now
+    maybeDef: MaybeCreated
+
+    stamped: Stamped | null
+
+    group: {
+        at: number.timestamp.created | null
+    }
+}
