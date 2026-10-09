@@ -164,14 +164,14 @@ describe("estimatedCount (opt-in)", () => {
 
 // ── C6 increments inside the session ─────────────────────────────────────────
 
-describe("@db.default.increment allocation joins the transaction", () => {
-  it("passes the session to the counter update and the max probe", async () => {
+describe("@db.default.increment allocation inside a transaction", () => {
+  it("advances the counter outside the session; the max probe joins it", async () => {
     const { space } = setup();
     const adapter = space.getAdapter(fx.PfTicket) as MongoAdapter;
     space.getTable(fx.PfTicket).getMetadata();
     await inTx(adapter, () => adapter.insertOne({ subject: "s" }));
     const counter = calls.find((c) => c.method === "findOneAndUpdate")!;
-    expect(counter.args[2]).toMatchObject({ upsert: true, session: SESSION });
+    expect(counter.args[2]).toEqual({ upsert: true, returnDocument: "after" });
     const max = calls.find((c) => c.method === "aggregate")!;
     expect(max.args[1]).toEqual({ session: SESSION });
     expect(calls.find((c) => c.method === "insertOne")!.args[1]).toEqual({ session: SESSION });
@@ -220,56 +220,6 @@ describe("ungrouped aggregate over no rows", () => {
 });
 
 // ── MG-3 $with lookups by field ──────────────────────────────────────────────
-
-describe("$with lookups on MongoDB 5.0+ name the join pair", () => {
-  const client = (maxWireVersion: number) => ({
-    topology: {
-      description: {
-        servers: new Map([
-          ["a", { maxWireVersion }],
-          ["b", { maxWireVersion: 0 }],
-        ]),
-      },
-    },
-  });
-
-  async function lookupOf(wire: number | undefined, relation: string, type: any, rows: unknown[]) {
-    const collection = fakeCollection(() => [], rows);
-    const { T } = setup({}, collection, wire === undefined ? undefined : client(wire));
-    await T(type).findMany({ filter: {}, controls: { $with: [{ name: relation }] } });
-    const pipeline = calls.find((c) => c.method === "aggregate")!.args[0] as Array<
-      Record<string, any>
-    >;
-    return pipeline.find((s) => s.$lookup)!.$lookup as Record<string, any>;
-  }
-
-  it("TO: localField / foreignField next to the unchanged correlation stages", async () => {
-    const lookup = await lookupOf(17, "author", fx.PfPost, [{ id: 1, authorId: 3 }]);
-    expect(lookup.localField).toBe("authorId");
-    expect(lookup.foreignField).toBe("id");
-    expect(lookup.let).toEqual({ fk_k0: { $ifNull: ["$authorId", null] } });
-    expect(lookup.pipeline.slice(0, 2)).toEqual([
-      { $match: { $expr: { $eq: ["$id", "$$fk_k0"] } } },
-      { $match: { id: { $ne: null } } },
-    ]);
-  });
-
-  it("FROM: the same, from the primary key to the foreign key", async () => {
-    const lookup = await lookupOf(13, "posts", fx.PfAuthor, [{ id: 3, email: "e", name: "n" }]);
-    expect(lookup.localField).toBe("id");
-    expect(lookup.foreignField).toBe("authorId");
-  });
-
-  it("keeps the pipeline-only form before 5.0 or when the version is unknown", async () => {
-    for (const wire of [12, undefined]) {
-      const lookup = await lookupOf(wire, "author", fx.PfPost, [{ id: 1, authorId: 3 }]);
-      expect(lookup.localField).toBeUndefined();
-      expect(lookup.foreignField).toBeUndefined();
-    }
-  });
-});
-
-// ── MG-4 / MG-5 search counts and vector pre-filters ─────────────────────────
 
 describe("search with count", () => {
   function mocked(rows: (pipeline: Array<Record<string, any>>) => unknown[]) {
@@ -351,6 +301,13 @@ describe("vector search pre-filters", () => {
     ]);
   });
 
+  it("keeps numCandidates within the Atlas cap (10000) for deep pages", async () => {
+    const { table, aggregate } = vectorPipeline();
+    await table.vectorSearch([1, 0, 0], { filter: {}, controls: { $skip: 1500, $limit: 100 } });
+    const pipeline = aggregate.mock.calls[0]![0] as Array<Record<string, any>>;
+    expect(pipeline[0]!.$vectorSearch).toMatchObject({ limit: 1600, numCandidates: 10_000 });
+  });
+
   it("with count: the same split before the $facet", async () => {
     const { table, aggregate } = vectorPipeline();
     await table.vectorSearchWithCount([1, 0, 0], {
@@ -421,13 +378,26 @@ describe("vector search pre-filters", () => {
 // ── MG-2 collated indexes ────────────────────────────────────────────────────
 
 describe("schema sync builds plain / unique indexes with the fields' collation", () => {
-  function syncHost(existing: Array<Record<string, unknown>>) {
+  function syncHost(
+    existing: Array<Record<string, unknown>>,
+    { duplicates = [] as unknown[], defaultCollation = undefined as unknown } = {},
+  ) {
     const { space } = setup();
     space.getTable(fx.PfAuthor).getMetadata();
     const adapter = space.getAdapter(fx.PfAuthor) as MongoAdapter;
     const createIndex = vi.fn(async () => "ok");
     const dropIndex = vi.fn(async () => undefined);
+    const aggregate = vi.fn((_pipeline: unknown, _options: unknown) => ({
+      toArray: async () => duplicates,
+    }));
+    const db = Object.create((adapter as any).db);
+    db.listCollections = (() => ({
+      next: async () => ({ name: "pf_authors", options: { collation: defaultCollation } }),
+    })) as never;
+    Object.defineProperty(adapter, "db", { value: db });
     vi.spyOn(adapter, "collection", "get").mockReturnValue({
+      collectionName: "pf_authors",
+      aggregate,
       listIndexes: () => ({ toArray: async () => existing }),
       createIndex,
       dropIndex,
@@ -438,7 +408,7 @@ describe("schema sync builds plain / unique indexes with the fields' collation",
       }),
     } as never);
     vi.spyOn(adapter, "ensureCollectionExists").mockResolvedValue(undefined);
-    return { adapter, createIndex, dropIndex };
+    return { adapter, createIndex, dropIndex, aggregate };
   }
 
   const options = (createIndex: ReturnType<typeof vi.fn>) =>
@@ -478,6 +448,32 @@ describe("schema sync builds plain / unique indexes with the fields' collation",
     await adapter.syncIndexes();
     expect(dropIndex.mock.calls).toEqual([["atscript__unique__pf_author_email"]]);
     expect([...options(createIndex).keys()]).toEqual(["atscript__unique__pf_author_email"]);
+  });
+
+  it("keeps a unique index whose collated replacement the data violates", async () => {
+    const { adapter, createIndex, dropIndex, aggregate } = syncHost(
+      [{ name: "atscript__unique__pf_author_email", key: { email: 1 }, unique: true }],
+      { duplicates: [{ _id: { email: "ann@x" }, n: 2 }] },
+    );
+    await expect(adapter.syncIndexes()).rejects.toThrow(/current index is kept/);
+    expect(aggregate.mock.calls[0]![1]).toMatchObject({ collation: { locale: "en", strength: 2 } });
+    expect(dropIndex).not.toHaveBeenCalled();
+    expect(options(createIndex).has("atscript__unique__pf_author_email")).toBe(false);
+  });
+
+  it("an index inheriting the collection's default collation counts as byte-wise", async () => {
+    const { adapter, dropIndex } = syncHost(
+      [
+        {
+          name: "atscript__plain__pf_author_name",
+          key: { name: 1 },
+          collation: { locale: "fr", strength: 1 },
+        },
+      ],
+      { defaultCollation: { locale: "fr", strength: 1 } },
+    );
+    await adapter.syncIndexes();
+    expect(dropIndex.mock.calls).not.toContainEqual(["atscript__plain__pf_author_name"]);
   });
 
   it("drops the collation of an index whose fields became byte-wise", async () => {

@@ -108,6 +108,20 @@ describe("nested FROM replace across parents", () => {
     expect(childReads()).toEqual([0, 2]);
   });
 
+  it("patch: a parent's earlier $insert is seen by its later $replace (reads per parent)", async () => {
+    await parents.bulkUpdate([
+      { id: 1, children: { $insert: [{ label: "y" }] } },
+      { id: 1, children: { $replace: [{ id: 10, label: "a2" }] } },
+      { id: 2, children: { $replace: [{ id: 20, label: "c2" }] } },
+    ]);
+    expect(await childRows()).toEqual([
+      [10, "a2", 1],
+      [20, "c2", 2],
+      [30, "d", 3],
+    ]);
+    expect(childReads()[0]).toBe(0);
+  });
+
   it("a single parent reads its children as before", async () => {
     await parents.replaceOne({ id: 2, children: [{ label: "only" }] });
     expect(childReads()).toEqual([0, 1]);

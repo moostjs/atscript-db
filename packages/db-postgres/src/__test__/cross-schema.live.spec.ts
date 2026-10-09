@@ -22,7 +22,12 @@ async function adminQuery(sql: string, database?: string): Promise<boolean> {
     const { Client } = (await import("pg")).default;
     const url = new URL(SERVER_URL);
     if (database) url.pathname = `/${database}`;
-    const client = new Client({ connectionString: url.toString(), connectionTimeoutMillis: 1500 });
+    // a short connect timeout only for the reachability probe — a slow (remote) server must not
+    // make a setup statement fail silently
+    const client = new Client({
+      connectionString: url.toString(),
+      connectionTimeoutMillis: sql === "SELECT 1" ? 1500 : 15_000,
+    });
     await client.connect();
     try {
       await client.query(sql);
@@ -48,7 +53,7 @@ describe.skipIf(!reachable)("[postgres live] cross-schema FKs + non-public curre
     fx = await import("./fixtures/cross-schema-live.as");
     await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
     await adminQuery(`CREATE DATABASE "${DB}"`);
-    await adminQuery(`CREATE SCHEMA "relfix_sp"`, DB);
+    expect(await adminQuery(`CREATE SCHEMA "relfix_sp"`, DB)).toBe(true);
     const url = new URL(SERVER_URL);
     url.pathname = `/${DB}`;
     // schema-less tables live in `relfix_sp`, not `public`

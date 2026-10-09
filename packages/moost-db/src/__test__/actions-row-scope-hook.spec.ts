@@ -275,7 +275,7 @@ describe("actionRowScope — reflected in $actions (/query, /pages)", () => {
     });
     expect(findMany).toHaveBeenCalledTimes(2); // the read + one scope query
     expect(findMany.mock.calls[1][0]).toEqual({
-      filter: { $and: [{ $or: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }] }, U1] },
+      filter: { $and: [{ id: { $in: [1, 2, 3, 4] } }, U1] },
       controls: { $select: ["id"] },
     });
   });
@@ -357,7 +357,7 @@ describe("actionRowScope — reflected in $actions (/query, /pages)", () => {
     ]);
     expect(findMany.mock.calls[0][0]).toMatchObject({ controls: { $select: ["owner", "code"] } });
     expect(findMany.mock.calls[1][0]).toEqual({
-      filter: { $and: [{ $or: [{ code: "c1" }, { code: "c2" }] }, U1] },
+      filter: { $and: [{ code: { $in: ["c1", "c2"] } }, U1] },
       controls: { $select: ["code"] },
     });
   });

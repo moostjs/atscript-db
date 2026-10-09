@@ -14,31 +14,32 @@ This page is about **intercepting existing CRUD**. For exposing **new domain ope
 
 All hooks are protected methods with sensible defaults (pass-through or no-op). Override only the ones you need.
 
-| Hook                                    | Available On                          | Called When                                    | Purpose                                                           |
-| --------------------------------------- | ------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
-| `prepareRequest(ctx)`                   | Both                                  | First, on every endpoint                       | Resolve per-request policy asynchronously (since 0.1.143)         |
-| `transformFilter(filter)`               | Both                                  | Before `/query` / `/pages` reads               | Modify filters (add tenant, soft-delete)                          |
-| `transformOne(filter)`                  | Both                                  | Before `/one` / `/one/:id` reads               | Filter overlay for id-based reads (defaults to `transformFilter`) |
-| `transformRelationFilter(path, filter)` | Both                                  | Each client `$some` / `$none`                  | Row overlay of the related table (since 0.1.147)                  |
-| `transformProjection(projection)`       | Both                                  | Before every read                              | Restrict visible fields                                           |
-| `hasField(path)`                        | Both                                  | Every field a request references               | Hide fields per request — answered as `Unknown field`             |
-| `validateInsights(insights)`            | Both                                  | After query parsing                            | Field-level access control                                        |
-| `computeEmbedding(search, fieldName?)`  | Both                                  | When `$vector` is present                      | Convert text to embedding vector                                  |
-| `decorateRows(rows, ctx)`               | Both                                  | After every row read                           | Attach computed `$`-keys, or `@DbDecorations` columns, to rows    |
-| `resolveRowIds(ids, ctx)`               | Both (`"remove"` on `AsDbController`) | Before any id-addressed read, delete or action | Map stale / alias ids to the row's current id (since 0.1.148)     |
-| `actionRowScope(action, ctx)`           | Both                                  | Action gate, `$actions` reads                  | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)  |
-| `queryTargetScope(action)`              | Both                                  | Resolving a query target                       | Read scope "all matching rows" resolve under (since 0.1.147)      |
-| `onWrite(action, data)`                 | AsDbController                        | Before insert/replace/update                   | Transform or reject write data (untrusted body, outside any tx)   |
-| `onRemove(id)`                          | AsDbController                        | Before delete                                  | Allow or prevent deletion                                         |
-| `guardWrite(ctx)`                       | AsDbController                        | Inside the table's tx, validated               | Validated-stage checks / enrichment (since 0.1.128)               |
-| `guardRemove(ctx)`                      | AsDbController                        | Inside the table's tx, id known                | Validated-stage delete checks (since 0.1.128)                     |
-| `checkWrite(ctx)`                       | AsDbController                        | Inside the table's tx, after it                | Post-write "WITH CHECK" on the written rows (since 0.1.143)       |
-| `withTransaction(fn)`                   | AsDbController                        | Called by you                                  | One transaction across several table ops in a custom route        |
-| `meta()`                                | Both                                  | On `GET /meta` request                         | Enrich the metadata response (cached)                             |
-| `applyMetaOverlay(meta)`                | Both                                  | Per request, after `meta()`                    | Per-principal `crud` / `actions` filtering (returns a clone)      |
-| `allowedActions(names)`                 | Both                                  | `$actions`, `/meta/actions`                    | Row-level actions the caller may run (0.1.145)                    |
-| `authorizeForm(name, actionNames)`      | Both                                  | On `GET /meta/form/:name`                      | Refuse a form per request — answered as an unknown form (0.1.143) |
-| `init()`                                | Both                                  | On controller construction                     | One-time setup                                                    |
+| Hook                                    | Available On                          | Called When                                    | Purpose                                                            |
+| --------------------------------------- | ------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------ |
+| `prepareRequest(ctx)`                   | Both                                  | First, on every endpoint                       | Resolve per-request policy asynchronously (since 0.1.143)          |
+| `transformFilter(filter)`               | Both                                  | Before `/query` / `/pages` reads               | Modify filters (add tenant, soft-delete)                           |
+| `transformOne(filter)`                  | Both                                  | Before `/one` / `/one/:id` reads               | Filter overlay for id-based reads (defaults to `transformFilter`)  |
+| `transformRelationFilter(path, filter)` | Both                                  | Each client `$some` / `$none`                  | Row overlay of the related table (since 0.1.147)                   |
+| `transformProjection(projection)`       | Both                                  | Before every read                              | Restrict visible fields                                            |
+| `hasField(path)`                        | Both                                  | Every field a request references               | Hide fields per request — answered as `Unknown field`              |
+| `validateInsights(insights)`            | Both                                  | After query parsing                            | Field-level access control                                         |
+| `computeEmbedding(search, fieldName?)`  | Both                                  | When `$vector` is present                      | Convert text to embedding vector                                   |
+| `decorateRows(rows, ctx)`               | Both                                  | After every row read                           | Attach computed `$`-keys, or `@DbDecorations` columns, to rows     |
+| `resolveRowIds(ids, ctx)`               | Both (`"remove"` on `AsDbController`) | Before any id-addressed read, delete or action | Map stale / alias ids to the row's current id (since 0.1.148)      |
+| `actionRowScope(action, ctx)`           | Both                                  | Action gate, `$actions` reads                  | Rows an action may run on (0.1.145; candidates in `ctx` 0.1.147)   |
+| `queryTargetScope(action)`              | Both                                  | Resolving a query target                       | Read scope "all matching rows" resolve under (since 0.1.147)       |
+| `onWrite(action, data)`                 | AsDbController                        | Before insert/replace/update                   | Transform or reject write data (untrusted body, outside any tx)    |
+| `onRemove(id)`                          | AsDbController                        | Before delete                                  | Allow or prevent deletion                                          |
+| `guardWrite(ctx)`                       | AsDbController                        | Inside the table's tx, validated               | Validated-stage checks / enrichment (since 0.1.128)                |
+| `guardRemove(ctx)`                      | AsDbController                        | Inside the table's tx, id known                | Validated-stage delete checks (since 0.1.128)                      |
+| `checkWrite(ctx)`                       | AsDbController                        | Inside the table's tx, after it                | Post-write "WITH CHECK" on the written rows (since 0.1.143)        |
+| `withTransaction(fn)`                   | AsDbController                        | Called by you                                  | One transaction across several table ops in a custom route         |
+| `meta()`                                | Both                                  | On `GET /meta` request                         | Enrich the metadata response (cached)                              |
+| `applyMetaOverlay(meta)`                | Both                                  | Per request, after `meta()`                    | Per-principal `crud` / `actions` filtering (returns a clone)       |
+| `metaHttpCaching()`                     | Both                                  | On `GET /meta`, `GET /meta/form/:name`         | `ETag` / `Cache-Control` / `Vary` of `/meta`, or `false` (0.1.151) |
+| `allowedActions(names)`                 | Both                                  | `$actions`, `/meta/actions`                    | Row-level actions the caller may run (0.1.145)                     |
+| `authorizeForm(name, actionNames)`      | Both                                  | On `GET /meta/form/:name`                      | Refuse a form per request — answered as an unknown form (0.1.143)  |
+| `init()`                                | Both                                  | On controller construction                     | One-time setup                                                     |
 
 ::: info Deprecated hook
 `checkGates(parsed)` still runs after the field capability gate but is deprecated since 0.1.128: the gate derived from `/meta.fields` already rejects every unlisted or non-sortable / non-filterable path before it. Override the read hooks above, or the table-level `guard` options, instead.
@@ -704,7 +705,7 @@ protected async meta() {
 }
 ```
 
-The base implementation caches its own result. Subclasses overriding with async enrichment should cache their own computation if they need per-request dedup. Use `meta()` for **static** enrichment that is the same for every caller. For **per-principal** filtering of `crud` / `actions`, override `applyMetaOverlay()` instead — it runs after caching, on every request.
+The base implementation caches its own result. Subclasses overriding with async enrichment should cache their own computation if they need per-request dedup. Never mutate the object `super.meta()` returns — it is the shared cached envelope; build a new one as above. An overridden `meta()` is sent with the caching headers but serialized per request, without an [ETag](./crud#meta-caching). Use `meta()` for **static** enrichment that is the same for every caller. For **per-principal** filtering of `crud` / `actions`, override `applyMetaOverlay()` instead — it runs after caching, on every request.
 
 ### applyMetaOverlay {#applymetaoverlay}
 
@@ -738,7 +739,39 @@ The argument is the cached envelope shared across all requests. Mutating it leak
 `applyMetaOverlay` controls what the UI **renders**. It does NOT stop a client from hitting the underlying route — for real per-principal route enforcement, use Moost auth guards (`@Authenticate`) and the [server-side action gate](./actions#server-side-gate). See [Permissions](./permissions) for the broader contract.
 :::
 
+::: tip Keep `/meta` cacheable (since 0.1.151)
+`/meta` is serialized once and sent with an [ETag](./crud#meta-caching) only while the same object comes back for the same inputs. Return `meta` itself when nothing changes for the caller. If you build variants, memoize them and return them through `stableMeta(variant)` (exported by `@atscript/moost-db`; it deep-freezes the object and marks it reusable), and never build a new object for the same inputs. Freezing alone (`Object.freeze`) is not enough. A fresh object on every request is still correct; it is just re-serialized and sent without an ETag. In tests (`NODE_ENV=test`), in development (`NODE_ENV=development`) or with `ATSCRIPT_DB_FREEZE_META=1`, served `/meta` objects are deep-frozen, so an in-place mutation throws.
+:::
+
 May return a `Promise`. By default, the [`$actions`](./actions#actions-augmentation) augmentation and [`GET /meta/actions/:id`](./actions#available-actions) take their action set from this overlay through [`allowedActions`](#allowedactions). Since 0.1.143 they read the cached envelope through `applyMetaOverlay` directly (`resolveMeta()`), not through an overridden `meta()`, and without re-running [`prepareRequest`](#preparerequest).
+
+### metaHttpCaching {#metahttpcaching}
+
+Since 0.1.151. Controls the HTTP caching headers of `GET /meta` and `GET /meta/form/:name` (behavior: [Caching and revalidation](./crud#meta-caching)). The default `{}` sends `Cache-Control: private, no-cache`, merges `Authorization` and `Cookie` into `Vary`, and adds a weak `ETag` with `304` revalidation.
+
+```typescript
+// No browser copy at all (shared machines, strict deployments):
+protected override metaHttpCaching() {
+  return { cacheControl: "no-store" };
+}
+
+// Responses vary by a tenant header too:
+protected override metaHttpCaching() {
+  return { vary: ["Authorization", "Cookie", "X-Tenant"] };
+}
+
+// The pre-0.1.151 response: no ETag, no 304, no caching headers.
+protected override metaHttpCaching() {
+  return false as const;
+}
+```
+
+| Option         | Default                       | Effect                                                                                 |
+| -------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
+| `cacheControl` | `"private, no-cache"`         | `Cache-Control` value. A `Cache-Control` already set (e.g. by an interceptor) is kept. |
+| `vary`         | `["Authorization", "Cookie"]` | Merged into an existing `Vary` header (case-insensitive; `*` is left alone).           |
+
+`TDbMetaHttpCaching` is exported from `@atscript/moost-db`. Keep `Vary` covering whatever identifies the caller (an API-key header, a tenant header). An after-interceptor that replaces the response body turns the ETag off for that response.
 
 ### allowedActions {#allowedactions}
 

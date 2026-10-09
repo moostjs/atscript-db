@@ -6,6 +6,7 @@ import {
 import type {
   AtscriptDbReadable,
   FilterExpr,
+  TQueryPathRefs,
   TCrudPermissions,
   TDbActionInfo,
   TDbActionTargetSummary,
@@ -94,6 +95,8 @@ import {
   idKey,
   projectRow,
   requiredFieldsOf,
+  splitPaths,
+  type TSplitPaths,
   type TAppliedIds,
   type TRowsByIdSource,
 } from "./actions/rows-by-id";
@@ -113,6 +116,7 @@ import { mapShape, selectShape } from "./select-shape";
 import { getAtscriptDbMate } from "./mate";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict, type TGateOp } from "./meta/field-capabilities";
+import { bits, freezeShared, identityId, metaVariant } from "./meta/meta-cache";
 import { insightError, unknownInsight, unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
@@ -251,6 +255,16 @@ function routedController(ctx: EventContext): unknown {
   return undefined;
 }
 
+/**
+ * `collectQueryPaths`' aggregate flag for a parsed query: `true` when its
+ * `$select` carries computed entries (aggregates, calendar buckets), else
+ * `undefined` (aggregate mode iff `$groupBy`).
+ */
+function computedMode(parsed: { controls?: object }): true | undefined {
+  const select = (parsed.controls as { $select?: unknown } | undefined)?.$select;
+  return (Array.isArray(select) && select.some((item) => typeof item !== "string")) || undefined;
+}
+
 /** The 400 of a filter / sort on a `@db.writeOnly` field. */
 function writeOnlyError(path: string, op: "filter" | "sort"): HttpError {
   const verdict = writeOnlyVerdict(path, op);
@@ -361,19 +375,51 @@ export class AsDbReadableController<
    * would keep advertising (and gating) the pre-sync answer (since 0.1.132).
    */
   protected get capabilities(): FieldCapabilityIndex {
+    const readable = this.readable;
+    const geo = readable.isGeoSearchable();
+    const units = readable.calendarBucketUnits();
+    const fns = readable.aggregateFns();
+    const expr = readable.supportsAggregateExpressions();
     const current = this._capabilities;
-    if (current && current.signature === FieldCapabilityIndex.adapterSignature(this.readable)) {
+    const seen = this._capabilityInputs;
+    // Identity fast path: the adapter answered with the very same values (its
+    // sets are constants) as when `current` was last confirmed.
+    if (
+      current &&
+      seen &&
+      seen.geo === geo &&
+      seen.units === units &&
+      seen.unitsSize === units.size &&
+      seen.fns === fns &&
+      seen.fnsSize === fns.size &&
+      seen.expr === expr
+    ) {
+      return current;
+    }
+    const inputs = { geo, units, unitsSize: units.size, fns, fnsSize: fns.size, expr };
+    if (current && current.signature === FieldCapabilityIndex.adapterSignature(readable)) {
+      this._capabilityInputs = inputs;
       return current;
     }
     const index = new FieldCapabilityIndex(
-      this.readable,
+      readable,
       this._writeOnlySet,
       this._decorations?.visibleOn,
     );
     this._capabilities = index;
+    this._capabilityInputs = inputs;
     return index;
   }
   private _capabilities?: FieldCapabilityIndex;
+  /** The adapter answers {@link capabilities} last confirmed its index against (identity fast path). */
+  private _capabilityInputs?: {
+    geo: boolean;
+    units: ReadonlySet<unknown>;
+    unitsSize: number;
+    fns: ReadonlySet<unknown>;
+    fnsSize: number;
+    expr: boolean;
+  };
   /** The client relational-predicate gate (since 0.1.147), built on first use — see {@link _relationGate}. */
   private _relGate?: RelationPredicateGate;
   /**
@@ -407,6 +453,18 @@ export class AsDbReadableController<
   private readonly _derivedSource: ReadonlyMap<string, readonly string[]>;
   /** `@db.writeOnly` paths of `$with` target readables, collected once per target. */
   private readonly _targetWriteOnly = new WeakMap<object, ReadonlySet<string>>();
+  /** The forced exclusion `$select` per sealed set (see {@link _sealSelect}). */
+  private readonly _exclusionBySealed = new WeakMap<
+    ReadonlySet<string>,
+    UniqueryControls["$select"]
+  >();
+  /** The objects of {@link _exclusionBySealed}. */
+  private readonly _forcedExclusions = new WeakSet<object>();
+  /** {@link widenPreferredIdProjection} of each forced exclusion. */
+  private readonly _widenedExclusions = new WeakMap<
+    object,
+    UniqueryControls["$select"] | undefined
+  >();
   /** Own leaf paths per readable (bound + `$with` targets), see {@link _leavesOf}. */
   private readonly _targetLeaves = new WeakMap<object, readonly string[]>();
   private _indexFieldPathsCache?: readonly TDbIndexFieldPaths[];
@@ -511,7 +569,7 @@ export class AsDbReadableController<
       this._decorations &&
       new DecorationPlanner(this._decorations, {
         isVisible,
-        scoped,
+        metaVariants: this._metaVariants,
         preferred: this._preferredIdSet,
         capabilities: () => this.capabilities,
         firstVisibleField: () => this._invertibleFields.find((path) => isVisible(path)),
@@ -679,9 +737,9 @@ export class AsDbReadableController<
     const isVisible = this.fieldVisibility.isVisible;
     // Aggregate mode as the core defines it: `$groupBy`, or computed entries
     // (aggregates, calendar buckets) in `$select`.
-    const select = (parsed.controls as { $select?: unknown } | undefined)?.$select;
-    const computed = Array.isArray(select) && select.some((item) => typeof item !== "string");
-    const refs = collectQueryPaths(parsed, computed || undefined);
+    const shared = this._sharedRefs;
+    const refs =
+      shared?.parsed === parsed ? shared.refs : collectQueryPaths(parsed, computedMode(parsed));
     if (refs.unsupportedOperator !== undefined) {
       return badRequest(
         refs.unsupportedOperator,
@@ -731,6 +789,22 @@ export class AsDbReadableController<
       this._checkIndexGate((parsed.controls ?? {}) as Record<string, unknown>)
     );
   }
+
+  /** {@link checkCapabilities} reusing `refs` (the walk it makes) when the method is not overridden. */
+  private _checkCapabilitiesWith(parsed: Uniquery, refs: TQueryPathRefs): HttpError | undefined {
+    if (this.checkCapabilities !== AsDbReadableController.prototype.checkCapabilities) {
+      return this.checkCapabilities(parsed);
+    }
+    this._sharedRefs = { parsed, refs };
+    try {
+      return this.checkCapabilities(parsed);
+    } finally {
+      this._sharedRefs = undefined;
+    }
+  }
+
+  /** The walk of the `parsed` in flight, handed to {@link checkCapabilities} (sync, cleared after). */
+  private _sharedRefs?: { parsed: object; refs: TQueryPathRefs };
 
   /**
    * The core's shared normalizer of `$select` computed entries
@@ -1176,25 +1250,46 @@ export class AsDbReadableController<
    */
   private _applyIndexVisibility(meta: TMetaResponse): TMetaResponse {
     if (!this._indexGateActive) return meta;
+    // Every request-dependent answer the narrowing reads: per index whether it
+    // is visible, per fallback field whether it is, and native searchability.
     const entries = this.indexFieldPaths();
+    const indexVisible = entries.map((e) => this._indexVisible(e));
+    const isSearchable = this.readable.isSearchable();
+    const fallbackVisible = isSearchable
+      ? []
+      : this._searchFallbackFields.map((f) => this.fieldVisibility.isVisible(f));
+    return metaVariant(
+      this._metaVariants,
+      meta,
+      `i:${bits(indexVisible)}:${isSearchable ? 1 : 0}:${bits(fallbackVisible)}`,
+      () => this._narrowIndexVisibility(meta, entries, indexVisible, isSearchable, fallbackVisible),
+    );
+  }
+
+  /** {@link _applyIndexVisibility} for the given answers. */
+  private _narrowIndexVisibility(
+    meta: TMetaResponse,
+    entries: readonly TDbIndexFieldPaths[],
+    indexVisible: readonly boolean[],
+    isSearchable: boolean,
+    fallbackVisible: readonly boolean[],
+  ): TMetaResponse {
     const visibleDefault = (type: "text" | "vector" | "geo") => {
-      const def = entries.find((e) => e.type === type && e.isDefault);
-      return def !== undefined && this._indexVisible(def);
+      const at = entries.findIndex((e) => e.type === type && e.isDefault);
+      return at >= 0 && indexVisible[at];
     };
     const has = (type: "text" | "vector" | "geo") => entries.some((e) => e.type === type);
     const anyVisible = (type: "text" | "vector" | "geo") =>
-      entries.some((e) => e.type === type && this._indexVisible(e));
+      entries.some((e, i) => e.type === type && indexVisible[i]);
     const hidden = new Set(
-      entries.filter((e) => e.type !== "geo" && !this._indexVisible(e)).map((e) => e.name),
+      entries.filter((e, i) => e.type !== "geo" && !indexVisible[i]).map((e) => e.name),
     );
-    const searchable = this.readable.isSearchable()
-      ? visibleDefault("text")
-      : this._searchFallbackFields.some((f) => this.fieldVisibility.isVisible(f));
+    const searchable = isSearchable ? visibleDefault("text") : fallbackVisible.some(Boolean);
     // The read controls the index gate would refuse, left out of `crud`:
     // `$index` / `$fuzzy` with no visible text index (nor the fallback),
     // `$vector` / `$threshold` with no visible vector index, `$search` with
     // neither; `/geo` with no visible geo index.
-    const textUsable = searchable || (this.readable.isSearchable() && anyVisible("text"));
+    const textUsable = searchable || (isSearchable && anyVisible("text"));
     const vectorUsable = anyVisible("vector");
     const unusable = new Set<string>();
     if (has("text") && !anyVisible("text")) unusable.add("index");
@@ -1481,7 +1576,7 @@ export class AsDbReadableController<
     );
     const sealed = this._sealControls(controls, transformed);
     const finish = (): TProjectedRead | HttpError => {
-      const select = this.widenPreferredIdProjection(sealed.$select);
+      const select = this._widenSealed(sealed.$select);
       if (select instanceof HttpError) return select;
       let kept: string[] | null | undefined;
       const keptPaths = (): string[] | null =>
@@ -1493,6 +1588,28 @@ export class AsDbReadableController<
       };
     };
     return { sealed, finish };
+  }
+
+  /**
+   * {@link widenPreferredIdProjection} of a sealed `$select` — memoized for the
+   * forced exclusion of a read without `$select` (one object per sealed set,
+   * see {@link _sealSelect}): its widening depends on the controller alone.
+   */
+  private _widenSealed(
+    select: UniqueryControls["$select"] | undefined,
+  ): UniqueryControls["$select"] | undefined | HttpError {
+    if (select === undefined || !this._forcedExclusions.has(select)) {
+      return this.widenPreferredIdProjection(select);
+    }
+    let widened = this._widenedExclusions.get(select);
+    if (widened === undefined) {
+      const out = this.widenPreferredIdProjection(select);
+      if (out instanceof HttpError) return out;
+      if (out !== undefined && out !== select) freezeShared(out);
+      this._widenedExclusions.set(select, out);
+      widened = out;
+    }
+    return widened;
   }
 
   private widenPreferredIdProjection(
@@ -1969,9 +2086,18 @@ export class AsDbReadableController<
             this.readable.findMany(q as Uniquery<any, any>) as Promise<Record<string, unknown>[]>;
           return byIds(plain, ids, undefined, fields);
         }
+        // The kept paths per id shape (the fields plus the id's own keys), split once.
+        const pathsByShape = new Map<string, TSplitPaths>();
+        const pathsOf = (id: Record<string, unknown>): TSplitPaths => {
+          const keys = Object.keys(id);
+          const shape = keys.join("\x1f");
+          let paths = pathsByShape.get(shape);
+          if (!paths) pathsByShape.set(shape, (paths = splitPaths(new Set([...fields, ...keys]))));
+          return paths;
+        };
         return Promise.resolve(
           alignRowsToIds(rows, ids).map((row, i) =>
-            row ? projectRow(row, new Set([...fields, ...Object.keys(ids[i]!)])) : undefined,
+            row ? projectRow(row, pathsOf(ids[i]!)) : undefined,
           ),
         );
       },
@@ -2281,7 +2407,8 @@ export class AsDbReadableController<
       sortGate: ids.length > 0 ? undefined : order,
       routeParams: sameRoute ? undefined : {},
     });
-    return rows.map((row) => projectRow(row, sealedSelect)) as never;
+    const paths = splitPaths(sealedSelect);
+    return rows.map((row) => projectRow(row, paths)) as never;
   }
 
   /**
@@ -2341,9 +2468,22 @@ export class AsDbReadableController<
   ): UniqueryControls["$select"] | undefined {
     if (writeOnly.size === 0) return select;
     const exclusion = (): UniqueryControls["$select"] => {
-      const out: Record<string, 0> = {};
-      for (const f of writeOnly) out[f] = 0;
-      return out as UniqueryControls["$select"];
+      // One object per sealed set the controller keeps (the bound readable's,
+      // a `$with` target's): a read without `$select` repeats it every request.
+      const shared =
+        writeOnly === this._writeOnlySet || writeOnly === this._targetWriteOnly.get(readable);
+      let out = shared ? this._exclusionBySealed.get(writeOnly) : undefined;
+      if (out === undefined) {
+        const built: Record<string, 0> = {};
+        for (const f of writeOnly) built[f] = 0;
+        out = built as UniqueryControls["$select"];
+        if (shared) {
+          freezeShared(out as object);
+          this._exclusionBySealed.set(writeOnly, out);
+          this._forcedExclusions.add(out as object);
+        }
+      }
+      return out;
     };
     if (select === undefined) return exclusion();
     // An inclusion path stays when unsealed; a parent of a sealed path becomes its unsealed leaves.
@@ -2748,9 +2888,14 @@ export class AsDbReadableController<
       // entries, so a pruning-by-visibility one cannot drop them.
       const meta = this._planner ? this._planner.meta(overlaid) : overlaid;
       const visible = this._applyIndexVisibility(meta);
-      return delegated.length > 0
-        ? { ...visible, actions: [...visible.actions, ...delegated] }
-        : visible;
+      if (delegated.length === 0) return visible;
+      // The delegated infos are discovered once per app: their identities key the variant.
+      return metaVariant(
+        this._metaVariants,
+        visible,
+        `d:${delegated.map((info) => identityId(info)).join(",")}`,
+        () => ({ ...visible, actions: [...visible.actions, ...delegated] }),
+      );
     })();
   }
 
@@ -3100,12 +3245,16 @@ export class AsDbReadableController<
       return error;
     }
 
+    let gateRefs: TQueryPathRefs | undefined;
     if (groupBy?.length && this._writeOnlySet.size > 0) {
       // Every path the grouped query reads a sealed value through — grouping,
       // aggregate / expression operands, `first` / `last` sources, `$rowOrder`
       // and `$sort` keys, calendar-bucket sources, plain `$select` fields. A
       // field hidden by `hasField` falls through to the gate's `Unknown field`.
-      const refs = collectQueryPaths(parsed, true);
+      // The walk `checkCapabilities` makes (shared with it below) — unless its
+      // mode is not aggregate (a `$groupBy` of no field name).
+      gateRefs = collectQueryPaths(parsed, computedMode(parsed));
+      const refs = gateRefs.aggregateMode ? gateRefs : collectQueryPaths(parsed, true);
       const sealed = [
         ...refs.groupBy,
         ...refs.aggregate,
@@ -3118,7 +3267,9 @@ export class AsDbReadableController<
       }
     }
 
-    const gateError = this.checkCapabilities(parsed);
+    const gateError = gateRefs
+      ? this._checkCapabilitiesWith(parsed, gateRefs)
+      : this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
     }
@@ -3471,8 +3622,10 @@ export class AsDbReadableController<
 
     const item = await this.returnOne(this._findRow(resolvedId, overlay, readControls));
     if (item instanceof HttpError) return item;
+    // Finishing may replace the row with a rebuilt copy (a stripped column): answer rows[0].
+    const rows = [item as unknown as Record<string, unknown>];
     const pending = this._finishRows(
-      [item as unknown as Record<string, unknown>],
+      rows,
       prep,
       {
         endpoint: "one",
@@ -3483,7 +3636,7 @@ export class AsDbReadableController<
       projected.read,
     );
     if (pending) await pending;
-    return item;
+    return rows[0] as unknown as DataType;
   }
 
   /**
@@ -3838,13 +3991,13 @@ export class AsDbReadableController<
     // One predicate call per action over every present row (batch shape).
     const verdicts = envelopes.map((e, i) => {
       const disabled = getCandidate(e)?.disabledFn;
-      return disabled && present.length > 0
-        ? judgeRows(
-            e.info.name,
-            disabled,
-            present.map((row) => projectRow(row, fieldsOf[i])),
-          )
-        : undefined;
+      if (!disabled || present.length === 0) return undefined;
+      const paths = splitPaths(fieldsOf[i]);
+      return judgeRows(
+        e.info.name,
+        disabled,
+        present.map((row) => projectRow(row, paths)),
+      );
     });
     let p = 0;
     return rows.map((row, r) => {

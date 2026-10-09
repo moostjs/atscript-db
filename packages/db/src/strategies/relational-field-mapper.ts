@@ -62,7 +62,7 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
         result[col.path] = value;
         continue;
       }
-      // Nested leaf: walk / create the parent objects (what `setNestedValue` does).
+      // Nested leaf: walk / create the parent objects.
       let current = result;
       for (let i = 0; i < parents.length; i++) {
         const part = parents[i]!;

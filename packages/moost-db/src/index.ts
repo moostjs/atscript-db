@@ -6,6 +6,7 @@ export * from "./as-json-value-help.controller";
 export * from "./decorators";
 export * from "./db-space-registry";
 export * from "./assert-exposed";
+export { stableMeta } from "./meta/meta-cache";
 export { getDbEndpoint } from "./db-endpoint";
 export * from "./validation-interceptor";
 export * from "./actions";

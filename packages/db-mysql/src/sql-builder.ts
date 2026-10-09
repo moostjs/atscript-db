@@ -276,7 +276,7 @@ export function buildColumnDefinition(
 
   const onUpdate = ctx.onUpdateFields?.get(field.physicalName);
   if (onUpdate) {
-    def += ` ON UPDATE ${onUpdate === "CURRENT_TIMESTAMP" ? currentTimestampFor(sqlType) : onUpdate}`;
+    def += ` ON UPDATE ${/^current_timestamp(\(\))?$/i.test(onUpdate) ? currentTimestampFor(sqlType) : onUpdate}`;
   }
 
   return { def, inventedDefault };
@@ -430,6 +430,9 @@ export function isMysqlTimestampColumn(fd: TDbFieldMeta): boolean {
   return mysqlTemporalFsp(fd) !== undefined;
 }
 
+/** {@link BUCKET_MAX_INSTANT} as a MySQL DATETIME literal. */
+const MYSQL_BUCKET_MAX = new Date(BUCKET_MAX_INSTANT).toISOString().slice(0, 19).replace("T", " ");
+
 /** `'1970-01-01 00:00:00'` as a DATETIME: the base for epoch arithmetic free of the session zone. */
 const MYSQL_EPOCH = "CAST('1970-01-01 00:00:00' AS DATETIME)";
 
@@ -465,8 +468,11 @@ export function mysqlCalendarBucket(quotedCol: string, b: TResolvedBucket): stri
   let inRange: string;
   if (isMysqlTimestampColumn(b.fd)) {
     utc = `CAST(${quotedCol} AS DATETIME)`;
-    // TIMESTAMP storage ends in 2038, far below BUCKET_MAX_INSTANT.
-    inRange = `${utc} >= '1970-01-02 00:00:00'`;
+    // TIMESTAMP storage ends in 2038, far below BUCKET_MAX_INSTANT; a
+    // DATETIME override reaches year 9999 and needs the upper bound too.
+    inRange = /^\s*datetime/i.test(String(b.fd.type?.metadata?.get("db.mysql.type") ?? ""))
+      ? `${utc} >= '1970-01-02 00:00:00' AND ${utc} < '${MYSQL_BUCKET_MAX}'`
+      : `${utc} >= '1970-01-02 00:00:00'`;
   } else {
     utc = `(${MYSQL_EPOCH} + INTERVAL FLOOR(${quotedCol} / 1000) SECOND)`;
     inRange = `${quotedCol} >= ${BUCKET_MIN_INSTANT} AND ${quotedCol} < ${BUCKET_MAX_INSTANT}`;

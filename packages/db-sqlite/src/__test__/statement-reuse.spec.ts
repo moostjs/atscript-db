@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeAll, beforeEach } from "vite-plus/test";
 import { DbError, DbSpace } from "@atscript/db";
 
@@ -103,11 +106,29 @@ describe("BetterSqlite3Driver statement cache", () => {
     }
     expect(driver.all("SELECT id FROM t ORDER BY id")).toEqual([{ id: 1 }, { id: 3 }]);
     expect(() => driver.exec("COMMIT")).toThrow(/no transaction is active/);
-    expect(
-      (driver as unknown as { _txStmts: Map<string, unknown> })._txStmts.size,
-    ).toBeGreaterThanOrEqual(3);
+    const cached = (driver as unknown as { _stmts: Map<string, unknown> })._stmts;
+    for (const sql of ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"]) expect(cached.has(sql)).toBe(true);
     driver.close();
     expect(cacheSize(driver)).toBe(0);
+  });
+
+  it("BEGIN IMMEDIATE locks a database attached after it was first prepared", () => {
+    const dir = mkdtempSync(join(tmpdir(), "asdb-attach-"));
+    const driver = new BetterSqlite3Driver(join(dir, "main.db"), { timeout: 0 });
+    const other = new BetterSqlite3Driver(join(dir, "aux.db"), { timeout: 0 });
+    try {
+      other.exec("CREATE TABLE w (a)");
+      driver.exec("BEGIN IMMEDIATE"); // prepared (and cached) before the ATTACH
+      driver.exec("COMMIT");
+      driver.exec(`ATTACH DATABASE '${join(dir, "aux.db")}' AS aux`);
+      driver.exec("BEGIN IMMEDIATE");
+      expect(() => other.run("INSERT INTO w VALUES (1)")).toThrow(/locked|busy/i);
+      driver.exec("COMMIT");
+    } finally {
+      driver.close();
+      other.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -196,5 +217,23 @@ describe("single-statement writes skip the wrapping transaction", () => {
       ["b@x.io", "hi"],
       ["c@x.io", null],
     ]);
+  });
+});
+
+describe("findManyWithCount", () => {
+  it("goes through overridden findMany / count (one-segment path only for the stock adapter)", async () => {
+    class TenantAdapter extends SqliteAdapter {
+      override async count(query: Parameters<SqliteAdapter["count"]>[0]) {
+        return (await super.count(query)) + 1000;
+      }
+    }
+    const driver = new BetterSqlite3Driver(":memory:");
+    const users = new DbSpace(() => new TenantAdapter(driver)).getTable(UsersTable) as any;
+    await users.ensureTable();
+    await users.insertOne({ email: "a@x.io", name: "a", status: "on" });
+    const page = await users.findManyWithCount({ filter: {}, controls: {} });
+    expect(page.data).toHaveLength(1);
+    expect(page.count).toBe(1001);
+    driver.close();
   });
 });

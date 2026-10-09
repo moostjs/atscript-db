@@ -125,11 +125,72 @@ function identityOf(
 }
 
 /**
+ * Sorted field lists per raw key order — every id of one shape sorts its keys
+ * once per call, not once per id.
+ */
+class IdShapes {
+  /** Raw key order (`Object.keys` joined) → the sorted fields. */
+  private readonly byRaw = new Map<string, readonly string[]>();
+  /** Sorted signature → the sorted fields (one entry per distinct shape). */
+  readonly bySorted = new Map<string, readonly string[]>();
+
+  fieldsOf(id: Record<string, unknown>): readonly string[] {
+    const keys = Object.keys(id);
+    const raw = `${keys.length}:${keys.join("\x1f")}`;
+    let sorted = this.byRaw.get(raw);
+    if (sorted === undefined) {
+      const own = keys.length > 1 ? keys.toSorted() : keys;
+      const sig = `${own.length}:${own.join("\x1f")}`;
+      sorted = this.bySorted.get(sig);
+      if (sorted === undefined) this.bySorted.set(sig, (sorted = own));
+      this.byRaw.set(raw, sorted);
+    }
+    return sorted;
+  }
+}
+
+/** A value `$in` matches exactly like the equality `{ field: value }` on every adapter. */
+function isInSafe(value: unknown): boolean {
+  const type = typeof value;
+  return (
+    type === "string" ||
+    type === "bigint" ||
+    type === "boolean" ||
+    (type === "number" && Number.isFinite(value as number))
+  );
+}
+
+/**
+ * The filter matching any of `ids` (deduped): `{ field: { $in } }` when they
+ * share one single-field shape with scalar values (one equality for a single
+ * id), else `{ $or: ids }`.
+ */
+function idsFilter(ids: readonly Record<string, unknown>[], shapes: IdShapes): FilterExpr {
+  if (ids.length > 0 && shapes.bySorted.size === 1) {
+    const [fields] = shapes.bySorted.values();
+    if (fields!.length === 1) {
+      const field = fields![0]!;
+      const values: unknown[] = [];
+      for (const id of ids) {
+        const value = id[field];
+        if (!isInSafe(value)) return { $or: ids } as FilterExpr;
+        values.push(value);
+      }
+      return (
+        values.length === 1 ? { [field]: values[0] } : { [field]: { $in: values } }
+      ) as FilterExpr;
+    }
+  }
+  return { $or: ids } as FilterExpr;
+}
+
+/**
  * The rows `ids` address that also match `scope` (none = every row),
  * aligned with `ids` — `undefined` where nothing matched. One `findMany`
- * over the deduped ids (`{ $or: ids } AND scope`) selecting `select` plus
- * every id field; ids of different identification shapes may be mixed.
- * The action row loader and `$actions` scope check share it.
+ * over the deduped ids (`{ field: { $in } }` for single-field ids, else
+ * `{ $or: ids }`; AND `scope`) selecting `select` plus every id field; ids of
+ * different identification shapes may be mixed. The action row loader and
+ * `$actions` scope check share it.
  */
 export async function findRowsByIds(
   source: TRowsByIdSource,
@@ -141,22 +202,28 @@ export async function findRowsByIds(
   const fields = new Set(select);
   const dedupedIds: Record<string, unknown>[] = [];
   const seenKeys = new Set<string>();
+  const shapes = new IdShapes();
+  const idKeys: Array<string | undefined> = [];
 
   for (const id of ids) {
-    const sortedFields = Object.keys(id).toSorted();
-    for (const f of sortedFields) fields.add(f);
+    const sortedFields = shapes.fieldsOf(id);
     const key = idKey(id, sortedFields);
+    idKeys.push(key);
     if (key !== undefined && !seenKeys.has(key)) {
       seenKeys.add(key);
       dedupedIds.push(id);
     }
   }
+  for (const sortedFields of shapes.bySorted.values()) {
+    for (const f of sortedFields) fields.add(f);
+  }
 
+  const match = idsFilter(dedupedIds, shapes);
   const rows = await source.findMany({
-    filter: scope ? { $and: [{ $or: dedupedIds }, scope] } : { $or: dedupedIds },
+    filter: scope ? { $and: [match, scope] } : match,
     controls: { $select: [...fields] },
   });
-  return alignRowsToIds(rows, ids);
+  return alignByKeys(rows, idKeys, shapes);
 }
 
 /**
@@ -168,17 +235,19 @@ export function alignRowsToIds(
   rows: readonly Record<string, unknown>[],
   ids: readonly Record<string, unknown>[],
 ): Array<Record<string, unknown> | undefined> {
-  const shapes = new Map<string, readonly string[]>();
-  const idKeys: Array<string | undefined> = [];
-  for (const id of ids) {
-    const sortedFields = Object.keys(id).toSorted();
-    const sig = sortedFields.join("\x1f");
-    if (!shapes.has(sig)) shapes.set(sig, sortedFields);
-    idKeys.push(idKey(id, sortedFields));
-  }
+  const shapes = new IdShapes();
+  const idKeys = ids.map((id) => idKey(id, shapes.fieldsOf(id)));
+  return alignByKeys(rows, idKeys, shapes);
+}
+
+function alignByKeys(
+  rows: readonly Record<string, unknown>[],
+  idKeys: readonly (string | undefined)[],
+  shapes: IdShapes,
+): Array<Record<string, unknown> | undefined> {
   const rowByKey = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
-    for (const sortedFields of shapes.values()) {
+    for (const sortedFields of shapes.bySorted.values()) {
       const key = idKey(row, sortedFields);
       if (key !== undefined && !rowByKey.has(key)) rowByKey.set(key, row);
     }
@@ -214,20 +283,65 @@ export function exceedsFields(row: Record<string, unknown>, fields: ReadonlySet<
   return false;
 }
 
+/**
+ * `row` without its own `keys` — a NEW object (same key order) when it has
+ * any of them, else `row` itself. Rows are rebuilt rather than `delete`d
+ * from: a deleted key turns an object into a slow dictionary-mode one for
+ * everything after (decoration, serialization).
+ */
+export function omitKeys(
+  row: Record<string, unknown>,
+  keys: ReadonlySet<string>,
+): Record<string, unknown> {
+  let has = false;
+  for (const key of keys) {
+    if (Object.hasOwn(row, key)) {
+      has = true;
+      break;
+    }
+  }
+  if (!has) return row;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(row)) {
+    if (keys.has(key)) continue;
+    if (key === "__proto__") {
+      Object.defineProperty(out, key, {
+        value: row[key],
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    } else {
+      out[key] = row[key];
+    }
+  }
+  return out;
+}
+
+/** Field paths split once for {@link projectRow} over many rows. */
+export type TSplitPaths = readonly (readonly string[])[];
+
+/** `fields` split at the dots — pass to {@link projectRow} when projecting many rows. */
+export function splitPaths(fields: Iterable<string>): TSplitPaths {
+  const out: string[][] = [];
+  for (const path of fields) out.push(path.split("."));
+  return out;
+}
+
 /** `row` narrowed to `fields` (dot paths copied into fresh nested objects). */
 export function projectRow(
   row: Record<string, unknown>,
-  fields: Iterable<string>,
+  fields: Iterable<string> | TSplitPaths,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const path of fields) {
-    const parts = path.split(".");
+    const parts = typeof path === "string" ? path.split(".") : path;
     let src: unknown = row;
     for (const p of parts) src = (src as Record<string, unknown> | null | undefined)?.[p];
     if (src === undefined) continue;
     let dst = out;
     for (let i = 0; i < parts.length - 1; i++) {
-      dst = (dst[parts[i]] ??= {}) as Record<string, unknown>;
+      dst = (dst[parts[i]!] ??= {}) as Record<string, unknown>;
     }
     dst[parts.at(-1)!] = src;
   }

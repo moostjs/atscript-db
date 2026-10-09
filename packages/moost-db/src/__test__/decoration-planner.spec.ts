@@ -14,13 +14,13 @@ function planner(requires: Record<string, string[]>) {
     requires: new Map(Object.entries(requires)),
     visibleOn: new Map(Object.entries(requires)),
     leavesOf: new Map(),
-    memo: { meta: new WeakMap() },
+    memo: {},
   };
   return new DecorationPlanner(index, {
     isVisible: () => true,
     capabilities: () => ({ decorationVisible: () => true }) as never,
     preferred: new Set(["id"]),
-    scoped: false,
+    metaVariants: new WeakMap(),
     firstVisibleField: () => "id",
   });
 }
@@ -72,9 +72,9 @@ describe("DecorationPlanner: a client-selected descendant of a required path", (
     const planner = p();
     const plan = planner.plan(select);
     const read = planner.serve(plan, null);
-    const out = row();
-    stripDecorations([out], read);
-    return { plan, out };
+    const rows: Record<string, any>[] = [row()];
+    stripDecorations(rows, read);
+    return { plan, out: rows[0]! };
   };
 
   it("an inclusion list keeps the selected child and drops the rest of the parent", () => {
@@ -119,8 +119,9 @@ describe("stripDecorations through arrays", () => {
       selectedPaths: selected,
     }) as never;
   const strip = (row: Record<string, unknown>, path: string[], selected?: string[][]) => {
-    stripDecorations([row], read(path, selected));
-    return row;
+    const rows = [row];
+    stripDecorations(rows, read(path, selected));
+    return rows[0]!;
   };
 
   it("an array every element of which the strip emptied goes with its parent key", () => {

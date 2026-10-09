@@ -84,30 +84,39 @@ export class AsJsonValueHelpController<
   ): Promise<{ data: DataType[]; count: number }> {
     let rows: DataType[] = this.rows;
 
-    // 1. Filter — compile the FilterExpr into a predicate via the shared engine.
+    // 1. $search — value-help's own case-insensitive substring match across the
+    //    searchable fields (the shared engine has no `$search`). A field
+    //    `hasField` hides never matches, so search can't probe its values.
+    //    Runs before the filter (both keep order, so the result is the same)
+    //    over all rows, where the lowercased values are cached by position.
+    const search = controls.controls.$search as string | undefined;
+    if (search) {
+      const needle = search.toLowerCase();
+      const columns = this.searchableFields
+        .filter((field) => this.hasField(field))
+        .map((field) => [field, this._lowercased(field)] as const);
+      rows = rows.filter((row, i) => {
+        for (const [field, column] of columns) {
+          const v = (row as Record<string, unknown>)[field];
+          if (typeof v !== "string") continue;
+          let lower = column.lower[i];
+          if (lower === undefined || column.src[i] !== v) {
+            lower = v.toLowerCase();
+            column.src[i] = v;
+            column.lower[i] = lower;
+          }
+          if (lower.includes(needle)) return true;
+        }
+        return false;
+      });
+    }
+
+    // 2. Filter — compile the FilterExpr into a predicate via the shared engine.
     //    Only build/apply when a filter is actually present (mirrors the old
     //    guard and keeps the no-filter path allocation-free).
     if (controls.filter && Object.keys(controls.filter).length > 0) {
       const predicate = buildMemoryPredicate(controls.filter);
       rows = rows.filter((row) => predicate(row as Record<string, unknown>));
-    }
-
-    // 2. $search — value-help's own case-insensitive substring match across the
-    //    searchable fields (the shared engine has no `$search`). A field
-    //    `hasField` hides never matches, so search can't probe its values.
-    const search = controls.controls.$search as string | undefined;
-    if (search) {
-      const needle = search.toLowerCase();
-      const fields = this.searchableFields.filter((field) => this.hasField(field));
-      rows = rows.filter((row) => {
-        for (const field of fields) {
-          const v = (row as Record<string, unknown>)[field];
-          if (typeof v === "string" && v.toLowerCase().includes(needle)) {
-            return true;
-          }
-        }
-        return false;
-      });
     }
 
     // 3. Sort — normalize the flexible value-help `$sort` grammar to an ordered
@@ -134,6 +143,26 @@ export class AsJsonValueHelpController<
 
     return { data, count: total };
   }
+
+  /**
+   * `field`'s lowercased values by position in {@link rows} (the `$search`
+   * haystack). An entry is used only while the row still holds the value it
+   * was lowercased from (`src`), so rows edited in place stay correct.
+   */
+  private _lowercased(field: string): { src: unknown[]; lower: Array<string | undefined> } {
+    let haystack = this._haystack;
+    if (haystack?.rows !== this.rows) {
+      haystack = this._haystack = { rows: this.rows, byField: new Map() };
+    }
+    let column = haystack.byField.get(field);
+    if (!column) haystack.byField.set(field, (column = { src: [], lower: [] }));
+    return column;
+  }
+
+  private _haystack?: {
+    rows: readonly DataType[];
+    byField: Map<string, { src: unknown[]; lower: Array<string | undefined> }>;
+  };
 
   protected async getOne(id: string | number): Promise<DataType | null> {
     return this._pkIndex?.get(String(id)) ?? null;

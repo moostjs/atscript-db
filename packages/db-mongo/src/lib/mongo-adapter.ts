@@ -651,30 +651,6 @@ export class MongoAdapter extends BaseDbAdapter {
     );
   }
 
-  /**
-   * Whether every reached server of the deployment runs MongoDB 5.0+ (wire
-   * version 13), so a `$with` `$lookup` may name its join pair as `localField` /
-   * `foreignField` next to its pipeline. Read from the driver's topology
-   * description (no round trip); `false` while it is unknown.
-   *
-   * @since 0.1.151
-   */
-  lookupJoinsByField(): boolean {
-    const client = this.client ?? (this.db as { client?: MongoClient }).client;
-    const servers = (
-      client as
-        | { topology?: { description?: { servers?: Map<string, { maxWireVersion: number }> } } }
-        | undefined
-    )?.topology?.description?.servers;
-    let known = false;
-    for (const server of servers?.values() ?? []) {
-      if (server.maxWireVersion === 0) continue; // not reached yet
-      if (server.maxWireVersion < 13) return false;
-      known = true;
-    }
-    return known;
-  }
-
   /** Returns the context object used by CollectionPatcher. */
   getPatcherContext(): TCollectionPatcherContext {
     return {
@@ -1759,12 +1735,15 @@ export class MongoAdapter extends BaseDbAdapter {
     for (const field of physicalFields) {
       const counterId = `${collectionName}.${field}`;
       const startValue = this._incrementFields.get(field);
-      // Inside a transaction the allocation joins it: a rollback returns
-      // the values, and the counter is read and written under its snapshot.
+      // The counter is advanced OUTSIDE any transaction (like a SQL
+      // sequence): in the session, every concurrent transaction inserting
+      // into the table would write-conflict on the counter document. A
+      // rollback leaves a gap. Only the max read below joins the session, so
+      // a fresh counter sees the transaction's own rows.
       const doc = await counters.findOneAndUpdate(
         { _id: counterId },
         { $inc: { seq: count } },
-        { upsert: true, returnDocument: "after", ...this._getSessionOpts() },
+        { upsert: true, returnDocument: "after" },
       );
       const seq = doc?.seq ?? count;
       // If this was a fresh counter (upserted), check if collection already has data
@@ -1776,11 +1755,7 @@ export class MongoAdapter extends BaseDbAdapter {
         const effectiveBase = Math.max(minStart, currentMax + 1);
         if (effectiveBase > seq) {
           const adjusted = effectiveBase + count - 1;
-          await counters.updateOne(
-            { _id: counterId },
-            { $max: { seq: adjusted } },
-            this._getSessionOpts(),
-          );
+          await counters.updateOne({ _id: counterId }, { $max: { seq: adjusted } });
           result.set(field, effectiveBase);
           continue;
         }

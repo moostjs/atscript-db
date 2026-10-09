@@ -106,17 +106,25 @@ export function quoteTableName(name: string): string {
 // ── PostgreSQL dialect ───────────────────────────────────────────────────────
 
 /**
- * A `db.geoPoint` value written or filtered on before the adapter knows
- * whether PostGIS backs the column (`geography`) or the JSONB fallback does —
- * schema sync never ran in this process. The adapter resolves it right before
- * the statement executes, once PostGIS presence is probed: EWKT for a
- * geography column, `raw` (what the JSONB path binds) otherwise.
+ * A `db.geoPoint` value written or filtered on before the adapter knows the
+ * physical type of its column — a PostGIS `geography` / `geometry` column
+ * (EWKT) or the JSONB fallback (`raw`, what the JSONB path binds). Whichever
+ * adapter executes the statement resolves it right before it runs (the
+ * marker may come from another table's formatter, e.g. a relational filter):
+ * `native` answers for the column the marker was formatted for, probing the
+ * catalog on `exec` when not known yet.
  */
 export class PendingGeoPoint {
   constructor(
     readonly point: [number, number],
     readonly raw: unknown,
+    readonly native: (exec: TGeoProbeExecutor) => boolean | Promise<boolean>,
   ) {}
+}
+
+/** The executor a {@link PendingGeoPoint} column probe runs on (the statement's own). */
+export interface TGeoProbeExecutor {
+  get<T>(sql: string, params?: unknown[]): Promise<T | null>;
 }
 
 /** Converts JS values to SQL-bindable params, keeping booleans native. */
@@ -129,7 +137,7 @@ function toPgValue(value: unknown): unknown {
   }
   if (value instanceof PendingGeoPoint) {
     // Resolved before execution; the JSONB form gets the conversion now.
-    return new PendingGeoPoint(value.point, toPgValue(value.raw));
+    return new PendingGeoPoint(value.point, toPgValue(value.raw), value.native);
   }
   if (value instanceof Date) {
     return value.toISOString();

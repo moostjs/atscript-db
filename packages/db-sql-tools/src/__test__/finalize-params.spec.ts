@@ -57,6 +57,8 @@ describe("finalizeParams", () => {
     expect(fin("SELECT ? -- why?\n, ? /* really? */ , ?")).toBe(
       "SELECT $1 -- why?\n, $2 /* really? */ , $3",
     );
+    // Block comments nest (PostgreSQL).
+    expect(fin("SELECT ? /* a /* b */ c? */ , ?")).toBe("SELECT $1 /* a /* b */ c? */ , $2");
   });
 
   it("leaves `?` inside dollar-quoted strings alone, but numbers after them", () => {
@@ -71,6 +73,8 @@ describe("finalizeParams", () => {
     );
     // `?||` is a placeholder followed by concatenation.
     expect(fin("SELECT ?||'%'")).toBe("SELECT $1||'%'");
+    // `?&&` is a placeholder followed by the array overlap operator.
+    expect(fin(`SELECT * FROM "t" WHERE ?&&"arr"`)).toBe(`SELECT * FROM "t" WHERE $1&&"arr"`);
   });
 
   it("is unaffected by unterminated quotes (rest of the text is skipped)", () => {

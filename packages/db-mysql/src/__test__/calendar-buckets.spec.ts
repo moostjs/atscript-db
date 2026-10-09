@@ -140,6 +140,18 @@ describe("mysqlCalendarBucket", () => {
     );
   });
 
+  it("a DATETIME(n) override is bounded above like epoch columns (year 3000)", () => {
+    const fd = {
+      ...timestampFd,
+      defaultValue: undefined,
+      type: { metadata: new Map([["db.mysql.type", "DATETIME(3)"]]) },
+    } as unknown as TDbFieldMeta;
+    const U = `CAST("createdAt" AS DATETIME)`;
+    expect(
+      mysqlCalendarBucket(`"createdAt"`, bucket("day", { field: "createdAt", fd, tz: "UTC" })),
+    ).toBe(wrap(`DATE(${U})`, `${U} >= '1970-01-02 00:00:00' AND ${U} < '3000-01-01 00:00:00'`));
+  });
+
   it.each(BUCKET_UNITS)("%s: parameter-free and session-zone free", (unit) => {
     for (const fd of [doubleFd, timestampFd]) {
       const sql = mysqlCalendarBucket(`"c"`, bucket(unit, { fd }));

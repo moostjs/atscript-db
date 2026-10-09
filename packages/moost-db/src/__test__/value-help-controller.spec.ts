@@ -157,6 +157,24 @@ describe("AsValueHelpController — @ui.dict.* are hints, not gates", () => {
     expect(result).toEqual([STATUSES[1]]);
   });
 
+  it("$search sees rows edited in place, and combines with a filter", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+      },
+    });
+    const rows: Status[] = STATUSES.map((row) => ({ ...row }));
+    const controller = new AsJsonValueHelpController<typeof type, Status>(type, rows, makeApp());
+    expect(await controller.runQuery("?$search=retir")).toEqual([]);
+    expect(await controller.runQuery("?$search=ACTIVE")).toEqual([rows[0]]);
+    rows[0]!.label = "Running";
+    rows[1]!.label = "Retired";
+    expect(await controller.runQuery("?$search=retir")).toEqual([rows[1]]);
+    expect(await controller.runQuery("?$search=running")).toEqual([rows[0]]);
+    expect(await controller.runQuery("?$search=r&id=draft")).toEqual([rows[2]]);
+  });
+
   it("prop-level @ui.dict.searchable narrows $search to the annotated props only", async () => {
     const type = makeValueHelpType({
       props: {

@@ -84,6 +84,7 @@ import {
   geoPointToEwkt,
   parseEwkbPointHex,
   PendingGeoPoint,
+  type TGeoProbeExecutor,
   pgCollateClause,
   pgDerivedColumnDef,
   pgGeoDistanceExpr,
@@ -107,24 +108,68 @@ interface TPgIgnorePlan {
   returningSuffix: string;
 }
 
-/** Read-only PostGIS presence lookup (no privileges needed, never aborts a transaction). */
-const GEO_PROBE_SQL =
-  "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis') AS present";
+/**
+ * Read-only geo facts of one table, in one round trip: PostGIS presence and
+ * the physical type of the named columns (`{ column: type }`, a domain
+ * reported as its base type; `null` when the relation does not exist). Catalog
+ * reads only — no privileges needed, never aborts a transaction.
+ */
+const GEO_PROBE_SQL = `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis') AS "postgis",
+  (SELECT json_object_agg(a.attname, COALESCE(b.typname, t.typname))
+     FROM pg_attribute a
+     JOIN pg_type t ON t.oid = a.atttypid
+     LEFT JOIN pg_type b ON b.oid = NULLIF(t.typbasetype, 0)
+    WHERE a.attrelid = to_regclass($1::text) AND a.attnum > 0 AND NOT a.attisdropped
+      AND a.attname = ANY($2::text[])) AS "columns"`;
 
-/** `params` with every {@link PendingGeoPoint} resolved — EWKT on PostGIS, the JSONB form otherwise. */
-function resolvePendingGeo(params: unknown[] | undefined, native: boolean): unknown[] | undefined {
-  if (!params) {
-    return params;
-  }
-  let out: unknown[] | undefined;
-  for (let i = 0; i < params.length; i++) {
-    const value = params[i];
-    if (value instanceof PendingGeoPoint) {
-      out ??= [...params];
-      out[i] = native ? geoPointToEwkt(value.point) : value.raw;
+/** A PostGIS column type — a geo value binds as EWKT. Anything else (JSONB, TEXT) takes the JSON form. */
+const POSTGIS_TYPES: ReadonlySet<string> = new Set(["geography", "geometry"]);
+
+/** The SQL `$geoWithin` renders (`pgDialect.geoWithin`) — PostGIS only. */
+const GEO_WITHIN_SQL = "ST_DWithin(";
+
+/** The answer of {@link GEO_PROBE_SQL}: PostGIS presence + column → PostGIS-typed (found columns only). */
+interface TGeoProbe {
+  postgis: boolean;
+  columns: Map<string, boolean>;
+}
+
+/** Index of the first {@link PendingGeoPoint} in `params`, or -1. */
+function firstPendingGeo(params: unknown[] | undefined): number {
+  if (params) {
+    for (let i = 0; i < params.length; i++) {
+      if (params[i] instanceof PendingGeoPoint) return i;
     }
   }
-  return out ?? params;
+  return -1;
+}
+
+/**
+ * A copy of `params` with every {@link PendingGeoPoint} (from `from` on)
+ * resolved for its own column — EWKT for a PostGIS column, the JSON form
+ * otherwise — each marker's column probe running on `exec`, the statement's.
+ */
+async function resolvePendingGeo(
+  params: unknown[],
+  from: number,
+  exec: TPgExecutor,
+): Promise<unknown[]> {
+  const out = params.slice();
+  for (let i = from; i < out.length; i++) {
+    const value = out[i];
+    if (value instanceof PendingGeoPoint) {
+      const native = value.native(exec);
+      out[i] = (typeof native === "boolean" ? native : await native)
+        ? geoPointToEwkt(value.point)
+        : value.raw;
+    }
+  }
+  return out;
+}
+
+/** `GEO_NOT_SUPPORTED` — geo search / `$geoWithin` without PostGIS. */
+function geoNotSupported(path: string, message: string): DbError {
+  return new DbError("GEO_NOT_SUPPORTED", [{ path, message }]);
 }
 
 /** PostgreSQL COUNT() may return string (bigint) — parse to number. */
@@ -226,16 +271,34 @@ export class PostgresAdapter extends BaseDbAdapter {
   /**
    * Whether the connected PostgreSQL instance has the PostGIS extension —
    * `undefined` until known: set by schema sync ({@link prepareTypeMapper},
-   * which installs it), or by the read-only probe that runs before the first
-   * statement when sync never ran in this process ({@link _ensureGeoKnown}).
+   * which installs it), or by the read-only geo probe ({@link _probeGeo}).
+   * Decides DDL and geo search; how a geo VALUE binds is decided per column
+   * ({@link _geoNative}).
    */
   private _supportsGeo: boolean | undefined;
   /** Whether {@link _detectGeoSupport} (the installing detection) already ran. */
   private _geoInstallTried = false;
-  /** The in-flight / settled read-only PostGIS probe. */
-  private _geoProbe?: Promise<void>;
   /** Memo of {@link _hasGeoPointFields}. */
   private _geoFields?: boolean;
+  /** Physical names of the unencrypted `db.geoPoint` columns (set with the metadata). */
+  private _geoColumnNames: string[] = [];
+  /**
+   * Physical geo column → whether it is a PostGIS column (`geography` /
+   * `geometry`: EWKT) or not (JSONB: the JSON form). Learned from the catalog
+   * — after schema sync ({@link afterSyncTable}) or before the first statement
+   * binding a geo value — never from the extension alone: a JSONB column
+   * created before PostGIS was installed stays JSONB until a sync migrates
+   * it. Cleared by every DDL path ({@link _geoSchemaChanged}).
+   */
+  private _geoNative = new Map<string, boolean>();
+  /** The in-flight shared geo probe and the executor it runs on. */
+  private _geoProbe?: { exec: TGeoProbeExecutor; promise: Promise<TGeoProbe> };
+  /** Bumped by {@link _geoSchemaChanged}: a probe started before a DDL caches nothing. */
+  private _geoSchemaGen = 0;
+  /** The pool executor with geo-marker resolution (built once). */
+  private _poolExec?: TPgExecutor;
+  /** The last transaction connection's wrapped executor. */
+  private _txExec?: { conn: TPgConnection; exec: TPgExecutor };
 
   // ── Per-table memos (the table metadata is built once per readable) ────
   private _pkColumnsMemo?: { src: readonly string[]; cols: string[]; returning: string };
@@ -326,30 +389,56 @@ export class PostgresAdapter extends BaseDbAdapter {
    * otherwise the pool-based driver.
    */
   private _exec(): TPgExecutor {
-    const exec = this._txConnection() ?? this.driver;
-    // geoPoint values formatted before PostGIS presence was known travel as
-    // `PendingGeoPoint` markers: probe (once), then resolve them.
-    return this._hasGeoPointFields() ? this._geoResolvingExec(exec) : exec;
+    const conn = this._txConnection();
+    if (!conn) {
+      return (this._poolExec ??= this._geoResolvingExec(this.driver));
+    }
+    if (this._txExec?.conn !== conn) {
+      this._txExec = { conn, exec: this._geoResolvingExec(conn) };
+    }
+    return this._txExec.exec;
   }
 
   /**
-   * `exec` resolving `PendingGeoPoint` params — after the PostGIS probe while
-   * support is still unknown. A marker may be formatted before the probe
-   * settles and run after, so resolution never depends on the probe's state.
+   * `exec` resolving `PendingGeoPoint` params before the statement runs. Every
+   * adapter wraps — not only geo tables: a relational filter on another
+   * table's geo column carries that table's markers into this one's
+   * statement. A statement without markers runs as is (one param scan).
    */
   private _geoResolvingExec(exec: TPgExecutor): TPgExecutor {
-    const prep = <R>(params: unknown[] | undefined, run: (p?: unknown[]) => Promise<R>) =>
-      this._supportsGeo === undefined
-        ? this._ensureGeoKnown(exec).then(() =>
-            run(resolvePendingGeo(params, this._supportsGeo === true)),
-          )
-        : run(resolvePendingGeo(params, this._supportsGeo));
-    return {
-      run: (sql, params) => prep(params, (p) => exec.run(sql, p)),
-      all: <T>(sql: string, params?: unknown[]) => prep(params, (p) => exec.all<T>(sql, p)),
-      get: <T>(sql: string, params?: unknown[]) => prep(params, (p) => exec.get<T>(sql, p)),
-      exec: (sql) => exec.exec(sql),
+    const prep = <R>(
+      sql: string,
+      params: unknown[] | undefined,
+      run: (p?: unknown[]) => Promise<R>,
+    ): Promise<R> => {
+      if (this._geoFields && this._supportsGeo !== true && sql.includes(GEO_WITHIN_SQL)) {
+        return this._assertGeoWithin(exec).then(() => prep(sql, params, run));
+      }
+      const at = firstPendingGeo(params);
+      return at < 0 ? run(params) : resolvePendingGeo(params!, at, exec).then(run);
     };
+    return {
+      run: (sql, params) => prep(sql, params, (p) => exec.run(sql, p)),
+      all: <T>(sql: string, params?: unknown[]) => prep(sql, params, (p) => exec.all<T>(sql, p)),
+      get: <T>(sql: string, params?: unknown[]) => prep(sql, params, (p) => exec.get<T>(sql, p)),
+      // DDL (every schema path runs it through here, recreate aside): the
+      // geo column types are learned anew once it has run.
+      exec: (sql) => exec.exec(sql).finally(() => this._geoSchemaChanged()),
+    };
+  }
+
+  /**
+   * `$geoWithin` passed the core guard while PostGIS presence was unknown
+   * ({@link isGeoSearchable} answers optimistically then): learn it, and
+   * refuse like the guard would have when it is absent.
+   */
+  private async _assertGeoWithin(exec: TPgExecutor): Promise<void> {
+    if (this._supportsGeo === undefined) {
+      await this._probeGeo(exec);
+    }
+    if (this._supportsGeo !== true) {
+      throw geoNotSupported("", "$geoWithin requires the PostGIS extension");
+    }
   }
 
   // ── Capability flags ──────────────────────────────────────────────────────
@@ -413,14 +502,17 @@ export class PostgresAdapter extends BaseDbAdapter {
   override onAfterFlatten(): void {
     // Scan field descriptors for @db.collate 'nocase' — maps to CITEXT column type
     // (case-insensitive text). Extension is provisioned in ensureTable().
-    let geo = false;
+    const geo: string[] = [];
     for (const fd of this._table.fieldDescriptors) {
       if (fd.collate === "nocase") {
         this._nocaseColumns.add(fd.physicalName);
       }
-      geo ||= fd.isGeoPoint === true && !fd.encrypted;
+      if (fd.isGeoPoint === true && !fd.encrypted) {
+        geo.push(fd.physicalName);
+      }
     }
-    this._geoFields = geo;
+    this._geoColumnNames = geo;
+    this._geoFields = geo.length > 0;
   }
 
   override onFieldScanned(
@@ -478,12 +570,14 @@ export class PostgresAdapter extends BaseDbAdapter {
       };
     }
     // geoPoint ↔ geography(Point,4326): EWKT text in, hex-EWKB parsed out.
-    // Branches at call time — PostGIS support is detected during sync (or
-    // probed before the first statement), after formatters are built. In
-    // JSONB-fallback mode values pass through untouched (the relational
-    // mapper's JSON handling already round-trips). Not known yet: a
-    // `PendingGeoPoint` the executor resolves once it is (see `_exec`).
+    // Branches at call time on the COLUMN's physical type (learned from the
+    // catalog after formatters are built — see `_geoNative`). A JSONB column
+    // (no PostGIS, or created before it was installed) gets the value
+    // untouched (the relational mapper's JSON handling already round-trips).
+    // Not known yet: a `PendingGeoPoint` the executing statement resolves.
     if (field.isGeoPoint && !field.encrypted) {
+      const column = field.physicalName;
+      const native = (exec: TGeoProbeExecutor) => this._geoColumnNative(column, exec);
       return {
         toStorage: (value: unknown) => {
           if (this._supportsGeo === false) {
@@ -493,7 +587,11 @@ export class PostgresAdapter extends BaseDbAdapter {
           if (!point) {
             return value;
           }
-          return this._supportsGeo ? geoPointToEwkt(point) : new PendingGeoPoint(point, value);
+          const known = this._geoNative.get(column);
+          if (known === undefined) {
+            return new PendingGeoPoint(point, value, native);
+          }
+          return known ? geoPointToEwkt(point) : value;
         },
         fromStorage: (value: unknown) => {
           if (typeof value === "string") {
@@ -1598,6 +1696,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       }
 
       await conn.exec("COMMIT");
+      this._geoSchemaChanged();
 
       // Reset identity sequences after data copy — the INSERT INTO ... SELECT
       // uses explicit values, so the sequence doesn't advance. Runs on the
@@ -1606,6 +1705,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       await this._resetIdentitySequences();
     } catch (err) {
       await conn.exec("ROLLBACK").catch(() => {});
+      this._geoSchemaChanged();
       // PostgreSQL puts the dependent object of a refused DROP (2BP01) — and
       // the offending row of a failed FK restore — in `detail`; carry it so
       // the schema-sync error entry names it (the same error is rethrown, so
@@ -1688,6 +1788,11 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   async afterSyncTable(): Promise<void> {
     await this._resetIdentitySequences();
+    // Learn the geo column types while syncing, so writes never probe after
+    // a sync. Best effort — the first geo write probes when this did not.
+    if (this._geoFields && this._supportsGeo === true && this._geoNative.size === 0) {
+      await this._probeGeo(this._txConnection() ?? this.driver).catch(() => undefined);
+    }
   }
 
   /**
@@ -2282,6 +2387,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     try {
       await this._exec().exec("CREATE EXTENSION IF NOT EXISTS postgis");
       this._supportsGeo = true;
+      // Columns are learned anew: one probed as JSONB before stays JSONB
+      // until sync migrates it — `_geoSchemaChanged` runs on that DDL.
     } catch {
       this._supportsGeo = false;
       this.logger.warn(
@@ -2292,32 +2399,100 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Resolves PostGIS presence without DDL when nothing has yet (schema sync
-   * never ran in this process): one read-only `pg_extension` lookup, shared
-   * by concurrent callers, run on `exec` (safe inside a transaction). A
-   * failed lookup is not cached. A table sync created over PostGIS has the
-   * extension installed, so presence decides the column type.
+   * Whether geo column `column` is a PostGIS column (EWKT) — synchronously
+   * when known, else after {@link _probeGeo} on `exec` (the statement's own
+   * executor). A column the catalog does not show (table not created yet)
+   * follows PostGIS presence — what sync would create — and is probed again
+   * next time.
    */
-  private _ensureGeoKnown(exec: Pick<TPgDriver, "get">): Promise<void> {
-    if (this._supportsGeo !== undefined) {
-      return Promise.resolve();
+  private _geoColumnNative(column: string, exec: TGeoProbeExecutor): boolean | Promise<boolean> {
+    if (this._supportsGeo === false) {
+      return false;
     }
-    this._geoProbe ??= (async () => {
-      try {
-        const row = await exec.get<{ present: unknown }>(GEO_PROBE_SQL, []);
-        if (this._supportsGeo === undefined) {
-          this._supportsGeo = row?.present === true;
-        }
-      } catch (err) {
-        this._geoProbe = undefined;
-        throw err;
-      }
-    })();
-    return this._geoProbe;
+    const known = this._geoNative.get(column);
+    if (known !== undefined) {
+      return known;
+    }
+    return this._probeGeo(exec).then(
+      (probe) => probe.columns.get(column) ?? this._supportsGeo ?? probe.postgis,
+    );
   }
 
+  /**
+   * The read-only geo probe ({@link GEO_PROBE_SQL}) of this table on `exec`:
+   * records PostGIS presence when not known yet, and caches the type of every
+   * geo column the catalog shows (unless a DDL path ran meanwhile).
+   *
+   * Concurrent callers on the SAME executor share one probe; a caller on
+   * another executor runs its own — waiting on a probe queued for a pool
+   * connection while holding a transaction connection could deadlock a
+   * small pool, and a transaction's failure (an aborted one) never reaches
+   * callers outside it. A failed probe is not cached, and a caller that
+   * joined it retries once (a pool probe may have hit a broken connection).
+   */
+  private _probeGeo(exec: TGeoProbeExecutor): Promise<TGeoProbe> {
+    const shared = this._geoProbe;
+    if (shared?.exec === exec) {
+      return shared.promise.catch(() => this._runGeoProbe(exec));
+    }
+    const promise = this._runGeoProbe(exec);
+    const entry = { exec, promise };
+    this._geoProbe = entry;
+    const clear = () => {
+      if (this._geoProbe === entry) this._geoProbe = undefined;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  private async _runGeoProbe(exec: TGeoProbeExecutor): Promise<TGeoProbe> {
+    const gen = this._geoSchemaGen;
+    const row = await exec.get<{ postgis: unknown; columns: unknown }>(GEO_PROBE_SQL, [
+      quoteTableName(this.resolveTableName()),
+      this._geoColumnNames,
+    ]);
+    const postgis = row?.postgis === true;
+    const raw = typeof row?.columns === "string" ? JSON.parse(row.columns) : row?.columns;
+    const columns = new Map<string, boolean>();
+    if (raw && typeof raw === "object") {
+      for (const [name, type] of Object.entries(raw as Record<string, unknown>)) {
+        columns.set(name, POSTGIS_TYPES.has(String(type)));
+      }
+    }
+    this._supportsGeo ??= postgis;
+    if (gen === this._geoSchemaGen) {
+      for (const [name, native] of columns) this._geoNative.set(name, native);
+    }
+    return { postgis, columns };
+  }
+
+  /**
+   * A DDL path ran (create / alter / recreate / rename / drop): the geo
+   * column types are learned anew, and a probe in flight caches nothing.
+   */
+  private _geoSchemaChanged(): void {
+    if (this._geoFields) {
+      this._geoNative.clear();
+      this._geoSchemaGen++;
+      this._geoProbe = undefined;
+    }
+  }
+
+  /**
+   * PostGIS presence when known; while unknown (no sync, no statement yet),
+   * a table with geo columns answers `true` — the geo paths learn presence
+   * before they run and refuse with `GEO_NOT_SUPPORTED` then, so the first
+   * geo search of a process that never syncs is not refused up front.
+   */
   override isGeoSearchable(): boolean {
-    return this._supportsGeo === true;
+    return this._supportsGeo ?? this._hasGeoPointFields();
+  }
+
+  /** PostGIS presence, probed when not known yet (geo search entry points). */
+  private async _ensureGeoKnown(): Promise<void> {
+    if (this._supportsGeo === undefined) {
+      await this._probeGeo(this._txConnection() ?? this.driver);
+    }
   }
 
   override async geoSearch(
@@ -2325,7 +2500,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): Promise<Array<Record<string, unknown>>> {
-    await this._ensureGeoKnown(this._txConnection() ?? this.driver);
+    await this._ensureGeoKnown();
     const { sql, params } = this._buildGeoSearchSelect(
       this._prepareGeoSearch(point, query, indexName),
     );
@@ -2339,7 +2514,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-    await this._ensureGeoKnown(this._txConnection() ?? this.driver);
+    await this._ensureGeoKnown();
     const ctx = this._prepareGeoSearch(point, query, indexName);
     const { sql, params } = this._buildGeoSearchSelect(ctx);
     const countFrag = buildGeoSearchCount(
@@ -2364,9 +2539,7 @@ export class PostgresAdapter extends BaseDbAdapter {
   /** Resolves the shared parts of a geo search once (column, filter, distance, window). */
   private _prepareGeoSearch(point: [number, number], query: DbQuery, indexName?: string) {
     if (!this._supportsGeo) {
-      throw new DbError("GEO_NOT_SUPPORTED", [
-        { path: "", message: "Geo search requires the PostGIS extension" },
-      ]);
+      throw geoNotSupported("", "Geo search requires the PostGIS extension");
     }
     const column = this._resolveGeoColumn(indexName);
     const controls = (query.controls ?? {}) as Record<string, unknown>;

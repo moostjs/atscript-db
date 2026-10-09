@@ -13,7 +13,7 @@
  */
 export function cloneValue<T>(value: T): T {
   if (value === null || typeof value !== "object") {
-    // A function / symbol throws `DataCloneError`, exactly as before.
+    // A function / symbol throws `DataCloneError`, like `structuredClone`.
     return typeof value === "function" || typeof value === "symbol"
       ? structuredClone(value)
       : value;

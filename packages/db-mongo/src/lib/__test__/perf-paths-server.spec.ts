@@ -1,5 +1,5 @@
 import { DbSpace } from "@atscript/db";
-import type { Db, MongoClient } from "mongodb";
+import { Collection, type Db, type MongoClient } from "mongodb";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { MongoAdapter } from "../mongo-adapter";
@@ -109,46 +109,44 @@ describe("collated indexes (MG-2)", () => {
   });
 });
 
-describe("$with lookups by field (MG-3)", () => {
-  it("load exactly what the pipeline-only form loads, odd keys included", async () => {
-    const s = space();
-    await seedAuthors(s);
-    await db.collection("pf_authors").insertMany([
-      { id: "1", email: "str@x", name: "string id" },
-      { id: [5, 6], email: "arr@x", name: "array id" },
-      // A unique `id` index treats null and missing alike, so only the null key is seeded here;
-      // the missing-key case is covered on the referencing side (post 5).
-      { id: null, email: "null@x", name: "null id" },
+describe("collated index migration safety (MG-2)", () => {
+  it("keeps a byte-wise unique index when case variants would violate the collated one", async () => {
+    const raw = db.collection("pf_authors");
+    await db.createCollection("pf_authors");
+    await raw.createIndex(
+      { email: 1 },
+      { name: "atscript__unique__pf_author_email", unique: true },
+    );
+    await raw.insertMany([
+      { _id: 1 as any, email: "Ann@x", name: "a" },
+      { _id: 2 as any, email: "ann@x", name: "b" },
     ]);
-    await db.collection("pf_posts").insertMany([
-      { id: 1, title: "to 1", authorId: 1 },
-      { id: 2, title: "to 1 as long", authorId: 1.0 },
-      { id: 3, title: "to '1'", authorId: "1" },
-      { id: 4, title: "null fk", authorId: null },
-      { id: 5, title: "missing fk" },
-      { id: 6, title: "array fk", authorId: [5, 6] },
-      { id: 7, title: "element of array id", authorId: 5 },
-      { id: 8, title: "dangling", authorId: 99 },
-    ]);
-    const posts = s.getTable(fx.PfPost) as any;
-    const authors = s.getTable(fx.PfAuthor) as any;
-    const load = async (byField: boolean) => {
-      const spies = [posts, authors].map((t) =>
-        vi.spyOn(t.dbAdapter as MongoAdapter, "lookupJoinsByField").mockReturnValue(byField),
-      );
-      const to = await posts.findMany({
-        filter: {},
-        controls: { $sort: { id: 1 }, $with: [{ name: "author" }] },
-      });
-      const from = await authors.findMany({
-        filter: { id: { $in: [1, 2, 3] } },
-        controls: { $sort: { id: 1 }, $with: [{ name: "posts", controls: { $sort: { id: 1 } } }] },
-      });
-      for (const spy of spies) spy.mockRestore();
-      return { to, from };
-    };
-    expect((s.getAdapter(fx.PfPost) as MongoAdapter).lookupJoinsByField()).toBe(true);
-    expect(await load(true)).toEqual(await load(false));
+    await expect((space().getTable(fx.PfAuthor) as any).syncIndexes()).rejects.toThrow(
+      /current index is kept/,
+    );
+    const index = (await raw.listIndexes().toArray()).find(
+      (i) => i.name === "atscript__unique__pf_author_email",
+    );
+    expect(index).toMatchObject({ unique: true });
+    expect(index?.collation).toBeUndefined();
+    await expect(raw.insertOne({ _id: 3 as any, email: "Ann@x", name: "c" })).rejects.toThrow(
+      /E11000/,
+    );
+  });
+
+  it("does not rebuild byte-wise indexes on a collection with a default collation", async () => {
+    await db.createCollection("pf_authors", { collation: { locale: "fr", strength: 1 } });
+    await (space().getTable(fx.PfAuthor) as any).syncIndexes();
+    const drop = vi.spyOn(Collection.prototype, "dropIndex");
+    const create = vi.spyOn(Collection.prototype, "createIndex");
+    try {
+      await (space().getTable(fx.PfAuthor) as any).syncIndexes();
+      expect(drop).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      drop.mockRestore();
+      create.mockRestore();
+    }
   });
 });
 
@@ -178,20 +176,31 @@ describe("ungrouped aggregate over no rows (MG-7)", () => {
 });
 
 describe("@db.default.increment inside a transaction (C6)", () => {
-  it("a rollback returns the allocated values", async () => {
+  it("concurrent transactions allocate without write conflicts (no retries)", async () => {
     const tickets = space().getTable(fx.PfTicket) as any;
     await tickets.insertOne({ subject: "first" });
-    await expect(
-      tickets.dbAdapter.withTransaction(async () => {
-        await tickets.insertOne({ subject: "rolled back" });
-        throw new Error("rollback");
-      }),
-    ).rejects.toThrow("rollback");
-    await tickets.insertOne({ subject: "second" });
+    let runs = 0;
+    await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        tickets.dbAdapter.withTransaction(async () => {
+          runs++;
+          await tickets.insertOne({ subject: `tx${i}` });
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }),
+      ),
+    );
+    expect(runs).toBe(5);
+    const ids = (await tickets.findMany({ filter: {}, controls: {} })).map((r: any) => r.id);
+    expect(new Set(ids).size).toBe(6);
+  });
+
+  it("a fresh counter inside a transaction sees the transaction's own rows", async () => {
+    const tickets = space().getTable(fx.PfTicket) as any;
+    await tickets.dbAdapter.withTransaction(async () => {
+      await tickets.insertOne({ id: 7, subject: "explicit" });
+      await tickets.insertOne({ subject: "allocated" });
+    });
     const rows = await tickets.findMany({ filter: {}, controls: { $sort: { id: 1 } } });
-    expect(rows.map((r: any) => [r.id, r.subject])).toEqual([
-      [1, "first"],
-      [2, "second"],
-    ]);
+    expect(rows.map((r: any) => r.id)).toEqual([7, 8]);
   });
 });

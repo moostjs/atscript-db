@@ -204,9 +204,21 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
   });
 
   it("@@auto_increment_increment = 3 as a server default, outside a transaction: ids are the stored ids", async () => {
-    // GLOBAL applies to connections opened afterwards: a fresh pool sees stride 3 on every connection
-    expect(await adminQuery("SET GLOBAL auto_increment_increment = 3")).toBe(true);
+    // GLOBAL applies to connections opened afterwards: a fresh pool sees stride 3 on every connection.
+    // A managed server (RDS, Cloud SQL) refuses SET GLOBAL — stride 3 is then set on every connection
+    // the pool opens, before the pool hands it out (the same per-connection state).
+    const global = await adminQuery("SET GLOBAL auto_increment_increment = 3");
     const pool = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    if (!global) {
+      type TRawConn = { query(sql: string, cb: () => void): unknown };
+      const raw = (await (pool as any).poolInit) as {
+        on(e: "connection", l: (c: TRawConn) => void): void;
+      };
+      raw.on(
+        "connection",
+        (conn) => void conn.query("SET SESSION auto_increment_increment = 3", () => {}),
+      );
+    }
     try {
       const auto = new AtscriptDbTable(fx.IgAuto, new MysqlAdapter(pool)) as any;
       expect(auto.dbAdapter.isInTransaction()).toBe(false);
@@ -220,7 +232,7 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
       expect(res.insertedIds).toEqual([id("o1"), id("o2"), id("o3")]);
       expect(id("o2") - id("o1")).toBe(3);
     } finally {
-      await adminQuery("SET GLOBAL auto_increment_increment = 1");
+      if (global) await adminQuery("SET GLOBAL auto_increment_increment = 1");
       await pool.close();
     }
   });

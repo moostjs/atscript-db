@@ -1,5 +1,6 @@
+import { isPlainObject } from "@atscript/db";
 import type { TDbActionEnvelope } from "./discover";
-import { exceedsFields, projectRow, requiredFieldsOf } from "./rows-by-id";
+import { exceedsFields, omitKeys, projectRow, requiredFieldsOf, splitPaths } from "./rows-by-id";
 import type { TDbActionDisabledVerdict } from "./types";
 import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
 
@@ -81,7 +82,8 @@ function computeStripFields(
 /**
  * Sets `$actions` on every row (plus `$disabledReasons` on rows where a
  * predicate returned a reason string) and strips the columns fetched only for an
- * action's `requiredFields` — IN PLACE; returns the same array, typed as
+ * action's `requiredFields` — IN PLACE in `rows` (a stripped row is replaced
+ * by a rebuilt copy, see `omitKeys`); returns the same array, typed as
  * augmented.
  */
 export function augmentRowsWithActions<
@@ -98,10 +100,11 @@ export function augmentRowsWithActions<
     if (!c.disabledFn) return undefined;
     // Judged on the columns its gate loads; rows already within them go as-is.
     const fields = gateFields?.(c.envelope);
-    const input =
-      fields && rows.some((row) => exceedsFields(row, fields))
-        ? rows.map((row) => projectRow(row, fields))
-        : rows;
+    let input: Record<string, unknown>[] = rows;
+    if (fields && rows.some((row) => exceedsFields(row, fields))) {
+      const paths = splitPaths(fields);
+      input = rows.map((row) => projectRow(row, paths));
+    }
     return judgeRows(c.envelope.info.name, c.disabledFn, input);
   });
 
@@ -129,10 +132,12 @@ export function augmentRowsWithActions<
   if (resolvedProjection !== null) {
     const stripFields = computeStripFields(candidates, resolvedProjection);
     if (stripFields !== null) {
-      for (const row of rows) {
-        for (const f of stripFields) {
-          delete (row as Record<string, unknown>)[f];
-        }
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i] as Record<string, unknown>;
+        // A plain row is copied without the keys (keeps it in fast mode); any
+        // other object keeps its prototype and loses the keys in place.
+        if (isPlainObject(row)) rows[i] = omitKeys(row, stripFields) as TRow;
+        else for (const key of stripFields) delete row[key];
       }
     }
   }

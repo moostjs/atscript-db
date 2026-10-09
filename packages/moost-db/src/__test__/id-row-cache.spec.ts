@@ -70,7 +70,7 @@ describe("cached ID row wook", () => {
         filter: unknown;
         controls: { $select: string[] };
       };
-      expect(arg.filter).toEqual({ $or: [{ slug: "alpha" }] });
+      expect(arg.filter).toEqual({ slug: "alpha" });
       // Effective projection unions the readable's preferredId (here =
       // primaryKeys = ['id']) with the submitted identifier-shape field.
       expect(new Set(arg.controls.$select)).toEqual(new Set(["id", "slug"]));
@@ -96,8 +96,9 @@ describe("cached ID row wook", () => {
       const rows = (await current().get(dbActionRowsSlot)) as Array<
         Record<string, unknown> | undefined
       >;
-      const callArg = findMany.mock.calls[0][0] as { filter: { $or: unknown[] } };
-      expect(callArg.filter.$or).toHaveLength(1);
+      const callArg = findMany.mock.calls[0][0] as { filter: unknown };
+      // one deduped identity → one equality
+      expect(callArg.filter).toEqual({ id: "1" });
       expect(rows).toHaveLength(3);
       expect(rows[0]).toEqual({ id: "1", name: "Alpha" });
       expect(rows[1]).toBe(rows[0]);

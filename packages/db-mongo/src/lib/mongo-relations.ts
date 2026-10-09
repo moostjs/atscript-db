@@ -45,11 +45,6 @@ export interface TMongoRelationHost {
   readonly _table: TMongoRelationReadable;
   readonly collection: Collection<any>;
   _getSessionOpts(): Record<string, unknown>;
-  /**
-   * Whether a `$lookup` may combine `localField` / `foreignField` with a
-   * `pipeline` (MongoDB 5.0+) — see {@link directLookup}. Absent: never.
-   */
-  lookupJoinsByField?(): boolean;
 }
 
 /** One `$with` relation's lookup and how its rows come back. */
@@ -125,7 +120,6 @@ export async function loadRelationsImpl(
   const source = host._table;
   const primaryKeys = source.primaryKeys as string[];
   const relMeta: TRelationLookup[] = [];
-  const byField = host.lookupJoinsByField?.() ?? false;
 
   for (const withRel of withRelations) {
     if (withRel.name.includes(".")) {
@@ -139,11 +133,7 @@ export async function loadRelationsImpl(
       );
     }
 
-    const lookup = buildRelationLookup(
-      { source, withRel, relation, byField },
-      foreignKeys,
-      tableResolver,
-    );
+    const lookup = buildRelationLookup(source, withRel, relation, foreignKeys, tableResolver);
     if (lookup) {
       relMeta.push(lookup);
     }
@@ -237,22 +227,14 @@ function buildPKMatchFilter(
   return orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
 }
 
-/** The relation a `$lookup` is built for. */
-interface TLookupSubject {
-  source: TMongoRelationReadable;
-  withRel: WithRelation;
-  relation: TDbRelation;
-  /** {@link TMongoRelationHost.lookupJoinsByField}. */
-  byField: boolean;
-}
-
 /** Dispatches to the correct $lookup builder based on relation direction. */
 function buildRelationLookup(
-  subject: TLookupSubject,
+  source: TMongoRelationReadable,
+  withRel: WithRelation,
+  relation: TDbRelation,
   foreignKeys: ReadonlyMap<string, TDbForeignKey>,
   tableResolver?: TTableResolver,
 ): TRelationLookup | undefined {
-  const { source, withRel, relation } = subject;
   const target = resolveReadable(tableResolver, relation.targetType());
   if (!target) {
     return undefined;
@@ -260,11 +242,11 @@ function buildRelationLookup(
   let built: { stages: Document[]; isArray: boolean; readControls: TReadControls } | undefined;
   switch (relation.direction) {
     case "to": {
-      built = buildToLookup(subject, target, foreignKeys);
+      built = buildToLookup(source, target, withRel, relation, foreignKeys);
       break;
     }
     case "from": {
-      built = buildFromLookup(subject, target);
+      built = buildFromLookup(source, target, withRel, relation);
       break;
     }
     case "via": {
@@ -302,68 +284,53 @@ function joinPairs(
 
 /** $lookup for TO relations (FK is on this table → target). Always single-valued. */
 function buildToLookup(
-  subject: TLookupSubject,
+  source: TMongoRelationReadable,
   target: TMongoRelationReadable,
+  withRel: WithRelation,
+  relation: TDbRelation,
   foreignKeys: ReadonlyMap<string, TDbForeignKey>,
 ): { stages: Document[]; isArray: boolean; readControls: TReadControls } | undefined {
-  const fk = findFKForRelation(subject.relation, foreignKeys);
+  const fk = findFKForRelation(relation, foreignKeys);
   return fk
-    ? directLookup(subject, target, {
-        sourceFields: fk.localFields,
-        targetFields: fk.targetFields,
-        prefix: "fk_",
-        isArray: false,
-      })
+    ? directLookup(source, target, withRel, relation, fk.localFields, fk.targetFields, "fk_", false)
     : undefined;
 }
 
 /** $lookup for FROM relations (FK is on target → this table). */
 function buildFromLookup(
-  subject: TLookupSubject,
+  source: TMongoRelationReadable,
   target: TMongoRelationReadable,
+  withRel: WithRelation,
+  relation: TDbRelation,
 ): { stages: Document[]; isArray: boolean; readControls: TReadControls } | undefined {
-  const remoteFK = findRemoteFK(target, subject.source.tableName, subject.relation.alias);
+  const remoteFK = findRemoteFK(target, source.tableName, relation.alias);
   return remoteFK
-    ? directLookup(subject, target, {
-        sourceFields: remoteFK.targetFields,
-        targetFields: remoteFK.fields,
-        prefix: "pk_",
-        isArray: subject.relation.isArray,
-      })
+    ? directLookup(
+        source,
+        target,
+        withRel,
+        relation,
+        remoteFK.targetFields,
+        remoteFK.fields,
+        "pk_",
+        relation.isArray,
+      )
     : undefined;
 }
 
 /**
  * The correlated `$lookup` of a TO / FROM relation: `sourceFields` of this
  * table paired with `targetFields` of the target, unwound when single-valued.
- *
- * A single-pair join on MongoDB 5.0+ ({@link TLookupSubject.byField}) also
- * names the pair as `localField` / `foreignField`: the server then finds the
- * candidate related documents by an equality lookup on the foreign field
- * (index-backed, planned once) instead of evaluating the pipeline's `$expr`
- * per related document. The pipeline still opens with the same
- * {@link correlate} stages, so the result is unchanged: those stages keep
- * exactly the documents whose key EQUALS the local one (whole-value `$eq` —
- * an array element match the field equality admits is dropped) and is not
- * `null`. The field equality only narrows: every such document is among its
- * candidates (it matches equal values, and an array local value element-wise)
- * — the one exception, an empty-array key on both sides, is not a value a
- * scalar key field holds.
  */
 function directLookup(
-  { source, withRel, relation, byField }: TLookupSubject,
+  source: TMongoRelationReadable,
   target: TMongoRelationReadable,
-  {
-    sourceFields,
-    targetFields,
-    prefix,
-    isArray,
-  }: {
-    sourceFields: readonly string[];
-    targetFields: readonly string[];
-    prefix: string;
-    isArray: boolean;
-  },
+  withRel: WithRelation,
+  relation: TDbRelation,
+  sourceFields: readonly string[],
+  targetFields: readonly string[],
+  prefix: string,
+  isArray: boolean,
 ): { stages: Document[]; isArray: boolean; readControls: TReadControls } {
   const pairs = joinPairs(source.getMetadata(), sourceFields, target.getMetadata(), targetFields);
   const inner = buildLookupInnerPipeline(
@@ -373,15 +340,10 @@ function directLookup(
     pairs.map((p) => p.inner),
   );
   const join = correlate(prefix, pairs);
-  const byFields =
-    byField && pairs.length === 1
-      ? { localField: pairs[0]!.outer, foreignField: pairs[0]!.inner }
-      : undefined;
   const stages: Document[] = [
     {
       $lookup: {
         from: collectionOf(target),
-        ...byFields,
         let: join.let,
         pipeline: [...join.stages, ...inner.filter, ...inner.page],
         as: withRel.name,

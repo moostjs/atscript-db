@@ -1,4 +1,4 @@
-import type { Collection, CreateIndexesOptions, Db } from "mongodb";
+import type { Collection, CreateIndexesOptions, Db, Document } from "mongodb";
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   isAtscriptDbView,
@@ -509,6 +509,20 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
   // for this collection.
   const { attempt, throwIfAny } = createFailureCollector("index sync");
 
+  // The collection's default collation (read once, only when an index
+  // reports a collation a byte-wise index should not have): an index built
+  // without one inherits it, so it counts as byte-wise there.
+  let defaultCollation: TRemoteMongoIndex["collation"] | null | undefined;
+  const collectionDefaultCollation = async () => {
+    if (defaultCollation === undefined) {
+      const info = (await host.db
+        .listCollections({ name: host.collection.collectionName })
+        .next()) as { options?: { collation?: TRemoteMongoIndex["collation"] } } | null;
+      defaultCollation = info?.options?.collation ?? null;
+    }
+    return defaultCollation ?? undefined;
+  };
+
   for (const remote of existingIndexes) {
     if (!remote.name.startsWith(INDEX_PREFIX)) {
       continue;
@@ -524,13 +538,34 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
         // plain unique index would never migrate to a partial unique index —
         // listIndexes() reports the same { field: 1 } key, so the old index
         // would be silently kept and the new options never applied.
+        const wantedCollation = indexCollation(host, local);
         const optionsMatch =
           local.type === "text" ||
           ((local.type === "unique") === (remote.unique === true) &&
             partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression) &&
-            collationEqual(indexCollation(host, local), remote.collation));
+            (sameCollation(wantedCollation, remote.collation) ||
+              (!wantedCollation &&
+                sameCollation(remote.collation, await collectionDefaultCollation()))));
+        // Replacing a unique index with one the current data violates (e.g.
+        // values that differ only by case under a new 'nocase' collation)
+        // would drop the constraint and fail the rebuild: keep it, report.
+        const violation =
+          fieldsMatch && weightsMatch && optionsMatch
+            ? undefined
+            : local.type === "unique" && remote.unique === true
+              ? await findUniqueViolation(host, local, wantedCollation)
+              : undefined;
         if (fieldsMatch && weightsMatch && optionsMatch) {
           indexesToCreate.delete(remote.name);
+        } else if (violation !== undefined) {
+          indexesToCreate.delete(remote.name);
+          await attempt(`replace unique index "${remote.name}"`, () =>
+            Promise.reject(
+              new Error(
+                `existing documents violate the new index (duplicate key ${JSON.stringify(violation)}); the current index is kept`,
+              ),
+            ),
+          );
         } else {
           host._log("dropIndex", remote.name);
           await attempt(`drop index "${remote.name}"`, () =>
@@ -689,14 +724,40 @@ function indexCollation(
   return mongoCollationOf(Object.keys(index.fields).map((field) => host.fieldCollation!(field)));
 }
 
-/** Whether an index's existing collation is the wanted one (locale + strength). */
-function collationEqual(
-  local: TMongoCollation | undefined,
-  remote: TRemoteMongoIndex["collation"],
+/** Whether two collations are the same (locale + strength; `simple` / none = byte-wise). */
+function sameCollation(
+  a: TRemoteMongoIndex["collation"] | TMongoCollation,
+  b: TRemoteMongoIndex["collation"],
 ): boolean {
-  const remoteLocale = remote?.locale === "simple" ? undefined : remote?.locale;
-  if (!local) return remoteLocale === undefined;
-  return remoteLocale === local.locale && remote?.strength === local.strength;
+  const la = a?.locale === "simple" ? undefined : a?.locale;
+  const lb = b?.locale === "simple" ? undefined : b?.locale;
+  return la === lb && (la === undefined || a?.strength === b?.strength);
+}
+
+/**
+ * One key the unique index `index` would reject in the current data (under
+ * `collation`, within its partial filter), or `undefined`. Missing and `null`
+ * values collide, as in a unique index.
+ */
+async function findUniqueViolation(
+  host: TMongoSchemaSyncHost,
+  index: TPlainIndex,
+  collation: TMongoCollation | undefined,
+): Promise<unknown> {
+  const id: Record<string, unknown> = {};
+  for (const field of Object.keys(index.fields)) {
+    id[field.replace(/\./g, "__")] = { $ifNull: [`$${field}`, null] };
+  }
+  const pipeline: Document[] = [
+    ...(index.partialFilterExpression ? [{ $match: index.partialFilterExpression }] : []),
+    { $group: { _id: id, n: { $sum: 1 } } },
+    { $match: { n: { $gt: 1 } } },
+    { $limit: 1 },
+  ];
+  const [hit] = await host.collection
+    .aggregate(pipeline, { allowDiskUse: true, ...(collation ? { collation } : {}) })
+    .toArray();
+  return hit?._id;
 }
 
 /**

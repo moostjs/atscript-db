@@ -152,8 +152,10 @@ export interface SqlDialect {
  * (`'…'`, `E'…'`, `$tag$…$tag$`), a quoted identifier (`"…"`) or a comment
  * (`-- …`, `/* … *\/`) is left alone, and so are PostgreSQL's jsonb operators
  * `?|` / `?&` (a placeholder directly followed by `|` / `&` is only ever
- * `?||`, the concatenation). `??` is an escaped literal `?` — how a builder
- * writes the bare jsonb `?` operator.
+ * `?||` / `?&&`, the concatenation / overlap). `??` is an escaped literal
+ * `?` — how a builder writes the bare jsonb `?` operator and any other
+ * operator that contains `?` (`@?` → `@??`, `?#` → `??#`, `?-` → `??-`).
+ * Block comments nest, as in PostgreSQL.
  */
 export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSqlFragment {
   const placeholder = dialect.paramPlaceholder;
@@ -179,7 +181,10 @@ export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSq
         out += s.slice(last, i + 1);
         last = i + 2;
         i += 2;
-      } else if ((next === PIPE && s.charCodeAt(i + 2) !== PIPE) || next === AMP) {
+      } else if (
+        (next === PIPE && s.charCodeAt(i + 2) !== PIPE) ||
+        (next === AMP && s.charCodeAt(i + 2) !== AMP)
+      ) {
         i += 2; // jsonb `?|` / `?&` operator — kept as is
       } else {
         out += s.slice(last, i) + placeholder(++idx);
@@ -193,8 +198,7 @@ export function finalizeParams(dialect: SqlDialect, fragment: TSqlFragment): TSq
       const end = s.indexOf("\n", i + 2);
       i = end === -1 ? n : end + 1;
     } else if (c === SLASH && s.charCodeAt(i + 1) === STAR) {
-      const end = s.indexOf("*/", i + 2);
-      i = end === -1 ? n : end + 2;
+      i = skipBlockComment(s, i);
     } else if (c === DOLLAR) {
       i = skipDollarQuoted(s, i);
     } else {
@@ -249,6 +253,25 @@ function skipStringLiteral(s: string, at: number): number {
     if (s.charCodeAt(end + 1) !== SQUOTE) return end + 1;
     i = end + 2;
   }
+}
+
+/** Index just past the `/* … *\/` comment opening at `at` (comments nest, as in PostgreSQL). */
+function skipBlockComment(s: string, at: number): number {
+  let depth = 1;
+  let i = at + 2;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === STAR && s.charCodeAt(i + 1) === SLASH) {
+      i += 2;
+      if (--depth === 0) return i;
+    } else if (c === SLASH && s.charCodeAt(i + 1) === STAR) {
+      depth++;
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  return s.length;
 }
 
 /**

@@ -1,5 +1,4 @@
 import { selfOrAncestor } from "@atscript/db";
-import type { TMetaResponse } from "@atscript/db";
 import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 import type { TDbDecorationsMeta } from "./db-decorations.decorator";
@@ -24,13 +23,11 @@ export interface TDecorationIndex {
   readonly visibleOn: ReadonlyMap<string, readonly string[]>;
   /** `requires` path → the own leaves below it, for a parent object only (what a narrowed projection must still carry). */
   readonly leavesOf: ReadonlyMap<string, readonly string[]>;
-  /** Per class (and readable) state the planner fills: the serialized type, the visible `/meta` envelopes. */
+  /** Per class (and readable) state the planner fills: the serialized type. */
   readonly memo: {
     serialized?: TSerializedAnnotatedType;
     /** The app scope (`db.http.path` overrides) {@link serialized} was built for. */
     serializedScope?: unknown;
-    /** `/meta` envelopes through the decoration step, per input (while visibility is not request-scoped). */
-    meta: WeakMap<TMetaResponse, TMetaResponse>;
   };
 }
 
@@ -141,6 +138,6 @@ export function buildDecorationIndex(
     requires,
     visibleOn,
     leavesOf,
-    memo: { meta: new WeakMap() },
+    memo: {},
   };
 }

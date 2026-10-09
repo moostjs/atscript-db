@@ -56,7 +56,7 @@ import type {
 } from "@atscript/moost-db";
 ```
 
-Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` + `@wooksjs/event-http` (slots + gate interceptor).
+Peer deps: `@wooksjs/http-body` (identifier body parse), `@wooksjs/event-core` (slots + gate interceptor), `moost` + `@moostjs/event-http`.
 
 ## Decorators
 

@@ -535,11 +535,18 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   /**
    * Page + total in one synchronous segment: the filter's WHERE is built once
-   * for both statements, and both read the same snapshot.
+   * for both statements, and both read the same snapshot. A subclass that
+   * overrides `findMany` / `count` keeps the base behaviour (both through them).
    */
   override async findManyWithCount(
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    if (
+      this.findMany !== SqliteAdapter.prototype.findMany ||
+      this.count !== SqliteAdapter.prototype.count
+    ) {
+      return super.findManyWithCount(query);
+    }
     const where = buildWhere(query.filter);
     const tableName = this.resolveTableName();
     const { sql, params } = buildSelect(tableName, where, query.controls);

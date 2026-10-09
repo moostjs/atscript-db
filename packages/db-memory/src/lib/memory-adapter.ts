@@ -8,6 +8,7 @@ import {
   DbSpace,
   containsRelationFilter,
   isAtscriptDbView,
+  isPlainObject,
 } from "@atscript/db";
 import type {
   DbQuery,
@@ -1253,7 +1254,7 @@ function collectPins(
     if (pinned.has(key) || !fields.includes(key)) {
       continue;
     }
-    const operand = isOperatorObject(value) ? value.$eq : value;
+    const operand = isPlainObject(value) ? value.$eq : value;
     if (
       typeof operand === "string" ||
       typeof operand === "number" ||
@@ -1263,16 +1264,6 @@ function collectPins(
       pinned.set(key, operand);
     }
   }
-}
-
-/** A plain object (an operator map such as `{ $eq: v }`), as `walkFilter` reads one. */
-function isOperatorObject(value: unknown): value is Record<string, unknown> {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
-  );
 }
 
 /**

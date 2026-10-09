@@ -31,6 +31,8 @@ function mockCol(existing: unknown[] = []) {
     createIndex: vi.fn(async (_fields: unknown, _opts?: unknown) => "ok"),
     dropIndex: vi.fn(async (_name: string) => undefined),
     listSearchIndexes: () => ({ toArray: async () => [] }),
+    // the pre-replace duplicate probe of a unique index: no violations
+    aggregate: () => ({ toArray: async () => [] }),
   };
   vi.spyOn(adapter, "collection", "get").mockReturnValue(col as never);
   return col;

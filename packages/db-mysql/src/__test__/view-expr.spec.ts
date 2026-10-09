@@ -144,7 +144,8 @@ describe.skipIf(!URI)("MysqlAdapter — first-row joins and computed columns (My
         meta: { level: 5 },
       },
     ]);
-  });
+    // ~40 sequential DDL / seed statements: a remote server needs more than the 10 s default
+  }, 60_000);
 
   afterAll(async () => {
     await driver?.close();

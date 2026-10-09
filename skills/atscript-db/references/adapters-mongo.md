@@ -136,7 +136,7 @@ embedding: db.vector
 - Pre-filter (0.1.151): top-level filter conjuncts on the index's `@db.search.filter` fields move into `$vectorSearch.filter` when the value is a string / number / boolean / `Date` / ObjectId under `$eq` (or bare), `$ne`, `$gt(e)`, `$lt(e)`, `$in`, `$nin` (non-empty) → full pages. Everything else (other fields, `null`, `$regex`, `$exists`, `$or`, predicates) filters the top-k AFTER the stage → page can be short. Several filter fields per index are all declared (≤ 0.1.150 kept only the last).
 - `$vectorSearch.limit` = `$skip + $limit` (≤ 0.1.150 a skipped page came back empty).
 - `searchWithCount` on Atlas `$search` with NO filter: page read directly + total from `$searchMeta` (`count: total`); filtered / classic `$text` / vector keep the `$facet`.
-- `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction). `$with` single-field TO/FROM joins on MongoDB 5.0+ add `localField`/`foreignField` (same rows; pipeline-only before 5.0 / unknown version).
+- `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction).
 
 ## Patch / CollectionPatcher
 

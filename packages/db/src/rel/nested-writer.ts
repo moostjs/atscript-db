@@ -710,16 +710,22 @@ export async function batchPatchNestedFrom(
       }
       patching.push({ parentPK, ops: extractNavPatchOps(navValue) });
     }
-    const current = await currentChildrenOf(
-      target,
-      patching.filter(({ ops }) => ops.replace).map(({ parentPK }) => parentPK),
-      patching.flatMap(({ ops }) => [
-        ...(ops.replace ?? []),
-        ...(ops.update ?? []),
-        ...(ops.upsert ?? []),
-        ...(ops.insert ?? []),
-      ]),
-    );
+    // One read for all `$replace` parents — unless a parent comes twice: its
+    // earlier item's `$insert` / `$upsert` would change its children first.
+    const parentKeys = new Set(patching.map(({ parentPK }) => keyString(parentPK)));
+    const current =
+      parentKeys.size < patching.length
+        ? undefined
+        : await currentChildrenOf(
+            target,
+            patching.filter(({ ops }) => ops.replace).map(({ parentPK }) => parentPK),
+            patching.flatMap(({ ops }) => [
+              ...(ops.replace ?? []),
+              ...(ops.update ?? []),
+              ...(ops.upsert ?? []),
+              ...(ops.insert ?? []),
+            ]),
+          );
 
     for (const { parentPK, ops } of patching) {
       // $replace

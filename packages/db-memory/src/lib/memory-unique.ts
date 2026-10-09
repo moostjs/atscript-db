@@ -46,7 +46,7 @@ export function recordUniqueIndex(
  * - `NaN`, an invalid `Date`, or any other object (arrays included — compared
  *   by reference, and rows never share one) → `undefined`: equal to nothing;
  * - a required member that is `null` or missing is a value like any other
- *   (`null` ≠ missing), as the scan treated it.
+ *   (`null` ≠ missing).
  */
 export function uniqueTupleKey(index: RecordedUniqueIndex, row: TRow): string | undefined {
   const parts: string[] = [];

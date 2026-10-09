@@ -520,7 +520,20 @@ controls arrays, and `actions[]` based on the current request principal —
 derive the principal via `@wooksjs/event-http` composables inside the hook
 (`useAuthorization()`, `useHeaders()`, `useCookies()`, `useRequest()`,
 `useHttpContext()` — there is no `useRequestContext`). Must shallow-clone
-before pruning; mutating the cached envelope leaks per-request state.
+before pruning; mutating the cached envelope leaks per-request state. Return `meta` unchanged when nothing is pruned (keeps the `/meta` ETag — see § `/meta` HTTP caching).
+
+### `/meta` HTTP caching (0.1.151)
+
+`GET /meta` + `GET /meta/form/:name` send `Cache-Control: private, no-cache`, `Vary: Authorization, Cookie` (merged) and a weak `ETag` = hash of the final bytes; matching `If-None-Match` → `304`, empty body. Docs: `docs/http/crud.md#meta-caching`.
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                   |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | ETag is computed after every overlay / `hasField` index pruning / delegated actions → another role (or re-login) with a carried tag gets `200` + a new tag. `304` only when the bytes are identical. Never derive a cache key from the URL alone (SW / client caches).                                                                                 |
+| 2   | `prepareRequest` throwing → its error status, never `304`. An after-interceptor `reply(x)` with a new body → no ETag for that response.                                                                                                                                                                                                                |
+| 3   | ETag + serialize-once only when the served object is reused across requests: `applyMetaOverlay` must return `meta` itself, or memoized variants passed through `stableMeta(obj)` (deep-freeze + mark; `Object.freeze` alone does NOT count) — a fresh object per request is correct but uncached (no ETag). An overridden `meta()` never gets an ETag. |
+| 4   | Never mutate a served `/meta` object (or the envelope) in place — stale bytes would be served. `NODE_ENV=test`/`development` or `ATSCRIPT_DB_FREEZE_META=1` deep-freeze served objects → mutation throws `TypeError` (500).                                                                                                                            |
+| 5   | Override `protected metaHttpCaching(): TDbMetaHttpCaching \| false` — `false` = no headers/ETag/304; `{ cacheControl: "no-store" }` for no browser copy; `{ vary: [..., "X-Tenant"] }` when another header identifies the caller. An existing `Cache-Control` header is kept.                                                                          |
+| 6   | Needs `moost` / `@moostjs/event-http` >= 0.6.48 (`prerenderJson` re-export).                                                                                                                                                                                                                                                                           |
 
 ### Pitfalls
 

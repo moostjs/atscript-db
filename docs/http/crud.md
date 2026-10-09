@@ -209,6 +209,34 @@ The `actions[]` entry shape is owned by [Actions](./actions) and the full `crud`
 
 The `type.metadata["db.http.path"]` carried in this payload follows the [normalization contract](../adapters/annotations#normalization-contract) — it is always the final public URL, prefixed with `/` and inclusive of the Moost `globalPrefix`, safe to use verbatim with `fetch()` or `new Client(url)`. A reference carries the target model's canonical route in the serving app; the root of a controller's own `/meta` carries that controller's own mount (see [Several controllers over one model](./#several-controllers)). `/meta` is therefore resolved per app (async in the base controller since 0.1.150).
 
+#### Caching and revalidation {#meta-caching}
+
+Since 0.1.151 `GET /meta` (and `GET /meta/form/:name`) is cacheable by the browser, per user:
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: private, no-cache
+Vary: Authorization, Cookie
+ETag: W/"oC1GGywzL4DrvNSrcTo23A"
+```
+
+The browser revalidates on every use (`no-cache`). When the server would send the same bytes, it answers `304 Not Modified` with no body:
+
+```bash
+curl -i http://localhost:3000/todos/meta -H 'If-None-Match: W/"oC1GGywzL4DrvNSrcTo23A"'
+# → HTTP/1.1 304 Not Modified
+```
+
+- **The ETag is a hash of the response bytes**, computed after every per-request hook ([`applyMetaOverlay`](./customization#applymetaoverlay), [`hasField`](./customization#hasfield) index pruning, delegated actions). A user whose role sees a different `/meta` gets a different ETag and a `200`, even when the browser sends the previous user's tag after a re-login. A `304` only confirms bytes the client already holds.
+- **A refused request is never a `304`.** A [`prepareRequest`](./customization#preparerequest) that throws answers with its error.
+- **The JSON is serialized once** per distinct payload, not on every request.
+- An ETag is sent only when the payload object is reused across requests: the default pipeline reuses it; an `applyMetaOverlay` that builds a fresh object per request is served without an ETag (see [applyMetaOverlay](./customization#applymetaoverlay)).
+- **Opt out or change the headers** with [`metaHttpCaching()`](./customization#metahttpcaching).
+
+::: warning Don't cache `/meta` by URL alone
+`/meta` differs per user. A service worker or client cache keyed only by URL serves one user's `/meta` to the next. Cache per identity, or let the browser revalidate. [`client.invalidateMeta()`](./client#meta) resets a reused client.
+:::
+
 #### FK ref shape in meta
 
 `/meta` always serializes FK fields as shallow refs — `ref.type` is the `{ id, metadata }` shape, independent of `@db.depth.limit` (which is a security guard on nested writes, not a serialization policy). The target's `db.http.path` is carried in `metadata`, so clients can:

@@ -13,8 +13,8 @@ import type {
   TMetaResponse,
   Uniquery,
 } from "@atscript/db";
-import { Get, HttpError } from "@moostjs/event-http";
-import { Moost, Param, useControllerContext, type TConsoleBase } from "moost";
+import { Get, HttpError, httpKind, prerenderJson } from "@moostjs/event-http";
+import { current, Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
@@ -28,6 +28,13 @@ import {
 import { discoverActions, getControllerFormType } from "./actions/discover";
 import { readRequestContext } from "./relation-predicates";
 import { applyTerminalRefs } from "./meta/terminal-ref";
+import {
+  freezeShared,
+  isStableMeta,
+  markStableMeta,
+  metaVariant,
+  type TMetaVariants,
+} from "./meta/meta-cache";
 import {
   addPublishHook,
   ensurePublished,
@@ -117,6 +124,26 @@ export interface TDbRequestContext {
   readonly onConflict?: "ignore";
 }
 
+/**
+ * HTTP caching of `GET /meta` and `GET /meta/form/:name` — see
+ * {@link AsReadableController.metaHttpCaching}.
+ *
+ * @since 0.1.151
+ */
+export interface TDbMetaHttpCaching {
+  /** `Cache-Control` value (default `"private, no-cache"`); not set when the response already has one. */
+  cacheControl?: string;
+  /** Request headers the response varies by, merged into `Vary` (default `["Authorization", "Cookie"]`). */
+  vary?: readonly string[];
+}
+
+const DEFAULT_META_CACHE_CONTROL = "private, no-cache";
+const DEFAULT_META_VARY: readonly string[] = ["Authorization", "Cookie"];
+
+/** The current event's HTTP response (wooks `HttpResponse`). */
+type TMetaHttpResponse = NonNullable<ReturnType<typeof readHttpResponse>>;
+const readHttpResponse = () => current().get(httpKind.keys.response);
+
 /** Control DTO a {@link AsReadableController.validateControls} call checks against. @since 0.1.143 (`"geo"`) */
 export type TDbControlsType = "query" | "pages" | "getOne" | "geo";
 
@@ -191,6 +218,13 @@ export abstract class AsReadableController<
 
   /** Cached serialized form schemas keyed by `FormType.name` — populated lazily by {@link metaForm}. */
   private _formSchemas = new Map<string, TSerializedAnnotatedType>();
+
+  /**
+   * @internal Memoized `/meta` variants of this controller (own mount path,
+   * index visibility, decorations, delegated actions) — per input object, then
+   * per layer-prefixed key; see `meta/meta-cache.ts`.
+   */
+  protected readonly _metaVariants: TMetaVariants = new WeakMap();
 
   /**
    * @param opts.canonical Multi-mount models only: marks (`true`) or excludes
@@ -639,11 +673,68 @@ export abstract class AsReadableController<
    * static envelope is cached (rebuilt when {@link metaCacheKey} changes);
    * {@link applyMetaOverlay} runs per request so subclasses can prune the
    * response by principal.
+   *
+   * Since 0.1.151 the response is HTTP-cacheable ({@link metaHttpCaching}):
+   * `Cache-Control: private, no-cache`, `Vary: Authorization, Cookie` and —
+   * when the payload is the same object as for an earlier request with the
+   * same inputs — a weak `ETag` computed from the serialized bytes, so a
+   * matching `If-None-Match` answers `304 Not Modified`. The JSON is then
+   * serialized once, not per request.
    */
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
     await this.parseRequest("meta");
-    return this._withOwnHttpPath(await this.resolveMeta());
+    // An overridden `meta()` post-processes this result: serve it without the
+    // serialize-once memo (its final object is the override's, not this one).
+    return this._serveMeta(
+      this._withOwnHttpPath(await this.resolveMeta()),
+      this.meta === AsReadableController.prototype.meta,
+    );
+  }
+
+  /**
+   * HTTP caching of `GET /meta` and `GET /meta/form/:name` (since 0.1.151).
+   * Default `{}`: `Cache-Control: private, no-cache` (kept when the response
+   * already carries one), `Vary: Authorization, Cookie` (merged into an
+   * existing `Vary`), and a weak `ETag` from the response bytes with `304`
+   * on a matching `If-None-Match`. Return `false` to send none of it (the
+   * pre-0.1.151 response), or override the header values — e.g.
+   * `{ cacheControl: "no-store" }` for deployments where no browser may keep
+   * a copy.
+   *
+   * The `ETag` is a hash of the final bytes, computed after every overlay:
+   * a request whose principal sees a different `/meta` gets a different tag
+   * (a `200`), so a `304` only ever confirms the bytes the client already
+   * holds. A refused request (`prepareRequest` throwing) is answered with its
+   * error, never `304`.
+   */
+  protected metaHttpCaching(): TDbMetaHttpCaching | false {
+    return {};
+  }
+
+  /**
+   * Applies {@link metaHttpCaching} to the current response and — when `body`
+   * is identity-stable (a cached / memoized object) — registers it for
+   * prerendering with an ETag (deep-frozen in dev / test).
+   */
+  private _serveMeta<M extends object>(body: M, prerender = true): M {
+    const caching = this.metaHttpCaching();
+    // Opted out: a shallow copy, so an object another request registered
+    // (prerender registry is global by identity) is not answered with its ETag.
+    if (caching === false) return isStableMeta(body) ? { ...body } : body;
+    let response: TMetaHttpResponse | undefined;
+    try {
+      response = readHttpResponse();
+    } catch {
+      // not inside an HTTP event (a direct call)
+    }
+    if (!response) return body;
+    applyMetaHeaders(response, caching);
+    if (prerender && isStableMeta(body)) {
+      freezeShared(body);
+      prerenderJson(body, { etag: true });
+    }
+    return body;
   }
 
   /**
@@ -654,7 +745,6 @@ export abstract class AsReadableController<
    * cached envelope.
    */
   private _withOwnHttpPath(meta: TMetaResponse): TMetaResponse {
-    const KEY = "db.http.path";
     let prefix: string | undefined;
     try {
       prefix = useControllerContext().getPrefix();
@@ -664,6 +754,16 @@ export abstract class AsReadableController<
     if (prefix === undefined || prefix === null) return meta;
     const own = normalizeHttpPath(prefix);
     if (isParametricPath(own)) return meta;
+    // The default serialize options are pure: the variant depends on the
+    // envelope and the mount only (an override's `processAnnotation` may not be).
+    return this.getSerializeOptions === AsReadableController.prototype.getSerializeOptions
+      ? metaVariant(this._metaVariants, meta, `o:${own}`, () => this._ownHttpPathOf(meta, own))
+      : this._ownHttpPathOf(meta, own);
+  }
+
+  /** {@link _withOwnHttpPath} for the mount `own`. */
+  private _ownHttpPathOf(meta: TMetaResponse, own: string): TMetaResponse {
+    const KEY = "db.http.path";
     const options = this.getSerializeOptions();
     if (options.ignoreAnnotations?.includes(KEY)) return meta;
     let key = KEY;
@@ -703,7 +803,9 @@ export abstract class AsReadableController<
       this.enterScope(scope);
       const key = this.metaCacheKey();
       if (!this._metaResponse || key !== this._metaResponseKey) {
-        this._metaResponse = this.buildScoped(scope, () => this.buildMetaResponse());
+        this._metaResponse = markStableMeta(
+          this.buildScoped(scope, () => this.buildMetaResponse()),
+        );
         this._metaResponseKey = key;
       }
       return this.applyMetaOverlay(this._metaResponse);
@@ -752,10 +854,10 @@ export abstract class AsReadableController<
     this.enterScope(scope);
     let cached = this._formSchemas.get(name);
     if (!cached) {
-      cached = this.buildScoped(scope, () => this.serializeForMeta(formType));
+      cached = markStableMeta(this.buildScoped(scope, () => this.serializeForMeta(formType)));
       this._formSchemas.set(name, cached);
     }
-    return cached;
+    return this._serveMeta(cached);
   }
 
   /**
@@ -820,8 +922,45 @@ export abstract class AsReadableController<
    * composables). The cached envelope MUST NOT be mutated — see
    * `docs/http/permissions.md` for the full contract, including the
    * "discoverability only" caveat.
+   *
+   * `/meta`'s serialize-once memo and `ETag` (since 0.1.151) need a stable
+   * object: return the envelope itself when nothing changes, or memoize your
+   * outputs and return them through `stableMeta()` (deep-freezes and marks
+   * them) — never mutate one afterwards. A fresh object per request is
+   * correct, just served without an `ETag`.
    */
   protected applyMetaOverlay(meta: TMetaResponse): TMetaResponse | Promise<TMetaResponse> {
     return meta;
   }
+}
+
+/** Sets `/meta`'s `Cache-Control` (unless present) and merges its `Vary` tokens. */
+function applyMetaHeaders(response: TMetaHttpResponse, caching: TDbMetaHttpCaching): void {
+  const headers = response.headers();
+  let cacheControlSet = false;
+  let varyKey = "vary";
+  for (const key in headers) {
+    const lower = key.toLowerCase();
+    if (lower === "cache-control") cacheControlSet = true;
+    else if (lower === "vary") varyKey = key;
+  }
+  if (!cacheControlSet) {
+    response.setHeader("cache-control", caching.cacheControl ?? DEFAULT_META_CACHE_CONTROL);
+  }
+  const wanted = caching.vary ?? DEFAULT_META_VARY;
+  if (wanted.length === 0) return;
+  const existing = headers[varyKey];
+  const tokens = (Array.isArray(existing) ? existing.join(",") : (existing ?? ""))
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (tokens.includes("*")) return;
+  const seen = new Set(tokens.map((t) => t.toLowerCase()));
+  for (const token of wanted) {
+    if (!seen.has(token.toLowerCase())) {
+      seen.add(token.toLowerCase());
+      tokens.push(token);
+    }
+  }
+  response.setHeader(varyKey, tokens.join(", "));
 }

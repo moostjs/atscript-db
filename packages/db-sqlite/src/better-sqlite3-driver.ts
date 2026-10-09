@@ -66,7 +66,6 @@ export class BetterSqlite3Driver implements TSqliteDriver {
 
   /** LRU of prepared statements by SQL text (Map insertion order = recency). */
   private readonly _stmts = new Map<string, TStatement>();
-  private readonly _txStmts = new Map<string, TStatement>();
   private readonly _maxStmts: number;
 
   constructor(
@@ -140,17 +139,15 @@ export class BetterSqlite3Driver implements TSqliteDriver {
 
   exec(sql: string): void {
     if (TX_CONTROL_SQL.has(sql)) {
-      let stmt = this._txStmts.get(sql);
-      if (stmt === undefined) {
-        stmt = this.db.prepare(sql);
-        this._txStmts.set(sql, stmt);
-      }
-      stmt.run();
+      // BEGIN / COMMIT / ROLLBACK go through the statement cache too.
+      this._prepare(sql).run();
       return;
     }
     this.db.exec(sql);
-    // `exec` carries DDL / PRAGMAs: drop the cached statements (SQLite would
-    // re-prepare them anyway; this releases the ones over dropped tables).
+    // `exec` carries DDL / PRAGMAs / ATTACH: drop the cached statements
+    // (SQLite would re-prepare them anyway; this releases the ones over
+    // dropped tables, and `BEGIN IMMEDIATE` locks the databases attached
+    // when it was prepared — `ATTACH` does not re-prepare it).
     this._stmts.clear();
   }
 
@@ -165,7 +162,6 @@ export class BetterSqlite3Driver implements TSqliteDriver {
   /** Idempotent: closing an already closed database is a no-op. */
   close(): void {
     this._stmts.clear();
-    this._txStmts.clear();
     if (!this.db.open) return;
     this.db.close();
   }

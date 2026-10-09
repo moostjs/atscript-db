@@ -4,6 +4,7 @@ import {
   containsRelationFilter,
   DbError,
   geoIndexNotFoundMessage,
+  isPlainObject,
   searchIndexNotFoundMessage,
   searchTermInteger,
   vectorIndexNotFoundMessage,
@@ -662,16 +663,9 @@ function isVectorFilterValue(value: unknown): boolean {
   }
 }
 
-/** A plain operator map (`{ $gt: 1 }`) — what `walkFilter` reads as operators, not a value. */
-function isOperatorMap(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto: unknown = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
-
 /** The `$vectorSearch.filter` form of one field condition, or `undefined` when it cannot move. */
 function vectorFilterCondition(value: unknown): Document | undefined {
-  if (!isOperatorMap(value)) {
+  if (!isPlainObject(value)) {
     return isVectorFilterValue(value) ? { $eq: value } : undefined;
   }
   const entries = Object.entries(value);
@@ -770,6 +764,7 @@ function buildVectorSearchStage(
   }
 
   // The page is `$skip` + `$limit` into the top-k, so the top-k must cover both.
+  // Atlas caps `numCandidates` at 10000 (and it must be >= `limit`).
   const topK = (skip || 0) + (limit || 20);
   return {
     stage: {
@@ -777,7 +772,7 @@ function buildVectorSearchStage(
         index: index.key,
         path: vectorField.path,
         queryVector: vector,
-        numCandidates: Math.max(topK * 10, 100),
+        numCandidates: Math.max(topK, Math.min(Math.max(topK * 10, 100), 10_000)),
         limit: topK,
       },
     },

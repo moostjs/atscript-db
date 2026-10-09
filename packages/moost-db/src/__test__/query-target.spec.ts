@@ -652,7 +652,7 @@ describe("query targets — the first batch follows the snapshot without a re-ch
     await query("stream", "status=open");
     const loads = loadsOf(spy);
     expect(loads).toHaveLength(2);
-    expect(loads[0]?.filter).toEqual({ $or: [{ id: 1 }, { id: 2 }] });
+    expect(loads[0]?.filter).toEqual({ id: { $in: [1, 2] } });
     expect(loads[1]?.filter).toHaveProperty("$and");
     expect(JSON.stringify(loads[1]?.filter)).toContain('"status":"open"');
     spy.mockRestore();

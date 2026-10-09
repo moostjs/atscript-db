@@ -179,6 +179,19 @@ describe("buildColumnDefinition", () => {
       expect(def).toContain("DEFAULT CURRENT_TIMESTAMP");
       expect(def).toContain("ON UPDATE CURRENT_TIMESTAMP");
     }
+    // Any spelling of CURRENT_TIMESTAMP gets the column's precision (MySQL 1294 otherwise).
+    const precise = field({
+      physicalName: "updatedAt",
+      designType: "number",
+      defaultValue: { kind: "fn", fn: "now" },
+      type: mysqlType("TIMESTAMP(3)"),
+    });
+    for (const spelling of ["current_timestamp", "CURRENT_TIMESTAMP()"]) {
+      const onUpdate = new Map([["updatedAt", spelling]]);
+      expect(
+        buildColumnDefinition(precise, ctx("create", { onUpdateFields: onUpdate })).def,
+      ).toContain("ON UPDATE CURRENT_TIMESTAMP(3)");
+    }
     const uuid = field({
       physicalName: "id",
       isPrimaryKey: true,

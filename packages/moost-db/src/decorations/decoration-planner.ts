@@ -3,6 +3,8 @@ import { isPlainObject, selfOrAncestor } from "@atscript/db";
 import type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 import type { FieldCapabilityIndex } from "../meta/field-capabilities";
+import { bits, identityId, metaVariant, type TMetaVariants } from "../meta/meta-cache";
+import { omitKeys } from "../actions/rows-by-id";
 import { selectShape } from "../select-shape";
 import type { TDecorationIndex } from "./decoration-index";
 
@@ -51,8 +53,8 @@ export interface TDecorationHost {
   capabilities(): FieldCapabilityIndex;
   /** The `preferredId` paths (the response carries them anyway). */
   readonly preferred: ReadonlySet<string>;
-  /** `true` while visibility is request-scoped (`hasField` overridden): nothing is memoized. */
-  readonly scoped: boolean;
+  /** The controller's `/meta` variant memo (the decoration step memoizes there). */
+  readonly metaVariants: TMetaVariants;
   /** The first own visible field — what an otherwise empty inclusion reads (and strips again). */
   firstVisibleField(): string | undefined;
 }
@@ -243,38 +245,41 @@ export class DecorationPlanner {
    * `fields[key]` entry (from its virtual capability-index entry); the others
    * are pruned, and `decorations` is dropped when none is left. Runs after
    * `applyMetaOverlay` — an overlay never sees the decoration `fields`
-   * entries. Memoized per input while visibility is not request-scoped.
+   * entries. Memoized per input and per the request's decoration visibility.
    */
   meta(meta: TMetaResponse): TMetaResponse {
-    if (!meta.decorations) return meta;
-    const { memo, keySet } = this.index;
-    const memoize = !this.host.scoped;
-    const hit = memoize ? memo.meta.get(meta) : undefined;
-    if (hit) return hit;
+    const decorations = meta.decorations;
+    if (!decorations) return meta;
+    const { keySet } = this.index;
     const capabilities = this.host.capabilities();
-    const props = (meta.decorations.type as { props?: Record<string, never> }).props ?? {};
-    const kept: Record<string, never> = {};
-    const fields = { ...meta.fields };
-    for (const [key, prop] of Object.entries(props)) {
-      const cap =
-        keySet.has(key) && this.visible(key) ? capabilities.decorationCap(key) : undefined;
-      if (!cap) continue;
-      kept[key] = prop;
-      fields[key] = { sortable: cap.sortable, filterable: cap.filterable, decoration: true };
-    }
-    let out: TMetaResponse;
-    if (Object.keys(kept).length === 0) {
-      const { decorations: _dropped, ...rest } = meta;
-      out = rest;
-    } else {
-      out = {
-        ...meta,
-        fields,
-        decorations: { ...meta.decorations, type: { ...meta.decorations.type, props: kept } },
-      } as TMetaResponse;
-    }
-    if (memoize) memo.meta.set(meta, out);
-    return out;
+    const props = (decorations.type as { props?: Record<string, never> }).props ?? {};
+    const entries = Object.entries(props);
+    const visible = entries.map(([key]) => keySet.has(key) && this.visible(key));
+    return metaVariant(
+      this.host.metaVariants,
+      meta,
+      `p:${identityId(capabilities)}:${bits(visible)}`,
+      () => {
+        const kept: Record<string, never> = {};
+        const fields = { ...meta.fields };
+        for (let i = 0; i < entries.length; i++) {
+          const [key, prop] = entries[i];
+          const cap = visible[i] ? capabilities.decorationCap(key) : undefined;
+          if (!cap) continue;
+          kept[key] = prop;
+          fields[key] = { sortable: cap.sortable, filterable: cap.filterable, decoration: true };
+        }
+        if (Object.keys(kept).length === 0) {
+          const { decorations: _dropped, ...rest } = meta;
+          return rest;
+        }
+        return {
+          ...meta,
+          fields,
+          decorations: { ...decorations, type: { ...decorations.type, props: kept } },
+        } as TMetaResponse;
+      },
+    );
   }
 
   /** The declared interface serialized for `/meta.decorations`, once per class and app scope. */
@@ -288,24 +293,37 @@ export class DecorationPlanner {
   }
 }
 
-/** Removes what a read must not carry — the unserved declared keys and the hook-only paths — from `rows`. */
-export function stripDecorations(
-  rows: readonly Record<string, unknown>[],
-  read: TDecorationRead,
-): void {
+/**
+ * Removes what a read must not carry — the unserved declared keys and the
+ * hook-only paths — from `rows`, in place in the array: a row losing a
+ * top-level key is replaced by a rebuilt copy (`omitKeys`); nested paths are
+ * deleted inside it.
+ */
+export function stripDecorations(rows: Record<string, unknown>[], read: TDecorationRead): void {
   const { dropKeys, dropPaths, keepPaths, selectedPaths } = read;
   if (dropKeys.length === 0 && dropPaths.length === 0) return;
   // a parent the client selected something at or below is its own data
   const owned = (prefix: readonly string[]): boolean =>
     selectedPaths !== undefined &&
     selectedPaths.some((sel) => prefix.every((part, i) => sel[i] === part));
-  for (const row of rows) {
-    for (const key of dropKeys) delete row[key];
-    dropPaths.forEach((parts, i) => {
+  const topLevel = new Set(dropKeys);
+  const nested: number[] = [];
+  dropPaths.forEach((parts, i) => {
+    if (parts.length === 1 && (keepPaths[i] ?? []).length === 0) topLevel.add(parts[0]!);
+    else nested.push(i);
+  });
+  for (let r = 0; r < rows.length; r++) {
+    let row = rows[r]!;
+    if (isPlainObject(row)) row = rows[r] = omitKeys(row, topLevel);
+    else for (const key of dropKeys) delete row[key];
+    for (const i of nested) {
       const keep = keepPaths[i] ?? [];
-      if (keep.length === 0) deleteDescending(row, parts, 0, selectedPaths !== undefined, owned);
-      else pruneExcept(row, parts, 0, keep);
-    });
+      if (keep.length === 0) {
+        deleteDescending(row, dropPaths[i]!, 0, selectedPaths !== undefined, owned);
+      } else {
+        pruneExcept(row, dropPaths[i]!, 0, keep);
+      }
+    }
   }
 }
 
