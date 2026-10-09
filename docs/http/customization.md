@@ -386,6 +386,15 @@ Checked once per class, with a `[moost-db]` error: the type is an object interfa
 - Overwrite or remove `$actions` or `$disabledReasons`.
 - Rely on columns that only an action's `requiredFields` pulled in — they are stripped again before the hook runs.
 
+::: warning Don't "correct" stored columns in `decorateRows`
+Overwriting a field of the table (`row.status = …`) changes only what the response shows:
+
+- **The database still works on the stored value.** It filters, sorts, groups and counts on what is stored, so the column shows one value and sorts or filters by another.
+- **The inputs may be missing.** `requires` paths are read only for a requested decoration key. A `$select` that names no decoration (`$select=title,status`) reads none of them, so the hook runs without the inputs of its "correction".
+
+For a derived value, use a view field with [`@db.compute`](/views/computed-columns) (arithmetic the database evaluates, so it sorts and filters like any column), or a [declared decoration](#declared-decorations) under its own name. For a wrong value, fix the stored data.
+:::
+
 ### resolveRowIds {#resolverowids}
 
 Since 0.1.148. A client may hold a stale key — a ticket key that was renamed, an alias. Override `resolveRowIds(ids, ctx)` to map such ids to the row's **current** id. One hook covers every id-addressed endpoint, so the alias policy lives in one place:

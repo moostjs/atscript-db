@@ -16,6 +16,11 @@ const dbErrorCodeToStatus: Record<string, number> = {
   TX_WAIT_TIMEOUT: 503,
   // The DbSpace was closed (shutdown in progress) — the store is unavailable.
   SPACE_CLOSED: 503,
+  // Row-lock contention (deadlock victim / lock wait timeout): transient —
+  // retrying the request may succeed.
+  DEADLOCK: 503,
+  LOCK_TIMEOUT: 503,
+  SERIALIZATION_FAILURE: 503,
   // The engine cannot resolve a calendar bucket's time zone (e.g. MySQL time
   // zone tables not loaded) — a store-configuration condition, not a bad
   // request. (`BUCKET_NOT_SUPPORTED` stays 400, like `GEO_NOT_SUPPORTED`.)

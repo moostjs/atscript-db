@@ -267,7 +267,7 @@ describe("document adapters — queries address the source path", () => {
       "payload.customer.vip": true,
       $or: [{ "meta_json.region": "eu" }, { status: "x" }],
     });
-    expect(query.controls.$sort).toEqual({ "payload.customer.id": -1, status: 1 });
+    expect(query.controls.$sort).toEqual({ "payload.customer.id": -1, status: 1, id: 1 });
     expect(query.controls.$select.asProjection).toEqual({ "payload.customer.id": 1, status: 1 });
 
     // Exclusion: a derived key is not a stored path; an excluded source of a

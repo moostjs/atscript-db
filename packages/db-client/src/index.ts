@@ -5,6 +5,8 @@ export {
   formatIdentifier,
   formatIdentifierField,
 } from "./client";
+export { MetaStore, clearMetaStore } from "./meta-store";
+export type { MetaStoreOptions } from "./meta-store";
 export {
   ClientError,
   ActionNotFoundError,

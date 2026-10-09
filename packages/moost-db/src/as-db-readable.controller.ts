@@ -3344,7 +3344,26 @@ export class AsDbReadableController<
   }
 
   /**
-   * **GET /pages** — returns paginated records with metadata.
+   * The `/pages` read without a `$sort` (since 0.1.153): ordered by the
+   * primary key, ascending, so consecutive pages neither overlap nor skip
+   * rows. A request with `$sort` keeps it (the core appends the primary key
+   * as the tie-breaker); a source without a primary key (a view without
+   * `@meta.id`) stays unordered. Only the plain read: text / vector search
+   * keep their relevance order.
+   */
+  private _pagesOrder(q: Uniquery<any, any>): Uniquery<any, any> {
+    const controls = q.controls as Record<string, unknown> | undefined;
+    const sort = controls?.$sort as Record<string, unknown> | undefined;
+    const pk = this.readable.primaryKeys;
+    if ((sort && Object.keys(sort).length > 0) || pk.length === 0) {
+      return q;
+    }
+    return { ...q, controls: { ...controls, $sort: Object.fromEntries(pk.map((f) => [f, 1])) } };
+  }
+
+  /**
+   * **GET /pages** — returns paginated records with metadata. Without a
+   * `$sort` the rows come in primary-key order (since 0.1.153).
    */
   @Get("pages")
   async pages(@Url() url: string): Promise<
@@ -3410,7 +3429,7 @@ export class AsDbReadableController<
               count: number;
             }>;
           case "plain":
-            return this.readable.findManyWithCount(q) as Promise<{
+            return this.readable.findManyWithCount(this._pagesOrder(q)) as Promise<{
               data: DataType[];
               count: number;
             }>;

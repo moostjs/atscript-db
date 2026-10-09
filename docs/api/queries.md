@@ -500,6 +500,24 @@ controls: { $sort: { status: 1, name: -1 } }
 Where `null` / missing values land follows the engine: SQLite, MySQL, MongoDB and the memory adapter put them **first** in ascending order (last in descending); PostgreSQL puts them **last** in ascending order (first in descending). When the position must be the same on every engine, filter `null` out (or query it separately) instead of relying on the sort.
 :::
 
+#### Ties and the primary-key tie-breaker {#tie-breaker}
+
+Since 0.1.153, rows that tie on every `$sort` key come back in a fixed order: the primary key is added to the end of the sort, so the same query returns the same order every time, and `$skip` / `$limit` pages never repeat or skip a row.
+
+```typescript
+await tasks.findMany({
+  controls: { $sort: { status: 1, priority: -1 }, $skip: 40, $limit: 20 },
+});
+// ORDER BY status ASC, priority DESC, id DESC
+```
+
+- **Direction.** The added fields take the direction of the **last** `$sort` key. A descending last key therefore needs only a backward scan of an index on `(…, key, id)`.
+- **Composite primary keys.** Every primary-key field not already in `$sort` is added, in declaration order.
+- **Nothing is added** when the `$sort` already orders rows on its own: it names every primary-key field, or every field of a unique index whose fields are all required. A unique index over an optional field does not count, because several rows can hold `null` there.
+- **Scope.** It applies to `findMany`, `findManyWithCount`, `findOne`, and an explicit `$sort` on `search` / `vectorSearch`, as well as to the rows of a `$with` relation that has its own `$sort`. It does not apply to grouped queries (`$groupBy`, see [Grouped Queries](/api/aggregation)) or to `count()`.
+- **No `$sort`, no order.** A query without `$sort` is not ordered. Text search keeps its relevance order, and vector and geo search keep their distance order. If offset paging must be stable, pass a `$sort`. The moost-db [`/pages`](/http/query-syntax#page-pagination-page-size) endpoint does this for you and reads in primary-key order when the request has no `$sort`.
+- **Views** get the tie-breaker only when they declare a primary key with `@meta.id` on the view's own fields. Selecting the source table's key (`id: Order.id`) does not declare one. Without a declared key, ties keep the engine's order.
+
 ### Pagination
 
 ```typescript

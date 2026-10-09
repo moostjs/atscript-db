@@ -45,7 +45,10 @@ describe("[sqlite] $with controls per parent row", () => {
     try {
       await ticketsWith({ name: "issues", controls: { $sort: { severity: -1 }, $limit: 1 } }, "id");
       const sql = all.mock.calls.map(([statement]) => statement).join("\n");
-      expect(sql).toContain('ROW_NUMBER() OVER (PARTITION BY "ticket_ref" ORDER BY "sev" DESC)');
+      // the primary-key tie-breaker follows the last key (since 0.1.153)
+      expect(sql).toContain(
+        'ROW_NUMBER() OVER (PARTITION BY "ticket_ref" ORDER BY "sev" DESC, "id" DESC)',
+      );
       expect(all.mock.calls).toHaveLength(2); // tickets + issues
       expect(all.mock.results[1]?.value).toHaveLength(3); // only the kept issue rows
     } finally {

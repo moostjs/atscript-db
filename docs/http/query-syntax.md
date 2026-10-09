@@ -223,7 +223,7 @@ curl "http://localhost:3000/todos/query?\$sort=-createdAt"           # descendin
 curl "http://localhost:3000/todos/query?\$sort=status,-priority"     # multi-field
 ```
 
-Prefix a field with `-` for descending order. Where `null` values land depends on the engine — see [Sorting](/api/queries#sorting).
+Prefix a field with `-` for descending order. Where `null` values land depends on the engine — see [Sorting](/api/queries#sorting). Rows that tie on every `$sort` field come back in primary-key order, in the direction of the last field, so pages never overlap. See [Ties and the primary-key tie-breaker](/api/queries#tie-breaker).
 
 ### Offset Pagination ($limit, $skip)
 
@@ -241,7 +241,7 @@ For `GET /pages` — use `$page` and `$size`:
 curl "http://localhost:3000/todos/pages?\$page=2&\$size=10"
 ```
 
-Pages are 1-based.
+Pages are 1-based. Without `$sort`, `/pages` reads in primary-key order, ascending (since 0.1.153), so page 2 continues exactly where page 1 ended. `$search` / `$vector` requests keep their relevance order, and a view without `@meta.id` stays unordered. `/query` without `$sort` imposes no order.
 
 ### Projection ($select)
 

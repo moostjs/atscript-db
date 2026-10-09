@@ -146,6 +146,21 @@ describe("SQLite insertMany onConflict: ignore", () => {
     expect(await ids()).toEqual([1, 3, 4]);
   });
 
+  it("lockConflicts is accepted and changes nothing (the database lock already serializes writers)", async () => {
+    await items().insertMany([item(1, "a")]);
+    const result = await items().dbAdapter.withTransaction(() =>
+      items().insertMany([item(1, "a"), item(2, "b")], {
+        onConflict: "ignore",
+        lockConflicts: true,
+      }),
+    );
+    expect(result.conflicts).toEqual([0]);
+    expect(await ids()).toEqual([1, 2]);
+    await expect(items().insertMany([item(3, "c")], { lockConflicts: true })).rejects.toMatchObject(
+      { code: "INVALID_QUERY" },
+    );
+  });
+
   it("the default mode still throws CONFLICT", async () => {
     await items().insertMany([item(1, "a")]);
     await expect(items().insertMany([item(2, "a")])).rejects.toMatchObject({ code: "CONFLICT" });

@@ -1,6 +1,9 @@
+import { createAnnotatedTypeNode } from "@atscript/typescript/utils";
 import type {
   TAtscriptAnnotatedType,
   TAtscriptTypeArray,
+  TAtscriptTypeObject,
+  TMetadataMap,
   TValidatorPlugin,
   TValidatorPluginContext,
 } from "@atscript/typescript/utils";
@@ -144,7 +147,7 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
         // Context check first: @db.json, non-merge objects, nav field passthrough
         if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap, dbCtx.navFields)) {
           ctx.error(
-            'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields or nested objects without @db.patch.strategy "merge"',
+            'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields, array items, or nested objects without @db.patch.strategy "merge"',
           );
           return false;
         }
@@ -185,6 +188,8 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
  * - The field itself is `@db.json` (ops on opaque blobs are meaningless).
  * - Any ancestor is `@db.json`.
  * - Any ancestor is a nested object without `@db.patch.strategy "merge"`.
+ * - Any ancestor is an embedded array (arrays are written whole, so an op
+ *   inside an item would be stored verbatim).
  *
  * Accepts immediately when an ancestor is a navigation field (TO/FROM/VIA) —
  * the nested data is extracted and validated against its own table separately.
@@ -211,6 +216,7 @@ function isFieldOpAllowed(
     const entry = flatMap.get(ancestor);
     if (!entry) continue;
     if (entry.metadata.has("db.json")) return false;
+    if (entry.type.kind === "array") return false;
     if (entry.type.kind === "object" && entry.metadata.get("db.patch.strategy") !== "merge") {
       return false;
     }
@@ -414,9 +420,16 @@ function validatePartialItems(
 
   const elementDef = arrayDef.type.of;
 
-  // Primitive arrays — validate each item against element type directly
+  // Primitive arrays — validate each item against the element type (not the
+  // array type: array-level constraints such as `@expect.minLength` describe
+  // the stored array, not the operator payload).
   if (elementDef.type.kind !== "object") {
-    return ctx.validateAnnotatedType(arrayDef, items);
+    for (let i = 0; i < items.length; i++) {
+      if (!validateAt(ctx, `${op}[${i}]`, elementDef, items[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // Object arrays — validate with key awareness
@@ -440,14 +453,28 @@ function validatePartialItems(
       }
     }
 
-    // Validate each provided property against its type
-    const objType = elementDef.type;
-    for (const [key, val] of Object.entries(rec)) {
+    // Validate each provided (known) property against its type. Going through
+    // the validator's own object walk (instead of calling validateAnnotatedType
+    // per prop) keeps the plain-array semantics — optional props accept
+    // null/undefined, plugins run per prop — and reports errors at the item
+    // prop path (`items.$update[0].qty`).
+    const objType = elementDef.type as TAtscriptTypeObject;
+    let provided: Map<string, TAtscriptAnnotatedType> | undefined;
+    let providedValue: Record<string, unknown> | undefined;
+    for (const key of Object.keys(rec)) {
       const propDef = objType.props.get(key);
       if (propDef) {
-        if (!ctx.validateAnnotatedType(propDef, val)) {
-          return false;
-        }
+        (provided ??= new Map()).set(key, propDef);
+        (providedValue ??= {})[key] = rec[key];
+      }
+    }
+    if (provided) {
+      const itemDef = createAnnotatedTypeNode(
+        { kind: "object", props: provided, propsPatterns: [], tags: objType.tags },
+        elementDef.metadata,
+      );
+      if (!validateAt(ctx, `${op}[${i}]`, itemDef, providedValue)) {
+        return false;
       }
     }
 
@@ -463,6 +490,30 @@ function validatePartialItems(
   }
 
   return true;
+}
+
+/**
+ * Validates `value` against `def` as if it sat under `segment` of the current
+ * path (`<path>.<segment>`), through the validator's full `validateSafe` walk
+ * (optional/null shortcut, `replace`, plugins). The plugin context has no
+ * public path push, so the value is wrapped in a single-prop object.
+ */
+function validateAt(
+  ctx: TValidatorPluginContext,
+  segment: string,
+  def: TAtscriptAnnotatedType,
+  value: unknown,
+): boolean {
+  const wrapper = createAnnotatedTypeNode(
+    {
+      kind: "object",
+      props: new Map([[segment, def]]),
+      propsPatterns: [],
+      tags: new Set(),
+    },
+    new Map() as TMetadataMap<AtscriptMetadata>,
+  );
+  return ctx.validateAnnotatedType(wrapper, { [segment]: value });
 }
 
 // ── Path normalization helpers ────────────────────────────────────────────────

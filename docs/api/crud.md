@@ -90,6 +90,28 @@ const one = await users.insertOne(
 - **A conflict reveals that the value exists**, exactly as the default mode's `409` does: a skipped row tells the caller that a row with that unique value is stored, even one the caller cannot read. An application that scopes uniqueness per tenant should declare per-tenant unique indexes (a composite unique index that includes the tenant column) instead of a global one.
 - An adapter that does not implement conflict-ignoring inserts throws `DbError("ON_CONFLICT_NOT_SUPPORTED")`; the built-in adapters all do. Over HTTP the mode is `POST /?$onConflict=ignore` ([CRUD endpoints](/http/crud)).
 
+#### Ignore, then update the skipped rows: `lockConflicts` {#insert-ignore-lock}
+
+A common pattern inside a [transaction](/api/transactions) is "insert what is new, then update what was already there". Since 0.1.153 an ignore-insert inside a caller's transaction leaves no lock on the stored rows it skipped (on MySQL it used to, and two such transactions updating the same row deadlocked). Pass `lockConflicts: true` (since 0.1.153) when the skipped rows must also stay untouched by others until you update them:
+
+```typescript
+await adapter.withTransaction(async () => {
+  const result = await stock.insertMany(rows, { onConflict: "ignore", lockConflicts: true });
+  // every stored row the batch collided with is now locked until COMMIT
+  for (const i of result.conflicts) {
+    await stock.updateOne({ sku: rows[i].sku, qty: { $inc: rows[i].qty } });
+  }
+});
+```
+
+- **MySQL / PostgreSQL:** the stored conflicting rows are locked with `SELECT … FOR UPDATE`, in primary-key order, before the rest is inserted. Only rows that exist are locked (no gap locks), so a concurrent transaction doing the same waits for yours to commit instead of deadlocking. A row that a concurrent writer commits while the call runs is still skipped correctly: PostgreSQL locks it after the insert; on MySQL it keeps the shared lock of the failed `INSERT` (a later update can then deadlock — retry, see below).
+- **SQLite, MongoDB, in-memory:** accepted and ignored. SQLite's write lock already serializes writers; MongoDB has no row locks (a concurrent write to the same document aborts one transaction, which the driver retries).
+- Outside a caller's transaction it is a no-op: the call's own transaction ends when it returns. Without `onConflict: "ignore"` it throws `INVALID_QUERY`.
+
+::: tip Retry on DEADLOCK / LOCK_TIMEOUT
+Since 0.1.153 a deadlock victim (MySQL errno 1213, PostgreSQL `40P01`) and a lock wait timeout (MySQL 1205, PostgreSQL `55P03`) throw `DbError` with code `DEADLOCK` / `LOCK_TIMEOUT` (PostgreSQL `40001`: `SERIALIZATION_FAILURE`) and `retryable: true` (`isRetryableDbError(error)`), on any write. Retry the **whole** transaction — see [Transactions](/api/transactions#retrying).
+:::
+
 ::: info Nested Creation
 Both `insertOne` and `insertMany` support nested relation data — inserting related records across foreign keys in a single call. This is covered in [Relations — Deep Operations](/relations/deep-operations).
 :::

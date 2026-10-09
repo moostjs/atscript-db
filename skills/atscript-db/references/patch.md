@@ -42,6 +42,8 @@ await users.updateOne({
 
 Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on the element's key field so the patcher knows what to match on.
 
+Item validation (since 0.1.153) = plain-array-set validation: optional item fields accept `null` in `$update`; errors name the item prop (`items.$update[0].qty`, `tags.$remove[1]`); primitive `$remove`/`$update` values are checked per element (array-level `@expect.minLength` no longer applies to the payload). `$inc`/`$dec`/`$mul` inside any array item (plain set, `$insert`, `$upsert`, `$update`) → validation error (used to be stored verbatim).
+
 ## `@db.patch.strategy`
 
 Per-field control of nested-object patch semantics. See [validation.md § Validator modes](validation.md#validator-modes-at-a-glance) for the validator-side detail.

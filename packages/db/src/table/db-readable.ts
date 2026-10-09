@@ -21,7 +21,7 @@ import type {
   Uniquery,
   WithRelation,
 } from "@uniqu/core";
-import { isAggregateExpr, resolveAlias } from "@uniqu/core";
+import { isAggregateExpr, isAggregateOfExpr, resolveAlias } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError, spaceClosedError } from "../db-error";
@@ -395,7 +395,7 @@ export class AtscriptDbReadable<
   public _translateForAdapter(query: Uniquery): ReturnType<FieldMappingStrategy["translateQuery"]> {
     this._ensureBuilt();
     this._guardQuery(query);
-    return this._fieldMapper.translateQuery(query, this._meta);
+    return this._fieldMapper.translateQuery(this._withStableSort(query), this._meta);
   }
 
   /**
@@ -829,6 +829,7 @@ export class AtscriptDbReadable<
         widened = widen.added;
       }
     }
+    readQuery = this._withStableSort(readQuery);
     return {
       translated: this._fieldMapper.translateQuery(readQuery, this._meta),
       controls: readQuery.controls as TReadControls | undefined,
@@ -856,6 +857,98 @@ export class AtscriptDbReadable<
       }
     }
     return rows;
+  }
+
+  /** `query` with {@link _withPkTieBreak} applied — a copy when the `$sort` changes. */
+  private _withStableSort(query: Uniquery): Uniquery {
+    const controls = query.controls as UniqueryControls | undefined;
+    const sort = this._withPkTieBreak(controls);
+    return sort ? ({ ...query, controls: { ...controls, $sort: sort } } as Uniquery) : query;
+  }
+
+  /**
+   * `$sort` with the primary-key tie-breaker appended (since 0.1.153), or
+   * `undefined` when the read keeps its `$sort` as written. Rows that tie on
+   * every `$sort` key otherwise come back in an engine-chosen order that can
+   * differ between two reads, so offset pages overlap or skip rows. The
+   * primary-key fields the `$sort` leaves out are appended in declaration
+   * order, in the direction of the LAST `$sort` key (a backward index scan
+   * serves `amount DESC, id DESC`).
+   *
+   * Unchanged when there is no `$sort` (no order is imposed), when the
+   * `$sort` already names every field of the primary key or of a unique key
+   * over non-nullable fields ({@link _totalOrderKeys}), when the table has no
+   * primary key (a view without `@meta.id`), and on grouped / aggregate /
+   * `$count` reads. Search, vector and geo relevance is never touched: the
+   * key is appended only to an explicit `$sort`. Every read path applies it
+   * ({@link _translateRead}, and {@link _translateForAdapter} for a native
+   * `$with` loader), so nested relation rows get it too.
+   */
+  private _withPkTieBreak(
+    controls: UniqueryControls | undefined,
+  ): UniqueryControls["$sort"] | undefined {
+    const sort = controls?.$sort as Record<string, unknown> | undefined;
+    if (!sort || typeof sort !== "object") return undefined;
+    const keys = Object.keys(sort);
+    if (keys.length === 0 || controls!.$count) return undefined;
+    if (Array.isArray(controls!.$groupBy) && controls!.$groupBy.length > 0) return undefined;
+    const select = controls!.$select;
+    if (
+      Array.isArray(select) &&
+      select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item))
+    ) {
+      return undefined;
+    }
+    const pk = this._meta.primaryKeys;
+    if (pk.length === 0) return undefined;
+    const sorted = new Set(keys.map((key) => this._meta.physicalPath(key)));
+    if (this._totalOrderKeys().some((set) => set.every((column) => sorted.has(column)))) {
+      return undefined;
+    }
+    const dir = sort[keys[keys.length - 1]!];
+    const next: Record<string, unknown> = { ...sort };
+    for (const field of pk) {
+      if (!sorted.has(this._meta.physicalPath(field))) next[field] = dir;
+    }
+    return next as UniqueryControls["$sort"];
+  }
+
+  private _totalOrderKeysCache?: ReadonlyArray<readonly string[]>;
+
+  /**
+   * Physical column sets that order rows totally: the primary key, then
+   * every unique index (and adapter-contributed unique field) whose fields
+   * are all non-nullable — a unique key over a nullable column admits
+   * several NULLs, so it does not.
+   */
+  private _totalOrderKeys(): ReadonlyArray<readonly string[]> {
+    if (this._totalOrderKeysCache) return this._totalOrderKeysCache;
+    const meta = this._meta;
+    const nullable = (logical: string): boolean => {
+      for (let path = logical; ; ) {
+        if (meta.flatMap.get(path)?.optional === true) return true;
+        const dot = path.lastIndexOf(".");
+        if (dot === -1) return false;
+        path = path.slice(0, dot);
+      }
+    };
+    const sets: string[][] = [];
+    if (meta.primaryKeys.length > 0) {
+      sets.push(meta.primaryKeys.map((f) => meta.physicalPath(f)));
+    }
+    for (const index of meta.indexes.values()) {
+      if (index.type !== "unique") continue;
+      // Index field names are physical; `optional` was resolved from the logical field.
+      const total = index.fields.every(
+        (f) => f.optional !== true && !nullable(meta.physicalToPath.get(f.name) ?? f.name),
+      );
+      if (total) sets.push(index.fields.map((f) => f.name));
+    }
+    for (const prop of meta.uniqueProps) {
+      if (!nullable(prop)) sets.push([meta.physicalPath(prop)]);
+    }
+    this._totalOrderKeysCache = sets;
+    return sets;
   }
 
   /** `$select` plus the join keys of `withRelations` it leaves out — `undefined` when none is missing. */

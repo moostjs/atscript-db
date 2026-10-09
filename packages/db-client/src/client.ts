@@ -39,6 +39,7 @@ import {
   type ActionTargetErrorBody,
   type VersionMismatchErrorBody,
 } from "./client-error";
+import { defaultMetaStore, type MetaStore } from "./meta-store";
 import type { ClientValidator, ValidatorMode } from "./validator";
 import type {
   AtscriptClientShape,
@@ -106,6 +107,8 @@ export class Client<
   private readonly _headers?: ClientOptions["headers"];
   private readonly _navigate?: ClientOptions["navigate"];
   private readonly _lenientWrites?: boolean;
+  private readonly _metaStore: MetaStore | undefined;
+  private readonly _metaKey?: string;
   private _metaPromise?: Promise<MetaResponse>;
   private _validatorPromise?: Promise<ClientValidator>;
   /** Cached deserialized form schemas keyed by resolved URL. */
@@ -118,6 +121,8 @@ export class Client<
     this._headers = opts?.headers;
     this._navigate = opts?.navigate;
     this._lenientWrites = opts?.lenientWrites;
+    this._metaStore = opts?.metaStore === false ? undefined : (opts?.metaStore ?? defaultMetaStore);
+    this._metaKey = opts?.metaKey;
   }
 
   // ── GET /query ─────────────────────────────────────────────────────────────
@@ -335,12 +340,14 @@ export class Client<
 
   /**
    * `GET /meta` — table/view metadata (cached after first call).
+   *
+   * The response is revalidated through the client's meta store
+   * (`ClientOptions.metaStore`): ETags seen before for this store key go out
+   * as `If-None-Match`, and a `304 Not Modified` reuses the stored body.
    */
   async meta(): Promise<MetaResponse> {
     if (!this._metaPromise) {
-      const p: Promise<MetaResponse> = (
-        this._request("GET", "meta") as Promise<MetaResponse>
-      ).catch((err) => {
+      const p: Promise<MetaResponse> = this._loadMeta().catch((err) => {
         if (this._metaPromise === p) this._metaPromise = undefined;
         throw err;
       });
@@ -356,6 +363,10 @@ export class Client<
    * identity changes (login, logout, role change): `/meta` is projected per
    * user, and a client reused across identities would otherwise keep serving
    * the previous user's columns, actions and write rules.
+   *
+   * The next `meta()` still revalidates through the meta store, so an
+   * unchanged `/meta` costs a `304`, not a download. On an identity change
+   * also clear the store (`clearMetaStore()` / `metaStore.clear()`).
    *
    * @since 0.1.151
    */
@@ -708,6 +719,76 @@ export class Client<
     return this._headers;
   }
 
+  /**
+   * `GET /meta` through the meta store: conditional when the store holds
+   * bodies for this key, falling back to a plain request whenever the
+   * conditional one cannot be answered from the store.
+   */
+  private async _loadMeta(): Promise<MetaResponse> {
+    const url = this._endpointUrl("meta");
+    const store = this._metaStore;
+    if (!store) return this._requestUrl("GET", url) as Promise<MetaResponse>;
+    const key = this._metaKey ?? url;
+    const headers = await this._resolveHeaders();
+    const candidates = store._isUnconditional(key) ? [] : store.candidates(key);
+    if (candidates.length > 0) {
+      const init: RequestInit = {
+        method: "GET",
+        headers: { ...headers, "If-None-Match": candidates.join(", ") },
+      };
+      let res: Awaited<ReturnType<typeof globalThis.fetch>> | undefined;
+      try {
+        res = await this._fetchUrl(url, init);
+      } catch {
+        // Retried below without the header. If that one succeeds, the
+        // conditional request itself is what fails (typically a cross-origin
+        // server whose CORS preflight does not allow `If-None-Match`).
+      }
+      if (res && res.status === 304) {
+        const etag = readEtag(res);
+        const text = etag === undefined ? undefined : store._reuse(key, etag);
+        if (text !== undefined) return JSON.parse(text) as MetaResponse;
+        // No (readable) ETag or one this store no longer holds: refetch.
+      } else if (res) {
+        return this._storeMeta(store, key, url, res);
+      } else {
+        const fallback = await this._fetchUrl(url, { method: "GET", headers: { ...headers } });
+        store._markUnconditional(key);
+        return this._storeMeta(store, key, url, fallback);
+      }
+    }
+    const res = await this._fetchUrl(url, { method: "GET", headers: { ...headers } });
+    return this._storeMeta(store, key, url, res);
+  }
+
+  /** Reads a `/meta` response; a `2xx` carrying a readable `ETag` goes into the store. */
+  private async _storeMeta(
+    store: MetaStore,
+    key: string,
+    url: string,
+    res: Awaited<ReturnType<typeof globalThis.fetch>>,
+  ): Promise<MetaResponse> {
+    const etag = res.ok ? readEtag(res) : undefined;
+    if (etag === undefined || typeof res.text !== "function") {
+      return this._readResponse(res, url, "GET", false) as Promise<MetaResponse>;
+    }
+    let body: MetaResponse;
+    let text: string;
+    try {
+      text = await res.text();
+      body = JSON.parse(text) as MetaResponse;
+    } catch (cause) {
+      throw new TransportError(
+        "GET",
+        url,
+        `HTTP ${res.status} body is not JSON (${describeCause(cause)})`,
+        cause,
+      );
+    }
+    store._put(key, etag, text);
+    return body;
+  }
+
   private _request(method: THttpMethod, endpoint: string, body?: unknown): Promise<unknown> {
     return this._requestUrl(method, this._endpointUrl(endpoint), body);
   }
@@ -735,14 +816,30 @@ export class Client<
   }
 
   private async _send(url: string, init: RequestInit, allowEmpty: boolean): Promise<unknown> {
-    const method = init.method ?? "GET";
-    let res: Awaited<ReturnType<typeof globalThis.fetch>>;
+    const res = await this._fetchUrl(url, init);
+    return this._readResponse(res, url, init.method ?? "GET", allowEmpty);
+  }
+
+  /** `fetch` with a network failure surfaced as {@link TransportError}. */
+  private async _fetchUrl(
+    url: string,
+    init: RequestInit,
+  ): Promise<Awaited<ReturnType<typeof globalThis.fetch>>> {
     try {
-      res = await this._fetch(url, init);
+      return await this._fetch(url, init);
     } catch (cause) {
       // No verdict: the request may or may not have reached the server.
-      throw new TransportError(method, url, describeCause(cause), cause);
+      throw new TransportError(init.method ?? "GET", url, describeCause(cause), cause);
     }
+  }
+
+  /** A response's JSON body, or the matching error for a non-2xx status. */
+  private async _readResponse(
+    res: Awaited<ReturnType<typeof globalThis.fetch>>,
+    url: string,
+    method: string,
+    allowEmpty: boolean,
+  ): Promise<unknown> {
     if (!res.ok) {
       let errorBody: Record<string, unknown>;
       try {
@@ -787,6 +884,14 @@ export class Client<
       return undefined;
     }
   }
+}
+
+/**
+ * The response's `ETag`, when readable — a cross-origin response hides it
+ * unless the server sends `Access-Control-Expose-Headers: ETag`.
+ */
+function readEtag(res: { headers?: { get?(name: string): string | null } }): string | undefined {
+  return res.headers?.get?.("etag") || undefined;
 }
 
 /** One-line rendering of a thrown value for a `TransportError` message. */

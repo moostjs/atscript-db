@@ -105,6 +105,8 @@ new Client<T>(path, {
   fetch?: typeof fetch,              // custom fetch (SSR / testing / auth proxying)
   headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>),
   navigate?: (url: string) => void | Promise<void>,  // SPA router for action() navigate dispatch
+  metaStore?: MetaStore | false,     // /meta ETag store (0.1.153); default = shared module-level store
+  metaKey?: string,                  // store key (0.1.153); default = the /meta URL
 })
 ```
 
@@ -324,6 +326,13 @@ try {
 ## Meta + validator caching
 
 - `client.meta()` lazy-fetches `/meta` on first call and caches the response. `client.invalidateMeta()` (0.1.151) drops it plus the validator and action forms — call it when the viewer's identity changes on a reused client (`/meta` is per-user).
+- **Meta store (0.1.153)** — `meta()` revalidates through an ETag-keyed store (`import { MetaStore, clearMetaStore } from "@atscript/db-client"`). Rules:
+  1. Default ON, one store shared by all clients: a new `Client` for a loaded controller, or `meta()` after `invalidateMeta()`, sends `If-None-Match` and reuses the stored body on `304`.
+  2. Candidates are remembered per store key = the `/meta` URL. For a parametric mount (`/api/tenant/:id/todos`) pass `metaKey: "<route template>"` to all its clients → a new param value costs a `304`, not the full body. Safe even if `/meta` varies by param (the server sends `304` only for byte-identical bodies).
+  3. Never stores errors or network failures; a `304` without a readable/known `ETag` refetches unconditionally. `meta()` never fails because of the store.
+  4. On identity change call `clearMetaStore()` (default store) / `store.clear()` plus `invalidateMeta()` on kept clients. A cross-user `304` is byte-identical with moost-db, so this is hygiene, not a correctness fix.
+  5. Bounded: `new MetaStore({ maxEntries })`, default 50 bodies, LRU. `metaStore: false` = always download.
+  6. Cross-origin: the server must send `Access-Control-Expose-Headers: ETag` and allow `If-None-Match` in `Access-Control-Allow-Headers`. Without the exposed ETag nothing is stored (behaves as before). If the preflight rejects `If-None-Match`, the request is retried without it, and that key stops sending it.
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.
 - The client builds a runtime validator from the meta type (same validator engine as the server). Meta ships `refDepth: 0.5` so FK refs carry target discovery metadata only; nested-write depth is enforced server-side via `@db.depth.limit`. Since 0.1.128 a prop declared through a reference chain carries the terminal `ref` (e.g. the dictionary, not the intermediate table) plus `db.rel.FK: true` — `deserializeAnnotatedType` yields `prop.ref.type().metadata.get('db.http.path')` of the dictionary (its canonical route in the serving app).
 - `meta.fields[path]` is exact: `sortable` ⇔ `$sort` accepted, `filterable` ⇔ value-comparison filter accepted; `indexed?: true` is an advisory hint (`TFieldMeta.indexed`, since 0.1.128). `filterOps?: string[]` (since 0.1.132) appears only when `filterable` is false yet narrower operators pass (SQL JSON / array column → `["$exists"]`, SQL geoPoint → `["$exists"]`, plus `"$geoWithin"` on a geo-searchable adapter) — a filter UI must offer only those; never infer "unfilterable" from `filterable: false` alone. `bucketable?: true` (since 0.1.132) marks fields that accept a calendar bucket; `groupable?: true` (since 0.1.148) marks fields that accept `$groupBy` (a distinct-values picker needs `filterable ∧ groupable`); top-level `meta.bucketUnits` (absent when none).

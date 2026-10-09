@@ -118,7 +118,8 @@ describe("AtscriptDbTable over a document adapter — renamed fields end to end"
     });
     const q = sent(adapter, "findMany");
     expect(q.controls.$select!.asProjection).toEqual({ id: 1, opened_on: 1, prof: 1 });
-    expect(q.controls.$sort).toEqual({ opened_on: -1 });
+    // the primary-key tie-breaker follows the last key (since 0.1.153)
+    expect(q.controls.$sort).toEqual({ opened_on: -1, id: -1 });
     // The mock ignores projection — the point is the logical keys on read.
     expect(rows[0]).toEqual({ id: 1, title: "a", renamedAt: 20, profile: { bio: "x" } });
     expect(rows[0]).not.toHaveProperty("opened_on");
@@ -135,7 +136,7 @@ describe("AtscriptDbTable over a document adapter — renamed fields end to end"
     const q = sent(adapter, "findMany");
     expect(q.filter).toEqual({ opened_on: 5 });
     expect(q.controls.$select!.asProjection).toEqual({ opened_on: 1 });
-    expect(q.controls.$sort).toEqual({ opened_on: 1 });
+    expect(q.controls.$sort).toEqual({ opened_on: 1, id: 1 });
     expect(res.count).toBe(1);
     expect(res.data).toEqual([{ id: 1, title: "a", renamedAt: 5 }]);
   });

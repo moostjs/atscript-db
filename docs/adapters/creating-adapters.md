@@ -64,9 +64,14 @@ Data is already validated, defaults applied, and columns mapped by the table lay
 Since 0.1.148. `insertMany(rows, { onConflict: "ignore" })` calls `insertManyIgnore(rows)` instead of `insertMany`, and `supportsInsertIgnore()` advertises it (moost-db lists the control in `/meta.crud.insert`).
 
 ```typescript
-insertManyIgnore(data: Array<Record<string, unknown>>): Promise<TDbInsertIgnoreSlot[]>
+insertManyIgnore(
+  data: Array<Record<string, unknown>>,
+  opts?: TDbInsertIgnoreOptions, // since 0.1.153
+): Promise<TDbInsertIgnoreSlot[]>
 supportsInsertIgnore(): boolean // default false
 ```
+
+`opts` (since 0.1.153): `inCallerTransaction` is `true` when the call joins a transaction its caller opened, so more statements follow in it — avoid leaving locks behind then (MySQL looks the stored keys up before inserting instead of letting a duplicate `INSERT` fail). `lockConflicts` asks to lock the stored rows the batch collides with until the transaction ends (sent only inside a caller's transaction); an engine without row locks ignores it. Map your engine's deadlock / lock-timeout errors to `DbError("DEADLOCK")` / `DbError("LOCK_TIMEOUT")` so callers can retry.
 
 `TDbInsertIgnoreSlot` (exported from `@atscript/db`) is `{ insertedId: unknown } | null`.
 

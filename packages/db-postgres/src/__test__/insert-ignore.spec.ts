@@ -163,6 +163,84 @@ describe("PostgresAdapter insertManyIgnore", () => {
   });
 });
 
+describe("PostgresAdapter insertManyIgnore lockConflicts (since 0.1.153)", () => {
+  function lockSetup(stored: Array<Record<string, unknown>>, raced: string[] = []) {
+    const driver = createMockDriver({
+      runResponder: (sql, params) =>
+        sql.startsWith("INSERT")
+          ? {
+              rows: [
+                { id: 5, sku: "e", pairA: null, pairB: null },
+                ...(params?.includes("z") && !raced.includes("z")
+                  ? [{ id: 8, sku: "z", pairA: null, pairB: null }]
+                  : []),
+              ],
+            }
+          : {},
+      allResult: (sql) => (/FOR UPDATE/.test(sql) ? stored : []),
+    });
+    const table = new AtscriptDbTable(fx.IgItem, new PostgresAdapter(driver)) as any;
+    const sent = () =>
+      driver.calls.filter((c) => /^(INSERT|SELECT|UPDATE)/.test(c.sql)).map((c) => c);
+    return { driver, table, sent };
+  }
+
+  it("locks the stored conflicting rows FOR UPDATE in primary-key order BEFORE the insert", async () => {
+    const { table, sent } = lockSetup([{ id: 2, sku: "b", pairA: null, pairB: null }]);
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(2, "b"), item(5, "e")], {
+        onConflict: "ignore",
+        lockConflicts: true,
+      }),
+    );
+    expect(result.conflicts).toEqual([0]);
+    expect(result.insertedIds).toEqual([5]);
+    const calls = sent();
+    expect(calls.map((c) => c.sql.split(" ")[0])).toEqual(["SELECT", "INSERT"]);
+    expect(calls[0]!.sql).toBe(
+      'SELECT "id", "sku", "pairA", "pairB" FROM "ig_items" WHERE ("id") IN (($1), ($2)) OR ("sku") IN (($3), ($4)) ORDER BY "id" FOR UPDATE',
+    );
+    expect(calls[0]!.params).toEqual([2, 5, "b", "e"]);
+  });
+
+  it("a row a concurrent writer committed after the lock is locked after the insert", async () => {
+    const { table, sent } = lockSetup([], ["z"]);
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(5, "e"), item(8, "z")], {
+        onConflict: "ignore",
+        lockConflicts: true,
+      }),
+    );
+    expect(result.conflicts).toEqual([1]);
+    const calls = sent();
+    expect(calls.map((c) => c.sql.split(" ")[0])).toEqual(["SELECT", "INSERT", "SELECT"]);
+    expect(calls[2]!.params).toEqual([8, "z"]);
+  });
+
+  it("is a no-op outside a caller transaction", async () => {
+    const { table, sent } = lockSetup([]);
+    await table.insertMany([item(5, "e")], { onConflict: "ignore", lockConflicts: true });
+    expect(sent().map((c) => c.sql.split(" ")[0])).toEqual(["INSERT"]);
+  });
+});
+
+describe("PostgresAdapter lock-contention errors (since 0.1.153)", () => {
+  it.each([
+    ["40P01", "DEADLOCK"],
+    ["55P03", "LOCK_TIMEOUT"],
+    ["40001", "SERIALIZATION_FAILURE"],
+  ])("SQLSTATE %s → retryable DbError %s", async (code, expected) => {
+    const driver = createMockDriver({
+      runResponder: () => {
+        throw Object.assign(new Error("lock"), { code });
+      },
+    });
+    const table = new AtscriptDbTable(fx.IgItem, new PostgresAdapter(driver)) as any;
+    const error = await table.updateOne({ id: 1, qty: 2 }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: expected, retryable: true });
+  });
+});
+
 describe("mapIgnoredBatch", () => {
   const keys = [["id"], ["sku"], ["a", "b"]];
 

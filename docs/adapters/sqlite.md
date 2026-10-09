@@ -420,7 +420,7 @@ A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is 
 
 ## Conflict-ignoring inserts {#insert-ignore}
 
-`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) runs one `INSERT … ON CONFLICT DO NOTHING` per row inside the call's transaction — in-process, so the extra statements are cheap. `DO NOTHING` without a target covers the primary key and every unique index; `changes === 0` marks a skipped row. `NOT NULL`, `CHECK` and foreign-key errors still raise (never `INSERT OR IGNORE`, which would swallow them). Requires SQLite 3.24+.
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) runs one `INSERT … ON CONFLICT DO NOTHING` per row inside the call's transaction — in-process, so the extra statements are cheap. `DO NOTHING` without a target covers the primary key and every unique index; `changes === 0` marks a skipped row. `NOT NULL`, `CHECK` and foreign-key errors still raise (never `INSERT OR IGNORE`, which would swallow them). Requires SQLite 3.24+. `lockConflicts` ([CRUD](/api/crud#insert-ignore-lock)) is accepted and has no effect: the database-level write lock already serializes writers.
 
 ## Limitations
 

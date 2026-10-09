@@ -55,12 +55,14 @@ const users = new Client<typeof User>("/api/users", {
 });
 ```
 
-| Option     | Type                                                                | Description                                                                             |
-| ---------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `baseUrl`  | `string`                                                            | Prepended to the path for every request                                                 |
-| `headers`  | `Record<string, string>` or `() => Promise<Record<string, string>>` | Default headers for every request — factory is called **before each request**           |
-| `fetch`    | `typeof fetch`                                                      | Custom fetch implementation                                                             |
-| `navigate` | `(url: string) => void \| Promise<void>`                            | SPA-router hook for `processor: 'navigate'` actions (see [Navigate dispatch](#actions)) |
+| Option      | Type                                                                | Description                                                                                                                         |
+| ----------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`   | `string`                                                            | Prepended to the path for every request                                                                                             |
+| `headers`   | `Record<string, string>` or `() => Promise<Record<string, string>>` | Default headers for every request — factory is called **before each request**                                                       |
+| `fetch`     | `typeof fetch`                                                      | Custom fetch implementation                                                                                                         |
+| `navigate`  | `(url: string) => void \| Promise<void>`                            | SPA-router hook for `processor: 'navigate'` actions (see [Navigate dispatch](#actions))                                             |
+| `metaStore` | `MetaStore \| false`                                                | Where `/meta` bodies are kept for revalidation — default: one store shared by all clients (see [Revalidating `/meta`](#meta-store)) |
+| `metaKey`   | `string`                                                            | Store key for this client's `/meta` — default: the `/meta` URL (see [Parametric mounts](#meta-store-parametric))                    |
 
 ### SSR and auth — async headers factory {#ssr-auth}
 
@@ -424,6 +426,74 @@ users.invalidateMeta();
 ```
 
 The payload is documented field by field in [CRUD Endpoints — GET /meta](./crud#get-meta). To tell whether the table is read-only, derive it from `meta.crud` — see [Permissions — Read-only check](./permissions#read-only-check).
+
+### Revalidating `/meta` — the meta store {#meta-store}
+
+Since 0.1.153 the client keeps every `/meta` response that carries an `ETag` in a **meta store**, keyed by that ETag. When a client loads `/meta` and the store already holds bodies for that URL, it sends their ETags as `If-None-Match`; the server answers `304 Not Modified` when one of them is still current, and the client reuses the stored body instead of downloading it again. A changed or differently projected `/meta` simply comes back as a `200` with a new ETag. moost-db sends the ETags by default — see [Caching and revalidation](./crud#meta-caching).
+
+It is on by default, with one store shared by every `Client` in the page, so you get:
+
+- **A new `Client` for an already-loaded controller** revalidates instead of downloading.
+- **`invalidateMeta()`** drops the client's own copy, and the next `meta()` revalidates. An unchanged `/meta` then costs a `304`, not the full body.
+
+The store is a cache only. The server decides on every request whether a stored body is still valid, so a stale or foreign body is never used without its confirmation. Error responses and network failures are never stored. The store keeps at most 50 bodies (least recently used are dropped first).
+
+#### Parametric mounts — `metaKey` {#meta-store-parametric}
+
+By default the store remembers ETags per `/meta` URL, so `/api/tenant/acme/todos/meta` and `/api/tenant/globex/todos/meta` are separate entries, and the first visit to each one downloads the full body. When one controller is mounted under a route param (see [Multi-Tenant Route Recipe](./customization#multi-tenant)), its `/meta` is usually the same for every param value. Give those clients one `metaKey`, such as the route template, and every new param value revalidates against the body already loaded for another:
+
+```typescript
+const todosFor = (tenantId: string) =>
+  new Client<typeof Todo>(`/api/tenant/${tenantId}/todos`, {
+    metaKey: "/api/tenant/:tenantId/todos",
+  });
+
+await todosFor("acme").meta(); // 200, stored
+await todosFor("globex").meta(); // If-None-Match → 304, body reused
+```
+
+A shared key is safe even when the server's `/meta` does depend on the param. The server answers `304` only when the bytes it would send match a stored ETag, and a different `/meta` comes back as a `200` and is stored next to the first one.
+
+#### Identity changes — clearing the store {#meta-store-clear}
+
+On sign-out, or any change of the signed-in user, clear the store along with the clients' own copies:
+
+```typescript
+import { clearMetaStore } from "@atscript/db-client";
+
+await signIn(otherUser);
+clearMetaStore(); // the shared default store
+users.invalidateMeta(); // each client you keep
+```
+
+Reusing a body across users is not a correctness risk with moost-db: its ETag is computed from the response bytes, so a `304` for the new user means their `/meta` is byte-for-byte the stored one. Clearing frees the memory and avoids sending the previous user's ETags. Do it anyway if the server computes ETags some other way.
+
+#### Own store or no store {#meta-store-options}
+
+```typescript
+import { Client, MetaStore } from "@atscript/db-client";
+
+// A separate store for a group of clients (e.g. per tenant workspace, or in SSR per request)
+const metaStore = new MetaStore({ maxEntries: 20 });
+const users = new Client<typeof User>("/api/users", { metaStore });
+
+metaStore.clear(); // forget everything in this store
+
+// Always download /meta, no If-None-Match
+const audit = new Client<typeof Audit>("/api/audit", { metaStore: false });
+```
+
+| Export                           | Description                                                                         |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `new MetaStore({ maxEntries? })` | A store; `maxEntries` bounds the kept bodies (default `50`)                         |
+| `metaStore.clear()`              | Drops every stored body and remembered ETag                                         |
+| `metaStore.candidates(key)`      | The ETags that would be sent as `If-None-Match` for a store key (most recent first) |
+| `metaStore.size`                 | Number of stored bodies                                                             |
+| `clearMetaStore()`               | Clears the shared default store                                                     |
+
+#### Cross-origin servers {#meta-store-cors}
+
+When the API is on another origin, the browser hides the `ETag` header unless the server sends `Access-Control-Expose-Headers: ETag`, and `If-None-Match` needs the preflight to allow it (`Access-Control-Allow-Headers: If-None-Match`, plus any auth headers you already send). Without the exposed ETag the client stores nothing and behaves as before: one full `/meta` per client. If the preflight rejects `If-None-Match`, the client retries that request without it and stops sending it for that store key. `meta()` does not fail because of the store.
 
 ## Actions {#actions}
 

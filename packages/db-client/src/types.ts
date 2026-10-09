@@ -1,3 +1,4 @@
+import type { MetaStore } from "./meta-store";
 import type {
   FilterExpr,
   SelectExpr,
@@ -114,6 +115,25 @@ export interface ClientOptions {
    * preflight catches typos.
    */
   lenientWrites?: boolean;
+
+  /**
+   * Where `meta()` keeps revalidatable `/meta` bodies (since 0.1.153).
+   * Defaults to one store shared by every client in the page, so clients for
+   * the same controller — or for one parametric controller under different
+   * route params — revalidate with `If-None-Match` and reuse the body on a
+   * `304`. Pass your own `new MetaStore()` to isolate a group of clients, or
+   * `false` to always download `/meta`.
+   */
+  metaStore?: MetaStore | false;
+
+  /**
+   * Key under which `metaStore` remembers this client's ETags (since
+   * 0.1.153). Defaults to the `/meta` URL. Give clients of a parametric
+   * mount one shared key (e.g. the route template
+   * `"/api/tenant/:tenantId/todos"`) so a new route param revalidates against
+   * the body already loaded for another one.
+   */
+  metaKey?: string;
 }
 
 // ── Meta Response Types ─────────────────────────────────────────────────────

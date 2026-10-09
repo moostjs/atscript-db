@@ -162,10 +162,11 @@ Leaf-comparison semantics are **JS-native and documented — deliberately not cl
 - **Null model** — Mongo-like. `{ f: null }` / `$eq: null` matches both an explicit `null` **and** a missing field; `$ne` matches only concrete, present values.
 - **`$exists`** — "holds a value", the same on every adapter: `$exists: true` ⇔ `$ne: null`, `$exists: false` ⇔ `$eq: null`. Before 0.1.132 a key holding `null` counted as present; it now counts as absent. See [Existence](/api/queries#existence).
 - **Ordering** — JS-native (`<` / `>`); strings compare by code point. There is **no collation** or locale awareness.
+- **Ties and unsorted reads** — rows that tie on every `$sort` key are ordered by the primary key, compared by value, in the direction of the last `$sort` key. This is the same [tie-breaker](/api/queries#tie-breaker) every adapter gets, and it also applies to a direct adapter call. Before 0.1.153 ties always went by the primary key ascending, compared as text, so `10` came before `9`. A read without `$sort` returns rows in insertion order (stored mode).
 
 ## Conflict-ignoring inserts {#insert-ignore}
 
-`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) tries each row and turns a primary-key / unique-index `CONFLICT` into a skipped slot. Memory has no transactions, so inside `withTransaction` a skipped row simply does not throw and nothing rolls back. Closing the space drops its in-memory tables ([Closing the space](/guide/setup#closing)).
+`insertMany(rows, { onConflict: "ignore" })` ([CRUD](/api/crud#insert-ignore)) tries each row and turns a primary-key / unique-index `CONFLICT` into a skipped slot. Memory has no transactions, so inside `withTransaction` a skipped row simply does not throw and nothing rolls back. `lockConflicts` ([CRUD](/api/crud#insert-ignore-lock)) is accepted and has no effect. Closing the space drops its in-memory tables ([Closing the space](/guide/setup#closing)).
 
 ## Limitations
 

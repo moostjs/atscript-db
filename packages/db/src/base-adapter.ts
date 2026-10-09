@@ -40,6 +40,7 @@ import type {
   TDbInsertResult,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
+  TDbInsertIgnoreOptions,
   TDbUpdateResult,
   TDbUpdateOptions,
   TDbDeleteResult,
@@ -1110,10 +1111,16 @@ export abstract class BaseDbAdapter {
    * and every other error must throw — and a skipped row must never abort the
    * surrounding transaction. Fail-closed by default: throws
    * `DbError("ON_CONFLICT_NOT_SUPPORTED")`; also override
-   * {@link supportsInsertIgnore}.
+   * {@link supportsInsertIgnore}. `opts` (since 0.1.153) tells whether the
+   * call joins a caller's transaction and whether to lock the stored rows the
+   * batch collides with — see {@link TDbInsertIgnoreOptions}; an adapter
+   * without row locks ignores it.
    * @since 0.1.148
    */
-  insertManyIgnore(_data: Array<Record<string, unknown>>): Promise<TDbInsertIgnoreSlot[]> {
+  insertManyIgnore(
+    _data: Array<Record<string, unknown>>,
+    _opts?: TDbInsertIgnoreOptions,
+  ): Promise<TDbInsertIgnoreSlot[]> {
     return Promise.reject(
       new DbError("ON_CONFLICT_NOT_SUPPORTED", [
         {

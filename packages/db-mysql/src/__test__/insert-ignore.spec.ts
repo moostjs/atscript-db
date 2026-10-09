@@ -239,6 +239,138 @@ describe("MysqlAdapter insertManyIgnore pre-check", () => {
   });
 });
 
+const kinds = (calls: Array<{ sql: string }>) => calls.map((c) => c.sql.split(" ")[0]);
+
+describe("MysqlAdapter insertManyIgnore inside a caller transaction (since 0.1.153)", () => {
+  it("pre-check FIRST, then ONE INSERT of the missing rows in primary-key order — no failed INSERT", async () => {
+    const { table, statements, inserts } = setup(
+      (sql, params) => {
+        if (sql.startsWith("INSERT") && params?.includes("b")) throw dup();
+        return {};
+      },
+      [{ id: 2, sku: "b" }],
+    );
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(3, "c"), item(2, "b"), item(1, "a")], { onConflict: "ignore" }),
+    );
+    expect(result).toEqual({
+      insertedCount: 2,
+      insertedIds: [3, 1],
+      inserted: [0, 2],
+      conflicts: [1],
+    });
+    expect(kinds(statements())).toEqual(["SELECT", "INSERT"]);
+    // ascending primary key: (1, a) before (3, c)
+    expect(inserts()[0]!.params).toEqual([1, "a", 1, 3, "c", 1]);
+    expect(statements().some((c) => /FOR UPDATE/.test(c.sql))).toBe(false);
+  });
+
+  it("an all-new batch is the pre-check + ONE INSERT (two statements)", async () => {
+    const { table, statements } = setup(() => ({}));
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(1, "a"), item(2, "b")], { onConflict: "ignore" }),
+    );
+    expect(result.insertedIds).toEqual([1, 2]);
+    expect(kinds(statements())).toEqual(["SELECT", "INSERT"]);
+  });
+
+  it("standalone (no caller transaction) keeps the optimistic single INSERT", async () => {
+    const { table, statements } = setup(() => ({}));
+    await table.insertMany([item(1, "a"), item(2, "b")], {
+      onConflict: "ignore",
+      lockConflicts: true, // no-op outside a caller transaction
+    });
+    expect(kinds(statements())).toEqual(["INSERT"]);
+  });
+
+  it("a race after the pre-check bisects the survivors in INPUT order (earlier row wins)", async () => {
+    const { table, inserts } = setup((sql, params) => {
+      if (sql.startsWith("INSERT") && params?.includes("b")) throw dup();
+      return {};
+    });
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(3, "c"), item(2, "b"), item(1, "a")], { onConflict: "ignore" }),
+    );
+    expect(result.conflicts).toEqual([1]);
+    expect(result.inserted).toEqual([0, 2]);
+    // sorted attempt fails → halves of the INPUT order: [c] then [b, a] → [b] fails, [a]
+    expect(inserts().map((c) => c.params?.filter((p) => typeof p === "string"))).toEqual([
+      ["a", "b", "c"],
+      ["c"],
+      ["b", "a"],
+      ["b"],
+      ["a"],
+    ]);
+  });
+
+  it("lockConflicts: FOR UPDATE on the found keys only (by the key each row collided on), before the INSERT", async () => {
+    const { table, statements } = setup(
+      () => ({}),
+      [
+        { id: 7, sku: "x" },
+        { id: 2, sku: "b" },
+      ],
+    );
+    const result = await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(2, "b"), item(5, "e"), item(9, "x")], {
+        onConflict: "ignore",
+        lockConflicts: true,
+      }),
+    );
+    expect(result.conflicts).toEqual([0, 2]);
+    expect(result.insertedIds).toEqual([5]);
+    const sent = statements();
+    expect(kinds(sent)).toEqual(["SELECT", "SELECT", "SELECT", "INSERT"]);
+    // (2, b) collided on the primary key, (9, x) on `sku` (stored as id 7)
+    expect(sent[1]!.sql).toBe(
+      "SELECT `id` FROM `ig_items` WHERE `id` IN (?) ORDER BY `id` FOR UPDATE",
+    );
+    expect(sent[1]!.params).toEqual([2]);
+    expect(sent[2]!.sql).toBe(
+      "SELECT `sku` FROM `ig_items` WHERE `sku` IN (?) ORDER BY `sku` FOR UPDATE",
+    );
+    expect(sent[2]!.params).toEqual(["x"]);
+  });
+
+  it("lockConflicts with nothing stored takes no lock", async () => {
+    const { table, statements } = setup(() => ({}));
+    await table.dbAdapter.withTransaction(() =>
+      table.insertMany([item(1, "a")], { onConflict: "ignore", lockConflicts: true }),
+    );
+    expect(kinds(statements())).toEqual(["SELECT", "INSERT"]);
+  });
+
+  it("lockConflicts without onConflict: 'ignore' is INVALID_QUERY", async () => {
+    const { table } = setup(() => ({}));
+    await expect(table.insertMany([item(1, "a")], { lockConflicts: true })).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+    });
+  });
+});
+
+describe("MysqlAdapter lock-contention errors (since 0.1.153)", () => {
+  it.each([
+    [1213, "DEADLOCK"],
+    [1205, "LOCK_TIMEOUT"],
+  ])("errno %i → retryable DbError %s", async (errno, code) => {
+    const { table } = setup(() => {
+      throw Object.assign(new Error("lock"), { errno, sqlMessage: "lock" });
+    });
+    const error = await table.updateOne({ id: 1, qty: 2 }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code, retryable: true });
+    const { isRetryableDbError } = await import("@atscript/db");
+    expect(isRetryableDbError(error)).toBe(true);
+  });
+
+  it("other DbErrors are not retryable", async () => {
+    const { table } = setup(() => {
+      throw dup();
+    });
+    const error = await table.insertOne(item(1, "a")).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "CONFLICT", retryable: false });
+  });
+});
+
 /** Generated-only statements report insertId 50; an explicit-only statement reports its last id. */
 const mixedDriver = (step?: number) =>
   createMockDriver({

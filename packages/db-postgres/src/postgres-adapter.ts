@@ -12,9 +12,11 @@ import {
   describeFulltext,
   defaultFulltextIndex,
   splitFulltextFields,
+  uniqueKeyTuple,
 } from "@atscript/db";
 import type {
   AtscriptDbView,
+  DbErrorCode,
   TDbObjectKind,
   TEnsureTableOptions,
   TPrimaryKeyChange,
@@ -26,6 +28,7 @@ import type {
   TDbIndex,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
+  TDbInsertIgnoreOptions,
   TDbInsertResult,
   TDbUpdateResult,
   TDbUpdateOptions,
@@ -199,6 +202,13 @@ function parseCount(value: number | string | undefined): number {
 /** The suffix PostgreSQL gives an auto-named constraint of each `pg_constraint.contype`. */
 /** Savepoint guarding one `insertManyIgnore` chunk (see {@link PostgresAdapter.insertManyIgnore}). */
 const IGNORE_SAVEPOINT = "atscript_ignore_chunk";
+
+/** Retryable concurrency SQLSTATEs (see `PostgresAdapter._mapConstraintError`). */
+const PG_CONTENTION_CODES: Record<string, DbErrorCode | undefined> = {
+  "40P01": "DEADLOCK",
+  "55P03": "LOCK_TIMEOUT",
+  "40001": "SERIALIZATION_FAILURE",
+};
 
 const PG_CONSTRAINT_LABELS: Record<string, string | undefined> = {
   p: "pkey",
@@ -616,6 +626,9 @@ export class PostgresAdapter extends BaseDbAdapter {
    * PostgreSQL uses SQLSTATE codes:
    * - 23505 = unique_violation
    * - 23503 = foreign_key_violation
+   * - 40P01 = deadlock_detected → `DEADLOCK`
+   * - 55P03 = lock_not_available (`lock_timeout`, `NOWAIT`) → `LOCK_TIMEOUT`
+   * - 40001 = serialization_failure → `SERIALIZATION_FAILURE`
    */
   private async _wrapConstraintError<R>(fn: () => Promise<R>): Promise<R> {
     try {
@@ -625,7 +638,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     }
   }
 
-  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation, else as is. */
+  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation or a deadlock / lock timeout, else as is. */
   private _mapConstraintError(error: unknown): never {
     if (error && typeof error === "object" && "code" in error) {
       const err = error as {
@@ -645,6 +658,12 @@ export class PostgresAdapter extends BaseDbAdapter {
       if (err.code === "23503") {
         const errors = this._mapFkError(err.detail ?? err.message, err.constraint);
         throw new DbError("FK_VIOLATION", errors);
+      }
+
+      // Row-lock contention: retryable (deadlock_detected / lock_not_available)
+      const contention = PG_CONTENTION_CODES[err.code];
+      if (contention) {
+        throw new DbError(contention, [{ path: "", message: err.message }]);
       }
     }
     throw error;
@@ -748,11 +767,26 @@ export class PostgresAdapter extends BaseDbAdapter {
    * with the same `ON CONFLICT DO NOTHING`, so the result is always exact. A
    * one-row chunk (or a table without keys) maps exactly by construction, so
    * it needs no savepoint — and a single such chunk no transaction either.
+   * `ON CONFLICT DO NOTHING` takes no lock on a stored conflicting row, so a
+   * caller's transaction is left without any. `opts.lockConflicts` (since
+   * 0.1.153) locks them: one `SELECT … FOR UPDATE` of the stored rows matching
+   * the batch's keys, in primary-key order, BEFORE the insert, and one more
+   * for the skipped rows a concurrent writer committed in between.
    */
   override async insertManyIgnore(
     data: Array<Record<string, unknown>>,
+    opts?: TDbInsertIgnoreOptions,
   ): Promise<TDbInsertIgnoreSlot[]> {
     if (data.length === 0) return [];
+    if (opts?.lockConflicts && this._table.uniqueKeySets.length > 0) {
+      return this.withTransaction(async () => {
+        const locked = await this._lockKeyedRows(data);
+        const slots = await this.insertManyIgnore(data);
+        const raced = data.filter((_, i) => slots[i] === null && !locked.has(i));
+        if (raced.length > 0) await this._lockKeyedRows(raced);
+        return slots;
+      });
+    }
     const plan = this._ignorePlan();
     const { columns, batches } = chunkInsertRows(data);
     // Only a multi-row chunk of a keyed table can map ambiguously.
@@ -811,6 +845,59 @@ export class PostgresAdapter extends BaseDbAdapter {
       return slots;
     };
     return batches.length === 1 && !needsSavepoint(batches[0]!) ? run() : this.withTransaction(run);
+  }
+
+  /**
+   * `SELECT <key columns> … FOR UPDATE` of the stored rows sharing a primary /
+   * unique key tuple with one of `rows`, ordered by the primary key (so
+   * concurrent lockers queue instead of deadlocking); PostgreSQL locks only
+   * the rows returned. Returns the indices of `rows` a locked row matched.
+   */
+  private async _lockKeyedRows(rows: Array<Record<string, unknown>>): Promise<Set<number>> {
+    const keySets = this._table.uniqueKeySets.filter((f) => f.length > 0);
+    const rowTuples = rows.map((row) => keySets.map((fields) => uniqueKeyTuple(row, fields)));
+    const order = (this._pk().cols.length > 0 ? this._pk().cols : keySets[0]!)
+      .map((c) => qi(c))
+      .join(", ");
+    const selectCols = [...new Set(keySets.flat())].map((c) => qi(c)).join(", ");
+    const lockedTuples = keySets.map(() => new Set<string>());
+    const width = keySets.reduce((n, f) => n + f.length, 0);
+    const sliceSize = Math.max(1, Math.floor(30000 / width));
+    for (let offset = 0; offset < rows.length; offset += sliceSize) {
+      const end = Math.min(rows.length, offset + sliceSize);
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      const ph = (value: unknown) => {
+        params.push(pgDialect.toValue(value));
+        return `$${params.length}`;
+      };
+      keySets.forEach((fields, k) => {
+        const tuples: string[] = [];
+        for (let i = offset; i < end; i++) {
+          if (rowTuples[i]![k] === undefined) continue;
+          const row = rows[i]!;
+          tuples.push(`(${fields.map((f) => ph(row[f])).join(", ")})`);
+        }
+        if (tuples.length > 0) {
+          clauses.push(`(${fields.map((f) => qi(f)).join(", ")}) IN (${tuples.join(", ")})`);
+        }
+      });
+      if (clauses.length === 0) continue;
+      const sql = `SELECT ${selectCols} FROM ${quoteTableName(this.resolveTableName())} WHERE ${clauses.join(" OR ")} ORDER BY ${order} FOR UPDATE`;
+      this._log(sql, params);
+      const found = await this._wrapConstraintError(() => this._exec().all(sql, params));
+      for (const doc of found) {
+        keySets.forEach((fields, k) => {
+          const tuple = uniqueKeyTuple(doc, fields);
+          if (tuple !== undefined) lockedTuples[k]!.add(tuple);
+        });
+      }
+    }
+    const locked = new Set<number>();
+    rowTuples.forEach((tuples, i) => {
+      if (tuples.some((t, k) => t !== undefined && lockedTuples[k]!.has(t))) locked.add(i);
+    });
+    return locked;
   }
 
   /**

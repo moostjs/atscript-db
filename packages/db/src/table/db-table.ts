@@ -55,6 +55,7 @@ import type {
   TDbInsertManyResult,
   TDbInsertIgnoreResult,
   TDbInsertManyIgnoreResult,
+  TDbInsertIgnoreOptions,
   TInsertOptions,
   TDbInsertResult,
   TDbRemoveGuardContext,
@@ -488,6 +489,7 @@ export class AtscriptDbTable<
       guard,
       check,
       onConflict,
+      lockConflicts,
     } = (opts ?? {}) as TInternalWriteOptions<DataType> & TInsertOptions<DataType>;
     if (onConflict !== undefined && onConflict !== "error" && onConflict !== "ignore") {
       throw new DbError("INVALID_QUERY", [
@@ -495,6 +497,17 @@ export class AtscriptDbTable<
       ]);
     }
     const ignore = onConflict === "ignore";
+    if (lockConflicts && !ignore) {
+      throw new DbError("INVALID_QUERY", [
+        { path: "lockConflicts", message: 'lockConflicts requires onConflict "ignore"' },
+      ]);
+    }
+    // Read BEFORE the write opens its own transaction: whether the caller's
+    // transaction continues after this call (adapters avoid leaving locks then).
+    const ignoreOpts: TDbInsertIgnoreOptions | undefined = ignore
+      ? { inCallerTransaction: this.adapter.isInTransaction() }
+      : undefined;
+    if (ignoreOpts?.inCallerTransaction && lockConflicts) ignoreOpts.lockConflicts = true;
     const maxDepth = userMax ?? 3;
     const depth = _depth ?? 0;
     const canNest = depth < maxDepth && this._writeTableResolver && this._meta.navFields.size > 0;
@@ -578,7 +591,7 @@ export class AtscriptDbTable<
         // the ids below only see inserted rows (dense, aligned with insertedIds).
         let ignored: TDbInsertManyIgnoreResult | undefined;
         if (ignore) {
-          ignored = await this._insertIgnoring(prepared);
+          ignored = await this._insertIgnoring(prepared, ignoreOpts);
           const keep = ignored.inserted;
           items = keep.map((i) => items[i]!);
           originals = canNest ? keep.map((i) => originals[i]!) : originals;
@@ -1711,6 +1724,7 @@ export class AtscriptDbTable<
    */
   private async _insertIgnoring(
     prepared: Array<Record<string, unknown>>,
+    opts?: TDbInsertIgnoreOptions,
   ): Promise<TDbInsertManyIgnoreResult> {
     const keySets = this.uniqueKeySets;
     const seen = keySets.map(() => new Set<string>());
@@ -1729,7 +1743,10 @@ export class AtscriptDbTable<
       send.push(i);
     }
     const slots = send.length
-      ? await this.adapter.insertManyIgnore(send.map((i) => prepared[i]!))
+      ? await this.adapter.insertManyIgnore(
+          send.map((i) => prepared[i]!),
+          opts,
+        )
       : [];
     if (slots.length !== send.length) {
       throw new DbError("INVALID_QUERY", [

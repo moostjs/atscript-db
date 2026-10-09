@@ -753,6 +753,7 @@ Since 0.1.147 a [first-row join](/views/#first-row-joins) always uses the pipeli
 
 - **Outside a transaction** (standalone server, or no `withTransaction`): `insertMany(rows, { ordered: false })`. Write errors with code 11000 mark the skipped rows; any other write error is rethrown after the batch, and rows already written stay (as with a plain non-transactional `insertMany`).
 - **Inside a transaction** (replica set): a duplicate key would abort the transaction even with `ordered: false`, so the stored keys are looked up first, inside the session, in chunks of 1000; the matches are skipped and the rest is inserted ordered. A concurrent writer that commits the same key in between is retried by the transaction; a residual duplicate (for example a collation-equal value the plain-equality lookup missed) throws `CONFLICT`, so the call never reports a partial result silently.
+- `lockConflicts` ([CRUD](/api/crud#insert-ignore-lock)) is accepted and has no effect: MongoDB has no row locks. Two transactions that write the same document conflict at write time instead, and the losing one is retried by the driver's transaction loop.
 
 ## Limitations
 

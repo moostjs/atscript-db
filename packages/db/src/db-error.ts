@@ -51,7 +51,36 @@ export type DbErrorCode =
   /** The adapter does not implement `insertManyIgnore` (moost-db: 400). @since 0.1.148 */
   | "ON_CONFLICT_NOT_SUPPORTED"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
-  | "TX_WAIT_TIMEOUT";
+  | "TX_WAIT_TIMEOUT"
+  // ── Row-lock contention (retryable; moost-db maps both to 503) ──
+  /**
+   * The engine chose this transaction as a deadlock victim (MySQL errno 1213,
+   * PostgreSQL 40P01) and rolled it back. Retry the WHOLE transaction.
+   * `retryable` is `true`. @since 0.1.153
+   */
+  | "DEADLOCK"
+  /**
+   * A row lock was not granted in time (MySQL errno 1205
+   * `innodb_lock_wait_timeout`, PostgreSQL 55P03 `lock_timeout` / `NOWAIT`).
+   * The statement failed; MySQL keeps the transaction open unless
+   * `innodb_rollback_on_timeout` is set, PostgreSQL aborts it — retry the
+   * whole transaction. `retryable` is `true`. @since 0.1.153
+   */
+  | "LOCK_TIMEOUT"
+  /**
+   * PostgreSQL could not serialize the transaction (`40001`: under
+   * `REPEATABLE READ` / `SERIALIZABLE`, e.g. a row locked or updated after it
+   * changed since the snapshot). The transaction is aborted — retry it whole.
+   * `retryable` is `true`. @since 0.1.153
+   */
+  | "SERIALIZATION_FAILURE";
+
+/** Codes whose operation may succeed when the whole transaction is retried. */
+const RETRYABLE_CODES: ReadonlySet<DbErrorCode> = new Set<DbErrorCode>([
+  "DEADLOCK",
+  "LOCK_TIMEOUT",
+  "SERIALIZATION_FAILURE",
+]);
 
 export class DbError extends Error {
   name = "DbError";
@@ -64,6 +93,25 @@ export class DbError extends Error {
     super(message ?? errors[0]?.message ?? "Database error");
     this.stack = undefined;
   }
+
+  /**
+   * `true` when retrying the whole transaction may succeed — a transient
+   * concurrency condition (`DEADLOCK`, `LOCK_TIMEOUT`,
+   * `SERIALIZATION_FAILURE`), not a fault of the
+   * request. @since 0.1.153
+   */
+  get retryable(): boolean {
+    return RETRYABLE_CODES.has(this.code);
+  }
+}
+
+/**
+ * Whether `error` is a retryable `DbError` (`DEADLOCK` / `LOCK_TIMEOUT` /
+ * `SERIALIZATION_FAILURE`):
+ * re-running the whole transaction may succeed. @since 0.1.153
+ */
+export function isRetryableDbError(error: unknown): error is DbError {
+  return error instanceof DbError && error.retryable;
 }
 
 /** Whether `error` is a `DbError` with code `CONFLICT` (unique / primary-key violation). */

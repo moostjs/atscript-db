@@ -24,6 +24,7 @@ import type {
   TDbIndex,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
+  TDbInsertIgnoreOptions,
   TDbInsertResult,
   TDbUpdateResult,
   TDbUpdateOptions,
@@ -193,6 +194,16 @@ type TZeroIsExplicit = () => Promise<boolean>;
 
 /** The statement surface the adapter runs CRUD through (pool or a dedicated connection). */
 type TMysqlExecutor = Pick<TMysqlDriver, "run" | "all" | "get" | "exec">;
+
+/**
+ * How `insertManyIgnore` handles a group: `precheck` — look up stored keys
+ * BEFORE inserting (a caller's transaction continues after the call);
+ * `lock` — also lock the stored conflicting rows exclusively.
+ */
+interface TIgnoreMode {
+  precheck: boolean;
+  lock: boolean;
+}
 
 /** A run of consecutive rows of one chunk sharing an id kind (all explicit or all generated), with their input positions. */
 interface TIdGroup {
@@ -577,7 +588,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
   }
 
-  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation, else as is. */
+  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation or a deadlock / lock wait timeout, else as is. */
   private _mapConstraintError(error: unknown): never {
     if (error && typeof error === "object" && "errno" in error) {
       const err = error as { errno: number; message: string; sqlMessage?: string };
@@ -595,6 +606,14 @@ export class MysqlAdapter extends BaseDbAdapter {
       if (err.errno === 1451 || err.errno === 1452) {
         const errors = this._mapFkError(err.message);
         throw new DbError("FK_VIOLATION", errors);
+      }
+
+      // Row-lock contention: retryable (ER_LOCK_DEADLOCK rolled the whole
+      // transaction back; ER_LOCK_WAIT_TIMEOUT failed the statement)
+      if (err.errno === 1213 || err.errno === 1205) {
+        throw new DbError(err.errno === 1213 ? "DEADLOCK" : "LOCK_TIMEOUT", [
+          { path: "", message: err.sqlMessage ?? err.message },
+        ]);
       }
     }
     throw error;
@@ -836,37 +855,60 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Per chunk: ONE optimistic multi-row INSERT (an all-new batch costs a single
-   * statement). Only when it hits a duplicate key (errno 1062 / 1586) does ONE
-   * SELECT of the chunk's primary / unique key tuples find the stored rows
-   * (skipped as conflicts) and the survivors go in as one more multi-row
-   * INSERT — a dense-duplicate chunk is three statements, never O(rows). Only
-   * if that INSERT still collides (a concurrent writer raced in, or a
-   * collation-equal value the exact-match pre-check missed) are the survivors
-   * bisected: each half is retried, recursively, and a single row that still
-   * collides is skipped. A failed statement is rolled back by InnoDB alone, so
-   * the transaction stays usable. A chunk mixing explicit and generated
-   * auto-increment ids is processed as one such sequence per consecutive run of a kind. Deliberately
-   * NOT `INSERT IGNORE` (it would downgrade NOT NULL / FK / truncation errors
-   * to warnings) and not `ON DUPLICATE KEY UPDATE` (a no-op update is
-   * indistinguishable from an insert in the affected-rows count).
+   * Standalone (no caller transaction): per chunk ONE optimistic multi-row
+   * INSERT (an all-new batch costs a single statement). Only when it hits a
+   * duplicate key (errno 1062 / 1586) does ONE SELECT of the chunk's primary /
+   * unique key tuples find the stored rows (skipped as conflicts) and the
+   * survivors go in as one more multi-row INSERT — a dense-duplicate chunk is
+   * three statements, never O(rows).
+   *
+   * Inside a CALLER's transaction (`opts.inCallerTransaction`, else
+   * `isInTransaction()` on entry) the key SELECT runs FIRST and only the
+   * missing rows are inserted, in primary-key order: a failed duplicate INSERT
+   * leaves InnoDB's shared lock on the duplicate record until COMMIT, and a
+   * later UPDATE of that row in two such transactions would deadlock (S→X).
+   * The SELECT is a non-locking consistent read, so the common case takes no
+   * lock on a stored row at all. `opts.lockConflicts` then locks the stored
+   * conflicting rows exclusively — `SELECT … WHERE pk IN (found) ORDER BY pk
+   * FOR UPDATE` (by the unique key a row collided on when that was not the
+   * primary key), existing keys only, so record locks and no gap locks —
+   * before inserting the rest.
+   *
+   * Either way, only if an INSERT still collides (a concurrent writer raced in
+   * — committed after the transaction's snapshot or still uncommitted — or a
+   * collation-equal value the exact-match pre-check missed) are the rows
+   * bisected in input order: each half is retried, recursively, and a single
+   * row that still collides is skipped (holding the failed INSERT's shared
+   * lock). A failed statement is rolled back by InnoDB alone, so the
+   * transaction stays usable. A chunk mixing explicit and generated
+   * auto-increment ids is processed as one such sequence per consecutive run
+   * of a kind. Deliberately NOT `INSERT IGNORE` (it would downgrade NOT NULL /
+   * FK / truncation errors to warnings) and not `ON DUPLICATE KEY UPDATE` (a
+   * no-op update is indistinguishable from an insert in the affected-rows
+   * count).
    */
   override async insertManyIgnore(
     data: Array<Record<string, unknown>>,
+    opts?: TDbInsertIgnoreOptions,
   ): Promise<TDbInsertIgnoreSlot[]> {
     if (data.length === 0) return [];
     await this._warnNonStrictMode();
     const { columns, batches } = chunkInsertRows(data);
+    const inTx = this._txConnection() !== undefined;
+    const mode: TIgnoreMode = {
+      precheck: opts?.inCallerTransaction ?? inTx,
+      lock: opts?.lockConflicts === true,
+    };
     // One row outside a transaction is ONE statement (a duplicate just skips
     // it): no START TRANSACTION / COMMIT around it.
-    const single =
-      data.length === 1 && !this._txConnection() ? this._uniformIdGroup(data) : undefined;
+    const single = data.length === 1 && !inTx ? this._uniformIdGroup(data) : undefined;
     if (single) {
       return this._insertIgnoringGroup(
         this.resolveTableName(),
         columns,
         single,
         this._incrementStep(),
+        mode,
       );
     }
     return this.withTransaction(async () => {
@@ -877,7 +919,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       for (const batch of batches) {
         const out: TDbInsertIgnoreSlot[] = Array.from({ length: batch.length }, () => null);
         for (const group of await this._idGroups(batch, zero)) {
-          const groupSlots = await this._insertIgnoringGroup(tableName, columns, group, step);
+          const groupSlots = await this._insertIgnoringGroup(tableName, columns, group, step, mode);
           groupSlots.forEach((slot, k) => {
             out[group.at[k]!] = slot;
           });
@@ -890,24 +932,25 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   /**
    * Indices of `rows` whose primary / unique-index key tuple is already stored
-   * (a row with a null / missing key component never collides). One SELECT
-   * covers every key set; it is split only to stay under the parameter limit.
-   * Skipped entirely when no row carries a key value (generated PK, no unique
-   * index values).
+   * (a row with a null / missing key component never collides), each mapped
+   * to the index (in `uniqueKeySets` order — the primary key first) of the
+   * first key set it collides on. One non-locking SELECT covers every key set;
+   * it is split only to stay under the parameter limit. Skipped entirely when
+   * no row carries a key value (generated PK, no unique index values).
    */
   private async _findStoredKeyConflicts(
     tableName: string,
     rows: Array<Record<string, unknown>>,
-  ): Promise<Set<number>> {
+  ): Promise<Map<number, number>> {
     const keySets = this._table.uniqueKeySets.filter((f) => f.length > 0);
     const rowTuples = rows.map((row) => keySets.map((fields) => uniqueKeyTuple(row, fields)));
     const used = keySets.map((_, k) => rowTuples.some((t) => t[k] !== undefined));
-    if (!used.includes(true)) return new Set();
+    if (!used.includes(true)) return new Map();
 
     const width = keySets.reduce((n, f, k) => n + (used[k] ? f.length : 0), 0);
     const sliceSize = Math.max(1, Math.floor(60000 / width));
     const selectCols = [...new Set(keySets.flat())].map((c) => qi(c)).join(", ");
-    const stored = keySets.map(() => new Set<string>());
+    const storedTuples = keySets.map(() => new Set<string>());
 
     for (let offset = 0; offset < rows.length; offset += sliceSize) {
       const end = Math.min(rows.length, offset + sliceSize);
@@ -940,47 +983,131 @@ export class MysqlAdapter extends BaseDbAdapter {
       for (const doc of found) {
         keySets.forEach((fields, k) => {
           const tuple = uniqueKeyTuple(doc, fields);
-          if (tuple !== undefined) stored[k]!.add(tuple);
+          if (tuple !== undefined) storedTuples[k]!.add(tuple);
         });
       }
     }
 
-    const skipped = new Set<number>();
+    const skipped = new Map<number, number>();
     rowTuples.forEach((tuples, i) => {
-      if (tuples.some((t, k) => t !== undefined && stored[k]!.has(t))) skipped.add(i);
+      const k = tuples.findIndex((t, k) => t !== undefined && storedTuples[k]!.has(t));
+      if (k >= 0) skipped.set(i, k);
     });
     return skipped;
   }
 
-  /** Optimistic INSERT of a group, then pre-check + survivor INSERT (+ bisect on a race). */
+  /**
+   * Exclusive locks on the stored rows the `skipped` input rows collide with
+   * (found by {@link _findStoredKeyConflicts}, so every key exists): `SELECT …
+   * FOR UPDATE` by the key set each row collided on — the primary key when it
+   * did — ascending, one statement per key set. The keys are the INPUT rows'
+   * own (write-form) values, which the pre-check matched exactly; a full
+   * unique-key equality on existing records takes record locks only, never a
+   * gap lock.
+   */
+  private async _lockStoredRows(
+    tableName: string,
+    rows: Array<Record<string, unknown>>,
+    skipped: Map<number, number>,
+  ): Promise<void> {
+    if (skipped.size === 0) return;
+    const keySets = this._table.uniqueKeySets.filter((f) => f.length > 0);
+    const byKeySet = new Map<number, Map<string, Record<string, unknown>>>();
+    for (const [i, k] of skipped) {
+      let keyed = byKeySet.get(k);
+      if (!keyed) byKeySet.set(k, (keyed = new Map()));
+      keyed.set(uniqueKeyTuple(rows[i]!, keySets[k]!)!, rows[i]!);
+    }
+    for (const [k, keyed] of byKeySet) {
+      const fields = keySets[k]!;
+      const keyRows = [...keyed.values()];
+      const sliceSize = Math.max(1, Math.floor(60000 / fields.length));
+      const cols = fields.map((f) => qi(f)).join(", ");
+      const tuple = fields.length === 1 ? "?" : `(${fields.map(() => "?").join(", ")})`;
+      for (let offset = 0; offset < keyRows.length; offset += sliceSize) {
+        const slice = keyRows.slice(offset, offset + sliceSize);
+        const params: unknown[] = [];
+        for (const row of slice) params.push(...fields.map((f) => mysqlDialect.toValue(row[f])));
+        const target = fields.length === 1 ? cols : `(${cols})`;
+        const sql = `SELECT ${cols} FROM ${quoteTableName(tableName)} WHERE ${target} IN (${slice.map(() => tuple).join(", ")}) ORDER BY ${cols} FOR UPDATE`;
+        this._log(sql, params);
+        await this._wrapConstraintError(() => this._exec().all(sql, params));
+      }
+    }
+  }
+
+  /** Input positions of `rows` in ascending primary-key order (input order without a complete key). */
+  private _pkOrder(rows: Array<Record<string, unknown>>, at: number[]): number[] {
+    const pkCols = this._table.primaryKeys.map((k) => this._table.physicalPath(k));
+    if (pkCols.length === 0 || at.length < 2) return at;
+    if (at.some((i) => pkCols.some((c) => rows[i]![c] === undefined || rows[i]![c] === null))) {
+      return at;
+    }
+    return at.toSorted((a, b) => {
+      for (const c of pkCols) {
+        const x = rows[a]![c];
+        const y = rows[b]![c];
+        if (x === y) continue;
+        return (x as number | string | bigint) < (y as number | string | bigint) ? -1 : 1;
+      }
+      return a - b;
+    });
+  }
+
+  /**
+   * One {@link _idGroups} group. Standalone: optimistic INSERT, then pre-check
+   * + survivor INSERT (+ bisect on a race). `mode.precheck`: pre-check (and
+   * `mode.lock`: lock the stored conflicts) FIRST, then insert the survivors in
+   * primary-key order.
+   */
   private async _insertIgnoringGroup(
     tableName: string,
     columns: string[],
     group: TIdGroup,
     step: TIncrementStep,
+    mode: TIgnoreMode,
   ): Promise<TDbInsertIgnoreSlot[]> {
-    const direct = await this._tryInsertGroup(tableName, columns, group, step);
-    if (direct) return direct;
-    if (group.rows.length === 1) return [null];
+    if (!mode.precheck && !mode.lock) {
+      const direct = await this._tryInsertGroup(tableName, columns, group, step);
+      if (direct) return direct;
+      if (group.rows.length === 1) return [null];
+    }
 
     const skipped = await this._findStoredKeyConflicts(tableName, group.rows);
-    // Nothing known stored (a collation-equal value, or a race): bisect.
-    if (skipped.size === 0) return this._bisectGroup(tableName, columns, group, step);
+    if (mode.lock) await this._lockStoredRows(tableName, group.rows, skipped);
+    // Standalone with nothing known stored (a collation-equal value, or a race): bisect.
+    if (skipped.size === 0 && !mode.precheck && !mode.lock) {
+      return this._bisectGroup(tableName, columns, group, step);
+    }
 
-    const survivors: TIdGroup = {
-      rows: group.rows.filter((_, i) => !skipped.has(i)),
-      at: [],
-      generated: group.generated,
-    };
-    const inserted =
-      survivors.rows.length > 0
-        ? ((await this._tryInsertGroup(tableName, columns, survivors, step)) ??
-          (survivors.rows.length === 1
-            ? [null]
-            : await this._bisectGroup(tableName, columns, survivors, step)))
-        : [];
-    let next = 0;
-    return group.rows.map((_, i) => (skipped.has(i) ? null : inserted[next++]!));
+    const keep = group.rows.map((_, i) => i).filter((i) => !skipped.has(i));
+    // Inside a caller transaction the survivors go in by primary key, so two
+    // transactions inserting overlapping new keys lock them in the same order.
+    const ordered = mode.precheck && !group.generated ? this._pkOrder(group.rows, keep) : keep;
+    const inserted = new Map<number, TDbInsertIgnoreSlot>();
+    if (ordered.length > 0) {
+      const sorted: TIdGroup = {
+        rows: ordered.map((i) => group.rows[i]!),
+        at: [],
+        generated: group.generated,
+      };
+      let slots = await this._tryInsertGroup(tableName, columns, sorted, step);
+      if (slots) {
+        slots.forEach((slot, k) => inserted.set(ordered[k]!, slot));
+      } else {
+        // A race / collation-equal duplicate: resolve in INPUT order, so an
+        // earlier row still wins over a later collation-equal one.
+        const survivors: TIdGroup = {
+          rows: keep.map((i) => group.rows[i]!),
+          at: [],
+          generated: group.generated,
+        };
+        slots =
+          keep.length === 1 ? [null] : await this._bisectGroup(tableName, columns, survivors, step);
+        slots.forEach((slot, k) => inserted.set(keep[k]!, slot));
+      }
+    }
+    return group.rows.map((_, i) => (skipped.has(i) ? null : inserted.get(i)!));
   }
 
   /** Retries the halves of a group whose one INSERT is known to collide; a lone colliding row is skipped. */

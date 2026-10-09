@@ -107,6 +107,27 @@ This applies to any kind of failure — validation errors, constraint violations
 
 If the rollback itself fails, the rollback error is swallowed and the original error is preserved.
 
+### Retrying deadlocks and lock timeouts {#retrying}
+
+Since 0.1.153, when MySQL or PostgreSQL picks your transaction as a **deadlock** victim (MySQL errno 1213, PostgreSQL `40P01`) or a row lock is **not granted in time** (MySQL 1205 `innodb_lock_wait_timeout`, PostgreSQL `55P03` `lock_timeout` / `NOWAIT`), the write throws `DbError` with code `DEADLOCK` or `LOCK_TIMEOUT`. PostgreSQL's `40001` (could not serialize access — under `REPEATABLE READ` / `SERIALIZABLE`) throws `SERIALIZATION_FAILURE`. All three carry `retryable: true`; `isRetryableDbError(error)` tests for them. The database has already rolled the transaction back (a MySQL lock wait timeout fails only the statement, but `withTransaction` rolls the rest back as the error propagates), so retry the **whole** callback, not the failed statement:
+
+```typescript
+import { isRetryableDbError } from "@atscript/db";
+
+async function inTransactionWithRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await adapter.withTransaction(fn);
+    } catch (error) {
+      if (!isRetryableDbError(error) || attempt >= attempts) throw error;
+      await new Promise((r) => setTimeout(r, 20 * attempt)); // small backoff
+    }
+  }
+}
+```
+
+`@atscript/moost-db` answers these codes with **503**. To avoid the most common deadlock — ignore-insert rows, then update the ones that already existed — see [`lockConflicts`](/api/crud#insert-ignore-lock).
+
 ## Adapter Behavior
 
 | Adapter    | DML transactions | Transactional DDL | Notes                                                                                                                                                            |

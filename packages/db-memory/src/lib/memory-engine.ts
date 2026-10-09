@@ -9,8 +9,8 @@ import { pathReader } from "./memory-filter";
  * there is exactly ONE implementation. Everything here is a pure function over
  * plain `Record<string, unknown>` rows — no adapter/table state — so other
  * consumers (e.g. moost-db's value-help controller) can reuse the SAME engine
- * instead of hand-rolling a second copy. The adapter wires its own PK-derived
- * tie-break / physical-PK fields in as parameters.
+ * instead of hand-rolling a second copy. The adapter appends its own
+ * physical primary-key fields to `$sort` before calling in.
  *
  * The dot-path READ / DELETE helpers (`getPath` / `deletePath`) are the
  * core's (`@atscript/db`); the dot-path WRITE helper ({@link setPath}) lives
@@ -79,8 +79,9 @@ export { deletePath };
  * - No `$sort` (or an empty one) → returns the input array UNCHANGED (same
  *   reference, insertion order preserved) — the fast path for an unsorted read.
  * - `tieBreak`, when supplied, is the FINAL deterministic tie-break key for a
- *   TOTAL order — the adapter injects its {@link MemoryAdapter.pkKey} here so
- *   rows with equal sort keys still order deterministically. When ABSENT the
+ *   TOTAL order, so rows with equal sort keys still order deterministically
+ *   (the adapter instead appends its primary-key fields to `$sort`, compared
+ *   by value like every other key — since 0.1.153). When ABSENT the
  *   sort falls back to preserving input order among equal keys (via each row's
  *   original index), so a consumer with no primary key keeps insertion order.
  * - `topK` (since 0.1.151), when supplied, asks for only the first `topK` rows
@@ -121,7 +122,7 @@ export function sortRows(
         return desc[i] ? -cmp : cmp;
       }
     }
-    // Deterministic tie-break: the injected key (e.g. the adapter's pkKey) for
+    // Deterministic tie-break: the injected key (when given) for
     // a TOTAL order; otherwise the original index, preserving insertion order.
     if (tieBreak) {
       const at = (a.tie ??= tieBreak(a.row));

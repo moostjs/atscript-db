@@ -443,6 +443,27 @@ export interface TDbInsertManyIgnoreResult extends TDbInsertManyResult {
  */
 export type TDbInsertIgnoreSlot = { insertedId: unknown } | null;
 
+/**
+ * Options the table hands to `BaseDbAdapter.insertManyIgnore`.
+ * @since 0.1.153
+ */
+export interface TDbInsertIgnoreOptions {
+  /**
+   * `true` when the call joins a transaction its CALLER opened (more
+   * statements may follow in it), `false` when the transaction (if any) is the
+   * call's own. Adapters whose failed duplicate INSERT leaves a lock behind
+   * (MySQL / InnoDB: a shared lock held to commit) look up the stored keys
+   * first in that case, so no lock outlives the call. Omitted (a direct
+   * adapter call): the adapter decides from `isInTransaction()`.
+   */
+  inCallerTransaction?: boolean;
+  /**
+   * Lock the stored rows the batch collides with until the transaction ends
+   * (`TInsertOptions.lockConflicts`). Only sent inside a caller transaction.
+   */
+  lockConflicts?: boolean;
+}
+
 export interface TDbUpdateResult {
   matchedCount: number;
   modifiedCount: number;
@@ -1189,6 +1210,20 @@ export interface TInsertOptions<Row = Record<string, unknown>> extends TWriteOpt
    * parent (`@db.rel.to` nested object) is rejected in this mode.
    */
   onConflict?: "error" | "ignore";
+  /**
+   * With `onConflict: 'ignore'` inside a caller's transaction: lock the STORED
+   * rows the batch collides with until that transaction ends, so the caller
+   * can update them next without racing — or deadlocking — a concurrent
+   * transaction doing the same. MySQL and PostgreSQL take exclusive row locks
+   * (`SELECT … FOR UPDATE`) on those rows only, in key order, before
+   * inserting the rest (on MySQL a row that a concurrent writer commits while
+   * the call runs keeps the shared lock of its failed INSERT instead); SQLite (database-level write lock), MongoDB and the
+   * in-memory adapter need no row locks and ignore it. Outside a caller
+   * transaction it is a no-op (the call's own transaction ends on return).
+   * Throws `INVALID_QUERY` without `onConflict: 'ignore'`.
+   * @since 0.1.153
+   */
+  lockConflicts?: boolean;
 }
 
 /**

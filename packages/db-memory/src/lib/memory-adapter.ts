@@ -891,18 +891,39 @@ export class MemoryAdapter extends BaseDbAdapter {
   // ── Reads ────────────────────────────────────────────────────────────────
 
   /**
-   * Stable multi-key comparator from `$sort`, with a final tie-break on
-   * {@link pkKey} for a deterministic total order. Returns the input unchanged
+   * Stable multi-key comparator from `$sort`, with the primary-key fields it
+   * leaves out appended in the direction of its LAST key and compared by
+   * value (numbers numerically, `Date`s by instant) — the same tie-breaker
+   * the core appends before a read reaches any adapter (since 0.1.153), so a
+   * direct adapter call orders ties the same way. Returns the input unchanged
    * (insertion order) when there is no `$sort`. Delegates to the shared pure
-   * {@link sortRows}, injecting {@link pkKey} as the total-order tie-break;
-   * `topK` asks for the head of that order only (`$skip + $limit`).
+   * {@link sortRows}; `topK` asks for the head of that order only
+   * (`$skip + $limit`).
    */
   private _sortRows(
     rows: Record<string, unknown>[],
     $sort?: Partial<Record<string, 1 | -1>>,
     topK?: number,
   ): Record<string, unknown>[] {
-    return sortRows(rows, $sort, (r) => this.pkKey(r), topK);
+    return sortRows(rows, this._withPkTieBreak($sort), undefined, topK);
+  }
+
+  /** `$sort` plus the primary-key fields it leaves out, in its last key's direction. */
+  private _withPkTieBreak(
+    $sort: Partial<Record<string, 1 | -1>> | undefined,
+  ): Partial<Record<string, 1 | -1>> | undefined {
+    if (!$sort || !hasSort($sort)) {
+      return $sort;
+    }
+    const keys = Object.keys($sort);
+    const missing = this._physicalPkFields().filter((field) => !(field in $sort));
+    if (missing.length === 0) {
+      return $sort;
+    }
+    const dir = $sort[keys[keys.length - 1]!];
+    const next = { ...$sort };
+    for (const field of missing) next[field] = dir;
+    return next;
   }
 
   /**

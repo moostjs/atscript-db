@@ -12,6 +12,7 @@ export {
   CasMismatchError,
   bucketTimeZoneUnavailable,
   isConflict,
+  isRetryableDbError,
   aggregateFailure,
   aggregateExpressionsNotSupported,
 } from "./db-error";
@@ -117,6 +118,7 @@ export type {
   TDbInsertIgnoreResult,
   TDbInsertManyIgnoreResult,
   TDbInsertIgnoreSlot,
+  TDbInsertIgnoreOptions,
   TInsertOptions,
   TDbUpdateResult,
   TDbUpdateOptions,

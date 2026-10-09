@@ -151,6 +151,7 @@ Field operations require that the target field maps to its own database column (
 | --------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------- |
 | Inside a `@db.json` field                                       | **Validation error** | JSON fields are stored as an opaque blob — the database cannot reach inside to increment a single key |
 | Inside a nested object **without** `@db.patch.strategy 'merge'` | **Validation error** | Without merge strategy the entire object is replaced — there is no individual column to increment     |
+| Inside an embedded-array item (any array operator or plain set) | **Validation error** | The array is written whole — an operator inside an item would be stored as data (since 0.1.153)       |
 
 ```typescript
 import { $inc } from "@atscript/db/ops";
@@ -264,6 +265,8 @@ Arrays stored directly on the record support five patch operators for fine-grain
 | `$remove`  | Remove items by key or value  |
 
 When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object.
+
+Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type.
 
 ::: warning SQL Adapters
 In relational databases (SQLite, PostgreSQL, MySQL), arrays are stored as JSON columns. Patch operators work via read-modify-write. For collections that need frequent partial updates in SQL, consider modeling them as separate tables with [FROM or VIA relations](/relations/patches) instead.
