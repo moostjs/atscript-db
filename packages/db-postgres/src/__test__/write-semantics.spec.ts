@@ -91,7 +91,7 @@ describe("PostgresAdapter write semantics", () => {
     // The PK stays in the SET list (pre-existing: the row is matched by the
     // filter), `cap` comes from the SDK-side value default, `note` is the null fill.
     expect(call!.sql).toBe(
-      'UPDATE "versioned_items" SET "id" = $1, "name" = $2, "cap" = $3, "note" = $4, "version" = "version" + 1 WHERE "id" = (SELECT "id" FROM "versioned_items" WHERE "id" = $5 LIMIT 1) AND "version" = $6',
+      'UPDATE "versioned_items" SET "id" = $1, "name" = $2, "cap" = $3, "note" = $4, "version" = "version" + 1 WHERE "id" = $5 AND "version" = $6',
     );
     expect(call!.params).toEqual([1, "a", 10000, null, 1, 4]);
     expect(result).toEqual({ matchedCount: 1, modifiedCount: 1 });
@@ -104,7 +104,7 @@ describe("PostgresAdapter write semantics", () => {
     expect(call).toBeDefined();
     // `createdAt` (@db.default.now) is native on PostgreSQL: no param, DEFAULT keyword.
     expect(call!.sql).toBe(
-      'UPDATE "tokens" SET "id" = $1, "label" = $2, "createdAt" = DEFAULT WHERE "id" = (SELECT "id" FROM "tokens" WHERE "id" = $3 LIMIT 1)',
+      'UPDATE "tokens" SET "id" = $1, "label" = $2, "createdAt" = DEFAULT WHERE "id" = $3',
     );
     expect(call!.params).toEqual(["t-1", "x", "t-1"]);
   });

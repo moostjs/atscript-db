@@ -338,12 +338,31 @@ export class Client<
    */
   async meta(): Promise<MetaResponse> {
     if (!this._metaPromise) {
-      this._metaPromise = (this._request("GET", "meta") as Promise<MetaResponse>).catch((err) => {
-        this._metaPromise = undefined;
+      const p: Promise<MetaResponse> = (
+        this._request("GET", "meta") as Promise<MetaResponse>
+      ).catch((err) => {
+        if (this._metaPromise === p) this._metaPromise = undefined;
         throw err;
       });
+      this._metaPromise = p;
     }
     return this._metaPromise;
+  }
+
+  /**
+   * Drops everything this client cached from the server's metadata — the
+   * `/meta` response, the validator built from it and the loaded action
+   * forms — so the next call fetches them again. Call it when the viewer's
+   * identity changes (login, logout, role change): `/meta` is projected per
+   * user, and a client reused across identities would otherwise keep serving
+   * the previous user's columns, actions and write rules.
+   *
+   * @since 0.1.151
+   */
+  invalidateMeta(): void {
+    this._metaPromise = undefined;
+    this._validatorPromise = undefined;
+    this._formCache.clear();
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────
@@ -522,12 +541,15 @@ export class Client<
   private _loadActionForm(url: string): Promise<TAtscriptAnnotatedType> {
     let p = this._formCache.get(url);
     if (!p) {
-      p = (this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>)
+      const loading: Promise<TAtscriptAnnotatedType> = (
+        this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>
+      )
         .then((schema) => deserializeAnnotatedType(schema))
         .catch((err) => {
-          this._formCache.delete(url);
+          if (this._formCache.get(url) === loading) this._formCache.delete(url);
           throw err;
         });
+      p = loading;
       this._formCache.set(url, p);
     }
     return p;
@@ -553,14 +575,15 @@ export class Client<
 
   private _getValidator(): Promise<ClientValidator> {
     if (!this._validatorPromise) {
-      this._validatorPromise = Promise.all([this.meta(), import("./validator")])
+      const p: Promise<ClientValidator> = Promise.all([this.meta(), import("./validator")])
         .then(([m, { createClientValidator }]) =>
           createClientValidator(m, { lenientWrites: this._lenientWrites }),
         )
         .catch((err) => {
-          this._validatorPromise = undefined;
+          if (this._validatorPromise === p) this._validatorPromise = undefined;
           throw err;
         });
+      this._validatorPromise = p;
     }
     return this._validatorPromise;
   }

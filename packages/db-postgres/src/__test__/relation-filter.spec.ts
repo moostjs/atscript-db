@@ -171,14 +171,23 @@ describe("[postgres] @db.column-renamed FK / PK columns (since 0.1.147)", () => 
 
   const stmt = (prefix: string) => driver.calls.find((c) => c.sql.startsWith(prefix))?.sql;
 
-  it("updateOne / deleteOne re-key on the physical primary key", async () => {
+  it("updateOne / deleteOne key on the physical primary key", async () => {
+    // An exact PK filter pins the row by itself (no LIMIT 1 subquery, since 0.1.151).
     await t(fx.RfTag).updateOne({ code: "a", label: "A" });
     expect(stmt('UPDATE "rf_tags"')).toBe(
-      'UPDATE "rf_tags" SET "label" = $1 WHERE "tag_code" = (SELECT "tag_code" FROM "rf_tags" WHERE "tag_code" = $2 LIMIT 1)',
+      'UPDATE "rf_tags" SET "label" = $1 WHERE "tag_code" = $2',
     );
     await t(fx.RfTag).deleteOne("a");
+    expect(stmt('DELETE FROM "rf_tags"')).toBe('DELETE FROM "rf_tags" WHERE "tag_code" = $1');
+    // Any other filter re-keys on the physical PK through the subquery.
+    driver.calls.length = 0;
+    await t(fx.RfTag).getAdapter().updateOne({ label: "A" }, { label: "B" });
+    expect(stmt('UPDATE "rf_tags"')).toBe(
+      'UPDATE "rf_tags" SET "label" = $1 WHERE "tag_code" = (SELECT "tag_code" FROM "rf_tags" WHERE "label" = $2 LIMIT 1)',
+    );
+    await t(fx.RfTag).getAdapter().deleteOne({ label: "A" });
     expect(stmt('DELETE FROM "rf_tags"')).toBe(
-      'DELETE FROM "rf_tags" WHERE "tag_code" = $1 AND "tag_code" = (SELECT "tag_code" FROM "rf_tags" WHERE "tag_code" = $2 LIMIT 1)',
+      'DELETE FROM "rf_tags" WHERE "label" = $1 AND "tag_code" = (SELECT "tag_code" FROM "rf_tags" WHERE "label" = $2 LIMIT 1)',
     );
   });
 

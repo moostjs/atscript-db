@@ -83,6 +83,7 @@ import {
   defaultValueToSqlLiteral,
   geoPointToEwkt,
   parseEwkbPointHex,
+  PendingGeoPoint,
   pgCollateClause,
   pgDerivedColumnDef,
   pgGeoDistanceExpr,
@@ -94,6 +95,37 @@ import {
   finalizeParams,
 } from "./sql-builder";
 import type { TPgConnection, TPgDriver } from "./types";
+
+/** The statement surface the adapter runs CRUD through (pool or transaction connection). */
+type TPgExecutor = Pick<TPgDriver, "run" | "all" | "get" | "exec">;
+
+/** The key columns of a conflict-ignoring insert (see `PostgresAdapter._ignorePlan`). */
+interface TPgIgnorePlan {
+  keySets: string[][];
+  returning: string[];
+  nonTextKeyCols: Set<string>;
+  returningSuffix: string;
+}
+
+/** Read-only PostGIS presence lookup (no privileges needed, never aborts a transaction). */
+const GEO_PROBE_SQL =
+  "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis') AS present";
+
+/** `params` with every {@link PendingGeoPoint} resolved — EWKT on PostGIS, the JSONB form otherwise. */
+function resolvePendingGeo(params: unknown[] | undefined, native: boolean): unknown[] | undefined {
+  if (!params) {
+    return params;
+  }
+  let out: unknown[] | undefined;
+  for (let i = 0; i < params.length; i++) {
+    const value = params[i];
+    if (value instanceof PendingGeoPoint) {
+      out ??= [...params];
+      out[i] = native ? geoPointToEwkt(value.point) : value.raw;
+    }
+  }
+  return out ?? params;
+}
 
 /** PostgreSQL COUNT() may return string (bigint) — parse to number. */
 function parseCount(value: number | string | undefined): number {
@@ -191,8 +223,33 @@ export class PostgresAdapter extends BaseDbAdapter {
   private _citextProvisioned = false;
 
   // ── Geo search state ────────────────────────────────────────────────────
-  /** Whether the connected PostgreSQL instance has the PostGIS extension. */
+  /**
+   * Whether the connected PostgreSQL instance has the PostGIS extension —
+   * `undefined` until known: set by schema sync ({@link prepareTypeMapper},
+   * which installs it), or by the read-only probe that runs before the first
+   * statement when sync never ran in this process ({@link _ensureGeoKnown}).
+   */
   private _supportsGeo: boolean | undefined;
+  /** Whether {@link _detectGeoSupport} (the installing detection) already ran. */
+  private _geoInstallTried = false;
+  /** The in-flight / settled read-only PostGIS probe. */
+  private _geoProbe?: Promise<void>;
+  /** Memo of {@link _hasGeoPointFields}. */
+  private _geoFields?: boolean;
+
+  // ── Per-table memos (the table metadata is built once per readable) ────
+  private _pkColumnsMemo?: { src: readonly string[]; cols: string[]; returning: string };
+  private _replaceColumnsMemo?: {
+    src: readonly TDbFieldMeta[];
+    cols: ReturnType<typeof replaceColumnsFor>;
+  };
+  private _ignorePlanMemo?: TPgIgnorePlan & { key: string };
+  private _fulltextMemo?: {
+    src: Map<string, TDbIndex>;
+    all: TDbIndex[];
+    def: TDbIndex | undefined;
+  };
+  private _searchIndexesMemo?: { src: Map<string, TDbIndex>; list: TSearchIndexInfo[] };
 
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the connected PostgreSQL instance has the pgvector extension. */
@@ -268,8 +325,31 @@ export class PostgresAdapter extends BaseDbAdapter {
    * Returns the active executor: dedicated connection if inside a transaction,
    * otherwise the pool-based driver.
    */
-  private _exec(): Pick<TPgDriver, "run" | "all" | "get" | "exec"> {
-    return this._txConnection() ?? this.driver;
+  private _exec(): TPgExecutor {
+    const exec = this._txConnection() ?? this.driver;
+    // geoPoint values formatted before PostGIS presence was known travel as
+    // `PendingGeoPoint` markers: probe (once), then resolve them.
+    return this._hasGeoPointFields() ? this._geoResolvingExec(exec) : exec;
+  }
+
+  /**
+   * `exec` resolving `PendingGeoPoint` params — after the PostGIS probe while
+   * support is still unknown. A marker may be formatted before the probe
+   * settles and run after, so resolution never depends on the probe's state.
+   */
+  private _geoResolvingExec(exec: TPgExecutor): TPgExecutor {
+    const prep = <R>(params: unknown[] | undefined, run: (p?: unknown[]) => Promise<R>) =>
+      this._supportsGeo === undefined
+        ? this._ensureGeoKnown(exec).then(() =>
+            run(resolvePendingGeo(params, this._supportsGeo === true)),
+          )
+        : run(resolvePendingGeo(params, this._supportsGeo));
+    return {
+      run: (sql, params) => prep(params, (p) => exec.run(sql, p)),
+      all: <T>(sql: string, params?: unknown[]) => prep(params, (p) => exec.all<T>(sql, p)),
+      get: <T>(sql: string, params?: unknown[]) => prep(params, (p) => exec.get<T>(sql, p)),
+      exec: (sql) => exec.exec(sql),
+    };
   }
 
   // ── Capability flags ──────────────────────────────────────────────────────
@@ -333,11 +413,14 @@ export class PostgresAdapter extends BaseDbAdapter {
   override onAfterFlatten(): void {
     // Scan field descriptors for @db.collate 'nocase' — maps to CITEXT column type
     // (case-insensitive text). Extension is provisioned in ensureTable().
+    let geo = false;
     for (const fd of this._table.fieldDescriptors) {
       if (fd.collate === "nocase") {
         this._nocaseColumns.add(fd.physicalName);
       }
+      geo ||= fd.isGeoPoint === true && !fd.encrypted;
     }
+    this._geoFields = geo;
   }
 
   override onFieldScanned(
@@ -395,17 +478,22 @@ export class PostgresAdapter extends BaseDbAdapter {
       };
     }
     // geoPoint ↔ geography(Point,4326): EWKT text in, hex-EWKB parsed out.
-    // Branches at call time — PostGIS support is detected during sync, after
-    // formatters are built. In JSONB-fallback mode values pass through
-    // untouched (the relational mapper's JSON handling already round-trips).
+    // Branches at call time — PostGIS support is detected during sync (or
+    // probed before the first statement), after formatters are built. In
+    // JSONB-fallback mode values pass through untouched (the relational
+    // mapper's JSON handling already round-trips). Not known yet: a
+    // `PendingGeoPoint` the executor resolves once it is (see `_exec`).
     if (field.isGeoPoint && !field.encrypted) {
       return {
         toStorage: (value: unknown) => {
-          if (!this._supportsGeo) {
+          if (this._supportsGeo === false) {
             return value;
           }
           const point = normalizeGeoPointValue(value);
-          return point ? geoPointToEwkt(point) : value;
+          if (!point) {
+            return value;
+          }
+          return this._supportsGeo ? geoPointToEwkt(point) : new PendingGeoPoint(point, value);
         },
         fromStorage: (value: unknown) => {
           if (typeof value === "string") {
@@ -499,12 +587,10 @@ export class PostgresAdapter extends BaseDbAdapter {
   // ── CRUD: Insert ──────────────────────────────────────────────────────────
 
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
-    let { sql, params } = buildInsert(this.resolveTableName(), data);
-    // Append RETURNING clause for PK fields
-    const pkCols = this._pkColumns().map((pk) => qi(pk));
-    if (pkCols.length > 0) {
-      sql += ` RETURNING ${pkCols.join(", ")}`;
-    }
+    const insert = buildInsert(this.resolveTableName(), data);
+    // RETURNING the PK fields
+    const sql = insert.sql + this._pk().returning;
+    const params = insert.params;
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     const returned = result.rows?.[0];
@@ -518,15 +604,12 @@ export class PostgresAdapter extends BaseDbAdapter {
       return { insertedCount: 0, insertedIds: [] };
     }
 
-    return this.withTransaction(async () => {
+    // Batch rows into multi-row INSERT statements over the column union of
+    // ALL rows (PG max params is ~65535; chunked well under the limit).
+    const { columns, batches } = chunkInsertRows(data);
+    const run = async (): Promise<TDbInsertManyResult> => {
       const tableName = this.resolveTableName();
-      const pkCols = this._pkColumns();
-      const returningSuffix =
-        pkCols.length > 0 ? ` RETURNING ${pkCols.map((pk) => qi(pk)).join(", ")}` : "";
-
-      // Batch rows into multi-row INSERT statements over the column union of
-      // ALL rows (PG max params is ~65535; chunked well under the limit).
-      const { columns, batches } = chunkInsertRows(data);
+      const returningSuffix = this._pk().returning;
       const allIds: unknown[] = [];
 
       for (const batch of batches) {
@@ -546,7 +629,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       }
 
       return { insertedCount: allIds.length, insertedIds: allIds };
-    });
+    };
+    // One statement is atomic on its own: no BEGIN / COMMIT round trips (and
+    // no held connection) around it. Several chunks commit together.
+    return batches.length === 1 ? run() : this.withTransaction(run);
   }
 
   override supportsInsertIgnore(): boolean {
@@ -558,43 +644,41 @@ export class PostgresAdapter extends BaseDbAdapter {
    * unique key columns>`: one statement per chunk (a conflict never raises, so
    * the surrounding transaction survives). Skipped rows are the ones missing
    * from RETURNING — mapped back by key values, see {@link mapIgnoredBatch}.
-   * Each chunk runs inside a SAVEPOINT: when the mapping is ambiguous (a key
-   * the server returns in another form than it was sent) the chunk is rolled
-   * back to the savepoint and redone row by row with the same
-   * `ON CONFLICT DO NOTHING`, so the result is always exact.
+   * A multi-row chunk of a keyed table runs inside a SAVEPOINT: when the
+   * mapping is ambiguous (a key the server returns in another form than it
+   * was sent) the chunk is rolled back to the savepoint and redone row by row
+   * with the same `ON CONFLICT DO NOTHING`, so the result is always exact. A
+   * one-row chunk (or a table without keys) maps exactly by construction, so
+   * it needs no savepoint — and a single such chunk no transaction either.
    */
   override async insertManyIgnore(
     data: Array<Record<string, unknown>>,
   ): Promise<TDbInsertIgnoreSlot[]> {
     if (data.length === 0) return [];
-    return this.withTransaction(async () => {
+    const plan = this._ignorePlan();
+    const { columns, batches } = chunkInsertRows(data);
+    // Only a multi-row chunk of a keyed table can map ambiguously.
+    const needsSavepoint = (batch: unknown[]) => batch.length > 1 && plan.returning.length > 0;
+    const run = async (): Promise<TDbInsertIgnoreSlot[]> => {
       const tableName = this.resolveTableName();
-      const pkCols = this._pkColumns();
-      const keySets = this._table.uniqueKeySets;
-      const returning = [...new Set(keySets.flat())];
-      const returningCols = new Set(returning);
-      const nonTextKeyCols = new Set(
-        this._table.fieldDescriptors
-          .filter((f) => returningCols.has(f.physicalName) && !isTextKeyType(this.typeMapper(f)))
-          .map((f) => f.physicalName),
-      );
-      const returningSuffix =
-        returning.length > 0 ? ` RETURNING ${returning.map((c) => qi(c)).join(", ")}` : "";
+      const { keySets, returning, nonTextKeyCols, returningSuffix } = plan;
+      const pkCols = this._pk().cols;
       const insertedId = (row: Record<string, unknown>, returned?: Record<string, unknown>) => ({
         insertedId: this._resolveInsertedId(
           row,
           pkCols.length > 0 ? returned?.[pkCols[0]!] : undefined,
         ),
       });
-
-      const { columns, batches } = chunkInsertRows(data);
       const slots: TDbInsertIgnoreSlot[] = [];
 
       for (const batch of batches) {
         const insert = buildInsertMany(tableName, batch, columns);
         const sql = `${insert.sql} ON CONFLICT DO NOTHING${returningSuffix}`;
         // The savepoint lets an ambiguous chunk be undone and redone row by row.
-        await this._exec().run(`SAVEPOINT ${IGNORE_SAVEPOINT}`);
+        const savepoint = needsSavepoint(batch);
+        if (savepoint) {
+          await this._exec().run(`SAVEPOINT ${IGNORE_SAVEPOINT}`);
+        }
         this._log(sql, insert.params);
         const result = await this._wrapConstraintError(() => this._exec().run(sql, insert.params));
         const returned = result.rows ?? [];
@@ -604,7 +688,9 @@ export class PostgresAdapter extends BaseDbAdapter {
             ? batch.map((_, i) => i)
             : mapIgnoredBatch(batch, returned, keySets, nonTextKeyCols);
         if (mapping) {
-          await this._exec().run(`RELEASE SAVEPOINT ${IGNORE_SAVEPOINT}`);
+          if (savepoint) {
+            await this._exec().run(`RELEASE SAVEPOINT ${IGNORE_SAVEPOINT}`);
+          }
           mapping.forEach((hit, i) =>
             slots.push(hit < 0 ? null : insertedId(batch[i]!, returned[hit])),
           );
@@ -612,6 +698,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         }
         // The returned rows cannot be matched back to the input (a key the
         // server normalizes, e.g. NUMERIC(10,2)): redo this chunk per row.
+        // (Only a savepointed chunk gets here — a one-row mapping is exact.)
         await this._exec().run(`ROLLBACK TO SAVEPOINT ${IGNORE_SAVEPOINT}`);
         for (const row of batch) {
           const single = buildInsert(tableName, row);
@@ -624,7 +711,32 @@ export class PostgresAdapter extends BaseDbAdapter {
         }
       }
       return slots;
-    });
+    };
+    return batches.length === 1 && !needsSavepoint(batches[0]!) ? run() : this.withTransaction(run);
+  }
+
+  /**
+   * The key columns of a conflict-ignoring insert (built once per table):
+   * every primary / unique key set, their RETURNING list, and the key columns
+   * whose physical type is not text (see {@link mapIgnoredBatch}). Keyed on the
+   * detected extension state the type mapper reads.
+   */
+  private _ignorePlan(): TPgIgnorePlan {
+    const key = `${this._supportsGeo}|${this._supportsVector}`;
+    const memo = this._ignorePlanMemo;
+    if (memo?.key === key) return memo;
+    const keySets = this._table.uniqueKeySets;
+    const returning = [...new Set(keySets.flat())];
+    const returningCols = new Set(returning);
+    const nonTextKeyCols = new Set(
+      this._table.fieldDescriptors
+        .filter((f) => returningCols.has(f.physicalName) && !isTextKeyType(this.typeMapper(f)))
+        .map((f) => f.physicalName),
+    );
+    const returningSuffix =
+      returning.length > 0 ? ` RETURNING ${returning.map((c) => qi(c)).join(", ")}` : "";
+    this._ignorePlanMemo = { key, keySets, returning, nonTextKeyCols, returningSuffix };
+    return this._ignorePlanMemo;
   }
 
   // ── CRUD: Read ────────────────────────────────────────────────────────────
@@ -706,9 +818,59 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── CRUD: Update ──────────────────────────────────────────────────────────
 
-  /** Physical primary-key columns (`@db.column` renames applied). */
-  private _pkColumns(): string[] {
-    return this._table.primaryKeys.map((key) => this._table.physicalPath(key));
+  /**
+   * Physical primary-key columns (`@db.column` renames applied) and their
+   * ` RETURNING …` clause (empty without a PK) — built once per table.
+   */
+  private _pk(): { cols: string[]; returning: string } {
+    const src = this._table.primaryKeys;
+    let memo = this._pkColumnsMemo;
+    if (memo?.src !== src) {
+      const cols = src.map((key) => this._table.physicalPath(key));
+      const returning = cols.length > 0 ? ` RETURNING ${cols.map((c) => qi(c)).join(", ")}` : "";
+      memo = this._pkColumnsMemo = { src, cols, returning };
+    }
+    return memo;
+  }
+
+  /**
+   * Whether `filter` pins at most one row by itself: a plain object holding
+   * exactly the primary-key columns, each equal to a scalar (`{ id: 5 }` or
+   * `{ id: { $eq: 5 } }`) — what the core sends for a by-id write. Such a
+   * filter needs no `LIMIT 1` re-keying subquery: the outer predicate is the
+   * PK equality either way.
+   */
+  private _isExactPkFilter(filter: FilterExpr): boolean {
+    const pk = this._pk().cols;
+    if (pk.length === 0 || typeof filter !== "object" || filter === null || Array.isArray(filter)) {
+      return false;
+    }
+    const f = filter as Record<string, unknown>;
+    if (Object.keys(f).length !== pk.length) {
+      return false;
+    }
+    for (const col of pk) {
+      if (!Object.hasOwn(f, col)) {
+        return false;
+      }
+      let value = f[col];
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        Object.getPrototypeOf(value) === Object.prototype
+      ) {
+        const ops = Object.keys(value);
+        if (ops.length !== 1 || ops[0] !== "$eq") {
+          return false;
+        }
+        value = (value as { $eq: unknown }).$eq;
+      }
+      const t = typeof value;
+      if (t !== "string" && t !== "number" && t !== "bigint" && t !== "boolean") {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -720,7 +882,7 @@ export class PostgresAdapter extends BaseDbAdapter {
    * existing behavior rather than guess.
    */
   private _limitOnePredicate(quotedTable: string, whereSql: string): string {
-    const pkCols = this._pkColumns();
+    const pkCols = this._pk().cols;
     const quotedKeys = pkCols.length > 0 ? pkCols.map((c) => qi(c)) : ["ctid"];
     const colList = quotedKeys.join(", ");
     const keyMatch = quotedKeys.length === 1 ? `${colList} =` : `(${colList}) IN`;
@@ -743,13 +905,15 @@ export class PostgresAdapter extends BaseDbAdapter {
     // it, then T2 matches zero rows and silently drops the update. A PK predicate
     // lets Postgres' EvalPlanQual recovery follow the updated tuple under READ
     // COMMITTED, so both UPDATEs serialize on the row lock and both take effect.
+    // An exact primary-key filter already pins one row: no subquery.
     const where = buildWhere(filter);
     const tableName = this.resolveTableName();
-    const quotedTable = quoteTableName(tableName);
-    const limitedWhere = {
-      sql: this._limitOnePredicate(quotedTable, where.sql),
-      params: where.params,
-    };
+    const limitedWhere = this._isExactPkFilter(filter)
+      ? where
+      : {
+          sql: this._limitOnePredicate(quoteTableName(tableName), where.sql),
+          params: where.params,
+        };
     const versionColumn = this._versionColumnFor(opts, expectedVersion);
     const { sql, params } = buildUpdate(
       tableName,
@@ -800,11 +964,24 @@ export class PostgresAdapter extends BaseDbAdapter {
     // replace instead of silently merging with the old row.
     const full = fillReplacePayload(
       data,
-      replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
+      this._replaceColumns(),
       this._table.versionColumnPhysical,
     );
     // No `opts`: a replace touches every column, so it always bumps.
     return this.updateOne(filter, full, undefined, expectedVersion);
+  }
+
+  /** The columns a full replace assigns (`replaceColumnsFor`), built once per table. */
+  private _replaceColumns(): ReturnType<typeof replaceColumnsFor> {
+    const src = this._table.fieldDescriptors;
+    let memo = this._replaceColumnsMemo;
+    if (memo?.src !== src) {
+      memo = this._replaceColumnsMemo = {
+        src,
+        cols: replaceColumnsFor(src, this.nativeDefaultFns()),
+      };
+    }
+    return memo.cols;
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
@@ -821,8 +998,12 @@ export class PostgresAdapter extends BaseDbAdapter {
     // fails), while a PK predicate follows the updated tuple. The filter is
     // repeated on the outer DELETE so that recheck also re-applies it — a row
     // updated out of the filter meanwhile is left alone, as a plain
-    // `DELETE … WHERE <filter>` would.
+    // `DELETE … WHERE <filter>` would. An exact primary-key filter already
+    // pins one row: a plain `DELETE … WHERE <pk> = ?`.
     const where = buildWhere(filter);
+    if (this._isExactPkFilter(filter)) {
+      return this._deleteWhere(where);
+    }
     const quotedTable = quoteTableName(this.resolveTableName());
     const raw = {
       sql: `DELETE FROM ${quotedTable} WHERE ${where.sql} AND ${this._limitOnePredicate(quotedTable, where.sql)}`,
@@ -835,7 +1016,10 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const where = buildWhere(filter);
+    return this._deleteWhere(buildWhere(filter));
+  }
+
+  private async _deleteWhere(where: TSqlFragment): Promise<TDbDeleteResult> {
     const { sql, params } = buildDelete(this.resolveTableName(), where);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -848,14 +1032,18 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (this._supportsVector === undefined && this._vectorFields.size > 0) {
       await this._detectVectorSupport();
     }
-    if (this._supportsGeo === undefined && this._hasGeoPointFields()) {
+    if (!this._geoInstallTried && this._hasGeoPointFields()) {
       await this._detectGeoSupport();
     }
   }
 
-  /** Whether the table declares any `db.geoPoint` fields (unencrypted). */
+  /**
+   * Whether the table declares any `db.geoPoint` fields (unencrypted) — set
+   * when the metadata is built (`false` before, and on an administrative
+   * adapter: no geo value can be formatted without built metadata).
+   */
   private _hasGeoPointFields(): boolean {
-    return this._table.fieldDescriptors.some((fd) => fd.isGeoPoint && !fd.encrypted);
+    return this._geoFields === true;
   }
 
   async ensureTable(opts?: TEnsureTableOptions): Promise<void> {
@@ -1776,10 +1964,19 @@ export class PostgresAdapter extends BaseDbAdapter {
   // ── Fulltext search ───────────────────────────────────────────────────────
 
   override getSearchIndexes(): TSearchIndexInfo[] {
+    // Built once per table (the index set is fixed); callers get their own array.
+    const src = this._table.indexes;
+    let memo = this._searchIndexesMemo;
+    if (memo?.src !== src) {
+      memo = this._searchIndexesMemo = { src, list: this._buildSearchIndexes() };
+    }
+    return [...memo.list];
+  }
+
+  private _buildSearchIndexes(): TSearchIndexInfo[] {
     const indexes: TSearchIndexInfo[] = [];
     // The default text index is the first one with a TEXT member (else the first).
-    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
-    const ftDefault = defaultFulltextIndex(ftAll);
+    const { all: ftAll, def: ftDefault } = this._fulltextIndexes();
     for (const index of ftAll) {
       indexes.push({
         name: index.key,
@@ -1893,9 +2090,20 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {
-    const ftAll = [...this._table.indexes.values()].filter((i) => i.type === "fulltext");
-    if (!indexName) return defaultFulltextIndex(ftAll);
-    return ftAll.find((index) => index.key === indexName);
+    const { all, def } = this._fulltextIndexes();
+    if (!indexName) return def;
+    return all.find((index) => index.key === indexName);
+  }
+
+  /** The table's fulltext indexes and the default one, built once per table. */
+  private _fulltextIndexes(): { all: TDbIndex[]; def: TDbIndex | undefined } {
+    const src = this._table.indexes;
+    let memo = this._fulltextMemo;
+    if (memo?.src !== src) {
+      const all = [...src.values()].filter((i) => i.type === "fulltext");
+      memo = this._fulltextMemo = { src, all, def: defaultFulltextIndex(all) };
+    }
+    return memo;
   }
 
   // ── Vector search ──────────────────────────────────────────────────────
@@ -1930,7 +2138,9 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires the pgvector extension");
     }
-    const { sql, params } = this._buildVectorSearchQuery(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(
+      this._prepareVectorSearch(vector, query, indexName),
+    );
     this._log(sql, params);
     return this._exec().all(sql, params);
   }
@@ -1944,12 +2154,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires the pgvector extension");
     }
-    const { sql, params } = this._buildVectorSearchQuery(vector, query, indexName);
-    const { sql: countSql, params: countParams } = this._buildVectorSearchCountQuery(
-      vector,
-      query,
-      indexName,
-    );
+    // One context (field, filter, threshold) for both statements.
+    const ctx = this._prepareVectorSearch(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(ctx);
+    const { sql: countSql, params: countParams } = this._buildVectorSearchCountQuery(ctx);
     this._log(sql, params);
     this._log(countSql, countParams);
     const [data, countRow] = await Promise.all([
@@ -2025,12 +2233,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     };
   }
 
-  private _buildVectorSearchQuery(
-    vector: number[],
-    query: DbQuery,
-    indexName?: string,
-  ): { sql: string; params: unknown[] } {
-    const ctx = this._prepareVectorSearch(vector, query, indexName);
+  private _buildVectorSearchQuery(ctx: ReturnType<PostgresAdapter["_prepareVectorSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
     const { source, maxDistance } = this._vectorSearchSource(ctx, true);
     const skip = Number(ctx.controls.$skip) || 0;
     return buildVectorSearchSelect(pgDialect, source, {
@@ -2041,15 +2247,11 @@ export class PostgresAdapter extends BaseDbAdapter {
     });
   }
 
-  private _buildVectorSearchCountQuery(
-    vector: number[],
-    query: DbQuery,
-    indexName?: string,
-  ): { sql: string; params: unknown[] } {
-    const { source, maxDistance } = this._vectorSearchSource(
-      this._prepareVectorSearch(vector, query, indexName),
-      false,
-    );
+  private _buildVectorSearchCountQuery(ctx: ReturnType<PostgresAdapter["_prepareVectorSearch"]>): {
+    sql: string;
+    params: unknown[];
+  } {
+    const { source, maxDistance } = this._vectorSearchSource(ctx, false);
     return buildVectorSearchCount(pgDialect, source, { maxDistance });
   }
 
@@ -2068,13 +2270,15 @@ export class PostgresAdapter extends BaseDbAdapter {
   // ── Geo search ───────────────────────────────────────────────────────────
 
   /**
-   * Detects PostGIS support by attempting to enable the extension.
-   * Idempotent — safe to call multiple times.
+   * Detects PostGIS support by attempting to enable the extension — schema
+   * sync's detection ({@link prepareTypeMapper}). Runs once; a probe that
+   * already found PostGIS skips it.
    */
   private async _detectGeoSupport(): Promise<boolean> {
-    if (this._supportsGeo !== undefined) {
-      return this._supportsGeo;
+    if (this._geoInstallTried || this._supportsGeo === true) {
+      return this._supportsGeo === true;
     }
+    this._geoInstallTried = true;
     try {
       await this._exec().exec("CREATE EXTENSION IF NOT EXISTS postgis");
       this._supportsGeo = true;
@@ -2087,6 +2291,31 @@ export class PostgresAdapter extends BaseDbAdapter {
     return this._supportsGeo;
   }
 
+  /**
+   * Resolves PostGIS presence without DDL when nothing has yet (schema sync
+   * never ran in this process): one read-only `pg_extension` lookup, shared
+   * by concurrent callers, run on `exec` (safe inside a transaction). A
+   * failed lookup is not cached. A table sync created over PostGIS has the
+   * extension installed, so presence decides the column type.
+   */
+  private _ensureGeoKnown(exec: Pick<TPgDriver, "get">): Promise<void> {
+    if (this._supportsGeo !== undefined) {
+      return Promise.resolve();
+    }
+    this._geoProbe ??= (async () => {
+      try {
+        const row = await exec.get<{ present: unknown }>(GEO_PROBE_SQL, []);
+        if (this._supportsGeo === undefined) {
+          this._supportsGeo = row?.present === true;
+        }
+      } catch (err) {
+        this._geoProbe = undefined;
+        throw err;
+      }
+    })();
+    return this._geoProbe;
+  }
+
   override isGeoSearchable(): boolean {
     return this._supportsGeo === true;
   }
@@ -2096,7 +2325,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): Promise<Array<Record<string, unknown>>> {
-    await this._detectGeoSupport();
+    await this._ensureGeoKnown(this._txConnection() ?? this.driver);
     const { sql, params } = this._buildGeoSearchSelect(
       this._prepareGeoSearch(point, query, indexName),
     );
@@ -2110,7 +2339,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     query: DbQuery,
     indexName?: string,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-    await this._detectGeoSupport();
+    await this._ensureGeoKnown(this._txConnection() ?? this.driver);
     const ctx = this._prepareGeoSearch(point, query, indexName);
     const { sql, params } = this._buildGeoSearchSelect(ctx);
     const countFrag = buildGeoSearchCount(

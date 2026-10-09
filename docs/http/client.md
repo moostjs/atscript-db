@@ -416,6 +416,13 @@ await users.remove({ tenantId: "t1", userId: "u1" });
 const meta = await users.meta();
 ```
 
+`/meta` is projected for the requesting user. When the identity changes (login, logout, a role change) and you keep the same `Client` instance, call `invalidateMeta()` (since 0.1.151): it drops the cached `/meta`, the validator built from it and the loaded action forms, and the next call fetches them again.
+
+```typescript
+await signIn(otherUser);
+users.invalidateMeta();
+```
+
 The payload is documented field by field in [CRUD Endpoints — GET /meta](./crud#get-meta). To tell whether the table is read-only, derive it from `meta.crud` — see [Permissions — Read-only check](./permissions#read-only-check).
 
 ## Actions {#actions}
@@ -853,6 +860,7 @@ import type { ClientValidationError } from "@atscript/db-client";
 | `meta()`              | GET    | `/meta`                                | `MetaResponse`                                                                                       |
 | `getActionForm()`     | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                                                                     |
 | `getValidator()`      | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                                                                     |
+| `invalidateMeta()`    | —      | _client-side_                          | `void` — drops the cached `/meta`, validator and action forms                                        |
 | `action()`            | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`)                                              |
 | `actionOnQuery()`     | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)                                                 |
 | `countActionTarget()` | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                                                                |

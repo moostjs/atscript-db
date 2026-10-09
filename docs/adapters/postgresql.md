@@ -414,12 +414,12 @@ try {
 
 The `PgDriver` configures custom type parsers for consistent JavaScript value handling:
 
-| PostgreSQL Type             | Parsed As           | Why                                                              |
-| --------------------------- | ------------------- | ---------------------------------------------------------------- |
-| `TIMESTAMP` / `TIMESTAMPTZ` | `number` (epoch ms) | Consistent with SQLite and MongoDB adapters                      |
-| `NUMERIC`                   | `number`            | Default pg driver returns `string`                               |
-| `INT8` / `BIGINT`           | `number`            | Returns `string` only if value exceeds `Number.MAX_SAFE_INTEGER` |
-| `BOOLEAN`                   | `boolean`           | Native (no conversion needed)                                    |
+| PostgreSQL Type             | Parsed As           | Why                                                                                                                                                                    |
+| --------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TIMESTAMP` / `TIMESTAMPTZ` | `number` (epoch ms) | Consistent with SQLite and MongoDB adapters. A `TIMESTAMP` (without time zone) holds a UTC wall time: it is read as UTC whatever the process time zone (since 0.1.151) |
+| `NUMERIC`                   | `number`            | Default pg driver returns `string`                                                                                                                                     |
+| `INT8` / `BIGINT`           | `number`            | Returns `string` only if value exceeds `Number.MAX_SAFE_INTEGER`                                                                                                       |
+| `BOOLEAN`                   | `boolean`           | Native (no conversion needed)                                                                                                                                          |
 
 These parsers are applied per-pool (not globally), so they don't affect other `pg` usage in the same process. When using a pre-created `pg.Pool`, type parsing is the caller's responsibility.
 

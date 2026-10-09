@@ -1,12 +1,20 @@
 import type { TMysqlConnection, TMysqlDriver, TMysqlRunResult } from "./types";
 import { utcDatetimeToEpochMs } from "./mysql-adapter";
 
-/** mysql2 rejects `undefined` in bind arrays — coerce to `null`. */
-function sanitizeParams(params?: unknown[]): unknown[] {
+const NO_PARAMS: unknown[] = [];
+
+/**
+ * mysql2 rejects `undefined` in bind arrays — coerce to `null`. Copies only
+ * when there is one (an array hole counts): the common case binds `params`
+ * as is (mysql2 never mutates the bind array).
+ */
+export function sanitizeParams(params?: unknown[]): unknown[] {
   if (!params) {
-    return [];
+    return NO_PARAMS;
   }
-  return params.map((v) => (v === undefined ? null : v));
+  return params.includes(undefined)
+    ? Array.from(params, (v) => (v === undefined ? null : v))
+    : params;
 }
 
 /**

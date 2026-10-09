@@ -117,7 +117,7 @@ export function mysqlTypeDefault(sqlType: string, field: TDbFieldMeta): string {
     return "(ST_SRID(POINT(0, 0), 4326))";
   }
   if (/^(TIMESTAMP|DATETIME)/.test(type)) {
-    return "CURRENT_TIMESTAMP";
+    return currentTimestampFor(type);
   }
   if (/^DATE\b/.test(type)) {
     return "'1970-01-01'";
@@ -259,7 +259,7 @@ export function buildColumnDefinition(
     if (field.defaultValue.fn === "uuid") {
       def += " DEFAULT (UUID())";
     } else if (field.defaultValue.fn === "now") {
-      def += " DEFAULT CURRENT_TIMESTAMP";
+      def += ` DEFAULT ${currentTimestampFor(sqlType)}`;
     }
   } else if (
     ctx.purpose === "add" &&
@@ -276,7 +276,7 @@ export function buildColumnDefinition(
 
   const onUpdate = ctx.onUpdateFields?.get(field.physicalName);
   if (onUpdate) {
-    def += ` ON UPDATE ${onUpdate}`;
+    def += ` ON UPDATE ${onUpdate === "CURRENT_TIMESTAMP" ? currentTimestampFor(sqlType) : onUpdate}`;
   }
 
   return { def, inventedDefault };
@@ -386,16 +386,48 @@ function mysqlJsonExtract(quotedCol: string, path: readonly string[], type: TVie
 
 // ── Calendar buckets ────────────────────────────────────────────────────────
 
+/** A `TIMESTAMP` / `DATETIME` column type, with its optional fractional-seconds precision. */
+const TEMPORAL_TYPE = /^\s*(?:TIMESTAMP|DATETIME)\s*(?:\(\s*(\d)\s*\))?\s*$/i;
+
 /**
- * Whether a field is stored as a native MySQL `TIMESTAMP`: a `number` with
- * `@db.default.now`. The adapter writes such values as UTC
- * `'YYYY-MM-DD HH:MM:SS'` strings and reads them back as epoch ms; every other
- * numeric timestamp is a DOUBLE / BIGINT epoch-ms column.
+ * `CURRENT_TIMESTAMP` at the precision of the TIMESTAMP / DATETIME column
+ * type `sqlType` — MySQL requires a column's `DEFAULT` / `ON UPDATE`
+ * `CURRENT_TIMESTAMP(n)` to carry the column's own precision (`TIMESTAMP(3)`
+ * rejects a bare `CURRENT_TIMESTAMP`).
+ */
+export function currentTimestampFor(sqlType: string): string {
+  const fsp = Number(TEMPORAL_TYPE.exec(sqlType)?.[1] ?? 0);
+  return fsp > 0 ? `CURRENT_TIMESTAMP(${fsp})` : "CURRENT_TIMESTAMP";
+}
+
+/**
+ * Fractional-seconds precision (0–6) of a `number` field stored as a native
+ * MySQL `TIMESTAMP` / `DATETIME`, else `undefined`: a `@db.mysql.type`
+ * `TIMESTAMP[(n)]` / `DATETIME[(n)]` override, or `@db.default.now` without
+ * an override (`TIMESTAMP`, whole seconds).
+ */
+export function mysqlTemporalFsp(fd: TDbFieldMeta): number | undefined {
+  if (fd.designType !== "number") {
+    return undefined;
+  }
+  const override = fd.type?.metadata?.get("db.mysql.type") as string | undefined;
+  if (override) {
+    const m = TEMPORAL_TYPE.exec(override);
+    return m ? Number(m[1] ?? 0) : undefined;
+  }
+  return fd.defaultValue?.kind === "fn" && fd.defaultValue.fn === "now" ? 0 : undefined;
+}
+
+/**
+ * Whether a field is stored as a native MySQL `TIMESTAMP` / `DATETIME`: a
+ * `number` with `@db.default.now` (→ `TIMESTAMP`) or with a `@db.mysql.type`
+ * TIMESTAMP / DATETIME override (see {@link mysqlTemporalFsp}). The adapter
+ * writes such values as UTC `'YYYY-MM-DD HH:MM:SS[.fff]'` strings and reads
+ * them back as epoch ms; every other numeric timestamp is a DOUBLE / BIGINT
+ * epoch-ms column.
  */
 export function isMysqlTimestampColumn(fd: TDbFieldMeta): boolean {
-  return (
-    fd.designType === "number" && fd.defaultValue?.kind === "fn" && fd.defaultValue.fn === "now"
-  );
+  return mysqlTemporalFsp(fd) !== undefined;
 }
 
 /** `'1970-01-01 00:00:00'` as a DATETIME: the base for epoch arithmetic free of the session zone. */

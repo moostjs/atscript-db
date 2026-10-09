@@ -377,7 +377,7 @@ describe("PostgresAdapter", () => {
       driver.calls.length = 0;
 
       const adapter = (table as any).adapter as PostgresAdapter;
-      await adapter.updateOne({ id: 1 }, { name: "Bob" });
+      await adapter.updateOne({ name: "Alice" }, { name: "Bob" });
 
       const updateCall = driver.calls.find((c) => c.sql.includes("UPDATE"));
       expect(updateCall).toBeDefined();
@@ -404,15 +404,68 @@ describe("PostgresAdapter", () => {
       driver.calls.length = 0;
 
       const adapter = (table as any).adapter as PostgresAdapter;
-      await adapter.deleteOne({ id: 1 });
+      await adapter.deleteOne({ name: "Alice" });
 
       const deleteCall = driver.calls.find((c) => c.sql.includes("DELETE"));
       expect(deleteCall).toBeDefined();
       expect(deleteCall!.sql).not.toContain("ctid");
       expect(deleteCall!.sql).toMatch(
-        /^DELETE FROM "auth"."users" WHERE "id" = \$1 AND "id" = \(SELECT "id" FROM "auth"."users" WHERE "id" = \$2 LIMIT 1\)$/,
+        /^DELETE FROM "auth"."users" WHERE "name" = \$1 AND "id" = \(SELECT "id" FROM "auth"."users" WHERE "name" = \$2 LIMIT 1\)$/,
       );
-      expect(deleteCall!.params).toEqual([1, 1]);
+      expect(deleteCall!.params).toEqual(["Alice", "Alice"]);
+    });
+
+    // An exact primary-key filter pins at most one row by itself: the outer
+    // predicate IS the PK equality the subquery would re-key on, so the
+    // statement drops the subquery (one index probe instead of two).
+    it("updateOne / deleteOne by an exact PK filter skip the LIMIT 1 subquery", async () => {
+      const { UsersTable } = await import("./fixtures/test-table.as");
+      const driver = createMockDriver();
+      const space = new DbSpace(() => new PostgresAdapter(driver));
+      const table = space.getTable(UsersTable as any);
+      await table.ensureTable();
+      const adapter = (table as any).adapter as PostgresAdapter;
+      const stmt = (verb: string) => driver.calls.find((c) => c.sql.startsWith(verb))!;
+
+      driver.calls.length = 0;
+      await adapter.updateOne({ id: 1 }, { name: "Bob" });
+      expect(stmt("UPDATE").sql).toBe('UPDATE "auth"."users" SET "name" = $1 WHERE "id" = $2');
+      expect(stmt("UPDATE").params).toEqual(["Bob", 1]);
+
+      driver.calls.length = 0;
+      await adapter.updateOne({ id: { $eq: 2 } }, { name: "Bob" });
+      expect(stmt("UPDATE").sql).toBe('UPDATE "auth"."users" SET "name" = $1 WHERE "id" = $2');
+
+      driver.calls.length = 0;
+      await adapter.deleteOne({ id: 1 });
+      expect(stmt("DELETE").sql).toBe('DELETE FROM "auth"."users" WHERE "id" = $1');
+      expect(stmt("DELETE").params).toEqual([1]);
+      expect(driver.calls).toHaveLength(1);
+    });
+
+    it.each([
+      ["PK plus another field", { id: 1, name: "Alice" }],
+      ["a PK operator other than $eq", { id: { $gt: 1 } }],
+      ["$eq with a second operator", { id: { $eq: 1, $ne: 2 } }],
+      ["a non-scalar PK value", { id: new Date(0) }],
+      ["a null PK value", { id: null }],
+      ["a logical wrapper", { $and: [{ id: 1 }] }],
+      ["a non-PK unique field", { email: "a@b.c" }],
+    ])("keeps the LIMIT 1 subquery for %s", async (_label, filter) => {
+      const { UsersTable } = await import("./fixtures/test-table.as");
+      const driver = createMockDriver();
+      const space = new DbSpace(() => new PostgresAdapter(driver));
+      const table = space.getTable(UsersTable as any);
+      await table.ensureTable();
+      const adapter = (table as any).adapter as PostgresAdapter;
+      driver.calls.length = 0;
+      await adapter.updateOne(filter as any, { name: "Bob" });
+      await adapter.deleteOne(filter as any);
+      for (const call of driver.calls) {
+        expect(call.sql).toContain(`"id" = (SELECT "id" FROM "auth"."users" WHERE`);
+        expect(call.sql).toContain("LIMIT 1)");
+      }
+      expect(driver.calls).toHaveLength(2);
     });
 
     it("deleteMany uses $N placeholders without ctid", async () => {
@@ -447,7 +500,7 @@ describe("PostgresAdapter", () => {
       driver.calls.length = 0;
 
       const adapter = (table as any).adapter as PostgresAdapter;
-      await adapter.updateOne({ id: 1 }, { name: "Bob" });
+      await adapter.updateOne({ name: "Alice" }, { name: "Bob" });
 
       const sql = driver.calls.find((c) => c.sql.includes("UPDATE"))!.sql;
       expect(sql).toContain(`"id" = (SELECT "id" FROM`);
@@ -464,7 +517,7 @@ describe("PostgresAdapter", () => {
       driver.calls.length = 0;
 
       const adapter = (table as any).adapter as PostgresAdapter;
-      await adapter.updateOne({ id: 1 }, {}, { inc: { createdAt: 1 } });
+      await adapter.updateOne({ name: "Alice" }, {}, { inc: { createdAt: 1 } });
 
       const sql = driver.calls.find((c) => c.sql.includes("UPDATE"))!.sql;
       // Atomic SET clause is preserved (correctness of the increment itself).
