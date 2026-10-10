@@ -404,7 +404,11 @@ destructiveOptionKeys(): ReadonlySet<string> {
 
 #### `hasRows(tableName?)` — since 0.1.128
 
-Whether the table has at least one row (`SELECT EXISTS`/`LIMIT 1`, not a count). Schema sync uses it in its pre-flight phase to refuse a primary-key change on a populated table; `tableName` is the OLD name of a table about to be renamed. The base class provides a default — `count() > 0` for the adapter's own table, a full scan on some engines — that returns `undefined` ("cannot tell") for any other `tableName`, which schema sync turns into a refusal asking for an override. Override it with a probe that accepts a table name.
+Whether the table has at least one row (`SELECT EXISTS`/`LIMIT 1`, not a count). Schema sync uses it in its pre-flight phase to check a primary-key change on a populated table (see `countKeyViolations`); `tableName` is the OLD name of a table about to be renamed. The base class provides a default — `count() > 0` for the adapter's own table, a full scan on some engines — that returns `undefined` ("cannot tell") for any other `tableName`, which schema sync turns into a refusal asking for an override. Override it with a probe that accepts a table name.
+
+#### `countKeyViolations(columns, tableName?)` — since 0.1.155
+
+Optional. How many rows of the live table the given columns cannot hold as a primary key: rows with a `NULL` (or missing value) in one of them, plus every row sharing its values with another — one query (`buildKeyViolationCount(dialect, quotedTable, columns)` from `@atscript/db-sql-tools` renders it for SQL engines). Schema sync calls it before rebuilding the primary key of a populated table: `0` → `rebuildPrimaryKey` (or `recreateTable`) runs with the rows in place; more → the run is refused with the count. Without it, a key change on a populated table is refused. `tableName` is the OLD name of a table about to be renamed.
 
 #### `getReferencingForeignKeys(tableName)` — since 0.1.128
 
@@ -438,7 +442,7 @@ Apply non-destructive table option changes. Called for each changed option that 
 
 #### `rebuildPrimaryKey(change)` — since 0.1.128
 
-Rewrite the table's primary key from `change.from` to `change.to` (physical column names). Called only on an **empty** table, after new columns were added and before stale ones are dropped, so both column sets exist. Adapters without it fall back to `recreateTable()`. Keep it to one atomic statement where the engine allows (MySQL `ALTER TABLE … DROP PRIMARY KEY, ADD PRIMARY KEY (…)`, PostgreSQL `DROP CONSTRAINT …, ADD PRIMARY KEY (…)`).
+Rewrite the table's primary key from `change.from` to `change.to` (physical column names). Called on an **empty** table, or (since 0.1.155) a populated one whose rows already satisfy the new key (`countKeyViolations` answered `0`) — keep the rows; after new columns were added and before stale ones are dropped, so both column sets exist. Adapters without it fall back to `recreateTable()`. Keep it to one atomic statement where the engine allows (MySQL `ALTER TABLE … DROP PRIMARY KEY, ADD PRIMARY KEY (…)`, PostgreSQL `DROP CONSTRAINT …, ADD PRIMARY KEY (…)`).
 
 ### Destructive Operations
 

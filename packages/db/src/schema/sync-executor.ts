@@ -75,6 +75,13 @@ export interface TTableFacts {
    */
   populated?: boolean | "unknown";
   /**
+   * Only probed for a populated table whose key changes: the rows the new key
+   * columns cannot hold as a primary key (NULLs and duplicates, see
+   * `countKeyViolations`); `undefined` when the adapter cannot count them or
+   * a new key column is added in the same run.
+   */
+  keyViolations?: number;
+  /**
    * Live inbound FKs — probed only when the run drops the physical table
    * (`dropsTable`; the drop-and-recreate half only when a removed table
    * could block it); `undefined` when not probed or when the adapter cannot
@@ -136,6 +143,7 @@ export function planTableInit(
   const pk = facts.diff?.primaryKeyChanged;
   if (pk) {
     init.pkChange = { from: pk.from, to: pk.to, rebuild: !skipped.includes("pk-rebuild") };
+    if (facts.populated === true) init.pkChange.populated = true;
   }
   if (!safe) {
     return init;
@@ -167,6 +175,11 @@ export function typeChangeStrategy(
     return "drop";
   }
   if (readable.syncMethod === "recreate" && adapter.recreateTable) {
+    return "recreate";
+  }
+  // A key change on an adapter without `rebuildPrimaryKey` recreates the
+  // table anyway (with its rows) — the type change rides along.
+  if (diff.primaryKeyChanged && !adapter.rebuildPrimaryKey && adapter.recreateTable) {
     return "recreate";
   }
   if (adapter.supportsColumnModify && adapter.syncColumns) {
@@ -273,13 +286,11 @@ export async function executeSyncTable(
             readable.columnDescriptors,
             existing,
             adapter.typeMapper?.bind(adapter),
-            { snapshot: storedSnapshot },
+            { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
           );
         // FK changes on adapters without syncForeignKeys (SQLite) require table recreation
         if (hasFkChanges && !adapter.syncForeignKeys && adapter.recreateTable) {
-          await adapter.recreateTable();
-          init.recreated = true;
-          init.status = "alter";
+          await recreateKeepingRenames(adapter, diff, init);
           if (diff.primaryKeyChanged) {
             // The recreated table already carries the new key.
             init.pkChange = { ...diff.primaryKeyChanged, rebuild: true };
@@ -318,7 +329,7 @@ export async function executeSyncTable(
             readable.columnDescriptors,
             snapshotToExistingColumns(storedSnapshot, readable),
             deps.resolveTypeMapper(adapter),
-            { snapshot: storedSnapshot },
+            { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
           );
         await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
       }
@@ -663,6 +674,33 @@ async function dropAndRecreate(
   init.status = "alter";
 }
 
+/**
+ * `recreateTable()` before the column diff is applied: it copies the rows by
+ * column name, so the columns renamed in this run are renamed first — under
+ * the old name their values would not be copied.
+ */
+async function recreateKeepingRenames(
+  adapter: BaseDbAdapter,
+  diff: TColumnDiff,
+  init: TSyncEntryInit,
+): Promise<void> {
+  if (diff.renamed.length > 0 && adapter.syncColumns) {
+    const { renamed } = await adapter.syncColumns({
+      added: [],
+      removed: [],
+      renamed: diff.renamed,
+      typeChanged: [],
+      nullableChanged: [],
+      defaultChanged: [],
+      conflicts: [],
+    });
+    init.columnsRenamed = renamed;
+  }
+  await adapter.recreateTable!();
+  init.recreated = true;
+  init.status = "alter";
+}
+
 async function applyColumnDiff(
   adapter: BaseDbAdapter,
   readable: AtscriptDbReadable,
@@ -711,9 +749,7 @@ async function applyColumnDiff(
         await dropAndRecreate(adapter, init, name, ensureOpts);
       }
     } else if (strategy === "recreate") {
-      await adapter.recreateTable!();
-      init.recreated = true;
-      init.status = "alter";
+      await recreateKeepingRenames(adapter, diff, init);
     } else if (strategy === "modify") {
       // Adapter can handle type changes in-place (e.g. MySQL MODIFY COLUMN)
       // Defer to the single syncColumns call below
@@ -743,9 +779,7 @@ async function applyColumnDiff(
         needsSyncColumns = true;
         init.status = "alter";
       } else if (adapter.recreateTable) {
-        await adapter.recreateTable();
-        init.recreated = true;
-        init.status = "alter";
+        await recreateKeepingRenames(adapter, diff, init);
       } else {
         // Schema-less adapter — just mark as alter; snapshot will be updated
         init.status = "alter";
@@ -824,8 +858,8 @@ async function applyColumnDiff(
 
   // Primary-key field-set change — after renames/adds (the new key columns
   // exist), before drops (an old key column removed in the same sync is still
-  // there for the swap). Pre-flight already refused populated tables, so the
-  // table is empty here, and `SchemaSync.execute()` already dropped the live
+  // there for the swap). Pre-flight already refused populated tables whose
+  // rows do not satisfy the new key, and `SchemaSync.execute()` already dropped the live
   // inbound FKs of retargeting children. A table recreated above already
   // carries the new key.
   if (diff.primaryKeyChanged && init.status !== "error") {

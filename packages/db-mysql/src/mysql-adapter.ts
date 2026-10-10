@@ -77,6 +77,7 @@ import {
   fromSourceSql,
   viewReadSource,
   type TSqlFromSource,
+  buildKeyViolationCount,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -94,6 +95,7 @@ import {
   defaultValueForType,
   defaultValueToSqlLiteral,
   geoPointToMysqlInternal,
+  isMysqlTimestampColumn,
   mysqlTemporalFsp,
   mysqlBytesPerChar,
   mysqlCharLength,
@@ -173,6 +175,10 @@ const TZ_PROBE_SQL =
 
 const isZero = (v: unknown) => v === 0 || v === "0";
 
+/** A live numeric column type (`INFORMATION_SCHEMA.COLUMNS.COLUMN_TYPE`). */
+const NUMERIC_SQL_TYPE =
+  /^(double|float|real|decimal|numeric|bigint|int|integer|mediumint|smallint|tinyint)\b/i;
+
 /** Drivers whose session `sql_mode` was already checked for strictness (see `_warnNonStrictMode`). */
 const nonStrictChecked = new WeakSet<TMysqlDriver>();
 
@@ -251,6 +257,11 @@ export class MysqlAdapter extends BaseDbAdapter {
   private _collation = "utf8mb4_unicode_ci";
   private _autoIncrementStart?: number;
   private _incrementFields = new Set<string>();
+  /**
+   * Changes of columns leaving a pending primary key that `syncColumns` left
+   * to the next `rebuildPrimaryKey` (re-declared in its swap statement).
+   */
+  private _leavingKeyColumns = new Map<string, TDbFieldMeta>();
   private _onUpdateFields = new Map<string, string>();
 
   // ── Vector search state ─────────────────────────────────────────────────
@@ -1530,14 +1541,29 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── Schema sync primitives (since 0.1.128) ─────────────────────────────
 
+  /** The quoted table `tableName` of the adapter's schema, or the adapter's own. */
+  private _quotedTable(tableName?: string): string {
+    return quoteTableName(
+      tableName
+        ? this._schema
+          ? `${this._schema}.${tableName}`
+          : tableName
+        : this.resolveTableName(),
+    );
+  }
+
   async hasRows(tableName?: string): Promise<boolean> {
-    const target = tableName
-      ? quoteTableName(this._schema ? `${this._schema}.${tableName}` : tableName)
-      : quoteTableName(this.resolveTableName());
-    const sql = `SELECT EXISTS(SELECT 1 FROM ${target}) AS present`;
+    const sql = `SELECT EXISTS(SELECT 1 FROM ${this._quotedTable(tableName)}) AS present`;
     this._log(sql);
     const row = await this._exec().get<{ present: number | boolean }>(sql, []);
     return Boolean(Number(row?.present ?? 0));
+  }
+
+  async countKeyViolations(columns: readonly string[], tableName?: string): Promise<number> {
+    const sql = buildKeyViolationCount(mysqlDialect, this._quotedTable(tableName), columns);
+    this._log(sql);
+    const row = await this._exec().get<{ violations: number | string }>(sql, []);
+    return Number(row?.violations ?? 0);
   }
 
   /** Live foreign keys referencing `tableName` (any table of the schema). */
@@ -1589,7 +1615,8 @@ export class MysqlAdapter extends BaseDbAdapter {
    * NOT NULL) together with the key swap — so an AUTO_INCREMENT column never
    * exists without a key (ER 1075), in safe mode or otherwise. A demoted key
    * column loses AUTO_INCREMENT in the same statement (pre-flight guarantees
-   * its model no longer declares increment). Called on an empty table only.
+   * its model no longer declares increment). Called on an empty table or one
+   * whose rows satisfy the new key (`countKeyViolations`).
    */
   async rebuildPrimaryKey(change: TPrimaryKeyChange): Promise<void> {
     const fields = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
@@ -1606,6 +1633,17 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
 
     if (change.from.length > 0) {
+      // Changes `syncColumns` left to this statement for columns leaving the
+      // key (one cannot become TEXT while still keyed, ER 1170).
+      const leaving = this._leavingKeyColumns;
+      this._leavingKeyColumns = new Map();
+      for (const field of leaving.values()) {
+        if (!to.has(field.physicalName)) {
+          clauses.push(
+            `MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`,
+          );
+        }
+      }
       const placeholders = change.from.map(() => "?").join(", ");
       const live = await this._exec().all<{
         COLUMN_NAME: string;
@@ -1618,7 +1656,11 @@ export class MysqlAdapter extends BaseDbAdapter {
         [this._table.tableName, this._schema, ...change.from],
       );
       for (const col of live) {
-        if (to.has(col.COLUMN_NAME) || !/auto_increment/i.test(col.EXTRA ?? "")) {
+        if (
+          to.has(col.COLUMN_NAME) ||
+          leaving.has(col.COLUMN_NAME) ||
+          !/auto_increment/i.test(col.EXTRA ?? "")
+        ) {
           continue;
         }
         const field = fields.get(col.COLUMN_NAME);
@@ -1753,15 +1795,26 @@ export class MysqlAdapter extends BaseDbAdapter {
       // Modifications — type, nullability and default changes on one column
       // collapse into ONE `MODIFY COLUMN <full definition>` (the definition
       // carries DEFAULT / COLLATE / ON UPDATE / AUTO_INCREMENT, so nothing is
-      // silently reset by a partial MODIFY). Columns entering a pending primary
-      // key are left to `rebuildPrimaryKey`, which re-declares them in the swap
-      // statement (their AUTO_INCREMENT needs the key in the same statement).
-      // A derived column never appears in these lists — its drift is a
+      // silently reset by a partial MODIFY). Columns entering or leaving a
+      // pending primary key are left to `rebuildPrimaryKey`, which re-declares
+      // them in the swap statement (an entering AUTO_INCREMENT needs the key in
+      // the same statement; a leaving column cannot become TEXT while still
+      // keyed). A derived column never appears in these lists — its drift is a
       // derived rebuild (`TColumnDiff.derivedChanged`), drop + add.
-      const enteringKey = new Set(diff.primaryKeyChanged?.to ?? []);
+      const keyChange = diff.primaryKeyChanged;
+      const entering = new Set(keyChange?.to ?? []);
+      const leaving = new Set(keyChange?.from.filter((c) => !entering.has(c)) ?? []);
+      this._leavingKeyColumns = new Map();
+      const rekeyed = (field: TDbFieldMeta): boolean => {
+        if (leaving.has(field.physicalName)) {
+          this._leavingKeyColumns.set(field.physicalName, field);
+          return true;
+        }
+        return entering.has(field.physicalName);
+      };
       const modified = new Map<string, TDbFieldMeta>();
-      for (const { field } of diff.typeChanged ?? []) {
-        if (enteringKey.has(field.physicalName)) {
+      for (const { field, existingType } of diff.typeChanged ?? []) {
+        if (rekeyed(field)) {
           continue;
         }
         const sqlType = this.typeMapper(field);
@@ -1771,10 +1824,17 @@ export class MysqlAdapter extends BaseDbAdapter {
           await this._migrateJsonColumnToPoint(conn, tableName, field);
           continue;
         }
+        if (isMysqlTimestampColumn(field) && NUMERIC_SQL_TYPE.test(existingType)) {
+          // epoch ms → TIMESTAMP / DATETIME (a field gaining `@db.default.now`,
+          // e.g. `number.timestamp.created` since 0.1.155). MODIFY would read
+          // the number as YYYYMMDDhhmmss — go through a temp column.
+          await this._migrateEpochColumnToTemporal(conn, tableName, field, sqlType);
+          continue;
+        }
         modified.set(field.physicalName, field);
       }
       for (const { field } of diff.nullableChanged ?? []) {
-        if (enteringKey.has(field.physicalName)) {
+        if (rekeyed(field)) {
           continue;
         }
         if (!field.optional) {
@@ -1792,7 +1852,7 @@ export class MysqlAdapter extends BaseDbAdapter {
         modified.set(field.physicalName, field);
       }
       for (const { field } of diff.defaultChanged ?? []) {
-        if (!enteringKey.has(field.physicalName)) {
+        if (!rekeyed(field)) {
           modified.set(field.physicalName, field);
         }
       }
@@ -2519,6 +2579,53 @@ export class MysqlAdapter extends BaseDbAdapter {
       ctx.dist,
       ctx.window,
       ctx.controls as TGeoSearchControls,
+    );
+  }
+
+  /**
+   * Migrates an epoch-ms number column to a native `TIMESTAMP` / `DATETIME`
+   * via a temp column: each value becomes the UTC wall time the adapter would
+   * write for it (`formatValue`), truncated to the column's precision. A value
+   * the type cannot hold (before 1970 / after 2038 for `TIMESTAMP`) — or a
+   * column the drop is refused for (an index it would leave with duplicates,
+   * a foreign key) — fails the sync with the original column untouched (the
+   * temp column is dropped again). The column keeps its position. A
+   * primary-key column is refused: dropping it would shrink the key.
+   */
+  private async _migrateEpochColumnToTemporal(
+    conn: TMysqlConnection,
+    tableName: string,
+    field: TDbFieldMeta,
+    sqlType: string,
+  ): Promise<void> {
+    if (field.isPrimaryKey) {
+      throw new Error(
+        `Cannot convert primary-key column "${field.physicalName}" from epoch milliseconds to ${sqlType} — migrate it manually.`,
+      );
+    }
+    const col = qi(field.physicalName);
+    const tmp = qi(`${field.physicalName}__ts_mig`);
+    const quotedTable = quoteTableName(tableName);
+    // epoch ms → whole units of the column's precision (≤ ms), in microseconds
+    const digits = Math.min(mysqlTemporalFsp(field) ?? 0, 3);
+    const micros = `FLOOR(${col} / ${10 ** (3 - digits)}) * ${10 ** (6 - digits)}`;
+    const run = async (ddl: string) => {
+      this._log(ddl);
+      await conn.exec(ddl);
+    };
+    await run(`ALTER TABLE ${quotedTable} ADD COLUMN ${tmp} ${sqlType} NULL AFTER ${col}`);
+    try {
+      await run(
+        `UPDATE ${quotedTable} SET ${tmp} = DATE_ADD(CAST('1970-01-01 00:00:00' AS DATETIME(6)), INTERVAL ${micros} MICROSECOND) WHERE ${col} IS NOT NULL`,
+      );
+      await run(`ALTER TABLE ${quotedTable} DROP COLUMN ${col}`);
+    } catch (error) {
+      await run(`ALTER TABLE ${quotedTable} DROP COLUMN ${tmp}`).catch(() => undefined);
+      throw error;
+    }
+    await run(`ALTER TABLE ${quotedTable} RENAME COLUMN ${tmp} TO ${col}`);
+    await run(
+      `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`,
     );
   }
 

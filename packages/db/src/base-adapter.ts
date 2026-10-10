@@ -1385,7 +1385,7 @@ export abstract class BaseDbAdapter {
 
   /**
    * Whether the table has at least one row. Schema sync uses it in the
-   * pre-flight phase to refuse a primary-key change on a populated table.
+   * pre-flight phase to check a primary-key change on a populated table.
    * Override with an EXISTS/LIMIT 1 probe — this default is `count() > 0`,
    * a full scan on some engines, and it can only answer for the adapter's
    * OWN table: for another `tableName` (or on an administrative adapter
@@ -1427,12 +1427,27 @@ export abstract class BaseDbAdapter {
 
   /**
    * Rewrites the table's primary key from `change.from` to `change.to`.
-   * Called only on an EMPTY table (schema sync refuses populated ones) after
-   * new columns were added and before stale columns are dropped, so both
-   * column sets exist. Adapters without it fall back to {@link recreateTable}.
+   * Called on an empty table, or (since 0.1.155) on a populated one whose
+   * rows already satisfy the new key ({@link countKeyViolations} answered
+   * `0`), after new columns were added and before stale columns are dropped,
+   * so both column sets exist. Adapters without it fall back to
+   * {@link recreateTable}.
    * @since 0.1.128
    */
   rebuildPrimaryKey?(change: TPrimaryKeyChange): Promise<void>;
+
+  /**
+   * How many rows of the live table `columns` cannot hold as a primary key:
+   * rows with a NULL (or missing value) in one of them, plus every row that
+   * shares its values with another. Schema sync rebuilds the key of a
+   * populated table only when this answers `0`, and refuses the run with the
+   * count otherwise. Optional — without it a populated key change is refused.
+   *
+   * @param tableName - Check this table instead of the adapter's own (the OLD
+   *   name of a table that is about to be renamed).
+   * @since 0.1.155
+   */
+  countKeyViolations?(columns: readonly string[], tableName?: string): Promise<number>;
 
   /**
    * Renames a table/collection from `oldName` to the adapter's current table name.

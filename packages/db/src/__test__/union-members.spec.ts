@@ -9,7 +9,9 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 // annotations as a union / tuple member or array element
 // (`number.timestamp.created | null` → `@db.default.now`, `string.char` →
 // `@expect.maxLength 1`). A member is not the column: only the prop's own
-// annotations (and, as before, a named alias member's non-db ones) apply.
+// annotations (and, as before, a named alias member's non-db ones) apply —
+// plus the db ones of the one non-null member of `T | null`, which is the
+// column's type.
 
 let UnionMembers: any;
 let UnionAliasMembers: any;
@@ -30,12 +32,17 @@ function field(table: AtscriptDbTable, path: string): TDbFieldMeta {
 const row = { pair: [1, "a"], emails: ["a@b.co"], n: null, code: "abc", created: 1 };
 
 describe("union / tuple member annotations", () => {
-  it("a member's @db.default.now is no column default", () => {
+  it("a tuple item's @db.default.now is no column default", () => {
     const table = new AtscriptDbTable(UnionMembers, new MockAdapter());
-    for (const path of ["x", "y", "pair"]) {
-      const fd = field(table, path);
-      expect(fd.defaultValue, path).toBeUndefined();
-      expect(fd.type.metadata.has("db.default.now"), path).toBe(false);
+    const fd = field(table, "pair");
+    expect(fd.defaultValue).toBeUndefined();
+    expect(fd.type.metadata.has("db.default.now")).toBe(false);
+  });
+
+  it("T | null gets the db annotations of T: @db.default.now", () => {
+    const table = new AtscriptDbTable(UnionMembers, new MockAdapter());
+    for (const path of ["x", "y", "created"]) {
+      expect(field(table, path).defaultValue, path).toEqual({ kind: "fn", fn: "now" });
     }
   });
 
@@ -44,7 +51,8 @@ describe("union / tuple member annotations", () => {
     // `string.char | string` — `@expect.maxLength 1` would size the column
     expect([...field(table, "code").type.metadata.keys()]).toEqual([]);
     expect([...field(table, "n").type.metadata.keys()]).toEqual([]);
-    expect([...field(table, "x").type.metadata.keys()]).toEqual([]);
+    // `T | null`: only T's db annotations, not its `@expect.int`
+    expect([...field(table, "x").type.metadata.keys()]).toEqual(["db.default.now"]);
   });
 
   it("the prop's own annotations and a named alias member's still apply", () => {
@@ -54,7 +62,7 @@ describe("union / tuple member annotations", () => {
     expect(field(table, "tsPair").defaultValue).toBeUndefined();
   });
 
-  it("an omitted field is not filled from a member default", async () => {
+  it("an omitted T | null field is filled from T's default", async () => {
     const table = new AtscriptDbTable(UnionMembers, new MockAdapter());
     let seen: Array<Record<string, unknown>> = [];
     await table.insertOne({ id: 1, x: 5, ...row } as any, {
@@ -62,12 +70,19 @@ describe("union / tuple member annotations", () => {
         seen = ctx.rows;
       },
     });
-    expect(seen[0]).not.toHaveProperty("y");
+    expect(typeof seen[0]!.y).toBe("number");
+    expect(seen[0]!.x).toBe(5);
   });
 
-  it("a member default does not make the field optional on insert", async () => {
+  it("a member default does not make the field optional on insert, T | null's does", async () => {
     const table = new AtscriptDbTable(UnionMembers, new MockAdapter());
-    await expect(table.insertOne({ id: 1, ...row } as any)).rejects.toThrow(/x/);
+    let seen: Array<Record<string, unknown>> = [];
+    await table.insertOne({ id: 1, ...row } as any, {
+      guard: (ctx: TDbWriteGuardContext<any>) => {
+        seen = ctx.rows;
+      },
+    });
+    expect(typeof seen[0]!.x).toBe("number");
     await expect(
       table.insertOne({ id: 2, x: 5, ...row, pair: [undefined, "a"] } as any),
     ).rejects.toThrow(/pair\.0/);
@@ -87,14 +102,27 @@ describe("union / tuple member annotations", () => {
     await expect(table.insertOne({ id: 3, x: 5, ...row, n: 1.5 } as any)).rejects.toThrow(/n/);
   });
 
-  it("a union alias prop and members inside nested objects get no member default", async () => {
+  it("a union alias prop and T | null inside nested objects get T's default", async () => {
     const table = new AtscriptDbTable(UnionAliasProps, new MockAdapter());
-    for (const path of ["maybe", "stamped.at", "group.at"]) {
-      expect(field(table, path).defaultValue, path).toBeUndefined();
+    for (const path of ["maybe", "maybeDef", "stamped.at", "group.at"]) {
+      expect(field(table, path).defaultValue, path).toEqual({ kind: "fn", fn: "now" });
     }
-    expect(field(table, "maybeDef").defaultValue).toEqual({ kind: "fn", fn: "now" });
-    const payload = { id: 1, stamped: null, group: { at: null } };
-    await expect(table.insertOne(payload as any)).rejects.toThrow(/maybe/);
-    await expect(table.insertOne({ ...payload, maybe: null } as any)).resolves.toBeDefined();
+    let seen: Array<Record<string, unknown>> = [];
+    const guard = (ctx: TDbWriteGuardContext<any>) => {
+      seen = ctx.rows;
+    };
+    await table.insertOne({ id: 1, stamped: null, group: {} } as any, { guard });
+    // filled inside a present object; a null embedded object stays null
+    expect(seen[0]).toMatchObject({ stamped: null, group: { at: expect.any(Number) } });
+    expect(typeof seen[0]!.maybe).toBe("number");
+    await table.insertOne(
+      { id: 2, maybe: null, stamped: { label: "a" }, group: { at: null } } as any,
+      {
+        guard,
+      },
+    );
+    // an explicit null is kept
+    expect(seen[0]).toMatchObject({ maybe: null, stamped: { label: "a", at: expect.any(Number) } });
+    expect(seen[0]!.group).toEqual({ at: null });
   });
 });

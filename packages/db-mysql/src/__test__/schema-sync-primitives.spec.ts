@@ -652,8 +652,9 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
   it("moving the key from one AUTO_INCREMENT column to a new one never has two AUTO_INCREMENT columns outside one statement", async () => {
     // Live: `id` BIGINT AUTO_INCREMENT PRIMARY KEY (PfTokenV1); desired: key on
     // a new increment column `seq`, `id` kept as a plain number (PfTokenSeq).
-    // The canned COLUMNS row is what the rebuild's probe sees AFTER
-    // syncColumns' `MODIFY id DOUBLE NOT NULL` removed the AUTO_INCREMENT.
+    // `id` leaves the key: its change (dropping AUTO_INCREMENT) is made in the
+    // swap statement itself (since 0.1.155 — a leaving column may not be
+    // changeable while still keyed).
     const driver = createDriver({
       all: [
         ["INFORMATION_SCHEMA.COLUMNS", [{ COLUMN_NAME: "id", COLUMN_TYPE: "double", EXTRA: "" }]],
@@ -671,8 +672,7 @@ describe("MysqlAdapter — columns entering the primary key (no helper index)", 
     const ddl = execSql(driver);
     expect(ddl).toEqual([
       "ALTER TABLE `pf_tokens` ADD COLUMN `seq` BIGINT NOT NULL",
-      "ALTER TABLE `pf_tokens` MODIFY COLUMN `id` DOUBLE NOT NULL",
-      "ALTER TABLE `pf_tokens` MODIFY COLUMN `seq` BIGINT AUTO_INCREMENT NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`seq`)",
+      "ALTER TABLE `pf_tokens` MODIFY COLUMN `seq` BIGINT AUTO_INCREMENT NOT NULL, MODIFY COLUMN `id` DOUBLE NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`seq`)",
     ]);
     // The only AUTO_INCREMENT declaration is in the statement that also adds the key
     const withAi = ddl.filter((d) => d.includes("AUTO_INCREMENT"));

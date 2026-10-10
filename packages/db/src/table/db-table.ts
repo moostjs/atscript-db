@@ -4,6 +4,7 @@ import {
   type OwnPropsOf,
   type NavPropsOf,
   type TAtscriptAnnotatedType,
+  type TAtscriptTypeArray,
   type TAtscriptDataType,
   type Validator,
 } from "@atscript/typescript/utils";
@@ -75,7 +76,8 @@ import type {
   NullableOptional,
 } from "../types";
 import { findRowsByKeys, pkTupleKey, sameKey, uniqueKeyTuple } from "../shared/keys";
-import { isEmptyObject, isPlainObject } from "../shared/object";
+import { nullableUnionBase } from "../shared/nullable-union";
+import { findAncestorInSet, isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
 import { relGuardState } from "../query/relation-filter";
@@ -1848,6 +1850,10 @@ export class AtscriptDbTable<
    * full row). Function defaults (`now` / `uuid` / `increment` / custom) the
    * adapter handles natively are NOT filled — the field stays absent so the
    * engine's own default applies. The version column is never touched.
+   * A nested field (`audit.createdAt`) is filled inside its object, only when
+   * that object is present (an absent or `null` embedded object stays so), and
+   * in every object of an array on the way; a field inside a JSON value or an
+   * array has no column default, so the SDK fills its function default too.
    */
   protected _applyDefaults(data: Record<string, unknown>): Record<string, unknown> {
     const nativeFns = this.adapter.nativeDefaultFns();
@@ -1858,25 +1864,54 @@ export class AtscriptDbTable<
       // DEFAULT). Skipping it here keeps `assertNoVersionWrites` happy on the
       // update/replace paths where the field MUST stay absent from the payload.
       if (field === versionField) continue;
-      if (data[field] === undefined) {
-        if (def.kind === "value") {
-          data[field] = this._valueDefault(field, def.value);
-        } else if (def.kind === "fn" && !nativeFns.has(def.fn)) {
-          switch (def.fn) {
-            case "now": {
-              data[field] = Date.now();
-              break;
-            }
-            case "uuid": {
-              data[field] = crypto.randomUUID();
-              break;
-            }
-            // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
-          }
-        }
+      let make: (() => unknown) | undefined;
+      if (def.kind === "value") {
+        make = () => this._valueDefault(field, def.value);
+      } else if (
+        def.kind === "fn" &&
+        (!nativeFns.has(def.fn) || findAncestorInSet(field, this._meta.jsonParents) !== undefined)
+      ) {
+        // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
+        if (def.fn === "now") make = Date.now;
+        else if (def.fn === "uuid") make = () => crypto.randomUUID();
+      }
+      if (!make) continue;
+      if (!field.includes(".")) {
+        if (data[field] === undefined) data[field] = make();
+      } else if (this._nestedDefaultFillable(field)) {
+        fillNested(data, field.split("."), 0, make);
       }
     }
     return data;
+  }
+
+  /** {@link _nestedDefaultFillable} per nested default path. */
+  private _fillableDefaults?: Map<string, boolean>;
+
+  /**
+   * Whether every parent of the nested default `field` is one object type —
+   * an object, `T | null` of one, or an array of one. Below a tuple or a
+   * union of several types the default cannot be placed (the item it belongs
+   * to is unknown), so it is not filled.
+   */
+  private _nestedDefaultFillable(field: string): boolean {
+    const cache = (this._fillableDefaults ??= new Map());
+    let fillable = cache.get(field);
+    if (fillable === undefined) {
+      fillable = true;
+      for (let dot = field.indexOf("."); dot !== -1; dot = field.indexOf(".", dot + 1)) {
+        let type = this.flatMap.get(field.slice(0, dot));
+        if (type?.type.kind === "union") type = nullableUnionBase(type);
+        if (type?.type.kind === "array") type = (type.type as TAtscriptTypeArray).of;
+        if (type?.type.kind === "union") type = nullableUnionBase(type);
+        if (type?.type.kind !== "object") {
+          fillable = false;
+          break;
+        }
+      }
+      cache.set(field, fillable);
+    }
+    return fillable;
   }
 
   /**
@@ -2108,5 +2143,23 @@ export class AtscriptDbTable<
     }
 
     return this.createValidator({ plugins: adapterPlugins });
+  }
+}
+
+/**
+ * Sets `segs[i..]` to `make()` where it is `undefined`, inside present plain
+ * objects only — fanned out over the objects of every array on the way.
+ */
+function fillNested(value: unknown, segs: readonly string[], i: number, make: () => unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) fillNested(item, segs, i, make);
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  const key = segs[i]!;
+  if (i === segs.length - 1) {
+    if (value[key] === undefined) value[key] = make();
+  } else {
+    fillNested(value[key], segs, i + 1, make);
   }
 }

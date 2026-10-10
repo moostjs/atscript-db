@@ -55,6 +55,24 @@ The `@meta.id` annotation takes no arguments. Every table should have at least o
 
 When a `number` field is the primary key, SQLite stores it as `INTEGER` rather than the default `REAL` so it can act as the table's row id.
 
+Only the table's own top-level fields form its key. A `@meta.id` inside an embedded object — an inline object, a type used as a field type (even one that is a `@db.table` itself), a `@db.json` object or an array item — identifies that object, not the row, and is ignored for the host's key. Before 0.1.155 it was added to the key; see [Upgrading](/guide/upgrading#v0-1-155-behavior).
+
+```atscript
+interface OrderLine {
+    @meta.id
+    lineId: string
+    qty: number
+}
+
+@db.table 'orders'
+export interface Order {
+    @meta.id
+    id: number          // the primary key: id alone
+
+    line: OrderLine     // line.lineId is a plain column
+}
+```
+
 ## Composite Primary Keys
 
 When multiple fields are annotated with `@meta.id`, they form a composite primary key. This is common for junction tables in many-to-many relationships:

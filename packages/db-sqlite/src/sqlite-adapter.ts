@@ -65,6 +65,7 @@ import {
   fromSourceSql,
   viewReadSource,
   type TSqlFromSource,
+  buildKeyViolationCount,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
@@ -1052,6 +1053,15 @@ export class SqliteAdapter extends BaseDbAdapter {
       const sql = `SELECT 1 AS one FROM "${esc(tableName ?? this.resolveTableName())}" LIMIT 1`;
       this._log(sql);
       return this.driver.get<{ one: number }>(sql) != null;
+    });
+  }
+
+  async countKeyViolations(columns: readonly string[], tableName?: string): Promise<number> {
+    return this._stmt(() => {
+      const target = `"${esc(tableName ?? this.resolveTableName())}"`;
+      const sql = buildKeyViolationCount(sqliteDialect, target, columns);
+      this._log(sql);
+      return this.driver.get<{ violations: number }>(sql)?.violations ?? 0;
     });
   }
 

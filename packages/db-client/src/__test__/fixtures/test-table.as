@@ -76,3 +76,19 @@ export interface DerivedOrder {
   @db.column.derived
   amount: DerivedOrder.payload.total
 }
+
+@db.table 'created_rows'
+export interface CreatedRow {
+  @meta.id
+  id: number
+
+  createdAt: number.timestamp.created
+
+  closedAt: number.timestamp.created | null
+
+  stamp: number.timestamp.created | string
+
+  audit: {
+    at: number.timestamp.created
+  }
+}

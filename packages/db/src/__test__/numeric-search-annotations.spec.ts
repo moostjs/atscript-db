@@ -158,6 +158,17 @@ export interface NsaComposite {
     expect(found[0]).toMatch(/"b" needs an index/);
   });
 
+  it("refuses an inline nested object's @meta.id as backing (no key of the row)", async () => {
+    const source = table(`    nested: {
+        @meta.id
+        @db.index.fulltext 'ft'
+        n: number.int
+    }`);
+    const found = await errors(source);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/"n" needs an index/);
+  });
+
   it("warns that a weight on an integer member is ignored", async () => {
     const all = await diagnosticsFor(
       table("    @db.index.fulltext 'ft', 5\n    @db.index.plain\n    n: number.int"),

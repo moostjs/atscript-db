@@ -986,6 +986,7 @@ export class SchemaSync {
         const typeMapper = adapter.typeMapper?.bind(adapter);
         facts.diff = computeColumnDiff(readable.columnDescriptors, facts.existing, typeMapper, {
           snapshot: storedSnapshot,
+          nativeDefaultFns: adapter.nativeDefaultFns(),
         });
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
@@ -1005,7 +1006,7 @@ export class SchemaSync {
           readable.columnDescriptors,
           existing,
           this.resolveTypeMapper(adapter),
-          { snapshot: storedSnapshot },
+          { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
         );
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
@@ -1068,7 +1069,25 @@ export class SchemaSync {
     // matters). `hasRows` answers for the OLD name of a pending rename; the
     // base default cannot, and says so with `undefined`.
     if (facts.diff?.primaryKeyChanged) {
-      facts.populated = (await adapter.hasRows(pendingRename ? dbName : undefined)) ?? "unknown";
+      const tableName = pendingRename ? dbName : undefined;
+      facts.populated = (await adapter.hasRows(tableName)) ?? "unknown";
+      // A populated table keeps its rows through the rebuild when they already
+      // satisfy the new key (a column added in this run holds no values yet).
+      // The rows are checked before the run: a key column renamed in it is
+      // counted under its live name.
+      const { added, renamed } = facts.diff;
+      const { to } = facts.diff.primaryKeyChanged;
+      if (
+        facts.populated === true &&
+        adapter.countKeyViolations &&
+        !added.some((f) => to.includes(f.physicalName))
+      ) {
+        const liveName = new Map(renamed.map((r) => [r.field.physicalName, r.oldName]));
+        facts.keyViolations = await adapter.countKeyViolations(
+          to.map((c) => liveName.get(c) ?? c),
+          tableName,
+        );
+      }
     }
     // Live inbound FKs — whenever the run drops the physical table (key
     // rebuild or drop-and-recreate): pre-flight checks retargeting, and the
@@ -1112,12 +1131,15 @@ export class SchemaSync {
       const pk = t.diff?.primaryKeyChanged;
       if (pk) {
         const label = pkLabel(pk);
-        // Populated table — refused in both modes
-        if (t.populated === true) {
+        // Populated table — rebuilt when its rows satisfy the new key (since
+        // 0.1.155), refused in both modes otherwise
+        if (t.populated === true && t.keyViolations !== 0) {
           addRefusal(
             refusals,
             t.name,
-            `Primary key of "${t.name}" changed ${label} but the table has rows; schema sync cannot rebuild a populated primary key. Migrate manually (or empty the table) and re-run.`,
+            t.keyViolations === undefined
+              ? `Primary key of "${t.name}" changed ${label} but the table has rows; schema sync cannot rebuild a populated primary key. Migrate manually (or empty the table) and re-run.`
+              : `Primary key of "${t.name}" changed ${label} but ${t.keyViolations} row${t.keyViolations === 1 ? " has" : "s have"} a NULL or duplicate (${pk.to.join(", ")}) — fix or remove ${t.keyViolations === 1 ? "it" : "them"} (or migrate manually) and re-run.`,
           );
         } else if (t.populated === "unknown") {
           addRefusal(
