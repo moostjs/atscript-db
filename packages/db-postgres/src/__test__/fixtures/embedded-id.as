@@ -68,3 +68,11 @@ export interface TsAbsent {
     }
     pay?: TsCard | TsBank
 }
+
+// A fractional column retyped to a 64-bit integer: no epoch, no rounding.
+@db.table 'big_counts'
+export interface BigCount {
+    @meta.id
+    id: number
+    n: number.int.int64
+}

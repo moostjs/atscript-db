@@ -290,7 +290,7 @@ A changed column type is applied in place (`ALTER COLUMN … TYPE … USING`), o
 
 - A value that does not parse as the new type (`'n/a'` into a number) fails the sync. The transaction rolls back, the table keeps its rows and old type, and its entry is an `error` (hash withheld). Fix the data and re-run.
 - Since 0.1.137 a value longer than a new `VARCHAR(n)` / `CHAR(n)` (`@expect.maxLength`) fails the same way. Before, an in-place change truncated it silently.
-- Since 0.1.155 a `DOUBLE PRECISION` / `REAL` / `NUMERIC` column becoming `BIGINT` (an epoch-ms field gaining `@db.default.now`, such as `number.timestamp` → `number.timestamp.created`) is rounded (`round(col)::bigint`) instead of failing on a fractional value.
+- Since 0.1.155 a `DOUBLE PRECISION` / `REAL` / `NUMERIC` column becoming the `BIGINT` of an epoch-ms field with `@db.default.now` (such as `number.timestamp` → `number.timestamp.created`) is rounded (`round(col)::bigint`) instead of failing on a fractional value. A fractional value changed to any other integer type (`number.int`, `number.int.int64`) still fails the sync.
 - In a recreate, a required column's `NULL`s take its `@db.default`, else the type's empty value (`''`, `0`, `false`). Before 0.1.137, a recreate that changed a required column's type always failed the copy (`invalid input syntax for type double precision: ""`), and one that changed an optional column from string to number failed too.
 
 ## Drops Never Cascade

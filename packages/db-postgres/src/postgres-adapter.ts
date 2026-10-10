@@ -2731,9 +2731,11 @@ const FRACTIONAL_TYPE = /^\s*(?:double precision|float[48]?|real|numeric|decimal
  * fails the statement instead of being coerced. A TEXT / VARCHAR(n) / CHAR(n)
  * target stops at `::text`: an explicit cast to VARCHAR(n) / CHAR(n) would
  * truncate an over-long value, the assignment into the column rejects it
- * (since 0.1.137). A fractional column (`existingType`) becoming `BIGINT` —
- * an epoch-ms `DOUBLE PRECISION` gaining `@db.default.now` — is rounded
- * (since 0.1.155): its text (`1700000000123.5`) does not parse as an integer.
+ * (since 0.1.137). An epoch-ms fractional column (`existingType`) becoming
+ * the `BIGINT` of `@db.default.now` (`number.timestamp` →
+ * `number.timestamp.created`) is rounded (since 0.1.155): its text
+ * (`1700000000123.5`) does not parse as an integer. Any other fractional
+ * value still fails a change to an integer type.
  */
 function convertColumnExpr(
   col: string,
@@ -2752,7 +2754,13 @@ function convertColumnExpr(
   if (CHARACTER_TYPE.test(sqlType)) {
     return `${col}::text`;
   }
-  if (/^BIGINT$/i.test(sqlType.trim()) && existingType && FRACTIONAL_TYPE.test(existingType)) {
+  if (
+    field.defaultValue?.kind === "fn" &&
+    field.defaultValue.fn === "now" &&
+    /^BIGINT$/i.test(sqlType.trim()) &&
+    existingType &&
+    FRACTIONAL_TYPE.test(existingType)
+  ) {
     return `round(${col})::bigint`;
   }
   return `${col}::text::${sqlType}`;

@@ -10,17 +10,18 @@ import { createMockDriver, prepareFixtures } from "./test-utils";
 // rounded.
 
 let TsAfter: any;
+let BigCount: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ TsAfter } = await import("./fixtures/embedded-id.as"));
+  ({ TsAfter, BigCount } = await import("./fixtures/embedded-id.as"));
 });
 
-async function alter(existingType: string): Promise<string[]> {
+async function alter(existingType: string, type = TsAfter, path = "createdAt"): Promise<string[]> {
   const driver = createMockDriver();
   const adapter = new PostgresAdapter(driver);
-  const table = new AtscriptDbTable(TsAfter, adapter);
-  const field = table.fieldDescriptors.find((f) => f.path === "createdAt")!;
+  const table = new AtscriptDbTable(type, adapter);
+  const field = table.fieldDescriptors.find((f) => f.path === path)!;
   await adapter.syncColumns({
     added: [],
     removed: [],
@@ -39,6 +40,12 @@ describe("[postgres] epoch-ms column → BIGINT", () => {
       'ALTER TABLE "ts_upgrade" ALTER COLUMN "createdAt" TYPE BIGINT USING round("createdAt")::bigint',
     ]);
     expect((await alter("NUMERIC(20,3)"))[0]).toContain('USING round("createdAt")::bigint');
+  });
+
+  it("another BIGINT field is not rounded: a fractional value still fails", async () => {
+    expect(await alter("DOUBLE PRECISION", BigCount, "n")).toEqual([
+      'ALTER TABLE "big_counts" ALTER COLUMN "n" TYPE BIGINT USING "n"::text::BIGINT',
+    ]);
   });
 
   it("a text column still converts through text", async () => {
