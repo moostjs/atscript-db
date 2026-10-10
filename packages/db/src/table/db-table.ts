@@ -76,7 +76,7 @@ import type {
   NullableOptional,
 } from "../types";
 import { findRowsByKeys, pkTupleKey, sameKey, uniqueKeyTuple } from "../shared/keys";
-import { nullableUnionBase } from "../shared/nullable-union";
+import { soleUnionMember } from "../shared/union-shape";
 import { findAncestorInSet, isEmptyObject, isPlainObject } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
@@ -1901,9 +1901,9 @@ export class AtscriptDbTable<
       fillable = true;
       for (let dot = field.indexOf("."); dot !== -1; dot = field.indexOf(".", dot + 1)) {
         let type = this.flatMap.get(field.slice(0, dot));
-        if (type?.type.kind === "union") type = nullableUnionBase(type);
+        if (type?.type.kind === "union") type = soleUnionMember(type);
         if (type?.type.kind === "array") type = (type.type as TAtscriptTypeArray).of;
-        if (type?.type.kind === "union") type = nullableUnionBase(type);
+        if (type?.type.kind === "union") type = soleUnionMember(type);
         if (type?.type.kind !== "object") {
           fillable = false;
           break;

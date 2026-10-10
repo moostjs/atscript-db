@@ -15,10 +15,10 @@ import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
-import { columnUnionBase } from "../shared/nullable-union";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
 import { searchMemberKind } from "../shared/search-fields";
 import {
+  columnUnionBase,
   pathPresence,
   soleUnionMember,
   unionValueMembers,

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vite-plus/test";
 
 import { DbSpace, resolveDesignType } from "../index";
 import { planJsonColumnMigration } from "../schema/json-column-copy";
+import { columnUnionBase, soleUnionMember } from "../shared/union-shape";
 import { MockAdapter, NestedMockAdapter, prepareFixtures } from "./test-utils";
 
 // Union layout rules (since 0.1.155): `T | null` resolves to T (nullable),
@@ -71,6 +72,19 @@ describe("union layout on relational storage", () => {
     expect([...((qty.type.type as { tags: Set<string> }).tags ?? [])]).toContain("int");
     const code = relational(fx.UcOrder).fieldDescriptors.find((fd) => fd.path === "code")!;
     expect(code.type.metadata.get("expect.maxLength")).toEqual({ length: 10 });
+  });
+
+  it("columnUnionBase: the value member of T | null, not through a field reference", async () => {
+    const pd = await import("./fixtures/primitive-defaults.as");
+    const props = (pd.PdEvent as any).type.props;
+    const nullable = props.get("nullable");
+    expect(columnUnionBase(nullable)).toBe(soleUnionMember(nullable));
+    expect(columnUnionBase(nullable)?.metadata.has("db.default.now")).toBe(true);
+    // `sourceClosedAt: PdSource.closedAt` shares that field's union
+    expect(soleUnionMember(props.get("sourceClosedAt"))).toBeDefined();
+    expect(columnUnionBase(props.get("sourceClosedAt"))).toBeUndefined();
+    expect(columnUnionBase(props.get("mixed"))).toBeUndefined();
+    expect(columnUnionBase(props.get("createdAt"))).toBeUndefined();
   });
 
   it("same-name leaves of several members", () => {

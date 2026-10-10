@@ -45,6 +45,17 @@ export function soleUnionMember(type: TAtscriptAnnotatedType): TAtscriptAnnotate
 }
 
 /**
+ * The `T` of a field typed `T | null` whose db annotations (`@db.default.now`
+ * of `number.timestamp.created`) describe the field's column like those of a
+ * field typed `T` — {@link soleUnionMember}, except for a reference to another
+ * field (`closedAt: Order.closedAt`): it shares that field's union, whose db
+ * annotations stay with the referenced field.
+ */
+export function columnUnionBase(type: TAtscriptAnnotatedType): TAtscriptAnnotatedType | undefined {
+  return type.ref?.field ? undefined : soleUnionMember(type);
+}
+
+/**
  * Whether a value at a path is always there (`"required"`), may be NULL /
  * missing (`"nullable"` — the path or an ancestor object is optional or a
  * `| null` union), or is declared by only some members of a union of objects

@@ -11,7 +11,7 @@ import type {
 import { DepthLimitExceededError } from "./db-error";
 import { getDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
-import { columnUnionBase, nullableUnionBase } from "./shared/nullable-union";
+import { columnUnionBase, soleUnionMember } from "./shared/union-shape";
 
 export interface DbValidationContext {
   mode: "insert" | "replace" | "patch";
@@ -81,7 +81,7 @@ function schemaPath(path: string): string {
 
 function markAmbiguous(dbCtx: DbValidationContext, def: TAtscriptAnnotatedType, path: string) {
   const kind = def.type.kind;
-  if (kind === "tuple" || (kind === "union" && !nullableUnionBase(def))) {
+  if (kind === "tuple" || (kind === "union" && !soleUnionMember(def))) {
     let paths = ambiguousPaths.get(dbCtx);
     if (!paths) ambiguousPaths.set(dbCtx, (paths = new Set()));
     paths.add(schemaPath(path));
