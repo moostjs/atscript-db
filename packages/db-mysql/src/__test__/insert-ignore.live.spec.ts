@@ -5,6 +5,13 @@ import { SchemaSync } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import {
+  mysqlAdmin,
+  mysqlReachable,
+  mysqlDbUrl,
+  recreateMysqlDatabase,
+  dropMysqlDatabase,
+} from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -13,25 +20,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // connection; the spec creates and drops its own `insert_ignore` database).
 // Conflict-ignoring insert (since 0.1.148) + DbSpace.close() end to end.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "insert_ignore";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 1500 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let space: DbSpace;
@@ -51,9 +42,7 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    const driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     space = new DbSpace(
       () => {
         const adapter = new MysqlAdapter(driver);
@@ -73,7 +62,7 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
 
   afterAll(async () => {
     await space?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   const items = () => t(fx.IgItem);
@@ -212,8 +201,8 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
     // GLOBAL applies to connections opened afterwards: a fresh pool sees stride 3 on every connection.
     // A managed server (RDS, Cloud SQL) refuses SET GLOBAL — stride 3 is then set on every connection
     // the pool opens, before the pool hands it out (the same per-connection state).
-    const global = await adminQuery("SET GLOBAL auto_increment_increment = 3");
-    const pool = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    const global = await mysqlAdmin("SET GLOBAL auto_increment_increment = 3");
+    const pool = new Mysql2Driver(mysqlDbUrl(DB));
     if (!global) {
       type TRawConn = { query(sql: string, cb: () => void): unknown };
       const raw = (await (pool as any).poolInit) as {
@@ -237,7 +226,7 @@ describe.skipIf(!reachable)("[mysql live] insert onConflict: ignore", () => {
       expect(res.insertedIds).toEqual([id("o1"), id("o2"), id("o3")]);
       expect(id("o2") - id("o1")).toBe(3);
     } finally {
-      if (global) await adminQuery("SET GLOBAL auto_increment_increment = 1");
+      if (global) await mysqlAdmin("SET GLOBAL auto_increment_increment = 1");
       await pool.close();
     }
   });

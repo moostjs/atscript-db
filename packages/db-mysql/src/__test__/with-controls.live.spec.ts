@@ -5,6 +5,7 @@ import { syncSchema } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -18,25 +19,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // related rows of EACH parent row (VIA `$sort` included); a paged TO / FROM
 // relation is read with one `ROW_NUMBER()` window statement.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "withsort_rel";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 1500 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let driver: Mysql2Driver;
@@ -48,9 +33,7 @@ describe.skipIf(!reachable)("[mysql live] $with controls per parent row", () => 
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/with-controls.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     space = new DbSpace(() => new MysqlAdapter(driver));
     const result = await syncSchema(space, [
       fx.WsTicket,
@@ -66,7 +49,7 @@ describe.skipIf(!reachable)("[mysql live] $with controls per parent row", () => 
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   defineCases();

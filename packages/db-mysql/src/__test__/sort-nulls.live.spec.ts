@@ -5,6 +5,7 @@ import { syncSchema } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -19,34 +20,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // `first()` / `last()` row-order key. MySQL has no `NULLS FIRST|LAST`: where
 // its native order (NULL smallest) differs, a leading `(expr IS NULL)` key.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_MYSQL_TEST_URL ??
-  process.env.MYSQL_TEST_URI ??
-  "mysql://root:test@127.0.0.1:33071";
 const DB = "r15_nulls_mysql";
 
-function serverUrl(database = ""): string {
-  const url = new URL(SERVER_URL);
-  url.pathname = database ? `/${database}` : "";
-  return url.toString();
-}
-
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: serverUrl(), connectTimeout: 5000 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let driver: Mysql2Driver;
@@ -58,9 +34,7 @@ describe.skipIf(!reachable)("[mysql live] NULL placement in sort", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/sort-nulls.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    driver = new Mysql2Driver(serverUrl(DB));
+    driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     await onlyFullGroupBy(driver);
     space = new DbSpace(() => new MysqlAdapter(driver));
     const result = await syncSchema(space, [fx.SnOwner, fx.SnItem]);
@@ -70,7 +44,7 @@ describe.skipIf(!reachable)("[mysql live] NULL placement in sort", () => {
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   defineCases({ nullsLargest: false });

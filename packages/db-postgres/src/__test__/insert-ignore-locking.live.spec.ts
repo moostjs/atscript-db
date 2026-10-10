@@ -5,6 +5,7 @@ import { SchemaSync } from "@atscript/db/sync";
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
@@ -15,35 +16,9 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 // transaction (since 0.1.153): `ON CONFLICT DO NOTHING` takes no lock on a
 // stored row, `lockConflicts` locks them FOR UPDATE.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ??
-  process.env.POSTGRES_TEST_URI ??
-  "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "insert_ignore_locking";
 
-function dbUrl(): string {
-  const url = new URL(SERVER_URL);
-  url.pathname = `/${DB}`;
-  return url.toString();
-}
-
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    const client = new Client({ connectionString: SERVER_URL, connectionTimeoutMillis: 5000 });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 let fx: Record<string, any>;
 let space: DbSpace;
@@ -66,9 +41,7 @@ describe.skipIf(!reachable)("[postgres live] onConflict: ignore row locks", () =
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    const driver = new PgDriver({ connectionString: dbUrl() });
+    const driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     space = new DbSpace(() => new PostgresAdapter(driver), { onClose: () => driver.close() });
     const result = await new SchemaSync(space).run([fx.IgItem], { force: true });
     expect(result.status).toBe("synced");
@@ -76,7 +49,7 @@ describe.skipIf(!reachable)("[postgres live] onConflict: ignore row locks", () =
 
   afterAll(async () => {
     await space?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}" WITH (FORCE)`);
+    await dropPgDatabase(DB, { force: true });
   });
 
   const items = () => t(fx.IgItem);

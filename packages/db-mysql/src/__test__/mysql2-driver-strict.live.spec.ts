@@ -5,6 +5,12 @@ import { SchemaSync } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import {
+  mysqlReachable,
+  mysqlDbUrl,
+  recreateMysqlDatabase,
+  dropMysqlDatabase,
+} from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -13,24 +19,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // the shared server's GLOBAL sql_mode is never touched), and a missing NOT NULL
 // column then raises in plain and ignore mode (since 0.1.148).
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "driver_strict";
 
-async function admin<T>(fn: (conn: any) => Promise<T>): Promise<T | undefined> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 1500 });
-    try {
-      return await fn(conn);
-    } finally {
-      await conn.end();
-    }
-  } catch {
-    return undefined;
-  }
-}
-
-const reachable = (await admin((c) => c.query("SELECT 1"))) !== undefined;
+const reachable = await mysqlReachable();
 
 const modeOf = async (driver: Mysql2Driver) =>
   ((await driver.get<{ m: string }>("SELECT @@SESSION.sql_mode AS m"))?.m ?? "").split(",");
@@ -42,7 +33,7 @@ const modeOf = async (driver: Mysql2Driver) =>
  */
 async function nonStrictPool(db: string) {
   const mysql = await import("mysql2/promise");
-  const pool = mysql.createPool({ uri: `${SERVER_URL}/${db}`, connectionLimit: 3 });
+  const pool = mysql.createPool({ uri: mysqlDbUrl(db), connectionLimit: 3 });
   (pool as any).on("connection", (conn: any) =>
     conn.query("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'", () => {}),
   );
@@ -55,16 +46,14 @@ describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
-    await admin((c) => c.query(`DROP DATABASE IF EXISTS \`${DB}\``));
-    await admin((c) => c.query(`CREATE DATABASE \`${DB}\``));
-    const driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    const driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     const space = new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
     await new SchemaSync(space).run([fx.IgItem], { force: true });
     await space.close();
   });
 
   afterAll(async () => {
-    await admin((c) => c.query(`DROP DATABASE IF EXISTS \`${DB}\``));
+    await dropMysqlDatabase(DB);
   });
 
   it("a fresh connection is strict and keeps the other modes", async () => {
@@ -81,7 +70,7 @@ describe.skipIf(!reachable)("[mysql live] Mysql2Driver strictMode", () => {
 
   it("every connection of a pre-used pool is strict, not just the ones opened afterwards", async () => {
     const mysql = await import("mysql2/promise");
-    const pool = mysql.createPool({ uri: `${SERVER_URL}/${DB}`, connectionLimit: 3 });
+    const pool = mysql.createPool({ uri: mysqlDbUrl(DB), connectionLimit: 3 });
     // the app warmed the pool (health check) on a non-strict session BEFORE the driver existed
     const warm = await Promise.all([pool.getConnection(), pool.getConnection()]);
     for (const conn of warm) await conn.query("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'");

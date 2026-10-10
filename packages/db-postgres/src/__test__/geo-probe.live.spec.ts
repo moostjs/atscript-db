@@ -5,6 +5,7 @@ import { SchemaSync } from "@atscript/db/sync";
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -18,30 +19,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // that never syncs; a geography column gets EWKT; a sync that migrates the
 // column learns the new type without a probe on the write path.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ?? "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "geo_probe";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    const client = new Client({
-      connectionString: SERVER_URL,
-      connectionTimeoutMillis: sql === "SELECT 1" ? 1500 : 15_000,
-    });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 const SF: [number, number] = [-122.42, 37.77];
 const LA: [number, number] = [-118.24, 34.05];
@@ -86,11 +66,7 @@ describe.skipIf(!reachable)("[postgres live] geo values bind by the column's typ
   beforeAll(async () => {
     await prepareFixtures();
     ({ GeoPlace } = await import("./fixtures/geo-table.as"));
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    expect(await adminQuery(`CREATE DATABASE "${DB}"`)).toBe(true);
-    const url = new URL(SERVER_URL);
-    url.pathname = `/${DB}`;
-    driver = new PgDriver({ connectionString: url.toString() });
+    driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     const get = driver.get.bind(driver);
     driver.get = ((sql: string, params?: unknown[]) => {
       if (sql.includes("pg_extension")) probes++;
@@ -100,7 +76,7 @@ describe.skipIf(!reachable)("[postgres live] geo values bind by the column's typ
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
+    await dropPgDatabase(DB);
   });
 
   it("JSONB column, PostGIS installed later, never synced: JSON writes, readable back", async () => {
