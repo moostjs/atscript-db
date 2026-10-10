@@ -130,6 +130,11 @@ describe.skipIf(!reachable)("[postgres live] number.timestamp.created + embedded
       createdAt: 1700000000123,
       audit: { at: 1700000000456 },
     } as any);
+    // a fractional epoch (written by other code — a DOUBLE PRECISION column
+    // holds any number) is rounded
+    await driver.exec(
+      `INSERT INTO "ts_upgrade" ("id", "createdAt", "audit__at") VALUES (3, 1700000000123.6, 1700000000456.4)`,
+    );
     const result = await new SchemaSync(space).run([fx.TsAfter], { force: true });
     expect(result.status).toBe("synced");
     for (const name of ["createdAt", "audit__at"]) {
@@ -140,6 +145,10 @@ describe.skipIf(!reachable)("[postgres live] number.timestamp.created + embedded
     const table = space.getTable(fx.TsAfter);
     expect(await table.findById(1)).toMatchObject({
       createdAt: 1700000000123,
+      audit: { at: 1700000000456 },
+    });
+    expect(await table.findById(3)).toMatchObject({
+      createdAt: 1700000000124,
       audit: { at: 1700000000456 },
     });
     await table.insertOne({ id: 2, audit: {} } as any);

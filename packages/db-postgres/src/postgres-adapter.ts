@@ -1564,10 +1564,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     // Double-cast via TEXT as intermediate handles most non-trivial transitions.
     // (A derived column never appears here — its type drift is a derived
     // rebuild, drop + add: a generated column's type cannot be altered with USING.)
-    for (const { field } of diff.typeChanged ?? []) {
+    for (const { field, existingType } of diff.typeChanged ?? []) {
       const sqlType = this.typeMapper(field);
       const col = qi(field.physicalName);
-      const ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${convertColumnExpr(col, field, sqlType)}`;
+      const ddl = `ALTER TABLE ${quoteTableName(tableName)} ALTER COLUMN ${col} TYPE ${sqlType} USING ${convertColumnExpr(col, field, sqlType, existingType)}`;
       this._log(ddl);
       await this._exec().exec(ddl);
     }
@@ -1766,8 +1766,9 @@ export class PostgresAdapter extends BaseDbAdapter {
           .map((field) => {
             const c = qi(field.physicalName);
             const sqlType = this.typeMapper(field);
-            const changed = isColumnTypeChanged(oldTypes.get(field.physicalName)!, sqlType);
-            const value = changed ? convertColumnExpr(c, field, sqlType) : c;
+            const oldType = oldTypes.get(field.physicalName)!;
+            const changed = isColumnTypeChanged(oldType, sqlType);
+            const value = changed ? convertColumnExpr(c, field, sqlType, oldType) : c;
             if (!field.optional && !field.isPrimaryKey) {
               const fallback =
                 field.defaultValue?.kind === "value"
@@ -2720,6 +2721,9 @@ export class PostgresAdapter extends BaseDbAdapter {
 /** A text / character type: the value is converted by the assignment into the column. */
 const CHARACTER_TYPE = /^\s*(?:text|varchar|character varying|char|character|bpchar)\b/i;
 
+/** A floating-point / decimal column type (live or mapped). */
+const FRACTIONAL_TYPE = /^\s*(?:double precision|float[48]?|real|numeric|decimal)\b/i;
+
 /**
  * The expression converting column `col` (quoted) to `sqlType`, the field's
  * new type — one rule for `ALTER COLUMN … TYPE … USING` and the recreate copy.
@@ -2727,9 +2731,16 @@ const CHARACTER_TYPE = /^\s*(?:text|varchar|character varying|char|character|bpc
  * fails the statement instead of being coerced. A TEXT / VARCHAR(n) / CHAR(n)
  * target stops at `::text`: an explicit cast to VARCHAR(n) / CHAR(n) would
  * truncate an over-long value, the assignment into the column rejects it
- * (since 0.1.137).
+ * (since 0.1.137). A fractional column (`existingType`) becoming `BIGINT` —
+ * an epoch-ms `DOUBLE PRECISION` gaining `@db.default.now` — is rounded
+ * (since 0.1.155): its text (`1700000000123.5`) does not parse as an integer.
  */
-function convertColumnExpr(col: string, field: TDbFieldMeta, sqlType: string): string {
+function convertColumnExpr(
+  col: string,
+  field: TDbFieldMeta,
+  sqlType: string,
+  existingType?: string,
+): string {
   if (field.isGeoPoint && sqlType.startsWith("geography")) {
     // v1 JSONB '[lng, lat]' → native geography(Point,4326). The generic
     // ::text double-cast can't parse a JSON tuple as WKT — build the
@@ -2738,6 +2749,9 @@ function convertColumnExpr(col: string, field: TDbFieldMeta, sqlType: string): s
   }
   if (CHARACTER_TYPE.test(sqlType)) {
     return `${col}::text`;
+  }
+  if (/^BIGINT$/i.test(sqlType.trim()) && existingType && FRACTIONAL_TYPE.test(existingType)) {
+    return `round(${col})::bigint`;
   }
   return `${col}::text::${sqlType}`;
 }
