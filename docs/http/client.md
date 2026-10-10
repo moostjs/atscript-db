@@ -223,6 +223,22 @@ const queue = await issues.aggregate({
 
 Offer expression operands from `meta.fields[path].numeric` (and check `meta.aggregateExpressions`).
 
+`$groupBy: []` is the ungrouped aggregate: one row over the whole filtered set (since 0.1.155 against moost-db — the request carries the aggregate `$select` and no `$groupBy`). Plain fields cannot be selected then:
+
+```typescript
+const [totals] = await orders.aggregate({
+  filter: { status: "paid" },
+  controls: {
+    $groupBy: [],
+    $select: [
+      { $fn: "sum", $field: "amount", $as: "revenue" },
+      { $fn: "count", $field: "*", $as: "orders" },
+    ],
+  },
+});
+// totals.revenue and totals.orders are number; over no matching row: { revenue: null, orders: 0 }
+```
+
 [Calendar buckets](/api/calendar-buckets) go in `$select` in object form; the client serializes them to `bucket(…)` (since 0.1.132):
 
 ```typescript
@@ -481,6 +497,15 @@ users.invalidateMeta(); // each client you keep
 
 Reusing a body across users is not a correctness risk with moost-db: its ETag is computed from the response bytes, so a `304` for the new user means their `/meta` is byte-for-byte the stored one. Clearing frees the memory and avoids sending the previous user's ETags. Do it anyway if the server computes ETags some other way.
 
+#### The client's store — `metaStore` {#meta-store-getter}
+
+`client.metaStore` (since 0.1.155) is the store the client revalidates through: the shared default store, the one you passed as `metaStore`, or `undefined` for `metaStore: false`. It is read-only. Use it when a client was handed to you (for example by a factory) and its store must be cleared on an identity change:
+
+```typescript
+client.invalidateMeta();
+client.metaStore?.clear();
+```
+
 #### Own store or no store {#meta-store-options}
 
 ```typescript
@@ -502,6 +527,7 @@ const audit = new Client<typeof Audit>("/api/audit", { metaStore: false });
 | `metaStore.clear()`                                | Drops every stored body and remembered ETag                                                                                                                                          |
 | `metaStore.candidates(key)`                        | The ETags that would be sent as `If-None-Match` for a store key (most recent first)                                                                                                  |
 | `metaStore.size`                                   | Number of stored bodies                                                                                                                                                              |
+| `client.metaStore`                                 | The store a client revalidates through (`undefined` with `metaStore: false`); read-only, since 0.1.155                                                                               |
 | `clearMetaStore()`                                 | Clears the shared default store                                                                                                                                                      |
 
 #### Cross-origin servers {#meta-store-cors}

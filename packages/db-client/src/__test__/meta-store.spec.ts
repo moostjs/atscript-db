@@ -308,6 +308,32 @@ describe("meta store", () => {
     expect(sent.map((s) => s.ifNoneMatch)).toEqual([undefined, undefined]);
   });
 
+  it("client.metaStore is the store meta() revalidates through (read-only)", () => {
+    const custom = new MetaStore();
+    const a = new Client("/api/a");
+    expect(a.metaStore).toBeInstanceOf(MetaStore);
+    expect(new Client("/api/b").metaStore).toBe(a.metaStore);
+    expect(new Client("/api/a", { metaStore: custom }).metaStore).toBe(custom);
+    expect(new Client("/api/a", { metaStore: false }).metaStore).toBeUndefined();
+    // @ts-expect-error — a getter only
+    expect(() => (a.metaStore = custom)).toThrow(TypeError);
+    expect(a.metaStore).not.toBe(custom);
+  });
+
+  it("clearing client.metaStore drops what that client revalidates against", async () => {
+    const metaStore = new MetaStore();
+    const { fetch, sent } = serverMock(
+      { status: 200, etag: '"m"', body: META_A },
+      { status: 200, etag: '"m"', body: META_A },
+    );
+    const client = new Client("/api/todos", { fetch, metaStore });
+    await client.meta();
+    client.invalidateMeta();
+    client.metaStore?.clear();
+    await client.meta();
+    expect(sent.map((s) => s.ifNoneMatch)).toEqual([undefined, undefined]);
+  });
+
   it("keeps the client's own headers on the conditional request", async () => {
     const metaStore = new MetaStore();
     const { fetch, sent } = serverMock(
