@@ -301,6 +301,21 @@ function legacyPrepare(
   m.prepareCommon(data, meta, adapter);
   const result: Record<string, unknown> = {};
   for (const key of Object.keys(data)) legacyWriteField(key, data[key], result, meta);
+  // Since 0.1.155: a nested column below an absent / null parent, or one only
+  // some union members declare, is written as NULL when left out.
+  for (const [physical, fd] of meta.leafByPhysical) {
+    if (physical in result || fd.derived || fd.isPrimaryKey) continue;
+    if (fd.storage === "column" || !fd.path.includes(".")) continue;
+    const segs = fd.path.split(".");
+    let parent: unknown = data;
+    for (const seg of segs.slice(0, -1)) {
+      parent =
+        parent && typeof parent === "object" ? (parent as Record<string, unknown>)[seg] : null;
+    }
+    if (!parent || typeof parent !== "object" || meta.presence(fd.path) === "partial") {
+      result[physical] = null;
+    }
+  }
   return m.formatWriteValues(result, meta);
 }
 

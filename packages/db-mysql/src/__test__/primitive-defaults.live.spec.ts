@@ -229,4 +229,21 @@ describe.skipIf(!reachable)("[mysql live] number.timestamp.created + embedded @m
     await table.insertOne({ id: 4 } as any);
     expect(((await table.findById(4)) as any).closedAt).toBeGreaterThan(1700000000000);
   });
+
+  it("an absent optional object stays absent although its columns have a now default", async () => {
+    expect((await new SchemaSync(space).run([fx.TsAbsent], { force: true })).status).toBe("synced");
+    const table = space.getTable(fx.TsAbsent);
+    await table.insertOne({ id: 1 } as any);
+    await table.insertOne({ id: 2, audit: null } as any);
+    await table.insertOne({ id: 3, audit: {} } as any);
+    await table.insertOne({ id: 4, pay: { kind: "bank", iban: "DE" } } as any);
+    const rows = (await table.findMany({ filter: {}, controls: { $sort: { id: 1 } } })) as any[];
+    expect(rows[0]!.audit ?? null).toBeNull();
+    expect(rows[1]!.audit ?? null).toBeNull();
+    expect(rows[2]!.audit.at).toBeGreaterThan(1700000000000);
+    expect(rows[3]!.pay).toEqual({ kind: "bank", iban: "DE" });
+    // a replace without the object clears it
+    await table.replaceOne({ id: 3 } as any);
+    expect(((await table.findById(3)) as any).audit ?? null).toBeNull();
+  });
 });

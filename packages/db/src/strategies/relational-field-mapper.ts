@@ -182,7 +182,9 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
     // (no private copy) — `prepareCommon`'s key preparation and stripping are
     // applied per key while flattening.
     if (meta.requiresMappings && !meta.onlyColumnRenames) {
-      return this.formatWriteValues(this.flattenWritePayload(payload, meta, adapter), meta);
+      const flat = this.flattenWritePayload(payload, meta, adapter);
+      nullAbsentNested(payload, flat, meta);
+      return this.formatWriteValues(flat, meta);
     }
 
     const data = { ...payload };
@@ -336,6 +338,69 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
       writeFlattenedField(root, "", key, value, result, meta);
     }
     return result;
+  }
+}
+
+// ── Absent nested values on full-row writes ─────────────────────────────────
+
+/** A column below a flattened parent (see {@link nullAbsentNested}). */
+interface TNestedColumn {
+  physical: string;
+  /** Logical segments of its parent objects. */
+  parents: string[];
+  /** Declared by only some members of a union of objects on the way. */
+  partial: boolean;
+}
+
+const nestedColumns = new WeakMap<TableMetadata, TNestedColumn[]>();
+
+function nestedColumnsFor(meta: TableMetadata): TNestedColumn[] {
+  let list = nestedColumns.get(meta);
+  if (list === undefined) {
+    list = [];
+    for (const [physical, fd] of meta.leafByPhysical) {
+      if (fd.derived || fd.isPrimaryKey || fd.storage === "column" || !fd.path.includes(".")) {
+        continue;
+      }
+      const segs = fd.path.split(".");
+      list.push({
+        physical,
+        parents: segs.slice(0, -1),
+        partial: meta.presence(fd.path) === "partial",
+      });
+    }
+    nestedColumns.set(meta, list);
+  }
+  return list;
+}
+
+/**
+ * Every write through `prepareForWrite` stores a whole row (insert, replace).
+ * A column the flattened row leaves out would take its column `DEFAULT` —
+ * a `now` default below an absent optional object would make the object
+ * reappear on read, and one of another union member's leaves would add a
+ * field to the stored member. So a column below an absent / `null` parent
+ * object, or one only some union members declare that the written member
+ * leaves out, is written as `NULL` (since 0.1.155), as the document adapters
+ * store such a row.
+ */
+function nullAbsentNested(
+  payload: Record<string, unknown>,
+  flat: Record<string, unknown>,
+  meta: TableMetadata,
+): void {
+  for (const col of nestedColumnsFor(meta)) {
+    if (col.physical in flat) continue;
+    let absent = false;
+    let current: unknown = payload;
+    for (const seg of col.parents) {
+      current = (current as Record<string, unknown>)[seg];
+      if (current === null || current === undefined || typeof current !== "object") {
+        absent = true;
+        break;
+      }
+    }
+    if (absent || col.partial) flat[col.physical] = null;
   }
 }
 

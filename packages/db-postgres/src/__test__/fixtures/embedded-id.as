@@ -46,3 +46,25 @@ export interface TsNullable {
     id: number
     closedAt: number.timestamp.created | null
 }
+
+// An absent optional object / another union member's leaves: the columns'
+// `now` default must not make them appear on read.
+export interface TsCard {
+    kind: 'card'
+    at: number.timestamp.created
+}
+
+export interface TsBank {
+    kind: 'bank'
+    iban: string
+}
+
+@db.table 'ts_absent'
+export interface TsAbsent {
+    @meta.id
+    id: number
+    audit?: {
+        at: number.timestamp.created
+    }
+    pay?: TsCard | TsBank
+}

@@ -120,7 +120,7 @@ tags: string[] | null                 // → tags JSON, nullable
 address: Address | null               // → address__street, address__zip — all nullable
 ```
 
-**An object that may be absent makes every column under it nullable.** This covers `address: Address | null` and an optional object (`shipping?: { street: string, city: string }`): `shipping__street` is nullable even though `street` is required, so a row can leave `shipping` out. A row whose columns under the object are all `NULL` reads back with the object as `null`. Setting the object to `null` in a patch sets all its columns to `NULL`.
+**An object that may be absent makes every column under it nullable.** This covers `address: Address | null` and an optional object (`shipping?: { street: string, city: string }`): `shipping__street` is nullable even though `street` is required, so a row can leave `shipping` out. A row whose columns under the object are all `NULL` reads back with the object as `null`. An insert or replace without the object (or with `null`) writes `NULL` into all its columns — also into a column with a `DEFAULT` — and so does setting the object to `null` in a patch. Likewise, writing one member of a union of objects writes `NULL` into the leaves only other members declare.
 
 **A union of objects is flattened like a nested object.** Each leaf of each member gets one `__` column, and the union field gets no column of its own:
 

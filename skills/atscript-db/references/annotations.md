@@ -85,7 +85,7 @@ Rules:
 | `@db.default.uuid`      | —                | Random UUID string.                                  |
 | `@db.default.now`       | —                | Current timestamp (numeric timestamp or ISO string). |
 
-`number.timestamp.created` carries `@db.default.now` (0.1.155 / atscript 0.1.104): directly, via a type alias, as `T | null`, on embedded-object fields — not via a field ref (`x: Order.createdAt`), another union, a tuple item or an array element; an explicit `@db.default` wins. `number.timestamp.updated` is a tag only. A defaulted field may be omitted on insert/replace (validation); defaults of nested fields are set inside the present object (PG/MySQL: the column DDL default still fills a row inserted without the object, which then reads back holding it), in every array item and inside `@db.json` values (SDK-filled there even for engine-native `now`/`uuid`); below a tuple / multi-type union they are not filled and the field is required on insert.
+`number.timestamp.created` carries `@db.default.now` (0.1.155 / atscript 0.1.104): directly, via a type alias, as `T | null`, on embedded-object fields — not via a field ref (`x: Order.createdAt`), another union, a tuple item or an array element; an explicit `@db.default` wins. `number.timestamp.updated` is a tag only. A defaulted field may be omitted on insert/replace (validation); defaults of nested fields are set inside the present object (an absent / `null` object stays absent: SQL insert/replace writes NULL into its columns, so a DDL default cannot make it reappear), in every array item and inside `@db.json` values (SDK-filled there even for engine-native `now`/`uuid`); below a tuple / multi-type union they are not filled and the field is required on insert.
 
 ## Indexes
 
