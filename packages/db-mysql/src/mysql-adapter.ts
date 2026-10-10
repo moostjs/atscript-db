@@ -185,6 +185,17 @@ const NUMERIC_SQL_TYPE =
 /** A live text column type — e.g. the column atscript-db <= 0.1.154 created for a `T | null` union. */
 const TEXT_SQL_TYPE = /^(tinytext|text|mediumtext|longtext|varchar|char)\b/i;
 
+/**
+ * Whether the type change of `field` from the live `existingType` converts
+ * epoch ms to a native TIMESTAMP / DATETIME (through a temp column, see
+ * `_migrateEpochColumnToTemporal`); `fromText`: the live column is text.
+ */
+function epochSource(field: TDbFieldMeta, existingType: string): { fromText: boolean } | undefined {
+  if (!isMysqlTimestampColumn(field)) return undefined;
+  const fromText = TEXT_SQL_TYPE.test(existingType);
+  return fromText || NUMERIC_SQL_TYPE.test(existingType) ? { fromText } : undefined;
+}
+
 /** Drivers whose session `sql_mode` was already checked for strictness (see `_warnNonStrictMode`). */
 const nonStrictChecked = new WeakSet<TMysqlDriver>();
 
@@ -268,6 +279,13 @@ export class MysqlAdapter extends BaseDbAdapter {
    * to the next `rebuildPrimaryKey` (re-declared in its swap statement).
    */
   private _leavingKeyColumns = new Map<string, TDbFieldMeta>();
+  /**
+   * Columns leaving a pending primary key that also convert from epoch ms to
+   * TIMESTAMP / DATETIME: the temp-column conversion drops the column, which
+   * a key column cannot be — the next `rebuildPrimaryKey` converts them
+   * after its swap.
+   */
+  private _epochAfterRekey = new Map<string, { field: TDbFieldMeta; fromText: boolean }>();
   private _onUpdateFields = new Map<string, string>();
 
   // ── Vector search state ─────────────────────────────────────────────────
@@ -1644,7 +1662,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       const leaving = this._leavingKeyColumns;
       this._leavingKeyColumns = new Map();
       for (const field of leaving.values()) {
-        if (!to.has(field.physicalName)) {
+        if (!to.has(field.physicalName) && !this._epochAfterRekey.has(field.physicalName)) {
           clauses.push(
             `MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`,
           );
@@ -1683,12 +1701,29 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (change.to.length > 0) {
       clauses.push(`ADD PRIMARY KEY (${change.to.map((c) => qi(c)).join(", ")})`);
     }
-    if (clauses.length === 0) {
+    const epochAfter = this._epochAfterRekey;
+    this._epochAfterRekey = new Map();
+    if (clauses.length === 0 && epochAfter.size === 0) {
       return;
     }
-    const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ${clauses.join(", ")}`;
-    this._log(ddl);
-    await this._withStrictSession((conn) => conn.exec(ddl));
+    const tableName = this.resolveTableName();
+    const ddl = `ALTER TABLE ${quoteTableName(tableName)} ${clauses.join(", ")}`;
+    await this._withStrictSession(async (conn) => {
+      if (clauses.length > 0) {
+        this._log(ddl);
+        await conn.exec(ddl);
+      }
+      // Columns that left the key, now droppable: epoch ms → TIMESTAMP.
+      for (const { field, fromText } of epochAfter.values()) {
+        await this._migrateEpochColumnToTemporal(
+          conn,
+          tableName,
+          field,
+          this.typeMapper(field),
+          fromText,
+        );
+      }
+    });
   }
 
   private async _ensureView(): Promise<void> {
@@ -1768,6 +1803,23 @@ export class MysqlAdapter extends BaseDbAdapter {
       const tableName = this.resolveTableName();
       const added: string[] = [];
       const renamed: string[] = [];
+      const keyChange = diff.primaryKeyChanged;
+      const entering = new Set(keyChange?.to ?? []);
+      const leaving = new Set(keyChange?.from.filter((c) => !entering.has(c)) ?? []);
+
+      // An epoch-ms column converted through a temp column is dropped and
+      // re-added: refused, before any DDL, for a column keyed before and after.
+      for (const { field, existingType } of diff.typeChanged ?? []) {
+        const name = field.physicalName;
+        const keyed = keyChange
+          ? keyChange.from.includes(name) && entering.has(name)
+          : field.isPrimaryKey;
+        if (keyed && epochSource(field, existingType) !== undefined) {
+          throw new Error(
+            `Cannot convert primary-key column "${name}" from epoch milliseconds to ${this.typeMapper(field)} — migrate it manually.`,
+          );
+        }
+      }
 
       // Renames first
       for (const { field, oldName } of diff.renamed ?? []) {
@@ -1807,10 +1859,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       // the same statement; a leaving column cannot become TEXT while still
       // keyed). A derived column never appears in these lists — its drift is a
       // derived rebuild (`TColumnDiff.derivedChanged`), drop + add.
-      const keyChange = diff.primaryKeyChanged;
-      const entering = new Set(keyChange?.to ?? []);
-      const leaving = new Set(keyChange?.from.filter((c) => !entering.has(c)) ?? []);
       this._leavingKeyColumns = new Map();
+      this._epochAfterRekey = new Map();
       const rekeyed = (field: TDbFieldMeta): boolean => {
         if (leaving.has(field.physicalName)) {
           this._leavingKeyColumns.set(field.physicalName, field);
@@ -1820,6 +1870,27 @@ export class MysqlAdapter extends BaseDbAdapter {
       };
       const modified = new Map<string, TDbFieldMeta>();
       for (const { field, existingType } of diff.typeChanged ?? []) {
+        const epoch = epochSource(field, existingType);
+        if (epoch) {
+          // epoch ms → TIMESTAMP / DATETIME (a field gaining `@db.default.now`,
+          // e.g. `number.timestamp.created` since 0.1.155, also from the text
+          // column of a `number.timestamp.created | null`). MODIFY would read
+          // the number as YYYYMMDDhhmmss — go through a temp column. A column
+          // entering the key is not keyed yet: converted now, the swap keeps
+          // its type; one leaving it is converted after the swap.
+          if (leaving.has(field.physicalName)) {
+            this._epochAfterRekey.set(field.physicalName, { field, fromText: epoch.fromText });
+          } else {
+            await this._migrateEpochColumnToTemporal(
+              conn,
+              tableName,
+              field,
+              this.typeMapper(field),
+              epoch.fromText,
+            );
+          }
+          continue;
+        }
         if (rekeyed(field)) {
           continue;
         }
@@ -1828,15 +1899,6 @@ export class MysqlAdapter extends BaseDbAdapter {
           // v1 JSON '[lng, lat]' → native POINT SRID 4326. MODIFY can't convert
           // JSON to geometry — go through a temp column, preserving NULLs.
           await this._migrateJsonColumnToPoint(conn, tableName, field);
-          continue;
-        }
-        const fromText = TEXT_SQL_TYPE.test(existingType);
-        if (isMysqlTimestampColumn(field) && (fromText || NUMERIC_SQL_TYPE.test(existingType))) {
-          // epoch ms → TIMESTAMP / DATETIME (a field gaining `@db.default.now`,
-          // e.g. `number.timestamp.created` since 0.1.155, also from the text
-          // column of a `number.timestamp.created | null`). MODIFY would read
-          // the number as YYYYMMDDhhmmss — go through a temp column.
-          await this._migrateEpochColumnToTemporal(conn, tableName, field, sqlType, fromText);
           continue;
         }
         modified.set(field.physicalName, field);
@@ -2619,10 +2681,11 @@ export class MysqlAdapter extends BaseDbAdapter {
    * the type cannot hold (before 1970 / after 2038 for `TIMESTAMP`) — or a
    * column the drop is refused for (an index it would leave with duplicates,
    * a foreign key) — fails the sync with the original column untouched (the
-   * temp column is dropped again). The column keeps its position. A
-   * primary-key column is refused: dropping it would shrink the key. In a
-   * text column (`fromText`) only a numeric value is epoch ms; other text is
-   * read as a datetime, as a plain `MODIFY` would.
+   * temp column is dropped again). The column keeps its position. It must
+   * not be keyed (dropping it would shrink the key): `syncColumns` refuses a
+   * column keyed before and after, and defers one leaving the key to
+   * `rebuildPrimaryKey`. In a text column (`fromText`) only a numeric value is
+   * epoch ms; other text is read as a datetime, as a plain `MODIFY` would.
    */
   private async _migrateEpochColumnToTemporal(
     conn: TMysqlConnection,
@@ -2631,11 +2694,6 @@ export class MysqlAdapter extends BaseDbAdapter {
     sqlType: string,
     fromText = false,
   ): Promise<void> {
-    if (field.isPrimaryKey) {
-      throw new Error(
-        `Cannot convert primary-key column "${field.physicalName}" from epoch milliseconds to ${sqlType} — migrate it manually.`,
-      );
-    }
     const col = qi(field.physicalName);
     const tmp = qi(`${field.physicalName}__ts_mig`);
     const quotedTable = quoteTableName(tableName);

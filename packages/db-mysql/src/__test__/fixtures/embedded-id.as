@@ -92,3 +92,35 @@ export interface TsAbsent {
     }
     pay?: TsCard | TsBank
 }
+
+// A key column converted from epoch ms to TIMESTAMP while leaving the key ...
+@db.table 'ts_rekey_leave'
+export interface TsLeaveBefore {
+    @meta.id
+    id: number
+    @meta.id
+    createdAt: number.timestamp
+}
+
+@db.table 'ts_rekey_leave'
+export interface TsLeaveAfter {
+    @meta.id
+    id: number
+    createdAt: number.timestamp.created
+}
+
+// ... or entering it.
+@db.table 'ts_rekey_enter'
+export interface TsEnterBefore {
+    @meta.id
+    id: number
+    createdAt: number.timestamp
+}
+
+@db.table 'ts_rekey_enter'
+export interface TsEnterAfter {
+    @meta.id
+    id: number
+    @meta.id
+    createdAt: number.timestamp.created
+}

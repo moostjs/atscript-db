@@ -10,10 +10,12 @@ import { createMockDriver, prepareFixtures } from "./test-utils";
 // temp column converted from epoch ms.
 
 let TsAfter: any;
+let TsLeaveAfter: any;
+let TsEnterAfter: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ TsAfter } = await import("./fixtures/embedded-id.as"));
+  ({ TsAfter, TsLeaveAfter, TsEnterAfter } = await import("./fixtures/embedded-id.as"));
 });
 
 /** The ALTER / UPDATE statements run (not the strict-session `SET`s around them). */
@@ -127,5 +129,72 @@ describe("[mysql] epoch-ms number column → TIMESTAMP", () => {
     expect(ddl(driver)).toEqual([
       "ALTER TABLE `ts_upgrade` MODIFY COLUMN `createdAt` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
     ]);
+  });
+
+  /** `syncColumns` + `rebuildPrimaryKey` of a key change that also converts `createdAt`. */
+  async function rekey(type: unknown, change: { from: string[]; to: string[] }) {
+    const driver = createMockDriver({ allResult: [] });
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(type as never, adapter);
+    const field = table.fieldDescriptors.find((f) => f.path === "createdAt")!;
+    await adapter.syncColumns({
+      added: [],
+      renamed: [],
+      typeChanged: [{ field, existingType: "DOUBLE" }],
+      nullableChanged: [],
+      defaultChanged: [],
+      primaryKeyChanged: change,
+    } as any);
+    const beforeSwap = ddl(driver).length;
+    await adapter.rebuildPrimaryKey(change as any);
+    return { sql: ddl(driver), beforeSwap };
+  }
+
+  it("a column leaving the key is converted after the key swap", async () => {
+    const { sql, beforeSwap } = await rekey(TsLeaveAfter, {
+      from: ["id", "createdAt"],
+      to: ["id"],
+    });
+    expect(beforeSwap).toBe(0);
+    expect(sql[0]).toBe(
+      "ALTER TABLE `ts_rekey_leave` MODIFY COLUMN `id` DOUBLE NOT NULL, DROP PRIMARY KEY, ADD PRIMARY KEY (`id`)",
+    );
+    expect(sql.slice(1)).toEqual([
+      "ALTER TABLE `ts_rekey_leave` ADD COLUMN `createdAt__ts_mig` TIMESTAMP NULL AFTER `createdAt`",
+      "UPDATE `ts_rekey_leave` SET `createdAt__ts_mig` = DATE_ADD(CAST('1970-01-01 00:00:00' AS DATETIME(6)), INTERVAL FLOOR(`createdAt` / 1000) * 1000000 MICROSECOND) WHERE `createdAt` IS NOT NULL",
+      "ALTER TABLE `ts_rekey_leave` DROP COLUMN `createdAt`",
+      "ALTER TABLE `ts_rekey_leave` RENAME COLUMN `createdAt__ts_mig` TO `createdAt`",
+      "ALTER TABLE `ts_rekey_leave` MODIFY COLUMN `createdAt` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    ]);
+  });
+
+  it("a column entering the key is converted before the key swap", async () => {
+    const { sql, beforeSwap } = await rekey(TsEnterAfter, {
+      from: ["id"],
+      to: ["id", "createdAt"],
+    });
+    expect(beforeSwap).toBe(5);
+    expect(sql[1]).toContain("INTERVAL FLOOR(`createdAt` / 1000)");
+    expect(sql.at(-1)).toBe(
+      "ALTER TABLE `ts_rekey_enter` MODIFY COLUMN `id` DOUBLE NOT NULL, MODIFY COLUMN `createdAt` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, DROP PRIMARY KEY, ADD PRIMARY KEY (`id`, `createdAt`)",
+    );
+  });
+
+  it("a column keyed before and after a key change is refused before any DDL", async () => {
+    const driver = createMockDriver();
+    const adapter = new MysqlAdapter(driver);
+    const table = new AtscriptDbTable(TsEnterAfter, adapter);
+    const field = table.fieldDescriptors.find((f) => f.path === "createdAt")!;
+    await expect(
+      adapter.syncColumns({
+        added: [field],
+        renamed: [],
+        typeChanged: [{ field, existingType: "DOUBLE" }],
+        nullableChanged: [],
+        defaultChanged: [],
+        primaryKeyChanged: { from: ["createdAt"], to: ["id", "createdAt"] },
+      } as any),
+    ).rejects.toThrow(/primary-key column "createdAt" from epoch milliseconds to TIMESTAMP/);
+    expect(ddl(driver)).toEqual([]);
   });
 });

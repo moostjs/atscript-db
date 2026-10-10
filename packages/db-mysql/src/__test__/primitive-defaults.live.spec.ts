@@ -246,4 +246,30 @@ describe.skipIf(!reachable)("[mysql live] number.timestamp.created + embedded @m
     await table.replaceOne({ id: 3 } as any);
     expect(((await table.findById(3)) as any).audit ?? null).toBeNull();
   });
+
+  it("a key column converted to TIMESTAMP while leaving or entering the key", async () => {
+    const before = [fx.TsLeaveBefore, fx.TsEnterBefore];
+    expect((await new SchemaSync(space).run(before, { force: true })).status).toBe("synced");
+    await space.getTable(fx.TsLeaveBefore).insertOne({ id: 1, createdAt: 1700000000123 } as any);
+    await space.getTable(fx.TsEnterBefore).insertOne({ id: 1, createdAt: 1700000000123 } as any);
+
+    const after = [fx.TsLeaveAfter, fx.TsEnterAfter];
+    const result = await new SchemaSync(space).run(after, { force: true });
+    for (const entry of result.entries) {
+      expect(entry, entry.name).toMatchObject({ status: "alter", errors: [] });
+    }
+    expect(await primaryKey("ts_rekey_leave")).toEqual(["id"]);
+    expect(await primaryKey("ts_rekey_enter")).toEqual(["createdAt", "id"]);
+    for (const table of ["ts_rekey_leave", "ts_rekey_enter"]) {
+      expect((await column("createdAt", table))?.DATA_TYPE, table).toBe("timestamp");
+    }
+    expect(await space.getTable(fx.TsLeaveAfter).findById(1)).toEqual({
+      id: 1,
+      createdAt: 1700000000000,
+    });
+    expect(
+      await space.getTable(fx.TsEnterAfter).findOne({ filter: { id: 1 }, controls: {} }),
+    ).toEqual({ id: 1, createdAt: 1700000000000 });
+    expect((await new SchemaSync(space).run(after)).status).toBe("up-to-date");
+  });
 });
