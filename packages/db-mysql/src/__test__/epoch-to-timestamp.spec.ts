@@ -99,12 +99,28 @@ describe("[mysql] epoch-ms number column → TIMESTAMP", () => {
     expect(ddl(driver)).toEqual([]);
   });
 
-  it("a non-numeric column keeps the plain MODIFY", async () => {
+  it("a text column: numeric text is epoch ms, other text a datetime", async () => {
+    // the column atscript-db <= 0.1.154 created for `number.timestamp.created | null`
     const { driver, adapter, field } = makeTable();
     await adapter.syncColumns({
       added: [],
       renamed: [],
-      typeChanged: [{ field, existingType: "VARCHAR(255)" }],
+      typeChanged: [{ field, existingType: "TEXT" }],
+      nullableChanged: [],
+      defaultChanged: [],
+    } as any);
+    expect(ddl(driver)[1]).toBe(
+      "UPDATE `ts_upgrade` SET `createdAt__ts_mig` = CASE WHEN `createdAt` REGEXP '^[0-9]+([.][0-9]+)?$' THEN DATE_ADD(CAST('1970-01-01 00:00:00' AS DATETIME(6)), INTERVAL FLOOR(`createdAt` / 1000) * 1000000 MICROSECOND) ELSE CAST(`createdAt` AS DATETIME(6)) END WHERE `createdAt` IS NOT NULL",
+    );
+    expect(ddl(driver)).toHaveLength(5);
+  });
+
+  it("another column type keeps the plain MODIFY", async () => {
+    const { driver, adapter, field } = makeTable();
+    await adapter.syncColumns({
+      added: [],
+      renamed: [],
+      typeChanged: [{ field, existingType: "DATE" }],
       nullableChanged: [],
       defaultChanged: [],
     } as any);

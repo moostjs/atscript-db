@@ -6,12 +6,14 @@ import type {
 import { flattenAnnotatedType, isAnnotatedType } from "@atscript/typescript/utils";
 
 import { tableNameOf } from "../rel/relation-helpers";
+import { pathPresence } from "../shared/union-shape";
 import { resolveDesignType } from "./db-readable";
 import {
   columnOverrideApplies,
   documentPath,
   findAncestorInSet,
   isNavRelation,
+  isStructuredMixedUnion,
   relationalColumnName,
   selfOrAncestor,
 } from "./table-metadata";
@@ -135,7 +137,7 @@ interface TSourceIndex {
   jsonRoots: Set<string>;
   /** Outermost `@db.encrypted` paths (one opaque column each). */
   encrypted: Set<string>;
-  /** Paths declared optional. */
+  /** Paths declared optional (the fallback of {@link pathPresence} inside an array). */
   optional: Set<string>;
   /** `@db.column.derived` paths → the JSON-leaf source path they read (since 0.1.141). */
   derived: Map<string, string>;
@@ -185,7 +187,11 @@ function sourceIndex(type: TAtscriptAnnotatedType): TSourceIndex {
       }
       if (metadata.has("db.encrypted")) {
         storage.push([path, false]);
-      } else if (metadata.has("db.json") || resolveDesignType(fieldType) === "array") {
+      } else if (
+        metadata.has("db.json") ||
+        resolveDesignType(fieldType) === "array" ||
+        isStructuredMixedUnion(fieldType)
+      ) {
         storage.push([path, true]);
       }
     }
@@ -255,8 +261,8 @@ export function sourceFieldMetadata(
  * aggregate's field, a predicate operand) to where it is physically stored.
  * Internal — `AtscriptDbView.resolveRefSource` is the public entry.
  *
- * Relational rules (`TableMetadata`'s): the outermost `@db.json` or array
- * node with segments remaining is the column and the rest becomes
+ * Relational rules (`TableMetadata`'s): the outermost `@db.json`, array or
+ * structured mixed union (`isStructuredMixedUnion`) node with segments remaining is the column and the rest becomes
  * {@link TViewSource.jsonPath}; a flattened leaf is its parent segments
  * joined with `__` plus its `@db.column` (or segment); a top-level field is
  * its `@db.column` or name. Nested-object adapters use the document path
@@ -291,8 +297,11 @@ export function resolveViewSource(
     };
   }
   const jsonRoot = selfOrAncestor(logicalPath, idx.jsonRoots);
+  const presence = pathPresence(sourceType, logicalPath);
   const optional =
-    selfOrAncestor(logicalPath, idx.optional) !== undefined ||
+    (presence === undefined
+      ? selfOrAncestor(logicalPath, idx.optional) !== undefined
+      : presence !== "required") ||
     (jsonRoot !== undefined && jsonRoot !== logicalPath);
 
   if (!node) {

@@ -229,7 +229,9 @@ export class RelationPredicateGate {
       const error =
         ref.predicate === "relation"
           ? this.checkRef(ref, state, target, prefix, depth)
-          : verdictError(index.check(ref.path, "filter", visible, ref.predicate, prefix));
+          : verdictError(
+              index.check(ref.path, "filter", visible, ref.predicate, prefix, ref.nullTest),
+            );
       if (error) return error;
     }
     return undefined;

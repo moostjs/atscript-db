@@ -37,3 +37,12 @@ export interface TsAfter {
         at: number.timestamp.created
     }
 }
+
+// `T | null` of a timestamp: a TEXT column up to 0.1.154 (a union), a nullable
+// timestamp column with the `now` default since 0.1.155.
+@db.table 'ts_nullable'
+export interface TsNullable {
+    @meta.id
+    id: number
+    closedAt: number.timestamp.created | null
+}

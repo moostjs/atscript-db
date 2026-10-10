@@ -78,7 +78,7 @@ createdAt: number.timestamp
 
 The default applies wherever the field's type is `number.timestamp.created`: directly, through a type alias (`type Created = number.timestamp.created`), as `number.timestamp.created | null`, and on a field of an embedded object. It does not apply to a field that references another field (`createdAt: Order.createdAt` copies the type, not the default), to a member of another union (`number.timestamp.created | string`), to a tuple item or to an array element. An explicit `@db.default` on the field wins. `number.timestamp.updated` is only a marker: nothing sets it.
 
-Before 0.1.155 (atscript 0.1.104) the default was not applied to such fields — see [Upgrading](/guide/upgrading#v0-1-155-behavior) for the schema change it brings.
+Before 0.1.155 (atscript 0.1.104) the default was not applied to such fields — see [Upgrading](/guide/upgrading#v0-1-155-sync) for the schema change it brings.
 
 ## Version Defaults
 

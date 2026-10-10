@@ -17,6 +17,7 @@ import type { TFieldOps } from "../ops";
 import type { TResolvedBucket } from "../query/buckets";
 import { INTEGER_REGEX_OP } from "../shared/search-term";
 import { rewriteIntegerRegex } from "../query/integer-regex";
+import { rewriteObjectNullTests } from "../query/object-null";
 import { arithToExprNode, computedAliases } from "../query/aggregate-expr";
 import { SOURCE_VALUE_FNS } from "../query/aggregate-fns";
 import {
@@ -469,7 +470,7 @@ export abstract class FieldMappingStrategy {
    * translate predicate operands at deeper levels).
    */
   translateFilter(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
-    filter = rewriteIntegerRegex(filter, meta);
+    filter = rewriteObjectNullTests(rewriteIntegerRegex(filter, meta), meta);
     const has = containsRelationFilter(filter);
     const resolved = has ? resolveRelationFilterTree(filter, meta, depth) : filter;
     return this.noteTranslated(filter, this.translateResolvedFilter(resolved, meta), has);

@@ -135,7 +135,7 @@ interface Ticket {
 ```
 
 - An explicit `$nulls` entry (URL `$sort=closedAt:first`) overrides it. It also applies to the `$rowOrder` of `first()` / `last()` and to a grouped `$sort` on the field.
-- **Optional fields only.** On a required top-level table field the compiler warns and the default has no effect (the field is never `null`). A required leaf inside an optional object, and every view field, can be `null` and are honoured.
+- **Nullable fields only.** On a required top-level table field the compiler warns and the default has no effect (the field is never `null`). A `T | null` field (since 0.1.155), a required leaf inside an optional object, and every view field can be `null` and are honoured.
 - An object, array, `@db.json` or `@db.encrypted` field is a compile error: it is not sortable.
 - The non-native placement costs the index its ORDER BY — see [Index use](/api/queries#nulls).
 - `/meta` keeps the annotation in the serialized `type` (`metadata["db.sort.nulls"]`) so a UI can show the placement next to the sort control. On an adapter without NULL placement support (`/meta.nullsPlacement` absent) the default is ignored.

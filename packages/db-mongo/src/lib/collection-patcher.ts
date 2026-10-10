@@ -7,7 +7,7 @@ import type {
   TValidatorOptions,
   Validator,
 } from "@atscript/typescript/utils";
-import { getKeyProps, getDbFieldOp } from "@atscript/db";
+import { getKeyProps, getDbFieldOp, isPlainObject } from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
 import { joinPath } from "./path-utils";
@@ -145,14 +145,18 @@ export class CollectionPatcher {
     this.updatePipeline.push(this.currentSetStage);
   }
 
-  /** Set a leaf, lifting an `$inc`/`$mul` field op into an aggregation expression if present. */
-  private _setLeaf(key: string, value: unknown) {
+  /**
+   * Set a leaf, lifting an `$inc`/`$mul` field op into an aggregation expression if present.
+   * `type`: the field's type, when known.
+   */
+  private _setLeaf(key: string, value: unknown, type?: TAtscriptAnnotatedType) {
     const fieldOp = getDbFieldOp(value);
     if (fieldOp) {
       this._set(key, this._fieldOpExpr(key, fieldOp.op, fieldOp.value));
-    } else if (containsAggregationExpr(value)) {
+    } else if (containsAggregationExpr(value) || replacesWhole(value, type)) {
       // Aggregation `$set` would read `$`-prefixed strings as field paths and
-      // drop the target when the path is missing (e.g. password hashes).
+      // drop the target when the path is missing (e.g. password hashes), and
+      // MERGES an object into the stored one.
       this._set(key, { $literal: value });
     } else {
       this._set(key, value);
@@ -185,7 +189,7 @@ export class CollectionPatcher {
       ) {
         this._flattenReplaceObject(value as Record<string, unknown>, key, flatType);
       } else if (key !== "_id") {
-        this._setLeaf(key, value);
+        this._setLeaf(key, value, flatType);
       }
     }
     return this.updatePipeline;
@@ -221,7 +225,7 @@ export class CollectionPatcher {
         }
         continue;
       }
-      this._setLeaf(childKey, childValue);
+      this._setLeaf(childKey, childValue, propType);
     }
   }
 
@@ -486,4 +490,15 @@ export class CollectionPatcher {
       });
     }
   }
+}
+
+/**
+ * Whether a plain-object patch value replaces the stored object instead of
+ * merging into it: a `@db.json` object, or a union of objects / `T | null`
+ * whose member may switch (since 0.1.155). A field the patcher cannot type
+ * (e.g. under a `@db.column` name) keeps the merge.
+ */
+function replacesWhole(value: unknown, type: TAtscriptAnnotatedType | undefined): boolean {
+  if (!type || !isPlainObject(value)) return false;
+  return type.metadata?.has("db.json") || type.type.kind === "union";
 }

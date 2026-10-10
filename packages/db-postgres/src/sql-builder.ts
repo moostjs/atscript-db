@@ -148,6 +148,13 @@ function toPgValue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Text a JSON column can take as it is (`SqlDialect.jsonFromText`): an
+ * object / array (by its first characters), or a whole JSON string, number,
+ * `true`, `false` or `null` — so `42 Main St` is no number.
+ */
+const PG_JSON_LIKE = String.raw`^\s*(\{\s*["}]|\[\s*(["{[\]tfn0-9-])|("([^"\\]|\\.)*"|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?|true|false|null)\s*$)`;
+
 export const pgDialect: SqlDialect = {
   quoteIdentifier(name: string) {
     return qi(name);
@@ -180,6 +187,15 @@ export const pgDialect: SqlDialect = {
   },
   calendarBucket: pgCalendarBucket,
   jsonExtract: pgJsonExtract,
+  // Schema sync's copy out of a JSON text column (since 0.1.155)
+  jsonExtractText: (quotedCol, path) => `((${quotedCol})::jsonb #>> ${pgJsonPath(path)})`,
+  jsonExtractValue: (quotedCol, path) =>
+    `NULLIF((${quotedCol})::jsonb #> ${pgJsonPath(path)}, 'null'::jsonb)`,
+  // No JSON validity test before PostgreSQL 16: a whole JSON scalar, or text
+  // that starts like an object / array, is kept (a malformed one fails the
+  // later `::jsonb` cast and the sync); other text becomes a JSON string.
+  jsonFromText: (quotedCol) =>
+    `CASE WHEN ${quotedCol} ~ '${PG_JSON_LIKE}' THEN ${quotedCol} ELSE to_jsonb(${quotedCol})::text END`,
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE PRECISION)`,
   // `first` / `last` derived columns: a streaming MIN where the type has one
   anyValue: pgAnyValue,
@@ -224,6 +240,11 @@ const PG_JSON_LEAF_CAST: Readonly<Record<TViewJsonType, string>> = {
   boolean: "::boolean",
 };
 
+/** A `#>` / `#>>` path literal (`'{"a","b"}'`). */
+function pgJsonPath(path: readonly string[]): string {
+  return sqlStringLiteral(`{${quotedJsonPathSegments(path).join(",")}}`);
+}
+
 /**
  * Typed read of a JSON leaf (`SqlDialect.jsonExtract`): `jsonb_typeof()`
  * guards the declared type, so a missing path, JSON `null` or another JSON
@@ -231,7 +252,7 @@ const PG_JSON_LEAF_CAST: Readonly<Record<TViewJsonType, string>> = {
  * native. The column is cast `::jsonb`, so JSON and JSONB storage both work.
  */
 function pgJsonExtract(quotedCol: string, path: readonly string[], type: TViewJsonType): string {
-  const p = sqlStringLiteral(`{${quotedJsonPathSegments(path).join(",")}}`);
+  const p = pgJsonPath(path);
   const j = `(${quotedCol})::jsonb`;
   const cast = PG_JSON_LEAF_CAST[type];
   const text = cast ? `(${j} #>> ${p})${cast}` : `${j} #>> ${p}`;

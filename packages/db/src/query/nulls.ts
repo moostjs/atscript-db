@@ -48,10 +48,12 @@ export class NullsSource {
 
   /**
    * Whether ordering by the LOGICAL field `path` can meet NULL (or a missing
-   * value): the field or one of its parent objects is optional, the field is
-   * a derived column, it is not a known field, or the source is a view. A
-   * `$nulls` entry on any other field changes nothing and is dropped, so the
-   * plain `ORDER BY` keeps using the index.
+   * value): the field can hold NULL (`TableMetadata.isNullable` — it or a
+   * parent object is optional or a `| null` union, or only some members of a
+   * union of objects declare it), the field is a derived column, it is not a
+   * known field, or the source is a view. A `$nulls` entry on any other
+   * field changes nothing and is dropped, so the plain `ORDER BY` keeps
+   * using the index.
    */
   nullable(path: string): boolean {
     let answer = this._nullable.get(path);
@@ -66,12 +68,7 @@ export class NullsSource {
     const { meta } = this._init;
     const fd = meta.descriptorByPath.get(path);
     if (!fd || fd.derived) return true;
-    for (let p = path; ; ) {
-      if (meta.flatMap.get(p)?.optional === true) return true;
-      const dot = p.lastIndexOf(".");
-      if (dot === -1) return false;
-      p = p.slice(0, dot);
-    }
+    return meta.isNullable(path);
   }
 
   /**

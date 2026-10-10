@@ -3,9 +3,11 @@ import type { FilterExpr, Uniquery, UniqueryControls } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import { containsRelationFilter, resolveRelationFilterTree } from "../query/relation-filter";
 import { rewriteIntegerRegex } from "../query/integer-regex";
+import { rewriteObjectNullTests } from "../query/object-null";
 import { UniquSelect } from "../query/uniqu-select";
 import type { DbControls, DbQuery } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
+import type { TPathPresence } from "../shared/union-shape";
 import { FieldMappingStrategy, toBool, toDecimalString, type TReadControls } from "./field-mapping";
 
 /**
@@ -75,11 +77,13 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
           current = next as Record<string, unknown>;
         }
       }
-      current[col.last] = value;
+      // A field only some union members declare is left out when NULL.
+      if (!col.partial || (value !== null && value !== undefined)) {
+        current[col.last] = value;
+      }
     }
 
-    // Collapse null parent objects (same order as `flattenedParents` — a
-    // deeper parent collapsed first lets its ancestor collapse too).
+    // Collapse null parent objects (deepest first — see `compileReadPlan`).
     for (const parent of plan.parents) {
       collapseNullParent(result, parent);
     }
@@ -88,7 +92,10 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
   }
 
   translateQuery(query: Uniquery, meta: TableMetadata): DbQuery {
-    const logical = rewriteIntegerRegex(query.filter as FilterExpr, meta);
+    const logical = rewriteObjectNullTests(
+      rewriteIntegerRegex(query.filter as FilterExpr, meta),
+      meta,
+    );
     const has = containsRelationFilter(logical);
     const filter = has ? resolveRelationFilterTree(logical, meta, 0) : logical;
     if (!meta.requiresMappings) {
@@ -222,7 +229,8 @@ export class RelationalFieldMapper extends FieldMappingStrategy {
       const fd = meta.leafByLogical.get(basePath);
       const finalKey = (fd?.physicalName ?? basePath) + suffix;
 
-      if (fd?.storage === "json" && typeof value === "object" && value !== null && !suffix) {
+      // Any JSON value — a mixed union's string / number member too (since 0.1.155)
+      if (fd?.storage === "json" && value !== null && value !== undefined && !suffix) {
         result[finalKey] = JSON.stringify(value);
       } else {
         result[finalKey] = value;
@@ -342,16 +350,22 @@ interface TReadColumn {
   /** Last segment of a nested leaf. */
   last: string;
   json: boolean;
+  /** Declared by only some members of a union of objects: a NULL is left out (since 0.1.155). */
+  partial: boolean;
   coerce?: (value: unknown) => unknown;
   fromFmt?: (value: unknown) => unknown;
 }
 
-/** A flattened parent collapsed to `null` / `{}` when every child read null. */
+/**
+ * A flattened parent collapsed when every child read null: to `{}` when it
+ * is always there, `null` when it may be NULL (optional, `| null`, or under
+ * such a parent), left out when only some union members declare it.
+ */
 interface TReadParent {
   /** Segments leading to the parent's container. */
   ancestors: string[];
   last: string;
-  optional: boolean;
+  presence: TPathPresence;
 }
 
 interface TReadPlan {
@@ -387,6 +401,7 @@ function compileReadPlan(meta: TableMetadata): TReadPlan {
       parents: segs?.slice(0, -1),
       last: segs ? segs[segs.length - 1]! : fd.path,
       json: fd.storage === "json",
+      partial: nested && meta.presence(fd.path) === "partial",
       coerce:
         fd.designType === "boolean"
           ? toBool
@@ -402,13 +417,15 @@ function compileReadPlan(meta: TableMetadata): TReadPlan {
     parents.push({
       ancestors: segs.slice(0, -1),
       last: segs[segs.length - 1]!,
-      optional: !!meta.flatMap?.get(parentPath)?.optional,
+      presence: meta.presence(parentPath) ?? "required",
     });
   }
+  // Deepest first: a collapsed child lets its parent collapse too.
+  parents.sort((a, b) => b.ancestors.length - a.ancestors.length);
   return { columns, parents };
 }
 
-/** If every child of a flattened parent is null / undefined, collapse it (`null` when optional, else `{}`). */
+/** If every child of a flattened parent is null / undefined, collapse it (see {@link TReadParent}). */
 function collapseNullParent(obj: Record<string, unknown>, parent: TReadParent): void {
   let current = obj;
   const ancestors = parent.ancestors;
@@ -429,7 +446,11 @@ function collapseNullParent(obj: Record<string, unknown>, parent: TReadParent): 
       return;
     }
   }
-  current[parent.last] = parent.optional ? null : {};
+  if (parent.presence === "partial") {
+    delete current[parent.last];
+  } else {
+    current[parent.last] = parent.presence === "nullable" ? null : {};
+  }
 }
 
 // ── Compiled write plan ─────────────────────────────────────────────────────

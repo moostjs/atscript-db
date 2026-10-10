@@ -24,6 +24,7 @@ import type {
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
+  TJsonCopyTarget,
   TTableOptionDiff,
   TSyncColumnResult,
   TDbFieldMeta,
@@ -1324,6 +1325,26 @@ export abstract class BaseDbAdapter {
    * Optional — only relational adapters implement this.
    */
   dropTable?(): Promise<void>;
+
+  /**
+   * Schema sync (since 0.1.155): copies the values of `source` — a text
+   * column holding a whole value as JSON (the layout atscript-db ≤ 0.1.154
+   * gave a `T | null` object or a union field) — into the columns that
+   * replace it, in rows where `source` is not NULL and every target is NULL.
+   * A malformed JSON value or one that does not convert to a target's type
+   * throws (the table's sync entry errors before anything is dropped).
+   * Optional — relational adapters implement it.
+   */
+  copyFromJsonColumn?(source: string, targets: readonly TJsonCopyTarget[]): Promise<void>;
+
+  /**
+   * Schema sync (since 0.1.155): rewrites the values of the text column
+   * `column` that are not JSON as JSON strings (`abc` → `"abc"`), before the
+   * column becomes a JSON column — the layout ≤ 0.1.154 stored a mixed
+   * union's string member as plain text. Idempotent.
+   * Optional — relational adapters implement it.
+   */
+  jsonifyTextColumn?(column: string): Promise<void>;
 
   /**
    * Drops one or more columns from the table.

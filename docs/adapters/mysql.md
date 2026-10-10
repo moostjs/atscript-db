@@ -51,9 +51,11 @@ const driver = new Mysql2Driver({
   connectionLimit: 10,
 });
 
-// Pre-created mysql2/promise Pool instance
+// Pre-created mysql2/promise Pool instance — give it the settings below
+// (`jsonStrings: true` at least, since 0.1.155: a JSON string value read
+// from a pool that parses JSON fails to parse again, or changes type)
 import mysql from "mysql2/promise";
-const pool = mysql.createPool({ host: "localhost", database: "mydb" });
+const pool = mysql.createPool({ host: "localhost", database: "mydb", jsonStrings: true });
 const driver = new Mysql2Driver(pool);
 ```
 
@@ -159,6 +161,7 @@ export interface User {
 | `boolean`                             | `TINYINT(1)`                              | Stored as `0` / `1`                                                                           |
 | `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                   |
 | Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                        |
+| `T \| null`                           | The column of `T`, nullable               | Unions of objects are flattened; see [Nullable and Union Fields](/api/storage#unions)         |
 | `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)        |
 | Arrays                                | `JSON`                                    | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)            |
 | `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`                                               |
@@ -312,7 +315,7 @@ Schema sync runs the statements that convert stored values — `MODIFY COLUMN`, 
 - changing `code: string` to `code: number` fails on a stored `'abc'`;
 - lowering `@expect.maxLength` below a stored value fails with `Data too long`.
 
-A number column that becomes a `TIMESTAMP` / `DATETIME` (a field gaining `@db.default.now`, such as `number.timestamp` → `number.timestamp.created`) holds epoch milliseconds, which `MODIFY COLUMN` would read as `YYYYMMDDhhmmss`. Since 0.1.155 the sync converts it through a temporary column instead: each value becomes the UTC datetime the adapter writes for it (milliseconds dropped unless the column has fractional seconds), the old column is dropped and the new one takes its name and position. A value the type cannot hold (a `TIMESTAMP` before 1970-01-01 00:00:01 or after 2038-01-19 UTC), or a drop the engine refuses (a foreign key on the column, a unique index it would leave with duplicates), fails the sync with the old column kept. A primary-key column is not converted: the sync fails for it — convert it manually.
+A number column that becomes a `TIMESTAMP` / `DATETIME` (a field gaining `@db.default.now`, such as `number.timestamp` → `number.timestamp.created`) — or the text column an earlier version created for a `number.timestamp.created | null` — holds epoch milliseconds, which `MODIFY COLUMN` would read as `YYYYMMDDhhmmss`. Since 0.1.155 the sync converts it through a temporary column instead: each value becomes the UTC datetime the adapter writes for it (in a text column, a value that is not a number is read as a datetime, as `MODIFY COLUMN` would) (milliseconds dropped unless the column has fractional seconds), the old column is dropped and the new one takes its name and position. A value the type cannot hold (a `TIMESTAMP` before 1970-01-01 00:00:01 or after 2038-01-19 UTC), or a drop the engine refuses (a foreign key on the column, a unique index it would leave with duplicates), fails the sync with the old column kept. A primary-key column is not converted: the sync fails for it — convert it manually.
 
 Before 0.1.140 this depended on the server. A server whose `sql_mode` is not strict — Amazon RDS for MySQL defaults to `NO_ENGINE_SUBSTITUTION` — coerced `'abc'` to `0` and truncated text, and the sync reported success. Clean or migrate such values before changing the type. Your application's own connections are strict too since 0.1.148 ([Strict mode per session](#strict-mode)); with `strictMode: false` they keep the server's `sql_mode`.
 
@@ -337,6 +340,7 @@ Under `explicit_defaults_for_timestamp = OFF` a required `TIMESTAMP` column with
 - **`TIMESTAMP` / `DATETIME` → `number`** (epoch milliseconds). Reads parse the UTC datetime string back to a number, fractional seconds included; writes accept epoch ms and emit `'YYYY-MM-DD HH:MM:SS'`, plus `.fff` on a column with fractional seconds (see below).
 - **`DECIMAL` / `NEWDECIMAL` → `number`** instead of `string`. Be aware that values outside JS safe-number range may lose precision — keep `decimal` columns within `~15` significant digits if you rely on this.
 - **`timezone: '+00:00'`** is set on the pool so all timestamp operations are UTC.
+- **`jsonStrings: true`** (since 0.1.155, and the same in the `typeCast`) — `JSON` columns come back as text, as on MariaDB, and atscript-db parses them, so a JSON value that is a string stays a string.
 - **`supportBigNumbers: true`**, **`bigNumberStrings: false`** — `BIGINT` values within `Number.MAX_SAFE_INTEGER` come back as `number`; out-of-range values come back as **`string`** (preserves full precision without truncation). Coerce to `BigInt` yourself if you need arithmetic on those values.
 
 If you pre-create your own `mysql2/promise` `Pool` and pass it to `Mysql2Driver`, type casting becomes the caller's responsibility — replicate the settings above if you want the same behavior.

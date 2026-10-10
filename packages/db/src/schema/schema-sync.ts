@@ -27,6 +27,7 @@ import {
 } from "./schema-hash";
 import type { TTableSnapshot, TViewSnapshot } from "./schema-hash";
 import { computeColumnDiff } from "./column-diff";
+import { planJsonColumnMigration } from "./json-column-copy";
 import { computeForeignKeyDiff, fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import { computeTableOptionDiff } from "./table-option-diff";
 import { topoOrder, reachable, stableTopo, type TDependencyEdge } from "./dependency-order";
@@ -49,6 +50,7 @@ import {
   derivedRebuildUnsupported,
   describeDerivedChanges,
   describeTypeChanges,
+  describeJsonMigration,
   describeNullableDefaults,
   type TSyncExecutorDeps,
   type TTableFacts,
@@ -989,6 +991,19 @@ export class SchemaSync {
           nativeDefaultFns: adapter.nativeDefaultFns(),
         });
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
+        // Values of the ≤ 0.1.154 union layout (since 0.1.155)
+        const migration = planJsonColumnMigration(readable, facts.diff, storedSnapshot);
+        facts.jsonMigration = migration;
+        Object.assign(init, describeJsonMigration(migration));
+        if (migration.errors.length > 0) {
+          init.status = "error";
+          init.errors = [...(init.errors ?? []), ...migration.errors];
+        } else if (
+          init.status === "in-sync" &&
+          (migration.copies.length > 0 || migration.jsonify.length > 0)
+        ) {
+          init.status = "alter";
+        }
       }
     } else if (adapter.syncColumns) {
       // Path B: Snapshot-based diffing (MongoDB) — reuses storedSnapshot from above

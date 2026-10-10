@@ -10,6 +10,8 @@ import { prepareFixtures } from "./test-utils";
 // `@expect.maxLength 1`. Members are not columns — except the one non-null
 // member of `T | null`, whose db annotations apply (a `now` default, filled on
 // insert); `created: number.timestamp.created` has the default too.
+// Since 0.1.155 a `T | null` field is a nullable column of `T`'s type and a
+// tuple a JSON column.
 
 let fx: Record<string, any>;
 
@@ -28,8 +30,9 @@ describe("SqliteAdapter — union / tuple members", () => {
     };
     // T | null and the plain field: no DDL default on SQLite (filled on insert);
     // no member sizes the column
-    expect(sql).not.toContain("DEFAULT");
-    expect(sql).toContain('"code" TEXT NOT NULL');
+    expect(sql).toBe(
+      'CREATE TABLE "union_members" ("id" INTEGER PRIMARY KEY, "x" REAL, "y" REAL, "pair" TEXT NOT NULL, "emails" TEXT NOT NULL, "n" REAL, "code" TEXT NOT NULL, "created" REAL NOT NULL)',
+    );
 
     const row = { pair: [1, "a"], emails: ["a@b.co"], n: 2, code: "abc" };
     await table.insertOne({ id: 1, x: 5, ...row } as any);

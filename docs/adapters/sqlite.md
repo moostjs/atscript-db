@@ -65,6 +65,7 @@ Atscript types map to SQLite column types as follows:
 | `boolean`         | `INTEGER`         | Stored as `0` / `1`                                                 |
 | arrays            | `TEXT`            | JSON-serialized                                                     |
 | nested objects    | flattened columns | `parent__child` naming convention                                   |
+| `T \| null`       | the column of `T` | nullable; see [Nullable and Union Fields](/api/storage#unions)      |
 | `@db.json` fields | `TEXT`            | JSON-serialized                                                     |
 | `db.geoPoint`     | `TEXT`            | JSON `[lng, lat]`; haversine-based [geo search](/search/geo-search) |
 

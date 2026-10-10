@@ -31,6 +31,7 @@ import type {
   TDbUpdateOptions,
   TExistingColumn,
   TColumnDiff,
+  TJsonCopyTarget,
   TSyncColumnResult,
   TSearchIndexInfo,
   TValueFormatterPair,
@@ -54,6 +55,8 @@ import {
   stripPartitionRowNumber,
   buildGeoSearchCount,
   buildGeoSearchSelect,
+  buildJsonColumnCopy,
+  buildJsonifyText,
   buildVectorSearchCount,
   buildVectorSearchSelect,
   fillReplacePayload,
@@ -947,6 +950,22 @@ export class SqliteAdapter extends BaseDbAdapter {
       const ddl = `DROP TABLE IF EXISTS "${esc(tableName)}"`;
       this._log(ddl);
       this.driver.exec(ddl);
+    });
+  }
+
+  async copyFromJsonColumn(source: string, targets: readonly TJsonCopyTarget[]): Promise<void> {
+    return this._stmt(() => {
+      const sql = buildJsonColumnCopy(sqliteDialect, this.resolveTableName(), source, targets);
+      this._log(sql);
+      this.driver.exec(sql);
+    });
+  }
+
+  async jsonifyTextColumn(column: string): Promise<void> {
+    return this._stmt(() => {
+      const sql = buildJsonifyText(sqliteDialect, this.resolveTableName(), column);
+      this._log(sql);
+      this.driver.exec(sql);
     });
   }
 

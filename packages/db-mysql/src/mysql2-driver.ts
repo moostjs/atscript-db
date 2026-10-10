@@ -22,8 +22,17 @@ export function sanitizeParams(params?: unknown[]): unknown[] {
  *
  * - TIMESTAMP/DATETIME → epoch milliseconds (number) instead of Date objects
  * - DECIMAL/NEWDECIMAL → number instead of string
+ * - JSON → its text (since 0.1.155), as MariaDB's `LONGTEXT` JSON and SQLite
+ *   return it: the relational mapper parses JSON text, so a JSON string value
+ *   is not mistaken for JSON text. Done here as well as with `jsonStrings`:
+ *   mysql2 caches compiled row parsers per process without keying them by
+ *   `jsonStrings`, so another pool's parser could otherwise be reused.
  */
 function atscriptTypeCast(field: any, next: () => any): any {
+  if (field.type === "JSON") {
+    // JSON arrives with the binary charset; its text is UTF-8.
+    return field.string("utf8");
+  }
   if (field.type === "TIMESTAMP" || field.type === "DATETIME") {
     const str = field.string();
     if (str === null) {
@@ -137,6 +146,7 @@ export class Mysql2Driver implements TMysqlDriver {
             timezone: "+00:00",
             supportBigNumbers: true,
             bigNumberStrings: false,
+            jsonStrings: true,
             typeCast: atscriptTypeCast,
           });
         } else {
@@ -145,6 +155,7 @@ export class Mysql2Driver implements TMysqlDriver {
             timezone: "+00:00",
             supportBigNumbers: true,
             bigNumberStrings: false,
+            jsonStrings: true,
             typeCast: atscriptTypeCast,
           });
         }

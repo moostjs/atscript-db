@@ -81,3 +81,21 @@ describe("Mysql2Driver strictMode", () => {
     expect(acquireListeners).toHaveLength(0);
   });
 });
+
+describe("Mysql2Driver JSON columns", () => {
+  // Since 0.1.155: JSON is read as text, like MariaDB's LONGTEXT JSON and
+  // SQLite — the mapper parses it, so a JSON string value stays a string.
+  it("reads JSON columns as text (URI and pool-options forms)", async () => {
+    await new Mysql2Driver("mysql://u@h/db").close();
+    await new Mysql2Driver({ host: "h", jsonStrings: false }).close();
+    expect(createPool.mock.calls.map(([opts]) => (opts as any).jsonStrings)).toEqual([true, true]);
+  });
+
+  it("the typeCast reads JSON as UTF-8 text whatever the pool's jsonStrings", async () => {
+    await new Mysql2Driver("mysql://u@h/db").close();
+    const typeCast = (createPool.mock.calls.at(-1)![0] as any).typeCast;
+    const field = { type: "JSON", string: (enc?: string) => (enc === "utf8" ? '"abc"' : "?") };
+    expect(typeCast(field, () => "parsed")).toBe('"abc"');
+    expect(typeCast({ type: "VAR_STRING" }, () => "next")).toBe("next");
+  });
+});

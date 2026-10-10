@@ -5,41 +5,20 @@ import { SchemaSync } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Server-gated: runs against a live MySQL 8 when one is reachable, skips
-// otherwise. Override with `ATSCRIPT_MYSQL_TEST_URL` (an admin connection; the
-// spec creates and drops its own database).
+// otherwise. Override with `ATSCRIPT_MYSQL_TEST_URL` (or `MYSQL_TEST_URI`; an
+// admin connection — the spec creates and drops its own database).
 // `number.timestamp.created` is a `DEFAULT CURRENT_TIMESTAMP` column (atscript
 // 0.1.104) and an embedded object's `@meta.id` stays out of the primary key —
 // on a fresh table and when syncing a table created by an earlier version.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "primitive_defaults_pk";
 
-function urlFor(db: string): string {
-  const url = new URL(SERVER_URL);
-  url.pathname = db ? `/${db}` : "";
-  return url.toString();
-}
-
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: urlFor(""), connectTimeout: 5000 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let driver: Mysql2Driver;
@@ -69,15 +48,13 @@ describe.skipIf(!reachable)("[mysql live] number.timestamp.created + embedded @m
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/embedded-id.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    driver = new Mysql2Driver(urlFor(DB));
+    driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     space = new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
   });
 
   afterAll(async () => {
     await space?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   it("a fresh table: host-only primary key, DEFAULT CURRENT_TIMESTAMP, filled on insert", async () => {
@@ -228,5 +205,28 @@ describe.skipIf(!reachable)("[mysql live] number.timestamp.created + embedded @m
     expect((await column("createdAt", "ts_upgrade"))?.DATA_TYPE).toBe("double");
     expect(await column("createdAt__ts_mig", "ts_upgrade")).toBeNull();
     expect(await space.getTable(fx.TsBefore).findById(1)).toMatchObject({ createdAt: 0 });
+  });
+
+  it("a `T | null` timestamp stored as union text by an earlier version is converted", async () => {
+    await driver.exec("DROP TABLE IF EXISTS `ts_nullable`");
+    await driver.exec(
+      "CREATE TABLE `ts_nullable` (`id` DOUBLE PRIMARY KEY, `closedAt` TEXT NOT NULL) ENGINE=InnoDB",
+    );
+    await driver.exec(
+      "INSERT INTO `ts_nullable` VALUES (1, '1700000000123'), (2, '2023-11-14 22:13:20')",
+    );
+    const result = await new SchemaSync(space).run([fx.TsNullable], { force: true });
+    expect(result.entries[0]).toMatchObject({ status: "alter", errors: [] });
+    const col = await column("closedAt", "ts_nullable");
+    expect(col?.DATA_TYPE).toBe("timestamp");
+    expect(col?.COLUMN_DEFAULT).toMatch(/current_timestamp/i);
+    const table = space.getTable(fx.TsNullable);
+    expect(await table.findById(1)).toEqual({ id: 1, closedAt: 1700000000000 });
+    // text that is no number is read as a datetime, as a plain MODIFY would
+    expect(await table.findById(2)).toEqual({ id: 2, closedAt: 1700000000000 });
+    await table.insertOne({ id: 3, closedAt: null } as any);
+    expect(await table.findById(3)).toEqual({ id: 3, closedAt: null });
+    await table.insertOne({ id: 4 } as any);
+    expect(((await table.findById(4)) as any).closedAt).toBeGreaterThan(1700000000000);
   });
 });

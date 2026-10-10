@@ -114,6 +114,16 @@ When an existing column's type no longer matches the desired type (e.g., `TEXT` 
 Without either adapter support for in-place modification or a `@db.sync.method` annotation, type changes result in an error status. Sync will not apply any changes to the table until you resolve the conflict. See [Structural Changes](#structural-changes) below.
 :::
 
+### Union Columns of atscript-db ≤ 0.1.154 {#union-layout}
+
+Since 0.1.155 a `T | null` object or a union field has its own column layout on the SQL adapters ([Nullable and Union Fields](/api/storage#unions)). Before, the whole value sat in one text column. The first sync of such a table moves the values before any other column change:
+
+- an object field now flattened: the new `__` columns are added and filled from the old column's JSON (in rows whose new columns are all `NULL`), then the old column and its unused dot-named columns are dropped with the other removed columns — `~ address → address__street, address__zip — copy JSON values` in the plan;
+- a field now stored as JSON that is a union with a string member (`extra: Address | string`): text that is not JSON is rewritten as a JSON string before the column becomes a JSON column — `~ extra — text values as JSON`;
+- malformed JSON, or a value that does not convert to its new column's type, makes the table an error entry — the old column and its data stay. Fields the copy cannot fill (`@db.encrypted`, `db.geoPoint`, a field with a `@db.default`, a MySQL `TIMESTAMP` / `DATETIME` column) refuse the table in the plan. A column the stored snapshot knows as a plain scalar is not copied.
+
+See [Upgrading](/guide/upgrading#v0-1-155-json-copy) for the choices.
+
 ### Nullable Change
 
 Sync detects when a field changes between optional and required:

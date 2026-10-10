@@ -30,6 +30,7 @@ When `Mysql2Driver` creates the pool itself it sets:
 
 - `timezone: "+00:00"` — write/read in UTC.
 - `supportBigNumbers: true`, `bigNumberStrings: false`.
+- `jsonStrings: true` (0.1.155, also enforced in the driver's `typeCast`) — `JSON` columns read as text (like MariaDB / SQLite) and parsed by atscript-db, so a JSON string value stays a string. A pre-created pool passed to `Mysql2Driver` needs `jsonStrings: true` too.
 - `typeCast`: `TIMESTAMP` / `DATETIME` → epoch ms `number` (via `utcDatetimeToEpochMs`); `DECIMAL` / `NEWDECIMAL` → `number`.
 
 Pre-created pools bypass these — install equivalents yourself for cross-adapter consistency.

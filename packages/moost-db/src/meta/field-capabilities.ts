@@ -23,6 +23,7 @@ import {
   narrowerFilterOps,
   selfOrAncestor,
   numericOperandProblem,
+  resolveDesignType,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
 
@@ -392,8 +393,8 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     const ignored = source.ignoredFields;
     for (const [path, entry] of flatMap as Map<string, TAtscriptAnnotatedType>) {
       if (!path || this._entries.has(path) || this._objectParents.has(path)) continue;
-      const kind = (entry as { type?: { kind?: string } } | undefined)?.type?.kind;
-      if (kind !== "object") continue;
+      // An object, a union of objects or `T | null` of one (since 0.1.155)
+      if (!entry?.type || resolveDesignType(entry) !== "object") continue;
       const meta = (entry as { metadata?: { has?: (k: string) => boolean } }).metadata;
       if (meta?.has?.("db.json")) continue;
       if (isNavOrDescendant(path)) continue;
@@ -544,6 +545,10 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    * `predicate` is a filter entry's class (`collectQueryPaths` records it per
    * occurrence); it only matters for `op === "filter"` on a listed leaf.
    *
+   * `nullTest` (since 0.1.155): the filter entry only tests presence
+   * (`TFilterRef.nullTest`) — accepted on a nested-object parent whose leaves
+   * are all visible.
+   *
    * `prefix` (since 0.1.147) is this index's readable's dotted path from the
    * controller when it judges a relational predicate's operand (`"ticket."`):
    * `exists` still receives the LOCAL path, the verdict's `path` and message
@@ -556,6 +561,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     exists: (path: string) => boolean,
     predicate: TFilterPredicate = "compare",
     prefix = "",
+    nullTest = false,
   ): TCapabilityVerdict | undefined {
     // Messages name the prefixed path; `exists` / classification use the local one.
     const path = prefix + local;
@@ -634,6 +640,20 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         const leaves = all.filter(exists).map((leaf) => prefix + leaf);
         if (leaves.length === 0 && all.length > 0) {
           return unknownField(path);
+        }
+        // A null test (`obj=null`, `obj!=null`, `$exists`) is `$exists` on
+        // every leaf (since 0.1.155) — accepted only while each leaf is visible
+        // and takes `$exists` itself (not writeOnly, encrypted or policy-blocked).
+        if (
+          op === "filter" &&
+          nullTest &&
+          all.length > 0 &&
+          all.every(
+            (leaf) => exists(leaf) && this._entries.get(leaf)?.filterBy.exists === undefined,
+          ) &&
+          findAncestorInSet(local, this._bucketTable.jsonValueParents) === undefined
+        ) {
+          return undefined;
         }
         return {
           path,

@@ -260,6 +260,17 @@ describe("@db.sort.nulls annotation", () => {
     );
   });
 
+  it("accepts a `| null` field, also through an alias (since 0.1.155)", async () => {
+    expect(
+      await diagnostics(table("    @db.sort.nulls 'last'\n    closedAt: number | null")),
+    ).toEqual([]);
+    expect(
+      await diagnostics(
+        `export type MaybeAt = number.timestamp | null\n${table("    @db.sort.nulls 'last'\n    closedAt: MaybeAt")}`,
+      ),
+    ).toEqual([]);
+  });
+
   it("warns on a required table field", async () => {
     const d = await diagnostics(table("    @db.sort.nulls 'first'\n    name: string"));
     expect(d).toHaveLength(1);

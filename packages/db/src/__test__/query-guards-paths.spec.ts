@@ -447,10 +447,11 @@ describe("filterPredicateOf / canFilterLeaf — the shared classification", () =
       } as any,
     });
     expect(refs.filter).toEqual([
-      { path: "ctx", predicate: "exists" },
+      // presence-only entries are marked (since 0.1.155 — a stored object accepts them)
+      { path: "ctx", predicate: "exists", nullTest: true },
       { path: "ctx", predicate: "compare" },
       { path: "geo", predicate: "geo" },
-      { path: "ctx", predicate: "exists" },
+      { path: "ctx", predicate: "exists", nullTest: true },
       { path: "title", predicate: "compare" },
     ]);
   });
@@ -514,7 +515,7 @@ describe("guardPaths — existence-only predicates on JSON-stored columns (relat
     }
   });
 
-  it("descendants, nested-object parents and navigation paths stay rejected for $exists", async () => {
+  it("descendants and navigation paths stay rejected for $exists; a nested-object parent takes it (0.1.155)", async () => {
     const { table } = sqlTable();
     const desc = await rejection(table.findMany(q({ "ctx.sub": { $exists: true } })));
     expect(desc.errors[0]).toMatchObject({
@@ -523,7 +524,8 @@ describe("guardPaths — existence-only predicates on JSON-stored columns (relat
     });
     const blob = await rejection(table.findMany(q({ "wrap.blob.v": { $exists: true } })));
     expect(blob.errors[0]!.message).toContain('JSON-stored column "wrap.blob"');
-    const parent = await rejection(table.findMany(q({ contact: { $exists: true } })));
+    await expect(table.findMany(q({ contact: { $exists: true } }))).resolves.toBeDefined();
+    const parent = await rejection(table.findMany(q({ contact: { $eq: "x" } })));
     expect(parent.errors[0]!.message).toContain("nested object");
     const nav = await rejection(table.findMany(q({ target: { $exists: false } })));
     expect(nav.errors[0]!.message).toContain("navigation path");

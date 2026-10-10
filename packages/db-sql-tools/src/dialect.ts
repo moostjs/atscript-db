@@ -101,6 +101,29 @@ export interface SqlDialect {
    */
   jsonExtract?(quotedCol: string, path: readonly string[], type: TViewJsonType): string;
   /**
+   * Schema sync's copy out of a JSON text column ({@link buildJsonColumnCopy},
+   * since 0.1.155): the value at `path` as text — a JSON string unquoted, a
+   * number / boolean as its JSON text (SQLite: as the SQL value), an object
+   * or array as JSON text; NULL when the path is missing or the value is JSON
+   * `null`. A malformed JSON column value makes the statement fail.
+   * Parameter-free; dialects without it cannot run that copy.
+   * @since 0.1.155
+   */
+  jsonExtractText?(quotedCol: string, path: readonly string[]): string;
+  /**
+   * The value at `path` as JSON (for a JSON column), NULL when missing or
+   * JSON `null` — see {@link jsonExtractText}.
+   * @since 0.1.155
+   */
+  jsonExtractValue?(quotedCol: string, path: readonly string[]): string;
+  /**
+   * A text column's value as JSON text ({@link buildJsonifyText}, since
+   * 0.1.155): a valid JSON value is kept, any other text becomes a JSON
+   * string (`abc` → `"abc"`). Parameter-free.
+   * @since 0.1.155
+   */
+  jsonFromText?(quotedCol: string): string;
+  /**
    * `expr` cast to an IEEE double — how a computed view column
    * (`@db.compute`) evaluates every field / literal leaf, so `7 / 2 = 3.5`
    * everywhere (no integer division, no DECIMAL rounding): SQLite

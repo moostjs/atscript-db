@@ -82,6 +82,7 @@ import { NullsSource } from "../query/nulls";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
 import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
 import { rowMatchesKey } from "../shared/keys";
+import { unionValueMembers } from "../shared/union-shape";
 
 /** A read translated for the adapter, with what finishing its rows needs — see `_translateRead`. */
 interface TReadPlan {
@@ -127,7 +128,9 @@ export type DbResponse<Data, Nav, Q> = [keyof Nav] extends [never]
  * otherwise trips up every adapter author.
  *
  * For union types (e.g., from flattened `{...} | {...}` objects):
- * - If all members resolve to the same type → returns that type (strong type)
+ * - `null` / `undefined` members are left out (since 0.1.155): `T | null`
+ *   resolves to the design type of `T`
+ * - If all other members resolve to the same type → returns that type (strong type)
  * - If members disagree → returns `'union'` (out of scope for type management)
  */
 export function resolveDesignType(fieldType: TAtscriptAnnotatedType): string {
@@ -141,9 +144,9 @@ export function resolveDesignType(fieldType: TAtscriptAnnotatedType): string {
     return "array";
   }
   if (fieldType.type.kind === "union") {
-    const items = (fieldType.type as { items: TAtscriptAnnotatedType[] }).items;
-    if (items.length > 0) {
-      const resolved = items.map((item) => resolveDesignType(item));
+    const { members } = unionValueMembers(fieldType);
+    if (members.length > 0) {
+      const resolved = members.map((item) => resolveDesignType(item));
       if (resolved.every((type) => type === resolved[0])) {
         return resolved[0];
       }
@@ -974,14 +977,6 @@ export class AtscriptDbReadable<
   private _totalOrderKeys(): ReadonlyArray<readonly string[]> {
     if (this._totalOrderKeysCache) return this._totalOrderKeysCache;
     const meta = this._meta;
-    const nullable = (logical: string): boolean => {
-      for (let path = logical; ; ) {
-        if (meta.flatMap.get(path)?.optional === true) return true;
-        const dot = path.lastIndexOf(".");
-        if (dot === -1) return false;
-        path = path.slice(0, dot);
-      }
-    };
     const sets: string[][] = [];
     if (meta.primaryKeys.length > 0) {
       sets.push(meta.primaryKeys.map((f) => meta.physicalPath(f)));
@@ -990,12 +985,12 @@ export class AtscriptDbReadable<
       if (index.type !== "unique") continue;
       // Index field names are physical; `optional` was resolved from the logical field.
       const total = index.fields.every(
-        (f) => f.optional !== true && !nullable(meta.physicalToPath.get(f.name) ?? f.name),
+        (f) => f.optional !== true && !meta.isNullable(meta.physicalToPath.get(f.name) ?? f.name),
       );
       if (total) sets.push(index.fields.map((f) => f.name));
     }
     for (const prop of meta.uniqueProps) {
-      if (!nullable(prop)) sets.push([meta.physicalPath(prop)]);
+      if (!meta.isNullable(prop)) sets.push([meta.physicalPath(prop)]);
     }
     this._totalOrderKeysCache = sets;
     return sets;

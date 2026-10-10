@@ -31,6 +31,7 @@ import type {
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
+  TJsonCopyTarget,
   TTableOptionDiff,
   TSyncColumnResult,
   TDbFieldMeta,
@@ -54,6 +55,8 @@ import type {
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
+  buildJsonColumnCopy,
+  buildJsonifyText,
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchSelect,
@@ -178,6 +181,9 @@ const isZero = (v: unknown) => v === 0 || v === "0";
 /** A live numeric column type (`INFORMATION_SCHEMA.COLUMNS.COLUMN_TYPE`). */
 const NUMERIC_SQL_TYPE =
   /^(double|float|real|decimal|numeric|bigint|int|integer|mediumint|smallint|tinyint)\b/i;
+
+/** A live text column type — e.g. the column atscript-db <= 0.1.154 created for a `T | null` union. */
+const TEXT_SQL_TYPE = /^(tinytext|text|mediumtext|longtext|varchar|char)\b/i;
 
 /** Drivers whose session `sql_mode` was already checked for strictness (see `_warnNonStrictMode`). */
 const nonStrictChecked = new WeakSet<TMysqlDriver>();
@@ -1824,11 +1830,13 @@ export class MysqlAdapter extends BaseDbAdapter {
           await this._migrateJsonColumnToPoint(conn, tableName, field);
           continue;
         }
-        if (isMysqlTimestampColumn(field) && NUMERIC_SQL_TYPE.test(existingType)) {
+        const fromText = TEXT_SQL_TYPE.test(existingType);
+        if (isMysqlTimestampColumn(field) && (fromText || NUMERIC_SQL_TYPE.test(existingType))) {
           // epoch ms → TIMESTAMP / DATETIME (a field gaining `@db.default.now`,
-          // e.g. `number.timestamp.created` since 0.1.155). MODIFY would read
+          // e.g. `number.timestamp.created` since 0.1.155, also from the text
+          // column of a `number.timestamp.created | null`). MODIFY would read
           // the number as YYYYMMDDhhmmss — go through a temp column.
-          await this._migrateEpochColumnToTemporal(conn, tableName, field, sqlType);
+          await this._migrateEpochColumnToTemporal(conn, tableName, field, sqlType, fromText);
           continue;
         }
         modified.set(field.physicalName, field);
@@ -1947,6 +1955,28 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async dropTable(): Promise<void> {
     return this.dropTableByName(this.resolveTableName());
+  }
+
+  async copyFromJsonColumn(source: string, targets: readonly TJsonCopyTarget[]): Promise<void> {
+    const temporal = targets.find((t) => mysqlTemporalFsp(t.field) !== undefined);
+    if (temporal) {
+      throw new Error(
+        `"${temporal.column}" is a TIMESTAMP / DATETIME column — its epoch-ms JSON values cannot be copied into it`,
+      );
+    }
+    const sql = buildJsonColumnCopy(mysqlDialect, this.resolveTableName(), source, targets);
+    // Strict session: a value that does not convert to its column fails the
+    // sync instead of being coerced.
+    await this._withStrictSession(async (conn) => {
+      this._log(sql);
+      await conn.exec(sql);
+    });
+  }
+
+  async jsonifyTextColumn(column: string): Promise<void> {
+    const sql = buildJsonifyText(mysqlDialect, this.resolveTableName(), column);
+    this._log(sql);
+    await this._exec().exec(sql);
   }
 
   async dropColumns(columns: string[]): Promise<void> {
@@ -2590,13 +2620,16 @@ export class MysqlAdapter extends BaseDbAdapter {
    * column the drop is refused for (an index it would leave with duplicates,
    * a foreign key) — fails the sync with the original column untouched (the
    * temp column is dropped again). The column keeps its position. A
-   * primary-key column is refused: dropping it would shrink the key.
+   * primary-key column is refused: dropping it would shrink the key. In a
+   * text column (`fromText`) only a numeric value is epoch ms; other text is
+   * read as a datetime, as a plain `MODIFY` would.
    */
   private async _migrateEpochColumnToTemporal(
     conn: TMysqlConnection,
     tableName: string,
     field: TDbFieldMeta,
     sqlType: string,
+    fromText = false,
   ): Promise<void> {
     if (field.isPrimaryKey) {
       throw new Error(
@@ -2609,15 +2642,17 @@ export class MysqlAdapter extends BaseDbAdapter {
     // epoch ms → whole units of the column's precision (≤ ms), in microseconds
     const digits = Math.min(mysqlTemporalFsp(field) ?? 0, 3);
     const micros = `FLOOR(${col} / ${10 ** (3 - digits)}) * ${10 ** (6 - digits)}`;
+    const epoch = `DATE_ADD(CAST('1970-01-01 00:00:00' AS DATETIME(6)), INTERVAL ${micros} MICROSECOND)`;
+    const value = fromText
+      ? `CASE WHEN ${col} REGEXP '^[0-9]+([.][0-9]+)?$' THEN ${epoch} ELSE CAST(${col} AS DATETIME(6)) END`
+      : epoch;
     const run = async (ddl: string) => {
       this._log(ddl);
       await conn.exec(ddl);
     };
     await run(`ALTER TABLE ${quotedTable} ADD COLUMN ${tmp} ${sqlType} NULL AFTER ${col}`);
     try {
-      await run(
-        `UPDATE ${quotedTable} SET ${tmp} = DATE_ADD(CAST('1970-01-01 00:00:00' AS DATETIME(6)), INTERVAL ${micros} MICROSECOND) WHERE ${col} IS NOT NULL`,
-      );
+      await run(`UPDATE ${quotedTable} SET ${tmp} = ${value} WHERE ${col} IS NOT NULL`);
       await run(`ALTER TABLE ${quotedTable} DROP COLUMN ${col}`);
     } catch (error) {
       await run(`ALTER TABLE ${quotedTable} DROP COLUMN ${tmp}`).catch(() => undefined);

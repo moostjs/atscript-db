@@ -24,6 +24,7 @@ import { NOT_DIMENSION_REASON } from "../shared/aggregate-rules";
 import { isPlainObject } from "../shared/object";
 import { hasRelationOp, relGuardState, type TRelGuardState } from "./relation-filter";
 import { guardFilterValues, guardHavingValues } from "./filter-values";
+import { isNullTest } from "./object-null";
 
 /**
  * Engine-agnostic query-time guards, applied in the core layer BEFORE filter
@@ -308,6 +309,11 @@ export type TFilterPredicate = "compare" | "geo" | "exists" | "relation";
 export interface TFilterRef {
   path: string;
   predicate: TFilterPredicate;
+  /**
+   * The entry only tests presence (`null`, `$eq` / `$ne: null`, `$exists`)
+   * — the one filter a stored object accepts (since 0.1.155).
+   */
+  nullTest?: boolean;
   /**
    * `relation` entries: each operator with its operand (a filter on the
    * related table, not walked here). @since 0.1.147
@@ -622,7 +628,9 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
       refs.filter.push(
         predicate === "relation"
           ? { path, predicate, relation: relationOpsOf(value) }
-          : { path, predicate },
+          : isNullTest(value)
+            ? { path, predicate, nullTest: true }
+            : { path, predicate },
       );
     },
     undefined,
@@ -787,6 +795,7 @@ export function guardPath(
   path: string,
   op: TQueryPathOp,
   predicate: TFilterPredicate = "compare",
+  nullTest = false,
 ): void {
   const verb = OP_VERB[op];
   const { kind, parent } = classifyQueryPath(pathSourceOf(meta), path);
@@ -796,6 +805,9 @@ export function guardPath(
       `"$some" / "$none" are only valid on a navigation relation — "${path}" is not one`,
     );
   }
+  // `{ obj: null }` / `$ne: null` / `$exists` on a stored object test its
+  // leaves (`rewriteObjectNullTests`, since 0.1.155)
+  if (op === "filter" && nullTest && meta.objectLeaves(path)?.length) return;
   switch (kind) {
     case "nav":
       // A relational predicate sits on the navigation field itself (one hop per level).
@@ -940,7 +952,7 @@ export function guardPaths(
   }
   let relState = state;
   for (const ref of refs.filter) {
-    guardPath(meta, adapter, ref.path, "filter", ref.predicate);
+    guardPath(meta, adapter, ref.path, "filter", ref.predicate, ref.nullTest);
     if (ref.predicate === "relation") {
       guardRelationRef(meta, adapter, ref, (relState ??= relGuardState()));
     }

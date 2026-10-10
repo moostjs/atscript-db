@@ -18,6 +18,12 @@ import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
 import { columnUnionBase } from "../shared/nullable-union";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
 import { searchMemberKind } from "../shared/search-fields";
+import {
+  pathPresence,
+  soleUnionMember,
+  unionValueMembers,
+  type TPathPresence,
+} from "../shared/union-shape";
 import type {
   TDbCollation,
   TDbDefaultValue,
@@ -94,6 +100,42 @@ export function relationalColumnName(
 /** Returns true if `metadata` indicates a navigation relation field. */
 export function isNavRelation(metadata: TMetadataMap<AtscriptMetadata>): boolean {
   return metadata.has("db.rel.to") || metadata.has("db.rel.from") || metadata.has("db.rel.via");
+}
+
+/**
+ * A union whose value members disagree on their design type and include a
+ * structure — `Addr | string`, or the leaf `a` of `{ a: Addr } | { a: string }`.
+ * It has no column layout of its own: relational storage keeps it as one
+ * JSON column, like `@db.json` (since 0.1.155).
+ */
+export function isStructuredMixedUnion(type: TAtscriptAnnotatedType): boolean {
+  if (type.type.kind !== "union" || resolveDesignType(type) !== "union") return false;
+  return unionValueMembers(type).members.some((member) => {
+    const kind = member.type.kind;
+    return kind === "object" || kind === "array" || kind === "tuple" || kind === "intersection";
+  });
+}
+
+/**
+ * The type a column of `type` is described by: the value member of a
+ * nullable union (`number.int | null` → `number.int`, so type mappers see
+ * its tags) carrying the field's own annotations and optionality, else
+ * `type` itself.
+ */
+function columnType(type: TAtscriptAnnotatedType): TAtscriptAnnotatedType {
+  const member = soleUnionMember(type);
+  if (!member) return type;
+  return {
+    __is_atscript_annotated_type: true,
+    type: member.type,
+    metadata: type.metadata,
+    optional: type.optional,
+    id: member.id,
+    ref: member.ref,
+    // the field's validator: it accepts null
+    validator: (...args: Parameters<TAtscriptAnnotatedType["validator"]>) =>
+      type.validator(...args),
+  } as TAtscriptAnnotatedType;
 }
 
 /** Returns true if the annotated type IS the `db.geoPoint` primitive (tag-based). */
@@ -315,12 +357,93 @@ export class TableMetadata {
   private _collateMap = new Map<string, TDbCollation>();
   private _columnFromMap = new Map<string, string>();
 
+  /** The annotated type `build()` ran on — the root of {@link presence}. */
+  private _rootType?: TAtscriptAnnotatedType;
+  private readonly _presence = new Map<string, TPathPresence | undefined>();
+
   constructor(nestedObjects: boolean) {
     this.nestedObjects = nestedObjects;
   }
 
   get isBuilt(): boolean {
     return this._built;
+  }
+
+  /**
+   * Whether the value of the LOGICAL field `path` is always there, may be
+   * NULL / missing, or is declared by only some members of a union of
+   * objects on the way ({@link TPathPresence}); `undefined` inside an array.
+   * @since 0.1.155
+   */
+  presence(path: string): TPathPresence | undefined {
+    if (this._presence.has(path)) return this._presence.get(path);
+    const root = this._rootType;
+    const answer = root ? pathPresence(root, path) : undefined;
+    this._presence.set(path, answer);
+    return answer;
+  }
+
+  /**
+   * Whether the LOGICAL field `path` can hold NULL (or be missing): it or a
+   * parent object is optional or a `| null` union, or only some members of
+   * a union of objects declare it. Inside an array: the field or a parent
+   * is optional.
+   * @since 0.1.155
+   */
+  isNullable(path: string): boolean {
+    const presence = this.presence(path);
+    if (presence !== undefined) return presence !== "required";
+    for (let p = path; ; ) {
+      if (this.flatMap.get(p)?.optional === true) return true;
+      const dot = p.lastIndexOf(".");
+      if (dot === -1) return false;
+      p = p.slice(0, dot);
+    }
+  }
+
+  private _objectLeaves?: Map<string, readonly string[] | undefined>;
+
+  /**
+   * The stored fields under the object field `path` that a null test on the
+   * object reads (`rewriteObjectNullTests`, since 0.1.155): its leaf columns
+   * on relational storage, its scalar / array / JSON fields on document
+   * storage (not inside an array or a JSON value). `undefined` when `path`
+   * is no stored object (a leaf, a `@db.json` / encrypted / ignored field,
+   * a navigation relation, inside a JSON value, unknown).
+   */
+  objectLeaves(path: string): readonly string[] | undefined {
+    this._objectLeaves ??= new Map();
+    if (this._objectLeaves.has(path)) return this._objectLeaves.get(path);
+    let leaves: string[] | undefined;
+    const fd = this.descriptorByPath.get(path);
+    // Not an object inside a JSON value: relational storage cannot address it.
+    const isObject =
+      findAncestorInSet(path, this.jsonValueParents) === undefined &&
+      (this.nestedObjects
+        ? fd !== undefined && fd.designType === "object" && fd.storage !== "json"
+        : this.flattenedParents.has(path) && !this.ignoredFields.has(path));
+    if (isObject) {
+      const prefix = `${path}.`;
+      leaves = [];
+      for (const [leaf, leafFd] of this.descriptorByPath) {
+        if (!leaf.startsWith(prefix) || leafFd.designType === "object") continue;
+        if (findAncestorInSet(leaf, this.jsonValueParents) !== undefined) continue;
+        if (this.presence(leaf) === undefined) continue;
+        leaves.push(leaf);
+      }
+    }
+    this._objectLeaves.set(path, leaves);
+    return leaves;
+  }
+
+  /**
+   * Whether the column of `path` is nullable: {@link isNullable}, except
+   * inside an array (document storage only), where the field's own
+   * optionality counts.
+   */
+  private _columnNullable(path: string, type: TAtscriptAnnotatedType): boolean {
+    const presence = this.presence(path);
+    return presence === undefined ? type.optional === true : presence !== "required";
   }
 
   /**
@@ -381,6 +504,7 @@ export class TableMetadata {
     }
 
     adapter.onBeforeFlatten?.(type);
+    this._rootType = type;
 
     // Phase 1: Collect field tuples. flattenAnnotatedType fires onField
     // post-order — children before parent — so nav fields (whose descendants
@@ -1120,7 +1244,7 @@ export class TableMetadata {
       const isArray = designType === "array";
       const isObject = designType === "object";
 
-      if (isArray) {
+      if (isArray || isStructuredMixedUnion(type)) {
         this.jsonFields.add(path);
       } else if (isObject && isJson) {
         // Already in jsonFields from @db.json detection
@@ -1335,6 +1459,7 @@ export class TableMetadata {
         !skipFlattening && findAncestorInSet(path, this.flattenedParents) !== undefined;
       // Encrypted values are stored as an opaque ASCII envelope — always text.
       const designType = isEncrypted ? "string" : isJson ? "json" : resolveDesignType(type);
+      const colType = columnType(type);
 
       let storage: TDbStorageType;
       if (skipFlattening) {
@@ -1369,10 +1494,12 @@ export class TableMetadata {
 
       descriptors.push({
         path,
-        type,
+        type: colType,
         physicalName,
         designType,
-        optional: type.optional === true,
+        // Document storage enforces no NULL-ability: there `optional` (the
+        // snapshot's) stays the field's own.
+        optional: skipFlattening ? type.optional === true : this._columnNullable(path, type),
         isPrimaryKey: this.primaryKeys.includes(path),
         ignored: this.ignoredFields.has(path),
         defaultValue: this.defaults.get(path),
@@ -1386,7 +1513,7 @@ export class TableMetadata {
         unitCode,
         unitRefField,
         encrypted: isEncrypted || underEncrypted || undefined,
-        isGeoPoint: isGeoPointType(type) || undefined,
+        isGeoPoint: isGeoPointType(colType) || undefined,
         derived: this.derivedFields.get(path),
         computed: computedMeta(rootType, path),
       });
@@ -1599,7 +1726,7 @@ export class TableMetadata {
         // use these to make a unique index present-only on optional fields.
         const ftype = this.flatMap.get(field.name);
         if (ftype) {
-          field.optional = ftype.optional === true;
+          field.optional = this._columnNullable(field.name, ftype);
           // Carry an `objectId` design type distinct from its string base so a
           // present-only filter can match both representations (24-hex string or
           // native BSON ObjectId). The tag is a no-op for non-Mongo adapters.

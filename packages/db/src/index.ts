@@ -21,6 +21,7 @@ export { DbEncryption } from "./encryption";
 export type { TDbEncryptionOptions } from "./encryption";
 export { assertGeoPoint, guardFilter, guardQuery, guardAggregate } from "./query/query-guards";
 export { isGeoPointType, isGeoIndexableType } from "./table/table-metadata";
+export type { TPathPresence } from "./shared/union-shape";
 export { withOptimisticRetry } from "./with-optimistic-retry";
 export type { WithOptimisticRetryOptions } from "./with-optimistic-retry";
 // ── Shared validator entry (used by both server and @atscript/db-client) ────
@@ -159,6 +160,7 @@ export type {
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
+  TJsonCopyTarget,
   TTableOptionDiff,
   TSyncColumnResult,
   // Schema sync primitives (since 0.1.128)
