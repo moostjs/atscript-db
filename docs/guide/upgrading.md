@@ -12,6 +12,10 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 - **No install scripts in the published packages.** Every `@atscript/db*` / `@atscript/moost-db` package declared `postinstall: "asc -f dts"` — a development step meant for this repository. npm 11 warned about it on install (`install-scripts`), and npm versions or setups that run dependency install scripts executed `asc` inside `node_modules`. The published packages now carry no install-time scripts.
 
+## 0.1.158 {#v0-1-158}
+
+Dependency refresh: built on `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.107, moost 0.6.52 and wooks 0.7.30, so an app that upgrades the whole set gets a single copy of each. `@atscript/db-client` now declares its `@atscript/db` peer at the same release (`^0.1.158`) instead of the old `^0.1.44`. No behavior change.
+
 ## 0.1.157 {#v0-1-157}
 
 ### Fixes
