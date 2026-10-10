@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vite-plus/test";
 
 import { PgDriver } from "../pg-driver";
+import { pgAdmin, pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
@@ -11,35 +12,9 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 // checked out is logged, not thrown out of an EventEmitter (since 0.1.154):
 // the process survives and the next query opens a fresh connection.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ??
-  process.env.POSTGRES_TEST_URI ??
-  "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "r15_poolerr_pg";
 
-function dbUrl(): string {
-  const url = new URL(SERVER_URL);
-  url.pathname = `/${DB}`;
-  return url.toString();
-}
-
-async function adminQuery(sql: string, params?: unknown[]): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    const client = new Client({ connectionString: SERVER_URL, connectionTimeoutMillis: 5000 });
-    await client.connect();
-    try {
-      await client.query(sql, params);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 /** Resolves once `fn` has been called, failing after `ms`. */
 async function calledWithin(fn: ReturnType<typeof vi.fn>, ms = 10_000): Promise<void> {
@@ -57,21 +32,22 @@ describe.skipIf(!reachable)("[postgres live] broken pool connections", () => {
   const warn = vi.fn();
 
   beforeAll(async () => {
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}" WITH (FORCE)`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    driver = new PgDriver({ connectionString: dbUrl(), max: 2 }, { logger: { warn } });
+    driver = new PgDriver(
+      { connectionString: await recreatePgDatabase(DB, { force: true }), max: 2 },
+      { logger: { warn } },
+    );
   });
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}" WITH (FORCE)`);
+    await dropPgDatabase(DB, { force: true });
   });
 
   it("an idle client's terminated backend is logged; the next query reconnects", async () => {
     warn.mockClear();
     const before = await driver.get<{ pid: number }>(PID_SQL);
     // the client is idle in the pool now
-    expect(await adminQuery("SELECT pg_terminate_backend($1)", [before!.pid])).toBe(true);
+    expect(await pgAdmin("SELECT pg_terminate_backend($1)", { params: [before!.pid] })).toBe(true);
     await calledWithin(warn);
     expect(warn.mock.calls[0][0]).toContain("idle pool connection lost");
     const after = await driver.get<{ pid: number }>(PID_SQL);
@@ -83,7 +59,7 @@ describe.skipIf(!reachable)("[postgres live] broken pool connections", () => {
     const conn = await driver.getConnection();
     const { pid } = (await conn.get<{ pid: number }>(PID_SQL))!;
     // checked out, between two statements (e.g. inside a transaction)
-    expect(await adminQuery("SELECT pg_terminate_backend($1)", [pid])).toBe(true);
+    expect(await pgAdmin("SELECT pg_terminate_backend($1)", { params: [pid] })).toBe(true);
     await calledWithin(warn);
     expect(warn.mock.calls[0][0]).toContain("checked-out pool connection lost");
     await expect(conn.get(PID_SQL)).rejects.toThrow();

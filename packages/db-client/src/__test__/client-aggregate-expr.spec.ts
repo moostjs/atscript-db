@@ -99,6 +99,50 @@ describe("aggregate() arithmetic and first / last", () => {
   });
 });
 
+describe("aggregate() without grouping ($groupBy: [])", () => {
+  it("types the one row over the filtered set", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Issue>("/api/issues");
+      const rows = c.aggregate({
+        filter: { ticketId: 7 },
+        controls: {
+          $groupBy: [],
+          $select: [
+            { $fn: "count", $field: "*", $as: "n" },
+            { $fn: "sum", $field: "price", $as: "total" },
+          ],
+        },
+      });
+      type Row = Awaited<typeof rows>[number];
+      expectTypeOf<Row["n"]>().toEqualTypeOf<number>();
+      expectTypeOf<Row["total"]>().toEqualTypeOf<number>();
+      // @ts-expect-error — no plain field is selected, so none is on the row
+      void (null as unknown as Row).ticketId;
+    }
+  });
+
+  it("sends the aggregate $select with no $groupBy — the server's ungrouped aggregate", async () => {
+    const fetchFn = mockFetch([{ n: 3, total: 42 }]);
+    const client = new Client<typeof Issue>("/api/issues", { fetch: fetchFn });
+    const rows = await client.aggregate({
+      filter: { ticketId: 7 },
+      controls: {
+        $groupBy: [],
+        $select: [
+          { $fn: "count", $field: "*", $as: "n" },
+          { $fn: "sum", $field: "price", $as: "total" },
+        ],
+      },
+    });
+    const url = decodeURIComponent(fetchFn.mock.calls[0]![0] as string);
+    expect(url).toContain("/api/issues/query?");
+    expect(url).toContain("ticketId=7");
+    expect(url).toContain("$select=count(*):n,sum(price):total");
+    expect(url).not.toContain("$groupBy");
+    expect(rows).toEqual([{ n: 3, total: 42 }]);
+  });
+});
+
 /** Type-only assertions run under tsc; at runtime the block is skipped. */
 function shouldRun(): true {
   return true;

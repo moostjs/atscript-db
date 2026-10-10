@@ -6,6 +6,7 @@ import { AE_ROWS, defineAggregateExprCases } from "../../../db/test-kit/aggregat
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -19,25 +20,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // every adapter runs, plus what only a real server shows — the window derived
 // table and the overflow mapping.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "aggexpr_live";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 1500 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 /** price * (2^53 - 1)^20, balanced (the expression depth is capped) — past a double's range. */
 const power = (n: number): unknown =>
@@ -59,9 +44,7 @@ describe.skipIf(!reachable)("[mysql live] aggregate arithmetic and first / last"
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/agg-expr.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     space = new DbSpace(() => new MysqlAdapter(driver));
     const result = await syncSchema(space, [fx.AeIssue]);
     expect(result.status).toBe("synced");
@@ -70,7 +53,7 @@ describe.skipIf(!reachable)("[mysql live] aggregate arithmetic and first / last"
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   defineAggregateExprCases("MySQL", issues);

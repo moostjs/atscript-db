@@ -70,6 +70,7 @@ weekly[0].week; // string ("YYYY-MM-DD"; hour bucket "YYYY-MM-DDTHH:00"); string
 - Offer time grouping only when `meta.bucketUnits` has the unit and `meta.fields[path].bucketable === true`.
 - Gap fill with `bucketSeries(first, last, unit, { weekStart?, tz? })` — pass the query's `$tz` (zone-free otherwise); time axis via `bucketStartInstant(label, tz)`. Rules, errors (400 / 501) → [calendar-buckets.md](calendar-buckets.md).
 - Arithmetic (0.1.148): `{ $fn: "sum", $expr: { $op: "*", $args: ["price", "qty"] }, $as }` and `{ $expr, $as }` serialize to `sum(price*qty)` / `expr(a/b)` (`+` → `%2B`); `{ $fn: "first" | "last", $field, $as }` + `$rowOrder: { f: 1 }` → `first(f)` / `$rowOrder=f`. Aliases typed `number | null` (expressions) / the field's type (first, last). Offer operands from `meta.fields[path].numeric` when `meta.aggregateExpressions`.
+- Ungrouped: `$groupBy: []` + aggregate-only `$select` → one typed row over the filtered set (URL has no `$groupBy`; served by moost-db since 0.1.155).
 - Type re-exports: `BucketExpr`, `BucketUnit`, `WeekStart`, `CalendarBucketLabel`, `BucketSeriesOptions`, `NextBucketOptions`, `ValidGroupBy`.
 
 ## Generic surface
@@ -333,6 +334,7 @@ try {
   4. On identity change call `clearMetaStore()` (default store) / `store.clear()` plus `invalidateMeta()` on kept clients. A cross-user `304` is byte-identical with moost-db, so this is hygiene, not a correctness fix.
   5. Bounded: `new MetaStore({ maxEntries })`, default 50 bodies, LRU. `metaStore: false` = always download.
   6. A conditional request refused at transport level (CORS preflight rejecting `If-None-Match`) → plain retry, and that key skips `If-None-Match` for `unconditionalMs` (default 5 min), then tries again.
+- `client.metaStore` (0.1.155, read-only getter) — the `MetaStore` this client revalidates through: the shared default, the one passed in, or `undefined` for `metaStore: false`. Code handed a client (factories, UI caches) clears it with `client.metaStore?.clear()` — never read the private `_metaStore`.
 - `client.metaEtag()` (0.1.153) — ETag of the body `meta()` resolved to; `undefined` before resolve / after `invalidateMeta()` / no readable ETag. Use it to key derived data (deserialized types, validators) across clients; equal ETag ⇒ identical `/meta` bytes.
 - `$nulls` is typed like `$sort` (own field keys) and serialized as the `:first` / `:last` suffix. 6. Cross-origin: the server must send `Access-Control-Expose-Headers: ETag` and allow `If-None-Match` in `Access-Control-Allow-Headers`. Without the exposed ETag nothing is stored (behaves as before). If the preflight rejects `If-None-Match`, the request is retried without it, and that key stops sending it.
 - `meta.preferredId: string[]` is a guaranteed field (always populated; defaults to `primaryKeys`). Used internally for `'navigate'` URL substitution; consumers can read it to drive their own list-key selection or link-building.

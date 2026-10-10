@@ -6,6 +6,7 @@ import { seedViewPrune } from "../../../db/test-kit/view-prune-cases";
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -19,27 +20,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // clause and unused above it — through a view, on a COUNT(*), for composite
 // unique keys, literal-pinned keys and first-row joins alike.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ?? "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "r15_views_prune";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    const client = new Client({ connectionString: SERVER_URL, connectionTimeoutMillis: 5000 });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 let fx: Record<string, any>;
 let driver: PgDriver;
@@ -54,11 +37,7 @@ describe.skipIf(!reachable)("[postgres live] native LEFT JOIN removal through vi
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/view-prune.as");
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    const url = new URL(SERVER_URL);
-    url.pathname = `/${DB}`;
-    driver = new PgDriver({ connectionString: url.toString() });
+    driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     space = new DbSpace(() => new PostgresAdapter(driver));
     const result = await syncSchema(space, [
       fx.VpRegion,
@@ -77,7 +56,7 @@ describe.skipIf(!reachable)("[postgres live] native LEFT JOIN removal through vi
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
+    await dropPgDatabase(DB);
   });
 
   it("the adapter reads views by name", () => {

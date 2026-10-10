@@ -5,6 +5,7 @@ import { SchemaSync } from "@atscript/db/sync";
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -13,32 +14,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // connection; the spec creates and drops its own `insert_ignore` database).
 // Conflict-ignoring insert (since 0.1.148) + DbSpace.close() end to end.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ?? "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "insert_ignore";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    // a short connect timeout only for the reachability probe — a slow (remote) server must
-    // not make a setup statement fail silently
-    const client = new Client({
-      connectionString: SERVER_URL,
-      connectionTimeoutMillis: sql === "SELECT 1" ? 5000 : 15_000,
-    });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 let fx: Record<string, any>;
 let space: DbSpace;
@@ -58,11 +36,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    const url = new URL(SERVER_URL);
-    url.pathname = `/${DB}`;
-    const driver = new PgDriver({ connectionString: url.toString() });
+    const driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     space = new DbSpace(
       () => {
         const adapter = new PostgresAdapter(driver);
@@ -82,7 +56,7 @@ describe.skipIf(!reachable)("[postgres live] insert onConflict: ignore", () => {
 
   afterAll(async () => {
     await space?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
+    await dropPgDatabase(DB);
   });
 
   const items = () => t(fx.IgItem);

@@ -5,6 +5,12 @@ import { planSchema, syncSchema } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import {
+  mysqlReachable,
+  mysqlDbUrl,
+  recreateMysqlDatabase,
+  dropMysqlDatabase,
+} from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -12,26 +18,10 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // Server-gated (see relation-filter.live.spec.ts): a foreign key into a table
 // of another database (`@db.schema`) — `REFERENCES` must be qualified.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "relfix_xs_main";
 const OTHER = "relfix_xs";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 1500 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let driver: Mysql2Driver;
@@ -42,17 +32,14 @@ describe.skipIf(!reachable)("[mysql live] cross-database FKs", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/cross-schema-live.as");
-    for (const db of [DB, OTHER]) {
-      await adminQuery(`DROP DATABASE IF EXISTS \`${db}\``);
-      await adminQuery(`CREATE DATABASE \`${db}\``);
-    }
-    driver = new Mysql2Driver(`${SERVER_URL}/${DB}`);
+    for (const db of [DB, OTHER]) await recreateMysqlDatabase(db);
+    driver = new Mysql2Driver(mysqlDbUrl(DB));
     space = new DbSpace(() => new MysqlAdapter(driver));
   });
 
   afterAll(async () => {
     await driver?.close();
-    for (const db of [DB, OTHER]) await adminQuery(`DROP DATABASE IF EXISTS \`${db}\``);
+    for (const db of [DB, OTHER]) await dropMysqlDatabase(db);
   });
 
   it("creates a table whose FK targets another database; a second sync is a no-op", async () => {

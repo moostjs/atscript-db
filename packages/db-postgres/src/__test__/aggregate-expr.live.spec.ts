@@ -6,6 +6,7 @@ import { AE_ROWS, defineAggregateExprCases } from "../../../db/test-kit/aggregat
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -19,32 +20,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // every adapter runs, plus what only a real server shows — the window derived
 // table, the boolean aggregates, the overflow mapping.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ?? "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "aggexpr_live";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    // a short connect timeout only for the reachability probe — a slow (remote) server must
-    // not make a setup statement fail silently
-    const client = new Client({
-      connectionString: SERVER_URL,
-      connectionTimeoutMillis: sql === "SELECT 1" ? 5000 : 15_000,
-    });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 /** price * (2^53 - 1)^20, balanced (the expression depth is capped) — past a double's range. */
 const power = (n: number): unknown =>
@@ -66,11 +44,7 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/agg-expr.as");
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    const url = new URL(SERVER_URL);
-    url.pathname = `/${DB}`;
-    driver = new PgDriver({ connectionString: url.toString() });
+    driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     space = new DbSpace(() => new PostgresAdapter(driver));
     const result = await syncSchema(space, [fx.AeIssue, fx.AeRef, fx.AeArray]);
     expect(result.status).toBe("synced");
@@ -79,7 +53,7 @@ describe.skipIf(!reachable)("[postgres live] aggregate arithmetic and first / la
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
+    await dropPgDatabase(DB);
   });
 
   defineAggregateExprCases("PostgreSQL", issues);

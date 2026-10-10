@@ -11,6 +11,7 @@ import {
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
@@ -25,25 +26,9 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 // and (b) MERGE its inline definition — a materialized derived table under a
 // paged read would scan the whole view.
 
-const SERVER_URL = process.env.ATSCRIPT_MYSQL_TEST_URL ?? "mysql://root:test@127.0.0.1:33071";
 const DB = "r15_views_prune";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: SERVER_URL, connectTimeout: 5000 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 /** Records every read statement (and its params). */
 class RecordingDriver extends Mysql2Driver {
@@ -89,9 +74,7 @@ describe.skipIf(!reachable)("[mysql live] view read pruning", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/view-prune.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    driver = new RecordingDriver(`${SERVER_URL}/${DB}`);
+    driver = new RecordingDriver(await recreateMysqlDatabase(DB));
     pruned = new DbSpace(() => new MysqlAdapter(driver));
     plain = new DbSpace(() => new MysqlAdapter(driver, { viewJoinPruning: false }));
     const result = await syncSchema(pruned, [
@@ -112,7 +95,7 @@ describe.skipIf(!reachable)("[mysql live] view read pruning", () => {
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   describe("plans", () => {

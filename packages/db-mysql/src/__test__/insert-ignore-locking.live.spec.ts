@@ -5,6 +5,12 @@ import { SchemaSync } from "@atscript/db/sync";
 import { MysqlAdapter } from "../mysql-adapter";
 import { Mysql2Driver } from "../mysql2-driver";
 import { prepareFixtures } from "./test-utils";
+import {
+  mysqlReachable,
+  mysqlDbUrl,
+  recreateMysqlDatabase,
+  dropMysqlDatabase,
+} from "./live-server";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
@@ -16,34 +22,9 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 // shared lock on the stored row until COMMIT, so two transactions that
 // ignore-insert the same stored row and then update it deadlock (S→X).
 
-const SERVER_URL =
-  process.env.ATSCRIPT_MYSQL_TEST_URL ??
-  process.env.MYSQL_TEST_URI ??
-  "mysql://root:test@127.0.0.1:33071";
 const DB = "insert_ignore_locking";
 
-function serverUrl(database = ""): string {
-  const url = new URL(SERVER_URL);
-  url.pathname = database ? `/${database}` : "";
-  return url.toString();
-}
-
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const mysql = await import("mysql2/promise");
-    const conn = await mysql.createConnection({ uri: serverUrl(), connectTimeout: 5000 });
-    try {
-      await conn.query(sql);
-    } finally {
-      await conn.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await mysqlReachable();
 
 let fx: Record<string, any>;
 let space: DbSpace;
@@ -66,9 +47,7 @@ describe.skipIf(!reachable)("[mysql live] onConflict: ignore row locks", () => {
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/insert-ignore.as");
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
-    await adminQuery(`CREATE DATABASE \`${DB}\``);
-    const driver = new Mysql2Driver(serverUrl(DB));
+    const driver = new Mysql2Driver(await recreateMysqlDatabase(DB));
     space = new DbSpace(() => new MysqlAdapter(driver), { onClose: () => driver.close() });
     const result = await new SchemaSync(space).run([fx.IgItem, fx.IgAuto], { force: true });
     expect(result.status).toBe("synced");
@@ -76,7 +55,7 @@ describe.skipIf(!reachable)("[mysql live] onConflict: ignore row locks", () => {
 
   afterAll(async () => {
     await space?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS \`${DB}\``);
+    await dropMysqlDatabase(DB);
   });
 
   const items = () => t(fx.IgItem);
@@ -225,7 +204,7 @@ describe.skipIf(!reachable)("[mysql live] onConflict: ignore row locks", () => {
       // the first consistent read fixes the snapshot
       await items().findMany({ filter: {}, controls: {} });
       // committed outside the transaction: invisible to the pre-check
-      const outside = new Mysql2Driver(serverUrl(DB));
+      const outside = new Mysql2Driver(mysqlDbUrl(DB));
       try {
         await outside.run("INSERT INTO `ig_items` (`id`, `sku`, `qty`) VALUES (?, ?, ?)", [
           9,

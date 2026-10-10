@@ -5,6 +5,7 @@ import { SchemaSync } from "@atscript/db/sync";
 import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
+import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 
 // Live DDL against a real server is slow under the parallel workspace run.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -20,32 +21,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // aggregate / computed columns, relational predicate operands, $having and
 // mutation filters; every valid form still answers.
 
-const SERVER_URL =
-  process.env.ATSCRIPT_PG_TEST_URL ?? "postgresql://postgres:test@127.0.0.1:54371/postgres";
 const DB = "typefix_filter_values";
 
-async function adminQuery(sql: string): Promise<boolean> {
-  try {
-    const { Client } = (await import("pg")).default;
-    // a short connect timeout only for the reachability probe — a slow (remote) server must
-    // not make a setup statement fail silently
-    const client = new Client({
-      connectionString: SERVER_URL,
-      connectionTimeoutMillis: sql === "SELECT 1" ? 5000 : 15_000,
-    });
-    await client.connect();
-    try {
-      await client.query(sql);
-    } finally {
-      await client.end();
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await adminQuery("SELECT 1");
+const reachable = await pgReachable();
 
 let fx: Record<string, any>;
 let driver: PgDriver;
@@ -72,11 +50,7 @@ describe.skipIf(!reachable)("[postgres live] filter values checked against the c
   beforeAll(async () => {
     await prepareFixtures();
     fx = await import("./fixtures/typefix.as");
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
-    await adminQuery(`CREATE DATABASE "${DB}"`);
-    const url = new URL(SERVER_URL);
-    url.pathname = `/${DB}`;
-    driver = new PgDriver({ connectionString: url.toString() });
+    driver = new PgDriver({ connectionString: await recreatePgDatabase(DB) });
     space = new DbSpace(() => new PostgresAdapter(driver));
     const result = await new SchemaSync(space).run([fx.TfTicket, fx.TfIssue, fx.TfTicketStats], {
       force: true,
@@ -94,7 +68,7 @@ describe.skipIf(!reachable)("[postgres live] filter values checked against the c
 
   afterAll(async () => {
     await driver?.close();
-    await adminQuery(`DROP DATABASE IF EXISTS "${DB}"`);
+    await dropPgDatabase(DB);
   });
 
   it("rejects values that cannot denote the column type", async () => {

@@ -286,7 +286,7 @@ Every `$select` entry is validated before the read (since 0.1.128, on `/query`, 
 
 #### Computed entries (grouped queries)
 
-With [`$groupBy`](./advanced#groupby), `$select` also takes computed entries, each with an optional `:alias`:
+On `/query`, `$select` also takes computed entries, each with an optional `:alias` — with [`$groupBy`](./advanced#groupby) one row per group, without it [one row over the filtered set](./advanced#ungrouped) (since 0.1.155):
 
 | Entry                                 | Meaning                                                                                                                                                                                                                                                                                                |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

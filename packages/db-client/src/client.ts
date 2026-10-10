@@ -157,6 +157,8 @@ export class Client<
 
   /**
    * `GET /query` with `$groupBy` — aggregate query with typed dimension/measure fields.
+   * `$groupBy: []` is the ungrouped aggregate: one row over the filtered set (served
+   * by moost-db since 0.1.155 — the URL carries the aggregate `$select` and no `$groupBy`).
    *
    * `$select` may carry calendar buckets (`{ $bucket, $field, $tz?, $weekStart?, $as? }`);
    * a `$groupBy` entry must be a dimension or a bucket alias (`ValidGroupBy`), and a
@@ -376,6 +378,19 @@ export class Client<
    */
   metaEtag(): string | undefined {
     return this._metaEtag;
+  }
+
+  /**
+   * The {@link MetaStore} {@link meta} revalidates through — the shared
+   * default store, the one passed as `ClientOptions.metaStore`, or
+   * `undefined` when that option was `false`. Read-only: clear it on an
+   * identity change (`client.metaStore?.clear()`) together with
+   * {@link invalidateMeta}.
+   *
+   * @since 0.1.155
+   */
+  get metaStore(): MetaStore | undefined {
+    return this._metaStore;
   }
 
   /**
