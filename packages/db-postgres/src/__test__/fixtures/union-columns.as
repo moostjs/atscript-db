@@ -168,3 +168,12 @@ export interface UcUnjson {
 
     addr: UcAddr
 }
+
+// A `T | null` object whose type has its own `@meta.id`: the earlier layout
+// keyed the table by its unused dot-named column (`line.lineId`) too.
+@db.table 'uc_legacy_line'
+export interface UcLegacyLine {
+    @meta.id
+    id: number
+    line: UcLine | null
+}

@@ -284,6 +284,33 @@ describe.skipIf(!reachable)("[mysql live] union columns", () => {
     expect((await syncSchema(space, [fx.UcLegacyMixed])).status).toBe("up-to-date");
   });
 
+  it("a `T | null` object whose `@meta.id` was in the key: copied, key rebuilt", async () => {
+    await driver.exec(
+      "CREATE TABLE `uc_legacy_line` (`id` DOUBLE NOT NULL, `line` TEXT NOT NULL, `line.lineId` VARCHAR(255) NOT NULL, `line.qty` DOUBLE NOT NULL, PRIMARY KEY (`id`, `line.lineId`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    );
+    await driver.exec(
+      "INSERT INTO `uc_legacy_line` VALUES (1, '{\"lineId\":\"a\",\"qty\":1}', '', 0), (2, 'null', '', 0)",
+    );
+    const result = await syncSchema(space, [fx.UcLegacyLine], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_legacy_line")!;
+    expect(entry.errors).toEqual([]);
+    expect(entry.pkChange).toMatchObject({ from: ["id", "line.lineId"], to: ["id"] });
+    expect(await columns("uc_legacy_line")).toEqual([
+      "id double NOT NULL",
+      "line__lineId text",
+      "line__qty double",
+    ]);
+    expect(
+      await space
+        .getTable(fx.UcLegacyLine)
+        .findMany({ filter: {}, controls: { $sort: { id: 1 } } }),
+    ).toEqual([
+      { id: 1, line: { lineId: "a", qty: 1 } },
+      { id: 2, line: null },
+    ]);
+    expect((await syncSchema(space, [fx.UcLegacyLine])).status).toBe("up-to-date");
+  });
+
   it("an object leaving `@db.json` is copied into its columns, required ones NOT NULL", async () => {
     expect((await syncSchema(space, [fx.UcUnjsonOld], { force: true })).status).toBe("synced");
     await space.getTable(fx.UcUnjsonOld).insertMany([

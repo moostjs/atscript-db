@@ -359,6 +359,34 @@ describe("SQLite — schema sync from the pre-0.1.155 union layout", () => {
     expect((await new SchemaSync(space).run([fx.UcLegacyMixed])).status).toBe("up-to-date");
   });
 
+  it("a `T | null` object whose `@meta.id` was in the key: copied, key rebuilt", async () => {
+    driver.exec(
+      'CREATE TABLE "uc_legacy_line" ("id" INTEGER NOT NULL, "line" TEXT NOT NULL, "line.lineId" TEXT NOT NULL, "line.qty" REAL NOT NULL, PRIMARY KEY ("id", "line.lineId"))',
+    );
+    driver.exec(
+      `INSERT INTO "uc_legacy_line" VALUES (1, '{"lineId":"a","qty":1}', '', 0), (2, 'null', '', 0)`,
+    );
+    const space = new DbSpace(() => new SqliteAdapter(driver));
+    const result = await new SchemaSync(space).run([fx.UcLegacyLine], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_legacy_line")!;
+    expect(entry.errors).toEqual([]);
+    expect(entry.pkChange).toMatchObject({ from: ["id", "line.lineId"], to: ["id"] });
+    expect(columns(driver, "uc_legacy_line")).toEqual([
+      "id INTEGER",
+      "line__lineId TEXT",
+      "line__qty REAL",
+    ]);
+    expect(
+      await space
+        .getTable(fx.UcLegacyLine)
+        .findMany({ filter: {}, controls: { $sort: { id: 1 } } }),
+    ).toEqual([
+      { id: 1, line: { lineId: "a", qty: 1 } },
+      { id: 2, line: null },
+    ]);
+    expect((await new SchemaSync(space).run([fx.UcLegacyLine])).status).toBe("up-to-date");
+  });
+
   it("an object leaving `@db.json` is copied into its columns, required ones NOT NULL", async () => {
     const space = new DbSpace(() => new SqliteAdapter(driver));
     expect((await new SchemaSync(space).run([fx.UcUnjsonOld], { force: true })).status).toBe(
