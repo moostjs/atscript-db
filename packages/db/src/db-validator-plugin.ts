@@ -11,6 +11,7 @@ import type {
 import { DepthLimitExceededError } from "./db-error";
 import { getDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
+import { columnUnionBase, nullableUnionBase } from "./shared/nullable-union";
 
 export interface DbValidationContext {
   mode: "insert" | "replace" | "patch";
@@ -65,6 +66,40 @@ function markComplexItems(def: TAtscriptAnnotatedType): void {
 }
 
 /**
+ * Per validation context: the paths (array indices as `*`) of the tuples and
+ * the unions of several types the validator visited. Which item a field
+ * below one belongs to is not known when defaults are applied, so its
+ * default is not filled (`AtscriptDbTable._applyDefaults`) — and the field
+ * is not optional on insert either.
+ */
+const ambiguousPaths = new WeakMap<DbValidationContext, Set<string>>();
+
+/** `items.3.at` → `items.*.at` */
+function schemaPath(path: string): string {
+  return path.replace(/(^|\.)\d+(?=\.|$)/g, "$1*");
+}
+
+function markAmbiguous(dbCtx: DbValidationContext, def: TAtscriptAnnotatedType, path: string) {
+  const kind = def.type.kind;
+  if (kind === "tuple" || (kind === "union" && !nullableUnionBase(def))) {
+    let paths = ambiguousPaths.get(dbCtx);
+    if (!paths) ambiguousPaths.set(dbCtx, (paths = new Set()));
+    paths.add(schemaPath(path));
+  }
+}
+
+/** Whether `path` lies below a tuple or a union of several types (see {@link ambiguousPaths}). */
+function belowAmbiguous(dbCtx: DbValidationContext, path: string): boolean {
+  const paths = ambiguousPaths.get(dbCtx);
+  if (!paths) return false;
+  const schema = schemaPath(path);
+  for (let dot = schema.lastIndexOf("."); dot !== -1; dot = schema.lastIndexOf(".", dot - 1)) {
+    if (paths.has(schema.slice(0, dot))) return true;
+  }
+  return false;
+}
+
+/**
  * Validator plugin for database operations.
  *
  * Handles navigation field constraints and delegates to the standard validator
@@ -82,6 +117,7 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       return undefined;
     }
     markComplexItems(def);
+    markAmbiguous(dbCtx, def, ctx.path);
 
     // ── db.geoPoint range validation ─────────────────────────────────────────
     // [lng, lat] in GeoJSON order: longitude first. Enforced on every write.
@@ -120,35 +156,39 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
 
     // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─
     // A union / tuple member is not the field: its annotations (a
-    // `number.timestamp.created` member's `@db.default.now`) do not make the
-    // field server-managed — only the prop's own do.
+    // `number.timestamp.created` member's `@db.default.now` in
+    // `number.timestamp.created | string`) do not make the field
+    // server-managed — only the prop's own do, and those of the one
+    // non-`null` member of `T | null`, which is the column's type.
     if (
       value === undefined &&
       (dbCtx.mode === "insert" || dbCtx.mode === "replace") &&
       !complexItems.has(def)
     ) {
       const meta = def.metadata;
+      const baseMeta = columnUnionBase(def)?.metadata;
+      // A default below a tuple / union of several types is not filled.
+      const defaulted = !belowAmbiguous(dbCtx, ctx.path);
+      const has = (key: keyof AtscriptMetadata) =>
+        defaulted && (meta.has(key) || baseMeta?.has(key) === true);
       // Server-managed fields: defaulted columns, the OCC version column
       // (adapter-initialised to 0 on insert, auto-bumped on every write) and
       // derived columns (computed from the row; a payload value is dropped) —
       // single source of truth for both the server validators and db-client.
       const serverManaged =
-        meta.has("db.default") ||
-        meta.has("db.default.increment") ||
-        meta.has("db.default.uuid") ||
-        meta.has("db.default.now") ||
+        has("db.default") ||
+        has("db.default.increment") ||
+        has("db.default.uuid") ||
+        has("db.default.now") ||
         meta.has("db.column.version") ||
         meta.has("db.column.derived");
       const hasFK = meta.has("db.rel.FK");
 
       if (serverManaged || hasFK) {
         // Default/FK fields optional in both modes, EXCEPT top-level PK in replace
-        // (must identify the record). Nested nav children are effectively inserts.
-        if (
-          dbCtx.mode === "replace" &&
-          meta.has("meta.id") &&
-          !isInsideNavField(ctx.path, dbCtx.navFields)
-        ) {
+        // (must identify the record). Nested nav children are effectively inserts,
+        // and an embedded object's `@meta.id` is not the row's key.
+        if (dbCtx.mode === "replace" && meta.has("meta.id") && !ctx.path.includes(".")) {
           return undefined;
         }
         return true;
@@ -246,16 +286,6 @@ function isFieldOpAllowed(
     }
   }
   return true;
-}
-
-/** Returns true if the given path is nested inside a navigation field. */
-function isInsideNavField(path: string, navFields?: ReadonlySet<string>): boolean {
-  if (!navFields) return false;
-  let pos = path.length;
-  while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
-    if (navFields.has(path.slice(0, pos))) return true;
-  }
-  return false;
 }
 
 // ── Nav field handler ─────────────────────────────────────────────────────────

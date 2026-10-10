@@ -488,4 +488,28 @@ export function buildProjection(
   return sql || `${prefix}*`;
 }
 
+/**
+ * One query counting the rows of `quotedTable` that `columns` cannot hold as
+ * a primary key: rows with a NULL in one of them, plus every row of a group
+ * sharing the same values. Schema sync asks it before rebuilding the key of
+ * a populated table (result column `violations`).
+ * @since 0.1.155
+ */
+export function buildKeyViolationCount(
+  dialect: SqlDialect,
+  quotedTable: string,
+  columns: readonly string[],
+): string {
+  const cols = columns.map((c) => dialect.quoteIdentifier(c));
+  const anyNull = cols.map((c) => `${c} IS NULL`).join(" OR ");
+  const noNull = cols.map((c) => `${c} IS NOT NULL`).join(" AND ");
+  return (
+    `SELECT (SELECT COUNT(*) FROM ${quotedTable} WHERE ${anyNull}) + ` +
+    `(SELECT COALESCE(SUM(${dialect.quoteIdentifier("n")}), 0) FROM ` +
+    `(SELECT COUNT(*) AS ${dialect.quoteIdentifier("n")} FROM ${quotedTable} WHERE ${noNull} ` +
+    `GROUP BY ${cols.join(", ")} HAVING COUNT(*) > 1) ${dialect.quoteIdentifier("d")}) AS ` +
+    dialect.quoteIdentifier("violations")
+  );
+}
+
 export { buildCreateView } from "./view-builder";

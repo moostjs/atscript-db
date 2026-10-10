@@ -94,10 +94,16 @@ describe("SQLite: schema-sync pre-flight, ordering and primitives", () => {
     expect(columns("pf_tokens")).toEqual(["code", "label"]);
   });
 
-  it("refuses the change on a POPULATED table and leaves the schema untouched", async () => {
+  it("refuses the change on a POPULATED table whose rows break the new key, schema untouched", async () => {
     const sync = syncFor();
     await sync.run([fx.PfTokenV1], { force: true });
-    driver.exec(`INSERT INTO "pf_tokens" ("code", "label") VALUES ('a', 'A')`);
+    // rows the old unique index on `code` would not admit (data from before it)
+    for (const { name } of driver.all<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'pf_tokens' AND sql IS NOT NULL`,
+    )) {
+      driver.exec(`DROP INDEX "${name}"`);
+    }
+    driver.exec(`INSERT INTO "pf_tokens" ("code", "label") VALUES ('a', 'A'), ('a', 'B')`);
 
     const before = driver.all(`PRAGMA table_info("pf_tokens")`);
     const result = await sync.run([fx.PfTokenV2], { force: true, onError: "silent" });
@@ -105,21 +111,45 @@ describe("SQLite: schema-sync pre-flight, ordering and primitives", () => {
     const entry = result.entries.find((e) => e.name === "pf_tokens")!;
     expect(entry.refused).toBe(true);
     expect(entry.errors[0]).toBe(
-      'Primary key of "pf_tokens" changed (id → code) but the table has rows; schema sync cannot rebuild a populated primary key. Migrate manually (or empty the table) and re-run.',
+      'Primary key of "pf_tokens" changed (id → code) but 2 rows have a NULL or duplicate (code) — fix or remove them (or migrate manually) and re-run.',
     );
     expect(driver.all(`PRAGMA table_info("pf_tokens")`)).toEqual(before);
-    expect(driver.all(`SELECT * FROM "pf_tokens"`)).toHaveLength(1);
+    expect(driver.all(`SELECT * FROM "pf_tokens"`)).toHaveLength(2);
     // Lock released, nothing tracked/hashed → next plan shows the change again
     const plan = await sync.plan([fx.PfTokenV2]);
     expect(plan.status).toBe("changes-needed");
     expect(plan.entries.find((e) => e.name === "pf_tokens")!.refused).toBe(true);
 
-    // Emptied → allowed
-    driver.exec(`DELETE FROM "pf_tokens"`);
+    // Rows satisfying the new key (since 0.1.155) → rebuilt with the data
+    driver.exec(`DELETE FROM "pf_tokens" WHERE "label" = 'B'`);
+    const ok = await sync.plan([fx.PfTokenV2]);
+    expect(ok.entries.find((e) => e.name === "pf_tokens")!.pkChange).toEqual({
+      from: ["id"],
+      to: ["code"],
+      rebuild: true,
+      populated: true,
+    });
     expect((await sync.run([fx.PfTokenV2], { force: true, onError: "silent" })).status).toBe(
       "synced",
     );
     expect(pkColumns("pf_tokens")).toEqual(["code"]);
+    expect(driver.all(`SELECT "code", "label" FROM "pf_tokens"`)).toEqual([
+      { code: "a", label: "A" },
+    ]);
+  });
+
+  it("checks a populated table's rows under the live name of a key column renamed in the run", async () => {
+    const sync = syncFor();
+    await sync.run([fx.PfTokenV1], { force: true });
+    driver.exec(`INSERT INTO "pf_tokens" ("code", "label") VALUES ('a', 'A'), ('b', 'B')`);
+
+    const result = await sync.run([fx.PfTokenV2Renamed], { force: true, onError: "silent" });
+    expect(result.status).toBe("synced");
+    expect(pkColumns("pf_tokens")).toEqual(["token"]);
+    expect(driver.all(`SELECT "token", "label" FROM "pf_tokens" ORDER BY "token"`)).toEqual([
+      { token: "a", label: "A" },
+      { token: "b", label: "B" },
+    ]);
   });
 
   it("refuses when an auto-increment column leaves the key", async () => {

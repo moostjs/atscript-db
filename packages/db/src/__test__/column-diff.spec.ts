@@ -199,6 +199,37 @@ describe("computeColumnDiff", () => {
     expect(diff.defaultChanged.length).toBe(0);
   });
 
+  it("detects a missing now / uuid default the engine applies, without a baseline", () => {
+    const desired = [
+      field({ physicalName: "createdAt", defaultValue: { kind: "fn", fn: "now" } }),
+      field({ physicalName: "token", defaultValue: { kind: "fn", fn: "uuid" } }),
+      field({ physicalName: "seq", defaultValue: { kind: "fn", fn: "increment" } }),
+      field({ physicalName: "status", defaultValue: { kind: "value", value: "active" } }),
+    ];
+    const existing = [
+      col("createdAt", "TEXT", true),
+      col("token", "TEXT", true),
+      col("seq", "TEXT", true),
+      col("status", "TEXT", true),
+    ];
+    const native = new Set(["now", "uuid", "increment"] as const);
+    const diff = computeColumnDiff(desired, existing, undefined, { nativeDefaultFns: native });
+    expect(
+      diff.defaultChanged.map((d) => [d.field.physicalName, d.oldDefault, d.newDefault]),
+    ).toEqual([
+      ["createdAt", undefined, "fn:now"],
+      ["token", undefined, "fn:uuid"],
+    ]);
+    // an adapter that fills them itself (SQLite) has no DDL default to miss
+    expect(computeColumnDiff(desired, existing).defaultChanged).toEqual([]);
+    // an existing one is not reported
+    const synced = [col("createdAt", "TEXT", true, false, "fn:now")];
+    expect(
+      computeColumnDiff(desired.slice(0, 1), synced, undefined, { nativeDefaultFns: native })
+        .defaultChanged,
+    ).toEqual([]);
+  });
+
   it("should detect default removed", () => {
     const desired = [field({ physicalName: "status" })];
     const existing = [col("status", "TEXT", false, false, "active")];

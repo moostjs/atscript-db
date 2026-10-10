@@ -90,11 +90,13 @@ export interface TSyncEntryInit {
   renamedFrom?: string;
   /**
    * The table's primary-key field set changes. `rebuild: true` when sync
-   * rebuilds the key (empty table); `false` when the rebuild is skipped
-   * (safe mode). A populated table is refused instead (see `refused`).
+   * rebuilds the key; `false` when the rebuild is skipped (safe mode).
+   * `populated: true` (since 0.1.155) when the table has rows — they satisfy
+   * the new key; a populated table whose rows do not is refused instead (see
+   * `refused`).
    * @since 0.1.128
    */
-  pkChange?: { from: string[]; to: string[]; rebuild: boolean };
+  pkChange?: { from: string[]; to: string[]; rebuild: boolean; populated?: boolean };
   /**
    * The work safe mode skipped on this table: `"pk-rebuild"` (`pkChange`
    * kept with `rebuild: false`), `"recreate"` (`typeChanges` kept),
@@ -163,7 +165,7 @@ export class SyncEntry {
   readonly errors: string[];
   readonly renamedFrom?: string;
   /** @since 0.1.128 — see {@link TSyncEntryInit.pkChange}. */
-  readonly pkChange?: { from: string[]; to: string[]; rebuild: boolean };
+  readonly pkChange?: { from: string[]; to: string[]; rebuild: boolean; populated?: boolean };
   /** @since 0.1.128 — see {@link TSyncEntryInit.skipped}. */
   readonly skipped: ReadonlyArray<TSyncSkippedWork>;
   /** @since 0.1.128 — see {@link TSyncEntryInit.dependsOn}. */
@@ -289,7 +291,7 @@ export class SyncEntry {
     return [`  ${c.red(head)}`, ...this.errors.map((err) => `      ${c.red(err)}`)];
   }
 
-  /** `! PK (id) → (code) — rebuild (table is empty)` / `— skipped (safe mode)` */
+  /** `! PK (id) → (code) — rebuild (table is empty)` / `— rebuild (rows satisfy the new key)` / `— skipped (safe mode)` */
   private printPkChange(c: TSyncColors, mode: "plan" | "result"): string[] {
     const pk = this.pkChange;
     if (!pk) {
@@ -300,7 +302,9 @@ export class SyncEntry {
       return [`      ${c.yellow(`! ${cols} — skipped (safe mode)`)}`];
     }
     return mode === "plan"
-      ? [`      ${c.red(`! ${cols} — rebuild (table is empty)`)}`]
+      ? [
+          `      ${c.red(`! ${cols} — rebuild (${pk.populated ? "rows satisfy the new key" : "table is empty"})`)}`,
+        ]
       : [`      ${c.yellow(`~ ${cols} — rebuilt`)}`];
   }
 

@@ -78,16 +78,19 @@ export function searchFieldVerdict(
 /**
  * Why an integer fulltext member is not index-backed (its exact-number match
  * would scan — or fail on MongoDB next to `$text`), or `undefined`. Backed:
- * `_id`, the first `@meta.id` of the type, or the first field (in declaration
- * order) of a `@db.index.plain` / `@db.index.unique` group.
+ * `_id` or the first `@meta.id` of an interface's own fields (an inline
+ * nested object's are no key of the row, like at runtime), or the first field
+ * (in declaration order) of a `@db.index.plain` / `@db.index.unique` group.
  */
 export function integerMemberIndexProblem(token: Token): string | undefined {
   const field = token.parentNode!;
   const struct = getParentStruct(token);
   if (!struct) return undefined;
-  if (field.id === "_id") return undefined;
   const props = [...struct.props.values()];
+  const topLevel = !!struct.ownerNode && isInterface(struct.ownerNode);
+  if (topLevel && field.id === "_id") return undefined;
   if (
+    topLevel &&
     field.countAnnotations("meta.id") > 0 &&
     props.find((p) => p.countAnnotations("meta.id") > 0) === field
   ) {

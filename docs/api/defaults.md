@@ -63,19 +63,22 @@ createdAt?: number
 
 Use `number` (epoch ms) for timestamps so they cross HTTP boundaries without any serialization step.
 
-::: tip Semantic Types Include Defaults
-Semantic types like `number.timestamp.created` already include `@db.default.now` — you don't need to add it manually:
+### Semantic types {#semantic-types}
+
+`number.timestamp.created` already includes `@db.default.now` — you don't need to add it:
 
 ```atscript
-// Concise — semantic type handles the default
-createdAt?: number.timestamp.created
+// Concise — the type carries the default
+createdAt: number.timestamp.created
 
 // Equivalent verbose form
 @db.default.now
-createdAt?: number
+createdAt: number.timestamp
 ```
 
-:::
+The default applies wherever the field's type is `number.timestamp.created`: directly, through a type alias (`type Created = number.timestamp.created`), as `number.timestamp.created | null`, and on a field of an embedded object. It does not apply to a field that references another field (`createdAt: Order.createdAt` copies the type, not the default), to a member of another union (`number.timestamp.created | string`), to a tuple item or to an array element. An explicit `@db.default` on the field wins. `number.timestamp.updated` is only a marker: nothing sets it.
+
+Before 0.1.155 (atscript 0.1.104) the default was not applied to such fields — see [Upgrading](/guide/upgrading#v0-1-155-behavior) for the schema change it brings.
 
 ## Version Defaults
 
@@ -102,6 +105,8 @@ Understanding when defaults apply:
 - **Static defaults are filled SDK-side on every adapter** (since 0.1.128) — `@db.default 'x'` is written explicitly into the row before validation, also on SQL adapters whose DDL carries the same `DEFAULT` clause (writing the column's own default is equivalent to leaving it out). Rows therefore reach validators and [write guards](/api/crud#write-guards) complete. Function defaults (`@db.default.now` / `.uuid` / `.increment`) stay adapter-native: they are generated SDK-side only when the adapter does not handle them in the engine (see each adapter's page).
 - **Optional fields without defaults** — become `NULL` if omitted from the insert.
 - **Fields with `@db.default.increment`** — typically omitted from inserts entirely. The database generates the next value.
+- **Fields of embedded objects** (since 0.1.155) — a default on `audit.at` is set inside `audit` when the row has an `audit` object; the SDK leaves an absent or `null` embedded object alone. On PostgreSQL and MySQL `audit.at` is a column of the row with the default in its DDL, so the engine still applies it to a row inserted without `audit`, which then reads back as an `audit` object holding the default. In an array of objects every item gets it, and inside a `@db.json` value (which has no column default) the SDK fills `now` / `uuid` on every adapter. Below a tuple or a union of several object types (`[A, B]`, `(A | B)[]`) the item a default belongs to is not known, so it is not filled, and the field is required on insert like a field without a default.
+- **Defaulted fields pass validation when omitted** — insert and replace validation (server and db-client) accept a row without a field that has a `@db.default*`, even when it is not optional (except below a tuple or a union of several types, see above). The TypeScript type still requires it unless it has `?` (next item).
 - **Non-optional fields without defaults** — must always be provided. `@db.default` does not make a field optional in TypeScript — you still need `?` if you want to omit it from inserts.
 
 ```typescript

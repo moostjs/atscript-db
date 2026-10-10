@@ -29,6 +29,20 @@ export interface PfTokenV2 {
     label: string
 }
 
+// PK moved to `code`, renamed to `token` in the same sync
+@db.table 'pf_tokens'
+@db.sync.method 'recreate'
+export interface PfTokenV2Renamed {
+    @meta.id
+    @db.column.renamed 'code'
+    token: string
+
+    @db.index.unique 'pf_id_idx'
+    id: number
+
+    label: string
+}
+
 // PK moved to `code` but `id` keeps @db.default.increment → refused
 @db.table 'pf_tokens'
 export interface PfTokenV2Inc {

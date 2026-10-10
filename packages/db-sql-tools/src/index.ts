@@ -54,6 +54,7 @@ export {
   derivedColumnExpr,
   fillReplacePayload,
   replaceColumnsFor,
+  buildKeyViolationCount,
 } from "./sql-builder";
 export {
   sqlStringLiteral,

@@ -109,6 +109,7 @@ import {
   getExistingTableOptionsImpl,
   getObjectKindImpl,
   hasRowsImpl,
+  countKeyViolationsImpl,
   DESTRUCTIVE_OPTION_KEYS,
 } from "./mongo-schema-sync";
 import { validateMongoIdPlugin } from "./validate-plugins";
@@ -767,7 +768,9 @@ export class MongoAdapter extends BaseDbAdapter {
     //   (registered in onAfterFlatten, on the stored path)
     // - Only remove from primaryKeys if the schema explicitly defines _id
     //   (via @db.mongo.collection). Otherwise keep it as PK for replace/update.
-    if (field !== "_id" && metadata.has("meta.id")) {
+    // Top-level fields only, like the primary key: an embedded document's
+    // `@meta.id` identifies that document, not this one.
+    if (field !== "_id" && !field.includes(".") && metadata.has("meta.id")) {
       this._pendingUniqueFields.push(field);
     }
     // @db.index.fulltext is registered ONLY by core (`_addIndexField("fulltext", …)`),
@@ -1689,10 +1692,14 @@ export class MongoAdapter extends BaseDbAdapter {
   async getObjectKind(name: string): Promise<TDbObjectKind | undefined> {
     return getObjectKindImpl(this as any as TMongoSchemaSyncHost, name);
   }
+  async countKeyViolations(fields: readonly string[], tableName?: string): Promise<number> {
+    return countKeyViolationsImpl(this as any as TMongoSchemaSyncHost, fields, tableName);
+  }
   /**
    * No physical primary key on MongoDB (`_id` is fixed): a `@meta.id` move is
-   * an index change that `syncIndexes` reconciles. Schema sync refuses the
-   * change on a populated collection for cross-adapter consistency.
+   * an index change that `syncIndexes` reconciles. Like on the other adapters,
+   * schema sync refuses it on a populated collection whose documents do not
+   * satisfy the new key.
    */
   async rebuildPrimaryKey(_change: TPrimaryKeyChange): Promise<void> {}
   override async syncIndexes(): Promise<void> {

@@ -1,4 +1,10 @@
-import type { TDbFieldMeta, TDerivedChangeReason, TExistingColumn, TColumnDiff } from "../types";
+import type {
+  TDbDefaultFn,
+  TDbFieldMeta,
+  TDerivedChangeReason,
+  TExistingColumn,
+  TColumnDiff,
+} from "../types";
 import { serializeDefaultValue, type TFieldSnapshot, type TTableSnapshot } from "./schema-hash";
 import { fkKey } from "./fk-diff";
 
@@ -65,7 +71,7 @@ export function computeColumnDiff(
   desired: readonly TDbFieldMeta[],
   existing: TExistingColumn[],
   typeMapper?: (field: TDbFieldMeta) => string,
-  opts?: { snapshot?: TTableSnapshot | null },
+  opts?: { snapshot?: TTableSnapshot | null; nativeDefaultFns?: ReadonlySet<TDbDefaultFn> },
 ): TColumnDiff {
   const existingByName = new Map(existing.map((c) => [c.name, c]));
   const snapshotByName = opts?.snapshot
@@ -130,9 +136,18 @@ export function computeColumnDiff(
 
         // Check default value change — only when a baseline exists.
         // When existingCol.dflt_value is undefined, we have no baseline
-        // (e.g., old DDL without DEFAULT clause) and can't detect changes.
+        // (e.g., old DDL without DEFAULT clause) and can't detect changes —
+        // except a `now` / `uuid` default the engine applies itself
+        // (`nativeDefaultFns`): the table layer leaves such a field out of an
+        // INSERT, so a column without it would reject the row.
         const desiredDefault = serializeDefaultValue(field.defaultValue);
-        if (existingCol.dflt_value !== undefined && existingCol.dflt_value !== desiredDefault) {
+        const fn = field.defaultValue?.kind === "fn" ? field.defaultValue.fn : undefined;
+        const missingNative =
+          fn !== undefined && fn !== "increment" && opts?.nativeDefaultFns?.has(fn) === true;
+        if (
+          (existingCol.dflt_value !== undefined || missingNative) &&
+          existingCol.dflt_value !== desiredDefault
+        ) {
           defaultChanged.push({
             field,
             oldDefault: existingCol.dflt_value,

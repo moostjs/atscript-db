@@ -15,6 +15,7 @@ import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
+import { columnUnionBase } from "../shared/nullable-union";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
 import { searchMemberKind } from "../shared/search-fields";
 import type {
@@ -513,10 +514,13 @@ export class TableMetadata {
    * into the synthetic flat entry of the prop's path, so a member's
    * annotations would reach the column (DDL type, size, default). Since
    * atscript 0.1.103 a built-in primitive member carries its built-in
-   * annotations (`number.timestamp.created | null` → `@db.default.now`,
-   * `string.char` → `@expect.maxLength 1`). Rebuild such an entry from the
-   * prop's own annotations plus the non-`db.*` annotations of named members
-   * (aliases, interfaces), so the column is described as before 0.1.103.
+   * annotations (`string.char` → `@expect.maxLength 1`). Rebuild such an
+   * entry from the prop's own annotations plus the non-`db.*` annotations of
+   * named members (aliases, interfaces), so the column is described as before
+   * 0.1.103. Exception: the one non-`null` member of `T | null` is the
+   * column's type, so its `db.*` annotations apply too — `createdAt:
+   * number.timestamp.created | null` gets `@db.default.now` like
+   * `createdAt: number.timestamp.created`.
    */
   private _dropMemberMetadata(collected: readonly TCollectedField[]): void {
     const byPath = new Map<string, TCollectedField[]>();
@@ -531,15 +535,22 @@ export class TableMetadata {
         | (TAtscriptAnnotatedType & { __flat_union?: boolean })
         | undefined;
       if (!flat?.__flat_union) continue;
+      const prop = entries.find((e) => !e.member);
+      const base = prop && columnUnionBase(prop.type);
       // The synthetic entry's map is its own (no member shares it): refill in place.
       const target = flat.metadata as Map<string, unknown>;
       target.clear();
       for (const entry of entries) {
-        if (entry.member && isInlinePrimitive(entry.type)) continue;
+        const inline = entry.member && isInlinePrimitive(entry.type);
+        const isBase = entry.member && entry.type === base;
         for (const [key, value] of entry.metadata) {
-          if (!entry.member || !key.startsWith("db.")) target.set(key, value);
+          if (!entry.member || (key.startsWith("db.") ? isBase : !inline)) {
+            target.set(key, value);
+          }
         }
       }
+      // Phase 2 scans the prop's entry: let it see T's db annotations too.
+      if (base && prop) prop.metadata = target as TMetadataMap<AtscriptMetadata>;
     }
   }
 
@@ -595,8 +606,9 @@ export class TableMetadata {
     metadata: TMetadataMap<AtscriptMetadata>,
     logger: TGenericLogger,
   ): void {
-    // @meta.id → primary key
-    if (metadata.has("meta.id")) {
+    // @meta.id → primary key. Only the table's own top-level fields: an
+    // embedded object's `@meta.id` identifies that object, not this row.
+    if (metadata.has("meta.id") && !fieldName.includes(".")) {
       this.primaryKeys.push(fieldName);
       this.originalMetaIdFields.push(fieldName);
     }

@@ -6,8 +6,10 @@ import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 import { prepareFixtures } from "./test-utils";
 
 // Since atscript 0.1.103 `number.timestamp.created | null` carries
-// `@db.default.now` on its member. Members are not columns: the table is the
-// same as with atscript 0.1.102 and no member default is filled on insert.
+// `@db.default.now` on its member and `string.char | string` carries
+// `@expect.maxLength 1`. Members are not columns — except the one non-null
+// member of `T | null`, whose db annotations apply (a `now` default, filled on
+// insert); `created: number.timestamp.created` has the default too.
 
 let fx: Record<string, any>;
 
@@ -24,16 +26,19 @@ describe("SqliteAdapter — union / tuple members", () => {
     const { sql } = driver.get("SELECT sql FROM sqlite_master WHERE name = 'union_members'") as {
       sql: string;
     };
-    expect(sql).toBe(
-      'CREATE TABLE "union_members" ("id" INTEGER PRIMARY KEY, "x" TEXT NOT NULL, "y" TEXT, "pair" TEXT NOT NULL, "emails" TEXT NOT NULL, "n" TEXT NOT NULL, "code" TEXT NOT NULL, "created" REAL NOT NULL)',
-    );
+    // T | null and the plain field: no DDL default on SQLite (filled on insert);
+    // no member sizes the column
+    expect(sql).not.toContain("DEFAULT");
+    expect(sql).toContain('"code" TEXT NOT NULL');
 
-    const row = { pair: [1, "a"], emails: ["a@b.co"], n: 2, code: "abc", created: 1 };
+    const row = { pair: [1, "a"], emails: ["a@b.co"], n: 2, code: "abc" };
     await table.insertOne({ id: 1, x: 5, ...row } as any);
-    expect(await table.findOne({ filter: { id: 1 }, controls: {} } as any)).toMatchObject({
-      y: null,
-    });
-    await expect(table.insertOne({ id: 2, ...row } as any)).rejects.toThrow(/x/);
+    const stored = (await table.findOne({ filter: { id: 1 }, controls: {} } as any)) as any;
+    expect(Number(stored.y)).toBeGreaterThan(0);
+    expect(stored.created).toBeGreaterThan(0);
+    await expect(table.insertOne({ id: 2, ...row, pair: [undefined, "a"] } as any)).rejects.toThrow(
+      /pair\.0/,
+    );
     driver.close();
   });
 });

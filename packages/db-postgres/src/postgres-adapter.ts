@@ -68,6 +68,7 @@ import {
   SEARCH_SOURCE_ALIAS,
   mapQueryErrors,
   orFragment,
+  buildKeyViolationCount,
 } from "@atscript/db-sql-tools";
 
 import { mapIgnoredBatch } from "./insert-ignore";
@@ -1292,6 +1293,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     return row?.present ?? false;
   }
 
+  async countKeyViolations(columns: readonly string[], tableName?: string): Promise<number> {
+    const target = tableName ? this._qualify(tableName) : quoteTableName(this.resolveTableName());
+    const sql = buildKeyViolationCount(pgDialect, target, columns);
+    this._log(sql);
+    const row = await this._exec().get<{ violations: number | string }>(sql, []);
+    return Number(row?.violations ?? 0);
+  }
+
   /**
    * Live foreign keys referencing `tableName`, via `pg_constraint` — exact for
    * composite keys (`conkey`/`confkey` are positionally aligned, unlike the
@@ -1363,8 +1372,9 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   /**
    * `ALTER TABLE … DROP CONSTRAINT <pk>, ADD PRIMARY KEY (…)` in ONE statement
-   * (atomic). Called on an empty table only; `ADD PRIMARY KEY` makes the new
-   * key columns NOT NULL. A demoted identity column is handled by the
+   * (atomic: rows a concurrent write made violate the new key fail it with
+   * the old key in place). Called on an empty table or one whose rows satisfy
+   * the new key; `ADD PRIMARY KEY` makes the new key columns NOT NULL. A demoted identity column is handled by the
    * `defaultChanged` diff (`DROP IDENTITY`).
    */
   async rebuildPrimaryKey(change: TPrimaryKeyChange): Promise<void> {

@@ -167,6 +167,39 @@ export async function hasRowsImpl(
   return doc !== null;
 }
 
+/**
+ * Documents `fields` cannot identify (see `BaseDbAdapter.countKeyViolations`):
+ * those missing one of them or holding `null`, plus every document sharing
+ * its values with another — one `$facet` aggregation.
+ */
+export async function countKeyViolationsImpl(
+  host: TMongoSchemaSyncHost,
+  fields: readonly string[],
+  tableName?: string,
+): Promise<number> {
+  const key = Object.fromEntries(fields.map((f, i) => [`k${i}`, `$${f}`]));
+  const [result] = await host.db
+    .collection(tableName ?? host.resolveTableName(false))
+    .aggregate<{ nulls: Array<{ n: number }>; dups: Array<{ n: number }> }>(
+      [
+        {
+          $facet: {
+            nulls: [{ $match: { $or: fields.map((f) => ({ [f]: null })) } }, { $count: "n" }],
+            dups: [
+              { $match: { $and: fields.map((f) => ({ [f]: { $ne: null } })) } },
+              { $group: { _id: key, n: { $sum: 1 } } },
+              { $match: { n: { $gt: 1 } } },
+              { $group: { _id: null, n: { $sum: "$n" } } },
+            ],
+          },
+        },
+      ],
+      host._getSessionOpts(),
+    )
+    .toArray();
+  return (result?.nulls[0]?.n ?? 0) + (result?.dups[0]?.n ?? 0);
+}
+
 /** Kind of the object stored under `name` (`listCollections` reports views as `"view"`). */
 export async function getObjectKindImpl(
   host: TMongoSchemaSyncHost,
