@@ -124,7 +124,7 @@ Use `versionColumnPhysical`, not `versionColumn`: `versionColumn` is the field n
 ### Schema
 
 - **`ensureTable(opts?)`** — Create the table/collection if it does not exist. Use `this._table.tableName`, `this._table.fieldDescriptors`, and `this._table.foreignKeys` to build the DDL — name FK columns by each FK's `physicalFields` / `physicalTargetFields` (since 0.1.147; `fields` / `targetFields` are the logical names and differ under `@db.column`). Branch on **`this._table.isView`** (or the exported `isAtscriptDbView()` guard) to create a view — never `instanceof AtscriptDbView`: a bundle can carry two copies of `@atscript/db`, and a false `instanceof` would create an empty physical table under the view's name. If your engine emits inline `FOREIGN KEY` constraints, omit those whose target is in `opts.deferForeignKeysTo` (since 0.1.128 — schema sync creates a foreign-key cycle that way and adds the constraints through `syncForeignKeys()` once every member exists).
-- **`syncIndexes()`** — Synchronize indexes between Atscript definitions and the database. Use `this._table.indexes` for the desired index state.
+- **`syncIndexes(opts?)`** — Synchronize indexes between Atscript definitions and the database. Use `this._table.indexes` for the desired index state. In safe mode schema sync passes `TSyncIndexesOptions` (since 0.1.156) naming indexes to leave as they are because the change they depend on was skipped: `keepPrimaryKey` (a skipped key rebuild — for an adapter whose primary key is an index, like MongoDB's `__pk`) and `keepColumns` (columns whose type change is pending — for index definitions that depend on the column type). Ignore it if neither applies.
 
 ::: tip
 Data passed to insert/update/replace methods is **already processed** by the table layer — defaults applied, `@db.ignore` fields stripped, column names mapped. Your adapter only needs to translate to the database's native query language.
@@ -466,7 +466,7 @@ Drop specific columns from the table. Used by schema sync to remove stale column
 
 #### `dropIndexesForColumns(columns)`
 
-Drop managed (`atscript__`-prefixed) indexes that reference any of the given columns. Called by schema sync **before** `dropColumns` — engines like SQLite refuse to drop a column while an index still references it, and a composite index that survives by name must be rebuilt without the removed column (`syncIndexes` recreates it afterwards). Implement this if your engine does not cascade index drops on `DROP COLUMN`.
+Drop managed (`atscript__`-prefixed) indexes that reference any of the given columns. Called by schema sync **before** `dropColumns` — engines like SQLite refuse to drop a column while an index still references it, and a composite index that survives by name must be rebuilt without the removed column (`syncIndexes` recreates it afterwards). Implement this if your engine does not cascade index drops on `DROP COLUMN`, or if an index can make the drop fail — MongoDB implements it because a unique index on a required field indexes an unset field as `null`, so `$unset` collides on the second document.
 
 ### Views
 

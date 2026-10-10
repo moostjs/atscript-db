@@ -28,6 +28,7 @@ import {
   type TColumnDiff,
   type TDbObjectKind,
   type TPrimaryKeyChange,
+  type TSyncIndexesOptions,
   type TSyncColumnResult,
   type TDbCollation,
   type TExistingTableOption,
@@ -100,6 +101,7 @@ import {
   syncIndexesImpl,
   syncColumnsImpl,
   dropColumnsImpl,
+  dropIndexesForColumnsImpl,
   renameTableImpl,
   recreateTableImpl,
   dropTableImpl,
@@ -1725,17 +1727,21 @@ export class MongoAdapter extends BaseDbAdapter {
    * No physical primary key on MongoDB (`_id` is fixed): a `@meta.id` move is
    * an index change that `syncIndexes` reconciles. Like on the other adapters,
    * schema sync refuses it on a populated collection whose documents do not
-   * satisfy the new key.
+   * satisfy the new key. An old key field removed in the same sync loses its
+   * `__pk` index first (`dropIndexesForColumns`).
    */
   async rebuildPrimaryKey(_change: TPrimaryKeyChange): Promise<void> {}
-  override async syncIndexes(): Promise<void> {
-    return syncIndexesImpl(this as any as TMongoSchemaSyncHost);
+  override async syncIndexes(opts?: TSyncIndexesOptions): Promise<void> {
+    return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts);
   }
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
     return syncColumnsImpl(this as any as TMongoSchemaSyncHost, diff);
   }
   async dropColumns(columns: string[]): Promise<void> {
     return dropColumnsImpl(this as any as TMongoSchemaSyncHost, columns);
+  }
+  async dropIndexesForColumns(columns: string[]): Promise<void> {
+    return dropIndexesForColumnsImpl(this as any as TMongoSchemaSyncHost, columns);
   }
   async renameTable(oldName: string): Promise<void> {
     return renameTableImpl(this as any as TMongoSchemaSyncHost, oldName);

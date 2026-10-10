@@ -868,6 +868,24 @@ export interface TEnsureTableOptions {
   deferForeignKeysTo?: ReadonlySet<string>;
 }
 
+/**
+ * Options accepted by `BaseDbAdapter.syncIndexes` (since 0.1.156): indexes
+ * that stay as they are because safe mode skipped the change they depend on
+ * (`entry.skipped`) — it is pending, applied by the next run without `safe`.
+ */
+export interface TSyncIndexesOptions {
+  /**
+   * The primary-key rebuild is skipped (`'pk-rebuild'`): an adapter whose
+   * key is an index (MongoDB's `__pk` unique index) keeps the live one.
+   */
+  keepPrimaryKey?: boolean;
+  /**
+   * Physical columns whose type change is skipped (`'recreate'`): indexes
+   * over them are neither dropped, replaced nor created.
+   */
+  keepColumns?: readonly string[];
+}
+
 /** Result of applying column diff to the database. */
 export interface TSyncColumnResult {
   added: string[];

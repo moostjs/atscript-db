@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 import {
   DbSpace,
   BaseDbAdapter,
@@ -2895,11 +2895,15 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
     // S.7: a skipped rebuild is not destructive
     expect(plan.entries.every((e) => !e.destructive)).toBe(true);
 
+    const syncIndexes = vi.spyOn(MockAdapter.prototype, "syncIndexes");
     const result = await sync.run([Pf.PfTokenV2], { force: true, safe: true, logger });
     expect(result.status).toBe("synced");
     const entry = result.entries.find((e) => e.name === "pf_tokens")!;
     expect(entry.status).toBe("alter");
     expect(entry.pkChange).toEqual({ from: ["id"], to: ["code"], rebuild: false });
+    // The live key's index (MongoDB `__pk`) stays as it is (since 0.1.156)
+    expect(syncIndexes).toHaveBeenCalledWith({ keepPrimaryKey: true, keepColumns: [] });
+    syncIndexes.mockRestore();
     expect(entry.destructive).toBe(false);
     expect(entry.print("result").join("\n")).toContain("! PK (id) → (code) — skipped (safe mode)");
     expect(sharedDdl.some((d) => d.startsWith("rebuildPrimaryKey"))).toBe(false);
@@ -2989,6 +2993,31 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
     expect(fkDrop).toBe(0);
     expect(pk).toBeGreaterThan(fkDrop);
     expect(childFk).toBeGreaterThan(pk);
+    // The child's own FK-change drop does not repeat it
+    expect(sharedDdl.filter((d) => d.startsWith("dropForeignKeys pf_children"))).toEqual([
+      "dropForeignKeys pf_children tokenId",
+    ]);
+  });
+
+  it("names a pre-dropped FK once when the retargeting child's step fails", async () => {
+    const { space, sync } = await syncTokensV1(Pf.PfChildOld);
+    const child = space.get(Pf.PfChildNew).dbAdapter as MockAdapter;
+    child.setExistingColumns([
+      { name: "id", type: "INTEGER", notnull: true, pk: true },
+      { name: "tokenId", type: "INTEGER", notnull: true, pk: false },
+    ]);
+    child.syncForeignKeys = async () => {
+      throw new Error("boom-fk");
+    };
+    const result = await sync.run([Pf.PfChildNew, Pf.PfTokenV2], {
+      force: true,
+      onError: "silent",
+    });
+    const entry = result.entries.find((e) => e.name === "pf_children")!;
+    expect(entry.status).toBe("error");
+    expect(entry.errors).toEqual([
+      "Index/FK sync failed on pf_children: boom-fk Dropped foreign keys before the failure: tokenId — the ones still in the model are re-added by the next run's syncForeignKeys.",
+    ]);
   });
 
   it("refuses a primary-key change when a retargeting child is renamed in the same run", async () => {

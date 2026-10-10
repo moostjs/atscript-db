@@ -139,7 +139,7 @@ interface SyncEntry {
   renamedFrom?: string;
 
   // Since 0.1.128
-  pkChange?: { from: string[]; to: string[]; rebuild: boolean }; // primary-key field set change; rebuild=false when safe mode skipped it
+  pkChange?: { from: string[]; to: string[]; rebuild: boolean; populated?: boolean }; // primary-key field set change; rebuild=false when safe mode skipped it; populated=true when the table has rows (since 0.1.155)
   dependsOn: string[]; // tables and views this entry's DDL waits for (FK parents / view sources / referencing children of a drop)
   dropGroup?: string[]; // set when a foreign-key cycle is dropped as one group
   refused: boolean; // this `error` entry is a pre-flight refusal — no DDL ran

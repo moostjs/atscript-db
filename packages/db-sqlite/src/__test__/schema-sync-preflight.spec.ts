@@ -122,16 +122,13 @@ describe("SQLite: schema-sync pre-flight, ordering and primitives", () => {
 
     // Rows satisfying the new key (since 0.1.155) → rebuilt with the data
     driver.exec(`DELETE FROM "pf_tokens" WHERE "label" = 'B'`);
+    const rebuilt = { from: ["id"], to: ["code"], rebuild: true, populated: true };
     const ok = await sync.plan([fx.PfTokenV2]);
-    expect(ok.entries.find((e) => e.name === "pf_tokens")!.pkChange).toEqual({
-      from: ["id"],
-      to: ["code"],
-      rebuild: true,
-      populated: true,
-    });
-    expect((await sync.run([fx.PfTokenV2], { force: true, onError: "silent" })).status).toBe(
-      "synced",
-    );
+    expect(ok.entries.find((e) => e.name === "pf_tokens")!.pkChange).toEqual(rebuilt);
+    // The run entry reports it as the plan does (since 0.1.156)
+    const run = await sync.run([fx.PfTokenV2], { force: true, onError: "silent" });
+    expect(run.status).toBe("synced");
+    expect(run.entries.find((e) => e.name === "pf_tokens")!.pkChange).toEqual(rebuilt);
     expect(pkColumns("pf_tokens")).toEqual(["code"]);
     expect(driver.all(`SELECT "code", "label" FROM "pf_tokens"`)).toEqual([
       { code: "a", label: "A" },

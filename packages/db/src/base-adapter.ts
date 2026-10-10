@@ -35,6 +35,7 @@ import type {
   TDbObjectKind,
   TEnsureTableOptions,
   TPrimaryKeyChange,
+  TSyncIndexesOptions,
   TReferencingForeignKey,
 } from "./types";
 import type {
@@ -1206,9 +1207,12 @@ export abstract class BaseDbAdapter {
 
   /**
    * Synchronizes indexes between the Atscript definitions and the database.
-   * Uses `this._table.indexes` for the full index definitions.
+   * Uses `this._table.indexes` for the full index definitions. Schema sync
+   * passes `opts` when safe mode skipped work the indexes depend on (see
+   * {@link TSyncIndexesOptions}); an adapter whose indexes do not depend on it
+   * ignores them.
    */
-  abstract syncIndexes(): Promise<void>;
+  abstract syncIndexes(opts?: TSyncIndexesOptions): Promise<void>;
 
   /**
    * Ensures the table exists in the database, creating it if needed.
@@ -1358,8 +1362,9 @@ export abstract class BaseDbAdapter {
    * given columns. Called by schema sync BEFORE {@link dropColumns} — engines
    * like SQLite refuse to drop a column while an index still references it,
    * and a composite index that survives by name must be rebuilt without the
-   * removed column (recreated later by {@link syncIndexes}).
-   * Optional — only relational adapters implement this.
+   * removed column (recreated later by {@link syncIndexes}). MongoDB drops
+   * them because a unique index would reject the `$unset` (`null` twice).
+   * Optional — the SQL adapters and MongoDB implement this.
    */
   dropIndexesForColumns?(columns: string[]): Promise<void>;
 

@@ -10,6 +10,7 @@ import type {
   TEnsureTableOptions,
   TExistingColumn,
   TReferencingForeignKey,
+  TSyncIndexesOptions,
   TTableOptionDiff,
 } from "../types";
 import type { SyncStore } from "./sync-store";
@@ -331,8 +332,12 @@ export async function executeSyncTable(
               ...fkDiff.changed.map((fk) => fkKey(fkColumns(fk.desired).fields)),
             ];
             if (keysToDrop.length > 0) {
-              await adapter.dropForeignKeys(keysToDrop);
-              droppedFks.push(...keysToDrop);
+              // Those to a key-changing parent are gone already (`preDroppedFks`)
+              const fresh = keysToDrop.filter((key) => !droppedFks.includes(key));
+              if (fresh.length > 0) {
+                await adapter.dropForeignKeys(fresh);
+                droppedFks.push(...fresh);
+              }
               init.status = "alter";
             }
           }
@@ -422,6 +427,11 @@ export async function executeSyncTable(
       }
     }
 
+    // Reported as `plan()` reports it (`planTableInit`)
+    if (init.pkChange && facts.populated === true) {
+      init.pkChange.populated = true;
+    }
+
     // The executor's defensive copies of the plan rules (see `applyColumnDiff`)
     // can still error the entry: no index/FK work on it then.
     if (init.status === "error") {
@@ -431,7 +441,7 @@ export async function executeSyncTable(
     // Indexes and foreign keys. DDL here can fail on data conflicts (e.g.
     // CREATE UNIQUE INDEX over duplicate rows).
     phase = "Index/FK sync";
-    await adapter.syncIndexes();
+    await adapter.syncIndexes(keptIndexes(init));
     // Cycle members add their FKs in the deferred pass, once every member exists.
     if (adapter.syncForeignKeys && !exec.deferForeignKeysTo) {
       await adapter.syncForeignKeys();
@@ -621,9 +631,34 @@ function markSkipped(init: TSyncEntryInit, kind: TSyncSkippedWork): void {
   init.skipped = [...(init.skipped ?? []), kind];
 }
 
-/** Whether nullable/default changes need DDL on this adapter (schema-less ones only update the snapshot). */
+/**
+ * Whether nullable/default changes need DDL on this adapter: in-place modify,
+ * or a recreate on a live-introspected one (SQLite). Snapshot-based adapters
+ * (MongoDB) have no column constraint to change — they only update the
+ * snapshot, even with a `recreateTable`.
+ */
 function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
-  return (!!adapter.supportsColumnModify && !!adapter.syncColumns) || !!adapter.recreateTable;
+  return (
+    (!!adapter.supportsColumnModify && !!adapter.syncColumns) ||
+    (!!adapter.recreateTable && !!adapter.getExistingColumns)
+  );
+}
+
+/**
+ * The indexes `syncIndexes` keeps as they are because safe mode skipped
+ * the change they depend on — a skipped key rebuild, the columns of a
+ * skipped type-change recreate (see `TSyncIndexesOptions`).
+ */
+function keptIndexes(init: TSyncEntryInit): TSyncIndexesOptions | undefined {
+  const skipped = init.skipped ?? [];
+  const keepPrimaryKey = skipped.includes("pk-rebuild");
+  const keepColumns = skipped.includes("recreate")
+    ? (init.typeChanges ?? []).map((tc) => tc.column)
+    : [];
+  if (!keepPrimaryKey && keepColumns.length === 0) {
+    return undefined;
+  }
+  return { keepPrimaryKey, keepColumns };
 }
 
 /**
@@ -828,7 +863,7 @@ async function applyColumnDiff(
       if (adapter.supportsColumnModify && adapter.syncColumns) {
         needsSyncColumns = true;
         init.status = "alter";
-      } else if (adapter.recreateTable) {
+      } else if (needsDdlForNullableDefaults(adapter)) {
         await recreateKeepingRenames(adapter, diff, init);
       } else {
         // Schema-less adapter — just mark as alter; snapshot will be updated

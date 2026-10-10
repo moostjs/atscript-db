@@ -218,7 +218,7 @@ Single-statement writes (0.1.151): one row + no `guard`/`check` + no nested nav 
 
 ## Index sync helper
 
-Reuse the template method. `prefix` defaults to `'atscript__'` — omit unless overriding.
+Reuse the template method. `prefix` defaults to `'atscript__'` — omit unless overriding. Schema sync calls `syncIndexes(opts?: TSyncIndexesOptions)` (0.1.156): in safe mode `keepPrimaryKey` (skipped key rebuild) / `keepColumns` (skipped `'drop'` type change) name indexes to leave untouched — only matters when your PK is an index (Mongo `__pk`) or index definitions depend on column types; otherwise ignore it.
 
 ```ts
 async syncIndexes(): Promise<void> {

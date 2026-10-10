@@ -10,11 +10,13 @@ import {
   type TDbFieldMeta,
   type TDbObjectKind,
   type TExistingTableOption,
+  type TSyncIndexesOptions,
 } from "@atscript/db";
 import {
   INDEX_PREFIX,
   isPlainIndex,
   mongoCollationOf,
+  mongoIndexKey,
   type TMongoCollation,
   type TMongoIndex,
   type TPlainIndex,
@@ -399,6 +401,34 @@ export async function dropColumnsImpl(
 }
 
 /**
+ * Drops the managed indexes over any of `columns` (or a path under one).
+ * Schema sync calls it before {@link dropColumnsImpl}: a unique index on a
+ * required field indexes a `$unset` document as `null`, so the second one
+ * collides (E11000) — e.g. the old key field's `__pk` index when a `@meta.id`
+ * move removes that field. `syncIndexesImpl` then builds what the model wants.
+ */
+export async function dropIndexesForColumnsImpl(
+  host: TMongoSchemaSyncHost,
+  columns: string[],
+): Promise<void> {
+  const dropped = new Set(columns);
+  let existing: TRemoteMongoIndex[];
+  try {
+    existing = (await host.collection.listIndexes().toArray()) as TRemoteMongoIndex[];
+  } catch (error) {
+    // NamespaceNotFound — no collection, no indexes
+    if ((error as { code?: number }).code === 26) return;
+    throw error;
+  }
+  for (const remote of existing) {
+    if (remote.name.startsWith(INDEX_PREFIX) && coversAny(remote.key, remote.weights, dropped)) {
+      host._log("dropIndex", remote.name);
+      await host.collection.dropIndex(remote.name);
+    }
+  }
+}
+
+/**
  * The segments of a field's physical document path with `$[]` after every
  * segment whose logical prefix is an array in the flatMap — Mongo's
  * all-positional operator walks every element. `physicalPath` defaults to
@@ -461,9 +491,36 @@ function resolveSyncDefault(field: TDbFieldMeta): unknown {
   return undefined;
 }
 
+/**
+ * Whether an index's fields include one of `paths` or a path under one —
+ * a text index lists its fields in `weights` (its key is `_fts` / `_ftsx`).
+ */
+function coversAny(
+  key: Record<string, unknown>,
+  weights: Record<string, number> | undefined,
+  paths: ReadonlySet<string>,
+): boolean {
+  return [...Object.keys(key), ...Object.keys(weights ?? {})].some(
+    (f) => paths.has(f) || hasAncestorIn(f, paths),
+  );
+}
+
 // ── Index sync ───────────────────────────────────────────────────────────────
 
-export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void> {
+/** The `__pk` unique index of non-`_id` `@meta.id` fields. */
+const PK_INDEX = mongoIndexKey("unique", "__pk");
+
+/**
+ * Reconciles the managed indexes with the model. `opts` (schema sync, safe
+ * mode) names the indexes that stay as they are — neither dropped, replaced
+ * nor created — because the change they depend on was skipped: the `__pk`
+ * index of a skipped key rebuild, the indexes over a column whose type change
+ * is pending (its present-only filter is typed).
+ */
+export async function syncIndexesImpl(
+  host: TMongoSchemaSyncHost,
+  opts?: TSyncIndexesOptions,
+): Promise<void> {
   await host.ensureCollectionExists();
 
   // Merge generic indexes with MongoDB-specific indexes
@@ -537,6 +594,24 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
 
   const indexesToCreate = new Map(allIndexes);
 
+  const keepColumns = new Set(opts?.keepColumns ?? []);
+  const isKept = (name: string, key: Record<string, unknown>, weights?: Record<string, number>) =>
+    (opts?.keepPrimaryKey === true && name === PK_INDEX) || coversAny(key, weights, keepColumns);
+  const kept = new Set<string>();
+  for (const index of allIndexes.values()) {
+    if (isPlainIndex(index) && isKept(index.key, index.fields, index.weights)) {
+      kept.add(index.key);
+    }
+  }
+  for (const remote of existingIndexes) {
+    if (isKept(remote.name, remote.key, remote.weights)) {
+      kept.add(remote.name);
+    }
+  }
+  for (const name of kept) {
+    indexesToCreate.delete(name);
+  }
+
   // Per-index error isolation: a failing createIndex/dropIndex (e.g. a unique
   // index over duplicate data) must not abort the remaining index maintenance
   // for this collection.
@@ -557,7 +632,7 @@ export async function syncIndexesImpl(host: TMongoSchemaSyncHost): Promise<void>
   };
 
   for (const remote of existingIndexes) {
-    if (!remote.name.startsWith(INDEX_PREFIX)) {
+    if (!remote.name.startsWith(INDEX_PREFIX) || kept.has(remote.name)) {
       continue;
     }
     if (indexesToCreate.has(remote.name)) {

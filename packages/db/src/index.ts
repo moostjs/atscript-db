@@ -169,6 +169,7 @@ export type {
   TReferencingForeignKey,
   TDbObjectKind,
   TEnsureTableOptions,
+  TSyncIndexesOptions,
   TTableResolver,
   TWriteTableResolver,
   AtscriptDbWritable,

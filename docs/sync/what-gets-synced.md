@@ -136,7 +136,7 @@ bio?: string
 bio: string
 ```
 
-Adapters with `supportsColumnModify` handle this in-place. On SQLite, nullable changes require table recreation (see [Structural Changes](#structural-changes)). In `--safe` mode neither runs: on an adapter that needs DDL for the change it is skipped and pending (`entry.skipped` includes `'nullable-defaults'`, the table's snapshot and the hash are withheld until a run without `--safe`); a snapshot-only adapter just records the new shape. Default changes follow the same rule.
+Adapters with `supportsColumnModify` handle this in-place. On SQLite, nullable changes require table recreation (see [Structural Changes](#structural-changes)). In `--safe` mode neither runs: on an adapter that needs DDL for the change it is skipped and pending (`entry.skipped` includes `'nullable-defaults'`, the table's snapshot and the hash are withheld until a run without `--safe`); a snapshot-only adapter just records the new shape. MongoDB has no column constraint: the snapshot is updated and a unique index over the field gets or loses its present-only filter, in safe mode too (since 0.1.156; before, the collection was recreated). Default changes follow the same rule.
 
 ### Default Change
 
@@ -541,7 +541,7 @@ Since 0.1.128 sync detects a change of the **primary-key field set** — `@meta.
 | MySQL      | One `ALTER TABLE … MODIFY <new key columns> NOT NULL[, MODIFY <old key columns>], DROP PRIMARY KEY, ADD PRIMARY KEY (…)` — a new increment key column is added without `AUTO_INCREMENT` and receives it here; an old key column's own changes (losing `AUTO_INCREMENT`, `VARCHAR(255)` → `TEXT`) are made in the same statement |
 | PostgreSQL | One `ALTER TABLE … DROP CONSTRAINT <pk>, ADD PRIMARY KEY (…)`; a demoted identity column gets `ALTER COLUMN … DROP IDENTITY`                                                                                                                                                                                                    |
 | SQLite     | Table recreation with the rows copied; a type change of a demoted key column (non-key numbers are `REAL`) is applied by the same recreation (since 0.1.155; before, it needed `@db.sync.method 'recreate'`)                                                                                                                     |
-| MongoDB    | No physical key: `_id` is fixed and a `@meta.id` move is an index change reconciled by index sync (`__pk` unique index); the populated check applies                                                                                                                                                                            |
+| MongoDB    | No physical key: `_id` is fixed and a `@meta.id` move is an index change reconciled by index sync (`__pk` unique index); the populated check applies. An old key field removed in the same sync loses its `__pk` index before it is unset (since 0.1.156)                                                                       |
 | Memory     | Not applicable (no column introspection)                                                                                                                                                                                                                                                                                        |
 
 ### Method Comparison
