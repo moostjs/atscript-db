@@ -3016,7 +3016,7 @@ describe("SchemaSync — pre-flight refusals (no DDL)", () => {
     const entry = result.entries.find((e) => e.name === "pf_children")!;
     expect(entry.status).toBe("error");
     expect(entry.errors).toEqual([
-      "Index/FK sync failed on pf_children: boom-fk Dropped foreign keys before the failure: tokenId — the ones still in the model are re-added by the next run's syncForeignKeys.",
+      "Index/FK sync failed on pf_children: boom-fk. Dropped foreign keys before the failure: tokenId — the ones still in the model are re-added by the next run's syncForeignKeys.",
     ]);
   });
 
@@ -4113,7 +4113,7 @@ describe("SchemaSync — a DDL failure inside a table becomes an error entry (0.
     const beta = result.entries.find((e) => e.name === "sf_beta")!;
     // The Path-A FK drop ran before the column op that failed — the message says so
     expect(beta.errors).toEqual([
-      "Column sync failed on sf_beta: boom-columns Dropped foreign keys before the failure: alphaId — the ones still in the model are re-added by the next run's syncForeignKeys.",
+      "Column sync failed on sf_beta: boom-columns. Dropped foreign keys before the failure: alphaId — the ones still in the model are re-added by the next run's syncForeignKeys.",
     ]);
     expect(beta.pending).toBe(true);
     // The plan's view of the table is carried on the error entry

@@ -455,7 +455,10 @@ export async function executeSyncTable(
       droppedFks.length > 0
         ? ` Dropped foreign keys before the failure: ${droppedFks.join(", ")} — the ones still in the model are re-added by the next run's syncForeignKeys.`
         : "";
-    const msg = `${phase} failed on ${name}: ${(error as Error).message}${dropped}`;
+    const reason = (error as Error).message;
+    // Engine messages (PostgreSQL, MySQL) end without a period — keep the note a separate sentence.
+    const sep = dropped && !/[.!?]$/.test(reason) ? "." : "";
+    const msg = `${phase} failed on ${name}: ${reason}${sep}${dropped}`;
     deps.logger.error?.(`[schema-sync] ${msg}`);
     const planned = planTableInit(facts, safe, exec.dependsOn);
     return new SyncEntry({

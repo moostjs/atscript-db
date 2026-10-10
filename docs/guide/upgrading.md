@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.157 {#v0-1-157}
+
+### Fixes
+
+- **Sync error message separator.** When a table's sync failed after foreign keys were dropped, the "Dropped foreign keys before the failure: …" note was appended to the engine message without a separator (PostgreSQL and MySQL messages end without a period). It is now a separate sentence. No behavior change — but code that matches the whole error line now needs the period.
+
 ## 0.1.156 {#v0-1-156}
 
 **Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.106.** In that release `number.timestamp.updated` carries `@db.default.now` and the new `@db.onUpdate.now` (atscript 0.1.104 and 0.1.105 described it as a marker that nothing sets — it was always documented as set on every write, and now is).
