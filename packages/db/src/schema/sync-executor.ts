@@ -27,6 +27,7 @@ import type { TTableSnapshot } from "./schema-hash";
 import { snapshotToExistingColumns, computeTableHash, computeViewSnapshot } from "./schema-hash";
 import {
   applyJsonColumnMigration,
+  diffAfterJsonCopy,
   planJsonColumnMigration,
   type TJsonColumnMigration,
 } from "./json-column-copy";
@@ -155,8 +156,10 @@ export function planTableInit(
   if (!safe) {
     return init;
   }
+  const diff = afterJsonCopy(facts);
   return {
     ...init,
+    ...(diff && describeNullableDefaults(diff)),
     columnsToDrop: [],
     typeChanges: skipped.includes("recreate") ? init.typeChanges : [],
     derivedChanges: skipped.includes("derived") ? init.derivedChanges : [],
@@ -603,6 +606,16 @@ export function willDropRecreate(
   );
 }
 
+/**
+ * The column diff the executor applies after the table's JSON column copy —
+ * its targets' NOT NULL and defaults deferred (see {@link diffAfterJsonCopy}).
+ */
+function afterJsonCopy(facts: TTableFacts): TColumnDiff | undefined {
+  return facts.diff && facts.jsonMigration
+    ? diffAfterJsonCopy(facts.jsonMigration, facts.diff)
+    : facts.diff;
+}
+
 /** Records work safe mode skipped on the entry (see `SyncEntry.skipped`). */
 function markSkipped(init: TSyncEntryInit, kind: TSyncSkippedWork): void {
   init.skipped = [...(init.skipped ?? []), kind];
@@ -622,7 +635,8 @@ function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
  * DDL either way.
  */
 export function safeModeSkips(facts: TTableFacts): TSyncSkippedWork[] {
-  const { readable, diff, optionDiff, fkDiff } = facts;
+  const { readable, optionDiff, fkDiff } = facts;
+  const diff = afterJsonCopy(facts);
   const adapter = readable.dbAdapter;
   const out: TSyncSkippedWork[] = [];
   if (facts.planEntry.status === "error") {

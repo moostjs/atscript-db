@@ -416,6 +416,42 @@ describe("SQLite — schema sync from the pre-0.1.155 union layout", () => {
     expect((await new SchemaSync(space).run([fx.UcUnjson])).status).toBe("up-to-date");
   });
 
+  it("safe mode copies into nullable columns, reports their NOT NULL as skipped", async () => {
+    const space = new DbSpace(() => new SqliteAdapter(driver));
+    await new SchemaSync(space).run([fx.UcUnjsonOld], { force: true });
+    await space.getTable(fx.UcUnjsonOld).insertMany([
+      { id: 1, addr: { street: "Main", zip: "Z" } },
+      { id: 2, addr: { street: "Side" } },
+    ] as any);
+    const sync = new SchemaSync(space);
+    const plan = await sync.plan([fx.UcUnjson], { force: true, safe: true });
+    const planned = plan.entries.find((e) => e.name === "uc_unjson")!;
+    const result = await sync.run([fx.UcUnjson], { force: true, safe: true });
+    const entry = result.entries.find((e) => e.name === "uc_unjson")!;
+    for (const e of [planned, entry]) {
+      expect(e.skipped).toEqual(["nullable-defaults"]);
+      expect(e.nullableChanges).toEqual([{ column: "addr__street", toNullable: false }]);
+    }
+    expect(columns(driver, "uc_unjson")).toEqual([
+      "id INTEGER",
+      "addr TEXT NOT NULL",
+      "addr__street TEXT",
+      "addr__zip TEXT",
+    ]);
+    await new SchemaSync(space).run([fx.UcUnjson], { force: true });
+    expect(columns(driver, "uc_unjson")).toEqual([
+      "id INTEGER",
+      "addr__street TEXT NOT NULL",
+      "addr__zip TEXT",
+    ]);
+    expect(
+      await space.getTable(fx.UcUnjson).findMany({ filter: {}, controls: { $sort: { id: 1 } } }),
+    ).toEqual([
+      { id: 1, addr: { street: "Main", zip: "Z" } },
+      { id: 2, addr: { street: "Side", zip: null } },
+    ]);
+  });
+
   it("a column the snapshot knows as a scalar is dropped, not copied", async () => {
     const space = new DbSpace(() => new SqliteAdapter(driver));
     await new SchemaSync(space).run([fx.UcRetypedOld], { force: true });
