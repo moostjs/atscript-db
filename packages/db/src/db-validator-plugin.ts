@@ -216,10 +216,8 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       const meta = def.metadata;
       const baseMeta = columnUnionBase(def)?.metadata;
       // A default below a tuple / union of several types is not filled.
-      const root = (ctx as { def?: TAtscriptAnnotatedType }).def;
       const defaulted = !(
-        belowAmbiguous(dbCtx, ctx.path) ||
-        (root !== undefined && pathBelowAmbiguous(root, ctx.path))
+        belowAmbiguous(dbCtx, ctx.path) || pathBelowAmbiguous(ctx.root, ctx.path)
       );
       const has = (key: keyof AtscriptMetadata) =>
         defaulted && (meta.has(key) || baseMeta?.has(key) === true);
