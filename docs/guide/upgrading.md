@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.159 {#v0-1-159}
+
+### Fixes
+
+- **No install scripts in the published packages.** Every `@atscript/db*` / `@atscript/moost-db` package declared `postinstall: "asc -f dts"` — a development step meant for this repository. npm 11 warned about it on install (`install-scripts`), and npm versions or setups that run dependency install scripts executed `asc` inside `node_modules`. The published packages now carry no install-time scripts.
+
 ## 0.1.157 {#v0-1-157}
 
 ### Fixes

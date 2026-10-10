@@ -41,7 +41,7 @@ function serialize(type: TAtscriptAnnotatedType) {
 }
 
 beforeAll(async () => {
-  // Cast: the fixture's generated `.as.d.ts` is refreshed at postinstall, not at
+  // Cast: the fixture's generated `.as.d.ts` is refreshed by `prepare` on install, not at
   // test time — the runtime module always carries the compiled `VersionedUser`.
   const fixtures = (await import("./fixtures/test-table.as")) as Record<string, unknown>;
   const base = {
