@@ -104,3 +104,19 @@ export interface UcTextJson {
 
     extra: UcAddr | string
 }
+
+// A copy target with a default: added without it (ADD COLUMN would fill
+// every row), copied, then the default is applied.
+@db.table 'uc_legacy_default'
+export interface UcLegacyDefault {
+    @meta.id
+    id: number
+
+    addr: {
+        street?: string
+        @db.default 'D'
+        zip?: string
+        @db.default.uuid
+        ref?: string
+    } | null
+}

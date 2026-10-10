@@ -5,7 +5,7 @@ import { resolveDesignType, type AtscriptDbReadable } from "../table/db-readable
 import { relationalColumnName } from "../table/table-metadata";
 import { unionValueMembers } from "../shared/union-shape";
 import type { TColumnDiff, TDbFieldMeta, TJsonCopyTarget } from "../types";
-import type { TTableSnapshot } from "./schema-hash";
+import { serializeDefaultValue, type TTableSnapshot } from "./schema-hash";
 
 /**
  * The data migration from the column layout atscript-db ≤ 0.1.154 gave union
@@ -43,9 +43,6 @@ const JSON_TEXT_DESIGN_TYPES: ReadonlySet<string> = new Set(["union", "json", "o
 function targetKind(fd: TDbFieldMeta): TJsonCopyTarget["kind"] | { problem: string } {
   if (fd.encrypted) return { problem: "it is @db.encrypted" };
   if (fd.isGeoPoint) return { problem: "it is a db.geoPoint" };
-  // `ADD COLUMN … DEFAULT` fills every existing row, so the copy (which
-  // fills only rows whose new columns are all NULL) would skip them all.
-  if (fd.defaultValue) return { problem: "it has a @db.default" };
   if (fd.storage === "json") return "json";
   return fd.designType === "boolean" ? "boolean" : "text";
 }
@@ -152,6 +149,12 @@ export function planJsonColumnMigration(
  * object that may be NULL), and the values are copied. Returns the diff
  * without the columns it added. Idempotent: a re-run converts nothing twice
  * and copies only into rows whose targets are all NULL.
+ *
+ * A target with a DDL default is added WITHOUT it — `ADD COLUMN … DEFAULT`
+ * fills every existing row, so the copy would skip them all — and the
+ * default is returned as a default change of the diff, which the rest of
+ * the table's sync applies after the copy (`SET DEFAULT` / `MODIFY COLUMN`,
+ * a table recreation on SQLite). Rows the copy leaves NULL stay NULL.
  */
 export async function applyJsonColumnMigration(
   adapter: BaseDbAdapter,
@@ -164,10 +167,11 @@ export async function applyJsonColumnMigration(
   if (migration.copies.length === 0) return { diff, added: [] };
   const targets = new Set(migration.copies.flatMap((c) => c.targets.map((t) => t.column)));
   const toAdd = diff.added.filter((fd) => targets.has(fd.physicalName));
+  const defaulted = toAdd.filter((fd) => fd.defaultValue !== undefined);
   let added: string[] = [];
   if (toAdd.length > 0) {
     const result = await adapter.syncColumns!({
-      added: toAdd,
+      added: toAdd.map((fd) => (defaulted.includes(fd) ? { ...fd, defaultValue: undefined } : fd)),
       removed: [],
       renamed: [],
       typeChanged: [],
@@ -181,7 +185,17 @@ export async function applyJsonColumnMigration(
     await adapter.copyFromJsonColumn!(copy.source, copy.targets);
   }
   return {
-    diff: { ...diff, added: diff.added.filter((fd) => !targets.has(fd.physicalName)) },
+    diff: {
+      ...diff,
+      added: diff.added.filter((fd) => !targets.has(fd.physicalName)),
+      defaultChanged: [
+        ...diff.defaultChanged,
+        ...defaulted.map((fd) => ({
+          field: fd,
+          newDefault: serializeDefaultValue(fd.defaultValue),
+        })),
+      ],
+    },
     added,
   };
 }

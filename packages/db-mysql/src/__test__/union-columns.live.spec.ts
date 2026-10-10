@@ -219,4 +219,28 @@ describe.skipIf(!reachable)("[mysql live] union columns", () => {
       addr: { street: "Main" },
     });
   });
+
+  it("copies into columns with a default, then applies the defaults", async () => {
+    await driver.exec(
+      "CREATE TABLE `uc_legacy_default` (`id` DOUBLE PRIMARY KEY, `addr` TEXT NOT NULL, `addr.street` TEXT, `addr.zip` TEXT, `addr.ref` TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    );
+    await driver.exec(
+      'INSERT INTO `uc_legacy_default` VALUES (1, \'{"street":"Main","ref":"r1"}\', NULL, NULL, NULL), (2, \'null\', NULL, NULL, NULL)',
+    );
+    const result = await syncSchema(space, [fx.UcLegacyDefault], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_legacy_default")!;
+    expect(entry.errors).toEqual([]);
+    expect(entry.status).toBe("alter");
+    const table = space.getTable(fx.UcLegacyDefault);
+    // copied values only — the defaults fill no existing row
+    expect(await table.findMany({ filter: {}, controls: { $sort: { id: 1 } } })).toEqual([
+      { id: 1, addr: { street: "Main", zip: null, ref: "r1" } },
+      { id: 2, addr: null },
+    ]);
+    await table.insertOne({ id: 3, addr: { street: "New" } } as any);
+    const row = (await table.findById(3)) as any;
+    expect(row.addr.zip).toBe("D");
+    expect(row.addr.ref).toMatch(/^[0-9a-f-]{36}$/);
+    expect((await syncSchema(space, [fx.UcLegacyDefault])).status).toBe("up-to-date");
+  });
 });

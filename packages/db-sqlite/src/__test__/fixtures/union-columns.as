@@ -106,7 +106,8 @@ export interface UcNote {
     }
 }
 
-// A copy target with a `@db.default` refuses the sync (ADD COLUMN fills it).
+// A copy target with a `@db.default`: added without it (ADD COLUMN would fill
+// every row), copied, then the default is applied.
 @db.table 'uc_legacy_default'
 export interface UcLegacyDefault {
     @meta.id

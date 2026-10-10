@@ -292,19 +292,31 @@ describe("SQLite — schema sync from the pre-0.1.155 union layout", () => {
     ]);
   });
 
-  it("refuses a copy into a column with a `@db.default` — ADD COLUMN would fill it", async () => {
+  it("copies into a column with a `@db.default`, then applies the default", async () => {
     driver.exec(
       'CREATE TABLE "uc_legacy_default" ("id" INTEGER PRIMARY KEY, "addr" TEXT NOT NULL, "addr.street" TEXT, "addr.zip" TEXT)',
     );
-    driver.exec(`INSERT INTO "uc_legacy_default" VALUES (1, '{"street":"Main"}', NULL, NULL)`);
+    driver.exec(
+      `INSERT INTO "uc_legacy_default" VALUES (1, '{"street":"Main"}', NULL, NULL), (2, '{"street":"Side","zip":"Z"}', NULL, NULL), (3, 'null', NULL, NULL)`,
+    );
     const space = new DbSpace(() => new SqliteAdapter(driver));
     const result = await new SchemaSync(space).run([fx.UcLegacyDefault], { force: true });
     const entry = result.entries.find((e) => e.name === "uc_legacy_default")!;
-    expect(entry.status).toBe("error");
-    expect(entry.errors.join(" ")).toMatch(/"addr__zip" \(it has a @db.default\)/);
-    expect(driver.get(`SELECT "addr" FROM "uc_legacy_default"`)).toEqual({
-      addr: '{"street":"Main"}',
-    });
+    expect(entry.errors).toEqual([]);
+    expect(entry.status).toBe("alter");
+    expect(entry.jsonCopies).toEqual([{ from: "addr", to: ["addr__street", "addr__zip"] }]);
+    // the copy is not overwritten by the default: a row without the value keeps NULL
+    const table = space.getTable(fx.UcLegacyDefault);
+    expect(await table.findMany({ filter: {}, controls: { $sort: { id: 1 } } })).toEqual([
+      { id: 1, addr: { street: "Main", zip: null } },
+      { id: 2, addr: { street: "Side", zip: "Z" } },
+      { id: 3, addr: null },
+    ]);
+    const { sql } = driver.get(
+      "SELECT sql FROM sqlite_master WHERE name = 'uc_legacy_default'",
+    ) as { sql: string };
+    expect(sql).toContain(`"addr__zip" TEXT DEFAULT 'D'`);
+    expect((await new SchemaSync(space).run([fx.UcLegacyDefault])).status).toBe("up-to-date");
   });
 
   it("a column the snapshot knows as a scalar is dropped, not copied", async () => {
