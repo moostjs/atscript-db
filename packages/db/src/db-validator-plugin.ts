@@ -99,6 +99,54 @@ function belowAmbiguous(dbCtx: DbValidationContext, path: string): boolean {
   return false;
 }
 
+/** Per validated root type: schema path → whether it lies below a tuple / union of several types. */
+const ambiguousByRoot = new WeakMap<TAtscriptAnnotatedType, Map<string, boolean>>();
+
+/**
+ * {@link belowAmbiguous} read from the type itself: walks `path` from `root`
+ * (the validator's own type) and answers whether a tuple or a union of
+ * several types lies on the way. The visit-based answer misses a union the
+ * plugin was not consulted for — a caller that runs this plugin only for
+ * absent values (a form's server-managed check) never shows it the union
+ * holding the value.
+ */
+function pathBelowAmbiguous(root: TAtscriptAnnotatedType, path: string): boolean {
+  let cache = ambiguousByRoot.get(root);
+  if (!cache) ambiguousByRoot.set(root, (cache = new Map()));
+  const schema = schemaPath(path);
+  let answer = cache.get(schema);
+  if (answer === undefined) {
+    answer = false;
+    let type: TAtscriptAnnotatedType | undefined = root;
+    for (const seg of schema.split(".")) {
+      if (type.type.kind === "union") {
+        const member = soleUnionMember(type);
+        if (!member) {
+          answer = true;
+          break;
+        }
+        type = member;
+      }
+      const kind: string = type.type.kind;
+      if (kind === "tuple") {
+        answer = true;
+        break;
+      }
+      type =
+        kind === "array"
+          ? seg === "*"
+            ? (type.type as TAtscriptTypeArray).of
+            : undefined
+          : kind === "object"
+            ? (type.type as TAtscriptTypeObject).props.get(seg)
+            : undefined;
+      if (!type) break;
+    }
+    cache.set(schema, answer);
+  }
+  return answer;
+}
+
 /**
  * Validator plugin for database operations.
  *
@@ -168,7 +216,11 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       const meta = def.metadata;
       const baseMeta = columnUnionBase(def)?.metadata;
       // A default below a tuple / union of several types is not filled.
-      const defaulted = !belowAmbiguous(dbCtx, ctx.path);
+      const root = (ctx as { def?: TAtscriptAnnotatedType }).def;
+      const defaulted = !(
+        belowAmbiguous(dbCtx, ctx.path) ||
+        (root !== undefined && pathBelowAmbiguous(root, ctx.path))
+      );
       const has = (key: keyof AtscriptMetadata) =>
         defaulted && (meta.has(key) || baseMeta?.has(key) === true);
       // Server-managed fields: defaulted columns, the OCC version column

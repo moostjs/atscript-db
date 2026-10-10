@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
+import { Validator, type TValidatorPlugin } from "@atscript/typescript/utils";
+
+import { createDbValidatorPlugin, type DbValidationContext } from "../db-validator-plugin";
 import { AtscriptDbTable } from "../table/db-table";
 import type { TDbWriteGuardContext } from "../types";
 
@@ -158,6 +161,24 @@ describe("number.timestamp.created", () => {
       { kind: "open", at: 2 },
       { kind: "note", text: "t" },
     ]);
+  });
+
+  it("required below a tuple / union also for a caller that asks only about absent values", () => {
+    // A form's server-managed check (atscript-ui) consults the plugin only for
+    // a missing value, so the plugin never sees the union / tuple holding it.
+    const dbPlugin = createDbValidatorPlugin();
+    const insert: DbValidationContext = { mode: "insert" };
+    const absentOnly: TValidatorPlugin = (ctx, def, value) =>
+      value === undefined
+        ? dbPlugin(Object.create(ctx, { context: { value: insert } }), def, value)
+        : undefined;
+    const validator = new Validator(PdEvent, { plugins: [absentOnly] });
+    const base = { ...required, audit: {} };
+    expect(validator.validate(base, true)).toBe(true);
+    expect(validator.validate({ ...base, steps: [{}, { note: "n" }] }, true)).toBe(false);
+    expect(validator.errors[0]!.path).toBe("steps.0.at");
+    expect(validator.validate({ ...base, events: [{ kind: "open" }] }, true)).toBe(false);
+    expect(validator.errors[0]!.path).toMatch(/^events\.0/);
   });
 
   it("other fields stay required", async () => {
