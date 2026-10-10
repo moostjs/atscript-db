@@ -93,7 +93,7 @@ MongoDB offers `@db.mongo.patch.strategy` for per-field override without changin
 Fields tagged `@db.json` are serialized to a single JSON column (or native `JSONB`/`JSON` type per adapter). Patch handling:
 
 - SQL adapters: the column is read, merged in JS, and written back (one round-trip).
-- MongoDB: stored verbatim in the document; patch goes through the usual pipeline. Since 0.1.155 an object value (`@db.json`, a union of objects, `T | null`) REPLACES the stored object (plain nested objects keep their `@db.patch.strategy`) — before, the pipeline `$set` merged it in (a member switch kept the old member's keys).
+- MongoDB: stored verbatim in the document; patch goes through the usual pipeline. Since 0.1.155 an object value (`@db.json`, a union of objects, `T | null`; renamed with `@db.column` too) REPLACES the stored object (plain nested objects keep their `@db.patch.strategy`) — before, the pipeline `$set` merged it in (a member switch kept the old member's keys).
 
 Avoid `@db.json` on high-write fields — every partial update becomes a read-modify-write.
 

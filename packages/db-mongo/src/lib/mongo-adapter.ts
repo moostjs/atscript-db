@@ -255,6 +255,11 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Unique fields accumulated during onFieldScanned, returned via getMetadataOverrides. */
   private _pendingUniqueFields: string[] = [];
+  /** {@link _patcherFlatMap}'s memo. */
+  private _patcherFlatMapMemo?: {
+    src: Map<string, TAtscriptAnnotatedType>;
+    map: Map<string, TAtscriptAnnotatedType>;
+  };
 
   constructor(
     protected readonly db: Db,
@@ -683,11 +688,32 @@ export class MongoAdapter extends BaseDbAdapter {
   /** Returns the context object used by CollectionPatcher. */
   getPatcherContext(): TCollectionPatcherContext {
     return {
-      flatMap: this._table.flatMap,
+      flatMap: this._patcherFlatMap(),
       prepareId: (id: any) => this.prepareIdFromIdType(id),
       createValidator: (opts?: Partial<TValidatorOptions>) =>
         this._table.createValidator(opts) as Validator<any>,
     };
+  }
+
+  /**
+   * The table's flat map keyed by document path: a patch reaches the patcher
+   * with `@db.column` names already applied (`translatePatchKeys`), so a
+   * renamed union / `@db.json` field is found — and replaced, not merged —
+   * under its stored name. Derived fields are left out (they map to their
+   * source's path). Built once per flat map.
+   */
+  private _patcherFlatMap(): Map<string, TAtscriptAnnotatedType> {
+    const src = this._table.flatMap;
+    let memo = this._patcherFlatMapMemo;
+    if (memo?.src !== src) {
+      const meta = this._table.getMetadata();
+      const map = new Map<string, TAtscriptAnnotatedType>();
+      for (const [path, type] of src) {
+        if (!meta.derivedFields.has(path)) map.set(meta.documentPath(path), type);
+      }
+      memo = this._patcherFlatMapMemo = { src, map };
+    }
+    return memo.map;
   }
 
   // ── Native patch ─────────────────────────────────────────────────────────

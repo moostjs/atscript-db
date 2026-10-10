@@ -98,16 +98,28 @@ describe("MongoAdapter — union fields", () => {
   it("patches: a renamed merge object merges; @db.json and `T | null` objects are replaced", async () => {
     const profiles = space.getTable(fx.UcProfile);
     const full = { name: "A", age: 1 };
-    await profiles.insertOne({ id: 1, merged: full, blob: full, maybe: full } as any);
+    await profiles.insertOne({
+      id: 1,
+      merged: full,
+      blob: full,
+      maybe: full,
+      rblob: full,
+      rmaybe: full,
+    } as any);
     await profiles.updateOne({
       id: 1,
       merged: { age: 5 },
       blob: { name: "B" },
       maybe: { name: "C" },
+      rblob: { name: "D" },
+      rmaybe: { name: "E" },
     } as any);
     const row = (await profiles.findOne({ filter: { id: 1 } } as any)) as Record<string, any>;
     expect(row.merged).toEqual({ name: "A", age: 5 });
     expect(row.blob).toEqual({ name: "B" });
     expect(row.maybe).toEqual({ name: "C" });
+    // renamed (`@db.column`): replaced under the stored name too
+    expect(row.rblob).toEqual({ name: "D" });
+    expect(row.rmaybe).toEqual({ name: "E" });
   });
 });

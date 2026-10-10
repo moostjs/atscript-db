@@ -51,7 +51,7 @@ export interface UcNote {
 }
 
 // Patches of objects: a renamed merge-strategy object merges, `@db.json`
-// and `T | null` objects are replaced whole.
+// and `T | null` objects are replaced whole, renamed or not.
 @db.table 'uc_profiles'
 export interface UcProfile {
     @meta.id
@@ -71,6 +71,20 @@ export interface UcProfile {
     }
 
     maybe: {
+        name: string
+        age?: number
+    } | null
+
+    // renamed: still replaced (the patcher finds them under the stored name)
+    @db.column 'blob2'
+    @db.json
+    rblob: {
+        name: string
+        age?: number
+    }
+
+    @db.column 'maybe2'
+    rmaybe: {
         name: string
         age?: number
     } | null
