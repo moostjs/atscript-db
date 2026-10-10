@@ -8,6 +8,8 @@ import { prepareFixtures } from "./test-utils";
 // Since atscript 0.1.103 `number.timestamp.created | null` carries
 // `@db.default.now` on its member. Members are not columns: the table is the
 // same as with atscript 0.1.102 and no member default is filled on insert.
+// Since 0.1.155 a `T | null` field is a nullable column of `T`'s type and a
+// tuple a JSON column.
 
 let fx: Record<string, any>;
 
@@ -25,7 +27,7 @@ describe("SqliteAdapter — union / tuple members", () => {
       sql: string;
     };
     expect(sql).toBe(
-      'CREATE TABLE "union_members" ("id" INTEGER PRIMARY KEY, "x" TEXT NOT NULL, "y" TEXT, "pair" TEXT NOT NULL, "emails" TEXT NOT NULL, "n" TEXT NOT NULL, "code" TEXT NOT NULL, "created" REAL NOT NULL)',
+      'CREATE TABLE "union_members" ("id" INTEGER PRIMARY KEY, "x" REAL, "y" REAL, "pair" TEXT NOT NULL, "emails" TEXT NOT NULL, "n" REAL, "code" TEXT NOT NULL, "created" REAL NOT NULL)',
     );
 
     const row = { pair: [1, "a"], emails: ["a@b.co"], n: 2, code: "abc", created: 1 };

@@ -25,6 +25,11 @@ import { fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import type { TForeignKeyDiff } from "./fk-diff";
 import type { TTableSnapshot } from "./schema-hash";
 import { snapshotToExistingColumns, computeTableHash, computeViewSnapshot } from "./schema-hash";
+import {
+  applyJsonColumnMigration,
+  planJsonColumnMigration,
+  type TJsonColumnMigration,
+} from "./json-column-copy";
 
 // ── Deps ─────────────────────────────────────────────────────────────────
 
@@ -83,6 +88,8 @@ export interface TTableFacts {
   inboundFks?: TReferencingForeignKey[];
   /** Physical object kind under `dbName` (`undefined` = absent or not introspectable). */
   objectKind?: TDbObjectKind;
+  /** The data migration from the ≤ 0.1.154 union layout (Path A, since 0.1.155). */
+  jsonMigration?: TJsonColumnMigration;
 }
 
 /** Per-table execution options computed by the discovery phase. */
@@ -267,7 +274,7 @@ export async function executeSyncTable(
         await adapter.ensureTable(ensureOpts);
         init.status = "create";
       } else if (existing.length > 0) {
-        const diff =
+        let diff =
           facts.diff ??
           computeColumnDiff(
             readable.columnDescriptors,
@@ -275,6 +282,22 @@ export async function executeSyncTable(
             adapter.typeMapper?.bind(adapter),
             { snapshot: storedSnapshot },
           );
+        // Values of the ≤ 0.1.154 union layout move first — before any
+        // recreate, type change or drop could lose the old column.
+        const migration =
+          facts.jsonMigration ?? planJsonColumnMigration(readable, diff, storedSnapshot);
+        if (migration.errors.length > 0) {
+          throw new Error(migration.errors.join(" "));
+        }
+        if (migration.copies.length > 0 || migration.jsonify.length > 0) {
+          phase = "JSON column copy";
+          const applied = await applyJsonColumnMigration(adapter, migration, diff);
+          diff = applied.diff;
+          Object.assign(init, describeJsonMigration(migration));
+          if (applied.added.length > 0) init.columnsAdded = applied.added;
+          init.status = "alter";
+          phase = "Column sync";
+        }
         // FK changes on adapters without syncForeignKeys (SQLite) require table recreation
         if (hasFkChanges && !adapter.syncForeignKeys && adapter.recreateTable) {
           await adapter.recreateTable();
@@ -623,6 +646,19 @@ export function safeModeSkips(facts: TTableFacts): TSyncSkippedWork[] {
   return out;
 }
 
+/** The plan-shaped summary of a {@link TJsonColumnMigration}. */
+export function describeJsonMigration(
+  migration: TJsonColumnMigration,
+): Pick<TSyncEntryInit, "jsonCopies" | "jsonified"> {
+  return {
+    jsonCopies:
+      migration.copies.length > 0
+        ? migration.copies.map((c) => ({ from: c.source, to: c.targets.map((t) => t.column) }))
+        : undefined,
+    jsonified: migration.jsonify.length > 0 ? migration.jsonify : undefined,
+  };
+}
+
 /** The plan-shaped nullable / default change summaries of a diff. */
 export function describeNullableDefaults(
   diff: TColumnDiff,
@@ -775,7 +811,7 @@ async function applyColumnDiff(
     adapter.syncColumns
   ) {
     const syncResult = await adapter.syncColumns(diff);
-    init.columnsAdded = syncResult.added;
+    init.columnsAdded = [...(init.columnsAdded ?? []), ...syncResult.added];
     init.columnsRenamed = syncResult.renamed;
     if (syncResult.added.length > 0 || (syncResult.renamed?.length ?? 0) > 0 || needsSyncColumns) {
       init.status = "alter";

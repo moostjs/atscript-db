@@ -34,6 +34,7 @@ import type {
   TDbUpdateOptions,
   TExistingColumn,
   TColumnDiff,
+  TJsonCopyTarget,
   TSyncColumnResult,
   TDbFieldMeta,
   TDbDefaultFn,
@@ -50,6 +51,8 @@ import type {
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
+  buildJsonColumnCopy,
+  buildJsonifyText,
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchSelect,
@@ -124,6 +127,16 @@ const GEO_PROBE_SQL = `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname =
      LEFT JOIN pg_type b ON b.oid = NULLIF(t.typbasetype, 0)
     WHERE a.attrelid = to_regclass($1::text) AND a.attnum > 0 AND NOT a.attisdropped
       AND a.attname = ANY($2::text[])) AS "columns"`;
+
+const identity = (value: unknown): unknown => value;
+
+/** A column type node-postgres parses on read. */
+const PG_JSON_TYPE = /^\s*jsonb?\s*$/i;
+
+/** A JSON string value as JSON text — see `formatValue`. */
+function reencodeJsonString(value: unknown): unknown {
+  return typeof value === "string" ? JSON.stringify(value) : value;
+}
 
 /** A PostGIS column type — a geo value binds as EWKT. Anything else (JSONB, TEXT) takes the JSON form. */
 const POSTGIS_TYPES: ReadonlySet<string> = new Set(["geography", "geometry"]);
@@ -618,6 +631,14 @@ export class PostgresAdapter extends BaseDbAdapter {
           return value;
         },
       };
+    }
+    // node-postgres hands JSON / JSONB back parsed, while the relational
+    // mapper parses a string read from a JSON column (SQLite stores text): a
+    // JSON string value — a string member of a mixed union (since 0.1.155) —
+    // is re-encoded so that parse gives the string back. A text column
+    // (`@db.pg.type 'TEXT'`) already returns the JSON text.
+    if (field.storage === "json" && !field.encrypted && PG_JSON_TYPE.test(this.typeMapper(field))) {
+      return { toStorage: identity, fromStorage: reencodeJsonString };
     }
     return undefined;
   }
@@ -1930,6 +1951,32 @@ export class PostgresAdapter extends BaseDbAdapter {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(this.resolveTableName())}`;
     this._log(ddl);
     await this._exec().exec(ddl);
+  }
+
+  async copyFromJsonColumn(source: string, targets: readonly TJsonCopyTarget[]): Promise<void> {
+    // `#>>` yields text: a scalar target is cast to its column type (a value
+    // that does not convert fails the sync); booleans and JSON keep theirs. A
+    // `VARCHAR(n)` / `CHAR(n)` target takes the text by assignment, which
+    // fails on overflow where an explicit cast would truncate.
+    const sql = buildJsonColumnCopy(
+      pgDialect,
+      this.resolveTableName(),
+      source,
+      targets,
+      (expr, target) => {
+        if (target.kind !== "text") return expr;
+        const type = this.typeMapper(target.field);
+        return /^(VARCHAR|CHAR)\b/i.test(type) ? expr : `(${expr})::${type}`;
+      },
+    );
+    this._log(sql);
+    await this._exec().exec(sql);
+  }
+
+  async jsonifyTextColumn(column: string): Promise<void> {
+    const sql = buildJsonifyText(pgDialect, this.resolveTableName(), column);
+    this._log(sql);
+    await this._exec().exec(sql);
   }
 
   async dropColumns(columns: string[]): Promise<void> {

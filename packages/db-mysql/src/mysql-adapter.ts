@@ -31,6 +31,7 @@ import type {
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
+  TJsonCopyTarget,
   TTableOptionDiff,
   TSyncColumnResult,
   TDbFieldMeta,
@@ -54,6 +55,8 @@ import type {
 import { resolveAggregateSearch } from "@atscript/db/agg";
 import {
   buildGeoSearchCount,
+  buildJsonColumnCopy,
+  buildJsonifyText,
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchSelect,
@@ -1887,6 +1890,28 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async dropTable(): Promise<void> {
     return this.dropTableByName(this.resolveTableName());
+  }
+
+  async copyFromJsonColumn(source: string, targets: readonly TJsonCopyTarget[]): Promise<void> {
+    const temporal = targets.find((t) => mysqlTemporalFsp(t.field) !== undefined);
+    if (temporal) {
+      throw new Error(
+        `"${temporal.column}" is a TIMESTAMP / DATETIME column — its epoch-ms JSON values cannot be copied into it`,
+      );
+    }
+    const sql = buildJsonColumnCopy(mysqlDialect, this.resolveTableName(), source, targets);
+    // Strict session: a value that does not convert to its column fails the
+    // sync instead of being coerced.
+    await this._withStrictSession(async (conn) => {
+      this._log(sql);
+      await conn.exec(sql);
+    });
+  }
+
+  async jsonifyTextColumn(column: string): Promise<void> {
+    const sql = buildJsonifyText(mysqlDialect, this.resolveTableName(), column);
+    this._log(sql);
+    await this._exec().exec(sql);
   }
 
   async dropColumns(columns: string[]): Promise<void> {

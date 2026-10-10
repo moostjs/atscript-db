@@ -82,6 +82,19 @@ export interface TSyncEntryInit {
    * @since 0.1.141
    */
   derivedChanges?: TSyncDerivedChange[];
+  /**
+   * Text columns of the atscript-db ≤ 0.1.154 union layout whose JSON values
+   * the run copies into the columns that replace them, before the old
+   * column is dropped (see `planJsonColumnMigration`).
+   * @since 0.1.155
+   */
+  jsonCopies?: Array<{ from: string; to: string[] }>;
+  /**
+   * Text columns of that layout becoming JSON columns: their plain-text
+   * values are rewritten as JSON strings first.
+   * @since 0.1.155
+   */
+  jsonified?: string[];
   columnsAdded?: string[];
   columnsRenamed?: string[];
   columnsDropped?: string[];
@@ -154,6 +167,10 @@ export class SyncEntry {
   readonly fkChanged: Array<{ fields: string[]; targetTable: string; details: string }>;
   /** @since 0.1.141 — see {@link TSyncEntryInit.derivedChanges}. */
   readonly derivedChanges: TSyncDerivedChange[];
+  /** @since 0.1.155 — see {@link TSyncEntryInit.jsonCopies}. */
+  readonly jsonCopies: Array<{ from: string; to: string[] }>;
+  /** @since 0.1.155 — see {@link TSyncEntryInit.jsonified}. */
+  readonly jsonified: string[];
 
   // Result fields
   readonly columnsAdded: string[];
@@ -191,6 +208,8 @@ export class SyncEntry {
     this.fkRemoved = init.fkRemoved ?? [];
     this.fkChanged = init.fkChanged ?? [];
     this.derivedChanges = init.derivedChanges ?? [];
+    this.jsonCopies = init.jsonCopies ?? [];
+    this.jsonified = init.jsonified ?? [];
     this.columnsAdded = init.columnsAdded ?? [];
     this.columnsRenamed = init.columnsRenamed ?? [];
     this.columnsDropped = init.columnsDropped ?? [];
@@ -337,6 +356,17 @@ export class SyncEntry {
     });
   }
 
+  /** `~ addr → addr__street, addr__zip — copy JSON values` / `~ extra — text values as JSON`. */
+  private printJsonMigration(c: TSyncColors, mode: "plan" | "result"): string[] {
+    const copy = mode === "plan" ? "copy JSON values" : "JSON values copied";
+    return [
+      ...this.jsonified.map((col) => `      ${c.yellow(`~ ${col} — text values as JSON`)}`),
+      ...this.jsonCopies.map(
+        (jc) => `      ${c.yellow(`~ ${jc.from} → ${jc.to.join(", ")} — ${copy}`)}`,
+      ),
+    ];
+  }
+
   /** `~ col — nullable` / `~ col — default a → b`, `— skipped (safe mode)` when pending. */
   private printNullableDefaults(c: TSyncColors): string[] {
     const suffix = this.skipped.includes("nullable-defaults") ? " — skipped (safe mode)" : "";
@@ -434,6 +464,7 @@ export class SyncEntry {
             `      ${c.green(`+ ${col.physicalName} (${col.designType})${col.derived ? " derived" : ""} — add`)}`,
         ),
         ...this.columnsToRename.map((r) => `      ${c.yellow(`~ ${r.from} → ${r.to} — rename`)}`),
+        ...this.printJsonMigration(c, "plan"),
         ...this.printTypeChanges(c),
         ...this.printNullableDefaults(c),
         ...this.printDerivedChanges(c, "plan"),
@@ -488,6 +519,8 @@ export class SyncEntry {
       this.optionChanges.length > 0 ||
       this.pkChange !== undefined ||
       this.derivedChanges.length > 0 ||
+      this.jsonCopies.length > 0 ||
+      this.jsonified.length > 0 ||
       this.skipped.length > 0;
 
     if (hasChanges || this.recreated || this.renamedFrom) {
@@ -502,6 +535,7 @@ export class SyncEntry {
         `  ${color(`~ ${vp}${label} — ${rlabel}${renameInfo}`)}`,
         ...this.columnsAdded.map((col) => `      ${c.green(`+ ${col} — added`)}`),
         ...this.columnsRenamed.map((col) => `      ${c.yellow(`~ ${col} — renamed`)}`),
+        ...this.printJsonMigration(c, "result"),
         ...this.printPkChange(c, "result"),
         ...this.printTypeChanges(c),
         ...this.printNullableDefaults(c),

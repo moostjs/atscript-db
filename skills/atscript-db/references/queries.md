@@ -89,7 +89,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 | JSON / array descendant (`prefs.theme`)    | SQL adapters: rejected (`… inside JSON-stored column "prefs"`); Mongo/memory ok    |
 | filter on JSON / array column (`prefs`)    | SQL: only a sole-`$exists` entry; else `… (accepted operators: $exists)`           |
 | navigation path (`assignee.name`)          | rejected — filter with `{ assignee: { $some: … } }` (§ below) or load with `$with` |
-| flattened parent (`contact`)               | `$select` ok (expands); filter / sort rejected — use a leaf                        |
+| flattened parent (`contact`)               | `$select` ok; null test ok (0.1.155); other filter / sort rejected                 |
 | `$sort` on JSON / array column             | rejected on every adapter (`canSortField`)                                         |
 | encrypted descendant in `$select`          | rejected — select the encrypted parent                                             |
 | filter node key other than `$and/$or/$not` | `Unsupported filter operator "$nor" — use $and, $or or $not`                       |

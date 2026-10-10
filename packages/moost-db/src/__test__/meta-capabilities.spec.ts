@@ -94,10 +94,12 @@ describe.each(["sql", "nested"] as const)(
         expect(await accepted(() => controller.query(`?${path}=1`)), `filter "${path}"`).toBe(
           false,
         );
+        // A nested-object parent takes a null test (since 0.1.155) — the one
+        // filter accepted on an unlisted path.
         expect(
           await accepted(() => controller.query(`?$exists=${path}`)),
           `$exists "${path}"`,
-        ).toBe(false);
+        ).toBe(path === "contact");
         expect(await accepted(() => controller.query(`?$sort=${path}`)), `$sort "${path}"`).toBe(
           false,
         );

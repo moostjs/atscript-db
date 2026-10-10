@@ -125,6 +125,7 @@ export interface Event {
 | `boolean`                                   | `BOOLEAN`                         | Native boolean (not INTEGER)                                                            |
 | `decimal`                                   | `NUMERIC(p,s)`                    | Defaults to `NUMERIC(10,2)`                                                             |
 | Nested objects                              | Flattened `__` columns            | `address.city` becomes `address__city`                                                  |
+| `T \| null`                                 | The column of `T`, nullable       | Unions of objects are flattened; see [Nullable and Union Fields](/api/storage#unions)   |
 | `@db.json`                                  | `JSONB`                           | Stored as a single JSONB column; descendant paths are not queryable (400 since 0.1.128) |
 | Arrays                                      | `JSONB`                           | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)      |
 | `@db.default.uuid`                          | `VARCHAR(255)`                    | `DEFAULT gen_random_uuid()`                                                             |

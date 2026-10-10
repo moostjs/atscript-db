@@ -73,3 +73,4 @@ export { buildViewSelect } from "./view-builder";
 export { viewReadSource } from "./view-read";
 export { fromSourceSql, fromSourceHint } from "./from-source";
 export type { TSqlFromSource, TSqlDerivedSource } from "./from-source";
+export { buildJsonColumnCopy, buildJsonifyText } from "./json-copy";

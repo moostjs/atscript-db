@@ -758,7 +758,14 @@ export class AsDbReadableController<
         if (relError) return relError;
         continue;
       }
-      const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
+      const verdict = capabilities.check(
+        ref.path,
+        "filter",
+        isVisible,
+        ref.predicate,
+        "",
+        ref.nullTest,
+      );
       if (verdict) return badRequest(verdict.path, verdict.message);
     }
     // `$with` sub-filters: the CLIENT's tree as recorded before

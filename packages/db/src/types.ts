@@ -763,6 +763,23 @@ export interface TExistingColumn {
  */
 export type TDerivedChangeReason = "kind" | "expression" | "type";
 
+/**
+ * One column {@link BaseDbAdapter.copyFromJsonColumn} fills from the JSON
+ * text of a column the previous layout stored a whole value in (since 0.1.155).
+ */
+export interface TJsonCopyTarget {
+  /** Physical column to fill. */
+  column: string;
+  /** Path of the value inside the source JSON (logical property names). */
+  path: readonly string[];
+  /**
+   * How the value is read: `text` — a scalar as text, cast to the column
+   * type; `boolean` — a JSON boolean; `json` — the sub-value as JSON.
+   */
+  kind: "text" | "boolean" | "json";
+  field: TDbFieldMeta;
+}
+
 /** Result of comparing desired schema against existing database columns. */
 export interface TColumnDiff {
   added: TDbFieldMeta[];

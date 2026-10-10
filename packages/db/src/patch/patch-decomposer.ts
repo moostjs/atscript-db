@@ -55,6 +55,12 @@ function flattenPatchPayload(
 
     const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
     if (!isObjectValue) {
+      if (value === null && meta.flattenedParents.has(key)) {
+        // A flattened object set to null nulls its columns — every one is
+        // nullable when the object is (optional or `| null`)
+        for (const lp of meta.optionalLeavesByLogicalParent.get(key) ?? []) update[lp] = null;
+        continue;
+      }
       // Simple field set
       update[key] = value;
       continue;

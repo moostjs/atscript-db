@@ -305,7 +305,7 @@ Every filter key, `$sort` key, `$select` entry, `$groupBy` field, `$having` key 
 - descendants of a `@db.json` / array column (`prefs.theme`) are rejected on SQL adapters (MongoDB and memory address them natively);
 - a `@db.json` / array column itself accepts only an [`$exists`](#existence) entry on SQL adapters (since 0.1.132; before, every filter on it was rejected);
 - navigation paths (`assignee.name`) are rejected — load relations with `$with`, or filter by them with a [relational predicate](#relational-filters) (`{ assignee: { $some: { name: … } } }`, since 0.1.147);
-- a flattened object parent (`contact`) can be selected but not filtered or sorted — use a leaf;
+- a flattened object parent (`contact`) can be selected but not sorted, and filtered only by a null test — `{ contact: null }`, `{ contact: { $ne: null } }`, `{ contact: { $exists: … } }` (since 0.1.155, see [Nullable and Union Fields](/api/storage#object-null-tests)); compare a leaf otherwise;
 - `$sort` on a JSON / array column is rejected on every adapter (`canSortField`);
 - filter nodes may only carry `$and`, `$or`, `$not` — `$nor` is rejected.
 - `$having` keys must be aggregate aliases (`$as`, else `fn_field`) or `$groupBy` fields — a real but non-grouped column throws `$having key "region" must be an aggregate alias or a $groupBy field` (before 0.1.128 PostgreSQL / MySQL raised an engine error, SQLite ignored the key and MongoDB returned no rows).
@@ -511,7 +511,7 @@ await tickets.findMany({
 
 - **One map for every ordered key.** An entry applies to the `$sort` key of the same name, and in [grouped queries](/api/aggregation) also to a computed alias in `$sort` and to the `$rowOrder` key of `first()` / `last()`. Entries for keys the query does not order by are ignored. Values other than `'first'` / `'last'` fail with `INVALID_QUERY`.
 - **Field default.** [`@db.sort.nulls 'first' | 'last'`](/adapters/annotations#db-sort-nulls) on a field applies whenever a query sorts by it without a `$nulls` entry. An explicit entry overrides it.
-- **Required fields are skipped.** A table field that cannot be `null` (required, and no optional parent object) has nothing to place, so its entry is dropped and the plain `ORDER BY` keeps using the index. Views keep every entry, because a left join or an aggregate can make any view column `null`.
+- **Required fields are skipped.** A table field that cannot be `null` (required, not `| null`, and no optional or `| null` parent object; since 0.1.155 a `| null` union counts as nullable) has nothing to place, so its entry is dropped and the plain `ORDER BY` keeps using the index. Views keep every entry, because a left join or an aggregate can make any view column `null`.
 - **Keys without an entry are unchanged.** `$nulls` is opt-in: a query without it sorts exactly as before. Grouped `$sort` and `$rowOrder` keep their existing "NULL is the smallest value" order unless an entry overrides it.
 - **Over HTTP**, write the placement as a suffix on the sort key: `$sort=-closedAt:last,title`. See [URL query syntax](/http/query-syntax#sort-nulls).
 

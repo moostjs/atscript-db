@@ -41,6 +41,31 @@ export function primitiveBaseType(def: SemanticNode | undefined): string | undef
   return typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
 }
 
+/**
+ * Whether a definition is a union with a `null` member — `T | null`, or a
+ * ref to an alias of one (compile-time mirror of the runtime nullable union,
+ * since 0.1.155).
+ */
+export function isNullableUnion(
+  def: SemanticNode | undefined,
+  doc: AtscriptDoc,
+  depth = 0,
+): boolean {
+  if (!def || depth > 8) return false;
+  if (isRef(def)) {
+    if (def.id === "null") return true;
+    return isNullableUnion(doc.unwindType(def.id!, def.chain)?.def, doc, depth + 1);
+  }
+  if (primitiveBaseType(def) === "null") return true;
+  const group = def as SemanticNode & {
+    isGroup?: boolean;
+    op?: string;
+    unwrap?: () => SemanticNode[];
+  };
+  if (!group.isGroup || group.op !== "|" || isStructure(def)) return false;
+  return group.unwrap!().some((member) => isNullableUnion(member, doc, depth + 1));
+}
+
 /** Resolves a field/prop's primitive base type, or `undefined` if it isn't a ref-to-primitive. */
 function getPrimitiveBaseType(node: SemanticNode, doc: AtscriptDoc): string | undefined {
   const def = node.getDefinition();

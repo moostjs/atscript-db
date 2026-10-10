@@ -6,6 +6,48 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.155 {#v0-1-155}
+
+### Breaking: union fields on SQL get their own column layout {#v0-1-155-unions}
+
+On SQLite, PostgreSQL and MySQL a union field used to be one text column, `NOT NULL` unless the field was optional — so `note: string | null` rejected `null`, `qty: number.int | null` stored `"5.0"` and read it back as a string — and an object member added dot-named columns (`address.street`) that were never written. Now the layout follows the members (see [Nullable and Union Fields](/api/storage#unions)):
+
+- **`T | null`** is a nullable column of `T`'s type: `qty: number.int | null` → `INTEGER` / `INT` / `REAL`, `paid: boolean | null` → `BOOLEAN` / `TINYINT(1)` / `INTEGER`, `tags: string[] | null` → JSON, `@expect.maxLength 10 code: string | null` → `VARCHAR(10)` on PostgreSQL / MySQL. Values read back with `T`'s type.
+- **`Address | null`** is flattened like `Address` (`address__street`, …), every column nullable; a `NULL` row reads back as `address: null`.
+- **A union of objects** (`payment: CardPayment | BankPayment`, inline object literals too) is flattened with `__`, without a column for the union itself. A leaf only some members declare is nullable, and reads return only the stored member's fields. With `| null`, every column is nullable. Before, a union of objects without `| null` was already flattened, but every member's required leaves were `NOT NULL`, so no row could be inserted; with `| null` it was a text column plus dot-named columns.
+- **A union mixing an object with another type** (`extra: Address | string`) is one JSON column (`JSONB` / `JSON` / `TEXT`), like `@db.json`. Tuples are JSON columns too.
+- **A required field inside an optional object is a nullable column.** `shipping?: { street: string }` used to create `shipping__street NOT NULL`, so a row without `shipping` could not be inserted. This changes the schema of every table with an optional object that has required fields.
+
+**What the first schema sync does.** Every table with such a field gets a new schema hash and is re-planned:
+
+- **PostgreSQL and MySQL** change the columns in place: `DROP NOT NULL` / `MODIFY … NULL`, and a type change with `ALTER COLUMN … TYPE … USING` / `MODIFY COLUMN` (`TEXT` → `INTEGER`, `DOUBLE PRECISION`, `BOOLEAN`, `JSONB`, …). Text that does not convert to the new type fails the sync for that table (an error entry) — clean such values first.
+- **SQLite** rebuilds the table for a nullability change (data is copied), as before. A type change (`TEXT` → `REAL`) is a sync error unless the table declares `@db.sync.method 'recreate'` (or `'drop'`); with `'recreate'` the data of the kept columns is copied over.
+- **The values move with the layout.** The old column held the whole value as text — JSON for an object or array, the plain text for a string or number member. Before anything else on the table, the sync:
+  - adds the new `__` columns and copies each field out of the old column's JSON into them (`json_extract` / `JSON_EXTRACT` / `#>>`, cast to the column type), in rows whose new columns are still all `NULL` — so a re-run never overwrites newer values. `plan()` lists it as `~ address → address__street, address__zip — copy JSON values` (`entry.jsonCopies`);
+  - rewrites the column of a mixed union with a string member (`extra: Address | string`) as JSON before it becomes a JSON column: valid JSON is kept, any other text becomes a JSON string (`plain` → `"plain"`, `42 Main St` → `"42 Main St"`) — so a string member whose whole text happens to be JSON (`5`, `true`) comes back as that JSON value. Listed as `~ extra — text values as JSON` (`entry.jsonified`);
+  - then applies the type and nullability changes and drops the old column and its dot-named columns (`address.street`, …), which were never written. [Safe mode](/sync/#safe-mode) copies but drops nothing.
+- **A value that cannot be moved refuses the table, nothing is dropped.** Malformed JSON in the old column, or a value that does not convert to its new column's type, fails the copy: the table's entry is an error (`JSON column copy failed on <table>: …`), the old column and its data stay, and the next run retries. A field the copy cannot fill — an `@db.encrypted` or `db.geoPoint` field inside the object, a field with a `@db.default` (adding its column fills every row with the default), or a MySQL `TIMESTAMP` / `DATETIME` column — refuses the table. A column the stored snapshot knows as a plain scalar (a `string` field retyped to an object) is not copied; it is dropped as before. Fix the data, or annotate the field `@db.json` to keep it in one column (`address` becomes a nullable JSON column with its data, converted in place), or migrate it manually.
+- Managed views that read such a field are recreated (an object field becomes one view column per leaf).
+- MongoDB and the in-memory adapter store nothing differently; their table hashes change for tables with a `| null` field, so each re-syncs once without DDL, except for the index change below.
+
+### Behavior changes {#v0-1-155-behavior}
+
+- **Null tests on a whole object.** `{ address: null }`, `{ address: { $ne: null } }` and `$exists` on an object field — `| null`, optional, a union of objects or a plain nested object — now work on every adapter and over HTTP (`?address=null`, `?address!=null`); they were rejected for nested objects. The object counts as null when none of its fields holds a value — on MongoDB and the in-memory adapter that includes a stored `{}` or an object with only `null` fields (a native `{ address: null }` would not match those). Over HTTP the test is accepted only while every field of the object is visible and takes `$exists` itself (none is `@db.writeOnly` or `@db.encrypted`). Other comparisons and sorting on the whole object stay rejected. See [Null tests on an object](/api/storage#object-null-tests).
+- **A mixed union is a JSON column on SQL**: it accepts only `$exists` filters, and paths inside it are rejected.
+- **A unique index over a `T | null` field, or over a field inside an optional or `| null` object, is present-only on MongoDB and the in-memory adapter.** Several rows without a value no longer conflict, as on the SQL adapters. MongoDB rebuilds such indexes with a `partialFilterExpression` on the first sync.
+- **`T | null` fields can hold NULL for `$nulls`** — a `$nulls` / `@db.sort.nulls` entry on one is applied (it was dropped as "not nullable"), and a unique index over one no longer counts as a total order for the [primary-key tie-breaker](/api/queries#tie-breaker), so the primary key is appended to such sorts.
+- **Setting an optional or `| null` object to `null` in a patch clears its columns** on the SQL adapters. It used to fail with an unknown-column error.
+- **MongoDB replaces object values whole in patches.** A `@db.json` object, a union of objects or a `T | null` object in a patch replaces the stored object (a plain nested object keeps its `@db.patch.strategy`). Before, the update pipeline merged it into the stored object, so switching `payment` from a card to a bank payment kept `card`.
+- **JSON string values round-trip on PostgreSQL and MySQL.** A JSON column holding a string (a string member of a mixed union, or a `@db.json` field typed as a string) failed to parse on read, or came back as another type (`"5"` as `5`). `Mysql2Driver` now reads JSON columns as text (`jsonStrings: true`, and in its `typeCast`) — pass `jsonStrings: true` to a `mysql2` pool you create yourself, or a JSON string value read through it fails to parse or changes type.
+
+### For adapter authors
+
+- `resolveDesignType()` leaves `null` / `undefined` members out of a union (`T | null` → `T`'s design type).
+- A field descriptor of a `T | null` field carries `T` as its `type` (with the field's annotations), so a type mapper sees `T`'s tags; `optional` is `true` for every column that can hold `NULL` (inside an optional or `| null` object, or declared by only some union members). Nested-object adapters keep the field's own `optional`.
+- `TableMetadata.isNullable(path)` and `presence(path)` (`"required"` / `"nullable"` / `"partial"`, type `TPathPresence`) answer nullability per logical path; `objectLeaves(path)` lists the fields a null test on an object reads (the filter reaches your adapter already rewritten to `$exists` on them).
+- Schema sync moves values out of the old layout through two new optional primitives: `copyFromJsonColumn(source, targets: TJsonCopyTarget[])` and `jsonifyTextColumn(column)`. Without them such a table is refused. SQL dialects built on `@atscript/db-sql-tools` implement `jsonExtractText`, `jsonExtractValue` and `jsonFromText` and run `buildJsonColumnCopy` / `buildJsonifyText`.
+- `TFilterRef.nullTest` marks a presence-only filter entry; `guardPath(…, nullTest)` and moost-db's `FieldCapabilityIndex.check(…, nullTest)` accept it on an object parent.
+
 ## 0.1.154 {#v0-1-154}
 
 ### Fixes

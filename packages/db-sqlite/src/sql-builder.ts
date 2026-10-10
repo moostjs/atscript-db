@@ -192,6 +192,13 @@ export const sqliteDialect: SqlDialect = {
   // queries before this renders.
   calendarBucket: sqliteCalendarBucket,
   jsonExtract: sqliteJsonExtract,
+  // Schema sync's copy out of a JSON text column (since 0.1.155): `json_extract`
+  // gives scalars as SQL values and objects / arrays as JSON text; `->` gives
+  // JSON text (`'null'` for JSON null).
+  jsonExtractText: (quotedCol, path) => `json_extract(${quotedCol}, ${jsonDollarPath(path)})`,
+  jsonExtractValue: (quotedCol, path) => `NULLIF(${quotedCol} -> ${jsonDollarPath(path)}, 'null')`,
+  jsonFromText: (quotedCol) =>
+    `CASE WHEN json_valid(${quotedCol}) THEN ${quotedCol} ELSE json_quote(${quotedCol}) END`,
   castDouble: (expr: string) => `CAST(${expr} AS REAL)`,
   // `NULLS FIRST` / `NULLS LAST` — SQLite ≥ 3.30 (better-sqlite3 bundles a newer one).
   nullsPlacementSyntax: true,

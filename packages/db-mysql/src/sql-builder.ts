@@ -350,6 +350,17 @@ export const mysqlDialect: SqlDialect = {
   // Why MySQL needs it: see `SqlDialect.bucketAliasInHaving`.
   bucketAliasInHaving: true,
   jsonExtract: mysqlJsonExtract,
+  // Schema sync's copy out of a JSON text column (since 0.1.155)
+  jsonExtractText: (quotedCol, path) => {
+    const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+    return `CASE WHEN JSON_TYPE(${e}) = 'NULL' THEN NULL ELSE JSON_UNQUOTE(${e}) END`;
+  },
+  jsonExtractValue: (quotedCol, path) => {
+    const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+    return `CASE WHEN JSON_TYPE(${e}) = 'NULL' THEN NULL ELSE ${e} END`;
+  },
+  jsonFromText: (quotedCol) =>
+    `IF(JSON_VALID(${quotedCol}), ${quotedCol}, JSON_QUOTE(${quotedCol}))`,
   // DOUBLE (not DECIMAL): no `div_precision_increment` rounding (MySQL 8.0.17+)
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE)`,
   createViewPrefix: "CREATE OR REPLACE VIEW",

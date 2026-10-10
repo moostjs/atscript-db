@@ -13,11 +13,13 @@ import { MockAdapter, NestedMockAdapter, prepareFixtures } from "./test-utils";
 // upgrade — the derived-column snapshot key must stay opt-in.
 //
 // Baseline computed with the 0.1.140 dist (scratch install), 2026-09-28.
+// Since 0.1.155 a required leaf of an optional object is a nullable column:
+// `sql:VsParity` (`meta?: { kind: string, … }`) moved from "-4a747fdf".
 const PINS: Record<string, string> = {
   "sql:VsUser": "3fe6aee8",
   "sql:VsRegion": "73e1f897",
   "sql:VsCountry": "7e8501dc",
-  "sql:VsParity": "-4a747fdf",
+  "sql:VsParity": "2cb699f9",
   "nested:VsUser": "05b90501",
   "nested:VsRegion": "73e1f897",
   "nested:VsCountry": "7e8501dc",

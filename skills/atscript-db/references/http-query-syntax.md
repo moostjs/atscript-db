@@ -188,7 +188,7 @@ HTTP/1.1 400 Bad Request
 | Path                                          | Filter / `$sort` / `$groupBy`                                     | `$select`                                                        |
 | --------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
 | listed field (`title`, `contact.email`)       | per `/meta.fields` flags (manual-mode policy on filter/sort only) | ok                                                               |
-| flattened object parent (`contact`)           | 400 `"contact" is a nested object — … leaves (contact.email, …)`  | ok (expands)                                                     |
+| flattened object parent (`contact`)           | `=null` / `!=null` ok (0.1.155); else 400 `… is a nested object`  | ok (expands)                                                     |
 | JSON parent (`prefs`, arrays)                 | filter: SQL `$exists` only, else 400; `$sort`: 400 everywhere     | ok (whole value)                                                 |
 | JSON descendant (`prefs.theme`)               | SQL: 400 `… inside JSON-stored column "prefs" …`; Mongo/memory ok | same                                                             |
 | navigation path (`assignee`, `assignee.name`) | 400 `… use assignee=$some(…) … or $with=assignee(...)`            | 400 — use `$with=assignee($select=name)`                         |

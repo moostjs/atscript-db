@@ -24,7 +24,7 @@ export interface User {
 }
 ```
 
-The string argument sets the physical table name in the database. Optional fields (marked with `?`) become nullable columns.
+The string argument sets the physical table name in the database. Optional fields (marked with `?`) and `T | null` fields become nullable columns — see [Nullable and Union Fields](/api/storage#unions).
 
 If you omit the name, the interface name is used directly:
 

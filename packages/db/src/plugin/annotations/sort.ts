@@ -2,7 +2,7 @@ import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isArray, isInterface, isPrimitive, isRef, isStructure } from "@atscript/core";
 
-import { getDbTableOwner, primitiveBaseType } from "../../shared/annotation-utils";
+import { getDbTableOwner, isNullableUnion, primitiveBaseType } from "../../shared/annotation-utils";
 
 /**
  * `@db.sort.nulls` (since 0.1.153) — a field's default NULL placement when a
@@ -19,8 +19,8 @@ export const dbSortAnnotations: TAnnotationsTree = {
         "- **`'last'`** — they come after every value, in both directions\n\n" +
         "Without it (and without `$nulls`) NULL placement is the database's own: first in " +
         "ascending order on SQLite, MySQL, MongoDB and the in-memory adapter, last on PostgreSQL. " +
-        "Applies to `$sort` and to the `$rowOrder` of `first()` / `last()`. Only optional fields " +
-        "can be NULL — on a required table field it has no effect. On PostgreSQL, MySQL and " +
+        "Applies to `$sort` and to the `$rowOrder` of `first()` / `last()`. Only optional and " +
+        "`| null` fields can be NULL — on another required table field it has no effect. On PostgreSQL, MySQL and " +
         "MongoDB a placement the engine does not produce natively costs the index its ORDER BY " +
         "(a sort step instead).\n\n" +
         "**Example:**\n" +
@@ -65,12 +65,14 @@ export const dbSortAnnotations: TAnnotationsTree = {
           fail("@db.sort.nulls needs a sortable scalar field — not an object or an array");
           return errors;
         }
-        // A required top-level field of a table is NOT NULL: nothing to place.
-        // (A view column can be NULL through a left join or an aggregate, and a
-        // nested field through its optional parent, so neither is flagged.)
+        // A required top-level field of a table is NOT NULL (unless `| null`):
+        // nothing to place. (A view column can be NULL through a left join or
+        // an aggregate, and a nested field through its optional parent, so
+        // neither is flagged.)
         const owner = getDbTableOwner(token);
         if (
           !field.has("optional") &&
+          !isNullableUnion(def, doc) &&
           owner &&
           owner.countAnnotations("db.table") > 0 &&
           field.ownerNode?.ownerNode === owner

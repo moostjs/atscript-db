@@ -64,7 +64,7 @@ await db.collection("inventory").aggregate([{ $search: { index: indexName /* …
 
 ## Unique indexes on optional fields are partial
 
-A `@db.index.unique` that includes an optional field is emitted with a `partialFilterExpression` restricting it to documents where the optional field is present — many docs may lack the field while present values stay unique (matches SQL `NULLS DISTINCT`). Composite unique: a doc is exempt as soon as any optional indexed field is missing. Changing a field's optionality changes the filter → index drop+recreate on next sync.
+A `@db.index.unique` that includes an optional field (since 0.1.155 also a `T | null` field, or a field inside an optional / `| null` object) is emitted with a `partialFilterExpression` restricting it to documents where the optional field is present — many docs may lack the field while present values stay unique (matches SQL `NULLS DISTINCT`). Composite unique: a doc is exempt as soon as any optional indexed field is missing. Changing a field's optionality changes the filter → index drop+recreate on next sync.
 
 ## Indexes carry the fields' collation (0.1.151, breaking)
 
