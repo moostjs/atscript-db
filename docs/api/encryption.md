@@ -103,7 +103,7 @@ Reads, list queries, search results, and relation loads all decrypt transparentl
 
 Ciphertext is opaque, so anything that needs to _interpret_ the stored value is rejected loudly:
 
-**At compile/build time** — `@db.encrypted` cannot combine with: `@meta.id`, `@db.rel.FK` (or being an FK target), any `@db.index.*` (incl. [geo](/search/geo-search)), `@db.search.vector`/`@db.search.filter`, `@db.mongo.search.*`, [`@db.column.version`](/api/versioning), `@db.default.increment`/`@db.default.now`, or `@db.patch.strategy "merge"`. (A plain `@db.default 'literal'` is fine — it's applied app-side before encryption.)
+**At compile/build time** — `@db.encrypted` cannot combine with: `@meta.id`, `@db.rel.FK` (or being an FK target), any `@db.index.*` (incl. [geo](/search/geo-search)), `@db.search.vector`/`@db.search.filter`, `@db.mongo.search.*`, [`@db.column.version`](/api/versioning), `@db.default.increment`/`@db.default.now`, [`@db.onUpdate.now`](/api/defaults#on-update) (so no `number.timestamp.created` / `.updated` either), or `@db.patch.strategy "merge"`. (A plain `@db.default 'literal'` is fine — it's applied app-side before encryption.)
 
 **At query/patch time** — engine-agnostic `DbError` rejections before any SQL/pipeline is built:
 

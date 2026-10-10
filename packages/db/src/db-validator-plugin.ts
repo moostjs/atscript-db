@@ -217,19 +217,23 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       const baseMeta = columnUnionBase(def)?.metadata;
       // A default below a tuple / union of several types is not filled.
       const defaulted = !(
-        belowAmbiguous(dbCtx, ctx.path) || pathBelowAmbiguous(ctx.root, ctx.path)
+        belowAmbiguous(dbCtx, ctx.path) ||
+        // `ctx.root` needs @atscript/typescript >= 0.1.105 — skip the type check below that
+        (ctx.root !== undefined && pathBelowAmbiguous(ctx.root, ctx.path))
       );
       const has = (key: keyof AtscriptMetadata) =>
         defaulted && (meta.has(key) || baseMeta?.has(key) === true);
       // Server-managed fields: defaulted columns, the OCC version column
-      // (adapter-initialised to 0 on insert, auto-bumped on every write) and
-      // derived columns (computed from the row; a payload value is dropped) —
+      // (adapter-initialised to 0 on insert, auto-bumped on every write),
+      // derived columns (computed from the row; a payload value is dropped)
+      // and, in a replace, `@db.onUpdate.now` columns (set by the write) —
       // single source of truth for both the server validators and db-client.
       const serverManaged =
         has("db.default") ||
         has("db.default.increment") ||
         has("db.default.uuid") ||
         has("db.default.now") ||
+        (dbCtx.mode === "replace" && has("db.onUpdate.now")) ||
         meta.has("db.column.version") ||
         meta.has("db.column.derived");
       const hasFK = meta.has("db.rel.FK");

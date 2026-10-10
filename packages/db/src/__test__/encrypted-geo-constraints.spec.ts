@@ -129,6 +129,13 @@ describe("@db.encrypted — rejected combinations (metadata build)", () => {
       ],
     ],
     [
+      "@db.onUpdate.now",
+      [
+        ["db.encrypted", true],
+        ["db.onUpdate.now", true],
+      ],
+    ],
+    [
       "@db.mongo.search.text",
       [
         ["db.encrypted", true],

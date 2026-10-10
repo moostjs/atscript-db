@@ -282,7 +282,7 @@ const result = await users.updateMany(
 // result: { matchedCount: 5, modifiedCount: 5 }
 ```
 
-`updateMany` does not support nested relation operations — only own fields. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version. Any other patch bumps each matched row, except [version-exempt](./versioning#version-exempt) ones (`updateMany` never checks the version).
+`updateMany` does not support nested relation operations — only own fields. Every update and replace also sets [`@db.onUpdate.now`](./defaults#on-update) fields (`number.timestamp.updated`) to the current time, overriding a value in the payload. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version. Any other patch bumps each matched row, except [version-exempt](./versioning#version-exempt) ones (`updateMany` never checks the version).
 
 ## Replacing Records
 

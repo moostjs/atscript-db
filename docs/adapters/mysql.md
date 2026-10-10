@@ -345,15 +345,18 @@ Under `explicit_defaults_for_timestamp = OFF` a required `TIMESTAMP` column with
 
 If you pre-create your own `mysql2/promise` `Pool` and pass it to `Mysql2Driver`, type casting becomes the caller's responsibility — replicate the settings above if you want the same behavior.
 
-Use `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` for auto-updating timestamps:
+For a last-modified time use `number.timestamp.updated` (or [`@db.onUpdate.now`](/api/defaults#on-update)): atscript-db writes the time in every update it runs, as on the other adapters, and the column gets no `ON UPDATE` clause. Add `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` when updates made outside atscript-db (raw SQL) must set it too — MySQL then also sets it itself whenever a row's values change, an explicit value in the statement winning:
 
 ```atscript
 @db.default.now
 createdAt: number.timestamp
 
-@db.default.now
+// set by every atscript-db update
+updatedAt: number.timestamp.updated
+
+// …and by MySQL for any other UPDATE that changes the row
 @db.mysql.onUpdate "CURRENT_TIMESTAMP"
-updatedAt: number.timestamp
+touchedAt: number.timestamp.updated
 ```
 
 ### Fractional seconds {#fractional-seconds}

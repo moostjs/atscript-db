@@ -6,6 +6,34 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.156 {#v0-1-156}
+
+**Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.106.** In that release `number.timestamp.updated` carries `@db.default.now` and the new `@db.onUpdate.now` (atscript 0.1.104 and 0.1.105 described it as a marker that nothing sets — it was always documented as set on every write, and now is).
+
+This release changes the SQL schema of tables with `number.timestamp.updated` fields on PostgreSQL and MySQL. Run `planSchema` before the first sync — [What the first schema sync changes](#v0-1-156-sync) lists it per adapter.
+
+### New features
+
+- **`@db.onUpdate.now`** sets a `number` field to the current time on every update and replace — `updateOne`, `bulkUpdate`, `updateMany`, `replaceOne`, `bulkReplace`, `replaceMany`, HTTP `PATCH` / `PUT` — on every adapter. The SDK writes the time in the statement, overriding a value in the payload; inserts are left to the field's default. Editor completion and hover come with the db plugin. See [Update Timestamps](/api/defaults#on-update).
+
+### Behavior changes {#v0-1-156-behavior}
+
+- **`number.timestamp.updated` is set on insert and on every update.** A field typed `number.timestamp.updated` — directly, optional, through a type alias, as `number.timestamp.updated | null`, also inside an embedded object — behaves like `@db.default.now` + `@db.onUpdate.now`: it may be omitted on insert (also in db-client validation) and is filled with the current time (an explicit value wins, as for `number.timestamp.created`), it may be omitted on replace, and every patch and replace sets it to the current time. Before, nothing set it and it was required on insert. A field that references another one (`updatedAt: Order.updatedAt`), a member of another union, a tuple item and an array element are not affected.
+- **A value for it in a patch or replace is ignored.** Code that wrote `updatedAt: Date.now()` itself keeps working. Code that stored a chosen value through an update (an import or migration copying a row's history) now gets the current time instead — write such rows with an insert, or declare the field `number.timestamp` (plus `@db.default.now` if wanted). Over HTTP a client can no longer set it with `PATCH` / `PUT`; on `POST` a supplied value is still stored, like `number.timestamp.created` — strip it in `onWrite` if clients must not choose it.
+- **A patch that writes only the timestamp is a no-op.** `updateOne({ id, updatedAt })` used to store the value; now the value is dropped, nothing else is left to write, and no statement runs (as for any empty patch). A patch of only [version-exempt](/api/versioning#version-exempt) fields still keeps the version, and now also sets the time.
+- **`/meta.type` keeps `db.onUpdate.now`**, next to `db.default.now`, so db-client and forms see the field as server-managed.
+
+### What the first schema sync changes {#v0-1-156-sync}
+
+Every table with a `number.timestamp.updated` field gets a new schema hash and is re-planned once. Only those fields change.
+
+- **PostgreSQL** — `DOUBLE PRECISION` → `BIGINT DEFAULT (epoch ms)`, converted in place (values keep their milliseconds; a fractional value is rounded), as for `number.timestamp.created` in [0.1.155](#v0-1-155-sync). A column that already has the type but no `DEFAULT` gets one.
+- **MySQL** — `DOUBLE` → `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` through a temporary column (the column keeps its position), as for `number.timestamp.created` in [0.1.155](#v0-1-155-sync). **A plain `TIMESTAMP` holds whole seconds: the stored milliseconds are truncated**, and so are the times later updates write. To keep milliseconds, add `@db.mysql.type "TIMESTAMP(3)"` to the field before this sync (see [Fractional seconds](/adapters/mysql#fractional-seconds)). A stored value a `TIMESTAMP` cannot hold (before 1970-01-01 00:00:01 or after 2038-01-19 UTC, such as a `0` placeholder) fails that table's sync with the column left as it was, and until it succeeds inserts, updates and replaces of the table fail (the adapter writes a datetime into the old `DOUBLE` column) — fix the rows first (for example `UPDATE orders SET updatedAt = createdAt WHERE updatedAt < 1000`) and re-run. No `ON UPDATE` clause is added.
+- **SQLite** — no DDL change: the SDK fills and sets the value.
+- **MongoDB and the in-memory adapter** store nothing differently; the tables re-sync once without changes.
+- **Views** — a managed view that selects an embedded object containing a `number.timestamp.updated` field gets a new definition hash and is dropped and recreated once (a materialized view is rebuilt), as in 0.1.155.
+- **Writes outside atscript-db** (raw SQL, other services) do not set the field — no engine trigger is created. On MySQL add `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` if such writes must set it.
+
 ## 0.1.155 {#v0-1-155}
 
 **Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.104.** That release applies a primitive extension's built-in annotations to every field typed with it, directly or through a type alias: `number.timestamp.created` carries `@db.default.now` and `string.required` / `boolean.required` carry `@meta.required` (earlier releases dropped them on every plain field). A field that references another field (`createdAt: Order.createdAt`) still does not get them.
@@ -34,7 +62,7 @@ The first sync moves the stored values into the new layout — see [Union column
 
 #### Defaults
 
-- **`number.timestamp.created` is a `@db.default.now` column, as documented.** A field typed `number.timestamp.created` (or a type alias of it, or `number.timestamp.created | null`, also inside an embedded object) now behaves exactly like a field with an explicit `@db.default.now`: it gets the database default, it may be omitted on insert (also in db-client validation) and is then filled with the current time, and a replace that omits it stores the current time as well. Before, the field got no default, was required on insert and was never filled. An explicit `@db.default` on the field still wins. A field that references another one (`createdAt: Order.createdAt`), a member of another union (`number.timestamp.created | string`), a tuple item and an array element get no default. `number.timestamp.updated` is unchanged: a marker tag, nothing sets it. See [Defaults](/api/defaults#semantic-types).
+- **`number.timestamp.created` is a `@db.default.now` column, as documented.** A field typed `number.timestamp.created` (or a type alias of it, or `number.timestamp.created | null`, also inside an embedded object) now behaves exactly like a field with an explicit `@db.default.now`: it gets the database default, it may be omitted on insert (also in db-client validation) and is then filled with the current time, and a replace that omits it stores the current time as well. Before, the field got no default, was required on insert and was never filled. An explicit `@db.default` on the field still wins. A field that references another one (`createdAt: Order.createdAt`), a member of another union (`number.timestamp.created | string`), a tuple item and an array element get no default. `number.timestamp.updated` was unchanged — it is set on insert and on every update since [0.1.156](#v0-1-156). See [Defaults](/api/defaults#semantic-types).
 - **`string.required` / `boolean.required` reject blank strings and `false` again.** On a plain field these types lost `@meta.required` in atscript 0.1.100–0.1.103, so `name: string.required` accepted `''`. Writes that store an empty (or whitespace-only) string or `false` in such a field now fail validation (HTTP 400 through moost-db). Check stored data and clients.
 
 #### Primary keys

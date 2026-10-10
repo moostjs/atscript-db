@@ -92,3 +92,20 @@ export interface CreatedRow {
     at: number.timestamp.created
   }
 }
+
+@db.table 'updated_rows'
+export interface UpdatedRow {
+  @meta.id
+  id: number
+
+  updatedAt: number.timestamp.updated
+
+  closedAt: number.timestamp.updated | null
+
+  audit: {
+    at: number.timestamp.updated
+  }
+
+  @db.onUpdate.now
+  editedAt: number.timestamp
+}

@@ -196,12 +196,13 @@ Tables **without** `@db.depth.limit` are now treated as `@db.depth.limit 0`: the
 
 ## Defaults
 
-| Annotation              | Applies To | Arguments         | Description                                        |
-| ----------------------- | ---------- | ----------------- | -------------------------------------------------- |
-| `@db.default`           | Field      | `value` (string)  | Static default value                               |
-| `@db.default.increment` | Field      | `start?` (number) | Auto-incrementing integer (requires number type)   |
-| `@db.default.uuid`      | Field      | —                 | Random UUID string (requires string type)          |
-| `@db.default.now`       | Field      | —                 | Current timestamp (requires number or string type) |
+| Annotation              | Applies To | Arguments         | Description                                                                                                       |
+| ----------------------- | ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `@db.default`           | Field      | `value` (string)  | Static default value                                                                                              |
+| `@db.default.increment` | Field      | `start?` (number) | Auto-incrementing integer (requires number type)                                                                  |
+| `@db.default.uuid`      | Field      | —                 | Random UUID string (requires string type)                                                                         |
+| `@db.default.now`       | Field      | —                 | Current timestamp (requires number or string type)                                                                |
+| `@db.onUpdate.now`      | Field      | —                 | Set to the current time by every update (requires number type) — see [Update Timestamps](/api/defaults#on-update) |
 
 ```atscript
 @db.table
@@ -215,6 +216,10 @@ interface Product {
 
   @db.default.now
   createdAt: number
+
+  @db.default.now
+  @db.onUpdate.now
+  updatedAt: number // or: updatedAt: number.timestamp.updated
 }
 ```
 

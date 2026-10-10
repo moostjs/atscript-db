@@ -30,6 +30,7 @@ export const DERIVED_INCOMPATIBLE: ReadonlyArray<[name: string, why: string]> = 
   ["db.default.increment", "the value is computed, never defaulted"],
   ["db.default.uuid", "the value is computed, never defaulted"],
   ["db.default.now", "the value is computed, never defaulted"],
+  ["db.onUpdate.now", "a derived column is never written"],
   ["db.column.version", "the version column is adapter-managed"],
   ["db.column.version.exempt", "a derived column is never written"],
   ["db.encrypted", "the value is a cleartext extraction of its source"],

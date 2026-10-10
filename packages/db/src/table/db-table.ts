@@ -523,7 +523,8 @@ export class AtscriptDbTable<
         // Clone (dropping `undefined` props — deep at the root call only, the
         // nested re-entries receive already-pruned subtrees) + apply defaults.
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
-        let items = payloads.map((p) => this._applyDefaults(clone(p)));
+        const now = Date.now();
+        let items = payloads.map((p) => this._applyDefaults(clone(p), now));
         if (ignore) this._linkToByKeyInIgnoreMode(items);
         // Nav data for the FROM / VIA phases, read from the pruned rows (nav
         // fields are stripped from `items` before the main insert).
@@ -687,10 +688,12 @@ export class AtscriptDbTable<
           length: payloads.length,
         });
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
+        const now = Date.now();
         const items = payloads.map((p, i) => {
           const c = clone(p);
           expectedVersions[i] = separateCas(c, versionColumn);
-          return this._applyDefaults(c);
+          this._stampOnUpdate(c, now, true);
+          return this._applyDefaults(c, now);
         });
         // Nav data for the FROM / VIA phases, read from the pruned rows.
         const originals = canNest ? items.map((item) => ({ ...item })) : [];
@@ -869,9 +872,14 @@ export class AtscriptDbTable<
           length: payloads.length,
         });
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
+        // `@db.onUpdate.now`: the caller's values are dropped here; the
+        // table's own columns are stamped in Phase 2 once the patch is known
+        // to write something (an empty patch stays a no-op).
+        const now = Date.now();
         const cloned: Array<Record<string, unknown>> = payloads.map((p, i) => {
           const c = clone(p);
           expectedVersions[i] = separateCas(c, versionColumn);
+          this._stampOnUpdate(c, now, false);
           return c;
         });
 
@@ -991,6 +999,7 @@ export class AtscriptDbTable<
             isVersionExemptPatch(data, this as AtscriptDbTable)
               ? [KEEP_VERSION]
               : [];
+          this._stampTopLevel(data, now);
 
           let result: TDbUpdateResult;
           if (this.adapter.supportsNativePatch()) {
@@ -1268,6 +1277,8 @@ export class AtscriptDbTable<
     );
     const dataCopy = _cloneWritePayload(data);
     this._meta.stripDerived(dataCopy);
+    const now = Date.now();
+    this._stampOnUpdate(dataCopy, now, false);
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still
@@ -1294,6 +1305,8 @@ export class AtscriptDbTable<
       versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable)
         ? [KEEP_VERSION]
         : [];
+    // An empty patch stays a no-op (below) — no update time without a write.
+    this._stampTopLevel(dataCopy, now);
     // Encrypt @db.encrypted fields BEFORE decomposition so the patch carries
     // envelope strings; operator objects on encrypted fields are rejected.
     await this._encryptItems([dataCopy], "patch");
@@ -1328,6 +1341,7 @@ export class AtscriptDbTable<
       this._writeTableResolver,
     );
     const dataCopy = _cloneWritePayload(data);
+    this._stampOnUpdate(dataCopy, Date.now(), true);
     await this._encryptItems([dataCopy], "write");
     return enrichFkViolation(this._meta, () =>
       this.adapter.replaceMany(
@@ -1854,8 +1868,13 @@ export class AtscriptDbTable<
    * that object is present (an absent or `null` embedded object stays so), and
    * in every object of an array on the way; a field inside a JSON value or an
    * array has no column default, so the SDK fills its function default too.
+   * Every `now` default the SDK fills gets the one time `now` (one per write
+   * call, so `createdAt` / `updatedAt` of a new row are equal).
    */
-  protected _applyDefaults(data: Record<string, unknown>): Record<string, unknown> {
+  protected _applyDefaults(
+    data: Record<string, unknown>,
+    now = Date.now(),
+  ): Record<string, unknown> {
     const nativeFns = this.adapter.nativeDefaultFns();
     const versionField = this._meta.versionField;
     for (const [field, def] of this._meta.defaults.entries()) {
@@ -1872,7 +1891,7 @@ export class AtscriptDbTable<
         (!nativeFns.has(def.fn) || findAncestorInSet(field, this._meta.jsonParents) !== undefined)
       ) {
         // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
-        if (def.fn === "now") make = Date.now;
+        if (def.fn === "now") make = () => now;
         else if (def.fn === "uuid") make = () => crypto.randomUUID();
       }
       if (!make) continue;
@@ -1883,6 +1902,35 @@ export class AtscriptDbTable<
       }
     }
     return data;
+  }
+
+  /**
+   * `@db.onUpdate.now` (since 0.1.156): sets each such field of a replace /
+   * patch payload to `now`, overriding the caller's value. A nested field
+   * (`audit.updatedAt`) is set inside its object only when the payload
+   * carries that object — in every item of an array on the way and of the
+   * items an array patch operator adds or updates — like
+   * {@link _applyDefaults}. `topLevel: false` (a patch) instead drops the
+   * caller's values of the table's own columns: {@link _stampTopLevel} sets
+   * them once the patch is known to write something.
+   */
+  private _stampOnUpdate(data: Record<string, unknown>, now: number, topLevel: boolean): void {
+    for (const field of this._meta.onUpdateNow) {
+      if (!field.includes(".")) {
+        if (topLevel) data[field] = now;
+        else delete data[field];
+      } else if (this._nestedDefaultFillable(field)) {
+        stampNested(data, field.split("."), 0, now);
+      }
+    }
+  }
+
+  /** Sets the top-level `@db.onUpdate.now` columns of a non-empty patch to `now`. */
+  private _stampTopLevel(data: Record<string, unknown>, now: number): void {
+    if (isEmptyObject(data)) return;
+    for (const field of this._meta.onUpdateNow) {
+      if (!field.includes(".")) data[field] = now;
+    }
   }
 
   /** {@link _nestedDefaultFillable} per nested default path. */
@@ -2143,6 +2191,32 @@ export class AtscriptDbTable<
     }
 
     return this.createValidator({ plugins: adapterPlugins });
+  }
+}
+
+/**
+ * Sets `segs` below `value` to `now` (see `_stampOnUpdate`), through
+ * arrays and the item lists of array patch operators (`$insert`, `$upsert`,
+ * `$replace`, `$update` — not `$remove`).
+ */
+function stampNested(value: unknown, segs: readonly string[], i: number, now: number): void {
+  if (Array.isArray(value)) {
+    for (const item of value) stampNested(item, segs, i, now);
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  const key = segs[i]!;
+  if (i === segs.length - 1) {
+    value[key] = now;
+    return;
+  }
+  const next = value[key];
+  if (isPlainObject(next) && Object.keys(next).some((k) => k.startsWith("$"))) {
+    for (const [op, items] of Object.entries(next)) {
+      if (op !== "$remove") stampNested(items, segs, i + 1, now);
+    }
+  } else {
+    stampNested(next, segs, i + 1, now);
   }
 }
 

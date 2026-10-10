@@ -46,7 +46,7 @@ Constraints (enforced at compile time):
 ::: tip Auto-bump is mandatory
 Every successful write to a versioned row increments `version` by 1, whether or not `$cas` was supplied. This is the property that makes OCC actually work — if the version column did not auto-increment, opting in to `$cas` would silently degrade to no protection.
 
-The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150).
+The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150). The [update time](./defaults#on-update) such a patch sets (`number.timestamp.updated`) does not count as a write here.
 :::
 
 Callers MAY read the version (and SHOULD, in order to pass `$cas`) but **MUST NOT** write it directly. See [Direct-write rejection](#direct-write-rejection).

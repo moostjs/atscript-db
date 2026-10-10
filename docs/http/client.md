@@ -849,7 +849,7 @@ validator.navFields; // Set of navigation field names
 validator.validate(data, "insert"); // throws on failure
 ```
 
-Server-managed fields follow the server's rules, read from the annotations the [`/meta` type](./crud#get-meta) keeps: insert and replace accept a missing `@db.default*`, `@db.rel.FK` or `@db.column.version` field (since 0.1.128) and a missing [derived column](/api/storage#derived-columns) (since 0.1.142), and `$inc` / `$dec` / `$mul` on a derived column is a `ClientValidationError` before any request is sent (since 0.1.142).
+Server-managed fields follow the server's rules, read from the annotations the [`/meta` type](./crud#get-meta) keeps: insert and replace accept a missing `@db.default*`, `@db.rel.FK` or `@db.column.version` field (since 0.1.128) and a missing [derived column](/api/storage#derived-columns) (since 0.1.142), replace a missing [`@db.onUpdate.now`](/api/defaults#on-update) field (since 0.1.156 — `number.timestamp.updated` is also `@db.default*`, so insert may omit it too), and `$inc` / `$dec` / `$mul` on a derived column is a `ClientValidationError` before any request is sent (since 0.1.142).
 
 ```typescript
 // customerId / amount are @db.column.derived (required in the type)

@@ -257,6 +257,12 @@ export class TableMetadata {
   /** Adapter-contributed multi-field unique keys (logical paths) — see `TMetadataOverrides.addUniqueKeys`. */
   uniqueKeys: string[][] = [];
   defaults = new Map<string, TDbDefaultValue>();
+  /**
+   * Logical paths annotated with `@db.onUpdate.now` (`number.timestamp.updated`
+   * applies it): set to the current time by every update and replace.
+   * @since 0.1.156
+   */
+  onUpdateNow = new Set<string>();
   /** Logical path → `@db.column` override (top-level keys only on document storage). */
   columnMap = new Map<string, string>();
   dimensions: string[] = [];
@@ -756,6 +762,11 @@ export class TableMetadata {
       this.defaults.set(fieldName, resolvedDefault);
     }
 
+    // @db.onUpdate.now
+    if (metadata.has("db.onUpdate.now")) {
+      this.onUpdateNow.add(fieldName);
+    }
+
     // @db.ignore
     if (metadata.has("db.ignore")) {
       this.ignoredFields.add(fieldName);
@@ -1064,6 +1075,9 @@ export class TableMetadata {
     }
     if (metadata.has("db.column.version")) {
       reject("@db.column.version", "the OCC filter needs cleartext equality");
+    }
+    if (metadata.has("db.onUpdate.now")) {
+      reject("@db.onUpdate.now", "the update time is set after the encryption transform");
     }
     if (metadata.has("db.default.increment") || metadata.has("db.default.now")) {
       reject(

@@ -47,6 +47,7 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
           index: dbIndexAnnotations.index,
           column: dbColumnAnnotations.column,
           default: dbColumnAnnotations.default,
+          onUpdate: dbColumnAnnotations.onUpdate,
           json: dbColumnAnnotations.json,
           ignore: dbColumnAnnotations.ignore,
           encrypted: dbColumnAnnotations.encrypted,

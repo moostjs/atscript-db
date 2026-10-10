@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-Atscript lets you set default values directly in your `.as` schema. Defaults ensure fields are populated automatically on insert — you define them once, and every adapter handles the rest.
+Atscript lets you set default values directly in your `.as` schema. Defaults ensure fields are populated automatically on insert — you define them once, and every adapter handles the rest. A last-modified time that every update sets is covered under [Update Timestamps](#on-update).
 
 ## Static Defaults
 
@@ -65,20 +65,49 @@ Use `number` (epoch ms) for timestamps so they cross HTTP boundaries without any
 
 ### Semantic types {#semantic-types}
 
-`number.timestamp.created` already includes `@db.default.now` — you don't need to add it:
+`number.timestamp.created` already includes `@db.default.now`, and `number.timestamp.updated` includes `@db.default.now` and [`@db.onUpdate.now`](#on-update) — you don't need to add them:
 
 ```atscript
-// Concise — the type carries the default
+// Concise — the types carry the annotations
 createdAt: number.timestamp.created
+updatedAt: number.timestamp.updated
 
 // Equivalent verbose form
 @db.default.now
 createdAt: number.timestamp
+
+@db.default.now
+@db.onUpdate.now
+updatedAt: number.timestamp
 ```
 
-The default applies wherever the field's type is `number.timestamp.created`: directly, through a type alias (`type Created = number.timestamp.created`), as `number.timestamp.created | null`, and on a field of an embedded object. It does not apply to a field that references another field (`createdAt: Order.createdAt` copies the type, not the default), to a member of another union (`number.timestamp.created | string`), to a tuple item or to an array element. An explicit `@db.default` on the field wins. `number.timestamp.updated` is only a marker: nothing sets it.
+The annotations apply wherever the field's type is `number.timestamp.created` / `number.timestamp.updated`: directly, through a type alias (`type Created = number.timestamp.created`), as `number.timestamp.created | null`, and on a field of an embedded object. They do not apply to a field that references another field (`createdAt: Order.createdAt` copies the type, not the default), to a member of another union (`number.timestamp.created | string`), to a tuple item or to an array element. An explicit `@db.default` on the field wins (for an `updated` field it replaces the insert value only; updates still set the time).
 
-Before 0.1.155 (atscript 0.1.104) the default was not applied to such fields — see [Upgrading](/guide/upgrading#v0-1-155-sync) for the schema change it brings.
+Before 0.1.155 (atscript 0.1.104) the default was not applied to `number.timestamp.created` fields, and before 0.1.156 (atscript 0.1.106) `number.timestamp.updated` was neither filled nor set — see [Upgrading](/guide/upgrading#v0-1-156) for the schema change it brings.
+
+## Update Timestamps {#on-update}
+
+`@db.onUpdate.now` sets a `number` field to the current time (epoch milliseconds) on every update. Pair it with `@db.default.now` to fill it on insert too — `number.timestamp.updated` is that pair:
+
+```atscript
+updatedAt: number.timestamp.updated
+
+// last edit only — required on insert, then set by every update
+@db.onUpdate.now
+editedAt?: number.timestamp
+```
+
+- **Which writes set it** — patches (`updateOne`, `bulkUpdate`, `updateMany`) and replaces (`replaceOne`, `bulkReplace`, `replaceMany`), including nested relation writes on the related table's own fields, `PATCH` / `PUT` through [moost-db](/http/crud) and `@atscript/db-client`. Inserts (also with `onConflict: 'ignore'`) are left to the field's default.
+- **The SDK writes the time** — one time per call, in the write's own statement, the same on SQLite, PostgreSQL, MySQL, MongoDB and the in-memory adapter: `updateMany` stamps every matched row with it. No engine trigger or `ON UPDATE` clause is created, so writes made outside atscript-db (raw SQL, other clients) leave the field unchanged. On MySQL you can add [`@db.mysql.onUpdate "CURRENT_TIMESTAMP"`](/adapters/mysql#mysql-specific-annotations) for those as well.
+- **A value in the payload is overridden** — on a patch or a replace the caller cannot set the field (an HTTP client cannot forge it). On insert an explicit value wins, as for every default; strip it in an `onWrite` hook if clients must not choose it.
+- **[Write guards](/api/crud#write-guards)** see the time in a replace's rows; a patch's rows do not carry the row's own update fields — the time is added after the guard, when the patch is known to write something.
+- **A write that changes nothing stays a no-op** — a patch with no other field than the row's key (or the row's own timestamp fields) runs no statement and keeps the stored time. A [versioned touch](/api/versioning#versioned-touch) (key + `$cas` only) and `touchMany` bump the version only.
+- **Nested fields** — `audit.updatedAt` is set when the write carries `audit`: a replace always does, a patch only when it includes the object. In an array of objects every item is set, and every item an array patch adds or updates (`$insert`, `$upsert`, `$replace`, `$update`). An array without [`@expect.array.key`](/api/update-patch#keyed-object-arrays) matches `$upsert` and unique `$insert` items by their whole value, which then includes the new time, so such an item is always added — give the array a key. Below a tuple or a union of several object types the field is not set: the payload's value is stored and required.
+- **Version-exempt patches** — the time is set but does not count as a write for [`@db.column.version.exempt`](/api/versioning#version-exempt): a patch that writes only exempt fields still keeps the version.
+- **Validation** — the field may be omitted on replace (server and db-client), and on insert when it also has a default. `/meta` keeps the annotation so forms can show the field as server-managed.
+- **MySQL** — with `@db.default.now` the column is a `TIMESTAMP`: the time is stored in whole seconds unless the field declares `@db.mysql.type "TIMESTAMP(3)"` (see [Fractional seconds](/adapters/mysql#fractional-seconds)).
+
+`@db.onUpdate.now` requires a `number` field and cannot be combined with `@meta.id`, `@db.column.version`, `@db.encrypted` or `@db.column.derived`.
 
 ## Version Defaults
 

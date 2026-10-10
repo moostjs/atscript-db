@@ -71,3 +71,79 @@ export interface PdEvent {
     @db.json
     events: ({ kind: 'open', at: number.timestamp.created } | { kind: 'note', text: string })[]
 }
+
+// `number.timestamp.updated` carries `@db.default.now` and `@db.onUpdate.now`
+// (atscript 0.1.106): filled on insert, set to the current time on every update.
+export type Updated = number.timestamp.updated
+
+@db.table 'pd_updated_source'
+export interface PdUpdatedSource {
+    @meta.id
+    id: number
+
+    updatedAt: number.timestamp.updated
+}
+
+@db.table 'pd_updated'
+export interface PdUpdated {
+    @meta.id
+    id: number
+
+    name?: string
+
+    updatedAt: number.timestamp.updated
+
+    updatedOpt?: number.timestamp.updated
+
+    aliased: Updated
+
+    nullable: number.timestamp.updated | null
+
+    // set on update only: required on insert, optional on replace
+    @db.onUpdate.now
+    editedAt?: number.timestamp
+
+    audit: {
+        note?: string
+        at: number.timestamp.updated
+    }
+
+    maybeAudit?: {
+        at: number.timestamp.updated
+    } | null
+
+    history: {
+        @expect.array.key
+        key: string
+        at: number.timestamp.updated
+    }[]
+
+    mixed?: number.timestamp.updated | string
+
+    sourceUpdatedAt?: PdUpdatedSource.updatedAt
+}
+
+@db.table 'pd_updated_versioned'
+export interface PdUpdatedVersioned {
+    @meta.id
+    id: number
+
+    @db.column.version
+    version: number.int
+
+    @db.column.version.exempt
+    views?: number
+
+    title?: string
+
+    updatedAt: number.timestamp.updated
+}
+
+@db.table 'pd_edited'
+export interface PdEdited {
+    @meta.id
+    id: number
+
+    @db.onUpdate.now
+    editedAt: number.timestamp
+}

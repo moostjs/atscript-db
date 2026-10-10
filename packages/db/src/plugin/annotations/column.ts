@@ -601,6 +601,44 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
   },
 
+  onUpdate: {
+    now: new AnnotationSpec({
+      description:
+        "Sets the field to the current time (epoch ms) on every update: patches " +
+        "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`) and replaces " +
+        "(`replaceOne`, `bulkReplace`, `replaceMany`, HTTP `PUT`). The value is " +
+        "written by the SDK in the same statement on every adapter and overrides a value " +
+        "the payload carries. Inserts are not affected — combine with `@db.default.now` " +
+        "(`number.timestamp.updated` applies both). Writes outside the SDK (raw SQL) " +
+        "do not set it." +
+        "\n\n**Example:**\n" +
+        "```atscript\n" +
+        "@db.default.now\n" +
+        "@db.onUpdate.now\n" +
+        "updatedAt: number.timestamp\n" +
+        "```\n",
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      validate(token, args, doc) {
+        const errors = validateFieldBaseType(token, doc, "@db.onUpdate.now", "number");
+        const field = token.parentNode!;
+        for (const [name, why] of [
+          ["meta.id", "the primary key identifies the row and is never updated"],
+          ["db.column.version", "the version column is adapter-managed"],
+        ]) {
+          if (field.countAnnotations(name) > 0) {
+            errors.push({
+              message: `@db.onUpdate.now cannot coexist with @${name} — ${why}`,
+              severity: 1,
+              range: token.range,
+            });
+          }
+        }
+        return errors;
+      },
+    }),
+  },
+
   json: new AnnotationSpec({
     description:
       "Forces a field to be stored as a single JSON column instead of being flattened " +
@@ -689,6 +727,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         ["db.column.version", "the OCC filter needs cleartext equality"],
         ["db.default.increment", "engine-side defaults bypass the encryption transform"],
         ["db.default.now", "engine-side defaults bypass the encryption transform"],
+        ["db.onUpdate.now", "the update time is set after the encryption transform"],
         ["db.mongo.search.text", "Atlas Search over ciphertext is impossible"],
         ["db.mongo.search.autocomplete", "Atlas Search over ciphertext is impossible"],
       ];

@@ -8,10 +8,11 @@ type TWalk = "none" | "exempt" | "versioned";
  * Whether a logical (pre-decomposition) patch writes ONLY version-exempt
  * fields (`@db.column.version.exempt`). `data` has nav fields, filter keys and
  * derived fields removed and `$cas` separated. Mirrors `flattenPatchPayload`
- * (keep the two side by side): PK keys are skipped; an exempt path (or one
- * under an exempt ancestor) is covered whatever its value (scalar, field op,
- * array ops, object); a non-exempt merge-strategy object recurses (only the
- * supplied children are written); anything else is a non-exempt write.
+ * (keep the two side by side): PK keys and `@db.onUpdate.now` fields are
+ * skipped; an exempt path (or one under an exempt ancestor) is covered
+ * whatever its value (scalar, field op, array ops, object); a non-exempt
+ * merge-strategy object recurses (only the supplied children are written);
+ * anything else is a non-exempt write.
  * True iff at least one key is covered and none is not.
  * @since 0.1.150
  */
@@ -24,12 +25,14 @@ export function isVersionExemptPatch(
   // Metadata read once per patch, not per key.
   const primaryKeys = meta.primaryKeys;
   const flatMap = meta.flatMap;
+  // The SDK's own `@db.onUpdate.now` stamps neither make nor break exemption.
+  const stamps = meta.onUpdateNow;
 
   const walk = (obj: Record<string, unknown>, prefix: string): TWalk => {
     let result: TWalk = "none";
     for (const [k, value] of Object.entries(obj)) {
       const key = prefix ? `${prefix}.${k}` : k;
-      if (primaryKeys.includes(key)) continue;
+      if (primaryKeys.includes(key) || stamps.has(key)) continue;
       if (meta.isVersionExemptPath(key)) {
         result = "exempt";
         continue;

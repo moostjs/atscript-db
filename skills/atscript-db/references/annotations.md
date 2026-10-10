@@ -78,14 +78,15 @@ Rules:
 
 ## Defaults
 
-| Annotation              | Args             | Effect                                               |
-| ----------------------- | ---------------- | ---------------------------------------------------- |
-| `@db.default`           | `value: string`  | Static default (string form — parsed per adapter).   |
-| `@db.default.increment` | `start?: number` | Auto-incrementing integer (requires numeric type).   |
-| `@db.default.uuid`      | —                | Random UUID string.                                  |
-| `@db.default.now`       | —                | Current timestamp (numeric timestamp or ISO string). |
+| Annotation              | Args             | Effect                                                              |
+| ----------------------- | ---------------- | ------------------------------------------------------------------- |
+| `@db.default`           | `value: string`  | Static default (string form — parsed per adapter).                  |
+| `@db.default.increment` | `start?: number` | Auto-incrementing integer (requires numeric type).                  |
+| `@db.default.uuid`      | —                | Random UUID string.                                                 |
+| `@db.default.now`       | —                | Current timestamp (numeric timestamp or ISO string).                |
+| `@db.onUpdate.now`      | —                | (0.1.156) Set to `Date.now()` by every patch/replace (number only). |
 
-`number.timestamp.created` carries `@db.default.now` (0.1.155 / atscript 0.1.104): directly, via a type alias, as `T | null`, on embedded-object fields — not via a field ref (`x: Order.createdAt`), another union, a tuple item or an array element; an explicit `@db.default` wins. `number.timestamp.updated` is a tag only. A defaulted field may be omitted on insert/replace (validation); defaults of nested fields are set inside the present object (an absent / `null` object stays absent: SQL insert/replace writes NULL into its columns, so a DDL default cannot make it reappear), in every array item and inside `@db.json` values (SDK-filled there even for engine-native `now`/`uuid`); below a tuple / multi-type union they are not filled and the field is required on insert.
+`number.timestamp.created` carries `@db.default.now` (0.1.155 / atscript 0.1.104): directly, via a type alias, as `T | null`, on embedded-object fields — not via a field ref (`x: Order.createdAt`), another union, a tuple item or an array element; an explicit `@db.default` wins. `number.timestamp.updated` (0.1.156 / atscript 0.1.106) carries `@db.default.now` + `@db.onUpdate.now`, same scoping. `@db.onUpdate.now`: every `updateOne`/`bulkUpdate`/`updateMany`/`replaceOne`/`bulkReplace`/`replaceMany` (HTTP PATCH/PUT, db-client) writes ONE `Date.now()` per call in its own statement on every adapter, OVERRIDING a payload value (clients cannot forge it on update; on insert an explicit value wins, like any default); no engine trigger/`ON UPDATE` (raw SQL doesn't set it; MySQL: add `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` for that); a patch with nothing else to write stays a no-op (no stamp); versioned touch / `touchMany` bump only the version; nested (`audit.at`) set only when the write carries the object (+ array items, `$insert/$upsert/$replace/$update` items); neutral for `@db.column.version.exempt`; optional on replace (validator), required on insert without a default; kept in `/meta.type`; keyless object arrays (no `@expect.array.key`) match `$upsert`/unique `$insert` by whole value → a stamped item is always appended; below a tuple / multi-type union NOT set (payload value kept, required); incompatible with `@meta.id` / `@db.column.version` / `@db.encrypted` / `@db.column.derived`. A defaulted field may be omitted on insert/replace (validation); defaults of nested fields are set inside the present object (an absent / `null` object stays absent: SQL insert/replace writes NULL into its columns, so a DDL default cannot make it reappear), in every array item and inside `@db.json` values (SDK-filled there even for engine-native `now`/`uuid`); below a tuple / multi-type union they are not filled and the field is required on insert.
 
 ## Indexes
 
