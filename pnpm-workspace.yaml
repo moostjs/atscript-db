@@ -5,14 +5,14 @@ packages:
 catalog:
   "@atscript/core": ^0.1.104
   "@atscript/typescript": ^0.1.104
-  "@moostjs/event-http": ^0.6.49
+  "@moostjs/event-http": ^0.6.51
   "@types/node": ^24
   "@uniqu/core": ^0.1.15
   "@uniqu/url": ^0.1.15
-  "@wooksjs/event-core": ^0.7.28
-  "@wooksjs/event-http": ^0.7.28
-  "@wooksjs/http-body": ^0.7.28
-  moost: ^0.6.49
+  "@wooksjs/event-core": ^0.7.29
+  "@wooksjs/event-http": ^0.7.29
+  "@wooksjs/http-body": ^0.7.29
+  moost: ^0.6.51
   sqlite-vec: ^0.1.9
   typescript: ^5
   unplugin-atscript: ^0.1.104
