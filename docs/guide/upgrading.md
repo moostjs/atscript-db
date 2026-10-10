@@ -49,7 +49,7 @@ Every table with a `number.timestamp.updated` field gets a new schema hash and i
 
 ## 0.1.155 {#v0-1-155}
 
-**Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.104.** That release applies a primitive extension's built-in annotations to every field typed with it, directly or through a type alias: `number.timestamp.created` carries `@db.default.now` and `string.required` / `boolean.required` carry `@meta.required` (earlier releases dropped them on every plain field). A field that references another field (`createdAt: Order.createdAt`) still does not get them.
+**Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.1.105** (0.1.104 applies the primitive annotations below; 0.1.105 adds `ctx.root` for the validator plugin). 0.1.104 applies a primitive extension's built-in annotations to every field typed with it, directly or through a type alias: `number.timestamp.created` carries `@db.default.now` and `string.required` / `boolean.required` carry `@meta.required` (earlier releases dropped them on every plain field). A field that references another field (`createdAt: Order.createdAt`) still does not get them.
 
 This release changes the SQL schema of tables with union fields, optional objects, `number.timestamp.created` fields or embedded `@meta.id` fields. Run `planSchema` before the first sync to see what it will do — [What the first schema sync changes](#v0-1-155-sync) lists it per adapter.
 
@@ -76,7 +76,7 @@ The first sync moves the stored values into the new layout — see [Union column
 #### Defaults
 
 - **`number.timestamp.created` is a `@db.default.now` column, as documented.** A field typed `number.timestamp.created` (or a type alias of it, or `number.timestamp.created | null`, also inside an embedded object) now behaves exactly like a field with an explicit `@db.default.now`: it gets the database default, it may be omitted on insert (also in db-client validation) and is then filled with the current time, and a replace that omits it stores the current time as well. Before, the field got no default, was required on insert and was never filled. An explicit `@db.default` on the field still wins. A field that references another one (`createdAt: Order.createdAt`), a member of another union (`number.timestamp.created | string`), a tuple item and an array element get no default. `number.timestamp.updated` was unchanged — it is set on insert and on every update since [0.1.156](#v0-1-156). See [Defaults](/api/defaults#semantic-types).
-- **`string.required` / `boolean.required` reject blank strings and `false` again.** On a plain field these types lost `@meta.required` in atscript 0.1.100–0.1.103, so `name: string.required` accepted `''`. Writes that store an empty (or whitespace-only) string or `false` in such a field now fail validation (HTTP 400 through moost-db). Check stored data and clients.
+- **`string.required` / `boolean.required` reject blank strings and `false` again.** On a plain field these types lost `@meta.required` in atscript 0.1.79–0.1.103, so `name: string.required` accepted `''`. Writes that store an empty (or whitespace-only) string or `false` in such a field now fail validation (HTTP 400 through moost-db). Check stored data and clients.
 
 #### Primary keys
 
