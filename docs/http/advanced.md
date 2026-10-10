@@ -323,6 +323,22 @@ curl "http://localhost:3000/orders/query?createdAt>1700000000&\$groupBy=region&\
 ]
 ```
 
+### Without `$groupBy` — totals over the filtered set {#ungrouped}
+
+Aggregates in `$select` without a `$groupBy` compute **one row** over every row the filter matches (since 0.1.155 — before, `/query` rejected the request with a generic `400`):
+
+```bash
+curl "http://localhost:3000/orders/query?status=paid&\$select=sum(amount):revenue,count(*):orders,avg(amount):avgOrder"
+```
+
+```json
+[{ "revenue": 24350.5, "orders": 129, "avgOrder": 188.76 }]
+```
+
+Over no matching row the one row has counts `0` and every other aggregate `null`. It is the ungrouped query of the core (`$groupBy: []`): every aggregate rule applies — a plain field in `$select` is a `400` (`must also appear in $groupBy`), `$having` filters the one row, `$count` returns `[{ "count": 1 }]` (or `0` when `$having` removes it). It passes the same gates as a grouped query: hidden fields, `@db.writeOnly` fields, the row overlay (`transformFilter`), and a `validateControls` override, which sees `controls.$groupBy` as `[]` (a check such as `if (controls.$groupBy)` blocks both; `prepareRequest`, which runs before, sees no `$groupBy`). `$with` and `$vector` are rejected as with `$groupBy`. Works on views too.
+
+`/pages` serves rows only: an aggregate there — `$groupBy`, or an aggregate in `$select` — is a `400` `Aggregate queries are only valid on /query` (since 0.1.155; before, the controls check rejected both with a generic message).
+
 ### With Sorting
 
 Sort aggregated results:

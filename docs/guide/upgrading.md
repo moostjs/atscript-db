@@ -6,6 +6,18 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.155 {#v0-1-155}
+
+### New features
+
+- **Ungrouped aggregates over HTTP.** `GET /query?status=paid&$select=sum(amount):revenue,count(*):orders` — aggregates in `$select` without `$groupBy` — returns one row over the filtered set, as `table.aggregate()` does for `$groupBy: []`. It goes through the same gates as a grouped query (hidden and write-only fields, the row overlay, `validateControls`). With `@atscript/db-client`, pass `$groupBy: []` to `aggregate()`. See [Without `$groupBy`](/http/advanced#ungrouped).
+- **`Client.metaStore`** in `@atscript/db-client`: the `MetaStore` a client revalidates `/meta` through (`undefined` with `metaStore: false`), read-only, so code that receives a client can clear its store on an identity change. See [The client's store](/http/client#meta-store-getter).
+
+### Behavior changes {#v0-1-155-behavior}
+
+- **An aggregate `$select` without `$groupBy` on `/query` is no longer a 400.** It used to fail the controls check (`Value does not match any of the allowed types…`). A `validateControls` override now receives such a request with `controls.$groupBy` set to `[]`: a rule that blocks aggregates with `if (controls.$groupBy)` blocks it too, while one testing `controls.$groupBy?.length` does not — check for presence, not length, to forbid aggregates. `prepareRequest` runs earlier and sees the controls as parsed — no `$groupBy` there; put aggregate rules in `validateControls`.
+- **`/pages` rejects aggregates with a clear message.** `$groupBy`, or an aggregate in `$select`, on `/pages` is a 400 `Aggregate queries are only valid on /query` (`errors[0].path` is `$groupBy` or `$select`). Both were 400s before, with the generic controls-check message.
+
 ## 0.1.154 {#v0-1-154}
 
 ### Fixes

@@ -860,7 +860,8 @@ export class AsDbReadableController<
   }
 
   /**
-   * {@link checkComputedSelect} (before the controls DTO), the controls DTO
+   * {@link checkComputedSelect} (before the controls DTO), on `/pages` the
+   * aggregate 400 (since 0.1.155), the controls DTO
    * ({@link validateControls}), then the `$with` relation names at every
    * level — BEFORE the `$with` sub-query paths ({@link validateInsights}),
    * so a hidden or nonexistent nested relation answers `Unknown relation`,
@@ -876,6 +877,14 @@ export class AsDbReadableController<
       return computedError;
     }
     const controls = parsed.controls as Record<string, unknown>;
+    // Aggregates — grouped or not (an aggregate `$select`) — are `/query`'s
+    // (since 0.1.155 one 400 naming the reason; before, the controls DTO rejected both).
+    if (type === "pages" && (controls?.$groupBy !== undefined || computedMode(parsed))) {
+      return badRequest(
+        controls?.$groupBy === undefined ? "$select" : "$groupBy",
+        "Aggregate queries are only valid on /query",
+      );
+    }
     // Record the client's `$with` tree before `validateControls` may conjoin
     // server row scopes into it (since 0.1.147 — see `snapshotClientWith`).
     if (controls && typeof controls === "object") {
@@ -3228,14 +3237,23 @@ export class AsDbReadableController<
   async query(@Url() url: string): Promise<DataType[] | number | HttpError> {
     const { parsed, controls } = await this.parseRequest("query", url);
 
-    const groupBy = controls.$groupBy as string[] | undefined;
-    if (groupBy?.length && (controls.$with as unknown[])?.length) {
+    // An aggregate `$select` without `$groupBy` is the ungrouped aggregate
+    // (since 0.1.155): one row over the filtered set. It is given `$groupBy: []`
+    // — the core's ungrouped form — so every hook and rule keyed on `$groupBy`
+    // (`validateControls` overrides, the DTO bypass, the gates below) treats
+    // it as the aggregate query it is.
+    const computed = computedMode(parsed);
+    if (computed && controls.$groupBy === undefined) {
+      controls.$groupBy = [];
+    }
+    const aggregate = computed || !!(controls.$groupBy as string[] | undefined)?.length;
+    if (aggregate && (controls.$with as unknown[])?.length) {
       return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
     }
     // `$vector` consumes `$search` as an embedding and no adapter can group by
     // similarity. Rejecting beats the silent alternative, where the term falls
     // through to `$search` and is matched as ordinary text instead.
-    if (groupBy?.length && controls.$vector !== undefined) {
+    if (aggregate && controls.$vector !== undefined) {
       return new HttpError(400, "Cannot combine $vector and $groupBy in the same query");
     }
 
@@ -3249,7 +3267,7 @@ export class AsDbReadableController<
     }
 
     let gateRefs: TQueryPathRefs | undefined;
-    if (groupBy?.length && this._writeOnlySet.size > 0) {
+    if (aggregate && this._writeOnlySet.size > 0) {
       // Every path the grouped query reads a sealed value through — grouping,
       // aggregate / expression operands, `first` / `last` sources, `$rowOrder`
       // and `$sort` keys, calendar-bucket sources, plain `$select` fields. A
@@ -3279,7 +3297,7 @@ export class AsDbReadableController<
     const clientFilter = await this._relationOverlay(parsed);
 
     // ── Aggregate path ──────────────────────────────────────────────
-    if (groupBy?.length) {
+    if (aggregate) {
       const filter = this.applySearchFallback(await this.transformFilter(clientFilter), controls);
       return this.readable.aggregate({
         filter,
