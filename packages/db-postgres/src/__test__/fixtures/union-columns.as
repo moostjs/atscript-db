@@ -130,3 +130,41 @@ export interface UcGeo {
 
     geo?: db.geoPoint | null
 }
+
+// Several 0.1.155 layout changes on one table of the earlier layout: a
+// `T | null` object in a JSON text column, a `number.timestamp.created`
+// column gaining its default, an embedded type's `@meta.id` leaving the
+// primary key.
+export interface UcLine {
+    @meta.id
+    lineId: string
+    qty: number
+}
+
+@db.table 'uc_legacy_mixed'
+export interface UcLegacyMixed {
+    @meta.id
+    id: number
+    line: UcLine
+    created: number.timestamp.created
+    addr: UcAddr | null
+}
+
+// An object that leaves `@db.json`: its JSON is copied into flattened
+// columns, some of them NOT NULL.
+@db.table 'uc_unjson'
+export interface UcUnjsonOld {
+    @meta.id
+    id: number
+
+    @db.json
+    addr: UcAddr
+}
+
+@db.table 'uc_unjson'
+export interface UcUnjson {
+    @meta.id
+    id: number
+
+    addr: UcAddr
+}

@@ -245,6 +245,71 @@ describe.skipIf(!reachable)("[postgres live] union columns", () => {
     expect((await syncSchema(space, [fx.UcLegacyDefault])).status).toBe("up-to-date");
   });
 
+  it("a table needing a JSON copy, a timestamp default and a key rebuild at once", async () => {
+    // 0.1.154: `addr` as JSON text, the embedded `lineId` in the key, `created` without default
+    await driver.exec(
+      'CREATE TABLE "uc_legacy_mixed" ("id" DOUBLE PRECISION NOT NULL, "line__lineId" VARCHAR(255) NOT NULL, "line__qty" DOUBLE PRECISION NOT NULL, "created" DOUBLE PRECISION NOT NULL, "addr" TEXT NOT NULL, "addr.street" TEXT NOT NULL, "addr.zip" TEXT, PRIMARY KEY ("id", "line__lineId"))',
+    );
+    await driver.exec(`INSERT INTO "uc_legacy_mixed" VALUES
+      (1, 'a', 1, 1700000000123, '{"street":"Main","zip":"Z"}', '', NULL),
+      (2, 'b', 2, 1700000000456, 'null', '', NULL)`);
+    const result = await syncSchema(space, [fx.UcLegacyMixed], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_legacy_mixed")!;
+    expect(entry.errors).toEqual([]);
+    expect(entry.jsonCopies.map((c) => c.from)).toEqual(["addr"]);
+    expect(entry.pkChange).toMatchObject({ from: ["id", "line__lineId"], to: ["id"] });
+    expect(await columns("uc_legacy_mixed")).toEqual([
+      "id double precision NOT NULL",
+      "line__lineId text NOT NULL",
+      "line__qty double precision NOT NULL",
+      "created bigint NOT NULL",
+      "addr__street text",
+      "addr__zip text",
+    ]);
+    const table = space.getTable(fx.UcLegacyMixed);
+    expect(await table.findMany({ filter: {}, controls: { $sort: { id: 1 } } })).toEqual([
+      {
+        id: 1,
+        line: { lineId: "a", qty: 1 },
+        created: 1700000000123,
+        addr: { street: "Main", zip: "Z" },
+      },
+      { id: 2, line: { lineId: "b", qty: 2 }, created: 1700000000456, addr: null },
+    ]);
+    await table.insertOne({ id: 3, line: { lineId: "a", qty: 1 }, addr: null } as any);
+    expect(((await table.findById(3)) as any).created).toBeGreaterThan(1700000000456);
+    await expect(
+      table.insertOne({ id: 1, line: { lineId: "c", qty: 1 }, addr: null } as any),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await syncSchema(space, [fx.UcLegacyMixed])).status).toBe("up-to-date");
+  });
+
+  it("an object leaving `@db.json` is copied into its columns, required ones NOT NULL", async () => {
+    expect((await syncSchema(space, [fx.UcUnjsonOld], { force: true })).status).toBe("synced");
+    await space.getTable(fx.UcUnjsonOld).insertMany([
+      { id: 1, addr: { street: "Main", zip: "Z" } },
+      { id: 2, addr: { street: "Side" } },
+    ] as any);
+    const result = await syncSchema(space, [fx.UcUnjson], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_unjson")!;
+    expect(entry.errors).toEqual([]);
+    expect(entry.jsonCopies).toEqual([{ from: "addr", to: ["addr__street", "addr__zip"] }]);
+    // added nullable for the copy (a NOT NULL column's type default would hide
+    // every row from it), NOT NULL afterwards
+    expect(await columns("uc_unjson")).toEqual([
+      "id double precision NOT NULL",
+      "addr__street text NOT NULL",
+      "addr__zip text",
+    ]);
+    expect(
+      await space.getTable(fx.UcUnjson).findMany({ filter: {}, controls: { $sort: { id: 1 } } }),
+    ).toEqual([
+      { id: 1, addr: { street: "Main", zip: "Z" } },
+      { id: 2, addr: { street: "Side", zip: null } },
+    ]);
+    expect((await syncSchema(space, [fx.UcUnjson])).status).toBe("up-to-date");
+  });
+
   it("a `db.geoPoint | null` text column of the earlier layout becomes geography", async () => {
     await driver.exec('CREATE TABLE "uc_geo" ("id" DOUBLE PRECISION PRIMARY KEY, "geo" TEXT)');
     await driver.exec(`INSERT INTO "uc_geo" VALUES (1, '[-122.42,37.77]'), (2, NULL)`);

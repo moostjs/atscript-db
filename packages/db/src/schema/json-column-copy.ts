@@ -145,16 +145,18 @@ export function planJsonColumnMigration(
 /**
  * Runs a planned {@link TJsonColumnMigration} — first, before any other
  * column work of the table: text columns become JSON text, the copy targets
- * that do not exist yet are added (all are nullable: they sit under an
- * object that may be NULL), and the values are copied. Returns the diff
- * without the columns it added. Idempotent: a re-run converts nothing twice
- * and copies only into rows whose targets are all NULL.
+ * that do not exist yet are added, and the values are copied. Returns the
+ * diff without the columns it added. Idempotent: a re-run converts nothing
+ * twice and copies only into rows whose targets are all NULL.
  *
- * A target with a DDL default is added WITHOUT it — `ADD COLUMN … DEFAULT`
- * fills every existing row, so the copy would skip them all — and the
- * default is returned as a default change of the diff, which the rest of
- * the table's sync applies after the copy (`SET DEFAULT` / `MODIFY COLUMN`,
- * a table recreation on SQLite). Rows the copy leaves NULL stay NULL.
+ * The targets are added nullable and WITHOUT a default — `ADD COLUMN …
+ * DEFAULT`, or the type default an adapter gives a required column (a
+ * leaf every member of a non-null union of objects declares), fills every
+ * existing row, so the copy would skip them all. A model default and NOT
+ * NULL are returned as default / nullability changes of the diff, which the
+ * rest of the table's sync applies after the copy (`SET DEFAULT` / `SET NOT
+ * NULL` / `MODIFY COLUMN`, a table recreation on SQLite). Rows the copy
+ * leaves NULL keep NULL in a nullable column; a required one backfills them.
  */
 export async function applyJsonColumnMigration(
   adapter: BaseDbAdapter,
@@ -167,11 +169,10 @@ export async function applyJsonColumnMigration(
   if (migration.copies.length === 0) return { diff, added: [] };
   const targets = new Set(migration.copies.flatMap((c) => c.targets.map((t) => t.column)));
   const toAdd = diff.added.filter((fd) => targets.has(fd.physicalName));
-  const defaulted = toAdd.filter((fd) => fd.defaultValue !== undefined);
   let added: string[] = [];
   if (toAdd.length > 0) {
     const result = await adapter.syncColumns!({
-      added: toAdd.map((fd) => (defaulted.includes(fd) ? { ...fd, defaultValue: undefined } : fd)),
+      added: toAdd.map((fd) => ({ ...fd, optional: true, defaultValue: undefined })),
       removed: [],
       renamed: [],
       typeChanged: [],
@@ -188,12 +189,15 @@ export async function applyJsonColumnMigration(
     diff: {
       ...diff,
       added: diff.added.filter((fd) => !targets.has(fd.physicalName)),
+      nullableChanged: [
+        ...diff.nullableChanged,
+        ...toAdd.filter((fd) => !fd.optional).map((fd) => ({ field: fd, wasNullable: true })),
+      ],
       defaultChanged: [
         ...diff.defaultChanged,
-        ...defaulted.map((fd) => ({
-          field: fd,
-          newDefault: serializeDefaultValue(fd.defaultValue),
-        })),
+        ...toAdd
+          .filter((fd) => fd.defaultValue !== undefined)
+          .map((fd) => ({ field: fd, newDefault: serializeDefaultValue(fd.defaultValue) })),
       ],
     },
     added,
