@@ -499,7 +499,7 @@ Reusing a body across users is not a correctness risk with moost-db: its ETag is
 
 #### The client's store — `metaStore` {#meta-store-getter}
 
-`client.metaStore` (since 0.1.155) is the store the client revalidates through: the shared default store, the one you passed as `metaStore`, or `undefined` for `metaStore: false`. It is read-only. Use it when a client was handed to you (for example by a factory) and its store must be cleared on an identity change:
+`client.metaStore` (since 0.1.155) is the store the client revalidates through: the shared default store (exported as `defaultMetaStore`), the one you passed as `metaStore`, or `undefined` for `metaStore: false`. It is read-only. Use it when a client was handed to you (for example by a factory) and its store must be cleared on an identity change:
 
 ```typescript
 client.invalidateMeta();
@@ -529,6 +529,7 @@ const audit = new Client<typeof Audit>("/api/audit", { metaStore: false });
 | `metaStore.size`                                   | Number of stored bodies                                                                                                                                                              |
 | `client.metaStore`                                 | The store a client revalidates through (`undefined` with `metaStore: false`); read-only, since 0.1.155                                                                               |
 | `clearMetaStore()`                                 | Clears the shared default store                                                                                                                                                      |
+| `defaultMetaStore`                                 | The shared default store, since 0.1.155 — `client.metaStore === defaultMetaStore` tells a client on the shared store from one with its own                                           |
 
 #### Cross-origin servers {#meta-store-cors}
 

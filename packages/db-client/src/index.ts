@@ -5,7 +5,7 @@ export {
   formatIdentifier,
   formatIdentifierField,
 } from "./client";
-export { MetaStore, clearMetaStore } from "./meta-store";
+export { MetaStore, clearMetaStore, defaultMetaStore } from "./meta-store";
 export type { MetaStoreOptions } from "./meta-store";
 export {
   ClientError,

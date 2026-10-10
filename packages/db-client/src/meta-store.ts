@@ -158,6 +158,8 @@ function opaque(etag: string): string {
 /**
  * The store every {@link Client} uses unless `ClientOptions.metaStore` says
  * otherwise, so all clients in a page share revalidated `/meta` bodies.
+ * Exported since 0.1.155: `client.metaStore === defaultMetaStore` tells a
+ * client on the shared store from one with its own.
  */
 export const defaultMetaStore = new MetaStore();
 

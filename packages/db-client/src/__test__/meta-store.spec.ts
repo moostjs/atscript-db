@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vite-plus/test";
 import { Client } from "../client";
 import { ClientError, TransportError } from "../client-error";
 import { MetaStore, clearMetaStore } from "../meta-store";
+import { defaultMetaStore } from "../index";
 
 const META_A = { searchable: false, fields: { id: {} }, marker: "a" };
 const META_B = { searchable: false, fields: { id: {} }, marker: "b" };
@@ -313,6 +314,8 @@ describe("meta store", () => {
     const a = new Client("/api/a");
     expect(a.metaStore).toBeInstanceOf(MetaStore);
     expect(new Client("/api/b").metaStore).toBe(a.metaStore);
+    // the shared default store is exported: a custom store is told apart from it
+    expect(a.metaStore).toBe(defaultMetaStore);
     expect(new Client("/api/a", { metaStore: custom }).metaStore).toBe(custom);
     expect(new Client("/api/a", { metaStore: false }).metaStore).toBeUndefined();
     // @ts-expect-error — a getter only
