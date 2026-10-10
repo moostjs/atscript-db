@@ -243,4 +243,19 @@ describe.skipIf(!reachable)("[mysql live] union columns", () => {
     expect(row.addr.ref).toMatch(/^[0-9a-f-]{36}$/);
     expect((await syncSchema(space, [fx.UcLegacyDefault])).status).toBe("up-to-date");
   });
+
+  it("a `db.geoPoint | null` text column of the earlier layout becomes POINT", async () => {
+    await driver.exec("CREATE TABLE `uc_geo` (`id` DOUBLE PRIMARY KEY, `geo` TEXT) ENGINE=InnoDB");
+    await driver.exec("INSERT INTO `uc_geo` VALUES (1, '[-122.42,37.77]'), (2, NULL)");
+    const result = await syncSchema(space, [fx.UcGeo], { force: true });
+    const entry = result.entries.find((e) => e.name === "uc_geo")!;
+    expect(entry.errors).toEqual([]);
+    expect(await columns("uc_geo")).toEqual(["id double NOT NULL", "geo point"]);
+    const rows = (await space
+      .getTable(fx.UcGeo)
+      .findMany({ filter: {}, controls: { $sort: { id: 1 } } })) as any[];
+    expect(rows[0].geo[0]).toBeCloseTo(-122.42, 9);
+    expect(rows[0].geo[1]).toBeCloseTo(37.77, 9);
+    expect(rows[1].geo ?? null).toBeNull();
+  });
 });

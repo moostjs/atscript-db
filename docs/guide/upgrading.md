@@ -57,7 +57,7 @@ The first sync moves the stored values into the new layout — see [Union column
 Every table with a union field, an optional object with required fields, a `number.timestamp.created` field or an embedded `@meta.id` gets a new schema hash and is re-planned once.
 
 - **PostgreSQL**
-  - Union and optional-object columns change in place: `DROP NOT NULL`, and a type change with `ALTER COLUMN … TYPE … USING` (`TEXT` → `INTEGER`, `DOUBLE PRECISION`, `BOOLEAN`, `JSONB`, …). Text that does not convert to the new type fails the sync for that table (an error entry) — clean such values first.
+  - Union and optional-object columns change in place: `DROP NOT NULL`, and a type change with `ALTER COLUMN … TYPE … USING` (`TEXT` → `INTEGER`, `DOUBLE PRECISION`, `BOOLEAN`, `JSONB`, `geography` for a `db.geoPoint | null`, …). Text that does not convert to the new type fails the sync for that table (an error entry) — clean such values first.
   - `number.timestamp.created`: `DOUBLE PRECISION` (`TEXT` for a `number.timestamp.created | null`) → `BIGINT DEFAULT (epoch ms)`, converted in place (values keep their milliseconds; a fractional value is rounded).
   - A column whose model has `@db.default.now` or `@db.default.uuid` but whose live column has no `DEFAULT` gets one (`ALTER … SET DEFAULT`). Those defaults are left to the engine, so such a column rejected inserts that omitted the field. Other default additions still need a baseline, see [Default Change](/sync/what-gets-synced#default-change).
   - A primary-key change is swapped in place (`DROP CONSTRAINT …_pkey, ADD PRIMARY KEY`).

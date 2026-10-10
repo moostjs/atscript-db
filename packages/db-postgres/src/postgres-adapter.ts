@@ -2744,8 +2744,10 @@ function convertColumnExpr(
   if (field.isGeoPoint && sqlType.startsWith("geography")) {
     // v1 JSONB '[lng, lat]' → native geography(Point,4326). The generic
     // ::text double-cast can't parse a JSON tuple as WKT — build the
-    // point explicitly, preserving NULLs.
-    return `CASE WHEN ${col} IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((${col}->>0)::float8, (${col}->>1)::float8), 4326)::geography END`;
+    // point explicitly, preserving NULLs. `::jsonb` also reads the TEXT
+    // column atscript-db <= 0.1.154 gave `db.geoPoint | null`.
+    const json = `${col}::jsonb`;
+    return `CASE WHEN ${col} IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((${json}->>0)::float8, (${json}->>1)::float8), 4326)::geography END`;
   }
   if (CHARACTER_TYPE.test(sqlType)) {
     return `${col}::text`;

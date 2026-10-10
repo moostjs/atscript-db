@@ -97,9 +97,23 @@ describe("[postgres] geo support", () => {
     const alter = driver.calls.find((c) => c.sql.includes("ALTER COLUMN"));
     expect(alter!.sql).toContain("TYPE geography(Point,4326)");
     expect(alter!.sql).toContain(
-      'ST_SetSRID(ST_MakePoint(("geo"->>0)::float8, ("geo"->>1)::float8), 4326)::geography',
+      'ST_SetSRID(ST_MakePoint(("geo"::jsonb->>0)::float8, ("geo"::jsonb->>1)::float8), 4326)::geography',
     );
     expect(alter!.sql).toContain('WHEN "geo" IS NULL THEN NULL');
+  });
+
+  it("migrates the TEXT column of a `db.geoPoint | null` of the earlier union layout too", async () => {
+    // `::jsonb` reads the JSON text; a JSONB column passes through unchanged
+    const { driver, adapter, table } = makeTable(GeoPlace);
+    await table.ensureTable();
+    const geoField = table.fieldDescriptors.find((f: any) => f.path === "geo")!;
+    await adapter.syncColumns({
+      added: [],
+      removed: [],
+      typeChanged: [{ field: geoField, existingType: "TEXT" }],
+    } as any);
+    const alter = driver.calls.find((c) => c.sql.includes("ALTER COLUMN"));
+    expect(alter!.sql).toContain('("geo"::jsonb->>0)::float8');
   });
 
   // ── Write/read path ───────────────────────────────────────────────────────

@@ -120,3 +120,13 @@ export interface UcLegacyDefault {
         ref?: string
     } | null
 }
+
+// `db.geoPoint | null`: a text column of the earlier union layout becomes a
+// geography column with its `[lng, lat]` values.
+@db.table 'uc_geo'
+export interface UcGeo {
+    @meta.id
+    id: number
+
+    geo?: db.geoPoint | null
+}
