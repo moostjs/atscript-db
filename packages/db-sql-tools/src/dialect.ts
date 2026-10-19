@@ -24,7 +24,7 @@ export interface SqlDialect {
    * predicates, JSON paths, defaults): `sqlStringLiteral` (quotes doubled),
    * or — for a dialect whose literals treat `\` as an escape (MySQL) — one
    * that escapes it too.
-   * @since 0.1.162 (required since 0.1.163)
+   * @since 0.1.162
    */
   stringLiteral: (value: string) => string;
   /**

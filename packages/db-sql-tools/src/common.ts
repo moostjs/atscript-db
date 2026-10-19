@@ -13,7 +13,7 @@ export function sqlStringLiteral(value: string): string {
 /**
  * The value of a single-quoted SQL string literal (`'it''s'` → `it's`) — as
  * engines report a column default — or `undefined` when `literal` is not one.
- * @since 0.1.163
+ * @since 0.1.162
  */
 export function unquoteSqlStringLiteral(literal: string): string | undefined {
   if (literal.length < 2 || !literal.startsWith("'") || !literal.endsWith("'")) return undefined;
@@ -30,7 +30,7 @@ export function unquoteSqlStringLiteral(literal: string): string | undefined {
  */
 export function jsonDollarPath(
   path: readonly string[],
-  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.163 */
+  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.162 */
   stringLiteral: (value: string) => string = sqlStringLiteral,
 ): string {
   return stringLiteral(["$", ...quotedJsonPathSegments(path)].join("."));
@@ -143,7 +143,7 @@ export function defaultValueForType(designType: string): string {
 export function defaultValueToSqlLiteral(
   designType: string,
   value: string,
-  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.163 */
+  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.162 */
   stringLiteral: (value: string) => string = sqlStringLiteral,
 ): string {
   switch (designType) {
