@@ -149,6 +149,32 @@ describe("base syncIndexesWithDiff — integer-only fulltext", () => {
     });
     expect(created).toContain("fulltext");
   });
+
+  // Adapters built against <= 0.1.161 pass these instead of `skipIndex`
+  it("honors the deprecated shouldSkipType / warnUnsupportedTypes options", async () => {
+    for (const legacy of [
+      { shouldSkipType: (type: string) => type === "fulltext" },
+      { warnUnsupportedTypes: { adapter: "legacy", types: ["fulltext"] } },
+    ]) {
+      const adapter = new Probe();
+      tableOf(fx.NsrNative, adapter);
+      const warned: string[] = [];
+      const probe = adapter as any;
+      probe.logger = { ...probe.logger, warn: (msg: string) => void warned.push(msg) };
+      const created: string[] = [];
+      await adapter.run({
+        listExisting: async () => [],
+        createIndex: async (index: { type: string }) => void created.push(index.type),
+        dropIndex: async () => {},
+        ...legacy,
+      });
+      expect(created).not.toContain("fulltext");
+      expect(created.length).toBeGreaterThan(0);
+      expect(warned.some((m) => m.startsWith("[legacy] fulltext index"))).toBe(
+        "warnUnsupportedTypes" in legacy,
+      );
+    }
+  });
 });
 
 describe("$regex on integer fields — value guard", () => {

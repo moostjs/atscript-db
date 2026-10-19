@@ -23,10 +23,10 @@ export interface SqlDialect {
    * Renders a string as an SQL string literal inlined into SQL text (view
    * predicates, JSON paths, defaults): `sqlStringLiteral` (quotes doubled),
    * or — for a dialect whose literals treat `\` as an escape (MySQL) — one
-   * that escapes it too.
+   * that escapes it too. Omitted: `sqlStringLiteral`.
    * @since 0.1.162
    */
-  stringLiteral: (value: string) => string;
+  stringLiteral?: (value: string) => string;
   /**
    * The optimizer hint asking the engine to MERGE the derived table `alias`
    * into the SELECT reading it (MySQL: `/*+ MERGE(\`alias\`) *\/`) — carried

@@ -160,6 +160,20 @@ describe("buildCreateView — view sources and join aliases", () => {
     );
   });
 
+  it("falls back to sqlStringLiteral for a dialect without stringLiteral (<= 0.1.161)", () => {
+    const { stringLiteral: _omit, ...legacy } = base;
+    const plan: TViewPlan = {
+      entryType: () => ({}) as never,
+      entryTable: "people",
+      joins: [],
+      filter: { left: ref("people", "city"), op: "$eq", right: "O'Hare" } as never,
+      materialized: false,
+    };
+    expect(buildCreateView(legacy, "v", plan, [col("id", "people")], resolve as never)).toBe(
+      "CREATE VIEW [v] AS SELECT [people].[id] AS [id] FROM [people] WHERE [people].[city] = 'O''Hare'",
+    );
+  });
+
   it("renders an aliased join as `JOIN table AS Alias` and addresses it by the alias (self-join)", () => {
     const plan: TViewPlan = {
       entryType: () => ({}) as never,

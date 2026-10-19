@@ -183,6 +183,16 @@ export interface TIndexDiffOptions {
    */
   skipIndex?(index: TDbIndex): string | null | undefined;
   /**
+   * Skips (silently) every index of a type this returns `true` for.
+   * @deprecated since 0.1.162 — use {@link TIndexDiffOptions.skipIndex} (return `null`).
+   */
+  shouldSkipType?(type: TDbIndex["type"]): boolean;
+  /**
+   * Index types the adapter does not support — warned about and skipped.
+   * @deprecated since 0.1.162 — use {@link TIndexDiffOptions.skipIndex} (return the warning).
+   */
+  warnUnsupportedTypes?: { adapter: string; types: ReadonlyArray<TDbIndex["type"]> };
+  /**
    * Prefixed indexes the adapter manages itself, outside the model's
    * `indexes` (e.g. PostgreSQL's pgvector HNSW indexes) — never dropped as
    * stale here.
@@ -194,6 +204,15 @@ export interface TIndexDiffOptions {
    * @since 0.1.162
    */
   dryRun?: boolean;
+}
+
+/** Skip verdict of the deprecated `shouldSkipType` / `warnUnsupportedTypes` options. */
+function legacySkipReason(opts: TIndexDiffOptions, index: TDbIndex): string | null | undefined {
+  const unsupported = opts.warnUnsupportedTypes;
+  if (unsupported?.types.includes(index.type)) {
+    return `[${unsupported.adapter}] ${index.type} index "${index.name}" declared but not supported by this adapter — skipped`;
+  }
+  return opts.shouldSkipType?.(index.type) ? null : undefined;
 }
 
 /**
@@ -1064,7 +1083,9 @@ export abstract class BaseDbAdapter {
 
       // An index the adapter does not build here (e.g. a geo index without
       // PostGIS) is never desired — warned once per real sync, not as work.
-      const skipReason = opts.skipIndex?.(index);
+      // `null` (skip silently) is a verdict too — only `undefined` falls through
+      let skipReason = opts.skipIndex?.(index);
+      if (skipReason === undefined) skipReason = legacySkipReason(opts, index);
       if (skipReason !== undefined) {
         if (skipReason !== null && !dryRun) {
           this.logger.warn(skipReason);
