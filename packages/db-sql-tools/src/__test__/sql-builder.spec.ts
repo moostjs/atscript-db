@@ -372,6 +372,16 @@ describe("buildDelete", () => {
     const result = buildDelete(mockDialect, "users", where, 1);
     expect(result.sql).toBe("DELETE FROM [users] WHERE [id] = ? LIMIT 1");
   });
+
+  it("renders a bounded write's ORDER BY before the LIMIT (UPDATE and DELETE)", () => {
+    const limit = { count: 3, orderBy: "[id] DESC" };
+    expect(buildDelete(mockDialect, "users", where, limit).sql).toBe(
+      "DELETE FROM [users] WHERE [id] = ? ORDER BY [id] DESC LIMIT 3",
+    );
+    expect(buildUpdate(mockDialect, "users", { name: "Bob" }, where, limit).sql).toBe(
+      "UPDATE [users] SET [name] = ? WHERE [id] = ? ORDER BY [id] DESC LIMIT 3",
+    );
+  });
 });
 
 describe("buildProjection", () => {

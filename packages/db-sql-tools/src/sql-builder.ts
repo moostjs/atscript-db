@@ -367,8 +367,8 @@ export function fillReplacePayload(
  *   `versionColumn` (CAS targets that column); supplying `expectedVersion`
  *   without `versionColumn` is a programmer error and throws.
  *
- * `orderBy` (since 0.1.162) renders `ORDER BY <orderBy>` before the `LIMIT`
- * (MySQL's bounded `UPDATE`).
+ * `limit` renders `LIMIT n`; as `{ count, orderBy }` (since 0.1.162) also
+ * `ORDER BY <orderBy>` before it (MySQL's bounded `UPDATE`).
  */
 // oxlint-disable-next-line max-params
 export function buildUpdate(
@@ -376,11 +376,10 @@ export function buildUpdate(
   table: string,
   data: Record<string, unknown>,
   where: TSqlFragment,
-  limit?: number,
+  limit?: number | TSqlWriteLimit,
   ops?: TFieldOps,
   versionColumn?: string,
   expectedVersion?: number,
-  orderBy?: string,
 ): TSqlFragment {
   const setClauses: string[] = [];
   const params: unknown[] = [];
@@ -432,13 +431,9 @@ export function buildUpdate(
     }
   }
 
-  let sql = `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${whereSql}`;
-  if (orderBy) {
-    sql += ` ORDER BY ${orderBy}`;
-  }
-  if (limit !== undefined) {
-    sql += ` LIMIT ${limit}`;
-  }
+  const sql =
+    `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${whereSql}` +
+    limitSql(limit);
 
   return finalizeParams(dialect, {
     sql,
@@ -447,25 +442,35 @@ export function buildUpdate(
 }
 
 /**
- * Builds a DELETE ... WHERE statement with optional ORDER BY (since 0.1.162)
- * and LIMIT.
+ * Builds a DELETE ... WHERE statement with an optional LIMIT — as
+ * `{ count, orderBy }` (since 0.1.162) with an ORDER BY before it.
  */
-// oxlint-disable-next-line max-params
 export function buildDelete(
   dialect: SqlDialect,
   table: string,
   where: TSqlFragment,
-  limit?: number,
-  orderBy?: string,
+  limit?: number | TSqlWriteLimit,
 ): TSqlFragment {
-  let sql = `DELETE FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
-  if (orderBy) {
-    sql += ` ORDER BY ${orderBy}`;
-  }
-  if (limit !== undefined) {
-    sql += ` LIMIT ${limit}`;
-  }
+  const sql = `DELETE FROM ${dialect.quoteTable(table)} WHERE ${where.sql}` + limitSql(limit);
   return finalizeParams(dialect, { sql, params: where.params });
+}
+
+/**
+ * The row bound of an `UPDATE` / `DELETE` on engines that render
+ * `ORDER BY … LIMIT n` on writes (MySQL; since 0.1.162).
+ */
+export interface TSqlWriteLimit {
+  /** Rows the statement may touch (rendered inline). */
+  count: number;
+  /** Rendered `ORDER BY` list (see {@link orderByList}). */
+  orderBy?: string;
+}
+
+/** ` [ORDER BY …] LIMIT n` of an UPDATE / DELETE, or `""` when unbounded. */
+function limitSql(limit: number | TSqlWriteLimit | undefined): string {
+  if (limit === undefined) return "";
+  if (typeof limit === "number") return ` LIMIT ${limit}`;
+  return (limit.orderBy ? ` ORDER BY ${limit.orderBy}` : "") + ` LIMIT ${limit.count}`;
 }
 
 /**
