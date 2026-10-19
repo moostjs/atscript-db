@@ -374,7 +374,7 @@ await tasks.updateMany(
 - **`limit`** — a positive integer; anything else throws `DbError("INVALID_QUERY")` (`errors[0].path === "limit"`). Without it the call is unbounded, as before.
 - **`sort`** — `$sort` shape; it picks which rows go first. The default is the primary key ascending, and the primary key is always appended as the final tie-breaker (in the direction of the last key), so the order is deterministic. `sort` without `limit` throws.
 - **Loop until the count is `0`**, not until it is below `limit` — for `updateMany` only when the patch moves the rows out of the filter (`status: "open"` → `"archived"`), or the loop never ends. Under concurrency a round can touch fewer than `limit` rows while matches remain: another transaction may delete or change the rows it picked between the pick and the write. A round never exceeds `limit`.
-- **`0` means nothing left matched.** When a round touches no rows although a row still matches the filter (it lost every picked row to a concurrent writer), it runs again, up to three more times; the probe and the retries run in the caller's transaction when there is one. Only if every attempt loses does it return `0` with matches left — so a loop until `0` does not stop early because of a race. MySQL's native statement takes the next matching rows itself and needs no retry.
+- **`0` means nothing matched; a retryable error when contention persists.** When a round touches no rows although a row still matches the filter (it lost every picked row to a concurrent writer), it runs again, up to three more times; the checks and the retries run in the caller's transaction when there is one. If every attempt loses while rows still match, it throws `DbError("SERIALIZATION_FAILURE")` (`retryable: true`, `errors[0].path === "limit"`) — retry the call, or the whole transaction inside one ([Retrying](/api/transactions#retrying)). So `0` never comes from a race, and a loop until `0` does not stop early. MySQL's and SQLite's native statements take the next matching rows themselves and need no retry.
 - **Requires a primary key** — a table without one throws `INVALID_QUERY`.
 - **Everything else is unchanged** — filter guards, payload validation, version bumps and exemption, `@db.onUpdate.*` stamps; `$cas` stays rejected on `updateMany`.
 - **Not exposed over HTTP** — moost-db has no bulk delete or filter-update endpoint.
@@ -386,7 +386,7 @@ await tasks.updateMany(
 | SQLite          | One statement: `… WHERE f AND rowid IN (SELECT rowid … ORDER BY … LIMIT n)`                                                                              |
 | MongoDB, memory | The first `n` keys are read in order, then the write targets the filter **and** those keys (inside the caller's transaction / session when there is one) |
 
-With [application-level cascades](/relations/referential-actions) (MongoDB, memory) a bounded `deleteMany` pins the keys first, inside its transaction: the cascade and the delete act on exactly those rows. Native foreign-key cascades are left to the database.
+With [application-level cascades](/relations/referential-actions) (MongoDB, memory) a bounded `deleteMany` pins the keys first, inside its transaction: the cascade and the delete act on exactly those rows, and only while they still match the filter (a row a concurrent writer moved out of it is left alone). Native foreign-key cascades are left to the database.
 
 ## Bulk Operations
 

@@ -44,7 +44,7 @@ describe("SqliteAdapter — bounded writes, @db.onUpdate.inc, validated bulk pay
   it("updateMany / replaceMany validate their payload", () => checkBulkValidation(t));
   it("bounded updateMany / deleteMany", () => checkBoundedWrites(t));
   it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
-    checkBoundedRace(t.tasks));
+    checkBoundedRace(t.tasks, true));
   it("a bounded delete with a native FK cascade", () => checkBoundedCascade(t));
   it("bounded writes on a composite renamed key, NULL sort keys, a self-relation", async () => {
     const driver = new BetterSqlite3Driver(":memory:");

@@ -393,7 +393,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
  * `{ $or: [{ a, b }, …] }` for a composite one. Values are the raw stored
  * values the adapter returned, so no value formatting is re-applied.
  */
-function pinByPrimaryKey(rows: Array<Record<string, unknown>>, pk: string[]): FilterExpr[] {
+export function pinByPrimaryKey(rows: Array<Record<string, unknown>>, pk: string[]): FilterExpr[] {
   const out: FilterExpr[] = [];
   for (let i = 0; i < rows.length; i += PIN_BATCH) {
     const batch = rows.slice(i, i + PIN_BATCH);

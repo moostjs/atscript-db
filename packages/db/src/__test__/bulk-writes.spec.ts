@@ -200,6 +200,69 @@ describe("bounded writes — native adapters", () => {
   });
 });
 
+/** Every bounded write loses its rows to a concurrent writer: it affects nothing. */
+class LosingMockAdapter extends OrderedMockAdapter {
+  override async deleteMany(filter: any): Promise<any> {
+    this.record("deleteMany", filter);
+    return { deletedCount: 0 };
+  }
+  override async updateMany(filter: any): Promise<any> {
+    this.record("updateMany", filter);
+    return { matchedCount: 0, modifiedCount: 0 };
+  }
+}
+
+class LosingLimitMockAdapter extends LosingMockAdapter {
+  override supportsWriteLimit(): boolean {
+    return true;
+  }
+}
+
+describe("bounded writes — contention", () => {
+  for (const [label, Adapter] of [
+    ["emulated", LosingMockAdapter],
+    ["native, not atomic", LosingLimitMockAdapter],
+  ] as const) {
+    it(`${label}: still losing after 1 + 3 attempts while rows match → retryable SERIALIZATION_FAILURE`, async () => {
+      const { table, adapter } = makeTable(new Adapter());
+      for (const write of [
+        () => table.deleteMany({ status: "old" }, { limit: 2 }),
+        () => table.updateMany({ status: "old" }, { note: "x" }, { limit: 2 }),
+      ]) {
+        adapter.calls.length = 0;
+        const err = (await rejection(write())) as DbError;
+        expect(err).toBeInstanceOf(DbError);
+        expect(err.code).toBe("SERIALIZATION_FAILURE");
+        expect(err.retryable).toBe(true);
+        expect(err.errors[0]!.path).toBe("limit");
+        const writes = adapter.calls.filter(
+          (c) => c.method === "deleteMany" || c.method === "updateMany",
+        );
+        expect(writes).toHaveLength(4);
+      }
+    });
+  }
+
+  it("an emulated write whose pick finds nothing returns 0 without a probe", async () => {
+    const { table, adapter } = makeTable(new LosingMockAdapter());
+    expect(await table.deleteMany({ status: "none" }, { limit: 2 })).toEqual({ deletedCount: 0 });
+    expect(calls(adapter, "findMany")).toHaveLength(1);
+    expect(calls(adapter, "deleteMany")).toHaveLength(0);
+  });
+
+  it("an atomic native write is never re-checked", async () => {
+    class Atomic extends LosingLimitMockAdapter {
+      override writeLimitIsAtomic(): boolean {
+        return true;
+      }
+    }
+    const { table, adapter } = makeTable(new Atomic());
+    expect(await table.deleteMany({ status: "old" }, { limit: 2 })).toEqual({ deletedCount: 0 });
+    expect(calls(adapter, "findMany")).toHaveLength(0);
+    expect(calls(adapter, "deleteMany")).toHaveLength(1);
+  });
+});
+
 describe("updateMany / replaceMany validate their payload", () => {
   it("updateMany: patch-mode validation (null on a non-nullable field, @expect, @meta.required)", async () => {
     const { table, adapter } = makeTable();
