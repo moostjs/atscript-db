@@ -107,7 +107,7 @@ function validateCompute(token: Token, args: Token[], doc: AtscriptDoc): TMessag
     error("@db.compute is only valid on a field of a @db.view.for view");
     return errors;
   }
-  errors.push(...validateExclusiveWith(token, "@db.compute", EXCLUSIVE_WITH));
+  errors.push(...validateExclusiveWith(token, "@db.compute", EXCLUSIVE_WITH, doc));
   if (!isPlainNumber(prop, doc)) {
     error(`Field "${field}" has a @db.compute and must be typed \`number\``);
   }

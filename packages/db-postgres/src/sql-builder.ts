@@ -242,6 +242,8 @@ const PG_JSON_LEAF_CAST: Readonly<Record<TViewJsonType, string>> = {
 
 /** A `#>` / `#>>` path literal (`'{"a","b"}'`). */
 function pgJsonPath(path: readonly string[]): string {
+  // An empty path addresses the JSON root (a primitive JSON column's value)
+  if (path.length === 0) return sqlStringLiteral("{}");
   return sqlStringLiteral(`{${quotedJsonPathSegments(path).join(",")}}`);
 }
 

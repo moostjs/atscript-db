@@ -16,7 +16,7 @@ import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
-import { searchMemberKind } from "../shared/search-fields";
+import { ENCRYPTED_SEARCH_FEATURES, searchMemberKind } from "../shared/search-fields";
 import {
   columnUnionBase,
   pathPresence,
@@ -568,6 +568,22 @@ export class TableMetadata {
       }
     }
 
+    // A search feature on a field INSIDE an encrypted object reads ciphertext
+    // too (the field itself is checked by `_validateEncryptedField`)
+    if (this.encryptedFields.size > 0) {
+      for (const entry of collected) {
+        if (entry.member || this.ignoredFields.has(entry.path)) continue;
+        const feature = ENCRYPTED_SEARCH_FEATURES.find((key) => entry.metadata.has(key));
+        if (!feature) continue;
+        const encrypted = findAncestorInSet(entry.path, this.encryptedFields);
+        if (encrypted !== undefined) {
+          throw new Error(
+            `@${feature} on "${entry.path}" — it is inside the @db.encrypted field "${encrypted}"; search over ciphertext is impossible`,
+          );
+        }
+      }
+    }
+
     // Classify fields and build path maps (before finalizing indexes)
     if (!this.nestedObjects) {
       this._classifyFields();
@@ -1069,6 +1085,9 @@ export class TableMetadata {
     }
     if (metadata.has("db.search.vector") || metadata.has("db.search.filter")) {
       reject("@db.search.*", "search over ciphertext is impossible");
+    }
+    if (metadata.has("db.column.searchable")) {
+      reject("@db.column.searchable", "search over ciphertext is impossible");
     }
     if (metadata.has("db.mongo.search.text") || metadata.has("db.mongo.search.autocomplete")) {
       reject("@db.mongo.search.*", "Atlas Search over ciphertext is impossible");

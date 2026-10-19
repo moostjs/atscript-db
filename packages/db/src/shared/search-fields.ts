@@ -15,6 +15,8 @@ export const SEARCH_PROBLEM = {
   precision: "has @db.column.precision (stored as a decimal)",
   float:
     "is a floating-point number — declare it number.int (or a sized integer), add @expect.int, or use @db.default.increment",
+  floatViewField:
+    "is a floating-point number — declare it number.int (or a sized integer) or add @expect.int",
   decimal: "is a decimal",
 } as const;
 
@@ -74,3 +76,20 @@ export function searchMemberKind(
     precision: has("db.column.precision"),
   });
 }
+
+/**
+ * Field annotations of the search / index features that cannot work over
+ * ciphertext — refused on an `@db.encrypted` field, on any field inside one
+ * and on a view field over an encrypted source (compile time and metadata
+ * build).
+ * @since 0.1.162
+ */
+export const ENCRYPTED_SEARCH_FEATURES = [
+  "db.column.searchable",
+  "db.index.fulltext",
+  "db.index.geo",
+  "db.search.vector",
+  "db.search.filter",
+  "db.mongo.search.text",
+  "db.mongo.search.autocomplete",
+] as const;

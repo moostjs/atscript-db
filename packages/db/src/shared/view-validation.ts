@@ -1,9 +1,14 @@
-import type { AtscriptDoc, SemanticNode, SemanticRefNode, TMessages } from "@atscript/core";
+import type { AtscriptDoc, SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure } from "@atscript/core";
 
-import { SUPPORTED_AGGREGATE_FNS, NULL_WHEN_EMPTY_AGGREGATE_FNS } from "../query/aggregate-fns";
-import { primitiveBaseType } from "./annotation-utils";
+import {
+  AGG_ANNOTATIONS,
+  SUPPORTED_AGGREGATE_FNS,
+  NULL_WHEN_EMPTY_AGGREGATE_FNS,
+} from "../query/aggregate-fns";
+import { getAnnotationAlias, isViewField, primitiveBaseType } from "./annotation-utils";
 import { JSON_LEAF_TYPES } from "./derived-rules";
+import { ENCRYPTED_SEARCH_FEATURES } from "./search-fields";
 import { viewJoins } from "./validation-utils";
 
 /** `@db.agg.*` annotations that are never NULL (the counts: 0 over no value). */
@@ -73,6 +78,175 @@ export function jsonChainInfo(ref: SemanticRefNode, doc: AtscriptDoc): TJsonChai
   }
   info.resolved = true;
   return info;
+}
+
+/** Read seals of a view field ({@link viewFieldSeals}). @since 0.1.162 */
+export interface TViewFieldSeals {
+  writeOnly: boolean;
+  encrypted: boolean;
+}
+
+/**
+ * The read seals a view field takes from the source field it reads, as the
+ * compiler sees them (compile-time mirror of the runtime `sourceFieldSeals`,
+ * which stamps them onto the view column — these annotations are
+ * `passedWhenReferred: false`, so they are not in the field's own metadata):
+ * - `writeOnly` — the source path or an ancestor object is `@db.writeOnly`;
+ * - `encrypted` — the source path or an ancestor object is `@db.encrypted`.
+ *
+ * (A `@db.json` source is no seal: a view reads a primitive JSON column's
+ * typed value, and an object one needs its own `@db.json`.)
+ *
+ * The source is the chain ref (`pin?: Account.pin`), or else the entry table's
+ * same-named field (or an aggregate's field) of a `@db.view.for` view. A source
+ * field that is itself a view field passes on its own seals. Computed fields
+ * and fields of anything but a view report no seal.
+ * @since 0.1.162
+ */
+export function viewFieldSeals(field: SemanticNode, doc: AtscriptDoc, depth = 0): TViewFieldSeals {
+  const seals: TViewFieldSeals = { writeOnly: false, encrypted: false };
+  if (depth > 8 || !isViewField(field) || field.countAnnotations("db.compute") > 0) return seals;
+  let typeName: string | undefined;
+  let path: string[];
+  const def = field.getDefinition();
+  if (def && isRef(def) && (def as SemanticRefNode).hasChain) {
+    typeName = def.id;
+    path = (def as SemanticRefNode).chain.map((t) => t.text);
+  } else {
+    const view = field.ownerNode!.ownerNode!;
+    typeName = getAnnotationAlias(view, "db.view.for");
+    const agg = field.annotations?.find((a) => (AGG_ANNOTATIONS as string[]).includes(a.name));
+    const aggField = agg?.args[0]?.text;
+    if (agg && (!aggField || aggField === "*")) return seals; // COUNT(*) reads no field
+    path = (aggField ?? field.id ?? "").split(".");
+  }
+  if (!typeName || !path.length || !path[0]) return seals;
+  for (let i = 1; i <= path.length; i++) {
+    const step = doc.unwindType(typeName, path.slice(0, i));
+    if (!step) break;
+    const node = step.node;
+    if (!node || !isProp(node)) continue;
+    if (node.countAnnotations("db.writeOnly") > 0) seals.writeOnly = true;
+    if (node.countAnnotations("db.encrypted") > 0) seals.encrypted = true;
+    // A view over a view: the source view's field carries its own seals
+    const inner = viewFieldSeals(node, step.doc, depth + 1);
+    seals.writeOnly ||= inner.writeOnly;
+    seals.encrypted ||= inner.encrypted;
+  }
+  return seals;
+}
+
+/**
+ * A search annotation (`@db.column.searchable` / `@db.index.fulltext`) on a
+ * view field whose source is `@db.writeOnly` — a search hit would reveal the
+ * sealed value (the runtime refuses it at sync and on every query), or
+ * `undefined`. The field's own `@db.writeOnly` is reported by that spec.
+ * @since 0.1.162
+ */
+export function viewSourceSealProblem(
+  token: Token,
+  doc: AtscriptDoc,
+  annotation: string,
+): TMessages[number] | undefined {
+  const field = token.parentNode!;
+  if (field.countAnnotations("db.writeOnly") > 0) return undefined;
+  if (!viewFieldSeals(field, doc).writeOnly) return undefined;
+  return {
+    message: `${annotation} on "${field.id}", which reads a @db.writeOnly source field — search results would reveal the sealed value`,
+    severity: 1,
+    range: token.range,
+  };
+}
+
+/**
+ * A search / index feature (`@db.column.searchable`, `@db.index.fulltext`,
+ * `@db.index.geo`, `@db.search.vector`, `@db.search.filter`) on a field that
+ * would read ciphertext: a field inside an `@db.encrypted` object, or a view
+ * field over an encrypted source — or `undefined`. The field's own
+ * `@db.encrypted` is reported by that spec.
+ * @since 0.1.162
+ */
+export function encryptedSearchProblem(
+  token: Token,
+  doc: AtscriptDoc,
+  annotation: string,
+): TMessages[number] | undefined {
+  const field = token.parentNode!;
+  if (field.countAnnotations("db.encrypted") > 0) return undefined;
+  const where = encryptedAncestorName(field);
+  const why =
+    where !== undefined
+      ? `it is inside the @db.encrypted field "${where}"`
+      : viewFieldSeals(field, doc).encrypted
+        ? "it reads a @db.encrypted source field"
+        : undefined;
+  if (!why) return undefined;
+  return {
+    message: `${annotation} on "${field.id}" — ${why}; search over ciphertext is impossible`,
+    severity: 1,
+    range: token.range,
+  };
+}
+
+/** Navigation fields hold another table's rows, never part of this field's value. */
+const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"];
+
+/**
+ * A search feature ({@link ENCRYPTED_SEARCH_FEATURES}) declared inside the
+ * TYPE of the `@db.encrypted` field carrying `token`, reached through a type
+ * ref (`@db.encrypted profile: Address`, where `Address` has
+ * `@db.index.fulltext city`) — the shared type's own annotations cannot see
+ * that this use encrypts them. Fields declared inline are reported by their
+ * own annotation (see {@link encryptedSearchProblem}).
+ * @since 0.1.162
+ */
+export function encryptedTypeSearchProblem(
+  token: Token,
+  doc: AtscriptDoc,
+): TMessages[number] | undefined {
+  const field = token.parentNode!;
+  const seen = new Set<SemanticNode>();
+  const visit = (
+    def: SemanticNode | undefined,
+    defDoc: AtscriptDoc,
+    viaRef: boolean,
+    prefix: string,
+  ): { path: string; feature: string } | undefined => {
+    if (!def || seen.has(def)) return undefined;
+    seen.add(def);
+    if (isRef(def)) {
+      const unwound = defDoc.unwindType(def.id!, (def as SemanticRefNode).chain);
+      return unwound ? visit(unwound.def, unwound.doc, true, prefix) : undefined;
+    }
+    const props = isInterface(def) || isStructure(def) ? def.props : undefined;
+    if (!props) return undefined;
+    for (const [name, prop] of props) {
+      if (NAV_ANNOTATIONS.some((key) => prop.countAnnotations(key) > 0)) continue;
+      const path = prefix ? `${prefix}.${name}` : name;
+      if (viaRef) {
+        const feature = ENCRYPTED_SEARCH_FEATURES.find((key) => prop.countAnnotations(key) > 0);
+        if (feature) return { path, feature };
+      }
+      const found = visit(prop.getDefinition(), defDoc, viaRef, path);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const found = visit(field.getDefinition(), doc, false, field.id ?? "");
+  if (!found) return undefined;
+  return {
+    message: `@db.encrypted on "${field.id}" — its type declares @${found.feature} on "${found.path}"; search over ciphertext is impossible`,
+    severity: 1,
+    range: token.range,
+  };
+}
+
+/** Name of the nearest `@db.encrypted` prop enclosing `field` (inline nested objects), if any. */
+export function encryptedAncestorName(field: SemanticNode): string | undefined {
+  for (let node = field.ownerNode; node; node = node.ownerNode) {
+    if (isProp(node) && node.countAnnotations("db.encrypted") > 0) return node.id;
+  }
+  return undefined;
 }
 
 /** Props of a view interface (its own structure; views don't use `extends`). */

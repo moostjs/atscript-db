@@ -131,15 +131,16 @@ View field refs keep the SOURCE column for the DB layer (`id: Task.id` reads `ta
 
 `theme?: User.settings.theme` where `settings` is `@db.json` → a typed view column; filter / sort / `$groupBy` it like any column.
 
-| #   | Rule                                                                                                                                                                                                       |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Leaf must be `string` / `number` / `boolean` (compile error otherwise). Declare the view field optional — it is `null` for a missing key, SQL `NULL` column, JSON `null`, or a value of ANOTHER JSON type. |
-| 2   | No coercion: `"14"` is not a number, `1` is not `true`. Numbers are doubles (ints > 2^53 lose precision).                                                                                                  |
-| 3   | Usable as SELECT column, GROUP BY dimension, `@db.agg.*` source (`@db.agg.sum "settings.score"`), `@db.view.having` operand. NOT in join ON / `@db.view.filter` (sync error).                              |
-| 4   | Computed per row — no index; filters/sorts on it scan the source. Need speed → `@db.column.derived` on the table (below), then read that column from the view.                                             |
-| 5   | MongoDB: reads the document path with NO type guard (off-type values written outside atscript-db pass through). SQL adapters guard with `json_type` / `JSON_TYPE` / `jsonb_typeof`.                        |
-| 6   | A path segment containing `"`, `\` or a control char fails sync (`JSON path segment … can't be extracted`).                                                                                                |
-| 7   | Custom SQL adapters: implement `SqlDialect.jsonExtract` → `creating-adapters.md § SQL helpers`.                                                                                                            |
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Leaf must be `string` / `number` / `boolean` (compile error otherwise). Declare the view field optional — it is `null` for a missing key, SQL `NULL` column, JSON `null`, or a value of ANOTHER JSON type.                                                                                                                                              |
+| 2   | No coercion: `"14"` is not a number, `1` is not `true`. Numbers are doubles (ints > 2^53 lose precision).                                                                                                                                                                                                                                               |
+| 3   | Usable as SELECT column, GROUP BY dimension, `@db.agg.*` source (`@db.agg.sum "settings.score"`), `@db.view.having` operand. NOT in join ON / `@db.view.filter` (sync error).                                                                                                                                                                           |
+| 4   | Computed per row — no index; filters/sorts on it scan the source. Need speed → `@db.column.derived` on the table (below), then read that column from the view.                                                                                                                                                                                          |
+| 5   | MongoDB: reads the document path with NO type guard (off-type values written outside atscript-db pass through). SQL adapters guard with `json_type` / `JSON_TYPE` / `jsonb_typeof`.                                                                                                                                                                     |
+| 6   | A path segment containing `"`, `\` or a control char fails sync (`JSON path segment … can't be extracted`).                                                                                                                                                                                                                                             |
+| 7   | Custom SQL adapters: implement `SqlDialect.jsonExtract` → `creating-adapters.md § SQL helpers`.                                                                                                                                                                                                                                                         |
+| 8   | 0.1.162: a view field over a whole PRIMITIVE `@db.json` field (`score?: User.score`) reads its typed value the same way (SQL: extraction at the JSON root) — returns `9`, not the JSON text `'9'`, and sorts / filters by value. Earlier versions returned and sorted the raw text. A view field that declares `@db.json` itself keeps the JSON column. |
 
 ### Derived columns (0.1.141)
 
@@ -235,6 +236,8 @@ A view column inherits the read seals of the source field it reads — no annota
 | `@db.encrypted` | Reads the ciphertext column and is encrypted on the view: rows come back DECRYPTED (the view's `DbSpace` needs the `encryption` config), filter / sort → `ENC_FIELD_FILTER` / `ENC_FIELD_SORT`. An aggregate over it fails at first use (`ciphertext cannot be aggregated`). |
 
 `@db.writeOnly` stays an HTTP-layer contract — server code reading the view still sees the value.
+
+Compile errors (0.1.162): `@db.column.searchable` / `@db.index.fulltext` on a view field over a write-only source; `@db.sort.nulls` on one over an encrypted source. Compile checks also read a ref field's INHERITED annotations (what its runtime metadata carries): `@expect.int` on the source makes a ref field searchable (no need to repeat it); `@db.amount.currency.ref` / `@db.unit.ref` on a field inheriting `@db.amount.currency` / `@db.unit` is an error.
 
 Row actions on a view (0.1.147): `@DbActionsFrom(() => SourceController)` on the view controller lists the source table's actions; the id map derives from the view's plain column over the source's `preferredId` → [view-actions.md](view-actions.md).
 

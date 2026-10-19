@@ -34,9 +34,12 @@ export const dbAmountAnnotations: TAnnotationsTree = {
           const errors: TMessages = [];
           errors.push(...validateFieldBaseType(token, doc, "@db.amount.currency", "decimal"));
           errors.push(
-            ...validateExclusiveWith(token, "@db.amount.currency", [
-              { key: "db.amount.currency.ref", displayName: "@db.amount.currency.ref" },
-            ]),
+            ...validateExclusiveWith(
+              token,
+              "@db.amount.currency",
+              [{ key: "db.amount.currency.ref", displayName: "@db.amount.currency.ref" }],
+              doc,
+            ),
           );
           const code = args[0]?.text;
           if (code && !CURRENCY_CODE_PATTERN.test(code)) {
@@ -78,10 +81,15 @@ export const dbAmountAnnotations: TAnnotationsTree = {
           // Cross-concept refs (currency-ref + unit-ref) on the same field would
           // collide in TableMetadata.quantityRefByField — reject up front.
           errors.push(
-            ...validateExclusiveWith(token, "@db.amount.currency.ref", [
-              { key: "db.amount.currency", displayName: "@db.amount.currency" },
-              { key: "db.unit.ref", displayName: "@db.unit.ref" },
-            ]),
+            ...validateExclusiveWith(
+              token,
+              "@db.amount.currency.ref",
+              [
+                { key: "db.amount.currency", displayName: "@db.amount.currency" },
+                { key: "db.unit.ref", displayName: "@db.unit.ref" },
+              ],
+              doc,
+            ),
           );
           errors.push(...validateSiblingStringField(token, args, doc, "@db.amount.currency.ref"));
           return errors;

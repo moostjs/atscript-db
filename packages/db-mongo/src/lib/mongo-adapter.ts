@@ -943,6 +943,18 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     this._pendingSearchFields = [];
 
+    // A dynamic Atlas mapping indexes every string field — an encrypted
+    // field's ciphertext too (compile-time mirror in the mongo plugin)
+    const [encrypted] = meta.encryptedFields;
+    if (
+      encrypted !== undefined &&
+      [...this._mongoIndexes.values()].some((i) => i.type === "dynamic_text")
+    ) {
+      throw new Error(
+        `@db.mongo.search.dynamic indexes every field, including the @db.encrypted field "${encrypted}" — Atlas Search over ciphertext is impossible; use @db.mongo.search.static with @db.mongo.search.text fields`,
+      );
+    }
+
     // MongoDB allows ONE text index per collection: a second fulltext index
     // name with TEXT members cannot exist physically, yet `$text` would search
     // the first while the visibility gate checked the second's fields.

@@ -103,7 +103,9 @@ Reads, list queries, search results, and relation loads all decrypt transparentl
 
 Ciphertext is opaque, so anything that needs to _interpret_ the stored value is rejected loudly:
 
-**At compile/build time** — `@db.encrypted` cannot combine with: `@meta.id`, `@db.rel.FK` (or being an FK target), any `@db.index.*` (incl. [geo](/search/geo-search)), `@db.search.vector`/`@db.search.filter`, `@db.mongo.search.*`, [`@db.column.version`](/api/versioning), `@db.default.increment`/`@db.default.now`, [`@db.onUpdate.now`](/api/defaults#on-update) (so no `number.timestamp.created` / `.updated` either), or `@db.patch.strategy "merge"`. (A plain `@db.default 'literal'` is fine — it's applied app-side before encryption.)
+**At compile/build time** — `@db.encrypted` cannot combine with: `@meta.id`, `@db.rel.FK` (or being an FK target), any `@db.index.*` (incl. [geo](/search/geo-search)), `@db.search.vector`/`@db.search.filter`, `@db.column.searchable` (since 0.1.162), `@db.mongo.search.*`, [`@db.column.version`](/api/versioning), `@db.default.increment`/`@db.default.now`, [`@db.onUpdate.now`](/api/defaults#on-update) (so no `number.timestamp.created` / `.updated` either), or `@db.patch.strategy "merge"`. (A plain `@db.default 'literal'` is fine — it's applied app-side before encryption.)
+
+Since 0.1.162 no search feature reads ciphertext by another route either: `@db.column.searchable`, `@db.index.fulltext`, `@db.index.geo`, `@db.search.vector`, `@db.search.filter` and `@db.mongo.search.text` / `.autocomplete` are also refused on a field **inside** an encrypted object (declared inline or in the type of a ref-typed field such as `@db.encrypted profile: Address`) and on a [view field over an encrypted source](/views/#write-only-and-encrypted-source-fields), and `@db.mongo.search.dynamic` (which indexes every field) is refused on a collection with any encrypted field — use `@db.mongo.search.static` with explicit `@db.mongo.search.text` fields. Each is a compile error and, for models built without the compiler, a metadata-build error.
 
 **At query/patch time** — engine-agnostic `DbError` rejections before any SQL/pipeline is built:
 

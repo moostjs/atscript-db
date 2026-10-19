@@ -6,6 +6,25 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.162 {#v0-1-162}
+
+### View fields over a primitive JSON field read the typed value {#v0-1-162-json-root}
+
+A view field over a whole `@db.json` field of type `string`, `number` or `boolean` (`score?: User.score`) now reads the typed value on SQL adapters: `9`, not the JSON text `'9'`. It also sorts and filters by that value; before, it sorted the text, so `'10'` came before `'9'`. Sync recreates such views. A view field that declares `@db.json` itself keeps the JSON column ([Reading JSON leaves](/views/#reading-json-leaves)).
+
+### Compile checks follow field refs {#v0-1-162-ref-checks}
+
+A field typed as a ref (`entityId: Account.entityId`) is now checked against the annotations its runtime metadata really carries — its own plus the ones it inherits through the ref — and a view field against the [read seals](/views/#write-only-and-encrypted-source-fields) of the source field it reads. That fixes one false error, and turns three failures that only surfaced at sync or query time into compile errors:
+
+- **Fixed:** `@db.column.searchable` / `@db.index.fulltext` on a ref to an `@expect.int` field is accepted — you no longer need to repeat `@expect.int` on the referring field. On a view field, the float refusal now suggests `@expect.int` (a view column cannot take `@db.default.increment`).
+- **New error:** `@db.column.searchable` / `@db.index.fulltext` on a view field over a `@db.writeOnly` source (sync and every query already threw).
+- **New error:** `@db.sort.nulls` on a view field over a `@db.encrypted` source (the sort already failed at query time).
+- **New error:** `@db.amount.currency.ref` / `@db.unit.ref` on a field that inherits `@db.amount.currency` / `@db.unit` through its ref (the field's metadata carried both forms).
+
+- **New error — no search over ciphertext:** `@db.column.searchable` on an `@db.encrypted` field (as `@db.encrypted`'s docs always promised); any search feature (`@db.column.searchable`, `@db.index.fulltext`, `@db.index.geo`, `@db.search.vector`, `@db.search.filter`, `@db.mongo.search.text` / `.autocomplete`) on a field inside an encrypted object (inline, or in the type of a ref-typed encrypted field such as `@db.encrypted profile: Address`) or on a view field over an encrypted source; and `@db.mongo.search.dynamic` on a collection with any encrypted field — switch it to `@db.mongo.search.static` with `@db.mongo.search.text` on the fields to search. Models built without the compiler get the same refusal when their metadata is built ([Encryption](/api/encryption)).
+
+Schemas that hit a new error were already broken at sync or query time (or carried two conflicting currency / unit forms). Remove the refused annotation, or drop the conflicting form on the ref field.
+
 ## 0.1.159 {#v0-1-159}
 
 ### Fixes

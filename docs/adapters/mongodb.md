@@ -427,7 +427,7 @@ An integer member of an `@db.index.fulltext` is searched with an Atlas `equals` 
 
 ### Dynamic Atlas Search
 
-`@db.mongo.search.dynamic` auto-indexes every string field in the collection:
+`@db.mongo.search.dynamic` auto-indexes every string field in the collection. Because that would include ciphertext, it is refused on a collection with any [`@db.encrypted`](/api/encryption) field (since 0.1.162) — use a static index with explicit `@db.mongo.search.text` fields there:
 
 ```atscript
 @db.table 'products'

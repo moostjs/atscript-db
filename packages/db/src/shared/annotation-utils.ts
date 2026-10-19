@@ -12,26 +12,58 @@ import {
   type TMessages,
 } from "@atscript/core";
 
-import { searchKindOf } from "./search-fields";
+import { SEARCH_PROBLEM, searchKindOf } from "./search-fields";
 
-/** Asserts the field carrying this annotation does not also carry any of `others`. */
+/**
+ * Names of a field's effective annotations: its own plus the ones it inherits
+ * through its type ref (`price: Order.price`), with the `passedWhenReferred:
+ * false` ones dropped — the set codegen writes into the field's runtime
+ * metadata (`AtscriptDoc.evalAnnotationsForNode`). Compile checks that mirror
+ * a runtime metadata check read this, not the own-only `countAnnotations`.
+ * @since 0.1.162
+ */
+export function effectiveAnnotationNames(field: SemanticNode, doc: AtscriptDoc): Set<string> {
+  const names = new Set(field.annotations?.map((a) => a.name));
+  for (const a of doc.evalAnnotationsForNode(field) ?? []) names.add(a.name);
+  return names;
+}
+
+/**
+ * Asserts the field carrying this annotation does not also carry any of
+ * `others` — its own or inherited through its type ref (since 0.1.162).
+ */
 export function validateExclusiveWith(
   token: Token,
   selfName: string,
   others: Array<{ key: string; displayName?: string }>,
+  doc: AtscriptDoc,
 ): TMessages {
   const errors = [] as TMessages;
   const field = token.parentNode!;
+  const effective = effectiveAnnotationNames(field, doc);
   for (const { key, displayName } of others) {
-    if (field.countAnnotations(key) > 0) {
-      errors.push({
-        message: `${selfName} cannot coexist with ${displayName ?? `@${key}`} on the same field — pick one form, not both`,
-        severity: 1,
-        range: token.range,
-      });
-    }
+    if (!effective.has(key)) continue;
+    const inherited = field.countAnnotations(key) === 0;
+    errors.push({
+      message: inherited
+        ? `${selfName} cannot coexist with ${displayName ?? `@${key}`}, which this field inherits from its type reference — pick one form, not both`
+        : `${selfName} cannot coexist with ${displayName ?? `@${key}`} on the same field — pick one form, not both`,
+      severity: 1,
+      range: token.range,
+    });
   }
   return errors;
+}
+
+/** Whether a prop is a field of a view interface (`@db.view` / `@db.view.for`). */
+export function isViewField(field: SemanticNode): boolean {
+  const struct = field.ownerNode;
+  const owner = struct && isStructure(struct) ? struct.ownerNode : undefined;
+  return (
+    !!owner &&
+    isInterface(owner) &&
+    (owner.countAnnotations("db.view") > 0 || owner.countAnnotations("db.view.for") > 0)
+  );
 }
 
 /** Primitive base type (`string`, `number`, `decimal`, …) of a resolved definition, if it is a primitive. */
@@ -88,15 +120,25 @@ export function searchFieldVerdict(
   const leaf = doc.unwindType(def.id!, def.chain)?.def;
   const base = primitiveBaseType(leaf);
   if (base === undefined) return { kind: "other" };
+  // Effective annotations — what the runtime check reads off the field's
+  // metadata (`@expect.int` travels through a ref; `increment` / `now` /
+  // `precision` do not)
+  const effective = effectiveAnnotationNames(field, doc);
   const kind = searchKindOf({
     base,
     tags: isPrimitive(leaf) ? leaf.tags : undefined,
-    expectInt: field.countAnnotations("expect.int") > 0,
-    increment: field.countAnnotations("db.default.increment") > 0,
-    now: field.countAnnotations("db.default.now") > 0,
-    precision: field.countAnnotations("db.column.precision") > 0,
+    expectInt: effective.has("expect.int"),
+    increment: effective.has("db.default.increment"),
+    now: effective.has("db.default.now"),
+    precision: effective.has("db.column.precision"),
   });
-  if (typeof kind === "object") return kind;
+  if (typeof kind === "object") {
+    // A view column cannot take @db.default.increment — don't suggest it
+    if (kind.problem === SEARCH_PROBLEM.float && isViewField(field)) {
+      return { problem: SEARCH_PROBLEM.floatViewField };
+    }
+    return kind;
+  }
   return { kind: kind === "integer" ? "integer" : base === "string" ? "string" : "other" };
 }
 

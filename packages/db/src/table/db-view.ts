@@ -66,6 +66,9 @@ export interface TViewColumnMapping {
   /**
    * Set when the source is a primitive leaf inside a JSON column
    * ({@link sourceColumn}): the path within it and the leaf's declared type.
+   * Since 0.1.162 also set, with an empty `path` (the JSON root), when the
+   * source is itself a primitive `@db.json` column — the view reads its typed
+   * value, not the JSON text.
    * @since 0.1.136
    */
   json?: { path: string[]; type: TViewJsonType };
@@ -676,6 +679,7 @@ export class AtscriptDbView<
         sourceTable,
         source,
         joinNullable,
+        fieldType.metadata.has("db.json"),
       );
       mappings.push(agg ? { ...mapping, ...agg } : mapping);
     }
@@ -731,6 +735,7 @@ export class AtscriptDbView<
     sourceTable: string,
     source: TViewSource,
     joinNullable: boolean,
+    viewJson = false,
   ): TViewColumnMapping {
     const mapping: TViewColumnMapping = {
       viewColumn,
@@ -748,6 +753,11 @@ export class AtscriptDbView<
         );
       }
       mapping.json = { path: source.jsonPath, type: source.designType };
+    } else if (source.jsonColumn && !viewJson && isJsonLeafType(source.designType)) {
+      // A primitive `@db.json` source column holds JSON text (`9`, `"abc"`):
+      // the view reads its typed root value, so it returns, sorts and filters
+      // by that value (a view field marked `@db.json` keeps the JSON text)
+      mapping.json = { path: [], type: source.designType };
     }
     return mapping;
   }
