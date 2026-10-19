@@ -153,7 +153,7 @@ await users.getAdapter().withTransaction(async () => {
 });
 ```
 
-Requires a replica set. The adapter uses `session.withTransaction()` internally and propagates the session via `AsyncLocalStorage` to nested tables in the same space.
+Requires a replica-set member or mongos — also over `directConnection=true` (fixed in 0.1.164; support is read from the server once per client, a standalone runs `fn` without a transaction). The adapter uses `session.withTransaction()` internally and propagates the session via `AsyncLocalStorage` to nested tables in the same space.
 
 ## Managed views
 

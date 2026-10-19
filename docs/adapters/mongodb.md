@@ -105,6 +105,8 @@ const db = new DbSpace(() => new MongoAdapter(client.db(), client));
 const client = new MongoClient("mongodb://localhost:27017/test?directConnection=true");
 ```
 
+Transactions over a direct connection depend on the server, not the connection mode — see [Transactions](#transactions).
+
 **In-process MongoDB for tests (`mongodb-memory-server`).** Spin up an ephemeral MongoDB inside the test process — no Docker required:
 
 ```bash
@@ -661,9 +663,9 @@ Capped collections do not support document deletion or updates that increase doc
 
 ## Transactions
 
-MongoDB transactions require a replica set or mongos topology. On standalone instances, the adapter gracefully skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#adapter-behavior) for usage and behavioral details.
+MongoDB transactions require a replica-set member, mongos or load balancer; this also holds over `directConnection=true` (since 0.1.164). The adapter reads it from the server once per client. On a standalone `mongod`, or an adapter created without a `MongoClient`, the adapter skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#adapter-behavior) for usage and behavioral details.
 
-Row-locking reads (`{ lock: 'update' }`) throw `DbError("LOCK_NOT_SUPPORTED")` (since 0.1.162). Use `$cas` / `withOptimisticRetry` instead; the transaction's write-conflict retry already makes "read X, then write X" safe. `withTransaction(fn, { isolation })` accepts `'read committed'` and `'repeatable read'`, which the transaction's snapshot satisfies. `'serializable'`, and any level on a standalone server, throws `ISOLATION_NOT_SUPPORTED`. See [Locking reads](/api/transactions#locking-reads).
+Row-locking reads (`{ lock: 'update' }`) throw `DbError("LOCK_NOT_SUPPORTED")` (since 0.1.162). Use `$cas` / `withOptimisticRetry` instead; the transaction's write-conflict retry already makes "read X, then write X" safe. `withTransaction(fn, { isolation })` accepts `'read committed'` and `'repeatable read'`, which the transaction's snapshot satisfies. `'serializable'`, and any level where no transaction is opened (standalone server, or no `MongoClient`), throws `ISOLATION_NOT_SUPPORTED`. See [Locking reads](/api/transactions#locking-reads).
 
 ## Schema Sync Notes
 

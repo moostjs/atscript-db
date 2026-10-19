@@ -4,6 +4,9 @@ import { MongoServerError } from "mongodb";
 /** Server code for an unrecognized `timezone` in a date expression (verified on MongoDB 7.0 and 8.0). */
 const UNKNOWN_TIME_ZONE = 40485;
 
+/** `CommandNotFound`: e.g. `hello` on a server before 4.2.10. */
+export const COMMAND_NOT_FOUND = 59;
+
 /**
  * Maps MongoDB server errors that describe the query, not a server fault:
  * - projection validation (31249, 31254) → `DbError("INVALID_QUERY")` (moost-db:

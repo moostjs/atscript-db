@@ -119,6 +119,7 @@ import {
   DESTRUCTIVE_OPTION_KEYS,
 } from "./mongo-schema-sync";
 import { validateMongoIdPlugin } from "./validate-plugins";
+import { transactionSupport } from "./mongo-transaction-support";
 
 // Public mongo-types surface. `mongoIndexKey`/`INDEX_PREFIX` let raw-`mongodb`-driver
 // consumers resolve the physical index name schema-sync provisions
@@ -301,61 +302,41 @@ export class MongoAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Per-client cache: whether transactions are unavailable (standalone MongoDB).
-   * Shared across all adapter instances for the same client so topology is probed once.
-   */
-  private static readonly _txDisabledClients = new WeakSet<MongoClient>();
-
-  private get _txDisabled(): boolean {
-    return this.client ? MongoAdapter._txDisabledClients.has(this.client) : true;
-  }
-
-  private set _txDisabled(value: boolean) {
-    if (value && this.client) {
-      MongoAdapter._txDisabledClients.add(this.client);
-    }
-  }
-
-  /**
    * Uses MongoDB's Convenient Transaction API (`session.withTransaction()`).
    * This handles txnNumber management and automatic retry for
    * `TransientTransactionError` / `UnknownTransactionCommitResult`.
    *
+   * Transaction support is read from the server, not the connection mode: a
+   * `directConnection=true` client to a replica-set primary runs real
+   * transactions; a standalone `mongod` (or an adapter without a client)
+   * runs `fn` without one.
+   *
    * `opts.isolation` (since 0.1.162): a MongoDB transaction reads one
    * snapshot, which satisfies `'read committed'` and `'repeatable read'`;
    * `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation
-   * allows write skew), and so does any level on a topology without
-   * transactions (standalone), where `fn` would run without one.
+   * allows write skew), and so does any level where `fn` would run without
+   * a transaction.
    */
   override async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
     const isolation = this._checkIsolation(opts);
     if (this._getTransactionState()) {
       return fn();
     }
-    const passThrough = (): Promise<T> => {
+    const passThrough = (reason: string): Promise<T> => {
       if (isolation) {
         throw this._isolationNotSupported(
-          `Isolation '${isolation}' needs a MongoDB transaction — this topology (standalone) has none`,
+          `Isolation '${isolation}' needs a MongoDB transaction — ${reason}`,
         );
       }
       return fn();
     };
-    if (this._txDisabled || !this._client) {
-      return passThrough();
+    if (!this._client) {
+      return passThrough("the adapter was created without a MongoClient");
     }
-    try {
-      const topology = (this._client as any).topology;
-      if (topology) {
-        const desc = topology.description ?? topology.s?.description;
-        const type = desc?.type;
-        if (type === "Single" || type === "Unknown") {
-          this._txDisabled = true;
-          return passThrough();
-        }
-      }
-    } catch {
-      this._txDisabled = true;
-      return passThrough();
+    if (!(await transactionSupport(this._client))) {
+      return passThrough(
+        "the server is a standalone mongod (transactions need a replica set or mongos)",
+      );
     }
 
     const session = this._client.startSession();

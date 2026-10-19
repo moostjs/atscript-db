@@ -221,7 +221,7 @@ In a `moost-db` controller, `this.withTransaction(fn, { isolation })` forwards t
 | PostgreSQL | ✅               | ✅                | Best support; CREATE / ALTER TABLE roll back on failure. A dedicated pooled connection is held for the whole `withTransaction` span                              |
 | SQLite     | ✅ (serialised)  | ❌                | One connection per driver: transactions queue behind each other and plain statements wait for `COMMIT` — see [SQLite serialisation](#sqlite-serialisation)       |
 | MySQL      | ✅ (InnoDB)      | ❌                | DDL auto-commits. A dedicated pooled connection is held for the whole `withTransaction` span                                                                     |
-| MongoDB    | ✅               | n/a               | **Requires a replica set**; falls back to no-op on standalone (same code works dev → prod). The callback may **re-run** on transient errors — keep it idempotent |
+| MongoDB    | ✅               | n/a               | **Requires a replica set or mongos**; a no-op on a standalone (same code works dev → prod). The callback may **re-run** on transient errors — keep it idempotent |
 | Memory     | ❌               | n/a               | `withTransaction` runs the callback; nothing rolls back. Test rollback behaviour on SQLite `:memory:` or with adapter spies                                      |
 
 ### SQLite serialisation {#sqlite-serialisation}
