@@ -3,6 +3,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   isAtscriptDbView,
   createFailureCollector,
+  createChangeRecorder,
   type AtscriptDbView,
   type TColumnDiff,
   type TSyncColumnResult,
@@ -523,7 +524,6 @@ export async function syncIndexesImpl(
   opts?: TSyncIndexesOptions,
   dryRun = false,
 ): Promise<TIndexChange[]> {
-  const changes: TIndexChange[] = [];
   /** Indexes dropped because their definition drifted — their re-creation is a rebuild. */
   const replaced = new Set<string>();
   if (dryRun) {
@@ -531,7 +531,7 @@ export async function syncIndexesImpl(
       .listCollections({ name: host.collection.collectionName }, { nameOnly: true })
       .hasNext();
     if (!exists) {
-      return changes;
+      return [];
     }
   } else {
     await host.ensureCollectionExists();
@@ -630,6 +630,7 @@ export async function syncIndexesImpl(
   // index over duplicate data) must not abort the remaining index maintenance
   // for this collection.
   const { attempt, throwIfAny } = createFailureCollector("index sync");
+  const { changes, apply } = createChangeRecorder<TIndexChange>(dryRun, attempt);
 
   // The collection's default collation (read once, only when an index
   // reports a collation a byte-wise index should not have): an index built
@@ -704,16 +705,10 @@ export async function syncIndexesImpl(
         }
       }
     } else {
-      if (dryRun) {
-        changes.push({ name: remote.name, action: "drop" });
-        continue;
-      }
-      host._log("dropIndex", remote.name);
-      if (
-        await attempt(`drop index "${remote.name}"`, () => host.collection.dropIndex(remote.name))
-      ) {
-        changes.push({ name: remote.name, action: "drop" });
-      }
+      await apply({ name: remote.name, action: "drop" }, `drop index "${remote.name}"`, () => {
+        host._log("dropIndex", remote.name);
+        return host.collection.dropIndex(remote.name);
+      });
     }
   }
 
@@ -764,17 +759,13 @@ export async function syncIndexesImpl(
         break;
       }
     }
-    const change: TIndexChange = { name: key, action: replaced.has(key) ? "rebuild" : "add" };
-    if (dryRun) {
-      changes.push(change);
-      continue;
-    }
-    if (await attempt(label, () => host.collection.createIndex(value.fields, indexOptions))) {
-      changes.push(change);
-    }
+    await apply({ name: key, action: replaced.has(key) ? "rebuild" : "add" }, label, () =>
+      host.collection.createIndex(value.fields, indexOptions),
+    );
   }
 
   // ── Sync search indexes (Atlas-only, gracefully skipped on standalone) ──
+  const search = createChangeRecorder<TIndexChange>(dryRun);
   try {
     const toUpdate = new Set<string>();
     const existingSearchIndexes = (await host.collection
@@ -814,12 +805,11 @@ export async function syncIndexesImpl(
         }
       } else {
         if (remote.status !== "DELETING") {
-          if (!dryRun) {
-            host._log("dropSearchIndex", remote.name);
-            await host.collection.dropSearchIndex(remote.name);
-          }
           // Recorded once done — a failure below is swallowed (Atlas-only API)
-          changes.push({ name: remote.name, action: "drop" });
+          await search.apply({ name: remote.name, action: "drop" }, remote.name, () => {
+            host._log("dropSearchIndex", remote.name);
+            return host.collection.dropSearchIndex(remote.name);
+          });
         }
       }
     }
@@ -829,26 +819,19 @@ export async function syncIndexesImpl(
         case "dynamic_text":
         case "search_text":
         case "vector": {
-          const change: TIndexChange = {
-            name: key,
-            action: toUpdate.has(key) ? "rebuild" : "add",
-          };
-          if (dryRun) {
-            changes.push(change);
-            break;
-          }
-          if (toUpdate.has(key)) {
-            host._log("updateSearchIndex", key, value.definition);
-            await host.collection.updateSearchIndex(key, value.definition);
-          } else {
+          const update = toUpdate.has(key);
+          await search.apply({ name: key, action: update ? "rebuild" : "add" }, key, () => {
+            if (update) {
+              host._log("updateSearchIndex", key, value.definition);
+              return host.collection.updateSearchIndex(key, value.definition);
+            }
             host._log("createSearchIndex", key, value.type);
-            await host.collection.createSearchIndex({
+            return host.collection.createSearchIndex({
               name: key,
               type: value.type === "vector" ? "vectorSearch" : "search",
               definition: value.definition,
             });
-          }
-          changes.push(change);
+          });
           break;
         }
         default:
@@ -860,7 +843,7 @@ export async function syncIndexesImpl(
   }
 
   throwIfAny();
-  return changes;
+  return [...changes, ...search.changes];
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────

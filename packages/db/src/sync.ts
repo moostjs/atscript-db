@@ -75,6 +75,7 @@ export type {
   TSyncSkippedWork,
 } from "./schema/schema-sync";
 export { computeColumnDiff, sameDefaultValue } from "./schema/column-diff";
+export type { TColumnDiffOptions } from "./schema/column-diff";
 export type { TSyncDerivedChange } from "./schema/sync-entry";
 export { computeTableOptionDiff } from "./schema/table-option-diff";
 export {

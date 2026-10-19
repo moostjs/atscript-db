@@ -56,6 +56,7 @@ import {
   runRecreatesTable,
   mergeLiveForeignKeyChanges,
   plannedIndexOptions,
+  columnDiffOptions,
   type TSyncExecutorDeps,
   type TTableFacts,
   type TViewSyncPlan,
@@ -616,6 +617,7 @@ export class SchemaSync {
       // Phase 2 — pre-flight
       const refusals = this.preflight(d, safe);
       if (refusals.size > 0) {
+        await this.planLiveWork(d, safe);
         const result: TSyncResult = {
           status: "refused",
           schemaHash: hash,
@@ -967,10 +969,12 @@ export class SchemaSync {
         init.columnsToAdd = [...readable.columnDescriptors];
       } else if (facts.existing && facts.existing.length > 0) {
         const typeMapper = adapter.typeMapper?.bind(adapter);
-        facts.diff = computeColumnDiff(readable.columnDescriptors, facts.existing, typeMapper, {
-          snapshot: storedSnapshot,
-          nativeDefaultFns: adapter.nativeDefaultFns(),
-        });
+        facts.diff = computeColumnDiff(
+          readable.columnDescriptors,
+          facts.existing,
+          typeMapper,
+          columnDiffOptions(adapter, storedSnapshot),
+        );
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
         // Values of the ≤ 0.1.154 union layout (since 0.1.155)
         const migration = planJsonColumnMigration(readable, facts.diff, storedSnapshot);
@@ -1002,7 +1006,7 @@ export class SchemaSync {
           readable.columnDescriptors,
           existing,
           this.resolveTypeMapper(adapter),
-          { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
+          columnDiffOptions(adapter, storedSnapshot),
         );
         this.populatePlanFromDiff(facts.diff, init, readable, safe);
       }
@@ -1044,39 +1048,6 @@ export class SchemaSync {
       const fkDiff = facts.fkDiff;
       init.status = "alter";
       Object.assign(init, describeForeignKeyChanges(fkDiff));
-    }
-
-    // Index work on the live table as it is now — not for a table the run
-    // creates, recreates (it rebuilds every index) or still has to rename
-    // (its indexes are introspected under the new name).
-    if (
-      adapter.planIndexes &&
-      init.status !== "create" &&
-      init.status !== "error" &&
-      // safe mode skips a destructive option change's recreate
-      (safe || !init.recreated) &&
-      !pendingRename &&
-      !runRecreatesTable(facts, safe)
-    ) {
-      // With the options the run passes (safe mode keeps some indexes)
-      const indexChanges = await adapter.planIndexes(plannedIndexOptions(facts, safe));
-      if (indexChanges.length > 0) {
-        init.indexChanges = indexChanges;
-        init.status = "alter";
-      }
-    }
-    // Foreign keys missing from (or extra on) the live table that the
-    // snapshot-based FK diff cannot see — e.g. a constraint dropped by hand.
-    if (
-      adapter.planForeignKeys &&
-      init.status !== "create" &&
-      init.status !== "error" &&
-      (safe || !init.recreated) &&
-      !pendingRename &&
-      !runRecreatesTable(facts, safe) &&
-      mergeLiveForeignKeyChanges(init, await adapter.planForeignKeys())
-    ) {
-      init.status = "alter";
     }
 
     // Primary-key change — the facts pre-flight needs (probed only when it
@@ -1121,6 +1092,47 @@ export class SchemaSync {
     }
 
     return facts;
+  }
+
+  /**
+   * Folds the index / foreign-key work on each live table as it is now
+   * (`planIndexes` / `planForeignKeys`) into its plan entry. Read only when
+   * plan entries are reported (`plan()`, a refused run) — a run reports what
+   * `syncIndexes` / `syncForeignKeys` did.
+   */
+  private async planLiveWork(d: TDiscovery, safe: boolean): Promise<void> {
+    await Promise.all(d.tables.map((t) => this.planTableLiveWork(t, safe)));
+  }
+
+  private async planTableLiveWork(facts: TTableFacts, safe: boolean): Promise<void> {
+    const adapter = facts.readable.dbAdapter;
+    const init = facts.planEntry;
+    // Not for a table the run creates, recreates (it rebuilds every index) or
+    // still has to rename (its indexes are introspected under the new name).
+    const plannable =
+      init.status !== "create" &&
+      init.status !== "error" &&
+      // safe mode skips a destructive option change's recreate
+      (safe || !init.recreated) &&
+      !facts.pendingRename &&
+      !runRecreatesTable(facts, safe);
+    if (!plannable) {
+      return;
+    }
+    // With the options the run passes (safe mode keeps some indexes)
+    const indexChanges = await adapter.planIndexes(plannedIndexOptions(facts, safe));
+    if (indexChanges.length > 0) {
+      init.indexChanges = indexChanges;
+      init.status = "alter";
+    }
+    // Foreign keys missing from (or extra on) the live table that the
+    // snapshot-based FK diff cannot see — e.g. a constraint dropped by hand.
+    if (
+      adapter.planForeignKeys &&
+      mergeLiveForeignKeyChanges(init, await adapter.planForeignKeys())
+    ) {
+      init.status = "alter";
+    }
   }
 
   // ── Phase 2: pre-flight ────────────────────────────────────────────────
@@ -1788,6 +1800,7 @@ export class SchemaSync {
 
     const d = await this.discover(resolved, safe);
     const refusals = this.preflight(d, safe);
+    await this.planLiveWork(d, safe);
 
     const entries = this.buildPlanEntries(d, safe, refusals);
 

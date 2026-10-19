@@ -1787,12 +1787,11 @@ export class MongoAdapter extends BaseDbAdapter {
    * `__pk` index first (`dropIndexesForColumns`).
    */
   async rebuildPrimaryKey(_change: TPrimaryKeyChange): Promise<void> {}
-  override async syncIndexes(opts?: TSyncIndexesOptions): Promise<TIndexChange[]> {
-    return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts);
-  }
-  /** The index changes {@link syncIndexes} would make — no DDL. */
-  async planIndexes(opts?: TSyncIndexesOptions): Promise<TIndexChange[]> {
-    return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts, true);
+  protected override async _syncIndexes(
+    dryRun: boolean,
+    opts?: TSyncIndexesOptions,
+  ): Promise<TIndexChange[]> {
+    return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts, dryRun);
   }
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
     return syncColumnsImpl(this as any as TMongoSchemaSyncHost, diff);

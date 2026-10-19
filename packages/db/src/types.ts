@@ -1016,13 +1016,13 @@ export interface TIndexChange {
 /**
  * One foreign key `syncForeignKeys` adds to the live table (missing there,
  * e.g. dropped by hand) or drops from it (not in the model) — matched by
- * the sorted local columns. `targetTable` is empty for a dropped constraint
- * the adapter does not resolve.
+ * the sorted local columns. `targetTable` is set for an added constraint;
+ * a dropped one may leave it out.
  * @since 0.1.162
  */
 export interface TForeignKeyChange {
   fields: string[];
-  targetTable: string;
+  targetTable?: string;
   action: "add" | "drop";
 }
 
