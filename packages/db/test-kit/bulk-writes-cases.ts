@@ -1,8 +1,8 @@
-import { expect } from "vite-plus/test";
+import { it, expect } from "vite-plus/test";
 
 /**
  * Shared end-to-end checks (since 0.1.162) for a table set built from
- * `fixtures/bulk-writes.as`: bounded `updateMany` / `deleteMany`,
+ * `fixtures/bulk-writes.as` (of each adapter): bounded `updateMany` / `deleteMany`,
  * `@db.onUpdate.inc` on every write path, `touchMany` stamping
  * `@db.onUpdate.now`, and the validated `updateMany` / `replaceMany` payloads.
  * The tables must exist and be empty.
@@ -310,5 +310,45 @@ export async function checkBoundedRace(tasks: any, atomic = false): Promise<void
   } finally {
     delete adapter.deleteMany;
     delete adapter.updateMany;
+  }
+}
+
+/** What an adapter passes to {@link defineBulkWritesCases}. */
+export interface TBulkWritesKit {
+  /** The empty `tasks` / `owners` / `items` tables (read when a case runs). */
+  tables: () => TBulkWriteTables;
+  /** The empty `BwBoard` table (omitted: no composite-key case). */
+  boards?: () => any;
+  /** Appended to the bounded-writes case title, e.g. `native` / `core emulation`. */
+  bounded?: string;
+  /** `native`: an FK `ON DELETE CASCADE`; `application`: the core cascades and pins the keys first. */
+  cascade: "native" | "application";
+  /** See {@link checkBoundedRace}. */
+  atomic?: boolean;
+}
+
+/**
+ * Registers the bounded-write / `@db.onUpdate.inc` / bulk-validation cases
+ * shared by every adapter. Adapter-specific cases (the counter upgrade, a
+ * pre-counter document) stay in the adapter's spec.
+ */
+export function defineBulkWritesCases(kit: TBulkWritesKit): void {
+  it("@db.onUpdate.inc moves on every write path; touchMany stamps @db.onUpdate.now", () =>
+    checkOnUpdateInc(kit.tables()));
+  it("updateMany / replaceMany validate their payload", () => checkBulkValidation(kit.tables()));
+  it(`bounded updateMany / deleteMany${kit.bounded ? ` (${kit.bounded})` : ""}`, () =>
+    checkBoundedWrites(kit.tables()));
+  it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
+    checkBoundedRace(kit.tables().tasks, kit.atomic));
+  if (kit.cascade === "native") {
+    it("a bounded delete with a native FK cascade", () => checkBoundedCascade(kit.tables()));
+  } else {
+    it("a bounded delete with an application-level cascade pins the keys first", () =>
+      checkBoundedCascade(kit.tables()));
+  }
+  const boards = kit.boards;
+  if (boards) {
+    it("bounded writes on a composite renamed key, NULL sort keys, a self-relation", async () =>
+      checkBoundedComposite(await boards()));
   }
 }

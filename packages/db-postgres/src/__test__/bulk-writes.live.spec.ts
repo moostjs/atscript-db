@@ -7,15 +7,10 @@ import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
 import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
 import {
-  checkBoundedCascade,
-  checkBoundedComposite,
-  checkBoundedRace,
-  checkBoundedWrites,
-  checkBulkValidation,
   checkCounterUpgrade,
-  checkOnUpdateInc,
+  defineBulkWritesCases,
   type TBulkWriteTables,
-} from "./bulk-writes-check";
+} from "../../../db/test-kit/bulk-writes-cases";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -67,15 +62,12 @@ describe.skipIf(!reachable)(
       await boards.deleteMany({});
     });
 
-    it("@db.onUpdate.inc moves on every write path; touchMany stamps @db.onUpdate.now", () =>
-      checkOnUpdateInc(t));
-    it("updateMany / replaceMany validate their payload", () => checkBulkValidation(t));
-    it("bounded updateMany / deleteMany (native)", () => checkBoundedWrites(t));
-    it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
-      checkBoundedRace(t.tasks));
-    it("a bounded delete with a native FK cascade", () => checkBoundedCascade(t));
-    it("bounded writes on a composite renamed key, NULL sort keys, a self-relation", () =>
-      checkBoundedComposite(space.getTable(fx.BwBoard)));
+    defineBulkWritesCases({
+      tables: () => t,
+      boards: () => space.getTable(fx.BwBoard),
+      bounded: "native",
+      cascade: "native",
+    });
     it("schema sync adds the counter to a populated table (backfilled 0)", () =>
       checkCounterUpgrade(space, SchemaSync, fx));
   },
