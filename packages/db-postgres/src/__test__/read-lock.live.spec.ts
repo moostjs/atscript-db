@@ -355,4 +355,30 @@ describe.skipIf(!reachable)("[postgres live] locking reads and isolation", () =>
     expect(await t2).toEqual({ deletedCount: 1 }); // row 3 — not 0 with a match left
     expect(await items().count({ filter: {}, controls: {} })).toBe(0);
   });
+
+  it("a bounded deleteMany whose picked rows a concurrent transaction deletes retries and takes the next match", async () => {
+    const locked = signal();
+    const release = signal();
+    const t1 = adapter().withTransaction(async () => {
+      await items().findMany({ filter: { id: { $in: [1, 2] } }, controls: {} }, { lock: "update" });
+      locked.fire();
+      await release.wait;
+      await items().deleteMany({ id: { $in: [1, 2] } });
+    });
+    await locked.wait;
+    let done = false;
+    const t2 = items()
+      .deleteMany({}, { limit: 2 })
+      .then((r: any) => {
+        done = true;
+        return r;
+      });
+    await sleep(400);
+    expect(done).toBe(false); // waits on T1's rows 1 and 2
+    release.fire();
+    await t1;
+    // the first statement loses both picked rows (0); the probe finds row 3 and the retry takes it
+    expect(await t2).toEqual({ deletedCount: 1 });
+    expect(await items().count({ filter: {}, controls: {} })).toBe(0);
+  });
 });

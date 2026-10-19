@@ -770,6 +770,14 @@ describe("mysqlDialect.jsonExtract", () => {
     }
   });
 
+  it("addresses the JSON root with '$' for an empty path (primitive @db.json column)", () => {
+    expect(extract("`t`.`data`", [], "string")).toBe(
+      `CASE JSON_TYPE(${e("$")}) WHEN 'STRING' THEN JSON_UNQUOTE(${e("$")}) END`,
+    );
+    expect(mysqlDialect.jsonExtractText!("`t`.`data`", [])).toContain(e("$"));
+    expect(mysqlDialect.jsonExtractValue!("`t`.`data`", [])).toContain(e("$"));
+  });
+
   it("renders the extraction in view SELECT / GROUP BY and a HAVING dimension by alias", () => {
     const tagSql = extract("`items`.`data`", ["tag"], "string");
     const scoreSql = extract("`items`.`data`", ["score"], "number");
