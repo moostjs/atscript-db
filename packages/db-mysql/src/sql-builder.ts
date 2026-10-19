@@ -59,6 +59,8 @@ export function mysqlStringLiteral(value: string): string {
 
 /** `'$."a"."b"'` — the shared JSON path, as a MySQL string literal. */
 function mysqlJsonPath(path: readonly string[]): string {
+  // An empty path addresses the JSON root (a primitive JSON column's value)
+  if (path.length === 0) return mysqlStringLiteral("$");
   return mysqlStringLiteral(`$.${quotedJsonPathSegments(path).join(".")}`);
 }
 
