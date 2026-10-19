@@ -361,6 +361,19 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether a native bounded write ({@link supportsWriteLimit}) picks and
+   * writes its rows atomically — a row a concurrent transaction deletes or
+   * moves out of the filter is passed over and the next match taken, so `0`
+   * affected rows always means nothing matched (MySQL's
+   * `UPDATE/DELETE … ORDER BY … LIMIT`). When `false` (the default) the core
+   * probes for a remaining match after a bounded write that affected no rows
+   * and retries it a few times (since 0.1.162).
+   */
+  writeLimitIsAtomic(): boolean {
+    return false;
+  }
+
+  /**
    * Logs a debug message if verbose mode is enabled.
    * Adapters call this to log DB operations with zero overhead when disabled.
    */

@@ -352,6 +352,15 @@ function invalidQuery(path: string, message: string): DbError {
 }
 
 /** The rows a bounded `updateMany` / `deleteMany` picks (see `_writeBound`). */
+/** Extra attempts of a bounded write that affected no rows while matches remain. */
+const BOUNDED_WRITE_RETRIES = 3;
+
+/** `deletedCount` of a delete result. */
+const deleted = (result: TDbDeleteResult): number => result.deletedCount;
+
+/** `matchedCount` of an update result. */
+const matched = (result: TDbUpdateResult): number => result.matchedCount;
+
 interface TWriteBound {
   /** Translated (physical) filter. */
   filter: FilterExpr;
@@ -1381,20 +1390,31 @@ export class AtscriptDbTable<
         return this.adapter.updateMany(translatedFilter, update, ops, ...optsArg(updateOpts));
       }
       if (this.adapter.supportsWriteLimit()) {
-        return this.adapter.updateMany(translatedFilter, update, ops, {
-          ...updateOpts,
-          limit: bound.writeLimit,
-        });
+        return this._boundedWrite(
+          bound,
+          () =>
+            this.adapter.updateMany(translatedFilter, update, ops, {
+              ...updateOpts,
+              limit: bound.writeLimit,
+            }),
+          matched,
+          this.adapter.writeLimitIsAtomic(),
+        );
       }
-      return this._pinBoundKeys(bound).then((keys) =>
-        keys
-          ? this.adapter.updateMany(
-              { $and: [translatedFilter, keys] },
-              update,
-              ops,
-              ...optsArg(updateOpts),
-            )
-          : { matchedCount: 0, modifiedCount: 0 },
+      return this._boundedWrite(
+        bound,
+        async () => {
+          const keys = await this._pinBoundKeys(bound);
+          return keys
+            ? this.adapter.updateMany(
+                { $and: [translatedFilter, keys] },
+                update,
+                ops,
+                ...optsArg(updateOpts),
+              )
+            : { matchedCount: 0, modifiedCount: 0 };
+        },
+        matched,
       );
     });
   }
@@ -1462,8 +1482,14 @@ export class AtscriptDbTable<
         this.adapter.withTransaction(async () => {
           if (!bound) return this._cascadeDelete(filter as FilterExpr, translate);
           // Pin the keys first: the cascade and the delete act on exactly them.
-          const keys = await this._pinBoundKeys(bound);
-          return keys ? this._cascadeDelete(keys, (f) => f) : { deletedCount: 0 };
+          return this._boundedWrite(
+            bound,
+            async () => {
+              const keys = await this._pinBoundKeys(bound);
+              return keys ? this._cascadeDelete(keys, (f) => f) : { deletedCount: 0 };
+            },
+            deleted,
+          );
         }),
       );
     }
@@ -1474,13 +1500,54 @@ export class AtscriptDbTable<
     }
     if (this.adapter.supportsWriteLimit()) {
       return remapDeleteFkViolation(this.tableName, () =>
-        this.adapter.deleteMany(bound.filter, { limit: bound.writeLimit }),
+        this._boundedWrite(
+          bound,
+          () => this.adapter.deleteMany(bound.filter, { limit: bound.writeLimit }),
+          deleted,
+          this.adapter.writeLimitIsAtomic(),
+        ),
       );
     }
-    return remapDeleteFkViolation(this.tableName, async () => {
-      const keys = await this._pinBoundKeys(bound);
-      return keys ? this.adapter.deleteMany({ $and: [bound.filter, keys] }) : { deletedCount: 0 };
-    });
+    return remapDeleteFkViolation(this.tableName, () =>
+      this._boundedWrite(
+        bound,
+        async () => {
+          const keys = await this._pinBoundKeys(bound);
+          return keys
+            ? this.adapter.deleteMany({ $and: [bound.filter, keys] })
+            : { deletedCount: 0 };
+        },
+        deleted,
+      ),
+    );
+  }
+
+  /**
+   * Runs a bounded write; when it affected no rows although a row still
+   * matches the filter — a concurrent transaction deleted or changed the rows
+   * it picked between the pick and the write — it runs again, at most
+   * {@link BOUNDED_WRITE_RETRIES} more times. So `0` means nothing matched
+   * (a loop until `0` cannot stop early); fewer than `limit` stays possible.
+   * `atomic` writes (MySQL native) skip the probe.
+   */
+  private async _boundedWrite<R>(
+    bound: TWriteBound,
+    write: () => Promise<R>,
+    affected: (result: R) => number,
+    atomic = false,
+  ): Promise<R> {
+    let result = await write();
+    if (atomic) return result;
+    for (let retry = 0; retry < BOUNDED_WRITE_RETRIES && affected(result) === 0; retry++) {
+      const { $sort: _sort, $nulls: _nulls, ...controls } = bound.query.controls;
+      const probe = await this.adapter.findMany({
+        ...bound.query,
+        controls: { ...controls, $limit: 1 },
+      });
+      if (probe.length === 0) break;
+      result = await write();
+    }
+    return result;
   }
 
   /**

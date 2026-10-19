@@ -7,6 +7,7 @@ import { MongoAdapter } from "../mongo-adapter";
 import { prepareFixtures } from "./test-utils";
 import {
   checkBoundedCascade,
+  checkBoundedRace,
   checkBoundedWrites,
   checkBulkValidation,
   checkCounterUpgrade,
@@ -60,6 +61,8 @@ describe("MongoAdapter — bounded writes, @db.onUpdate.inc, validated bulk payl
     checkOnUpdateInc(t));
   it("updateMany / replaceMany validate their payload", () => checkBulkValidation(t));
   it("bounded updateMany / deleteMany (core emulation)", () => checkBoundedWrites(t));
+  it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
+    checkBoundedRace(t.tasks));
   it("a bounded delete with an application-level cascade pins the keys first", () =>
     checkBoundedCascade(t));
 

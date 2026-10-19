@@ -9,6 +9,7 @@ import { mysqlReachable, recreateMysqlDatabase, dropMysqlDatabase } from "./live
 import {
   checkBoundedCascade,
   checkBoundedComposite,
+  checkBoundedRace,
   checkBoundedWrites,
   checkBulkValidation,
   checkCounterUpgrade,
@@ -70,6 +71,8 @@ describe.skipIf(!reachable)(
       checkOnUpdateInc(t));
     it("updateMany / replaceMany validate their payload", () => checkBulkValidation(t));
     it("bounded updateMany / deleteMany (native)", () => checkBoundedWrites(t));
+    it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
+      checkBoundedRace(t.tasks, true));
     it("a bounded delete with a native FK cascade", () => checkBoundedCascade(t));
     it("bounded writes on a composite renamed key, NULL sort keys, a self-relation", () =>
       checkBoundedComposite(space.getTable(fx.BwBoard)));

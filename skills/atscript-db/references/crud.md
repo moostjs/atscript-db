@@ -146,7 +146,7 @@ await tasks.updateMany(
 );
 ```
 
-Bounded `deleteMany` / `updateMany` (`{ limit, sort? }`, 0.1.162): `limit` positive integer else `INVALID_QUERY` (path `limit`); `sort` defaults to PK asc, PK always appended as tie-breaker (last key's direction); `sort` without `limit` → `INVALID_QUERY`; table without PK → `INVALID_QUERY`. MySQL native `ORDER BY … LIMIT`; PG/SQLite one statement with PK/rowid subquery; Mongo/memory/custom adapters read keys then write `filter AND keys` (a round may return < limit under concurrency). App-level cascades pin keys first. NOT exposed over HTTP. Docs: `/api/crud#bounded-writes`.
+Bounded `deleteMany` / `updateMany` (`{ limit, sort? }`, 0.1.162): `limit` positive integer else `INVALID_QUERY` (path `limit`); `sort` defaults to PK asc, PK always appended as tie-breaker (last key's direction); `sort` without `limit` → `INVALID_QUERY`; table without PK → `INVALID_QUERY`. MySQL native `ORDER BY … LIMIT`; PG/SQLite one statement with PK/rowid subquery; Mongo/memory/custom adapters read keys then write `filter AND keys` (a round may return < limit under concurrency). Contract: `0` = nothing left matched — a round that affects 0 rows while a row still matches (picked rows lost to a concurrent writer) is retried up to 3 times (not on MySQL native, which takes the next rows itself), so `while ((await t.deleteMany(f, { limit })).deletedCount) {}` cannot stop early. App-level cascades pin keys first. NOT exposed over HTTP. Docs: `/api/crud#bounded-writes`.
 
 `deleteOne` triggers referential actions (cascade/setNull/restrict) via the integrity strategy.
 

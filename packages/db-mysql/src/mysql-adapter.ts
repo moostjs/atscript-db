@@ -1480,6 +1480,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** The `ORDER BY … LIMIT` scan locks as it goes and skips rows gone meanwhile. */
+  override writeLimitIsAtomic(): boolean {
+    return true;
+  }
+
   async updateMany(
     filter: FilterExpr,
     data: Record<string, unknown>,

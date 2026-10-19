@@ -373,7 +373,8 @@ await tasks.updateMany(
 
 - **`limit`** — a positive integer; anything else throws `DbError("INVALID_QUERY")` (`errors[0].path === "limit"`). Without it the call is unbounded, as before.
 - **`sort`** — `$sort` shape; it picks which rows go first. The default is the primary key ascending, and the primary key is always appended as the final tie-breaker (in the direction of the last key), so the order is deterministic. `sort` without `limit` throws.
-- **Loop until the count is `0`**, not until it is below `limit`: on engines where the bound is emulated (see below), a concurrent writer can make one round touch fewer rows while matches remain. A round never exceeds `limit`.
+- **Loop until the count is `0`**, not until it is below `limit`. Under concurrency a round can touch fewer than `limit` rows while matches remain: another transaction may delete or change the rows it picked between the pick and the write. A round never exceeds `limit`.
+- **`0` means nothing left matched.** When a round touches no rows although a row still matches the filter (it lost every picked row to a concurrent writer), it runs again, up to three more times; the probe and the retries run in the caller's transaction when there is one. Only if every attempt loses does it return `0` with matches left — so a loop until `0` does not stop early because of a race. MySQL's native statement takes the next matching rows itself and needs no retry.
 - **Requires a primary key** — a table without one throws `INVALID_QUERY`.
 - **Everything else is unchanged** — filter guards, payload validation, version bumps and exemption, `@db.onUpdate.*` stamps; `$cas` stays rejected on `updateMany`.
 - **Not exposed over HTTP** — moost-db has no bulk delete or filter-update endpoint.

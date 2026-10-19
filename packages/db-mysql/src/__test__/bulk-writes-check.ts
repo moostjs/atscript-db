@@ -243,3 +243,72 @@ export async function checkBoundedComposite(boards: any): Promise<void> {
   expect(del.deletedCount).toBe(2);
   expect(await keys({})).toEqual(["o1/a", "o1/b", "o2/a", "o2/b"]);
 }
+
+/**
+ * A bounded write that loses the rows it picked to a concurrent writer runs
+ * again while a row still matches (since 0.1.162), at most 3 more times — so
+ * `0` means nothing matched and a "loop until 0" cannot stop early. The race
+ * is injected into the adapter's write: on the read-keys-first path a
+ * "concurrent" delete takes the picked rows right before the write; on a
+ * native path the write reports the outcome of a lost race (nothing written).
+ * `atomic` (MySQL): the native write never loses rows, so it is not retried.
+ */
+export async function checkBoundedRace(tasks: any, atomic = false): Promise<void> {
+  const adapter = tasks.getAdapter();
+  const own = { deleteMany: adapter.deleteMany, updateMany: adapter.updateMany };
+  let steals = 0;
+  let attempts = 0;
+  const losing =
+    (method: "deleteMany" | "updateMany") =>
+    async (...args: any[]): Promise<unknown> => {
+      const native = (method === "deleteMany" ? args[1] : args[3])?.limit !== undefined;
+      const pinned = !native && "$and" in (args[0] ?? {});
+      if (native || pinned) {
+        attempts++;
+        if (steals > 0) {
+          steals--;
+          if (native) {
+            return method === "deleteMany"
+              ? { deletedCount: 0 }
+              : { matchedCount: 0, modifiedCount: 0 };
+          }
+          await own.deleteMany.call(adapter, args[0]); // the concurrent deleter
+        }
+      }
+      return (own[method] as any).apply(adapter, args);
+    };
+  adapter.deleteMany = losing("deleteMany");
+  adapter.updateMany = losing("updateMany");
+  try {
+    await tasks.insertMany(Array.from({ length: 20 }, (_, i) => task(i + 1)));
+
+    // One lost race: the retry writes the next matches
+    steals = 1;
+    attempts = 0;
+    const del = await tasks.deleteMany({ status: "old" }, { limit: 2 });
+    expect(del.deletedCount).toBe(atomic ? 0 : 2);
+    expect(attempts).toBe(atomic ? 1 : 2);
+
+    steals = 1;
+    attempts = 0;
+    const upd = await tasks.updateMany({ status: "old" }, { status: "new" }, { limit: 2 });
+    expect(upd.matchedCount).toBe(atomic ? 0 : 2);
+    expect(attempts).toBe(atomic ? 1 : 2);
+
+    // Always losing: 1 + 3 attempts, then the honest 0 (matches remain)
+    steals = 100;
+    attempts = 0;
+    expect(await tasks.deleteMany({ status: "old" }, { limit: 1 })).toEqual({ deletedCount: 0 });
+    expect(attempts).toBe(atomic ? 1 : 4);
+    expect((await ids(tasks, { status: "old" })).length).toBeGreaterThan(0);
+
+    // Nothing matches: no retry (read-keys-first writes nothing at all)
+    steals = 0;
+    attempts = 0;
+    expect(await tasks.deleteMany({ status: "none" }, { limit: 2 })).toEqual({ deletedCount: 0 });
+    expect(attempts).toBeLessThanOrEqual(1);
+  } finally {
+    delete adapter.deleteMany;
+    delete adapter.updateMany;
+  }
+}
