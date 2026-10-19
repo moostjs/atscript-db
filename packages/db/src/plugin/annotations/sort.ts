@@ -3,6 +3,7 @@ import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isArray, isInterface, isPrimitive, isRef, isStructure } from "@atscript/core";
 
 import { getDbTableOwner, isNullableUnion, primitiveBaseType } from "../../shared/annotation-utils";
+import { viewFieldSeals } from "../../shared/view-validation";
 
 /**
  * `@db.sort.nulls` (since 0.1.153) — a field's default NULL placement when a
@@ -51,6 +52,13 @@ export const dbSortAnnotations: TAnnotationsTree = {
         }
         if (field.countAnnotations("db.encrypted") > 0) {
           fail("@db.sort.nulls on a @db.encrypted field — encrypted fields are not sortable");
+          return errors;
+        }
+        // A view field takes its source's seals (also through a view over a view)
+        if (viewFieldSeals(field, doc).encrypted) {
+          fail(
+            "@db.sort.nulls on a view field over a @db.encrypted source field — encrypted fields are not sortable",
+          );
           return errors;
         }
         const def = field.getDefinition();

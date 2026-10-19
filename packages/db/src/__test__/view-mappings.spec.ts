@@ -10,6 +10,7 @@ let fixtures: Record<string, any>;
 let vs: Record<string, any>;
 let docFx: Record<string, any>;
 let vg: Record<string, any>;
+let jr: Record<string, any>;
 
 beforeAll(async () => {
   await prepareFixtures();
@@ -17,6 +18,7 @@ beforeAll(async () => {
   vs = await import("./fixtures/view-source.as");
   docFx = await import("./fixtures/doc-renames.as");
   vg = await import("./fixtures/view-agg.as");
+  jr = await import("./fixtures/view-json-root.as");
 });
 
 /** A document-store adapter (nested objects kept inline, like MongoDB). */
@@ -125,6 +127,18 @@ describe("getViewColumnMappings — physical source names", () => {
     expect(m.get("settings")).toMatchObject({ viewColumn: "settings", sourceColumn: "settings" });
     expect(m.get("settings")!.json).toBeUndefined();
     expect(m.get("tags")).toMatchObject({ sourceColumn: "tags" });
+  });
+
+  it("reads a primitive @db.json source field at its typed JSON root (since 0.1.162)", () => {
+    const m = byView(jr.VjrItemView);
+    expect(m.get("score")).toMatchObject({
+      sourceColumn: "score",
+      json: { path: [], type: "number" },
+    });
+    expect(m.get("label")!.json).toEqual({ path: [], type: "string" });
+    expect(m.get("active")!.json).toEqual({ path: [], type: "boolean" });
+    // A view field with its own @db.json keeps the JSON column
+    expect(byView(jr.VjrRawView).get("score")!.json).toBeUndefined();
   });
 
   it("expands an object field over a flattened source into one mapping per leaf", () => {

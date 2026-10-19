@@ -10,7 +10,12 @@ import {
   validateFieldBaseType,
 } from "../../shared/annotation-utils";
 import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
-import { jsonChainInfo } from "../../shared/view-validation";
+import {
+  encryptedSearchProblem,
+  encryptedTypeSearchProblem,
+  jsonChainInfo,
+  viewSourceSealProblem,
+} from "../../shared/view-validation";
 
 /** Nav-field annotations: a navigation field has no column on this table. */
 const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
@@ -420,6 +425,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
+        const sealed =
+          viewSourceSealProblem(token, doc, "@db.column.searchable") ??
+          encryptedSearchProblem(token, doc, "@db.column.searchable");
+        if (sealed) return [sealed];
         const verdict = searchFieldVerdict(token.parentNode!, doc);
         if (!("problem" in verdict)) return [];
         return [
@@ -643,7 +652,9 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     description:
       "Forces a field to be stored as a single JSON column instead of being flattened " +
       "into separate columns. Use on nested object fields that should remain as JSON " +
-      "in the database." +
+      "in the database. On a primitive field (string / number / boolean) it stores the " +
+      "value as JSON too: SQL adapters filter the column only with `$exists` and never sort " +
+      "it — drop `@db.json` to get a typed, sortable scalar column." +
       "\n\n**Example:**\n" +
       "```atscript\n" +
       "@db.json\n" +
@@ -662,7 +673,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         if (unwound && isPrimitive(unwound.def)) {
           errors.push({
             message:
-              "@db.json on a primitive field has no effect — primitive fields are already stored as scalar columns",
+              "@db.json on a primitive field stores it as one JSON column — filterable only with $exists and never sortable; drop @db.json for a typed scalar column",
             severity: 2,
             range: token.range,
           });
@@ -712,15 +723,18 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,
-    validate(token, _args, _doc) {
+    validate(token, _args, doc) {
       const errors = [] as TMessages;
       const field = token.parentNode!;
+      const typeProblem = encryptedTypeSearchProblem(token, doc);
+      if (typeProblem) errors.push(typeProblem);
       const incompatible: Array<[string, string]> = [
         ["meta.id", "the primary key must be addressable"],
         ["db.rel.FK", "joins are impossible over ciphertext"],
         ["db.index.plain", "indexes over ciphertext are meaningless"],
         ["db.index.unique", "indexes over ciphertext are meaningless"],
         ["db.index.fulltext", "indexes over ciphertext are meaningless"],
+        ["db.column.searchable", "search over ciphertext is impossible"],
         ["db.index.geo", "geo indexes over ciphertext are meaningless"],
         ["db.search.vector", "vector search over ciphertext is impossible"],
         ["db.search.filter", "search filters need cleartext equality"],

@@ -1,5 +1,59 @@
-import type { TAnnotationsTree, TMessages } from "@atscript/core";
+import type {
+  AtscriptDoc,
+  SemanticNode,
+  TAnnotationSpecConfig,
+  TAnnotationsTree,
+  TMessages,
+} from "@atscript/core";
 import { AnnotationSpec, isInterface, isStructure, isRef, isPrimitive } from "@atscript/core";
+import { encryptedSearchProblem } from "@atscript/db/shared";
+
+/**
+ * Atlas Search over ciphertext is impossible: refuses a search field inside an
+ * `@db.encrypted` object or on a view field over an encrypted source (since
+ * 0.1.162; the field's own `@db.encrypted`, and a ref-typed encrypted field
+ * whose type declares the annotation, are reported by that spec).
+ */
+function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
+  return (token, _args, doc) => {
+    const problem = encryptedSearchProblem(token, doc, annotation);
+    return problem ? [problem] : [];
+  };
+}
+
+/** Navigation fields hold another collection's documents, never this one's. */
+const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"];
+
+/**
+ * Path of the first `@db.encrypted` field stored in a structure (nested
+ * objects and type refs included; navigation relations skipped).
+ */
+function findEncryptedField(
+  struct: SemanticNode | undefined,
+  doc: AtscriptDoc,
+  prefix = "",
+  seen = new Set<SemanticNode>(),
+): string | undefined {
+  if (!struct || seen.has(struct)) return undefined;
+  seen.add(struct);
+  const props = isInterface(struct) ? struct.props : isStructure(struct) ? struct.props : undefined;
+  if (!props) {
+    const def = struct.getDefinition();
+    return def && def !== struct ? findEncryptedField(def, doc, prefix, seen) : undefined;
+  }
+  for (const [name, prop] of props) {
+    if (NAV_ANNOTATIONS.some((key) => prop.countAnnotations(key) > 0)) continue;
+    const path = prefix ? `${prefix}.${name}` : name;
+    if (prop.countAnnotations("db.encrypted") > 0) return path;
+    let def = prop.getDefinition();
+    if (def && isRef(def)) def = doc.unwindType(def.id!, def.chain)?.def;
+    if (def && (isStructure(def) || isInterface(def))) {
+      const found = findEncryptedField(def, doc, path, seen);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
 
 const analyzers = [
   "lucene.standard",
@@ -174,6 +228,18 @@ export const annotations: TAnnotationsTree = {
       nodeType: ["interface"],
       passedWhenReferred: false,
       multiple: false,
+      validate(token, _args, doc) {
+        // A dynamic mapping indexes every string field — ciphertext included
+        const encrypted = findEncryptedField(token.parentNode, doc);
+        if (!encrypted) return [];
+        return [
+          {
+            message: `@db.mongo.search.dynamic indexes every field, including the @db.encrypted field "${encrypted}" — Atlas Search over ciphertext is impossible; use @db.mongo.search.static with @db.mongo.search.text fields`,
+            severity: 1,
+            range: token.range,
+          },
+        ];
+      },
       argument: [
         {
           optional: true,
@@ -251,6 +317,7 @@ export const annotations: TAnnotationsTree = {
         "firstName: string\n" +
         "```\n",
       nodeType: ["prop"],
+      validate: refuseCiphertext("@db.mongo.search.text"),
       passedWhenReferred: false,
       multiple: true,
       argument: [
@@ -286,6 +353,7 @@ export const annotations: TAnnotationsTree = {
         "username: string\n" +
         "```\n",
       nodeType: ["prop"],
+      validate: refuseCiphertext("@db.mongo.search.autocomplete"),
       passedWhenReferred: false,
       multiple: true,
       argument: [

@@ -35,9 +35,12 @@ export const dbUnitAnnotations: TAnnotationsTree = {
         const errors: TMessages = [];
         errors.push(...validateFieldBaseType(token, doc, "@db.unit", UNIT_HOST_TYPES));
         errors.push(
-          ...validateExclusiveWith(token, "@db.unit", [
-            { key: "db.unit.ref", displayName: "@db.unit.ref" },
-          ]),
+          ...validateExclusiveWith(
+            token,
+            "@db.unit",
+            [{ key: "db.unit.ref", displayName: "@db.unit.ref" }],
+            doc,
+          ),
         );
         return errors;
       },
@@ -71,10 +74,15 @@ export const dbUnitAnnotations: TAnnotationsTree = {
         const errors: TMessages = [];
         errors.push(...validateFieldBaseType(token, doc, "@db.unit.ref", UNIT_HOST_TYPES));
         errors.push(
-          ...validateExclusiveWith(token, "@db.unit.ref", [
-            { key: "db.unit", displayName: "@db.unit" },
-            { key: "db.amount.currency.ref", displayName: "@db.amount.currency.ref" },
-          ]),
+          ...validateExclusiveWith(
+            token,
+            "@db.unit.ref",
+            [
+              { key: "db.unit", displayName: "@db.unit" },
+              { key: "db.amount.currency.ref", displayName: "@db.amount.currency.ref" },
+            ],
+            doc,
+          ),
         );
         errors.push(...validateSiblingStringField(token, args, doc, "@db.unit.ref"));
         return errors;

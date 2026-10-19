@@ -392,8 +392,19 @@ Overwriting a field of the table (`row.status = …`) changes only what the resp
 - **The database still works on the stored value.** It filters, sorts, groups and counts on what is stored, so the column shows one value and sorts or filters by another.
 - **The inputs may be missing.** `requires` paths are read only for a requested decoration key. A `$select` that names no decoration (`$select=title,status`) reads none of them, so the hook runs without the inputs of its "correction".
 
-For a derived value, use a view field with [`@db.compute`](/views/computed-columns) (arithmetic the database evaluates, so it sorts and filters like any column), or a [declared decoration](#declared-decorations) under its own name. For a wrong value, fix the stored data.
 :::
+
+#### Correcting stored columns {#correcting-stored-columns}
+
+A [declared decoration](#declared-decorations) can never be named like a column, and a hook that overwrites a column is the overlay the warning above describes. Pick the tool by what the corrected value must do:
+
+| The value…                | Use                                                                                                                                                                                             |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| is only shown             | A [declared decoration](#declared-decorations) under its **own** key (`effectiveStatus`, not `status`). A client selects it, and its `requires` are read for it.                                |
+| must sort, filter or page | A view field: a [`@db.compute`](/views/computed-columns) column (the database evaluates it) or a [first-row join](/views/#first-row-joins) field (taken from one related row). The two combine. |
+| is stored wrong           | Normalize it at write time — [`onWrite`](#onwrite) / [`guardWrite`](#guardwrite), or a `@db.default*` / `@db.onUpdate.now` annotation — and migrate the existing rows.                          |
+
+`@db.compute` is numeric only: arithmetic and `coalesce` over number operands. It has no string or conditional form, so a corrected string or status is a first-row join field, a decoration under its own key, or a write-time fix.
 
 ### resolveRowIds {#resolverowids}
 

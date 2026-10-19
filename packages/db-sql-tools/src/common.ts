@@ -19,6 +19,8 @@ export function sqlStringLiteral(value: string): string {
  * @throws as {@link quotedJsonPathSegments}.
  */
 export function jsonDollarPath(path: readonly string[]): string {
+  // An empty path addresses the JSON root (a primitive JSON column's value)
+  if (path.length === 0) return sqlStringLiteral("$");
   return sqlStringLiteral(`$.${quotedJsonPathSegments(path).join(".")}`);
 }
 

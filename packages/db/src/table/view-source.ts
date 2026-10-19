@@ -41,6 +41,13 @@ export interface TViewSource {
   /** Set for a relational object stored as one column per leaf. */
   flattened?: true;
   /**
+   * Set when the path is itself a JSON-stored column (relational) — a
+   * `@db.json` field, an array or a structured mixed union — so
+   * {@link column} holds its JSON text, not the typed value.
+   * @since 0.1.162
+   */
+  jsonColumn?: true;
+  /**
    * `true` when the value may be absent: the path or an ancestor segment is
    * optional, or it reads inside a JSON-stored value.
    */
@@ -332,7 +339,7 @@ export function resolveViewSource(
       jsonRoot.includes("."),
     );
     return jsonRoot === logicalPath
-      ? { column, designType, optional }
+      ? { column, designType, optional, jsonColumn: true }
       : {
           column,
           jsonPath: logicalPath.slice(jsonRoot.length + 1).split("."),

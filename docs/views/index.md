@@ -300,6 +300,8 @@ Since 0.1.143 a view column inherits the read seals of the source field it reads
 
 The seals travel through [views over views](#views-over-views). No annotation is needed on the view field; `@db.writeOnly` stays an HTTP-layer contract (server code reading the view still sees the value).
 
+Since 0.1.162 the compiler applies the same seals: `@db.column.searchable` / `@db.index.fulltext` on a view field over a write-only source, and `@db.sort.nulls` on one over an encrypted source, are compile errors.
+
 ## Reading JSON Leaves
 
 Since 0.1.136 a view field can reference a primitive leaf **inside** a `@db.json` column. The view extracts it into a typed column you can filter, sort and group like any other:
@@ -337,6 +339,8 @@ The leaf must be a `string`, `number` or `boolean` (checked at compile time). Th
 | another JSON type (`7`, `"14"`, `1`)         | `null`           | `null`              | `null`           |
 
 Values are never coerced — the string `"14"` is not a number, `1` is not `true`. Numbers are read as doubles, so integers beyond 2^53 lose precision.
+
+The same applies to a view field over a whole `@db.json` field of a primitive type (`score?: User.score`, where `score` is `@db.json` and `number`). Since 0.1.162 the view reads its typed value, so it returns `9` rather than the JSON text `'9'`, and it sorts and filters by that value. Earlier versions returned and sorted the raw JSON text. A view field that declares `@db.json` itself keeps the JSON column as is.
 
 The leaf works everywhere a view column does: in the `SELECT` list, as a `GROUP BY` dimension of an [aggregation view](./aggregation-views), as the source of `@db.agg.*`, and in `@db.view.having`. Join conditions and `@db.view.filter` can't read inside a JSON column — on SQL adapters sync fails with `JSON paths are not supported in view conditions`.
 

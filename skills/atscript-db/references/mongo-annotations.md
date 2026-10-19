@@ -9,12 +9,12 @@ plugins: [ts(), dbPlugin(), MongoPlugin()];
 
 ## Collection-level
 
-| Annotation                 | Args                                                                       | Effect                                                                                                                                           |
-| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `@db.mongo.collection`     | —                                                                          | Mark as Mongo collection. Auto-injects `_id: mongo.objectId` when the interface has no `@meta.id`.                                               |
-| `@db.mongo.capped`         | `size: number, max?: number`                                               | Capped collection (bytes; optional doc limit).                                                                                                   |
-| `@db.mongo.search.dynamic` | `analyzer?: string, fuzzy?: number`                                        | Dynamic Atlas Search index (indexes all string fields).                                                                                          |
-| `@db.mongo.search.static`  | `analyzer?: string, fuzzy?: number, indexName?: string, strategy?: string` | Named static Atlas Search index. Combine with `@db.mongo.search.text` / `.autocomplete` on fields. `strategy` locks the query shape (see below). |
+| Annotation                 | Args                                                                       | Effect                                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@db.mongo.collection`     | —                                                                          | Mark as Mongo collection. Auto-injects `_id: mongo.objectId` when the interface has no `@meta.id`.                                                     |
+| `@db.mongo.capped`         | `size: number, max?: number`                                               | Capped collection (bytes; optional doc limit).                                                                                                         |
+| `@db.mongo.search.dynamic` | `analyzer?: string, fuzzy?: number`                                        | Dynamic Atlas Search index (indexes all string fields). Refused (compile + metadata build, 0.1.162) when the collection has any `@db.encrypted` field. |
+| `@db.mongo.search.static`  | `analyzer?: string, fuzzy?: number, indexName?: string, strategy?: string` | Named static Atlas Search index. Combine with `@db.mongo.search.text` / `.autocomplete` on fields. `strategy` locks the query shape (see below).       |
 
 ## Field-level
 

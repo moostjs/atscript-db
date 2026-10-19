@@ -1,5 +1,15 @@
 import { AnnotationSpec } from "@atscript/core";
-import type { TAnnotationsTree } from "@atscript/core";
+import type { TAnnotationsTree, TAnnotationSpecConfig } from "@atscript/core";
+
+import { encryptedSearchProblem } from "../../shared/view-validation";
+
+/** Refuses the feature on a field that reads ciphertext (since 0.1.162). */
+function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
+  return (token, _args, doc) => {
+    const problem = encryptedSearchProblem(token, doc, annotation);
+    return problem ? [problem] : [];
+  };
+}
 
 export const dbSearchAnnotations: TAnnotationsTree = {
   search: {
@@ -18,6 +28,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "embedding: db.vector\n" +
           "```\n",
         nodeType: ["prop"],
+        validate: refuseCiphertext("@db.search.vector"),
         passedWhenReferred: false,
         multiple: false,
         argument: [
@@ -99,6 +110,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
         "category: string\n" +
         "```\n",
       nodeType: ["prop"],
+      validate: refuseCiphertext("@db.search.filter"),
       passedWhenReferred: false,
       multiple: true,
       argument: {
