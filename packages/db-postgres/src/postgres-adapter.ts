@@ -940,7 +940,9 @@ export class PostgresAdapter extends BaseDbAdapter {
       if (clauses.length === 0) continue;
       const sql = `SELECT ${selectCols} FROM ${quoteTableName(this.resolveTableName())} WHERE ${clauses.join(" OR ")} ORDER BY ${order} FOR UPDATE`;
       this._log(sql, params);
-      const found = await this._wrapConstraintError(() => this._exec().all(sql, params));
+      const found = await this._exec()
+        .all(sql, params)
+        .catch((error: unknown) => this._mapConstraintError(error));
       for (const doc of found) {
         keySets.forEach((fields, k) => {
           const tuple = uniqueKeyTuple(doc, fields);
@@ -987,14 +989,18 @@ export class PostgresAdapter extends BaseDbAdapter {
     const { sql, params } = buildSelect(this.resolveTableName(), where, controls, query.lock);
     this._log(sql, params);
     // Contention (a locking read's NOWAIT, a deadlock, a serialization failure) → retryable DbError
-    return this._wrapConstraintError(() => this._exec().get(sql, params));
+    return this._exec()
+      .get(sql, params)
+      .catch((error: unknown) => this._mapConstraintError(error));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
     const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls, query.lock);
     this._log(sql, params);
-    return this._wrapConstraintError(() => this._exec().all(sql, params));
+    return this._exec()
+      .all(sql, params)
+      .catch((error: unknown) => this._mapConstraintError(error));
   }
 
   /**

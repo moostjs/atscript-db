@@ -1,4 +1,4 @@
-import { CasExhaustedError, DbError } from "./db-error";
+import { CasExhaustedError, DbError, invalidQuery } from "./db-error";
 import { isEmptyObject } from "./shared/object";
 import type { AtscriptDbTable } from "./table/db-table";
 import type { FilterExpr, TDbUpdateResult } from "./types";
@@ -51,14 +51,11 @@ export async function withOptimisticRetry<TRow extends Record<string, unknown>>(
 ): Promise<TDbUpdateResult> {
   const versionColumn = table.versionColumn;
   if (versionColumn === undefined) {
-    throw new DbError("INVALID_QUERY", [
-      {
-        path: "$cas",
-        message:
-          `withOptimisticRetry: table "${table.tableName}" has no ` +
-          `@db.column.version column — CAS cannot be applied`,
-      },
-    ]);
+    throw invalidQuery(
+      "$cas",
+      `withOptimisticRetry: table "${table.tableName}" has no ` +
+        `@db.column.version column — CAS cannot be applied`,
+    );
   }
 
   const maxAttempts = opts?.maxAttempts ?? 5;
