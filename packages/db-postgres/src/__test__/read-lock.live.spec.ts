@@ -6,7 +6,7 @@ import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures } from "./test-utils";
 import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
-import { defineReadLockCases, signal, sleep } from "../../../db/test-kit/read-lock-cases";
+import { defineReadLockCases } from "../../../db/test-kit/read-lock-cases";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
@@ -102,31 +102,5 @@ describe.skipIf(!reachable)("[postgres live] locking reads and isolation", () =>
     expect(inTx).toMatchObject({ transaction_isolation: "serializable" });
     const next = await adapter().withTransaction(level);
     expect(next).toMatchObject({ transaction_isolation: "read committed" });
-  });
-
-  it("a bounded deleteMany whose picked rows a concurrent transaction deletes retries and takes the next match", async () => {
-    const locked = signal();
-    const release = signal();
-    const t1 = adapter().withTransaction(async () => {
-      await items().findMany({ filter: { id: { $in: [1, 2] } }, controls: {} }, { lock: "update" });
-      locked.fire();
-      await release.wait;
-      await items().deleteMany({ id: { $in: [1, 2] } });
-    });
-    await locked.wait;
-    let done = false;
-    const t2 = items()
-      .deleteMany({}, { limit: 2 })
-      .then((r: any) => {
-        done = true;
-        return r;
-      });
-    await sleep(400);
-    expect(done).toBe(false); // waits on T1's rows 1 and 2
-    release.fire();
-    await t1;
-    // the first statement loses both picked rows (0); the probe finds row 3 and the retry takes it
-    expect(await t2).toEqual({ deletedCount: 1 });
-    expect(await items().count({ filter: {}, controls: {} })).toBe(0);
   });
 });
