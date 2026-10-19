@@ -393,6 +393,14 @@ These optional methods enable the schema sync system (`asc db sync`) to introspe
 
 Return the current table structure as an array of `TExistingColumn` (name, type, nullability, default, PK status). The sync system diffs these against the current Atscript field descriptors to determine what has changed. Query `information_schema.columns` or your database's equivalent to build the result. Flag a generated column with `generated: true` (since 0.1.141) — see [Derived columns](#derived-columns).
 
+Report each default as your database stores it. Schema sync compares defaults by value (`1` = `true`, `1.0` = `1`, key order of JSON ignored). If your database cannot report some defaults exactly, implement the optional `reportedDefault(desired, field)` (since 0.1.162). It returns the form in which a model default comes back. A live default equal to that form counts as unchanged. For example, MySQL reports a 4-byte character of a literal default as `?`:
+
+```typescript
+reportedDefault(desired: string): string {
+  return desired.replace(/[\u{10000}-\u{10FFFF}]/gu, '?')
+}
+```
+
 #### `getExistingColumnsForTable(tableName)`
 
 Same as `getExistingColumns()` but for an arbitrary table name (not the adapter's own table). Used by schema sync's `plan()` to inspect a table under its old name before a rename operation.
@@ -551,7 +559,7 @@ A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141, `fi
 
 #### `syncForeignKeys()`
 
-Synchronize foreign key constraints between Atscript definitions and the database. Uses `this._table.foreignKeys` for the full FK definitions; compare and create constraints on the physical columns (`physicalFields` / `physicalTargetFields`, since 0.1.147).
+Synchronize foreign key constraints between Atscript definitions and the database. Uses `this._table.foreignKeys` for the full FK definitions; compare and create constraints on the physical columns (`physicalFields` / `physicalTargetFields`, since 0.1.147). Without this method, schema sync recreates the table to change its foreign keys (when the adapter implements `recreateTable()`). See [Foreign key sync helper](#foreign-key-sync-helper).
 
 #### `dropForeignKeys(fkFieldKeys)`
 
@@ -594,11 +602,12 @@ This avoids per-value method dispatch — only fields that need formatting get a
 
 ## Index Sync Helper
 
-`BaseDbAdapter` provides `syncIndexesWithDiff()` — a template method that handles the diff algorithm for index synchronization. You provide the three database-specific primitives:
+`BaseDbAdapter` provides `syncIndexesWithDiff()` — a template method that handles the diff algorithm for index synchronization. Since 0.1.162, `BaseDbAdapter` implements `syncIndexes()` and `planIndexes()` over one protected method, `_syncIndexes(dryRun, opts?)`. Implement that method with the helper and pass `dryRun` through. You provide the three database-specific primitives:
 
 ```typescript
-async syncIndexes(): Promise<void> {
-  await this.syncIndexesWithDiff({
+protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
+  return this.syncIndexesWithDiff({
+    dryRun,
     listExisting: async () => {
       // Return existing indexes as [{ name: string, columns?: string[] }].
       // Include the ordered column list so the helper can detect definition
@@ -619,8 +628,8 @@ async syncIndexes(): Promise<void> {
     dropIndex: async (name) => {
       await this.pool.query(`DROP INDEX "${name}"`)
     },
-    // Optional: skip index types your DB doesn't support
-    shouldSkipType: (type) => type === 'fulltext',
+    // Optional: index types this helper should not build (null = skip silently)
+    skipIndex: (index) => (index.type === 'fulltext' ? null : undefined),
   })
 }
 ```
@@ -635,26 +644,35 @@ The helper:
 
 You can override the prefix via the `prefix` option (defaults to `'atscript__'`).
 
-Since 0.1.162 the helper returns the changes it made as `TIndexChange[]` (`{ name, action: 'add' | 'drop' | 'rebuild' }`). If `syncIndexes()` returns them, schema sync reports the work on the run entry and marks it `alter`. A version that returns `void` reports nothing.
-
-To have the plan report index work too, implement the optional `planIndexes()` method. Call the same helper with `dryRun: true`, which computes the changes and issues no DDL:
-
-```typescript
-async syncIndexes() { return this.syncIndexesWithDiff(this.indexDiffOptions()) }
-async planIndexes() { return this.syncIndexesWithDiff({ ...this.indexDiffOptions(), dryRun: true }) }
-```
+Since 0.1.162 the helper returns the changes it made as `TIndexChange[]` (`{ name, action: 'add' | 'drop' | 'rebuild' }`). With `dryRun: true` it computes the changes and issues no DDL. `syncIndexes()` reports the work on the run entry and `planIndexes()` on the plan entry, both marked `alter`. An adapter that overrides `syncIndexes()` itself, as before 0.1.162, still works: it plans no index work, and a `syncIndexes()` that returns `void` reports none.
 
 Two more options keep a converged schema free of false index work:
 
-- `skipIndex(index)` returns a warning for an index this database cannot build, such as a geo index without its extension. The index is then neither created nor reported as missing.
+- `skipIndex(index)` names an index this helper does not build. Return a warning string for an index this database cannot build, such as a geo index without its extension; the warning is logged on a real sync. Return `null` to skip silently, for example an index type your adapter builds itself. Return `undefined` to build the index. A skipped index is neither created nor reported as missing.
 - `isUnmanaged(name)` excludes prefixed indexes your adapter maintains itself, which are never dropped as stale.
 
-Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list.
+Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list. `createChangeRecorder(dryRun, attempt?)` (from `@atscript/db`) records such changes: its `apply(change, label, op)` runs `op` unless `dryRun` is set, then records `change`.
 
-Relational adapters can do the same for foreign keys:
+### Foreign key sync helper
 
-- `syncForeignKeys()` returns `TForeignKeyChange[]` (`{ fields, targetTable, action: 'add' | 'drop' }`), with the constraints it added or dropped against the live table.
-- The optional `planForeignKeys()` method computes the same list without DDL.
+Relational adapters can report foreign-key work too. `syncForeignKeys()` returns `TForeignKeyChange[]` (`{ fields, targetTable?, action: 'add' | 'drop' }`) with the constraints it added or dropped against the live table. The optional `planForeignKeys()` computes the same list without DDL. `targetTable` may be left out on a dropped constraint.
+
+`syncForeignKeysWithDiff()` (since 0.1.162) does the diff. It drops live constraints the model does not declare and adds declared ones the table lacks, matched by their sorted local columns. A failing statement throws.
+
+```typescript
+async syncForeignKeys() { return this.fkSync(false) }
+async planForeignKeys() { return this.fkSync(true) }
+
+private fkSync(dryRun: boolean) {
+  return this.syncForeignKeysWithDiff({
+    dryRun,
+    // Map of constraint name → local column names
+    listExisting: () => this.readForeignKeyConstraints(),
+    dropConstraint: (name) => this.exec(`ALTER TABLE … DROP CONSTRAINT "${name}"`),
+    addConstraint: (fk) => this.exec(`ALTER TABLE … ADD ${foreignKeySql(qi, fk)}`),
+  })
+}
+```
 
 ## Grouped Queries {#grouped-queries}
 
