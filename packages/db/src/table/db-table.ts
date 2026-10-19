@@ -351,7 +351,6 @@ function invalidQuery(path: string, message: string): DbError {
   return new DbError("INVALID_QUERY", [{ path, message }]);
 }
 
-/** The rows a bounded `updateMany` / `deleteMany` picks (see `_writeBound`). */
 /** Extra attempts of a bounded write that affected no rows while matches remain. */
 const BOUNDED_WRITE_RETRIES = 3;
 
@@ -361,6 +360,7 @@ const deleted = (result: TDbDeleteResult): number => result.deletedCount;
 /** `matchedCount` of an update result. */
 const matched = (result: TDbUpdateResult): number => result.matchedCount;
 
+/** The rows a bounded `updateMany` / `deleteMany` picks (see `_writeBound`). */
 interface TWriteBound {
   /** Translated (physical) filter. */
   filter: FilterExpr;
