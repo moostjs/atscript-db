@@ -91,9 +91,9 @@ export {
   ALL_VIEW_CAPABILITIES,
   ALL_ISOLATION_LEVELS,
 } from "./base-adapter";
-export type { TViewCapability, TIndexDiffOptions } from "./base-adapter";
+export type { TViewCapability, TIndexDiffOptions, TForeignKeyDiffOptions } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
-export { fkColumns } from "./schema/fk-diff";
+export { fkColumns, fkKey } from "./schema/fk-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
@@ -222,7 +222,7 @@ export type {
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";
-export { createFailureCollector } from "./shared/failure-collector";
+export { createFailureCollector, createChangeRecorder } from "./shared/failure-collector";
 
 // Re-export walker utilities from @uniqu/core for adapter implementations
 export { walkFilter, isPrimitive, computeInsights } from "@uniqu/core";

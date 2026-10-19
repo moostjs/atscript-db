@@ -11,7 +11,8 @@ import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from
 import { DbError } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
 import { compositeKey, slicePerGroup } from "./rel/relation-helpers";
-import { createFailureCollector } from "./shared/failure-collector";
+import { fkColumns, fkKey } from "./schema/fk-diff";
+import { createChangeRecorder, createFailureCollector } from "./shared/failure-collector";
 import { geoIndexNotFoundMessage } from "./shared/index-messages";
 import { getPath } from "./shared/object";
 
@@ -167,7 +168,6 @@ export interface TIndexDiffOptions {
   createIndex(index: TDbIndex): Promise<void>;
   dropIndex(name: string): Promise<void>;
   prefix?: string;
-  shouldSkipType?(type: TDbIndex["type"]): boolean;
   /**
    * Renders one desired key part for the drift comparison, so adapters whose
    * `listExisting` reports more than a bare column name (e.g. MySQL's
@@ -177,17 +177,13 @@ export interface TIndexDiffOptions {
    */
   renderDesiredColumn?(index: TDbIndex, field: TDbIndex["fields"][number]): string;
   /**
-   * Index types declared on the model but not supported by this adapter —
-   * warns and skips (models stay portable; sync never errors on these).
-   */
-  warnUnsupportedTypes?: { adapter: string; types: ReadonlyArray<TDbIndex["type"]> };
-  /**
-   * An index the adapter cannot build in this database (e.g. a geo index
-   * without PostGIS): the warning to log, or `undefined` to build it. A
-   * skipped index is not desired — never reported as work to do.
+   * An index this diff does not build: a string — the warning to log (e.g. a
+   * geo index without PostGIS); `null` — skipped silently (e.g. an index type
+   * the adapter maintains itself); `undefined` — built. A skipped index is not
+   * desired — never reported as work to do, and a stale one is dropped.
    * @since 0.1.162
    */
-  skipIndex?(index: TDbIndex): string | undefined;
+  skipIndex?(index: TDbIndex): string | null | undefined;
   /**
    * Prefixed indexes the adapter manages itself, outside the model's
    * `indexes` (e.g. PostgreSQL's pgvector HNSW indexes) — never dropped as
@@ -199,6 +195,20 @@ export interface TIndexDiffOptions {
    * Compute the changes only — no DDL (`planIndexes`).
    * @since 0.1.162
    */
+  dryRun?: boolean;
+}
+
+/**
+ * What an adapter hands `BaseDbAdapter.syncForeignKeysWithDiff`: its
+ * foreign-key constraint primitives.
+ * @since 0.1.162
+ */
+export interface TForeignKeyDiffOptions {
+  /** The live table's foreign-key constraints: constraint name → local column names. */
+  listExisting(): Promise<ReadonlyMap<string, string[]>>;
+  dropConstraint(name: string): Promise<void>;
+  addConstraint(fk: TDbForeignKey): Promise<void>;
+  /** Compute the changes only — no DDL (`planForeignKeys`). */
   dryRun?: boolean;
 }
 
@@ -663,6 +673,17 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * How this engine's introspection (`getExistingColumns`) reports the
+   * model default `desired` (`serializeDefaultValue` form) of `field` when
+   * it cannot report it exactly — e.g. MySQL reports a 4-byte character of a
+   * literal default as `?` while the column stores it intact. Schema sync
+   * treats a live default equal to this as unchanged. Optional — omit when
+   * introspection reports defaults faithfully.
+   * @since 0.1.162
+   */
+  reportedDefault?(desired: string, field: TDbFieldMeta): string;
+
+  /**
    * Calendar-bucket units (`{ $bucket, $field }` in an aggregate `$select`)
    * this adapter can group by, over IANA time zones. Empty (the default) =
    * calendar buckets unsupported: the core rejects them with
@@ -1015,12 +1036,13 @@ export abstract class BaseDbAdapter {
    *
    * @example
    * ```typescript
-   * async syncIndexes() {
-   *   await this.syncIndexesWithDiff({
+   * protected override _syncIndexes(dryRun: boolean) {
+   *   return this.syncIndexesWithDiff({
+   *     dryRun,
    *     listExisting: async () => this.driver.all('PRAGMA index_list(...)'),
    *     createIndex: async (index) => this.driver.exec('CREATE INDEX ...'),
    *     dropIndex: async (name) => this.driver.exec('DROP INDEX ...'),
-   *     shouldSkipType: (type) => type === 'fulltext',
+   *     skipIndex: (index) => (index.type === 'fulltext' ? null : undefined),
    *   })
    * }
    * ```
@@ -1028,7 +1050,6 @@ export abstract class BaseDbAdapter {
   protected async syncIndexesWithDiff(opts: TIndexDiffOptions): Promise<TIndexChange[]> {
     const prefix = opts.prefix ?? "atscript__";
     const dryRun = opts.dryRun === true;
-    const changes: TIndexChange[] = [];
 
     // List existing indexes, filter to managed ones
     const existing = await opts.listExisting();
@@ -1046,42 +1067,21 @@ export abstract class BaseDbAdapter {
     // INDEX over duplicate rows) must not abort the remaining index
     // maintenance for this table.
     const { attempt, throwIfAny } = createFailureCollector("index sync");
-    /** Records the change; issues `ddl` unless this is a dry run. */
-    const apply = async (change: TIndexChange, label: string, ddl: () => Promise<void>) => {
-      if (dryRun) {
-        changes.push(change);
-        return;
-      }
-      if (await attempt(label, ddl)) {
-        changes.push(change);
-      }
-    };
+    const { changes, apply } = createChangeRecorder<TIndexChange>(dryRun, attempt);
 
     // Create missing indexes, rebuild definition-drifted ones
     for (const index of this._table.indexes.values()) {
-      if (opts.warnUnsupportedTypes?.types.includes(index.type)) {
-        if (!dryRun) {
-          this.logger.warn(
-            `[${opts.warnUnsupportedTypes.adapter}] ${index.type} index "${index.name}" declared but not supported by this adapter — skipped`,
-          );
-        }
-        continue;
-      }
-      if (opts.shouldSkipType?.(index.type)) {
-        continue;
-      }
-
       // A fulltext index of integer members only has no physical artifact
       // (they are matched by exact number) — never desired, a stale one drops.
       if (index.type === "fulltext" && !index.fields.some((f) => !f.integer)) {
         continue;
       }
 
-      // An index the adapter cannot build here (e.g. a geo index without
-      // PostGIS) is never desired — reported once per real sync, not as work.
+      // An index the adapter does not build here (e.g. a geo index without
+      // PostGIS) is never desired — warned once per real sync, not as work.
       const skipReason = opts.skipIndex?.(index);
       if (skipReason !== undefined) {
-        if (!dryRun) {
+        if (skipReason !== null && !dryRun) {
           this.logger.warn(skipReason);
         }
         continue;
@@ -1128,6 +1128,44 @@ export abstract class BaseDbAdapter {
     }
 
     throwIfAny();
+    return changes;
+  }
+
+  /**
+   * Template method for foreign-key constraint synchronization: drops the
+   * live constraints the model does not declare and adds the declared ones
+   * the live table lacks — matched by their sorted local columns
+   * ({@link fkKey}). A failing statement throws. Returns the changes (made,
+   * or with `dryRun` only computed).
+   * @since 0.1.162
+   */
+  protected async syncForeignKeysWithDiff(
+    opts: TForeignKeyDiffOptions,
+  ): Promise<TForeignKeyChange[]> {
+    const { changes, apply } = createChangeRecorder<TForeignKeyChange>(opts.dryRun === true);
+    const existing = await opts.listExisting();
+    const desired = [...this._table.foreignKeys.values()];
+    const desiredKeys = new Set(desired.map((fk) => fkKey(fkColumns(fk).fields)));
+
+    for (const [name, columns] of existing) {
+      if (!desiredKeys.has(fkKey(columns))) {
+        await apply({ fields: columns, action: "drop" }, `drop foreign key "${name}"`, () =>
+          opts.dropConstraint(name),
+        );
+      }
+    }
+
+    const existingKeys = new Set([...existing.values()].map((columns) => fkKey(columns)));
+    for (const fk of desired) {
+      const { fields } = fkColumns(fk);
+      if (!existingKeys.has(fkKey(fields))) {
+        await apply(
+          { fields, targetTable: fk.targetTable, action: "add" },
+          `add foreign key (${fields.join(", ")})`,
+          () => opts.addConstraint(fk),
+        );
+      }
+    }
     return changes;
   }
 
@@ -1461,18 +1499,38 @@ export abstract class BaseDbAdapter {
    * entry; `void` reports none. Schema sync
    * passes `opts` when safe mode skipped work the indexes depend on (see
    * {@link TSyncIndexesOptions}); an adapter whose indexes do not depend on it
-   * ignores them.
+   * ignores them. Default: {@link _syncIndexes} without `dryRun`.
    */
-  abstract syncIndexes(opts?: TSyncIndexesOptions): Promise<void | TIndexChange[]>;
+  async syncIndexes(opts?: TSyncIndexesOptions): Promise<void | TIndexChange[]> {
+    return this._syncIndexes(false, opts);
+  }
 
   /**
    * The index changes {@link syncIndexes} would make now — no DDL. Schema
    * sync's plan reports them (`entry.indexChanges`) and marks the entry
-   * `alter`; a run reports what `syncIndexes` returns. Optional: an adapter
-   * without it plans no index work.
+   * `alter`; a run reports what `syncIndexes` returns.
    * @since 0.1.162
    */
-  planIndexes?(opts?: TSyncIndexesOptions): Promise<TIndexChange[]>;
+  async planIndexes(opts?: TSyncIndexesOptions): Promise<TIndexChange[]> {
+    return this._syncIndexes(true, opts);
+  }
+
+  /**
+   * The one index pass behind {@link syncIndexes} (`dryRun: false`) and
+   * {@link planIndexes} (`dryRun: true` — compute the changes, no DDL).
+   * Adapters implement this (usually over {@link syncIndexesWithDiff}). An
+   * adapter that overrides `syncIndexes` instead plans no index work.
+   * @since 0.1.162
+   */
+  protected async _syncIndexes(
+    dryRun: boolean,
+    _opts?: TSyncIndexesOptions,
+  ): Promise<TIndexChange[]> {
+    if (dryRun) {
+      return [];
+    }
+    throw new Error(`${this.constructor.name} implements neither syncIndexes nor _syncIndexes`);
+  }
 
   /**
    * Ensures the table exists in the database, creating it if needed.
@@ -1487,11 +1545,6 @@ export abstract class BaseDbAdapter {
   abstract ensureTable(opts?: TEnsureTableOptions): Promise<void>;
 
   /**
-   * Synchronizes foreign key constraints between Atscript definitions and the database.
-   * Uses `this._table.foreignKeys` for the full FK definitions.
-   * Optional — only relational adapters need to implement this.
-   */
-  /**
    * Post-sync hook called after all table operations (columns, indexes, FKs)
    * are complete. Adapters can use this for finalization work such as
    * resetting auto-increment sequences to match existing data.
@@ -1503,9 +1556,12 @@ export abstract class BaseDbAdapter {
    * Synchronizes foreign key constraints between Atscript definitions and
    * the live table — adds the missing ones, drops the ones the model does
    * not declare (matched by their local columns). Returns what it changed
-   * (since 0.1.162); schema sync reports it on the run entry.
+   * (since 0.1.162); schema sync reports it on the run entry. Optional —
+   * only relational adapters implement it (usually over
+   * {@link syncForeignKeysWithDiff}); without it, schema sync recreates the
+   * table to change its foreign keys (when the adapter can).
    */
-  async syncForeignKeys?(): Promise<void | TForeignKeyChange[]>;
+  syncForeignKeys?(): Promise<void | TForeignKeyChange[]>;
 
   /**
    * The changes {@link syncForeignKeys} would make now — no DDL. Schema

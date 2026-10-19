@@ -12,6 +12,16 @@ export interface TSyncColors {
   underline(s: string): string;
 }
 
+/** How each index change prints: its mark, color and past-tense word. */
+const INDEX_CHANGE_STYLE: Record<
+  TIndexChange["action"],
+  { mark: string; color: "green" | "red" | "yellow"; done: string }
+> = {
+  add: { mark: "+", color: "green", done: "added" },
+  drop: { mark: "-", color: "red", done: "dropped" },
+  rebuild: { mark: "~", color: "yellow", done: "rebuilt" },
+};
+
 const noColor: TSyncColors = {
   green: (s) => s,
   red: (s) => s,
@@ -456,16 +466,8 @@ export class SyncEntry {
   /** `+ index name — add` / `- … — drop` / `~ … — rebuild` (plan); `added` / `dropped` / `rebuilt` (result). */
   private printIndexChanges(c: TSyncColors, mode: "plan" | "result"): string[] {
     return this.indexChanges.map((ic) => {
-      const word =
-        mode === "plan"
-          ? ic.action
-          : { add: "added", drop: "dropped", rebuild: "rebuilt" }[ic.action];
-      if (ic.action === "add") {
-        return `      ${c.green(`+ index ${ic.name} — ${word}`)}`;
-      }
-      return ic.action === "drop"
-        ? `      ${c.red(`- index ${ic.name} — ${word}`)}`
-        : `      ${c.yellow(`~ index ${ic.name} — ${word}`)}`;
+      const { mark, color, done } = INDEX_CHANGE_STYLE[ic.action];
+      return `      ${c[color](`${mark} index ${ic.name} — ${mode === "plan" ? ic.action : done}`)}`;
     });
   }
 

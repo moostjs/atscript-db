@@ -22,7 +22,7 @@ import {
   type TSyncEntryStatus,
   type TSyncSkippedWork,
 } from "./sync-entry";
-import { computeColumnDiff } from "./column-diff";
+import { computeColumnDiff, type TColumnDiffOptions } from "./column-diff";
 import { fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
 import type { TForeignKeyDiff } from "./fk-diff";
 import type { TTableSnapshot } from "./schema-hash";
@@ -298,7 +298,7 @@ export async function executeSyncTable(
             readable.columnDescriptors,
             existing,
             adapter.typeMapper?.bind(adapter),
-            { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
+            columnDiffOptions(adapter, storedSnapshot),
           );
         // Values of the ≤ 0.1.154 union layout move first — before any
         // recreate, type change or drop could lose the old column.
@@ -361,7 +361,7 @@ export async function executeSyncTable(
             readable.columnDescriptors,
             snapshotToExistingColumns(storedSnapshot, readable),
             deps.resolveTypeMapper(adapter),
-            { snapshot: storedSnapshot, nativeDefaultFns: adapter.nativeDefaultFns() },
+            columnDiffOptions(adapter, storedSnapshot),
           );
         await applyColumnDiff(adapter, readable, diff, init, safe, deps.logger, ensureOpts);
       }
@@ -612,6 +612,18 @@ export function describeDerivedChanges(diff: TColumnDiff): TSyncDerivedChange[] 
   }));
 }
 
+/** The {@link computeColumnDiff} options for a table of `adapter`. */
+export function columnDiffOptions(
+  adapter: BaseDbAdapter,
+  snapshot: TTableSnapshot | null | undefined,
+): TColumnDiffOptions {
+  return {
+    snapshot,
+    nativeDefaultFns: adapter.nativeDefaultFns(),
+    reportedDefault: adapter.reportedDefault?.bind(adapter),
+  };
+}
+
 /** The plan-shaped summary of a diff's type changes (`entry.typeChanges`). */
 export function describeTypeChanges(
   diff: TColumnDiff,
@@ -669,12 +681,6 @@ function markSkipped(init: TSyncEntryInit, kind: TSyncSkippedWork): void {
 }
 
 /**
- * Whether nullable/default changes need DDL on this adapter: in-place modify,
- * or a recreate on a live-introspected one (SQLite). Snapshot-based adapters
- * (MongoDB) have no column constraint to change — they only update the
- * snapshot, even with a `recreateTable`.
- */
-/**
  * Whether the run (without safe mode) recreates this existing table — an FK
  * change on an adapter without `syncForeignKeys`, a `'drop'` / `'recreate'`
  * type change, nullable / default DDL through `recreateTable`, or a key
@@ -714,6 +720,12 @@ export function runRecreatesTable(facts: TTableFacts, safe = false): boolean {
   return !!diff.primaryKeyChanged && !adapter.rebuildPrimaryKey;
 }
 
+/**
+ * Whether nullable/default changes need DDL on this adapter: in-place modify,
+ * or a recreate on a live-introspected one (SQLite). Snapshot-based adapters
+ * (MongoDB) have no column constraint to change — they only update the
+ * snapshot, even with a `recreateTable`.
+ */
 function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
   return (
     (!!adapter.supportsColumnModify && !!adapter.syncColumns) ||
@@ -721,11 +733,6 @@ function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
   );
 }
 
-/**
- * The indexes `syncIndexes` keeps as they are because safe mode skipped
- * the change they depend on — a skipped key rebuild, the columns of a
- * skipped type-change recreate (see `TSyncIndexesOptions`).
- */
 /**
  * The `syncIndexes` options the run will pass for this table — what the plan
  * passes `planIndexes`, so both report the same index work.
@@ -746,6 +753,11 @@ export function plannedIndexOptions(
   });
 }
 
+/**
+ * The indexes `syncIndexes` keeps as they are because safe mode skipped
+ * the change they depend on — a skipped key rebuild, the columns of a
+ * skipped type-change recreate (see `TSyncIndexesOptions`).
+ */
 function keptIndexes(init: TSyncEntryInit): TSyncIndexesOptions | undefined {
   const skipped = init.skipped ?? [];
   const keepPrimaryKey = skipped.includes("pk-rebuild");
@@ -868,8 +880,6 @@ export function describeForeignKeyChanges(
   };
 }
 
-const fkFieldsKey = (fields: readonly string[]): string => fkKey([...fields]);
-
 /**
  * Folds the live FK changes `syncForeignKeys` / `planForeignKeys` report
  * into the entry: those the snapshot-based FK diff did not already name
@@ -885,16 +895,17 @@ export function mergeLiveForeignKeyChanges(
   }
   const known = new Set(
     [...(init.fkAdded ?? []), ...(init.fkRemoved ?? []), ...(init.fkChanged ?? [])].map((fk) =>
-      fkFieldsKey(fk.fields),
+      fkKey(fk.fields),
     ),
   );
   let merged = false;
   for (const change of changes) {
-    if (known.has(fkFieldsKey(change.fields))) {
+    const key = fkKey(change.fields);
+    if (known.has(key)) {
       continue;
     }
-    known.add(fkFieldsKey(change.fields));
-    const fk = { fields: change.fields, targetTable: change.targetTable };
+    known.add(key);
+    const fk = { fields: change.fields, targetTable: change.targetTable ?? "" };
     if (change.action === "add") {
       init.fkAdded = [...(init.fkAdded ?? []), fk];
     } else {
@@ -1002,15 +1013,18 @@ async function applyColumnDiff(
   let needsSyncColumns = false;
   if (diff.typeChanged.length > 0 && init.status !== "error") {
     const strategy = typeChangeStrategy(readable, diff);
+    const typeChanges = describeTypeChanges(diff);
+    if (strategy !== "none") {
+      init.typeChanges = typeChanges;
+    }
     if (strategy === "drop") {
       if (safe) {
         // Safe mode never drops: the change stays pending, reported like a
         // skipped key rebuild. `SchemaSync.execute()` withholds the table's
         // snapshot and the hash so the next run without `safe` recreates.
-        init.typeChanges = describeTypeChanges(diff);
         markSkipped(init, "recreate");
         init.status = "alter";
-        const cols = init.typeChanges
+        const cols = typeChanges
           .map((tc) => `${tc.column}: ${tc.fromType} → ${tc.toType}`)
           .join(", ");
         logger.warn?.(
@@ -1018,16 +1032,13 @@ async function applyColumnDiff(
         );
       } else {
         await dropAndRecreate(adapter, init, name, ensureOpts);
-        init.typeChanges = describeTypeChanges(diff);
       }
     } else if (strategy === "recreate") {
       await recreateKeepingRenames(adapter, diff, init);
-      init.typeChanges = describeTypeChanges(diff);
     } else if (strategy === "modify") {
       // Adapter can handle type changes in-place (e.g. MySQL MODIFY COLUMN)
       // Defer to the single syncColumns call below
       needsSyncColumns = true;
-      init.typeChanges = describeTypeChanges(diff);
       init.status = "alter";
     } else {
       // Defensive copy of the plan rule (`populatePlanFromDiff`): reachable

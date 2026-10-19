@@ -231,8 +231,8 @@ a text column compares as the model renders it. An index the database cannot
 build is not counted as missing, such as a geo index without PostGIS or a
 MySQL `SPATIAL` index over an optional field. PostgreSQL's pgvector `HNSW`
 indexes are created once rather than rebuilt on every sync. Sort direction is
-not compared. An adapter without index reporting (`planIndexes`, such as the
-memory adapter) plans none.
+not compared. An adapter without index reporting, such as the memory adapter, plans
+none.
 
 ### Dropping Indexed Columns
 

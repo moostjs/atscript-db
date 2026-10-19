@@ -79,3 +79,19 @@ export function deletePath(
     delete (current as Record<string, unknown>)[segments[segments.length - 1]!];
   }
 }
+
+/**
+ * `JSON.stringify` with object keys sorted at every level — one string per
+ * JSON value, whatever its key order (`{"b":1,"a":2}` = `{"a":2,"b":1}`).
+ * @since 0.1.162
+ */
+export function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(v).toSorted()) {
+      sorted[k] = (v as Record<string, unknown>)[k];
+    }
+    return sorted;
+  });
+}

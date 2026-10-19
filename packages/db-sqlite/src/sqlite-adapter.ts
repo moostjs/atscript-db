@@ -6,6 +6,7 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  createChangeRecorder,
   searchIndexNotFoundMessage,
   vectorIndexNotFoundMessage,
   searchTermInteger,
@@ -1235,16 +1236,11 @@ export class SqliteAdapter extends BaseDbAdapter {
     });
   }
 
-  async syncIndexes(): Promise<TIndexChange[]> {
+  override async syncIndexes(): Promise<TIndexChange[]> {
     return this._withExclusiveConnection(() => this._syncIndexes(false));
   }
 
-  /** The index changes {@link syncIndexes} would make — no DDL. */
-  async planIndexes(): Promise<TIndexChange[]> {
-    return this._syncIndexes(true);
-  }
-
-  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
+  protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this.resolveTableName();
 
     const changes = await this.syncIndexesWithDiff({
@@ -1277,13 +1273,13 @@ export class SqliteAdapter extends BaseDbAdapter {
       },
       // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
       // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
-      shouldSkipType: (type) => type === "fulltext" || type === "geo",
+      skipIndex: (index) => (index.type === "fulltext" || index.type === "geo" ? null : undefined),
     });
 
     // Sync FTS5 virtual tables for fulltext indexes
-    changes.push(...this._syncFtsIndexes(tableName, dryRun));
+    changes.push(...(await this._syncFtsIndexes(tableName, dryRun)));
 
-    changes.push(...this._syncVecIndexes(tableName, dryRun));
+    changes.push(...(await this._syncVecIndexes(tableName, dryRun)));
     return changes;
   }
 
@@ -1516,28 +1512,21 @@ export class SqliteAdapter extends BaseDbAdapter {
   /**
    * Creates/drops FTS5 virtual tables and sync triggers to match desired fulltext indexes.
    */
-  private _syncFtsIndexes(tableName: string, dryRun = false): TIndexChange[] {
-    const changes: TIndexChange[] = [];
+  private async _syncFtsIndexes(tableName: string, dryRun: boolean): Promise<TIndexChange[]> {
+    const { changes, apply } = createChangeRecorder<TIndexChange>(dryRun);
     // Integer-only indexes have no FTS5 table (their members are matched by number)
     const ftIndexes = this._getFulltextIndexes().filter(
       (idx) => splitFulltextFields(idx).text.length > 0,
     );
     const desiredFtsTables = new Set(ftIndexes.map((idx) => this._ftsTableName(idx.name)));
 
-    // List existing FTS virtual tables for this content table (exclude shadow tables like _data, _idx)
-    const existingFts = this.driver
-      .all<{ name: string; sql: string }>(
-        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
-        [`${tableName}__fts__%`],
-      )
-      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
-      .map((r) => r.name);
+    // Existing FTS virtual tables for this content table (not their _data, _idx shadow tables)
+    const existingFts = this._listShadowTables(tableName, "fts");
 
     // Drop stale FTS tables
     for (const name of existingFts) {
       if (!desiredFtsTables.has(name)) {
-        changes.push({ name, action: "drop" });
-        if (!dryRun) this._dropFtsTable(name);
+        await apply({ name, action: "drop" }, name, () => this._dropFtsTable(name));
       }
     }
 
@@ -1546,15 +1535,15 @@ export class SqliteAdapter extends BaseDbAdapter {
     for (const index of ftIndexes) {
       const ftsTable = this._ftsTableName(index.name);
       if (!existingSet.has(ftsTable)) {
-        changes.push({ name: ftsTable, action: "add" });
-        if (!dryRun) this._createFtsTable(tableName, ftsTable, index);
+        await apply({ name: ftsTable, action: "add" }, ftsTable, () =>
+          this._createFtsTable(tableName, ftsTable, index),
+        );
       } else if (!this._ftsColumnsMatch(ftsTable, index)) {
         // Column drift (e.g. a table built when integer members were indexed as text)
-        changes.push({ name: ftsTable, action: "rebuild" });
-        if (!dryRun) {
+        await apply({ name: ftsTable, action: "rebuild" }, ftsTable, () => {
           this._dropFtsTable(ftsTable);
           this._createFtsTable(tableName, ftsTable, index);
-        }
+        });
       }
     }
     return changes;
@@ -1930,8 +1919,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   /**
    * Creates/drops vec0 virtual shadow tables and sync triggers to match desired vector fields.
    */
-  private _syncVecIndexes(tableName: string, dryRun = false): TIndexChange[] {
-    const changes: TIndexChange[] = [];
+  private async _syncVecIndexes(tableName: string, dryRun: boolean): Promise<TIndexChange[]> {
+    const { changes, apply } = createChangeRecorder<TIndexChange>(dryRun);
     if (this._vectorFields.size === 0) {
       return changes;
     }
@@ -1950,26 +1939,20 @@ export class SqliteAdapter extends BaseDbAdapter {
       desiredVecTables.set(this._vecTableName(meta.indexName), { field: fieldPath, meta });
     }
 
-    const existingVec = this.driver
-      .all<{ name: string; sql: string }>(
-        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
-        [`${tableName}__vec__%`],
-      )
-      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
-      .map((r) => r.name);
+    const existingVec = this._listShadowTables(tableName, "vec");
 
     for (const name of existingVec) {
       if (!desiredVecTables.has(name)) {
-        changes.push({ name, action: "drop" });
-        if (!dryRun) this._dropVecTable(name);
+        await apply({ name, action: "drop" }, name, () => this._dropVecTable(name));
       }
     }
 
     const existingSet = new Set(existingVec);
     for (const [vecTable, { field, meta }] of desiredVecTables.entries()) {
       if (!existingSet.has(vecTable)) {
-        changes.push({ name: vecTable, action: "add" });
-        if (!dryRun) this._createVecTable(tableName, vecTable, field, meta);
+        await apply({ name: vecTable, action: "add" }, vecTable, () =>
+          this._createVecTable(tableName, vecTable, field, meta),
+        );
       }
     }
     return changes;

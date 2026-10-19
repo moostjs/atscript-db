@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { serializeDefaultValue, type TFieldSnapshot, type TTableSnapshot } from "./schema-hash";
 import { fkKey } from "./fk-diff";
+import { stableJson } from "../shared/object";
 
 /**
  * Why a derived column (desired, live, or both) must be dropped and re-added,
@@ -125,24 +126,10 @@ function canonicalBoolean(value: string): "1" | "0" | undefined {
 /** Parsed JSON re-serialized with object keys sorted; `undefined` when not JSON. */
 function canonicalJson(value: string): string | undefined {
   try {
-    return JSON.stringify(sortKeys(JSON.parse(value)));
+    return stableJson(JSON.parse(value));
   } catch {
     return undefined;
   }
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeys);
-  }
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value).toSorted()) {
-      out[key] = sortKeys((value as Record<string, unknown>)[key]);
-    }
-    return out;
-  }
-  return value;
 }
 
 const DECIMAL_RE = /^([+-]?)(\d*)(?:\.(\d*))?$/;
@@ -198,6 +185,21 @@ function roundDecimal(value: string, scale: number): string | undefined {
   return `${sign}${head}${scale > 0 ? `.${tail}` : ""}`;
 }
 
+/** Options of {@link computeColumnDiff}. */
+export interface TColumnDiffOptions {
+  /**
+   * The table's stored snapshot (since 0.1.141) — the baseline a derived
+   * column's expression is compared with (the engine normalizes the
+   * expression it stores, so the live column cannot be). Without one, only a
+   * kind or type drift is seen.
+   */
+  snapshot?: TTableSnapshot | null;
+  /** The adapter's `nativeDefaultFns()`: a column missing such a default drifts. */
+  nativeDefaultFns?: ReadonlySet<TDbDefaultFn>;
+  /** The adapter's `reportedDefault` hook (since 0.1.162): a live default equal to it is unchanged. */
+  reportedDefault?: (desired: string, field: TDbFieldMeta) => string;
+}
+
 /**
  * Computes the difference between desired schema fields and existing database columns.
  *
@@ -208,16 +210,13 @@ function roundDecimal(value: string, scale: number): string | undefined {
  *                     Receives the full field meta (design type, annotations, PK status, etc.)
  *                     so adapters can produce context-aware types (e.g., `VARCHAR(255)` from maxLength).
  *                     Required for type change detection.
- * @param opts.snapshot - The table's stored snapshot (since 0.1.141) — the baseline a
- *                        derived column's expression is compared with (the engine normalizes
- *                        the expression it stores, so the live column cannot be). Without
- *                        one, only a kind or type drift is seen.
+ * @param opts - See {@link TColumnDiffOptions}.
  */
 export function computeColumnDiff(
   desired: readonly TDbFieldMeta[],
   existing: TExistingColumn[],
   typeMapper?: (field: TDbFieldMeta) => string,
-  opts?: { snapshot?: TTableSnapshot | null; nativeDefaultFns?: ReadonlySet<TDbDefaultFn> },
+  opts?: TColumnDiffOptions,
 ): TColumnDiff {
   const existingByName = new Map(existing.map((c) => [c.name, c]));
   const snapshotByName = opts?.snapshot
@@ -265,10 +264,9 @@ export function computeColumnDiff(
         renamedOldNames.add(field.renamedFrom);
       } else if (!checkDerived(field, existingCol, field.physicalName)) {
         // Check type change (requires typeMapper)
-        if (typeMapper) {
-          if (isColumnTypeChanged(existingCol.type, typeMapper(field))) {
-            typeChanged.push({ field, existingType: existingCol.type });
-          }
+        const mappedType = typeMapper?.(field);
+        if (mappedType !== undefined && isColumnTypeChanged(existingCol.type, mappedType)) {
+          typeChanged.push({ field, existingType: existingCol.type });
         }
 
         // Check nullable change — skip primary keys (SQLite PRAGMA reports notnull=0
@@ -286,24 +284,26 @@ export function computeColumnDiff(
         // except a `now` / `uuid` default the engine applies itself
         // (`nativeDefaultFns`): the table layer leaves such a field out of an
         // INSERT, so a column without it would reject the row.
+        const liveDefault = existingCol.dflt_value;
         const desiredDefault = serializeDefaultValue(field.defaultValue);
         const fn = field.defaultValue?.kind === "fn" ? field.defaultValue.fn : undefined;
         const missingNative =
           fn !== undefined && fn !== "increment" && opts?.nativeDefaultFns?.has(fn) === true;
         if (
-          (existingCol.dflt_value !== undefined || missingNative) &&
+          (liveDefault !== undefined || missingNative) &&
+          liveDefault !== desiredDefault &&
           // Rounded to the scale the column has after this sync — the model's
           // type when it changes (a DECIMAL(10,2) → (10,3) keeps 2.345)
-          !sameDefaultValue(
-            field,
-            existingCol.dflt_value,
-            desiredDefault,
-            typeMapper ? typeMapper(field) : existingCol.type,
+          !sameDefaultValue(field, liveDefault, desiredDefault, mappedType ?? existingCol.type) &&
+          !(
+            liveDefault !== undefined &&
+            desiredDefault !== undefined &&
+            opts?.reportedDefault?.(desiredDefault, field) === liveDefault
           )
         ) {
           defaultChanged.push({
             field,
-            oldDefault: existingCol.dflt_value,
+            oldDefault: liveDefault,
             newDefault: desiredDefault,
           });
         }

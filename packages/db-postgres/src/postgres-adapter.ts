@@ -6,9 +6,10 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  createChangeRecorder,
   isColumnTypeChanged,
   vectorIndexNotFoundMessage,
-  fkColumns,
+  fkKey,
   searchTermInteger,
   describeFulltext,
   defaultFulltextIndex,
@@ -2105,22 +2106,18 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── Index sync ────────────────────────────────────────────────────────────
 
-  async syncIndexes(): Promise<TIndexChange[]> {
-    return this._syncIndexes(false);
-  }
-
-  /** The index changes {@link syncIndexes} would make — no DDL. */
-  async planIndexes(): Promise<TIndexChange[]> {
-    return this._syncIndexes(true);
-  }
-
-  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
+  protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this._table.tableName;
     const schema = this._schema;
     // Resolve PostGIS availability before index DDL (idempotent; usually
     // already resolved by ensureTable/schema sync).
     await this.prepareTypeMapper();
 
+    const dropIndex = async (name: string) => {
+      const sql = `DROP INDEX IF EXISTS ${schema ? `${qi(schema)}.` : ""}${qi(name)}`;
+      this._log(sql);
+      await this._exec().exec(sql);
+    };
     /** Every index name on the table (read by `listExisting`) — the vector pass checks it. */
     let liveNames = new Set<string>();
     const changes = await this.syncIndexesWithDiff({
@@ -2177,12 +2174,7 @@ export class PostgresAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
-      dropIndex: async (name: string) => {
-        const schemaPrefix = schema ? `${qi(schema)}.` : "";
-        const sql = `DROP INDEX IF EXISTS ${schemaPrefix}${qi(name)}`;
-        this._log(sql);
-        await this._exec().exec(sql);
-      },
+      dropIndex,
     });
 
     // Drop HNSW indexes of vector fields the model no longer has
@@ -2191,14 +2183,10 @@ export class PostgresAdapter extends BaseDbAdapter {
         ? [...this._vectorFields.values()].map((v) => `${PG_VECTOR_INDEX_PREFIX}${v.indexName}`)
         : [],
     );
+    const vector = createChangeRecorder<TIndexChange>(dryRun);
     for (const name of liveNames) {
       if (name.startsWith(PG_VECTOR_INDEX_PREFIX) && !desiredVector.has(name)) {
-        changes.push({ name, action: "drop" });
-        if (!dryRun) {
-          const sql = `DROP INDEX IF EXISTS ${schema ? `${qi(schema)}.` : ""}${qi(name)}`;
-          this._log(sql);
-          await this._exec().exec(sql);
-        }
+        await vector.apply({ name, action: "drop" }, name, () => dropIndex(name));
       }
     }
 
@@ -2209,17 +2197,15 @@ export class PostgresAdapter extends BaseDbAdapter {
         if (liveNames.has(indexName)) {
           continue;
         }
-        changes.push({ name: indexName, action: "add" });
-        if (dryRun) {
-          continue;
-        }
-        const opsClass = similarityToPgOps(vec.similarity);
-        const sql = `CREATE INDEX IF NOT EXISTS ${qi(indexName)} ON ${quoteTableName(this.resolveTableName())} USING hnsw (${qi(field)} ${opsClass})`;
-        this._log(sql);
-        await this._exec().exec(sql);
+        await vector.apply({ name: indexName, action: "add" }, indexName, async () => {
+          const opsClass = similarityToPgOps(vec.similarity);
+          const sql = `CREATE INDEX IF NOT EXISTS ${qi(indexName)} ON ${quoteTableName(this.resolveTableName())} USING hnsw (${qi(field)} ${opsClass})`;
+          this._log(sql);
+          await this._exec().exec(sql);
+        });
       }
     }
-    return changes;
+    return [...changes, ...vector.changes];
   }
 
   // ── FK sync ───────────────────────────────────────────────────────────────
@@ -2233,43 +2219,17 @@ export class PostgresAdapter extends BaseDbAdapter {
     return this._syncForeignKeys(true);
   }
 
-  private async _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
-    const changes: TForeignKeyChange[] = [];
-    const existingByName = await this._getExistingFkConstraints();
-
-    // Build desired FK set (keyed by sorted local column names)
-    const desiredFkKeys = new Set<string>();
-    for (const fk of this._table.foreignKeys.values()) {
-      desiredFkKeys.add([...fkColumns(fk).fields].toSorted().join(","));
-    }
-
-    // Drop stale FKs (managed ones that no longer match desired)
-    for (const [constraintName, columns] of existingByName) {
-      const key = [...columns].toSorted().join(",");
-      if (!desiredFkKeys.has(key)) {
-        changes.push({ fields: columns, targetTable: "", action: "drop" });
-        if (dryRun) continue;
-        const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP CONSTRAINT ${qi(constraintName)}`;
-        this._log(ddl);
-        await this._exec().exec(ddl);
-      }
-    }
-
-    // Add missing FKs
-    const existingKeys = new Set(
-      [...existingByName.values()].map((cols) => cols.toSorted().join(",")),
-    );
-    for (const fk of this._table.foreignKeys.values()) {
-      const key = [...fkColumns(fk).fields].toSorted().join(",");
-      if (!existingKeys.has(key)) {
-        changes.push({ fields: fkColumns(fk).fields, targetTable: fk.targetTable, action: "add" });
-        if (dryRun) continue;
+  private _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
+    return this.syncForeignKeysWithDiff({
+      dryRun,
+      listExisting: () => this._getExistingFkConstraints(),
+      dropConstraint: (name) => this._dropFkConstraint(name),
+      addConstraint: async (fk) => {
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
-      }
-    }
-    return changes;
+      },
+    });
   }
 
   async dropForeignKeys(fkFieldKeys: string[]): Promise<void> {
@@ -2277,16 +2237,17 @@ export class PostgresAdapter extends BaseDbAdapter {
       return;
     }
     const keySet = new Set(fkFieldKeys);
-    const existingByName = await this._getExistingFkConstraints();
-
-    for (const [constraintName, cols] of existingByName) {
-      const key = cols.toSorted().join(",");
-      if (keySet.has(key)) {
-        const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP CONSTRAINT ${qi(constraintName)}`;
-        this._log(ddl);
-        await this._exec().exec(ddl);
+    for (const [constraintName, cols] of await this._getExistingFkConstraints()) {
+      if (keySet.has(fkKey(cols))) {
+        await this._dropFkConstraint(constraintName);
       }
     }
+  }
+
+  private async _dropFkConstraint(name: string): Promise<void> {
+    const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP CONSTRAINT ${qi(name)}`;
+    this._log(ddl);
+    await this._exec().exec(ddl);
   }
 
   /** Queries information_schema for existing FK constraints. */

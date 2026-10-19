@@ -13,7 +13,7 @@ import {
   containsRelationFilter,
   forEachResolvedRelation,
   vectorIndexNotFoundMessage,
-  fkColumns,
+  fkKey,
   searchTermInteger,
   describeFulltext,
   defaultFulltextIndex,
@@ -1824,6 +1824,14 @@ export class MysqlAdapter extends BaseDbAdapter {
     await this._exec().exec(sql);
   }
 
+  /**
+   * INFORMATION_SCHEMA reports a 4-byte character (an emoji) of a literal
+   * default as `?` — the column stores it intact.
+   */
+  override reportedDefault(desired: string): string {
+    return desired.replace(/[\u{10000}-\u{10FFFF}]/gu, "?");
+  }
+
   async getExistingColumns(): Promise<TExistingColumn[]> {
     return this.getExistingColumnsForTable(this._table.tableName);
   }
@@ -1860,12 +1868,6 @@ export class MysqlAdapter extends BaseDbAdapter {
        ORDER BY c.ORDINAL_POSITION`,
       [tableName, this._schema],
     );
-    // An administrative adapter (no registered readable) has no model
-    const modelDefaults = new Map(
-      ((this._table as typeof this._table | undefined)?.fieldDescriptors ?? [])
-        .filter((f) => f.defaultValue?.kind === "value")
-        .map((f) => [f.physicalName, (f.defaultValue as { value: string }).value]),
-    );
     return rows.map((r) => {
       const column: TExistingColumn = {
         name: r.COLUMN_NAME,
@@ -1877,10 +1879,7 @@ export class MysqlAdapter extends BaseDbAdapter {
             : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
         notnull: r.IS_NULLABLE === "NO",
         pk: Boolean(Number(r.IS_PK ?? 0)),
-        dflt_value: reconcileAstralDefault(
-          normalizeMysqlDefault(r.COLUMN_DEFAULT, r.EXTRA),
-          modelDefaults.get(r.COLUMN_NAME),
-        ),
+        dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT, r.EXTRA),
       };
       // `VIRTUAL GENERATED` / `STORED GENERATED` (MySQL and MariaDB) — not
       // `DEFAULT_GENERATED`, which marks an expression default.
@@ -2201,16 +2200,7 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── Index sync ────────────────────────────────────────────────────────────
 
-  async syncIndexes(): Promise<TIndexChange[]> {
-    return this._syncIndexes(false);
-  }
-
-  /** The index changes {@link syncIndexes} would make — no DDL. */
-  async planIndexes(): Promise<TIndexChange[]> {
-    return this._syncIndexes(true);
-  }
-
-  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
+  protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this._table.tableName;
     const schema = this._schema;
 
@@ -2318,43 +2308,17 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._syncForeignKeys(true);
   }
 
-  private async _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
-    const changes: TForeignKeyChange[] = [];
-    const existingByName = await this._getExistingFkConstraints();
-
-    // Build desired FK set (keyed by sorted local column names)
-    const desiredFkKeys = new Set<string>();
-    for (const fk of this._table.foreignKeys.values()) {
-      desiredFkKeys.add([...fkColumns(fk).fields].toSorted().join(","));
-    }
-
-    // Drop stale FKs (managed ones that no longer match desired)
-    for (const [constraintName, columns] of existingByName) {
-      const key = [...columns].toSorted().join(",");
-      if (!desiredFkKeys.has(key)) {
-        changes.push({ fields: columns, targetTable: "", action: "drop" });
-        if (dryRun) continue;
-        const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP FOREIGN KEY ${qi(constraintName)}`;
-        this._log(ddl);
-        await this._exec().exec(ddl);
-      }
-    }
-
-    // Add missing FKs
-    const existingKeys = new Set(
-      [...existingByName.values()].map((cols) => cols.toSorted().join(",")),
-    );
-    for (const fk of this._table.foreignKeys.values()) {
-      const key = [...fkColumns(fk).fields].toSorted().join(",");
-      if (!existingKeys.has(key)) {
-        changes.push({ fields: fkColumns(fk).fields, targetTable: fk.targetTable, action: "add" });
-        if (dryRun) continue;
+  private _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
+    return this.syncForeignKeysWithDiff({
+      dryRun,
+      listExisting: () => this._getExistingFkConstraints(),
+      dropConstraint: (name) => this._dropFkConstraint(name),
+      addConstraint: async (fk) => {
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
-      }
-    }
-    return changes;
+      },
+    });
   }
 
   async dropForeignKeys(fkFieldKeys: string[]): Promise<void> {
@@ -2362,16 +2326,17 @@ export class MysqlAdapter extends BaseDbAdapter {
       return;
     }
     const keySet = new Set(fkFieldKeys);
-    const existingByName = await this._getExistingFkConstraints();
-
-    for (const [constraintName, cols] of existingByName) {
-      const key = cols.toSorted().join(",");
-      if (keySet.has(key)) {
-        const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP FOREIGN KEY ${qi(constraintName)}`;
-        this._log(ddl);
-        await this._exec().exec(ddl);
+    for (const [constraintName, cols] of await this._getExistingFkConstraints()) {
+      if (keySet.has(fkKey(cols))) {
+        await this._dropFkConstraint(constraintName);
       }
     }
+  }
+
+  private async _dropFkConstraint(name: string): Promise<void> {
+    const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP FOREIGN KEY ${qi(name)}`;
+    this._log(ddl);
+    await this._exec().exec(ddl);
   }
 
   /** Queries INFORMATION_SCHEMA for existing FK constraints, grouped by constraint name → column names. */
@@ -2931,21 +2896,6 @@ function decodeLatin1Utf8(value: string): string {
   }
   const decoded = Buffer.from(value, "latin1").toString("utf8");
   return decoded.includes("\uFFFD") ? value : decoded;
-}
-
-/**
- * INFORMATION_SCHEMA reports a 4-byte character (an emoji) of a literal
- * default as `?` — the column stores it intact. A live default that is the
- * model default with each such character as `?` is the model default.
- */
-function reconcileAstralDefault(
-  live: string | undefined,
-  model: string | undefined,
-): string | undefined {
-  if (live === undefined || model === undefined || live === model || !live.includes("?")) {
-    return live;
-  }
-  return model.replace(/[\u{10000}-\u{10FFFF}]/gu, "?") === live ? model : live;
 }
 
 const MYSQL_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", "0": "\0", Z: "\x1a" };

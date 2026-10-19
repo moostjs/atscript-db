@@ -105,6 +105,9 @@ const col = (name: string, dflt_value: string): TExistingColumn => ({
   dflt_value,
 });
 
+/** MySQL reports a 4-byte character of a literal default as `?`. */
+const astralAsQuestionMark = (desired: string) => desired.replace(/[\u{10000}-\u{10FFFF}]/gu, "?");
+
 describe("computeColumnDiff — engine-reported defaults of a converged table", () => {
   const desired = [
     field("ratio", "number", "1.0"),
@@ -143,6 +146,18 @@ describe("computeColumnDiff — engine-reported defaults of a converged table", 
     expect(diff.defaultChanged.map((d) => [d.oldDefault, d.newDefault])).toEqual([
       ["2.35", "2.345"],
     ]);
+  });
+
+  it("a live default equal to the adapter's reportedDefault form is unchanged", () => {
+    const note = field("note", "string", "a \u{1F600}");
+    const opts = { reportedDefault: astralAsQuestionMark };
+    expect(computeColumnDiff([note], [col("note", "a ?")], undefined, opts).defaultChanged).toEqual(
+      [],
+    );
+    // Without the hook, or for another value, it is a change
+    expect(computeColumnDiff([note], [col("note", "a ?")]).defaultChanged).toHaveLength(1);
+    const other = computeColumnDiff([note], [col("note", "b ?")], undefined, opts);
+    expect(other.defaultChanged.map((d) => d.oldDefault)).toEqual(["b ?"]);
   });
 });
 
@@ -270,7 +285,7 @@ describe("syncIndexesWithDiff — reported changes and dry run", () => {
       ],
       createIndex: async (index: { key: string }) => void ddl.push(`create ${index.key}`),
       dropIndex: async (name: string) => void ddl.push(`drop ${name}`),
-      shouldSkipType: (type: string) => type === "fulltext",
+      skipIndex: (index: { type: string }) => (index.type === "fulltext" ? null : undefined),
     });
     const planned = await adapter.run(opts(true));
     expect(ddl).toEqual([]);
@@ -311,7 +326,7 @@ describe("mergeLiveForeignKeyChanges", () => {
       mergeLiveForeignKeyChanges(init, [
         { fields: ["a"], targetTable: "x", action: "add" },
         { fields: ["c", "b"], targetTable: "y", action: "add" },
-        { fields: ["d"], targetTable: "", action: "drop" },
+        { fields: ["d"], action: "drop" },
       ]),
     ).toBe(true);
     expect(init.fkAdded).toEqual([{ fields: ["c", "b"], targetTable: "y" }]);

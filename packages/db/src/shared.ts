@@ -15,3 +15,5 @@ export {
   viewFieldSeals,
   type TViewFieldSeals,
 } from "./shared/view-validation";
+// Key-order-independent JSON (since 0.1.162)
+export { stableJson } from "./shared/object";

@@ -7,6 +7,7 @@ import {
   type TRowOrderKey,
 } from "@atscript/db";
 import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/db/agg";
+import { stableJson } from "@atscript/db/shared";
 import { bucketer } from "@uniqu/core";
 import type { NullsPlacement } from "@uniqu/core";
 
@@ -214,18 +215,6 @@ function identityToken(value: unknown): string {
     default:
       return `j${stableJson(value)}`;
   }
-}
-
-/** `JSON.stringify` with object keys sorted at every level. */
-function stableJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v: unknown) => {
-    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
-    const sorted: Record<string, unknown> = {};
-    for (const k of Object.keys(v).toSorted()) {
-      sorted[k] = (v as Record<string, unknown>)[k];
-    }
-    return sorted;
-  });
 }
 
 // ── Accumulators ──────────────────────────────────────────────────────────────
