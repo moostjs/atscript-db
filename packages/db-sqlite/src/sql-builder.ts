@@ -164,6 +164,7 @@ export const sqliteDialect: SqlDialect = {
     return `"${esc(name)}"`;
   },
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: toSqlValue,
   toParam(value: unknown) {
     if (value === undefined) {

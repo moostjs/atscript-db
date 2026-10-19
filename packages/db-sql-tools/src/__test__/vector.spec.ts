@@ -3,12 +3,13 @@ import { UniquSelect } from "@atscript/db";
 
 import type { SqlDialect } from "../dialect";
 import { buildVectorSearchCount, buildVectorSearchSelect, vectorDistanceSource } from "../vector";
-import { toSqlValue } from "../common";
+import { toSqlValue, sqlStringLiteral } from "../common";
 
 const dialect: SqlDialect = {
   quoteIdentifier: (n) => `"${n}"`,
   quoteTable: (n) => `"${n}"`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: toSqlValue,
   toParam: (v) => v,
   regex: () => ({ sql: "", params: [] }),

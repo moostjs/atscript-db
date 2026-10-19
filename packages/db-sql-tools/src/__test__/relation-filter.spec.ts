@@ -2,6 +2,7 @@ import { describe, it, expect } from "vite-plus/test";
 import { ResolvedRelationFilter, UniquSelect, type BaseDbAdapter } from "@atscript/db";
 import type { FilterExpr } from "@uniqu/core";
 
+import { sqlStringLiteral } from "../common";
 import { buildWhere, createFilterVisitor } from "../filter-builder";
 import { finalizeParams } from "../dialect";
 import type { SqlDialect } from "../dialect";
@@ -19,6 +20,7 @@ const dialect: SqlDialect = {
       .map((p) => `"${p}"`)
       .join("."),
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => v,
   toParam: (v) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
   regex: (col, v) => ({ sql: `${col} LIKE ?`, params: [String(v)] }),

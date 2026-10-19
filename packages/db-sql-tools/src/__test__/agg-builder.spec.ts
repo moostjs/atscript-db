@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vite-plus/test";
 
+import { sqlStringLiteral } from "../common";
 import { buildAggregateSelect, buildAggregateCount } from "../agg";
 import type { SqlDialect, TSqlFragment } from "../dialect";
 import { UniquSelect } from "@atscript/db";
@@ -8,6 +9,7 @@ const mockDialect: SqlDialect = {
   quoteIdentifier: (name) => `[${name}]`,
   quoteTable: (name) => `[${name}]`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => {
     if (v === undefined) {
       return null;

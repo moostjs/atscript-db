@@ -3,7 +3,7 @@ import type { TViewColumnMapping } from "@atscript/db";
 
 import type { SqlDialect } from "../dialect";
 import { quotedJsonPathSegments } from "../dialect";
-import { jsonDollarPath } from "../common";
+import { jsonDollarPath, sqlStringLiteral } from "../common";
 import { viewSourceExpr } from "../view-builder";
 
 // JSON-leaf view columns (since 0.1.136): viewSourceExpr routes `mapping.json`
@@ -13,6 +13,7 @@ const base: SqlDialect = {
   quoteIdentifier: (name) => `[${name}]`,
   quoteTable: (name) => `[${name}]`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => v,
   toParam: (v) => v,
   regex: () => ({ sql: "", params: [] }),
@@ -67,8 +68,8 @@ describe("quotedJsonPathSegments", () => {
     expect(() => quotedJsonPathSegments([seg])).toThrow(/JSON path segment .* can't be extracted/);
   });
 
-  it("rejects an empty path", () => {
-    expect(() => quotedJsonPathSegments([])).toThrow("needs a path below the JSON column");
+  it("has no segments for the JSON root", () => {
+    expect(quotedJsonPathSegments([])).toEqual([]);
   });
 });
 

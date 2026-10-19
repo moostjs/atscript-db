@@ -88,6 +88,7 @@ import {
   viewReadSource,
   type TSqlFromSource,
   buildKeyViolationCount,
+  unquoteSqlStringLiteral,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere } from "./filter-builder";
@@ -2919,10 +2920,7 @@ function normalizeMysqlDefault(value: string | null, extra?: string | null): str
   }
   // Strip enclosing single quotes and un-double escaped quotes
   // MySQL INFORMATION_SCHEMA returns 'it''s active' for DEFAULT 'it''s active'
-  if (v.startsWith("'") && v.endsWith("'")) {
-    return v.slice(1, -1).replace(/''/g, "'");
-  }
-  return v;
+  return unquoteSqlStringLiteral(v) ?? v;
 }
 
 /** `value`'s code units (all ≤ U+00FF) as bytes, decoded as UTF-8 — `value` unchanged otherwise. */

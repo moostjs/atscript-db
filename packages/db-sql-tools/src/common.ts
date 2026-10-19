@@ -11,17 +11,29 @@ export function sqlStringLiteral(value: string): string {
 }
 
 /**
+ * The value of a single-quoted SQL string literal (`'it''s'` → `it's`) — as
+ * engines report a column default — or `undefined` when `literal` is not one.
+ * @since 0.1.163
+ */
+export function unquoteSqlStringLiteral(literal: string): string | undefined {
+  if (literal.length < 2 || !literal.startsWith("'") || !literal.endsWith("'")) return undefined;
+  return literal.slice(1, -1).replace(/''/g, "'");
+}
+
+/**
  * The SQL string literal of a `$`-rooted JSON path with every segment quoted
  * (`'$."a"."b"'`) — the path argument of SQLite's and MySQL's `json_extract` /
- * `json_type`.
+ * `json_type`; an empty path is the JSON root (`'$'`).
  *
  * @since 0.1.136
  * @throws as {@link quotedJsonPathSegments}.
  */
-export function jsonDollarPath(path: readonly string[]): string {
-  // An empty path addresses the JSON root (a primitive JSON column's value)
-  if (path.length === 0) return sqlStringLiteral("$");
-  return sqlStringLiteral(`$.${quotedJsonPathSegments(path).join(".")}`);
+export function jsonDollarPath(
+  path: readonly string[],
+  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.163 */
+  stringLiteral: (value: string) => string = sqlStringLiteral,
+): string {
+  return stringLiteral(["$", ...quotedJsonPathSegments(path)].join("."));
 }
 
 /**
@@ -128,7 +140,12 @@ export function defaultValueForType(designType: string): string {
  * respecting the field's designType. Booleans become 0/1, numbers stay unquoted,
  * strings are single-quote-escaped.
  */
-export function defaultValueToSqlLiteral(designType: string, value: string): string {
+export function defaultValueToSqlLiteral(
+  designType: string,
+  value: string,
+  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.163 */
+  stringLiteral: (value: string) => string = sqlStringLiteral,
+): string {
   switch (designType) {
     case "boolean": {
       return value === "true" || value === "1" ? "1" : "0";
@@ -140,7 +157,7 @@ export function defaultValueToSqlLiteral(designType: string, value: string): str
       return Number.isFinite(n) ? String(n) : "0";
     }
     default: {
-      return sqlStringLiteral(value);
+      return stringLiteral(value);
     }
   }
 }
@@ -155,10 +172,7 @@ export const queryOpToSql: Record<string, string> = {
 };
 
 /** An inlined SQL literal for a view-predicate value (DDL — no parameters). */
-function predicateLiteral(
-  value: unknown,
-  stringLiteral: (value: string) => string = sqlStringLiteral,
-): string {
+function predicateLiteral(value: unknown, stringLiteral: (value: string) => string): string {
   if (value === null || value === undefined) {
     return "NULL";
   }
@@ -190,8 +204,8 @@ function predicateLiteral(
 export function queryNodeToSql(
   node: AtscriptQueryNode,
   resolveFieldRef: (ref: AtscriptQueryFieldRef) => string,
-  /** Renders a string value (default `sqlStringLiteral`; MySQL escapes `\\` too). @since 0.1.162 */
-  stringLiteral?: (value: string) => string,
+  /** The dialect's string literal (`SqlDialect.stringLiteral`). @since 0.1.162 */
+  stringLiteral: (value: string) => string = sqlStringLiteral,
 ): string {
   if ("$and" in node) {
     const children = (node as { $and: AtscriptQueryNode[] }).$and;

@@ -12,7 +12,7 @@ import {
   esc,
   qi,
   quoteTableName,
-  sqlStringLiteral,
+  mysqlStringLiteral,
   collationToMysql,
   defaultValueForType,
 } from "../sql-builder";
@@ -127,14 +127,14 @@ describe("mysqlDialect.toParam", () => {
   });
 });
 
-describe("sqlStringLiteral", () => {
+describe("mysqlStringLiteral", () => {
   it("should quote and escape single quotes", () => {
-    expect(sqlStringLiteral("it's")).toBe("'it''s'");
-    expect(sqlStringLiteral("hello")).toBe("'hello'");
+    expect(mysqlStringLiteral("it's")).toBe("'it''s'");
+    expect(mysqlStringLiteral("hello")).toBe("'hello'");
   });
 
   it("escapes backslashes (MySQL reads them as escapes)", () => {
-    expect(sqlStringLiteral(String.raw`a\b'`)).toBe(String.raw`'a\\b'''`);
+    expect(mysqlStringLiteral(String.raw`a\b'`)).toBe(String.raw`'a\\b'''`);
   });
 });
 
