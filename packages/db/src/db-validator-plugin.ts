@@ -235,6 +235,9 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       // and, in a replace, `@db.onUpdate.now` columns (set by the write),
       // `@db.onUpdate.inc` counters (0 on insert, incremented by the write) —
       // single source of truth for both the server validators and db-client.
+      // The two `onUpdate` keys stay explicit (not `isServerStampedOnUpdate`):
+      // `.now` is server-managed only in a replace and honours the defaulted /
+      // union-base lookup, `.inc` always and on the prop's own metadata.
       const serverManaged =
         has("db.default") ||
         has("db.default.increment") ||

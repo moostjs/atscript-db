@@ -857,6 +857,8 @@ await orders.insert({ id: 1, status: "open", payload: { customer: { id: "c1" }, 
 await orders.update({ id: 1, amount: { $inc: 1 } }); // ClientValidationError at "amount"
 ```
 
+For form and plugin code, `@atscript/db/validator` exports `isServerStampedOnUpdate(metadata)` and the `SERVER_STAMPED_ON_UPDATE_KEYS` set behind it (since 0.1.163): `true` when a field carries `@db.onUpdate.now` or `@db.onUpdate.inc`, i.e. the server overwrites it on every update — e.g. to show it read-only in an edit form (`isServerStampedOnUpdate(validator.flatMap.get("updatedAt")!.metadata)`).
+
 Patch preflight is **merge-aware** (since 0.1.124), mirroring the server's update validation exactly: a nested [`@db.patch.strategy 'merge'`](../api/update-patch#embedded-object-patches) block validates as a deep partial — absent required keys (e.g. server-stamped fields) pass, present keys are still type-checked — while non-merge nested objects keep full validation, since they are `$set` as a whole. Insert and replace always validate the full shape.
 
 ### Lenient writes (projected metas) {#lenient-writes}

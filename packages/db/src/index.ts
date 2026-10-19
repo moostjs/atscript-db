@@ -42,6 +42,8 @@ export {
   $upsert,
   $update,
   $remove,
+  SERVER_STAMPED_ON_UPDATE_KEYS,
+  isServerStampedOnUpdate,
 } from "./validator";
 export type {
   DbValidationContext,

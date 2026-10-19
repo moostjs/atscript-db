@@ -12,6 +12,8 @@ export { $inc, $dec, $mul, $cas, $replace, $insert, $upsert, $update, $remove } 
 export { separateCas, reconcileCas } from "./ops";
 export { DbError } from "./db-error";
 export { isPlainObject, isEmptyObject } from "./shared/object";
+// Fields the server stamps on every update (`@db.onUpdate.now` / `.inc`), since 0.1.163
+export { SERVER_STAMPED_ON_UPDATE_KEYS, isServerStampedOnUpdate } from "./shared/server-stamped";
 
 import {
   flattenAnnotatedType,

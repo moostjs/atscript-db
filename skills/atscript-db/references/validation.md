@@ -39,6 +39,8 @@ validator.validate(payload, "patch");
 
 Server and client share the plugin — same partial logic, same ref-depth gate. The client validator reconstructs `flatMap` + `navFields` via `buildValidationContext(deserializedType)`.
 
+`isServerStampedOnUpdate(metadata)` / `SERVER_STAMPED_ON_UPDATE_KEYS` (0.1.163, `@atscript/db/validator`, no compiler dependency): `true` when the field has `@db.onUpdate.now` or `@db.onUpdate.inc` — the server overwrites it on every update; use it in UI/plugin code (e.g. read-only in edit forms) instead of listing the keys.
+
 ## Error shape
 
 ```ts
