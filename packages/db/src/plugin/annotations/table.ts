@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import type { SemanticNode } from "@atscript/core";
@@ -12,14 +12,12 @@ export const dbTableAnnotations: TAnnotationsTree = {
     sortable: tableCapability("sortable"),
 
     $self: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Marks an interface as a database-persisted entity (table in SQL, collection in MongoDB). " +
-        "If the name argument is omitted, the adapter derives the table name from the interface name." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.table "users"\n' +
-        "export interface User { ... }\n" +
-        "```\n",
+          "If the name argument is omitted, the adapter derives the table name from the interface name.",
+        '@db.table "users"',
+        "export interface User { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -44,15 +42,13 @@ export const dbTableAnnotations: TAnnotationsTree = {
     }),
 
     renamed: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Specifies the previous table name for table rename migration. " +
-        "The sync engine generates ALTER TABLE RENAME instead of drop+create." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.table "app_users"\n' +
-        '@db.table.renamed "users"\n' +
-        "export interface User { ... }\n" +
-        "```\n",
+          "The sync engine generates ALTER TABLE RENAME instead of drop+create.",
+        '@db.table "app_users"',
+        '@db.table.renamed "users"',
+        "export interface User { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -76,18 +72,16 @@ export const dbTableAnnotations: TAnnotationsTree = {
 
     preferredId: {
       uniqueIndex: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Selects a unique index as the table's preferred row identifier. " +
-          "When the unique-index name is omitted, the first declared unique-index group wins." +
-          "\n\n**Example:**\n" +
-          "```atscript\n" +
-          "@db.table\n" +
-          '@db.table.preferredId.uniqueIndex "by_slug"\n' +
-          "export interface Post {\n" +
-          '  @db.index.unique "by_slug"\n' +
-          "  slug: string\n" +
-          "}\n" +
-          "```\n",
+            "When the unique-index name is omitted, the first declared unique-index group wins.",
+          "@db.table",
+          '@db.table.preferredId.uniqueIndex "by_slug"',
+          "export interface Post {",
+          '  @db.index.unique "by_slug"',
+          "  slug: string",
+          "}",
+        ),
         nodeType: ["interface"],
         passedWhenReferred: false,
         multiple: false,
@@ -157,14 +151,12 @@ export const dbTableAnnotations: TAnnotationsTree = {
   },
 
   schema: new AnnotationSpec({
-    description:
-      "Assigns the entity to a database schema/namespace." +
-      "\n\n**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "users"\n' +
-      '@db.schema "auth"\n' +
-      "export interface User { ... }\n" +
-      "```\n",
+    description: annotationExample(
+      "Assigns the entity to a database schema/namespace.",
+      '@db.table "users"',
+      '@db.schema "auth"',
+      "export interface User { ... }",
+    ),
     nodeType: ["interface"],
     passedWhenReferred: false,
     argument: {
@@ -175,20 +167,18 @@ export const dbTableAnnotations: TAnnotationsTree = {
   }),
 
   space: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Binds the entity to a named database space (a `DbSpace` — one per " +
-      "physical database) for apps running more than one database at once " +
-      "(e.g. MongoDB + PostgreSQL). Absent means the default space." +
-      "\n\n" +
-      "Consumed by the generated model manifest (grouping in `modelsBySpace`) " +
-      "and by `@TableController(Model)` token binding, which resolves the " +
-      "space registered under this name via `provideDbSpace(space, name)`." +
-      "\n\n**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "feed_runs"\n' +
-      '@db.space "analytics"\n' +
-      "export interface FeedRun { ... }\n" +
-      "```\n",
+        "physical database) for apps running more than one database at once " +
+        "(e.g. MongoDB + PostgreSQL). Absent means the default space." +
+        "\n\n" +
+        "Consumed by the generated model manifest (grouping in `modelsBySpace`) " +
+        "and by `@TableController(Model)` token binding, which resolves the " +
+        "space registered under this name via `provideDbSpace(space, name)`.",
+      '@db.table "feed_runs"',
+      '@db.space "analytics"',
+      "export interface FeedRun { ... }",
+    ),
     nodeType: ["interface"],
     passedWhenReferred: false,
     argument: {
@@ -200,18 +190,16 @@ export const dbTableAnnotations: TAnnotationsTree = {
 
   http: {
     path: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "HTTP endpoint path where this table is served. " +
-        "Used by the UI for value-help on FK fields. " +
-        "After app.init() the app publishes the canonical controller route here at runtime; " +
-        "a model mounted on several routes needs `canonical: true` on one of its controllers " +
-        "(or declare this annotation and mount that controller without an explicit prefix)." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.table "authors"\n' +
-        '@db.http.path "/authors"\n' +
-        "export interface Author { ... }\n" +
-        "```\n",
+          "Used by the UI for value-help on FK fields. " +
+          "After app.init() the app publishes the canonical controller route here at runtime; " +
+          "a model mounted on several routes needs `canonical: true` on one of its controllers " +
+          "(or declare this annotation and mount that controller without an explicit prefix).",
+        '@db.table "authors"',
+        '@db.http.path "/authors"',
+        "export interface Author { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -224,17 +212,15 @@ export const dbTableAnnotations: TAnnotationsTree = {
 
   sync: {
     method: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Controls how the sync engine handles structural changes that cannot be applied via ALTER TABLE." +
-        "\n\n" +
-        '- `"recreate"` — lossless: create temp table, copy data, drop old, rename.\n' +
-        '- `"drop"` — lossy: drop table entirely and create from scratch.\n\n' +
-        "Without this annotation, structural changes fail with an error requiring manual intervention." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.sync.method "drop"\n' +
-        "interface Logs { ... }\n" +
-        "```\n",
+          "\n\n" +
+          '- `"recreate"` — lossless: create temp table, copy data, drop old, rename.\n' +
+          '- `"drop"` — lossy: drop table entirely and create from scratch.\n\n' +
+          "Without this annotation, structural changes fail with an error requiring manual intervention.",
+        '@db.sync.method "drop"',
+        "interface Logs { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -248,23 +234,21 @@ export const dbTableAnnotations: TAnnotationsTree = {
 
   depth: {
     limit: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Security guard on nested-write payloads. `N` is a non-negative integer declaring " +
-        "the maximum depth a client may nest `@db.rel.from` children in insert, replace, " +
-        "or patch payloads. Writes deeper than `N` are rejected at the server boundary with " +
-        "HTTP 400 before any DB access.\n\n" +
-        "**Default when absent:** `0` — any nested-write payload is rejected. Authors opt in " +
-        "explicitly to `N >= 1` when they want the server to accept deep writes. This is a " +
-        "security / blast-radius control, not a performance knob.\n\n" +
-        "**Scope:** affects only write acceptance. Has no effect on `/meta` serialization, " +
-        "read/query paths, or wire shape — the meta endpoint always ships FK refs as the " +
-        "shallow `{ id, metadata }` shape regardless of this annotation." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.table "authors"\n' +
-        "@db.depth.limit 2\n" +
-        "export interface Author { ... }\n" +
-        "```\n",
+          "the maximum depth a client may nest `@db.rel.from` children in insert, replace, " +
+          "or patch payloads. Writes deeper than `N` are rejected at the server boundary with " +
+          "HTTP 400 before any DB access.\n\n" +
+          "**Default when absent:** `0` — any nested-write payload is rejected. Authors opt in " +
+          "explicitly to `N >= 1` when they want the server to accept deep writes. This is a " +
+          "security / blast-radius control, not a performance knob.\n\n" +
+          "**Scope:** affects only write acceptance. Has no effect on `/meta` serialization, " +
+          "read/query paths, or wire shape — the meta endpoint always ships FK refs as the " +
+          "shallow `{ id, metadata }` shape regardless of this annotation.",
+        '@db.table "authors"',
+        "@db.depth.limit 2",
+        "export interface Author { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       multiple: false,
@@ -341,33 +325,39 @@ function collectUniqueIndexGroups(owner: SemanticNode | undefined): string[] {
 function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec {
   const example =
     capability === "filterable"
-      ? "  @db.column.filterable\n  email: string\n  // other fields not filterable via the controller\n"
-      : "  @db.column.sortable\n  createdAt: number.timestamp\n  // other fields not sortable via the controller\n";
+      ? [
+          "  @db.column.filterable",
+          "  email: string",
+          "  // other fields not filterable via the controller",
+        ]
+      : [
+          "  @db.column.sortable",
+          "  createdAt: number.timestamp",
+          "  // other fields not sortable via the controller",
+        ];
   const verb = capability === "filterable" ? "filter" : "sort";
   return new AnnotationSpec({
-    description:
+    description: annotationExample(
       `Controls ${verb}-gating on the readable controller's \`/query\` and \`/pages\` endpoints.\n\n` +
-      `- **\`'auto'\`** (default when the annotation is absent) — every column the adapter can ` +
-      `${verb} is ${capability} (JSON / array columns are never sortable, and not filterable on ` +
-      "SQL adapters).\n" +
-      `- **\`'manual'\`** — only fields annotated \`@db.column.${capability}\` are ${capability}; ` +
-      "  all others are rejected with HTTP 400.\n\n" +
-      "`/meta.fields[*]." +
-      capability +
-      "` advertises exactly what the gate accepts in either mode. The policy applies to " +
-      (capability === "filterable"
-        ? "filters only — `$groupBy`, `$having` keys and aggregate fields use the adapter's physical capability.\n\n"
-        : "`$sort` only.\n\n") +
-      `Writing the annotation explicitly as \`@db.table.${capability} 'auto'\` has the same ` +
-      "runtime effect as omitting it; use it to document intent.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "users"\n' +
-      `@db.table.${capability} "manual"\n` +
-      "export interface User {\n" +
-      example +
-      "}\n" +
-      "```\n",
+        `- **\`'auto'\`** (default when the annotation is absent) — every column the adapter can ` +
+        `${verb} is ${capability} (JSON / array columns are never sortable, and not filterable on ` +
+        "SQL adapters).\n" +
+        `- **\`'manual'\`** — only fields annotated \`@db.column.${capability}\` are ${capability}; ` +
+        "  all others are rejected with HTTP 400.\n\n" +
+        "`/meta.fields[*]." +
+        capability +
+        "` advertises exactly what the gate accepts in either mode. The policy applies to " +
+        (capability === "filterable"
+          ? "filters only — `$groupBy`, `$having` keys and aggregate fields use the adapter's physical capability.\n\n"
+          : "`$sort` only.\n\n") +
+        `Writing the annotation explicitly as \`@db.table.${capability} 'auto'\` has the same ` +
+        "runtime effect as omitting it; use it to document intent.",
+      '@db.table "users"',
+      `@db.table.${capability} "manual"`,
+      "export interface User {",
+      ...example,
+      "}",
+    ),
     nodeType: ["interface"],
     passedWhenReferred: false,
     multiple: false,

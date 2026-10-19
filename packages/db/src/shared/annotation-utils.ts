@@ -1,5 +1,6 @@
 import {
   AnnotationSpec,
+  annotationExample,
   type AtscriptDoc,
   isArray,
   isInterface,
@@ -325,14 +326,12 @@ export function getAnnotationAlias(prop: SemanticNode, annotationName: string): 
  */
 export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSpec {
   return new AnnotationSpec({
-    description:
-      `Referential action when the target ${name === "onDelete" ? "row is deleted" : "key is updated"}. Only valid on @db.rel.FK fields.\n\n` +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.rel.FK\n" +
-      `@db.rel.${name} "cascade"\n` +
-      "authorId: User.id\n" +
-      "```\n",
+    description: annotationExample(
+      `Referential action when the target ${name === "onDelete" ? "row is deleted" : "key is updated"}. Only valid on @db.rel.FK fields.`,
+      "@db.rel.FK",
+      `@db.rel.${name} "cascade"`,
+      "authorId: User.id",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     argument: {

@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isRef } from "@atscript/core";
 
@@ -18,23 +18,22 @@ export const VIEW_SOURCE_ARGUMENT = {
  */
 export const dbAliasAnnotations: TAnnotationsTree = {
   alias: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Declares a **join alias**: a type alias of a `@db.table` or `@db.view` that a view can " +
-      "join under its own name — to join the same table twice or to self-join the entry table. " +
-      "Only valid on `export type X = Target`, where `Target` is the argument. The alias is a " +
-      "scope name inside view definitions, not a table: it is never synced or registered on a " +
-      "`DbSpace`, and it cannot be the `@db.view.for` entry.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.alias Employee\n" +
-      "export type Manager = Employee\n\n" +
-      "@db.view.for Employee\n" +
-      "@db.view.joins Manager, `Manager.id = Employee.managerId`, 'left'\n" +
-      "export interface Staff {\n" +
-      "    id: Employee.id\n" +
-      "    managerName?: Manager.name\n" +
-      "}\n" +
-      "```\n",
+        "join under its own name — to join the same table twice or to self-join the entry table. " +
+        "Only valid on `export type X = Target`, where `Target` is the argument. The alias is a " +
+        "scope name inside view definitions, not a table: it is never synced or registered on a " +
+        "`DbSpace`, and it cannot be the `@db.view.for` entry.",
+      "@db.alias Employee",
+      "export type Manager = Employee",
+      "",
+      "@db.view.for Employee",
+      "@db.view.joins Manager, `Manager.id = Employee.managerId`, 'left'",
+      "export interface Staff {",
+      "    id: Employee.id",
+      "    managerName?: Manager.name",
+      "}",
+    ),
     nodeType: ["type"],
     // A scope name describes the declaring alias only — a view field reading
     // `Manager.name` must not inherit it.

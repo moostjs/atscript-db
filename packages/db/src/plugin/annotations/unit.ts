@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import {
   validateExclusiveWith,
@@ -11,19 +11,17 @@ const UNIT_HOST_TYPES = ["decimal", "number"];
 export const dbUnitAnnotations: TAnnotationsTree = {
   unit: {
     $self: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Hard-coded **unit of measure** for this quantity field. Use when a table " +
-        "stores all values for this field in a single, fixed unit.\n\n" +
-        "For per-row units, use `@db.unit.ref 'fieldName'` instead.\n\n" +
-        "Valid on `decimal` and `number` fields. Unlike `@db.amount.currency`, the " +
-        "unit code is free-form (`'kg'`, `'rpm'`, `'qps'`, …) — no ISO-style validation.\n\n" +
-        "Aggregations on a unit-tagged field do not need grouping when the unit is a " +
-        "fixed literal — the constraint is satisfied schema-wide.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.unit 'kg'\n" +
-        "weight: decimal\n" +
-        "```\n",
+          "stores all values for this field in a single, fixed unit.\n\n" +
+          "For per-row units, use `@db.unit.ref 'fieldName'` instead.\n\n" +
+          "Valid on `decimal` and `number` fields. Unlike `@db.amount.currency`, the " +
+          "unit code is free-form (`'kg'`, `'rpm'`, `'qps'`, …) — no ISO-style validation.\n\n" +
+          "Aggregations on a unit-tagged field do not need grouping when the unit is a " +
+          "fixed literal — the constraint is satisfied schema-wide.",
+        "@db.unit 'kg'",
+        "weight: decimal",
+      ),
       nodeType: ["prop"],
       multiple: false,
       argument: {
@@ -46,19 +44,17 @@ export const dbUnitAnnotations: TAnnotationsTree = {
       },
     }),
     ref: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Binds this quantity to a **sibling field** that holds its unit. Use when " +
-        "different rows may carry different units (e.g. mixed kg/lb measurements).\n\n" +
-        "The referenced field must be a `string`.\n\n" +
-        "Valid on `decimal` and `number` fields. Aggregating this field forces the " +
-        "referenced unit field into `$groupBy` at runtime — summing rows with " +
-        "different units is rejected.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "unit: string\n" +
-        "@db.unit.ref 'unit'\n" +
-        "weight: decimal\n" +
-        "```\n",
+          "different rows may carry different units (e.g. mixed kg/lb measurements).\n\n" +
+          "The referenced field must be a `string`.\n\n" +
+          "Valid on `decimal` and `number` fields. Aggregating this field forces the " +
+          "referenced unit field into `$groupBy` at runtime — summing rows with " +
+          "different units is rejected.",
+        "unit: string",
+        "@db.unit.ref 'unit'",
+        "weight: decimal",
+      ),
       nodeType: ["prop"],
       // Binds to a sibling by name in the DECLARING interface — a referring
       // field's host may not have that sibling, so the binding must not

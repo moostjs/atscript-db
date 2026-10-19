@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isArray, isInterface, isPrimitive, isRef, isStructure } from "@atscript/core";
 
@@ -12,23 +12,21 @@ import { viewFieldSeals } from "../../shared/view-validation";
 export const dbSortAnnotations: TAnnotationsTree = {
   sort: {
     nulls: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Default **NULL placement** when a read sorts by this field and the request names none " +
-        "(`$nulls` control, URL suffix `$sort=-closedAt:last`).\n\n" +
-        "- **`'first'`** — rows where the field is NULL (or missing) come before every value, " +
-        "in both sort directions\n" +
-        "- **`'last'`** — they come after every value, in both directions\n\n" +
-        "Without it (and without `$nulls`) NULL placement is the database's own: first in " +
-        "ascending order on SQLite, MySQL, MongoDB and the in-memory adapter, last on PostgreSQL. " +
-        "Applies to `$sort` and to the `$rowOrder` of `first()` / `last()`. Only optional and " +
-        "`| null` fields can be NULL — on another required table field it has no effect. On PostgreSQL, MySQL and " +
-        "MongoDB a placement the engine does not produce natively costs the index its ORDER BY " +
-        "(a sort step instead).\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.sort.nulls 'last'\n" +
-        "closedAt?: number.timestamp\n" +
-        "```\n",
+          "(`$nulls` control, URL suffix `$sort=-closedAt:last`).\n\n" +
+          "- **`'first'`** — rows where the field is NULL (or missing) come before every value, " +
+          "in both sort directions\n" +
+          "- **`'last'`** — they come after every value, in both directions\n\n" +
+          "Without it (and without `$nulls`) NULL placement is the database's own: first in " +
+          "ascending order on SQLite, MySQL, MongoDB and the in-memory adapter, last on PostgreSQL. " +
+          "Applies to `$sort` and to the `$rowOrder` of `first()` / `last()`. Only optional and " +
+          "`| null` fields can be NULL — on another required table field it has no effect. On PostgreSQL, MySQL and " +
+          "MongoDB a placement the engine does not produce natively costs the index its ORDER BY " +
+          "(a sort step instead).",
+        "@db.sort.nulls 'last'",
+        "closedAt?: number.timestamp",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,

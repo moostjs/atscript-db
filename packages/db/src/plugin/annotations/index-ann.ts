@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 
 import { integerMemberIndexProblem, searchFieldVerdict } from "../../shared/annotation-utils";
@@ -7,14 +7,12 @@ import { refuseCiphertext, sealedSearchProblem } from "../../shared/view-validat
 export const dbIndexAnnotations: TAnnotationsTree = {
   index: {
     plain: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Standard (non-unique) index for query performance. " +
-        "Fields sharing the same index name form a composite index." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.index.plain "idx_timeline", "desc"\n' +
-        "createdAt: number.timestamp\n" +
-        "```\n",
+          "Fields sharing the same index name form a composite index.",
+        '@db.index.plain "idx_timeline", "desc"',
+        "createdAt: number.timestamp",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: true,
@@ -37,14 +35,12 @@ export const dbIndexAnnotations: TAnnotationsTree = {
     }),
 
     unique: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Unique index — ensures no two rows/documents have the same value(s). " +
-        "Fields sharing the same index name form a composite unique constraint." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.index.unique "tenant_email"\n' +
-        "email: string.email\n" +
-        "```\n",
+          "Fields sharing the same index name form a composite unique constraint.",
+        '@db.index.unique "tenant_email"',
+        "email: string.email",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: true,
@@ -58,28 +54,26 @@ export const dbIndexAnnotations: TAnnotationsTree = {
     }),
 
     fulltext: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Full-text search index. " +
-        "Fields sharing the same index name form a composite full-text index. " +
-        "A string member is part of the engine's text index. An integer member " +
-        "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) is never part of " +
-        "the physical text index: when the whole search term is a whole number (`2946`, `-12`; " +
-        "no leading zeros), rows whose member equals it exactly also match (OR'd with the text " +
-        "match). An integer member must be index-backed — the primary key (first `@meta.id`) or " +
-        "the first field of a `@db.index.plain` / `@db.index.unique`. " +
-        "Floats, decimals and timestamps are refused." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.index.fulltext "ft_content"\n' +
-        "title: string\n" +
-        "\n" +
-        '@db.index.fulltext "ft_content", 5\n' +
-        "bio: string\n" +
-        "\n" +
-        '@db.index.fulltext "ft_content"\n' +
-        "@db.index.unique\n" +
-        "refNo: number.int\n" +
-        "```\n",
+          "Fields sharing the same index name form a composite full-text index. " +
+          "A string member is part of the engine's text index. An integer member " +
+          "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) is never part of " +
+          "the physical text index: when the whole search term is a whole number (`2946`, `-12`; " +
+          "no leading zeros), rows whose member equals it exactly also match (OR'd with the text " +
+          "match). An integer member must be index-backed — the primary key (first `@meta.id`) or " +
+          "the first field of a `@db.index.plain` / `@db.index.unique`. " +
+          "Floats, decimals and timestamps are refused.",
+        '@db.index.fulltext "ft_content"',
+        "title: string",
+        "",
+        '@db.index.fulltext "ft_content", 5',
+        "bio: string",
+        "",
+        '@db.index.fulltext "ft_content"',
+        "@db.index.unique",
+        "refNo: number.int",
+      ),
       validate(token, args, doc): TMessages {
         const field = token.parentNode!;
         const sealed = sealedSearchProblem(token, doc, "@db.index.fulltext");
@@ -132,14 +126,12 @@ export const dbIndexAnnotations: TAnnotationsTree = {
     }),
 
     geo: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Geospatial index on a `db.geoPoint` field. " +
-        "Enables `geoSearch()` (distance-ranked) and accelerates `$geoWithin` filters." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.index.geo\n" +
-        "geo: db.geoPoint\n" +
-        "```\n",
+          "Enables `geoSearch()` (distance-ranked) and accelerates `$geoWithin` filters.",
+        "@db.index.geo",
+        "geo: db.geoPoint",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
