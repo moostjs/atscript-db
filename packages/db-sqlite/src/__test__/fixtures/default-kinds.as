@@ -5,6 +5,10 @@ export interface DkDefaults {
     @meta.id
     id: number
 
+    // @db.onUpdate.inc: an implicit DEFAULT 0 (since 0.1.162)
+    @db.onUpdate.inc
+    revision: number.int
+
     @db.default '1.0'
     ratio: number
 

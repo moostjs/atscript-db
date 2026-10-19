@@ -294,4 +294,40 @@ describe.skipIf(!reachable)("[postgres live] locking reads and isolation", () =>
     );
     expect(viaCode).toMatchObject({ id: 5 });
   });
+
+  it("a locking read and bounded updateMany / deleteMany share one transaction", async () => {
+    await adapter().withTransaction(async () => {
+      const locked = (await items().findMany(
+        { filter: {}, controls: { $sort: { id: 1 }, $limit: 2 } },
+        { lock: "update" },
+      )) as any[];
+      expect(locked.map((r) => r.id)).toEqual([1, 2]);
+      const updated = await items().updateMany({}, { qty: 7 }, { limit: 2, sort: { id: -1 } });
+      expect(updated).toMatchObject({ matchedCount: 2, modifiedCount: 2 });
+      expect(await items().deleteMany({}, { limit: 1 })).toEqual({ deletedCount: 1 });
+    });
+    const rows = (await items().findMany({ filter: {}, controls: { $sort: { id: 1 } } })) as any[];
+    expect(rows.map((r) => [r.id, r.qty])).toEqual([
+      [2, 7],
+      [3, 7],
+    ]);
+  });
+
+  it("a bounded updateMany waits for a row another transaction holds, then writes the committed row", async () => {
+    let done = false;
+    const result = await holdingRow1("update", async () => {
+      const t2 = adapter()
+        .withTransaction(() => items().updateMany({}, { qty: 5 }, { limit: 1 }))
+        .then((r: unknown) => {
+          done = true;
+          return r;
+        });
+      await sleep(400);
+      expect(done).toBe(false); // blocked on row 1
+      return { t2 };
+    });
+    expect(await result.t2).toMatchObject({ matchedCount: 1, modifiedCount: 1 });
+    const rows = (await items().findMany({ filter: {}, controls: { $sort: { id: 1 } } })) as any[];
+    expect(rows.map((r) => r.qty)).toEqual([5, 1, 1]); // T1 wrote 10 first, then T2's 5
+  });
 });

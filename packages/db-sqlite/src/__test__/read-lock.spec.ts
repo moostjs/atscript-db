@@ -66,4 +66,27 @@ describe("SqliteAdapter — locking reads and isolation", () => {
       Array.from({ length: 4 }, () => "BEGIN IMMEDIATE"),
     );
   });
+
+  it("a locking read and bounded updateMany / deleteMany share one transaction", async () => {
+    await users.insertMany([
+      { id: 2, name: "b", status: "new", counter: 0 },
+      { id: 3, name: "c", status: "new", counter: 0 },
+    ] as any[]);
+    await adapter.withTransaction(async () => {
+      const locked = await users.findMany(
+        { filter: {}, controls: { $sort: { id: 1 }, $limit: 2 } },
+        { lock: "update" },
+      );
+      expect(locked.map((r: any) => r.id)).toEqual([1, 2]);
+      expect(
+        await users.updateMany({}, { status: "seen" } as any, { limit: 2, sort: { id: -1 } }),
+      ).toMatchObject({ matchedCount: 2, modifiedCount: 2 });
+      expect(await users.deleteMany({}, { limit: 1 })).toEqual({ deletedCount: 1 });
+    });
+    const rows = await users.findMany({ filter: {}, controls: { $sort: { id: 1 } } });
+    expect(rows.map((r: any) => [r.id, r.status])).toEqual([
+      [2, "seen"],
+      [3, "seen"],
+    ]);
+  });
 });
