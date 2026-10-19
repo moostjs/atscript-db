@@ -1,3 +1,4 @@
+import { annotationExample } from "@atscript/core";
 import type { TAtscriptPlugin } from "@atscript/core";
 import { generateModelManifest, type TDbManifestOptions } from "./manifest";
 import { dbAggAnnotations } from "./annotations/agg";
@@ -71,53 +72,47 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
           extensions: {
             vector: {
               type: { kind: "array", of: "number" },
-              documentation:
+              documentation: annotationExample(
                 "Represents a **vector embedding** (array of numbers) for **similarity search**.\n\n" +
-                "- Equivalent to `number[]` but explicitly marks the field as a vector embedding.\n" +
-                "- Each adapter maps this to its native vector type:\n" +
-                "  - **MongoDB** → BSON array\n" +
-                "  - **MySQL 9+** → `VECTOR(N)`\n" +
-                "  - **PostgreSQL** → pgvector `vector(N)`\n" +
-                "  - **SQLite** → JSON\n\n" +
-                "**Example:**\n" +
-                "```atscript\n" +
-                '@db.search.vector 1536, "cosine"\n' +
-                "embedding: db.vector\n" +
-                "```\n",
+                  "- Equivalent to `number[]` but explicitly marks the field as a vector embedding.\n" +
+                  "- Each adapter maps this to its native vector type:\n" +
+                  "  - **MongoDB** → BSON array\n" +
+                  "  - **MySQL 9+** → `VECTOR(N)`\n" +
+                  "  - **PostgreSQL** → pgvector `vector(N)`\n" +
+                  "  - **SQLite** → JSON",
+                '@db.search.vector 1536, "cosine"',
+                "embedding: db.vector",
+              ),
             },
             geoPoint: {
               type: { kind: "array", of: "number" },
-              documentation:
+              documentation: annotationExample(
                 "Represents a **geographic point** as a `[longitude, latitude]` tuple " +
-                "(GeoJSON coordinate order).\n\n" +
-                "- Equivalent to `number[]` of length 2, but explicitly marks the field as a geo point.\n" +
-                "- **Coordinate order is GeoJSON order: longitude first.**\n" +
-                "- Each adapter maps this to its native storage:\n" +
-                "  - **MongoDB** → GeoJSON `{ type: 'Point', coordinates: [lng, lat] }`\n" +
-                "  - **PostgreSQL** → PostGIS `geography(Point,4326)` (JSONB without PostGIS)\n" +
-                "  - **MySQL** → `POINT SRID 4326`\n" +
-                "  - **SQLite** → JSON `TEXT` (haversine-based search)\n\n" +
-                "**Example:**\n" +
-                "```atscript\n" +
-                "@db.index.geo\n" +
-                "geo: db.geoPoint\n" +
-                "```\n",
+                  "(GeoJSON coordinate order).\n\n" +
+                  "- Equivalent to `number[]` of length 2, but explicitly marks the field as a geo point.\n" +
+                  "- **Coordinate order is GeoJSON order: longitude first.**\n" +
+                  "- Each adapter maps this to its native storage:\n" +
+                  "  - **MongoDB** → GeoJSON `{ type: 'Point', coordinates: [lng, lat] }`\n" +
+                  "  - **PostgreSQL** → PostGIS `geography(Point,4326)` (JSONB without PostGIS)\n" +
+                  "  - **MySQL** → `POINT SRID 4326`\n" +
+                  "  - **SQLite** → JSON `TEXT` (haversine-based search)",
+                "@db.index.geo",
+                "geo: db.geoPoint",
+              ),
             },
             currencyCode: {
               type: "string",
-              documentation:
+              documentation: annotationExample(
                 "Represents a **currency code** — typically ISO 4217 (`'USD'`, `'EUR'`, `'JPY'`) " +
-                "but accepts any uppercase alphanumeric code 2–10 chars long, so crypto and " +
-                "custom codes (`'BTC'`, `'USDC'`, `'POINTS'`) fit too.\n\n" +
-                "Pair with `@db.amount.currency.ref 'fieldName'` on a `decimal` field to bind " +
-                "the amount to its row-level currency. The validator checks that the ref target " +
-                "resolves to this type (or a plain `string`).\n\n" +
-                "**Example:**\n" +
-                "```atscript\n" +
-                "currency: db.currencyCode\n" +
-                "@db.amount.currency.ref 'currency'\n" +
-                "amount: decimal\n" +
-                "```\n",
+                  "but accepts any uppercase alphanumeric code 2–10 chars long, so crypto and " +
+                  "custom codes (`'BTC'`, `'USDC'`, `'POINTS'`) fit too.\n\n" +
+                  "Pair with `@db.amount.currency.ref 'fieldName'` on a `decimal` field to bind " +
+                  "the amount to its row-level currency. The validator checks that the ref target " +
+                  "resolves to this type (or a plain `string`).",
+                "currency: db.currencyCode",
+                "@db.amount.currency.ref 'currency'",
+                "amount: decimal",
+              ),
               annotations: {
                 "expect.pattern": [
                   {

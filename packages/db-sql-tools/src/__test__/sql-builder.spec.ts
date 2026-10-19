@@ -1,6 +1,7 @@
 /* eslint-disable unicorn/consistent-function-scoping */
 import { describe, it, expect } from "vite-plus/test";
 
+import { sqlStringLiteral } from "../common";
 import {
   SQL_DEFAULT,
   buildInsert,
@@ -30,6 +31,7 @@ const mockDialect: SqlDialect = {
   quoteIdentifier: (name) => `[${name}]`,
   quoteTable: (name) => `[${name}]`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => {
     if (v === undefined) {
       return null;

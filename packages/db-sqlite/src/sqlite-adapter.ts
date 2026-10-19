@@ -75,6 +75,7 @@ import {
   viewReadSource,
   type TSqlFromSource,
   buildKeyViolationCount,
+  unquoteSqlStringLiteral,
 } from "@atscript/db-sql-tools";
 
 import { buildWhere, buildPrefixedWhere } from "./filter-builder";
@@ -2094,8 +2095,5 @@ function normalizeSqliteDefault(value: string | null): string | undefined {
   }
   // Strip enclosing single quotes from string literals and un-double the
   // escaped quotes (PRAGMA reports DEFAULT 'it''s' as written)
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1).replace(/''/g, "'");
-  }
-  return value;
+  return unquoteSqlStringLiteral(value) ?? value;
 }

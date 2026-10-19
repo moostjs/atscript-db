@@ -20,12 +20,13 @@ export interface SqlDialect {
   /** SQL literal for unlimited LIMIT (SQLite: '-1', MySQL: '18446744073709551615') */
   unlimitedLimit: string;
   /**
-   * Renders a string as an SQL string literal inlined into DDL (view
-   * predicates). Default: `sqlStringLiteral` (quotes doubled) — a dialect
-   * whose literals treat `\` as an escape (MySQL) escapes it too.
+   * Renders a string as an SQL string literal inlined into SQL text (view
+   * predicates, JSON paths, defaults): `sqlStringLiteral` (quotes doubled),
+   * or — for a dialect whose literals treat `\` as an escape (MySQL) — one
+   * that escapes it too.
    * @since 0.1.162
    */
-  stringLiteral?: (value: string) => string;
+  stringLiteral: (value: string) => string;
   /**
    * The optimizer hint asking the engine to MERGE the derived table `alias`
    * into the SELECT reading it (MySQL: `/*+ MERGE(\`alias\`) *\/`) — carried
@@ -456,13 +457,12 @@ export function orderKeySql(
  * reads the same on every dialect (SQLite's quoted path labels have no escape
  * syntax), so it is rejected rather than escaped.
  *
+ * An empty path (the JSON root — a primitive JSON column's value) has no segments.
+ *
  * @since 0.1.136
- * @throws for an empty path or a segment that is empty or holds such a character.
+ * @throws for a segment that is empty or holds such a character.
  */
 export function quotedJsonPathSegments(path: readonly string[]): string[] {
-  if (path.length === 0) {
-    throw new Error("JSON extraction needs a path below the JSON column");
-  }
   return path.map((seg) => {
     let ok = seg.length > 0;
     for (let i = 0; ok && i < seg.length; i++) {

@@ -10,12 +10,13 @@ import {
   renameGeoDistance,
 } from "../geo";
 import { buildWhere } from "../filter-builder";
-import { toSqlValue } from "../common";
+import { toSqlValue, sqlStringLiteral } from "../common";
 
 const dialect: SqlDialect = {
   quoteIdentifier: (n) => `"${n}"`,
   quoteTable: (n) => `"${n}"`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: toSqlValue,
   toParam: (v) => v,
   regex: () => ({ sql: "", params: [] }),

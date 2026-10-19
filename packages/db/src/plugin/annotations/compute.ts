@@ -1,4 +1,4 @@
-import { AnnotationSpec, isPrimitive, isRef } from "@atscript/core";
+import { AnnotationSpec, isPrimitive, isRef, annotationExample } from "@atscript/core";
 import type {
   AtscriptDoc,
   SemanticExprItemNode,
@@ -171,20 +171,19 @@ function validateCompute(token: Token, args: Token[], doc: AtscriptDoc): TMessag
 
 export const dbComputeAnnotations: TAnnotationsTree = {
   compute: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Declares a **computed view column** (since 0.1.147): closed arithmetic over the view's own " +
-      "fields — dimensions, aggregates, first-row-join fields and other computed fields — " +
-      "evaluated by the database, so the column sorts, filters and pages like any other.\n\n" +
-      "Grammar: `+ - * /`, unary `-`, parentheses, numeric literals, `coalesce(a, b, …)`. " +
-      "Every value is a double (`7 / 2 = 3.5`); a NULL operand yields NULL; division by zero " +
-      "yields NULL — so an expression with `/` or an optional operand needs an optional field.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.agg.count 'id', `Issue.status = 'open'`\n" +
-      "openCount: Issue.id\n\n" +
-      "@db.compute `openCount * 10 + coalesce(oldestSeverity, 0)`\n" +
-      "rank: number\n" +
-      "```\n",
+        "fields — dimensions, aggregates, first-row-join fields and other computed fields — " +
+        "evaluated by the database, so the column sorts, filters and pages like any other.\n\n" +
+        "Grammar: `+ - * /`, unary `-`, parentheses, numeric literals, `coalesce(a, b, …)`. " +
+        "Every value is a double (`7 / 2 = 3.5`); a NULL operand yields NULL; division by zero " +
+        "yields NULL — so an expression with `/` or an optional operand needs an optional field.",
+      "@db.agg.count 'id', `Issue.status = 'open'`",
+      "openCount: Issue.id",
+      "",
+      "@db.compute `openCount * 10 + coalesce(oldestSeverity, 0)`",
+      "rank: number",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     argument: {

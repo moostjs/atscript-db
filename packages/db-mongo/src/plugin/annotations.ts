@@ -1,59 +1,15 @@
-import type {
-  AtscriptDoc,
-  SemanticNode,
-  TAnnotationSpecConfig,
-  TAnnotationsTree,
-  TMessages,
+import type { TAnnotationsTree, TMessages } from "@atscript/core";
+import {
+  AnnotationSpec,
+  isInterface,
+  isStructure,
+  isRef,
+  isPrimitive,
+  annotationExample,
 } from "@atscript/core";
-import { AnnotationSpec, isInterface, isStructure, isRef, isPrimitive } from "@atscript/core";
-import { encryptedSearchProblem } from "@atscript/db/shared";
+import { findStoredField, refuseCiphertext } from "@atscript/db/shared";
 
-/**
- * Atlas Search over ciphertext is impossible: refuses a search field inside an
- * `@db.encrypted` object or on a view field over an encrypted source (since
- * 0.1.162; the field's own `@db.encrypted`, and a ref-typed encrypted field
- * whose type declares the annotation, are reported by that spec).
- */
-function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
-  return (token, _args, doc) => {
-    const problem = encryptedSearchProblem(token, doc, annotation);
-    return problem ? [problem] : [];
-  };
-}
-
-/** Navigation fields hold another collection's documents, never this one's. */
-const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"];
-
-/**
- * Path of the first `@db.encrypted` field stored in a structure (nested
- * objects and type refs included; navigation relations skipped).
- */
-function findEncryptedField(
-  struct: SemanticNode | undefined,
-  doc: AtscriptDoc,
-  prefix = "",
-  seen = new Set<SemanticNode>(),
-): string | undefined {
-  if (!struct || seen.has(struct)) return undefined;
-  seen.add(struct);
-  const props = isInterface(struct) ? struct.props : isStructure(struct) ? struct.props : undefined;
-  if (!props) {
-    const def = struct.getDefinition();
-    return def && def !== struct ? findEncryptedField(def, doc, prefix, seen) : undefined;
-  }
-  for (const [name, prop] of props) {
-    if (NAV_ANNOTATIONS.some((key) => prop.countAnnotations(key) > 0)) continue;
-    const path = prefix ? `${prefix}.${name}` : name;
-    if (prop.countAnnotations("db.encrypted") > 0) return path;
-    let def = prop.getDefinition();
-    if (def && isRef(def)) def = doc.unwindType(def.id!, def.chain)?.def;
-    if (def && (isStructure(def) || isInterface(def))) {
-      const found = findEncryptedField(def, doc, path, seen);
-      if (found) return found;
-    }
-  }
-  return undefined;
-}
+import { dynamicSearchEncryptedMessage } from "../lib/search-messages";
 
 const analyzers = [
   "lucene.standard",
@@ -109,20 +65,18 @@ const fuzzyDescription =
  */
 export const annotations: TAnnotationsTree = {
   collection: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Marks an interface as a **MongoDB collection**.\n\n" +
-      '- Use together with `@db.table "name"` which provides the collection name.\n' +
-      "- Automatically injects a **non-optional** `_id` field if not explicitly defined.\n" +
-      "- `_id` must be of type **`string`**, **`number`**, or **`mongo.objectId`**.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "users"\n' +
-      "@db.mongo.collection\n" +
-      "export interface User {\n" +
-      "    _id: mongo.objectId\n" +
-      "    email: string.email\n" +
-      "}\n" +
-      "```\n",
+        '- Use together with `@db.table "name"` which provides the collection name.\n' +
+        "- Automatically injects a **non-optional** `_id` field if not explicitly defined.\n" +
+        "- `_id` must be of type **`string`**, **`number`**, or **`mongo.objectId`**.",
+      '@db.table "users"',
+      "@db.mongo.collection",
+      "export interface User {",
+      "    _id: mongo.objectId",
+      "    email: string.email",
+      "}",
+    ),
     nodeType: ["interface"],
     passedWhenReferred: false,
     validate(token, args, doc) {
@@ -177,22 +131,20 @@ export const annotations: TAnnotationsTree = {
   }),
 
   capped: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Creates a **capped collection** with a fixed maximum size.\n\n" +
-      "- Capped collections have fixed size and maintain insertion order.\n" +
-      "- Ideal for logs, event streams, and cache-like data.\n" +
-      '- Changing the cap size requires dropping and recreating the collection — use `@db.sync.method "drop"` to allow this.\n\n' +
-      "**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "logs"\n' +
-      "@db.mongo.collection\n" +
-      "@db.mongo.capped 10485760, 10000\n" +
-      '@db.sync.method "drop"\n' +
-      "export interface LogEntry {\n" +
-      "    message: string\n" +
-      "    timestamp: number\n" +
-      "}\n" +
-      "```\n",
+        "- Capped collections have fixed size and maintain insertion order.\n" +
+        "- Ideal for logs, event streams, and cache-like data.\n" +
+        '- Changing the cap size requires dropping and recreating the collection — use `@db.sync.method "drop"` to allow this.',
+      '@db.table "logs"',
+      "@db.mongo.collection",
+      "@db.mongo.capped 10485760, 10000",
+      '@db.sync.method "drop"',
+      "export interface LogEntry {",
+      "    message: string",
+      "    timestamp: number",
+      "}",
+    ),
     nodeType: ["interface"],
     passedWhenReferred: false,
     multiple: false,
@@ -215,26 +167,26 @@ export const annotations: TAnnotationsTree = {
 
   search: {
     dynamic: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Creates a **dynamic MongoDB Search Index** that applies to the entire collection.\n\n" +
-        "- **Indexes all text fields automatically** (no need to specify fields).\n" +
-        "- Supports **language analyzers** for text tokenization.\n" +
-        "- Enables **fuzzy search** (typo tolerance) if needed.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.mongo.search.dynamic "lucene.english", 1\n' +
-        "export interface MongoCollection {}\n" +
-        "```\n",
+          "- **Indexes all text fields automatically** (no need to specify fields).\n" +
+          "- Supports **language analyzers** for text tokenization.\n" +
+          "- Enables **fuzzy search** (typo tolerance) if needed.",
+        '@db.mongo.search.dynamic "lucene.english", 1',
+        "export interface MongoCollection {}",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
         // A dynamic mapping indexes every string field — ciphertext included
-        const encrypted = findEncryptedField(token.parentNode, doc);
+        const encrypted = findStoredField(token.parentNode, doc, (prop, path) =>
+          prop.countAnnotations("db.encrypted") > 0 ? path : undefined,
+        );
         if (!encrypted) return [];
         return [
           {
-            message: `@db.mongo.search.dynamic indexes every field, including the @db.encrypted field "${encrypted}" — Atlas Search over ciphertext is impossible; use @db.mongo.search.static with @db.mongo.search.text fields`,
+            message: dynamicSearchEncryptedMessage(encrypted),
             severity: 1,
             range: token.range,
           },
@@ -260,16 +212,14 @@ export const annotations: TAnnotationsTree = {
     }),
 
     static: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Defines a **MongoDB Atlas Search Index** for the collection. The props can refer to this index using `@db.mongo.search.text` annotation.\n\n" +
-        "- **Creates a named search index** for full-text search.\n" +
-        "- **Specify analyzers and fuzzy search** behavior at the index level.\n" +
-        "- **Fields must explicitly use `@db.mongo.search.text`** to be included in this search index.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.mongo.search.static "lucene.english", 1, "mySearchIndex"\n' +
-        "export interface MongoCollection {}\n" +
-        "```\n",
+          "- **Creates a named search index** for full-text search.\n" +
+          "- **Specify analyzers and fuzzy search** behavior at the index level.\n" +
+          "- **Fields must explicitly use `@db.mongo.search.text`** to be included in this search index.",
+        '@db.mongo.search.static "lucene.english", 1, "mySearchIndex"',
+        "export interface MongoCollection {}",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       multiple: true,
@@ -307,15 +257,13 @@ export const annotations: TAnnotationsTree = {
     }),
 
     text: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Marks a field to be **included in a MongoDB Atlas Search Index** defined by `@db.mongo.search.static`.\n\n" +
-        "- **The field has to reference an existing search index name**.\n" +
-        "- If index name is not defined, a new search index with default attributes will be created.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.mongo.search.text "lucene.english", "mySearchIndex"\n' +
-        "firstName: string\n" +
-        "```\n",
+          "- **The field has to reference an existing search index name**.\n" +
+          "- If index name is not defined, a new search index with default attributes will be created.",
+        '@db.mongo.search.text "lucene.english", "mySearchIndex"',
+        "firstName: string",
+      ),
       nodeType: ["prop"],
       validate: refuseCiphertext("@db.mongo.search.text"),
       passedWhenReferred: false,
@@ -341,17 +289,15 @@ export const annotations: TAnnotationsTree = {
     }),
 
     autocomplete: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Marks a field for **prefix / typeahead (as-you-type)** matching in a MongoDB Atlas Search Index.\n\n" +
-        "- Indexes the field as the Atlas **`autocomplete`** type, **and** double-maps it as `string` so exact-word hits still rank.\n" +
-        '- Lets `search()` match partial words: with the default `edgeGram` tokenization, `"art"` matches `"Artem"` **as you type** (no whole word required).\n' +
-        "- Use `nGram` tokenization for true mid-word (infix/substring) matching at higher index cost.\n" +
-        "- Like `@db.mongo.search.text`, the field joins the index named by `indexName` (or the default index).\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.mongo.search.autocomplete "users"\n' +
-        "username: string\n" +
-        "```\n",
+          "- Indexes the field as the Atlas **`autocomplete`** type, **and** double-maps it as `string` so exact-word hits still rank.\n" +
+          '- Lets `search()` match partial words: with the default `edgeGram` tokenization, `"art"` matches `"Artem"` **as you type** (no whole word required).\n' +
+          "- Use `nGram` tokenization for true mid-word (infix/substring) matching at higher index cost.\n" +
+          "- Like `@db.mongo.search.text`, the field joins the index named by `indexName` (or the default index).",
+        '@db.mongo.search.autocomplete "users"',
+        "username: string",
+      ),
       nodeType: ["prop"],
       validate: refuseCiphertext("@db.mongo.search.autocomplete"),
       passedWhenReferred: false,

@@ -1,5 +1,6 @@
 import {
   AnnotationSpec,
+  annotationExample,
   type AtscriptDoc,
   isArray,
   isInterface,
@@ -53,6 +54,29 @@ export function validateExclusiveWith(
     });
   }
   return errors;
+}
+
+/**
+ * Reports each of `pairs` (`[annotation, why]`) the field carrying `token`
+ * also carries — its own or inherited through its type ref (the field's
+ * effective annotations, what the runtime mirror reads off the metadata):
+ * `${tag} cannot coexist with @${annotation} — ${why}`.
+ * @since 0.1.162
+ */
+export function validateIncompatible(
+  token: Token,
+  tag: string,
+  pairs: ReadonlyArray<readonly [annotation: string, why: string]>,
+  doc: AtscriptDoc,
+): TMessages {
+  const effective = effectiveAnnotationNames(token.parentNode!, doc);
+  return pairs
+    .filter(([name]) => effective.has(name))
+    .map(([name, why]) => ({
+      message: `${tag} cannot coexist with @${name} — ${why}`,
+      severity: 1 as const,
+      range: token.range,
+    }));
 }
 
 /** Whether a prop is a field of a view interface (`@db.view` / `@db.view.for`). */
@@ -302,14 +326,12 @@ export function getAnnotationAlias(prop: SemanticNode, annotationName: string): 
  */
 export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSpec {
   return new AnnotationSpec({
-    description:
-      `Referential action when the target ${name === "onDelete" ? "row is deleted" : "key is updated"}. Only valid on @db.rel.FK fields.\n\n` +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.rel.FK\n" +
-      `@db.rel.${name} "cascade"\n` +
-      "authorId: User.id\n" +
-      "```\n",
+    description: annotationExample(
+      `Referential action when the target ${name === "onDelete" ? "row is deleted" : "key is updated"}. Only valid on @db.rel.FK fields.`,
+      "@db.rel.FK",
+      `@db.rel.${name} "cascade"`,
+      "authorId: User.id",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     argument: {

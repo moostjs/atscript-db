@@ -163,6 +163,7 @@ export const pgDialect: SqlDialect = {
     return quoteTableName(name);
   },
   unlimitedLimit: "ALL",
+  stringLiteral: sqlStringLiteral,
   toValue: toPgValue,
   toParam(value: unknown) {
     if (value === undefined) {
@@ -242,8 +243,7 @@ const PG_JSON_LEAF_CAST: Readonly<Record<TViewJsonType, string>> = {
 
 /** A `#>` / `#>>` path literal (`'{"a","b"}'`). */
 function pgJsonPath(path: readonly string[]): string {
-  // An empty path addresses the JSON root (a primitive JSON column's value)
-  if (path.length === 0) return sqlStringLiteral("{}");
+  // An empty path ('{}') addresses the JSON root (a primitive JSON column's value)
   return sqlStringLiteral(`{${quotedJsonPathSegments(path).join(",")}}`);
 }
 

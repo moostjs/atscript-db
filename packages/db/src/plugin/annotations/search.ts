@@ -1,32 +1,22 @@
-import { AnnotationSpec } from "@atscript/core";
-import type { TAnnotationsTree, TAnnotationSpecConfig } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
+import type { TAnnotationsTree } from "@atscript/core";
 
-import { encryptedSearchProblem } from "../../shared/view-validation";
-
-/** Refuses the feature on a field that reads ciphertext (since 0.1.162). */
-function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
-  return (token, _args, doc) => {
-    const problem = encryptedSearchProblem(token, doc, annotation);
-    return problem ? [problem] : [];
-  };
-}
+import { refuseCiphertext } from "../../shared/view-validation";
 
 export const dbSearchAnnotations: TAnnotationsTree = {
   search: {
     vector: {
       $self: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Marks a field as a **vector embedding** for **similarity search**.\n\n" +
-          "- Each adapter maps this to its native vector type and index:\n" +
-          "  - **MongoDB** → Atlas `$vectorSearch` index\n" +
-          "  - **MySQL 9+** → `VECTOR(N)` column + `VEC_DISTANCE_*` functions\n" +
-          "  - **PostgreSQL** → pgvector `vector(N)` column + distance operators\n" +
-          "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)\n\n" +
-          "**Example:**\n" +
-          "```atscript\n" +
-          '@db.search.vector 1536, "cosine"\n' +
-          "embedding: db.vector\n" +
-          "```\n",
+            "- Each adapter maps this to its native vector type and index:\n" +
+            "  - **MongoDB** → Atlas `$vectorSearch` index\n" +
+            "  - **MySQL 9+** → `VECTOR(N)` column + `VEC_DISTANCE_*` functions\n" +
+            "  - **PostgreSQL** → pgvector `vector(N)` column + distance operators\n" +
+            "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)",
+          '@db.search.vector 1536, "cosine"',
+          "embedding: db.vector",
+        ),
         nodeType: ["prop"],
         validate: refuseCiphertext("@db.search.vector"),
         passedWhenReferred: false,
@@ -73,17 +63,15 @@ export const dbSearchAnnotations: TAnnotationsTree = {
       }),
 
       threshold: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Sets a **default minimum similarity threshold** for vector search queries on this field.\n\n" +
-          "- Results with a similarity score below this threshold are excluded.\n" +
-          "- Query-time `$threshold` control overrides this default.\n" +
-          "- Value range: `0` to `1` (where `1` means exact match).\n\n" +
-          "**Example:**\n" +
-          "```atscript\n" +
-          '@db.search.vector 1536, "cosine"\n' +
-          "@db.search.vector.threshold 0.7\n" +
-          "embedding: db.vector\n" +
-          "```\n",
+            "- Results with a similarity score below this threshold are excluded.\n" +
+            "- Query-time `$threshold` control overrides this default.\n" +
+            "- Value range: `0` to `1` (where `1` means exact match).",
+          '@db.search.vector 1536, "cosine"',
+          "@db.search.vector.threshold 0.7",
+          "embedding: db.vector",
+        ),
         nodeType: ["prop"],
         passedWhenReferred: false,
         multiple: false,
@@ -98,17 +86,16 @@ export const dbSearchAnnotations: TAnnotationsTree = {
     },
 
     filter: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Assigns a field as a **pre-filter** for a **vector search index**.\n\n" +
-        "- Filters allow vector search queries to return results only within a specific subset.\n" +
-        "- The referenced index must be defined using `@db.search.vector`.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.search.vector 1536, "cosine"\n' +
-        "embedding: db.vector\n\n" +
-        '@db.search.filter "embedding"\n' +
-        "category: string\n" +
-        "```\n",
+          "- Filters allow vector search queries to return results only within a specific subset.\n" +
+          "- The referenced index must be defined using `@db.search.vector`.",
+        '@db.search.vector 1536, "cosine"',
+        "embedding: db.vector",
+        "",
+        '@db.search.filter "embedding"',
+        "category: string",
+      ),
       nodeType: ["prop"],
       validate: refuseCiphertext("@db.search.filter"),
       passedWhenReferred: false,

@@ -1,4 +1,11 @@
-import type { AtscriptDoc, SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
+import type {
+  AtscriptDoc,
+  SemanticNode,
+  SemanticRefNode,
+  TAnnotationSpecConfig,
+  Token,
+  TMessages,
+} from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure } from "@atscript/core";
 
 import {
@@ -121,19 +128,46 @@ export function viewFieldSeals(field: SemanticNode, doc: AtscriptDoc, depth = 0)
     path = (aggField ?? field.id ?? "").split(".");
   }
   if (!typeName || !path.length || !path[0]) return seals;
-  for (let i = 1; i <= path.length; i++) {
-    const step = doc.unwindType(typeName, path.slice(0, i));
-    if (!step) break;
+  // One segment at a time, each step from the previous one's definition
+  let step: TPathStep | undefined = doc.unwindType(typeName, [path[0]]);
+  for (let i = 1; step; i++) {
     const node = step.node;
-    if (!node || !isProp(node)) continue;
-    if (node.countAnnotations("db.writeOnly") > 0) seals.writeOnly = true;
-    if (node.countAnnotations("db.encrypted") > 0) seals.encrypted = true;
-    // A view over a view: the source view's field carries its own seals
-    const inner = viewFieldSeals(node, step.doc, depth + 1);
-    seals.writeOnly ||= inner.writeOnly;
-    seals.encrypted ||= inner.encrypted;
+    if (node && isProp(node)) {
+      if (node.countAnnotations("db.writeOnly") > 0) seals.writeOnly = true;
+      if (node.countAnnotations("db.encrypted") > 0) seals.encrypted = true;
+      // A view over a view: the source view's field carries its own seals
+      const inner = viewFieldSeals(node, step.doc, depth + 1);
+      seals.writeOnly ||= inner.writeOnly;
+      seals.encrypted ||= inner.encrypted;
+    }
+    if (i === path.length) break;
+    step = propStep(step, path[i]);
   }
   return seals;
+}
+
+/** A resolved step of a field path (the shape `AtscriptDoc.unwindType` returns). */
+interface TPathStep {
+  doc: AtscriptDoc;
+  node?: SemanticNode;
+  def: SemanticNode;
+}
+
+/** The step to the `name` prop of `step`'s object definition — its type ref resolved. */
+function propStep(step: TPathStep, name: string): TPathStep | undefined {
+  const def = step.def;
+  const prop = isInterface(def) || isStructure(def) ? def.props.get(name) : undefined;
+  const propDef = prop?.getDefinition();
+  if (!prop || !propDef) return undefined;
+  if (!isRef(propDef)) return { doc: step.doc, node: prop, def: propDef };
+  const unwound = step.doc.unwindType(propDef.id!, (propDef as SemanticRefNode).chain);
+  return unwound && { doc: unwound.doc, node: prop, def: unwound.def };
+}
+
+/** {@link viewFieldSeals} of `field`, computed on first use. */
+function lazySeals(field: SemanticNode, doc: AtscriptDoc): () => TViewFieldSeals {
+  let seals: TViewFieldSeals | undefined;
+  return () => (seals ??= viewFieldSeals(field, doc));
 }
 
 /**
@@ -147,10 +181,11 @@ export function viewSourceSealProblem(
   token: Token,
   doc: AtscriptDoc,
   annotation: string,
+  seals = lazySeals(token.parentNode!, doc),
 ): TMessages[number] | undefined {
   const field = token.parentNode!;
   if (field.countAnnotations("db.writeOnly") > 0) return undefined;
-  if (!viewFieldSeals(field, doc).writeOnly) return undefined;
+  if (!seals().writeOnly) return undefined;
   return {
     message: `${annotation} on "${field.id}", which reads a @db.writeOnly source field — search results would reveal the sealed value`,
     severity: 1,
@@ -171,13 +206,21 @@ export function encryptedSearchProblem(
   doc: AtscriptDoc,
   annotation: string,
 ): TMessages[number] | undefined {
+  return encryptedProblem(token, annotation, lazySeals(token.parentNode!, doc));
+}
+
+function encryptedProblem(
+  token: Token,
+  annotation: string,
+  seals: () => TViewFieldSeals,
+): TMessages[number] | undefined {
   const field = token.parentNode!;
   if (field.countAnnotations("db.encrypted") > 0) return undefined;
   const where = encryptedAncestorName(field);
   const why =
     where !== undefined
       ? `it is inside the @db.encrypted field "${where}"`
-      : viewFieldSeals(field, doc).encrypted
+      : seals().encrypted
         ? "it reads a @db.encrypted source field"
         : undefined;
   if (!why) return undefined;
@@ -188,8 +231,86 @@ export function encryptedSearchProblem(
   };
 }
 
-/** Navigation fields hold another table's rows, never part of this field's value. */
-const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"];
+/**
+ * {@link viewSourceSealProblem}, else {@link encryptedSearchProblem} — the
+ * view field's source seals computed once.
+ */
+export function sealedSearchProblem(
+  token: Token,
+  doc: AtscriptDoc,
+  annotation: string,
+): TMessages[number] | undefined {
+  const seals = lazySeals(token.parentNode!, doc);
+  return (
+    viewSourceSealProblem(token, doc, annotation, seals) ??
+    encryptedProblem(token, annotation, seals)
+  );
+}
+
+/**
+ * An annotation's `validate` refusing it on a field that reads ciphertext
+ * ({@link encryptedSearchProblem}) — for the search features of sibling
+ * adapter plugins too.
+ * @since 0.1.162
+ */
+export function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
+  return (token, _args, doc) => {
+    const problem = encryptedSearchProblem(token, doc, annotation);
+    return problem ? [problem] : [];
+  };
+}
+
+/**
+ * Navigation relation annotations — a navigation field holds another table's
+ * rows, never part of this table's stored value.
+ * @since 0.1.162
+ */
+export const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
+
+/** Whether a prop is a navigation field ({@link NAV_ANNOTATIONS}). */
+export function isNavProp(prop: SemanticNode): boolean {
+  return NAV_ANNOTATIONS.some((key) => prop.countAnnotations(key) > 0);
+}
+
+/**
+ * Walks the fields stored in `root` (an interface, a structure or a type ref)
+ * depth-first — nested objects and type refs included, navigation fields and
+ * arrays skipped — and returns the first non-`undefined` result of `visit`.
+ * `path` is the field's dotted path below `prefix`; `viaRef` tells whether
+ * a type ref was followed to reach it.
+ * @since 0.1.162
+ */
+export function findStoredField<T>(
+  root: SemanticNode | undefined,
+  doc: AtscriptDoc,
+  visit: (prop: SemanticNode, path: string, viaRef: boolean) => T | undefined,
+  prefix = "",
+): T | undefined {
+  const seen = new Set<SemanticNode>();
+  const walk = (
+    def: SemanticNode | undefined,
+    defDoc: AtscriptDoc,
+    viaRef: boolean,
+    prefix: string,
+  ): T | undefined => {
+    if (!def || seen.has(def)) return undefined;
+    seen.add(def);
+    if (isRef(def)) {
+      const unwound = defDoc.unwindType(def.id!, (def as SemanticRefNode).chain);
+      return unwound ? walk(unwound.def, unwound.doc, true, prefix) : undefined;
+    }
+    const props = isInterface(def) || isStructure(def) ? def.props : undefined;
+    if (!props) return undefined;
+    for (const [name, prop] of props) {
+      if (isNavProp(prop)) continue;
+      const path = prefix ? `${prefix}.${name}` : name;
+      const found = visit(prop, path, viaRef) ?? walk(prop.getDefinition(), defDoc, viaRef, path);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  return walk(root, doc, false, prefix);
+}
 
 /**
  * A search feature ({@link ENCRYPTED_SEARCH_FEATURES}) declared inside the
@@ -205,34 +326,16 @@ export function encryptedTypeSearchProblem(
   doc: AtscriptDoc,
 ): TMessages[number] | undefined {
   const field = token.parentNode!;
-  const seen = new Set<SemanticNode>();
-  const visit = (
-    def: SemanticNode | undefined,
-    defDoc: AtscriptDoc,
-    viaRef: boolean,
-    prefix: string,
-  ): { path: string; feature: string } | undefined => {
-    if (!def || seen.has(def)) return undefined;
-    seen.add(def);
-    if (isRef(def)) {
-      const unwound = defDoc.unwindType(def.id!, (def as SemanticRefNode).chain);
-      return unwound ? visit(unwound.def, unwound.doc, true, prefix) : undefined;
-    }
-    const props = isInterface(def) || isStructure(def) ? def.props : undefined;
-    if (!props) return undefined;
-    for (const [name, prop] of props) {
-      if (NAV_ANNOTATIONS.some((key) => prop.countAnnotations(key) > 0)) continue;
-      const path = prefix ? `${prefix}.${name}` : name;
-      if (viaRef) {
-        const feature = ENCRYPTED_SEARCH_FEATURES.find((key) => prop.countAnnotations(key) > 0);
-        if (feature) return { path, feature };
-      }
-      const found = visit(prop.getDefinition(), defDoc, viaRef, path);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  const found = visit(field.getDefinition(), doc, false, field.id ?? "");
+  const found = findStoredField(
+    field.getDefinition(),
+    doc,
+    (prop, path, viaRef) => {
+      if (!viaRef) return undefined;
+      const feature = ENCRYPTED_SEARCH_FEATURES.find((key) => prop.countAnnotations(key) > 0);
+      return feature ? { path, feature } : undefined;
+    },
+    field.id ?? "",
+  );
   if (!found) return undefined;
   return {
     message: `@db.encrypted on "${field.id}" — its type declares @${found.feature} on "${found.path}"; search over ciphertext is impossible`,

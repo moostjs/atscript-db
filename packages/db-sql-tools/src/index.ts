@@ -61,6 +61,7 @@ export {
 } from "./sql-builder";
 export {
   sqlStringLiteral,
+  unquoteSqlStringLiteral,
   jsonDollarPath,
   sqlTimeZoneLiteral,
   toSqlValue,

@@ -1,4 +1,4 @@
-import { aliasTargetOf } from "@atscript/db";
+import { aliasTargetOf, isNavRelation } from "@atscript/db";
 import {
   serializeAnnotatedType,
   type TAtscriptAnnotatedType,
@@ -31,12 +31,6 @@ export interface TTerminalRef {
 }
 
 type TShallowTarget = { id: string; metadata: Record<string, unknown> };
-
-const NAV_KEYS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
-
-function isNav(metadata: { has(key: string): boolean }): boolean {
-  return NAV_KEYS.some((key) => metadata.has(key));
-}
 
 /**
  * Resolves a (possibly dotted) prop path against an object type by walking
@@ -138,7 +132,7 @@ function walk(
       const sProp = sType.props[name];
       if (!sProp) continue;
       // Nav subtrees expand fully and their FK props are direct hops — skip.
-      if (isNav(prop.metadata)) continue;
+      if (isNavRelation(prop)) continue;
       if (prop.ref?.field && sProp.ref && !("type" in sProp.ref.type)) {
         const terminal = resolveTerminalRef(prop);
         if (terminal) {

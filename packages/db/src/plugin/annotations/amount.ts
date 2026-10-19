@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import {
   validateExclusiveWith,
@@ -12,16 +12,14 @@ export const dbAmountAnnotations: TAnnotationsTree = {
   amount: {
     currency: {
       $self: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Hard-coded **currency code** for this amount field. Use when a table stores " +
-          "amounts in a single, fixed currency.\n\n" +
-          "For per-row currency, use `@db.amount.currency.ref 'fieldName'` instead.\n\n" +
-          "Only valid on `decimal` fields — money in floating-point is wrong.\n\n" +
-          "**Example:**\n" +
-          "```atscript\n" +
-          "@db.amount.currency 'EUR'\n" +
-          "amount: decimal\n" +
-          "```\n",
+            "amounts in a single, fixed currency.\n\n" +
+            "For per-row currency, use `@db.amount.currency.ref 'fieldName'` instead.\n\n" +
+            "Only valid on `decimal` fields — money in floating-point is wrong.",
+          "@db.amount.currency 'EUR'",
+          "amount: decimal",
+        ),
         nodeType: ["prop"],
         multiple: false,
         argument: {
@@ -53,17 +51,15 @@ export const dbAmountAnnotations: TAnnotationsTree = {
         },
       }),
       ref: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Binds this amount to a **sibling field** that holds its currency code. " +
-          "Use when each row may have a different currency.\n\n" +
-          "The referenced field should be of type `db.currencyCode` (or at least a `string`).\n\n" +
-          "Only valid on `decimal` fields.\n\n" +
-          "**Example:**\n" +
-          "```atscript\n" +
-          "currency: db.currencyCode\n" +
-          "@db.amount.currency.ref 'currency'\n" +
-          "amount: decimal\n" +
-          "```\n",
+            "Use when each row may have a different currency.\n\n" +
+            "The referenced field should be of type `db.currencyCode` (or at least a `string`).\n\n" +
+            "Only valid on `decimal` fields.",
+          "currency: db.currencyCode",
+          "@db.amount.currency.ref 'currency'",
+          "amount: decimal",
+        ),
         nodeType: ["prop"],
         // Binds to a sibling by name in the DECLARING interface — a referring
         // field's host may not have that sibling, so the binding must not

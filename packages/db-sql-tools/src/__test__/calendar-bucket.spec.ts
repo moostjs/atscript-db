@@ -3,7 +3,7 @@ import { BUCKET_UNITS, type BucketUnit } from "@uniqu/core";
 import { UniquSelect, type TDbFieldMeta, type TResolvedBucket } from "@atscript/db";
 
 import { buildAggregateSelect, buildAggregateCount, groupKeySql } from "../agg";
-import { sqlTimeZoneLiteral } from "../common";
+import { sqlTimeZoneLiteral, sqlStringLiteral } from "../common";
 import type { SqlDialect, TSqlFragment } from "../dialect";
 
 /**
@@ -18,6 +18,7 @@ const baseDialect: SqlDialect = {
   quoteIdentifier: (name) => `"${name}"`,
   quoteTable: (name) => `"${name}"`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => v,
   toParam: (v) => v,
   regex: (col, v) => ({ sql: `${col} LIKE ?`, params: [String(v)] }),

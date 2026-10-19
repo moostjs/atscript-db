@@ -80,6 +80,7 @@ import {
   orFragment,
   buildKeyViolationCount,
   writeLimitWhere,
+  unquoteSqlStringLiteral,
 } from "@atscript/db-sql-tools";
 
 import { mapIgnoredBatch } from "./insert-ignore";
@@ -2980,16 +2981,9 @@ function normalizePgDefault(value: string | null, isIdentity: string): string | 
   if (lower.startsWith("nextval(")) {
     return "fn:increment";
   }
-  // Strip ::type casts (e.g., 'value'::character varying → 'value')
-  const castMatch = cleaned.match(/^'(.*)'::[\w\s]+$/);
-  if (castMatch) {
-    return castMatch[1].replace(/''/g, "'");
-  }
-  // Strip enclosing single quotes
-  if (cleaned.startsWith("'") && cleaned.endsWith("'")) {
-    return cleaned.slice(1, -1).replace(/''/g, "'");
-  }
-  return cleaned;
+  // Strip a ::type cast (e.g., 'value'::character varying) and the enclosing single quotes
+  const castMatch = cleaned.match(/^('.*')::[\w\s]+$/);
+  return unquoteSqlStringLiteral(castMatch ? castMatch[1] : cleaned) ?? cleaned;
 }
 
 /**

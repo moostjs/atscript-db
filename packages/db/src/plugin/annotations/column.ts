@@ -1,24 +1,32 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure, isPrimitive } from "@atscript/core";
-import type { AtscriptDoc, SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
+import type {
+  AtscriptDoc,
+  SemanticNode,
+  SemanticPrimitiveNode,
+  SemanticRefNode,
+  Token,
+  TMessages,
+} from "@atscript/core";
 import {
+  effectiveAnnotationNames,
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  primitiveBaseType,
   searchFieldVerdict,
   validateFieldBaseType,
+  validateIncompatible,
 } from "../../shared/annotation-utils";
+import { ENCRYPTED_INCOMPATIBLE } from "../../shared/search-fields";
 import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
 import {
-  encryptedSearchProblem,
   encryptedTypeSearchProblem,
+  isNavProp,
   jsonChainInfo,
-  viewSourceSealProblem,
+  sealedSearchProblem,
 } from "../../shared/view-validation";
-
-/** Nav-field annotations: a navigation field has no column on this table. */
-const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
 
 /**
  * Compile-time placement rules of `@db.column.version.exempt` (E1–E5, W1, W2).
@@ -40,7 +48,7 @@ function validateVersionExempt(token: Token): TMessages {
   if (field.countAnnotations("meta.id") > 0) {
     fail(`${tag} cannot mark a primary key — it identifies the row and is never patched`);
   }
-  if (NAV_ANNOTATIONS.some((n) => field.countAnnotations(n) > 0)) {
+  if (isNavProp(field)) {
     fail(
       `${tag} cannot mark a navigation field — related rows follow their own table's versioning`,
     );
@@ -99,6 +107,18 @@ function validateVersionExempt(token: Token): TMessages {
   return errors;
 }
 
+/** Annotations a `@db.onUpdate.inc` field cannot carry, with the reason. */
+const ON_UPDATE_INC_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string]> = [
+  ["meta.id", "the primary key identifies the row and is never updated"],
+  ["db.column.version", "the version column is already bumped on every update"],
+  ["db.onUpdate.now", "a field is either a time stamp or a counter"],
+  ["db.default", "the counter starts at 0"],
+  ["db.default.increment", "the counter starts at 0"],
+  ["db.default.uuid", "the counter starts at 0"],
+  ["db.default.now", "the counter starts at 0"],
+  ["db.json", "a JSON column is written as one value"],
+];
+
 /**
  * Compile-time rules of `@db.onUpdate.inc` (since 0.1.162). The runtime
  * mirror (top level, encryption) is in `TableMetadata`.
@@ -120,18 +140,7 @@ function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
   if (!struct?.ownerNode || !isInterface(struct.ownerNode)) {
     fail(`${tag} must sit on a top-level field of the table, not inside a nested object`);
   }
-  for (const [name, why] of [
-    ["meta.id", "the primary key identifies the row and is never updated"],
-    ["db.column.version", "the version column is already bumped on every update"],
-    ["db.onUpdate.now", "a field is either a time stamp or a counter"],
-    ["db.default", "the counter starts at 0"],
-    ["db.default.increment", "the counter starts at 0"],
-    ["db.default.uuid", "the counter starts at 0"],
-    ["db.default.now", "the counter starts at 0"],
-    ["db.json", "a JSON column is written as one value"],
-  ]) {
-    if (field.countAnnotations(name) > 0) fail(`${tag} cannot coexist with @${name} — ${why}`);
-  }
+  errors.push(...validateIncompatible(token, tag, ON_UPDATE_INC_INCOMPATIBLE, doc));
   return errors;
 }
 
@@ -140,33 +149,27 @@ function isIntegerField(field: SemanticNode, doc: AtscriptDoc): boolean {
   const def = field.getDefinition();
   if (!def || !isRef(def)) return true;
   const leaf = doc.unwindType(def.id!, def.chain)?.def;
-  if (!leaf || !isPrimitive(leaf)) return true;
-  const ct = leaf.config.type;
-  const base = typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
-  if (base !== "number") return true;
-  if (leaf.tags?.has("int")) return true;
-  // Effective annotations — `@expect.int` on the field or on an alias it refers to.
-  const effective = doc.evalAnnotationsForNode(field) ?? field.annotations ?? [];
-  return effective.some((a) => a.name === "expect.int");
+  if (primitiveBaseType(leaf) !== "number") return true;
+  if ((leaf as SemanticPrimitiveNode).tags?.has("int")) return true;
+  // `@expect.int` on the field or on an alias it refers to
+  return effectiveAnnotationNames(field, doc).has("expect.int");
 }
 
 export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
     strategy: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Defines the **patching strategy** for updating nested objects.\n\n" +
-        '- **"replace"** → The field or object will be **fully replaced**.\n' +
-        '- **"merge"** → The field or object will be **merged recursively** (applies only to objects, not arrays).\n\n' +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.patch.strategy "merge"\n' +
-        "settings: {\n" +
-        "  notifications: boolean\n" +
-        "  preferences: {\n" +
-        "    theme: string\n" +
-        "  }\n" +
-        "}\n" +
-        "```\n",
+          '- **"replace"** → The field or object will be **fully replaced**.\n' +
+          '- **"merge"** → The field or object will be **merged recursively** (applies only to objects, not arrays).',
+        '@db.patch.strategy "merge"',
+        "settings: {",
+        "  notifications: boolean",
+        "  preferences: {",
+        "    theme: string",
+        "  }",
+        "}",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
@@ -206,23 +209,21 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
   column: {
     $self: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Overrides the physical column name in the database. " +
-        "For nested (flattened) fields, the parent prefix is still prepended automatically. " +
-        "Document storage (MongoDB) renames top-level fields only — a nested field keeps its name there." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.column "first_name"\n' +
-        "firstName: string\n" +
-        "// → physical column: first_name\n" +
-        "\n" +
-        "// Nested:\n" +
-        "address: {\n" +
-        '  @db.column "zip_code"\n' +
-        "  zip: string\n" +
-        "}\n" +
-        "// → physical column: address__zip_code\n" +
-        "```\n",
+          "For nested (flattened) fields, the parent prefix is still prepended automatically. " +
+          "Document storage (MongoDB) renames top-level fields only — a nested field keeps its name there.",
+        '@db.column "first_name"',
+        "firstName: string",
+        "// → physical column: first_name",
+        "",
+        "// Nested:",
+        "address: {",
+        '  @db.column "zip_code"',
+        "  zip: string",
+        "}",
+        "// → physical column: address__zip_code",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -233,16 +234,14 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     renamed: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Specifies the previous local field name for column rename migration. " +
-        "The sync engine generates ALTER TABLE RENAME COLUMN instead of drop+add " +
-        "(on document storage, top-level fields only)." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.column.renamed "zip"\n' +
-        "postalCode: string\n" +
-        "// Renames address__zip → address__postalCode\n" +
-        "```\n",
+          "The sync engine generates ALTER TABLE RENAME COLUMN instead of drop+add " +
+          "(on document storage, top-level fields only).",
+        '@db.column.renamed "zip"',
+        "postalCode: string",
+        "// Renames address__zip → address__postalCode",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -253,19 +252,17 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     collate: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Portable collation for string comparison and sorting. " +
-        "Adapters map the generic value to their native collation." +
-        "\n\n" +
-        '- **"binary"** — exact byte comparison (case-sensitive)\n' +
-        '- **"nocase"** — case-insensitive comparison\n' +
-        '- **"unicode"** — full Unicode-aware sorting\n\n' +
-        "For adapter-specific collations, use `@db.<engine>.collate` instead." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.column.collate "nocase"\n' +
-        "username: string\n" +
-        "```\n",
+          "Adapters map the generic value to their native collation." +
+          "\n\n" +
+          '- **"binary"** — exact byte comparison (case-sensitive)\n' +
+          '- **"nocase"** — case-insensitive comparison\n' +
+          '- **"unicode"** — full Unicode-aware sorting\n\n' +
+          "For adapter-specific collations, use `@db.<engine>.collate` instead.",
+        '@db.column.collate "nocase"',
+        "username: string",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -280,16 +277,14 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     precision: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Sets decimal precision and scale for database storage. " +
-        "Adapters map this to their native decimal type (e.g., `DECIMAL(10,2)` in SQL, ignored in MongoDB)." +
-        "\n\n" +
-        "For `decimal` fields the runtime value is a string; for `number` fields this is a DB storage hint only." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.column.precision 10, 2\n" +
-        "price: decimal\n" +
-        "```\n",
+          "Adapters map this to their native decimal type (e.g., `DECIMAL(10,2)` in SQL, ignored in MongoDB)." +
+          "\n\n" +
+          "For `decimal` fields the runtime value is a string; for `number` fields this is a DB storage hint only.",
+        "@db.column.precision 10, 2",
+        "price: decimal",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: [
@@ -310,34 +305,35 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     derived: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Declares a **derived column**: a read-only column computed from one `string`, " +
-        "`number` or `boolean` leaf inside a `@db.json` field of the **same table**, so the " +
-        "leaf can be filtered, sorted, grouped and indexed like a real column. The field's " +
-        "type is a chain reference into that field (`customerId: Order.payload.customer.id`); " +
-        "the path may not cross an array or a `@db.encrypted` field. Declare the field " +
-        "optional when the path can be absent (a missing leaf reads as `null`). A value " +
-        "written to it is dropped; `$inc` / `$dec` / `$mul` on it are rejected.\n\n" +
-        "Storage per adapter, schema sync and the compatible annotations: " +
-        "https://atscript.dev/db/api/storage#derived-columns\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.table 'orders'\n" +
-        "export interface Order {\n" +
-        "  @meta.id\n" +
-        "  id: number\n\n" +
-        "  @db.json\n" +
-        "  payload: {\n" +
-        "    customer: { id: string, vip: boolean }\n" +
-        "    total: number\n" +
-        "  }\n\n" +
-        "  @db.column.derived\n" +
-        "  @db.index.plain\n" +
-        "  customerId: Order.payload.customer.id\n\n" +
-        "  @db.column.derived\n" +
-        "  vip?: Order.payload.customer.vip\n" +
-        "}\n" +
-        "```\n",
+          "`number` or `boolean` leaf inside a `@db.json` field of the **same table**, so the " +
+          "leaf can be filtered, sorted, grouped and indexed like a real column. The field's " +
+          "type is a chain reference into that field (`customerId: Order.payload.customer.id`); " +
+          "the path may not cross an array or a `@db.encrypted` field. Declare the field " +
+          "optional when the path can be absent (a missing leaf reads as `null`). A value " +
+          "written to it is dropped; `$inc` / `$dec` / `$mul` on it are rejected.\n\n" +
+          "Storage per adapter, schema sync and the compatible annotations: " +
+          "https://atscript.dev/db/api/storage#derived-columns",
+        "@db.table 'orders'",
+        "export interface Order {",
+        "  @meta.id",
+        "  id: number",
+        "",
+        "  @db.json",
+        "  payload: {",
+        "    customer: { id: string, vip: boolean }",
+        "    total: number",
+        "  }",
+        "",
+        "  @db.column.derived",
+        "  @db.index.plain",
+        "  customerId: Order.payload.customer.id",
+        "",
+        "  @db.column.derived",
+        "  vip?: Order.payload.customer.vip",
+        "}",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
@@ -450,35 +446,31 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     sortable: columnCapability("sortable", "sorting"),
 
     searchable: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Includes this column in the generic `$search` fallback: when the adapter reports no " +
-        "native search capability (no FTS / Atlas index configured), the readable controller " +
-        "matches the `$search` term as a case-insensitive substring across all " +
-        "`@db.column.searchable` fields (`$or`). Where adapter-native search IS available it " +
-        "wins and this annotation is not consulted. The term is escaped literally — no " +
-        "user-supplied regex. String and integer columns only: an integer column " +
-        "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) matches when the " +
-        "term is a substring of the number's decimal text (`2946` finds `29461277`). " +
-        "Floats, decimals and timestamps are refused.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.table "jobs"\n' +
-        "export interface Job {\n" +
-        "  @db.column.searchable\n" +
-        "  jobName: string\n" +
-        "  @db.column.searchable\n" +
-        "  description: string\n" +
-        "  @db.column.searchable\n" +
-        "  refNo: number.int\n" +
-        "}\n" +
-        "```\n",
+          "native search capability (no FTS / Atlas index configured), the readable controller " +
+          "matches the `$search` term as a case-insensitive substring across all " +
+          "`@db.column.searchable` fields (`$or`). Where adapter-native search IS available it " +
+          "wins and this annotation is not consulted. The term is escaped literally — no " +
+          "user-supplied regex. String and integer columns only: an integer column " +
+          "(`number.int` and its sizes, `@expect.int`, `@db.default.increment`) matches when the " +
+          "term is a substring of the number's decimal text (`2946` finds `29461277`). " +
+          "Floats, decimals and timestamps are refused.",
+        '@db.table "jobs"',
+        "export interface Job {",
+        "  @db.column.searchable",
+        "  jobName: string",
+        "  @db.column.searchable",
+        "  description: string",
+        "  @db.column.searchable",
+        "  refNo: number.int",
+        "}",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
-        const sealed =
-          viewSourceSealProblem(token, doc, "@db.column.searchable") ??
-          encryptedSearchProblem(token, doc, "@db.column.searchable");
+        const sealed = sealedSearchProblem(token, doc, "@db.column.searchable");
         if (sealed) return [sealed];
         const verdict = searchFieldVerdict(token.parentNode!, doc);
         if (!("problem" in verdict)) return [];
@@ -494,21 +486,19 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
     version: {
       $self: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Marks a numeric column as the row's version for optimistic concurrency control (OCC). " +
-          "The adapter auto-increments this column on every UPDATE, and callers may pass " +
-          "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
-          "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected. " +
-          "Fields marked `@db.column.version.exempt` do not bump it." +
-          "\n\n**Constraints:**\n" +
-          "- At most one version column per table.\n" +
-          "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
-          "- Default value on insert is `0`.\n" +
-          "\n**Example:**\n" +
-          "```atscript\n" +
-          "@db.column.version\n" +
-          "version: int\n" +
-          "```\n",
+            "The adapter auto-increments this column on every UPDATE, and callers may pass " +
+            "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
+            "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected. " +
+            "Fields marked `@db.column.version.exempt` do not bump it." +
+            "\n\n**Constraints:**\n" +
+            "- At most one version column per table.\n" +
+            "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
+            "- Default value on insert is `0`.",
+          "@db.column.version",
+          "version: int",
+        ),
         nodeType: ["prop"],
         passedWhenReferred: false,
         validate(token, _args, doc) {
@@ -547,20 +537,18 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       }),
 
       exempt: new AnnotationSpec({
-        description:
+        description: annotationExample(
           "Marks a field as **version-exempt**: a patch that writes ONLY exempt fields " +
-          "(`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged " +
-          "and adds no version check. A patch touching any other field bumps as usual; `$cas`, replace and " +
-          "`touchMany` always bump. Use it for derived/reporting columns refreshed in the background " +
-          "(scores, counters, caches) so they do not invalidate versions held by editors. " +
-          "On an object field it covers every nested field." +
-          "\n\n**Example:**\n" +
-          "```atscript\n" +
-          "@db.column.version\n" +
-          "version: number.int\n" +
-          "@db.column.version.exempt\n" +
-          "score: number\n" +
-          "```\n",
+            "(`updateOne` / `bulkUpdate` without `$cas`, `updateMany`) leaves `@db.column.version` unchanged " +
+            "and adds no version check. A patch touching any other field bumps as usual; `$cas`, replace and " +
+            "`touchMany` always bump. Use it for derived/reporting columns refreshed in the background " +
+            "(scores, counters, caches) so they do not invalidate versions held by editors. " +
+            "On an object field it covers every nested field.",
+          "@db.column.version",
+          "version: number.int",
+          "@db.column.version.exempt",
+          "score: number",
+        ),
         nodeType: ["prop"],
         passedWhenReferred: false,
         multiple: false,
@@ -573,14 +561,12 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
   default: {
     $self: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Sets a static DB-level default value (used in DDL DEFAULT clause). " +
-        "For string fields the value is used as-is; for other types it is parsed as JSON." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.default "active"\n' +
-        "status: string\n" +
-        "```\n",
+          "For string fields the value is used as-is; for other types it is parsed as JSON.",
+        '@db.default "active"',
+        "status: string",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -592,18 +578,16 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     increment: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Auto-incrementing integer default. Each adapter maps this to its native mechanism " +
-        "(e.g., `AUTO_INCREMENT` in MySQL, `INTEGER PRIMARY KEY` in SQLite, counter collection in MongoDB)." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.default.increment\n" +
-        "id: number.int\n" +
-        "\n" +
-        "// With optional start value:\n" +
-        "@db.default.increment 1000\n" +
-        "id: number.int\n" +
-        "```\n",
+          "(e.g., `AUTO_INCREMENT` in MySQL, `INTEGER PRIMARY KEY` in SQLite, counter collection in MongoDB).",
+        "@db.default.increment",
+        "id: number.int",
+        "",
+        "// With optional start value:",
+        "@db.default.increment 1000",
+        "id: number.int",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -629,14 +613,12 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     uuid: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "UUID generation default. Each adapter maps this to its native mechanism " +
-        "(e.g., `DEFAULT (UUID())` in MySQL, `gen_random_uuid()` in PostgreSQL, app-level in SQLite)." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.default.uuid\n" +
-        "id: string.uuid\n" +
-        "```\n",
+          "(e.g., `DEFAULT (UUID())` in MySQL, `gen_random_uuid()` in PostgreSQL, app-level in SQLite).",
+        "@db.default.uuid",
+        "id: string.uuid",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       validate(token, args, doc) {
@@ -645,14 +627,12 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     now: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Current timestamp default. Each adapter maps this to its native mechanism " +
-        "(e.g., `DEFAULT CURRENT_TIMESTAMP` in MySQL, `DEFAULT now()` in PostgreSQL)." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.default.now\n" +
-        "createdAt: number.timestamp\n" +
-        "```\n",
+          "(e.g., `DEFAULT CURRENT_TIMESTAMP` in MySQL, `DEFAULT now()` in PostgreSQL).",
+        "@db.default.now",
+        "createdAt: number.timestamp",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       validate(token, args, doc) {
@@ -663,20 +643,18 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
   onUpdate: {
     now: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Sets the field to the current time (epoch ms) on every update: patches " +
-        "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`) and replaces " +
-        "(`replaceOne`, `bulkReplace`, `replaceMany`, HTTP `PUT`). The value is " +
-        "written by the SDK in the same statement on every adapter and overrides a value " +
-        "the payload carries. Inserts are not affected — combine with `@db.default.now` " +
-        "(`number.timestamp.updated` applies both). Writes outside the SDK (raw SQL) " +
-        "do not set it." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.default.now\n" +
-        "@db.onUpdate.now\n" +
-        "updatedAt: number.timestamp\n" +
-        "```\n",
+          "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`) and replaces " +
+          "(`replaceOne`, `bulkReplace`, `replaceMany`, HTTP `PUT`). The value is " +
+          "written by the SDK in the same statement on every adapter and overrides a value " +
+          "the payload carries. Inserts are not affected — combine with `@db.default.now` " +
+          "(`number.timestamp.updated` applies both). Writes outside the SDK (raw SQL) " +
+          "do not set it.",
+        "@db.default.now",
+        "@db.onUpdate.now",
+        "updatedAt: number.timestamp",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       validate(token, args, doc) {
@@ -699,23 +677,21 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     }),
 
     inc: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "A per-row **change counter**: `0` on insert (unless the insert supplies a value), " +
-        "then `+1` in the same statement on every SDK update of the row — patches " +
-        "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`, including patches that write only " +
-        "`@db.column.version.exempt` fields), replaces (`replaceOne`, `bulkReplace`, `replaceMany`, " +
-        "HTTP `PUT`) and `touchMany`. A value the payload carries is ignored, so clients cannot " +
-        "set it. An empty patch writes nothing and leaves it unchanged. It has no compare-and-set " +
-        "and does not affect `@db.column.version`. Writes outside the SDK (raw SQL, native " +
-        "`ON DELETE SET NULL` actions) do not move it." +
-        "\n\n**Constraints:** a non-optional integer field at the top level of the table; " +
-        "not the primary key, the version column, a `@db.onUpdate.now`, `@db.default*`, " +
-        "`@db.json` or `@db.encrypted` field." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        "@db.onUpdate.inc\n" +
-        "revision: number.int\n" +
-        "```\n",
+          "then `+1` in the same statement on every SDK update of the row — patches " +
+          "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`, including patches that write only " +
+          "`@db.column.version.exempt` fields), replaces (`replaceOne`, `bulkReplace`, `replaceMany`, " +
+          "HTTP `PUT`) and `touchMany`. A value the payload carries is ignored, so clients cannot " +
+          "set it. An empty patch writes nothing and leaves it unchanged. It has no compare-and-set " +
+          "and does not affect `@db.column.version`. Writes outside the SDK (raw SQL, native " +
+          "`ON DELETE SET NULL` actions) do not move it." +
+          "\n\n**Constraints:** a non-optional integer field at the top level of the table; " +
+          "not the primary key, the version column, a `@db.onUpdate.now`, `@db.default*`, " +
+          "`@db.json` or `@db.encrypted` field.",
+        "@db.onUpdate.inc",
+        "revision: number.int",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       multiple: false,
@@ -726,17 +702,15 @@ export const dbColumnAnnotations: TAnnotationsTree = {
   },
 
   json: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Forces a field to be stored as a single JSON column instead of being flattened " +
-      "into separate columns. Use on nested object fields that should remain as JSON " +
-      "in the database. On a primitive field (string / number / boolean) it stores the " +
-      "value as JSON too: SQL adapters filter the column only with `$exists` and never sort " +
-      "it — drop `@db.json` to get a typed, sortable scalar column." +
-      "\n\n**Example:**\n" +
-      "```atscript\n" +
-      "@db.json\n" +
-      "metadata: { key: string, value: string }\n" +
-      "```\n",
+        "into separate columns. Use on nested object fields that should remain as JSON " +
+        "in the database. On a primitive field (string / number / boolean) it stores the " +
+        "value as JSON too: SQL adapters filter the column only with `$exists` and never sort " +
+        "it — drop `@db.json` to get a typed, sortable scalar column.",
+      "@db.json",
+      "metadata: { key: string, value: string }",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     validate(token, _args, doc) {
@@ -762,14 +736,12 @@ export const dbColumnAnnotations: TAnnotationsTree = {
   }),
 
   ignore: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Excludes a field from the database schema. The field exists in the Atscript type " +
-      "but has no column in the DB." +
-      "\n\n**Example:**\n" +
-      "```atscript\n" +
-      "@db.ignore\n" +
-      "displayName: string\n" +
-      "```\n",
+        "but has no column in the DB.",
+      "@db.ignore",
+      "displayName: string",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     validate(token, _args, _doc) {
@@ -787,72 +759,39 @@ export const dbColumnAnnotations: TAnnotationsTree = {
   }),
 
   encrypted: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Encrypts this field at rest. Values are AES-256-GCM encrypted by the core layer " +
-      "before reaching the database and decrypted on read — transparent to application code.\n\n" +
-      "Constraints: the field cannot be filtered, sorted, indexed, used as PK/FK, " +
-      "patched with arithmetic ops, or referenced by search/vector/geo features.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.encrypted\n" +
-      "apiToken?: string\n" +
-      "```\n",
+        "before reaching the database and decrypted on read — transparent to application code.\n\n" +
+        "Constraints: the field cannot be filtered, sorted, indexed, used as PK/FK, " +
+        "patched with arithmetic ops, or referenced by search/vector/geo features.",
+      "@db.encrypted",
+      "apiToken?: string",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,
     validate(token, _args, doc) {
-      const errors = [] as TMessages;
-      const field = token.parentNode!;
       const typeProblem = encryptedTypeSearchProblem(token, doc);
-      if (typeProblem) errors.push(typeProblem);
-      const incompatible: Array<[string, string]> = [
-        ["meta.id", "the primary key must be addressable"],
-        ["db.rel.FK", "joins are impossible over ciphertext"],
-        ["db.index.plain", "indexes over ciphertext are meaningless"],
-        ["db.index.unique", "indexes over ciphertext are meaningless"],
-        ["db.index.fulltext", "indexes over ciphertext are meaningless"],
-        ["db.column.searchable", "search over ciphertext is impossible"],
-        ["db.index.geo", "geo indexes over ciphertext are meaningless"],
-        ["db.search.vector", "vector search over ciphertext is impossible"],
-        ["db.search.filter", "search filters need cleartext equality"],
-        ["db.column.version", "the OCC filter needs cleartext equality"],
-        ["db.default.increment", "engine-side defaults bypass the encryption transform"],
-        ["db.default.now", "engine-side defaults bypass the encryption transform"],
-        ["db.onUpdate.now", "the update time is set after the encryption transform"],
-        ["db.onUpdate.inc", "the counter is incremented by the database"],
-        ["db.mongo.search.text", "Atlas Search over ciphertext is impossible"],
-        ["db.mongo.search.autocomplete", "Atlas Search over ciphertext is impossible"],
-      ];
-      for (const [name, why] of incompatible) {
-        if (field.countAnnotations(name) > 0) {
-          errors.push({
-            message: `@db.encrypted cannot coexist with @${name} — ${why}`,
-            severity: 1,
-            range: token.range,
-          });
-        }
-      }
-      return errors;
+      const errors = validateIncompatible(token, "@db.encrypted", ENCRYPTED_INCOMPATIBLE, doc);
+      return typeProblem ? [typeProblem, ...errors] : errors;
     },
   }),
 
   writeOnly: new AnnotationSpec({
-    description:
+    description: annotationExample(
       "Marks a field as write-only over HTTP: it may be set through insert/update/replace " +
-      "payloads but NEVER appears in read responses — the readable controller excludes it " +
-      "from every projection, rejects filtering/sorting/grouping on it, and `/meta` serves " +
-      "its TYPE (flagged `writeOnly`) so client preflight validation and generated forms " +
-      "still know its shape. The classic case is a sealed secret (pair with `@db.encrypted`): " +
-      "writable via generic forms, unreadable by anyone.\n\n" +
-      "Server-side code reading through `AtscriptDbTable` still sees the value — the seal is " +
-      "an HTTP-layer contract, not a storage one. It cannot be combined with `@db.index.fulltext` " +
-      "or `@db.column.searchable`: a search hit would reveal the sealed value.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      "@db.writeOnly\n" +
-      "@db.encrypted\n" +
-      "credentials?: string\n" +
-      "```\n",
+        "payloads but NEVER appears in read responses — the readable controller excludes it " +
+        "from every projection, rejects filtering/sorting/grouping on it, and `/meta` serves " +
+        "its TYPE (flagged `writeOnly`) so client preflight validation and generated forms " +
+        "still know its shape. The classic case is a sealed secret (pair with `@db.encrypted`): " +
+        "writable via generic forms, unreadable by anyone.\n\n" +
+        "Server-side code reading through `AtscriptDbTable` still sees the value — the seal is " +
+        "an HTTP-layer contract, not a storage one. It cannot be combined with `@db.index.fulltext` " +
+        "or `@db.column.searchable`: a search hit would reveal the sealed value.",
+      "@db.writeOnly",
+      "@db.encrypted",
+      "credentials?: string",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,
@@ -883,25 +822,23 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 function columnCapability(capability: "filterable" | "sortable", verb: string): AnnotationSpec {
   const example =
     capability === "filterable"
-      ? "  @db.column.filterable\n  email: string\n"
-      : "  @db.column.sortable\n  createdAt: number.timestamp\n";
+      ? ["  @db.column.filterable", "  email: string"]
+      : ["  @db.column.sortable", "  createdAt: number.timestamp"];
   return new AnnotationSpec({
-    description:
+    description: annotationExample(
       `Marks a column as ${capability} in the readable controller's query/pages endpoints. ` +
-      `Relevant only when the host \`@db.table\` interface opts into strict mode with ` +
-      `\`@db.table.${capability} 'manual'\`; otherwise ${verb} is open on every column the ` +
-      "adapter can handle (default-open, back-compat) and the annotation is a no-op. Adapter " +
-      "capability always wins: `@db.json` / array columns stay non-sortable (and non-filterable " +
-      "on SQL adapters) even when annotated. `/meta.fields` advertises exactly what the gate " +
-      "accepts; index-backed columns additionally carry the advisory `indexed` flag.\n\n" +
-      "**Example:**\n" +
-      "```atscript\n" +
-      '@db.table "users"\n' +
-      `@db.table.${capability} "manual"\n` +
-      "export interface User {\n" +
-      example +
-      "}\n" +
-      "```\n",
+        `Relevant only when the host \`@db.table\` interface opts into strict mode with ` +
+        `\`@db.table.${capability} 'manual'\`; otherwise ${verb} is open on every column the ` +
+        "adapter can handle (default-open, back-compat) and the annotation is a no-op. Adapter " +
+        "capability always wins: `@db.json` / array columns stay non-sortable (and non-filterable " +
+        "on SQL adapters) even when annotated. `/meta.fields` advertises exactly what the gate " +
+        "accepts; index-backed columns additionally carry the advisory `indexed` flag.",
+      '@db.table "users"',
+      `@db.table.${capability} "manual"`,
+      "export interface User {",
+      ...example,
+      "}",
+    ),
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,

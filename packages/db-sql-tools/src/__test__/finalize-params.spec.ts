@@ -3,13 +3,14 @@ import { describe, it, expect } from "vite-plus/test";
 import { finalizeParams } from "../dialect";
 import type { SqlDialect } from "../dialect";
 import { buildInsert, buildInsertMany, InsertSqlCache } from "../sql-builder";
-import { toSqlValue } from "../common";
+import { toSqlValue, sqlStringLiteral } from "../common";
 
 const qi = (n: string) => `"${n.replace(/"/g, '""')}"`;
 const base = {
   quoteIdentifier: qi,
   quoteTable: qi,
   unlimitedLimit: "ALL",
+  stringLiteral: sqlStringLiteral,
   toValue: toSqlValue,
   toParam: (v: unknown) => v,
   regex: () => ({ sql: "", params: [] }),

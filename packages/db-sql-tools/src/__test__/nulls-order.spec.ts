@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vite-plus/test";
 import { UniquSelect, type DbControls } from "@atscript/db";
 
+import { sqlStringLiteral } from "../common";
 import { buildAggregateSelect } from "../agg";
 import { nullsOrderSql, nullsPlacementOf, orderKeySql, type SqlDialect } from "../dialect";
 import { buildPartitionedSelect, buildSelect, orderByList } from "../sql-builder";
@@ -15,6 +16,7 @@ const base: SqlDialect = {
   quoteIdentifier: (n) => `"${n}"`,
   quoteTable: (n) => `"${n}"`,
   unlimitedLimit: "-1",
+  stringLiteral: sqlStringLiteral,
   toValue: (v) => v as never,
   toParam: (v) => v as never,
   regex: (col, v) => ({ sql: `${col} LIKE ?`, params: [String(v)] }),

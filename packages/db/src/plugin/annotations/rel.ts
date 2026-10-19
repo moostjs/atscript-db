@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import {
   isArray,
@@ -68,30 +68,28 @@ function checkCompositeFkCoverage(
 export const dbRelAnnotations: TAnnotationsTree = {
   rel: {
     FK: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Declares a foreign key reference on this field. The field must use a chain " +
-        "reference type (e.g., `User.id`) whose target is a primary key (`@meta.id`) " +
-        "or unique (`@db.index.unique`) field.\n\n" +
-        "**Dual role:**\n" +
-        "- On a `@db.table` interface, `@db.rel.FK` additionally drives DB-relation semantics — " +
-        "  relation loading with `@db.rel.to` / `@db.rel.from`, junction pairing with `@db.rel.via`, etc.\n" +
-        "- On any other interface (value-help sources, WF forms, plain interfaces), `@db.rel.FK` " +
-        "  acts purely as the value-help indicator: the client-side picker resolver uses it to " +
-        "  decide which fields render a value-help picker. The target's `@db.http.path` (published " +
-        "  by its canonical readable controller) supplies the picker URL.\n" +
-        "- In `/meta` (and `/meta/form/:name`) the marker is inherited through reference chains: " +
-        "  a field declared as `code: Issue.code` where `Issue.code: Dict.code` carries `@db.rel.FK` " +
-        "  is served with `ref` pointing at the terminal field (`Dict.code`) and `db.rel.FK: true`, " +
-        "  so view fields get the dictionary picker. Runtime metadata is untouched.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.FK\n" +
-        "authorId: User.id\n" +
-        "\n" +
-        "// With alias (required when multiple FKs point to the same type)\n" +
-        '@db.rel.FK "author"\n' +
-        "authorId: User.id\n" +
-        "```\n",
+          "reference type (e.g., `User.id`) whose target is a primary key (`@meta.id`) " +
+          "or unique (`@db.index.unique`) field.\n\n" +
+          "**Dual role:**\n" +
+          "- On a `@db.table` interface, `@db.rel.FK` additionally drives DB-relation semantics — " +
+          "  relation loading with `@db.rel.to` / `@db.rel.from`, junction pairing with `@db.rel.via`, etc.\n" +
+          "- On any other interface (value-help sources, WF forms, plain interfaces), `@db.rel.FK` " +
+          "  acts purely as the value-help indicator: the client-side picker resolver uses it to " +
+          "  decide which fields render a value-help picker. The target's `@db.http.path` (published " +
+          "  by its canonical readable controller) supplies the picker URL.\n" +
+          "- In `/meta` (and `/meta/form/:name`) the marker is inherited through reference chains: " +
+          "  a field declared as `code: Issue.code` where `Issue.code: Dict.code` carries `@db.rel.FK` " +
+          "  is served with `ref` pointing at the terminal field (`Dict.code`) and `db.rel.FK: true`, " +
+          "  so view fields get the dictionary picker. Runtime metadata is untouched.",
+        "@db.rel.FK",
+        "authorId: User.id",
+        "",
+        "// With alias (required when multiple FKs point to the same type)",
+        '@db.rel.FK "author"',
+        "authorId: User.id",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -227,18 +225,16 @@ export const dbRelAnnotations: TAnnotationsTree = {
     }),
 
     to: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Forward navigational property — the FK is on **this** interface. " +
-        "The compiler resolves the matching @db.rel.FK by target type or alias.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.to\n" +
-        "author?: User\n" +
-        "\n" +
-        "// With alias\n" +
-        '@db.rel.to "author"\n' +
-        "author?: User\n" +
-        "```\n",
+          "The compiler resolves the matching @db.rel.FK by target type or alias.",
+        "@db.rel.to",
+        "author?: User",
+        "",
+        "// With alias",
+        '@db.rel.to "author"',
+        "author?: User",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -360,17 +356,15 @@ export const dbRelAnnotations: TAnnotationsTree = {
     }),
 
     from: new AnnotationSpec({
-      description:
-        "Inverse navigational property — the FK is on the **target** interface, pointing back to this one.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.from\n" +
-        "posts: Post[]\n" +
-        "\n" +
-        "// With alias\n" +
-        '@db.rel.from "original"\n' +
-        "comments: Comment[]\n" +
-        "```\n",
+      description: annotationExample(
+        "Inverse navigational property — the FK is on the **target** interface, pointing back to this one.",
+        "@db.rel.from",
+        "posts: Post[]",
+        "",
+        "// With alias",
+        '@db.rel.from "original"',
+        "comments: Comment[]",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -504,14 +498,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
     onUpdate: refActionAnnotation("onUpdate"),
 
     via: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Declares a many-to-many navigational property through an explicit junction table. " +
-        "`@db.rel.via` is self-sufficient — no `@db.rel.from` pairing is needed.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.via PostTag\n" +
-        "tags: Tag[]\n" +
-        "```\n",
+          "`@db.rel.via` is self-sufficient — no `@db.rel.from` pairing is needed.",
+        "@db.rel.via PostTag",
+        "tags: Tag[]",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
@@ -625,20 +617,18 @@ export const dbRelAnnotations: TAnnotationsTree = {
     }),
 
     filterable: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Lets HTTP clients filter the parent rows by this relation's related rows — " +
-        "`ticket=$some(status=open)` / `ticket=$none(...)` in a moost-db query " +
-        "(`{ ticket: { $some: { status: 'open' } } }`). Off by default: a client " +
-        "predicate filters the PARENT set and runs a correlated subquery. Server-side " +
-        "code (`transformFilter`, `actionRowScope`, direct table calls) never needs it. " +
-        "The related table's own field rules (visibility, encryption, write-only) apply " +
-        "inside the predicate.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.to\n" +
-        "@db.rel.filterable\n" +
-        "ticket?: Ticket\n" +
-        "```\n",
+          "`ticket=$some(status=open)` / `ticket=$none(...)` in a moost-db query " +
+          "(`{ ticket: { $some: { status: 'open' } } }`). Off by default: a client " +
+          "predicate filters the PARENT set and runs a correlated subquery. Server-side " +
+          "code (`transformFilter`, `actionRowScope`, direct table calls) never needs it. " +
+          "The related table's own field rules (visibility, encryption, write-only) apply " +
+          "inside the predicate.",
+        "@db.rel.to",
+        "@db.rel.filterable",
+        "ticket?: Ticket",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       validate(token) {
@@ -661,15 +651,13 @@ export const dbRelAnnotations: TAnnotationsTree = {
     }),
 
     filter: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Applies a filter to a navigational property, restricting which related records are loaded " +
-        "(`$with`) and which count in relational predicates (`$some` / `$none`).\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.rel.from\n" +
-        "@db.rel.filter `Post.published = true`\n" +
-        "publishedPosts: Post[]\n" +
-        "```\n",
+          "(`$with`) and which count in relational predicates (`$some` / `$none`).",
+        "@db.rel.from",
+        "@db.rel.filter `Post.published = true`",
+        "publishedPosts: Post[]",
+      ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {

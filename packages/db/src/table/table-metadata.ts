@@ -16,7 +16,11 @@ import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
-import { ENCRYPTED_SEARCH_FEATURES, searchMemberKind } from "../shared/search-fields";
+import {
+  ENCRYPTED_INCOMPATIBLE,
+  ENCRYPTED_SEARCH_FEATURES,
+  searchMemberKind,
+} from "../shared/search-fields";
 import {
   columnUnionBase,
   pathPresence,
@@ -1090,43 +1094,8 @@ export class TableMetadata {
     const reject = (what: string, why: string) => {
       throw new Error(`@db.encrypted on "${fieldName}" cannot coexist with ${what} — ${why}`);
     };
-    if (metadata.has("meta.id")) {
-      reject("@meta.id", "the primary key must be addressable");
-    }
-    if (metadata.has("db.rel.FK")) {
-      reject("@db.rel.FK", "joins are impossible over ciphertext");
-    }
-    if (
-      metadata.has("db.index.plain") ||
-      metadata.has("db.index.unique") ||
-      metadata.has("db.index.fulltext") ||
-      metadata.has("db.index.geo")
-    ) {
-      reject("@db.index.*", "indexes over ciphertext are meaningless");
-    }
-    if (metadata.has("db.search.vector") || metadata.has("db.search.filter")) {
-      reject("@db.search.*", "search over ciphertext is impossible");
-    }
-    if (metadata.has("db.column.searchable")) {
-      reject("@db.column.searchable", "search over ciphertext is impossible");
-    }
-    if (metadata.has("db.mongo.search.text") || metadata.has("db.mongo.search.autocomplete")) {
-      reject("@db.mongo.search.*", "Atlas Search over ciphertext is impossible");
-    }
-    if (metadata.has("db.column.version")) {
-      reject("@db.column.version", "the OCC filter needs cleartext equality");
-    }
-    if (metadata.has("db.onUpdate.now")) {
-      reject("@db.onUpdate.now", "the update time is set after the encryption transform");
-    }
-    if (metadata.has("db.onUpdate.inc")) {
-      reject("@db.onUpdate.inc", "the counter is incremented by the database");
-    }
-    if (metadata.has("db.default.increment") || metadata.has("db.default.now")) {
-      reject(
-        "@db.default.increment / @db.default.now",
-        "engine-side defaults bypass the encryption transform",
-      );
+    for (const [name, why] of ENCRYPTED_INCOMPATIBLE) {
+      if (metadata.has(name as never)) reject(`@${name}`, why);
     }
     if (metadata.get("db.patch.strategy") === "merge") {
       reject(

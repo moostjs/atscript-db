@@ -1,4 +1,4 @@
-import { AnnotationSpec } from "@atscript/core";
+import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { AtscriptDoc, TAnnotationsTree, Token, TQueryScope } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import { getFieldsForType, isArray, isPrimitive, isProp } from "@atscript/core";
@@ -95,14 +95,12 @@ function orderKeyProblem(doc: AtscriptDoc, target: string, path: string[]): stri
 export const dbViewAnnotations: TAnnotationsTree = {
   view: {
     $self: new AnnotationSpec({
-      description:
-        "Marks an interface as a **database view**. Optionally takes a view name argument.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        '@db.view "active_premium_users"\n' +
-        "@db.view.for User\n" +
-        "export interface ActivePremiumUser { ... }\n" +
-        "```\n",
+      description: annotationExample(
+        "Marks an interface as a **database view**. Optionally takes a view name argument.",
+        '@db.view "active_premium_users"',
+        "@db.view.for User",
+        "export interface ActivePremiumUser { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -127,16 +125,14 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     for: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Specifies the entry/primary source for a computed view — a `@db.table`, or another " +
-        "`@db.view` (views over views, since 0.1.141). Required for views that map fields via chain refs. " +
-        "A `@db.alias` type cannot be the entry.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.view.for Order\n" +
-        "@db.view.filter `Order.status = 'active'`\n" +
-        "export interface ActiveOrderDetails { ... }\n" +
-        "```\n",
+          "`@db.view` (views over views, since 0.1.141). Required for views that map fields via chain refs. " +
+          "A `@db.alias` type cannot be the entry.",
+        "@db.view.for Order",
+        "@db.view.filter `Order.status = 'active'`",
+        "export interface ActiveOrderDetails { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -176,27 +172,23 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     joins: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Declares an explicit join for a view. Joins are INNER by default — pass `'left'` as the " +
-        "third argument to keep entry rows without a match (fields read from a left-joined table " +
-        "must be optional). A join condition may reference the entry table and joins declared " +
-        "before it (chained joins). The target is a `@db.table`, a `@db.view` (since 0.1.141), or a " +
-        "`@db.alias` type — the way to join one table twice or to self-join the entry table: " +
-        "every scope name (entry + joins) must be unique.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.view.for Order\n" +
-        "@db.view.joins Customer, `Customer.id = Order.customerId`\n" +
-        "@db.view.joins Region, `Region.id = Customer.regionId`, 'left'\n" +
-        "export interface OrderRegion { ... }\n" +
-        "```\n\n" +
-        "**First-row join** (since 0.1.147): a 4th argument — an ordering of the target's fields " +
-        "(`` `raisedAt, id` ``, `` `severity desc` ``) — joins only the FIRST matching target row " +
-        "by that ordering (the target's primary key is appended as the final tie-break), so every " +
-        "field read through the join comes from that one row. NULL sorts first in `asc`.\n" +
-        "```atscript\n" +
-        "@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt`\n" +
-        "```\n",
+          "third argument to keep entry rows without a match (fields read from a left-joined table " +
+          "must be optional). A join condition may reference the entry table and joins declared " +
+          "before it (chained joins). The target is a `@db.table`, a `@db.view` (since 0.1.141), or a " +
+          "`@db.alias` type — the way to join one table twice or to self-join the entry table: " +
+          "every scope name (entry + joins) must be unique.",
+        "@db.view.for Order",
+        "@db.view.joins Customer, `Customer.id = Order.customerId`",
+        "@db.view.joins Region, `Region.id = Customer.regionId`, 'left'",
+        "export interface OrderRegion { ... }",
+        "```",
+        "",
+        "**First-row join** (since 0.1.147): a 4th argument — an ordering of the target's fields (`` `raisedAt, id` ``, `` `severity desc` ``) — joins only the FIRST matching target row by that ordering (the target's primary key is appended as the final tie-break), so every field read through the join comes from that one row. NULL sorts first in `asc`.",
+        "```atscript",
+        "@db.view.joins OldestOpenIssue, `OldestOpenIssue.ticketId = Ticket.id and OldestOpenIssue.status = 'open'`, 'left', `raisedAt`",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       multiple: true,
@@ -327,14 +319,12 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     filter: new AnnotationSpec({
-      description:
-        "WHERE clause for a view, filtering which rows are included.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.view.for User\n" +
-        "@db.view.filter `User.status = 'active' and User.age >= 18`\n" +
-        "export interface ActiveUser { ... }\n" +
-        "```\n",
+      description: annotationExample(
+        "WHERE clause for a view, filtering which rows are included.",
+        "@db.view.for User",
+        "@db.view.filter `User.status = 'active' and User.age >= 18`",
+        "export interface ActiveUser { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -382,18 +372,16 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     materialized: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Marks a view as materialized (precomputed, stored on disk). " +
-        "Supported by PostgreSQL, CockroachDB, Oracle, SQL Server (indexed views), Snowflake. " +
-        "MongoDB supports on-demand materialized views via $merge/$out. " +
-        "Not applicable to MySQL or SQLite.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.view.materialized\n" +
-        "@db.view.for User\n" +
-        "@db.view.filter `User.status = 'active'`\n" +
-        "export interface ActiveUsers { ... }\n" +
-        "```\n",
+          "Supported by PostgreSQL, CockroachDB, Oracle, SQL Server (indexed views), Snowflake. " +
+          "MongoDB supports on-demand materialized views via $merge/$out. " +
+          "Not applicable to MySQL or SQLite.",
+        "@db.view.materialized",
+        "@db.view.for User",
+        "@db.view.filter `User.status = 'active'`",
+        "export interface ActiveUsers { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       validate(token, _args, _doc) {
@@ -414,16 +402,14 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     renamed: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Specifies the previous view name for view rename migration. " +
-        "The sync engine drops the old view and creates the new one." +
-        "\n\n**Example:**\n" +
-        "```atscript\n" +
-        '@db.view "active_premium_users"\n' +
-        '@db.view.renamed "active_users"\n' +
-        "@db.view.for User\n" +
-        "export interface ActivePremiumUser { ... }\n" +
-        "```\n",
+          "The sync engine drops the old view and creates the new one.",
+        '@db.view "active_premium_users"',
+        '@db.view.renamed "active_users"',
+        "@db.view.for User",
+        "export interface ActivePremiumUser { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
@@ -446,17 +432,15 @@ export const dbViewAnnotations: TAnnotationsTree = {
     }),
 
     having: new AnnotationSpec({
-      description:
+      description: annotationExample(
         "Post-aggregation filter (HAVING clause) for analytical views. " +
-        "References the view's own fields, unqualified (`totalRevenue > 100`) — aggregate " +
-        "fields by their alias, plain fields as GROUP BY dimensions; source-table refs are not in scope.\n\n" +
-        "**Example:**\n" +
-        "```atscript\n" +
-        "@db.view\n" +
-        "@db.view.for Order\n" +
-        "@db.view.having `totalRevenue > 100`\n" +
-        "export interface TopCategories { ... }\n" +
-        "```\n",
+          "References the view's own fields, unqualified (`totalRevenue > 100`) — aggregate " +
+          "fields by their alias, plain fields as GROUP BY dimensions; source-table refs are not in scope.",
+        "@db.view",
+        "@db.view.for Order",
+        "@db.view.having `totalRevenue > 100`",
+        "export interface TopCategories { ... }",
+      ),
       nodeType: ["interface"],
       passedWhenReferred: false,
       argument: {
