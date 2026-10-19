@@ -229,6 +229,14 @@ Transaction context is tracked via `AsyncLocalStorage` — nested `withTransacti
 
 Since 0.1.151 a single-row write that is one statement — one row, no `guard` / `check`, no nested navigation data, and foreign keys enforced by the database (or none) — calls your adapter **outside** any transaction: `insertMany([row])`, `replaceOne`, `updateOne` / `nativePatch` (or `count` for an empty patch). A batch, a guarded or checked write, a nested write, an array-operator read-modify-write and an application-level FK check still run inside `withTransaction`. If your `insertMany` opens its own transaction, a one-row call reached this way can skip it when that row is a single atomic statement.
 
+### Locking reads and isolation levels — since 0.1.162 {#locking-reads}
+
+These two capabilities default to off, so a third-party adapter fails closed:
+
+- **`supportsReadLocks()`** defaults to `false`, and a [locking read](/api/transactions#locking-reads) throws `LOCK_NOT_SUPPORTED`. Return `true` to receive the lock on `DbQuery.lock` (`{ mode: 'update' | 'share', wait: 'block' | 'nowait' | 'skipLocked' }`) in `findOne` / `findMany`. The core sets it only on a table read inside your owner's `withTransaction` scope. A SQL adapter can append `readLockSql(query.lock)` from `@atscript/db-sql-tools`, or pass the lock as `buildSelect`'s last argument. An engine whose transactions already serialise writers may return `true` and ignore the lock. Map the engine's NOWAIT / lock-timeout / deadlock errors on the **read** path to `LOCK_TIMEOUT` / `DEADLOCK`.
+- **`readLockNowaitKeepsTransaction()`** defaults to `false`. When a `skipLocked` `findById` skips an id candidate, the core checks whether that row exists with a plain read, which must never wait for a row lock. Return `true` if a failed `NOWAIT` statement leaves the transaction usable. The core then re-checks with `NOWAIT` instead. MySQL returns `true`, because a plain read under SERIALIZABLE is a shared locking read there.
+- **`isolationLevels()`** defaults to empty, and `withTransaction(fn, { isolation })` throws `ISOLATION_NOT_SUPPORTED`. Return the levels you support (`ALL_ISOLATION_LEVELS` for all three), then apply `opts.isolation` in `_beginTransaction(opts)`. The core validates the level before it calls you. If every transaction already runs at a fixed level (SQLite: serializable), override `_inherentIsolation()` so nested requests join.
+
 ### Advanced: Custom Transaction Flow
 
 If your database has a specialized transaction API (e.g., MongoDB's `session.withTransaction()`), override `withTransaction()` directly and use `_runInTransactionContext(state, fn)` to set up the shared context. This ensures that nested adapters within the same async chain see the same transaction state. If a context already exists (nesting), it is reused.

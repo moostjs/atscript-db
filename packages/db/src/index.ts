@@ -85,7 +85,12 @@ export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 export type { TViewReadPlan } from "./table/view-read-plan";
 export { queryReadColumns } from "./query/read-columns";
 export type { TReadColumnsKind } from "./query/read-columns";
-export { BaseDbAdapter, ALL_BUCKET_UNITS, ALL_VIEW_CAPABILITIES } from "./base-adapter";
+export {
+  BaseDbAdapter,
+  ALL_BUCKET_UNITS,
+  ALL_VIEW_CAPABILITIES,
+  ALL_ISOLATION_LEVELS,
+} from "./base-adapter";
 export type { TViewCapability } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
 export { fkColumns } from "./schema/fk-diff";
@@ -203,6 +208,12 @@ export type {
   TIdResolveOptions,
   TRowResolveOptions,
   TTouchManyOptions,
+  TDbLockMode,
+  TDbLockWait,
+  TDbReadLock,
+  TReadLockOptions,
+  TDbIsolationLevel,
+  TTransactionOptions,
 } from "./types";
 export type { TGenericLogger } from "./logger";
 export { NoopLogger } from "./logger";

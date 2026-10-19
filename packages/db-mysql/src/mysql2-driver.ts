@@ -224,6 +224,9 @@ export class Mysql2Driver implements TMysqlDriver {
       release() {
         conn.release();
       },
+      destroy() {
+        conn.destroy();
+      },
     };
   }
 

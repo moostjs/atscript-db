@@ -3,6 +3,7 @@ import {
   ALL_AGGREGATE_FNS,
   ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
+  ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
   isConflict,
@@ -42,6 +43,8 @@ import type {
   TReferencingForeignKey,
   TValueFormatterPair,
   TFieldOps,
+  TDbIsolationLevel,
+  TTransactionOptions,
 } from "@atscript/db";
 import type {
   AggregateFn,
@@ -359,11 +362,29 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._getTransactionState() as TMysqlConnection | undefined;
   }
 
-  protected override async _beginTransaction(): Promise<TMysqlConnection> {
+  protected override async _beginTransaction(
+    opts?: TTransactionOptions,
+  ): Promise<TMysqlConnection> {
     const conn = await this.driver.getConnection();
-    await conn.exec("START TRANSACTION");
-    this._log("START TRANSACTION");
-    return conn;
+    let levelPending = false;
+    try {
+      if (opts?.isolation) {
+        // Applies to the next transaction of this session only.
+        const sql = `SET TRANSACTION ISOLATION LEVEL ${opts.isolation.toUpperCase()}`;
+        this._log(sql);
+        await conn.exec(sql);
+        levelPending = true;
+      }
+      await conn.exec("START TRANSACTION");
+      this._log("START TRANSACTION");
+      return conn;
+    } catch (err) {
+      // A pending one-shot `SET TRANSACTION` level must not reach the next
+      // borrower of this pooled connection: close it instead of releasing it.
+      if (levelPending && conn.destroy) conn.destroy();
+      else conn.release();
+      throw err;
+    }
   }
 
   protected override async _commitTransaction(state: unknown): Promise<void> {
@@ -475,6 +496,29 @@ export class MysqlAdapter extends BaseDbAdapter {
   /** `$nulls` / `@db.sort.nulls` NULL placement — a leading `(col IS NULL)` key where the native order differs. */
   override supportsNullsPlacement(): boolean {
     return true;
+  }
+
+  /**
+   * Locking reads: `SELECT … FOR UPDATE` / `FOR SHARE` [`NOWAIT` /
+   * `SKIP LOCKED`] (MySQL 8). A locking read is a current read — it sees the
+   * latest committed row even under REPEATABLE READ. @since 0.1.162
+   */
+  override supportsReadLocks(): boolean {
+    return true;
+  }
+
+  /**
+   * `ER_LOCK_NOWAIT` fails the statement only. (A plain read is no safe
+   * existence probe here: under SERIALIZABLE it is a shared locking read.)
+   * @since 0.1.162
+   */
+  override readLockNowaitKeepsTransaction(): boolean {
+    return true;
+  }
+
+  /** Every level, set by `SET TRANSACTION ISOLATION LEVEL` before `START TRANSACTION`. @since 0.1.162 */
+  override isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return ALL_ISOLATION_LEVELS;
   }
 
   /** Computed view columns and first-row joins. */
@@ -676,8 +720,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       }
 
       // Row-lock contention: retryable (ER_LOCK_DEADLOCK rolled the whole
-      // transaction back; ER_LOCK_WAIT_TIMEOUT failed the statement)
-      if (err.errno === 1213 || err.errno === 1205) {
+      // transaction back; ER_LOCK_WAIT_TIMEOUT / ER_LOCK_NOWAIT (3572, a
+      // `NOWAIT` locking read) failed the statement)
+      if (err.errno === 1213 || err.errno === 1205 || err.errno === 3572) {
         throw new DbError(err.errno === 1213 ? "DEADLOCK" : "LOCK_TIMEOUT", [
           { path: "", message: err.sqlMessage ?? err.message },
         ]);
@@ -1224,16 +1269,27 @@ export class MysqlAdapter extends BaseDbAdapter {
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
     const where = buildWhere(query.filter);
     const controls = { ...query.controls, $limit: 1 };
-    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, controls);
+    const { sql, params } = buildSelect(
+      this._readSource(query, "rows"),
+      where,
+      controls,
+      query.lock,
+    );
     this._log(sql, params);
-    return this._exec().get(sql, params);
+    // Contention (a locking read's NOWAIT / lock wait timeout / deadlock) → retryable DbError
+    return this._wrapConstraintError(() => this._exec().get(sql, params));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
-    const { sql, params } = buildSelect(this._readSource(query, "rows"), where, query.controls);
+    const { sql, params } = buildSelect(
+      this._readSource(query, "rows"),
+      where,
+      query.controls,
+      query.lock,
+    );
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return this._wrapConstraintError(() => this._exec().all(sql, params));
   }
 
   /**

@@ -9,6 +9,7 @@ import type {
   TDbWriteCheckContext,
   TDbWriteGuardContext,
   TDeleteOptions,
+  TTransactionOptions,
   TWriteOptions,
 } from "@atscript/db";
 import { DbError, isEmptyObject, isPlainObject, reconcileCas } from "@atscript/db";
@@ -201,10 +202,13 @@ export class AsDbController<
   /**
    * Runs `fn` inside the bound table's adapter transaction (nested calls
    * join it). For custom actions and routes that need one transaction across
-   * several table operations.
+   * several table operations. `opts.isolation` (since 0.1.162) sets the
+   * level of the transaction this call opens — see `TTransactionOptions`.
+   * Inside it, `this.table.findOne(q, { lock: 'update' })` is a locking read
+   * (never reachable from a URL — it is a server-side option only).
    */
-  protected withTransaction<R>(fn: () => Promise<R>): Promise<R> {
-    return this.table.getAdapter().withTransaction(fn);
+  protected withTransaction<R>(fn: () => Promise<R>, opts?: TTransactionOptions): Promise<R> {
+    return this.table.getAdapter().withTransaction(fn, opts);
   }
 
   // ── Write pipeline internals ───────────────────────────────────────────

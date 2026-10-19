@@ -6,6 +6,7 @@ import {
   buildInsert,
   chunkInsertRows,
   buildSelect,
+  readLockSql,
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildUpdate,
@@ -102,6 +103,28 @@ describe("buildSelect", () => {
       $sort: { name: 1, age: -1 },
     });
     expect(result.sql).toBe("SELECT * FROM [users] WHERE 1=1 ORDER BY [name] ASC, [age] DESC");
+  });
+
+  it("appends a row-locking clause after LIMIT / OFFSET (since 0.1.162)", () => {
+    const result = buildSelect(
+      mockDialect,
+      "users",
+      emptyWhere,
+      { $sort: { id: 1 }, $limit: 2, $skip: 4 },
+      { mode: "update", wait: "block" },
+    );
+    expect(result.sql).toBe(
+      "SELECT * FROM [users] WHERE 1=1 ORDER BY [id] ASC LIMIT ? OFFSET ? FOR UPDATE",
+    );
+    expect(result.params).toEqual([2, 4]);
+  });
+
+  it("readLockSql renders every mode / wait combination", () => {
+    expect(readLockSql(undefined)).toBe("");
+    expect(readLockSql({ mode: "update", wait: "block" })).toBe(" FOR UPDATE");
+    expect(readLockSql({ mode: "share", wait: "block" })).toBe(" FOR SHARE");
+    expect(readLockSql({ mode: "update", wait: "nowait" })).toBe(" FOR UPDATE NOWAIT");
+    expect(readLockSql({ mode: "share", wait: "skipLocked" })).toBe(" FOR SHARE SKIP LOCKED");
   });
 
   it("includes limit", () => {

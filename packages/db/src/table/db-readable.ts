@@ -38,7 +38,10 @@ import type {
   TDerivedColumn,
   TIdDescriptor,
   TIdentification,
+  TDbLockWait,
+  TDbReadLock,
   TIdResolveOptions,
+  TReadLockOptions,
   TRowResolveOptions,
   TSearchIndexInfo,
   TTableResolver,
@@ -182,6 +185,17 @@ export function resolveDefaultFromMetadata(
     return { kind: "fn", fn: "now" };
   }
   return undefined;
+}
+
+const LOCK_WAITS: ReadonlySet<TDbLockWait> = new Set<TDbLockWait>([
+  "block",
+  "nowait",
+  "skipLocked",
+]);
+
+/** The `INVALID_QUERY` a malformed / misplaced locking read throws. */
+function lockError(path: string, message: string): DbError {
+  return new DbError("INVALID_QUERY", [{ path, message }]);
 }
 
 /**
@@ -1158,17 +1172,85 @@ export class AtscriptDbReadable<
   // ── Read operations ────────────────────────────────────────────────────────
 
   /**
+   * The row lock a `findOne` / `findMany` asked for (`opts.lock`, since
+   * 0.1.162), validated — `undefined` when none was asked for.
+   *
+   * @throws DbError `INVALID_QUERY` — bad `lock` / `wait` value, a view, a
+   *   grouped / aggregate / `$count` read, or no `withTransaction` scope of
+   *   this table's adapter; `LOCK_NOT_SUPPORTED` — the adapter cannot lock.
+   */
+  private _readLock(query: Uniquery, opts: TReadLockOptions | undefined): TDbReadLock | undefined {
+    const mode = opts?.lock;
+    const wait = opts?.wait;
+    if (mode === undefined) {
+      if (wait !== undefined) throw lockError("wait", "`wait` requires `lock`");
+      return undefined;
+    }
+    if (mode !== "update" && mode !== "share") {
+      throw lockError("lock", `Unknown lock mode "${String(mode)}" — use 'update' or 'share'`);
+    }
+    if (wait !== undefined && !LOCK_WAITS.has(wait)) {
+      throw lockError(
+        "wait",
+        `Unknown lock wait "${String(wait)}" — use 'block', 'nowait' or 'skipLocked'`,
+      );
+    }
+    if (this.isView) {
+      throw lockError("lock", `Locking reads run on tables only — "${this.tableName}" is a view`);
+    }
+    const controls = query.controls as UniqueryControls | undefined;
+    const select = controls?.$select;
+    if (
+      controls?.$count ||
+      (Array.isArray(controls?.$groupBy) && controls.$groupBy.length > 0) ||
+      (Array.isArray(select) &&
+        select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item)))
+    ) {
+      throw lockError("lock", "A locking read cannot group, aggregate or $count rows");
+    }
+    if (!this.adapter.supportsReadLocks()) {
+      throw new DbError("LOCK_NOT_SUPPORTED", [
+        {
+          path: "lock",
+          message: `The adapter behind "${this.tableName}" cannot lock rows on read — use $cas / withOptimisticRetry`,
+        },
+      ]);
+    }
+    if (!this.adapter.inTransactionScope()) {
+      throw lockError(
+        "lock",
+        "A locking read requires a transaction — run it inside withTransaction() of this table's adapter",
+      );
+    }
+    return { mode, wait: wait ?? "block" };
+  }
+
+  /**
    * Finds a single record matching the query.
    * The return type automatically excludes nav props unless they are
    * explicitly requested via `$with`.
+   *
+   * `opts.lock` (since 0.1.162) makes it a locking read — see
+   * {@link TReadLockOptions}:
+   *
+   * ```typescript
+   * await adapter.withTransaction(async () => {
+   *   const order = await orders.findOne({ filter: { id }, controls: {} }, { lock: 'update' })
+   *   // … the row stays locked until the transaction ends
+   * })
+   * ```
    */
   public async findOne<Q extends Uniquery<OwnProps, NavType>>(
     query: Q,
+    opts?: TReadLockOptions,
   ): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
+    const lock = this._readLock(query as Uniquery, opts);
     const read = this._translateRead(query as Uniquery);
-    const result = await this.adapter.findOne(read.translated);
+    const result = await this.adapter.findOne(
+      lock ? { ...read.translated, lock } : read.translated,
+    );
     if (!result) {
       return null;
     }
@@ -1180,14 +1262,23 @@ export class AtscriptDbReadable<
    * Finds all records matching the query.
    * The return type automatically excludes nav props unless they are
    * explicitly requested via `$with`.
+   *
+   * `opts.lock` (since 0.1.162) makes it a locking read — see
+   * {@link TReadLockOptions}. Sort by the primary key when locking several
+   * rows, so concurrent transactions take the locks in the same order.
    */
   public async findMany<Q extends Uniquery<OwnProps, NavType>>(
     query: Q,
+    opts?: TReadLockOptions,
   ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
+    const lock = this._readLock(query as Uniquery, opts);
     const read = this._translateRead(query as Uniquery);
-    const rows = await this._finishRead(await this.adapter.findMany(read.translated), read);
+    const rows = await this._finishRead(
+      await this.adapter.findMany(lock ? { ...read.translated, lock } : read.translated),
+      read,
+    );
     return rows as Array<DbResponse<DataType, NavType, Q>>;
   }
 
@@ -1760,16 +1851,19 @@ export class AtscriptDbReadable<
    *
    * // With relations — only requested nav props appear
    * const user = await table.findById('123', { controls: { $with: [{ name: 'posts' }] } })
+   *
+   * // Locking read inside a transaction (since 0.1.162) — see TReadLockOptions
+   * const user = await table.findById('123', { lock: 'update' })
    * ```
    */
   public async findById<
     Q extends { controls?: UniqueryControls<OwnProps, NavType> } = Record<string, never>,
-  >(id: IdType, query?: Q): Promise<DbResponse<DataType, NavType, Q> | null> {
-    return this.findOneByRow(id, { controls: query?.controls }) as Promise<DbResponse<
-      DataType,
-      NavType,
-      Q
-    > | null>;
+  >(id: IdType, query?: Q & TReadLockOptions): Promise<DbResponse<DataType, NavType, Q> | null> {
+    return this.findOneByRow(id, {
+      controls: query?.controls,
+      lock: query?.lock,
+      wait: query?.wait,
+    }) as Promise<DbResponse<DataType, NavType, Q> | null>;
   }
 
   /**
@@ -1781,21 +1875,74 @@ export class AtscriptDbReadable<
    * must also match `opts.scope` (an out-of-scope row answers `null` like a
    * missing one).
    *
+   * `opts.lock` / `opts.wait` (since 0.1.162) lock the row found — see
+   * {@link TReadLockOptions}. With `wait: 'skipLocked'` a row the id
+   * resolves to that another transaction holds answers `null` — the
+   * resolution never falls through to a lower-precedence identification.
+   *
    * @since 0.1.143
    */
   public async findOneByRow<
     Q extends { controls?: UniqueryControls<OwnProps, NavType> } = Record<string, never>,
-  >(id: unknown, opts?: TRowResolveOptions & Q): Promise<DbResponse<DataType, NavType, Q> | null> {
+  >(
+    id: unknown,
+    opts?: TRowResolveOptions & TReadLockOptions & Q,
+  ): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
     const controls = opts?.controls ?? {};
+    const lock: TReadLockOptions | undefined =
+      opts?.lock === undefined && opts?.wait === undefined
+        ? undefined
+        : { lock: opts.lock, wait: opts.wait };
+    // Validate up front — an id with no identification must still fail a misplaced lock.
+    if (lock) this._readLock({ filter: {}, controls } as Uniquery, lock);
     for (const candidate of this._idCandidates(id, opts)) {
-      const row = await this.findOne({
-        filter: this._andScope(candidate, opts?.scope),
-        controls,
-      } as Uniquery<OwnProps, NavType>);
+      const filter = this._andScope(candidate, opts?.scope);
+      const row = await this.findOne({ filter, controls } as Uniquery<OwnProps, NavType>, lock);
       if (row) return row as DbResponse<DataType, NavType, Q>;
+      // `skipLocked` answers "no row" for a row another transaction holds — that row
+      // still wins the id resolution: never fall through to a lower-precedence
+      // candidate (a unique key matching a DIFFERENT row).
+      if (lock?.wait === "skipLocked") {
+        const probed = await this._probeSkippedRow(filter, controls, lock);
+        if (probed !== undefined) return probed as DbResponse<DataType, NavType, Q> | null;
+      }
     }
     return null;
+  }
+
+  /**
+   * After a `skipLocked` read of one id candidate answered "no row": does a
+   * row match it after all (held by another transaction)? `undefined` — no
+   * row, try the next candidate; `null` — the row is held; a row — it was
+   * released meanwhile and is now locked for the caller. Never waits: where
+   * a failed `NOWAIT` statement leaves the transaction usable
+   * (`readLockNowaitKeepsTransaction()`, MySQL) it re-reads with `NOWAIT`
+   * (a plain read could wait under SERIALIZABLE there); elsewhere a plain
+   * read, which takes no lock (PostgreSQL at every level).
+   */
+  private async _probeSkippedRow(
+    filter: FilterExpr,
+    controls: unknown,
+    lock: TReadLockOptions,
+  ): Promise<Record<string, unknown> | null | undefined> {
+    if (this.adapter.readLockNowaitKeepsTransaction()) {
+      try {
+        const row = await this.findOne({ filter, controls } as Uniquery<OwnProps, NavType>, {
+          lock: lock.lock,
+          wait: "nowait",
+        });
+        return row ?? undefined;
+      } catch (error) {
+        if (error instanceof DbError && error.code === "LOCK_TIMEOUT") return null;
+        throw error;
+      }
+    }
+    const probe = this._fieldMapper.translateQuery(
+      { filter, controls: { $limit: 1 } } as Uniquery,
+      this._meta,
+    );
+    return (await this.adapter.findOne(probe)) === null ? undefined : null;
   }
 
   /**

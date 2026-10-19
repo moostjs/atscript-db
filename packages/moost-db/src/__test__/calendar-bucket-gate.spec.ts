@@ -336,4 +336,11 @@ describe("DbError → HTTP status", () => {
       expect(replied.body.statusCode, code).toBe(status);
     }
   });
+
+  it("LOCK_NOT_SUPPORTED / ISOLATION_NOT_SUPPORTED are 501 (since 0.1.162)", () => {
+    for (const code of ["LOCK_NOT_SUPPORTED", "ISOLATION_NOT_SUPPORTED"] as const) {
+      const replied = httpReplyFor(new DbError(code, [{ path: "lock", message: "m" }]));
+      expect(replied.body.statusCode, code).toBe(501);
+    }
+  });
 });

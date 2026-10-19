@@ -43,6 +43,7 @@ export {
   InsertSqlCache,
   chunkInsertRows,
   buildSelect,
+  readLockSql,
   buildPartitionedSelect,
   orderByList,
   stripPartitionRowNumber,

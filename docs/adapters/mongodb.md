@@ -663,6 +663,8 @@ Capped collections do not support document deletion or updates that increase doc
 
 MongoDB transactions require a replica set or mongos topology. On standalone instances, the adapter gracefully skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#adapter-behavior) for usage and behavioral details.
 
+Row-locking reads (`{ lock: 'update' }`) throw `DbError("LOCK_NOT_SUPPORTED")` (since 0.1.162). Use `$cas` / `withOptimisticRetry` instead; the transaction's write-conflict retry already makes "read X, then write X" safe. `withTransaction(fn, { isolation })` accepts `'read committed'` and `'repeatable read'`, which the transaction's snapshot satisfies. `'serializable'`, and any level on a standalone server, throws `ISOLATION_NOT_SUPPORTED`. See [Locking reads](/api/transactions#locking-reads).
+
 ## Schema Sync Notes
 
 MongoDB uses **snapshot-based** schema sync (Path B — no column introspection):

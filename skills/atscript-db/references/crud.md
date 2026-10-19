@@ -185,9 +185,9 @@ await users.findManyWithCount(q); // { data, count } — adapter may optimise to
 ## Transactions
 
 ```ts
-await users.withTransaction(async () => {
+await users.getAdapter().withTransaction(async () => {
   await users.insertOne({ name: "A" });
-  await posts.insertOne({ authorId: 1, body: "..." }); // nested call reuses the same tx
+  await posts.insertOne({ authorId: 1, body: "..." }); // same space → same tx
 });
 ```
 
@@ -198,6 +198,31 @@ await users.withTransaction(async () => {
 - Schema sync is not one transaction: each step takes its own statement group (on SQLite its own gate hold), so run `syncSchema` before serving traffic.
 - SQLite (since 0.1.128): transactions are serialised per driver (`BEGIN IMMEDIATE` behind a FIFO gate; plain statements wait for COMMIT). Never await external I/O inside; see `adapters-sqlite.md`.
 - In `moost-db` controllers use `this.withTransaction(fn)` / override `guardWrite` — see `moost-db.md`.
+
+### Locking reads + isolation (since 0.1.162)
+
+```ts
+await adapter.withTransaction(
+  async () => {
+    const order = await orders.findById(id, { lock: "update" }); // SELECT … FOR UPDATE
+    await orders.updateOne({ id, status: "paid" });
+  },
+  { isolation: "read committed" },
+); // optional
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                  |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `{ lock: 'update' \| 'share', wait?: 'block' \| 'nowait' \| 'skipLocked' }` = 2nd arg of `findOne` / `findMany`; inside `findById` / `findOneByRow` options (`skipLocked` + held PK row → `null`, never another identification's row). `wait` without `lock` → `INVALID_QUERY`.                       |
+| 2   | Requires a `withTransaction` scope of the table's adapter (pass-through memory scope counts) — else `INVALID_QUERY`.                                                                                                                                                                                  |
+| 3   | Tables only: views, `$groupBy`, aggregate `$select`, `$count` → `INVALID_QUERY`. `count` / `aggregate` / `findManyWithCount` / search take no lock.                                                                                                                                                   |
+| 4   | Locks ROOT rows only; `$with` relations load unlocked; `$some`/`$none` don't lock related rows. Rows passed over by `$skip` ARE locked (PG/MySQL). Held until the outermost tx ends.                                                                                                                  |
+| 5   | PG / MySQL 8: native `FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`]. NOWAIT failure → `LOCK_TIMEOUT` (retryable); PG RR/serializable lock of a changed row → `SERIALIZATION_FAILURE`. MySQL locking read = current read (sees latest commit under RR).                                         |
+| 6   | SQLite: no-op (`BEGIN IMMEDIATE` holds the db write lock). Memory: ignored. Mongo: `LOCK_NOT_SUPPORTED` (moost-db 501) — use `$cas` / `withOptimisticRetry`.                                                                                                                                          |
+| 7   | Server-side only — never a query control, unreachable from HTTP (`?$lock=` → 400). In moost-db use it inside `this.withTransaction(fn, opts)`.                                                                                                                                                        |
+| 8   | `isolation` = "at least this level", applied on the OUTERMOST call (PG `BEGIN ISOLATION LEVEL`, MySQL `SET TRANSACTION` before `START TRANSACTION`). Nested call may name the same or a weaker level; stricter (or any, under the engine default) → `INVALID_QUERY`. Unknown level → `INVALID_QUERY`. |
+| 9   | SQLite / memory satisfy every level; Mongo satisfies RC/RR, `serializable` or a standalone server → `ISOLATION_NOT_SUPPORTED` (501).                                                                                                                                                                  |
+| 10  | Want fresh data before writing? Use a locking read, not isolation (isolation takes no lock). Keep locked tx short (no external I/O), lock by PK, `$sort` by PK when locking many rows; retry `DEADLOCK`.                                                                                              |
 
 ## DbError
 

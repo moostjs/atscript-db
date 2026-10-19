@@ -1,5 +1,5 @@
 import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
-import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
+import type { TDbDefaultFn, TDbFieldMeta, TDbReadLock } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams, nullsOrderSql, nullsPlacementOf } from "./dialect";
@@ -145,12 +145,14 @@ export function buildInsertMany(
 /**
  * Builds a SELECT statement with optional sort, limit, offset, projection.
  * `table` may be a derived source (a pruned view read, since 0.1.153).
+ * `lock` (since 0.1.162) appends a row-locking clause — see {@link readLockSql}.
  */
 export function buildSelect(
   dialect: SqlDialect,
   table: TSqlFromSource,
   where: TSqlFragment,
   controls?: DbControls,
+  lock?: TDbReadLock,
 ): TSqlFragment {
   const cols = buildProjection(dialect, controls?.$select);
   let sql = `SELECT ${fromSourceHint(table)}${cols} FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
@@ -174,7 +176,23 @@ export function buildSelect(
     params.push(controls.$skip);
   }
 
+  if (lock) sql += readLockSql(lock);
+
   return finalizeParams(dialect, { sql, params });
+}
+
+/**
+ * The row-locking clause of a locking read — `" FOR UPDATE"`,
+ * `" FOR SHARE NOWAIT"`, `" FOR UPDATE SKIP LOCKED"`, … (PostgreSQL and
+ * MySQL 8 share the syntax); `""` without a lock. Goes after `LIMIT` /
+ * `OFFSET`. @since 0.1.162
+ */
+export function readLockSql(lock: TDbReadLock | undefined): string {
+  if (!lock) return "";
+  const mode = lock.mode === "share" ? " FOR SHARE" : " FOR UPDATE";
+  if (lock.wait === "nowait") return `${mode} NOWAIT`;
+  if (lock.wait === "skipLocked") return `${mode} SKIP LOCKED`;
+  return mode;
 }
 
 /**
