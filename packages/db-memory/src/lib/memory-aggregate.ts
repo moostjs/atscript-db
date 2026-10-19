@@ -1,5 +1,6 @@
 import {
   evaluateExpr,
+  stableJson,
   type DbControls,
   type FilterExpr,
   type TExprAggregate,
@@ -7,7 +8,6 @@ import {
   type TRowOrderKey,
 } from "@atscript/db";
 import { type AggregateExpr, assertAggregateFn, resolveAlias } from "@atscript/db/agg";
-import { stableJson } from "@atscript/db/shared";
 import { bucketer } from "@uniqu/core";
 import type { NullsPlacement } from "@uniqu/core";
 

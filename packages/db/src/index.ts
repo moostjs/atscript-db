@@ -56,7 +56,7 @@ export type {
 // ── Server-only ops (not in ./validator) ────────────────────────────────────
 export { getDbFieldOp, separateFieldOps, separateCas, reconcileCas } from "./ops";
 export type { TFieldOps } from "./ops";
-export { isPlainObject, isEmptyObject, getPath, deletePath } from "./shared/object";
+export { isPlainObject, isEmptyObject, getPath, deletePath, stableJson } from "./shared/object";
 export { uniqueKeyTuple } from "./shared/keys";
 // ── Since 0.1.143 ────────────────────────────────────────────────────────────
 export { selfOrAncestor } from "./shared/object";
