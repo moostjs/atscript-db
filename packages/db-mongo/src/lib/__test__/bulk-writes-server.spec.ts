@@ -6,14 +6,10 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vite-plus
 import { MongoAdapter } from "../mongo-adapter";
 import { prepareFixtures } from "./test-utils";
 import {
-  checkBoundedCascade,
-  checkBoundedRace,
-  checkBoundedWrites,
-  checkBulkValidation,
   checkCounterUpgrade,
-  checkOnUpdateInc,
+  defineBulkWritesCases,
   type TBulkWriteTables,
-} from "./bulk-writes-check";
+} from "../../../../db/test-kit/bulk-writes-cases";
 
 // MongoDB (mongodb-memory-server): bounded writes are emulated by the core
 // (read the first keys in order, then write filter AND keys); a replace
@@ -57,14 +53,11 @@ beforeEach(async () => {
 });
 
 describe("MongoAdapter — bounded writes, @db.onUpdate.inc, validated bulk payloads", () => {
-  it("@db.onUpdate.inc moves on every write path; touchMany stamps @db.onUpdate.now", () =>
-    checkOnUpdateInc(t));
-  it("updateMany / replaceMany validate their payload", () => checkBulkValidation(t));
-  it("bounded updateMany / deleteMany (core emulation)", () => checkBoundedWrites(t));
-  it("a bounded write that loses its picked rows to a concurrent writer retries while matches remain", () =>
-    checkBoundedRace(t.tasks));
-  it("a bounded delete with an application-level cascade pins the keys first", () =>
-    checkBoundedCascade(t));
+  defineBulkWritesCases({
+    tables: () => t,
+    bounded: "core emulation",
+    cascade: "application",
+  });
 
   it("a document written before the counter existed counts from 1 on every path", async () => {
     const base = { status: "s", priority: 1, title: "t" };

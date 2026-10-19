@@ -6,6 +6,7 @@ import { PostgresAdapter } from "../postgres-adapter";
 import { PgDriver } from "../pg-driver";
 import { prepareFixtures, createMockDriver } from "./test-utils";
 import { pgReachable, recreatePgDatabase, dropPgDatabase } from "./live-server";
+import { VJR_ITEMS, defineViewJsonRootCases } from "../../../db/test-kit/view-json-root-cases";
 
 // A view field over a whole primitive @db.json field reads the typed JSON root
 // value — `9`, not the JSON text — and sorts / filters by it (since 0.1.162).
@@ -48,14 +49,7 @@ describe.skipIf(!reachable)("[pg live] view over a primitive @db.json field", ()
     space = new DbSpace(() => new PostgresAdapter(driver));
     const result = await syncSchema(space, [fx.VjrItem, fx.VjrItemView]);
     expect(result.status).toBe("synced");
-    await space
-      .getTable(fx.VjrItem as never)
-      .insertMany([
-        { id: 1, score: 9, label: "b", active: true },
-        { id: 2, score: 10, label: "a", active: false },
-        { id: 3, score: 2.5, label: "c", active: true },
-        { id: 4 },
-      ] as never);
+    await space.getTable(fx.VjrItem as never).insertMany(VJR_ITEMS);
   });
 
   afterAll(async () => {
@@ -63,34 +57,5 @@ describe.skipIf(!reachable)("[pg live] view over a primitive @db.json field", ()
     await dropPgDatabase(DB);
   });
 
-  const view = () => space.getView(fx.VjrItemView as never) as any;
-  const ids = async (query: { filter?: object; controls?: object }) =>
-    (
-      (await view().findMany({
-        filter: query.filter ?? {},
-        controls: { $select: ["id"], ...query.controls },
-      })) as Array<{ id: number }>
-    ).map((r) => r.id);
-
-  it("returns the typed values", async () => {
-    expect(await view().findMany({ filter: {}, controls: { $sort: { id: 1 } } })).toEqual([
-      { id: 1, score: 9, label: "b", active: true },
-      { id: 2, score: 10, label: "a", active: false },
-      { id: 3, score: 2.5, label: "c", active: true },
-      { id: 4, score: null, label: null, active: null },
-    ]);
-  });
-
-  it("sorts and filters by the typed value", async () => {
-    expect(
-      await ids({ filter: { score: { $exists: true } }, controls: { $sort: { score: 1 } } }),
-    ).toEqual([3, 1, 2]);
-    expect(
-      await ids({ filter: { score: { $gt: 5 } }, controls: { $sort: { score: -1 } } }),
-    ).toEqual([2, 1]);
-    expect(await ids({ filter: { active: true }, controls: { $sort: { id: 1 } } })).toEqual([1, 3]);
-    expect(
-      await ids({ filter: { label: { $exists: true } }, controls: { $sort: { label: 1 } } }),
-    ).toEqual([2, 1, 3]);
-  });
+  defineViewJsonRootCases({ view: () => space.getView(fx.VjrItemView as never) });
 });
