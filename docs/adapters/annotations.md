@@ -196,13 +196,14 @@ Tables **without** `@db.depth.limit` are now treated as `@db.depth.limit 0`: the
 
 ## Defaults
 
-| Annotation              | Applies To | Arguments         | Description                                                                                                       |
-| ----------------------- | ---------- | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `@db.default`           | Field      | `value` (string)  | Static default value                                                                                              |
-| `@db.default.increment` | Field      | `start?` (number) | Auto-incrementing integer (requires number type)                                                                  |
-| `@db.default.uuid`      | Field      | —                 | Random UUID string (requires string type)                                                                         |
-| `@db.default.now`       | Field      | —                 | Current timestamp (requires number or string type)                                                                |
-| `@db.onUpdate.now`      | Field      | —                 | Set to the current time by every update (requires number type) — see [Update Timestamps](/api/defaults#on-update) |
+| Annotation              | Applies To | Arguments         | Description                                                                                                                                             |
+| ----------------------- | ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.default`           | Field      | `value` (string)  | Static default value                                                                                                                                    |
+| `@db.default.increment` | Field      | `start?` (number) | Auto-incrementing integer (requires number type)                                                                                                        |
+| `@db.default.uuid`      | Field      | —                 | Random UUID string (requires string type)                                                                                                               |
+| `@db.default.now`       | Field      | —                 | Current timestamp (requires number or string type)                                                                                                      |
+| `@db.onUpdate.now`      | Field      | —                 | Set to the current time by every update (requires number type) — see [Update Timestamps](/api/defaults#on-update)                                       |
+| `@db.onUpdate.inc`      | Field      | —                 | Change counter: `0` on insert, `+1` on every update (non-optional top-level integer; since 0.1.162) — see [Change Counter](/api/defaults#on-update-inc) |
 
 ```atscript
 @db.table

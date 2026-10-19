@@ -32,6 +32,8 @@ import type {
   TDbInsertResult,
   TDbUpdateResult,
   TDbUpdateOptions,
+  TDbDeleteManyOptions,
+  TDbWriteLimit,
   TExistingColumn,
   TColumnDiff,
   TJsonCopyTarget,
@@ -72,6 +74,7 @@ import {
   mapQueryErrors,
   orFragment,
   buildKeyViolationCount,
+  writeLimitWhere,
 } from "@atscript/db-sql-tools";
 
 import { mapIgnoredBatch } from "./insert-ignore";
@@ -1141,13 +1144,30 @@ export class PostgresAdapter extends BaseDbAdapter {
     return { matchedCount: result.affectedRows, modifiedCount: result.affectedRows };
   }
 
+  /**
+   * Bounded writes (since 0.1.162): PostgreSQL has no `UPDATE/DELETE … LIMIT`,
+   * so the statement is re-keyed on the primary key through an ordered,
+   * limited subquery — the `deleteOne` / `updateOne` pattern with `n` rows.
+   */
+  override supportsWriteLimit(): boolean {
+    return true;
+  }
+
+  /** `where` narrowed to a bounded write's rows, or `where` itself when unbounded. */
+  private _boundedWhere(where: TSqlFragment, bound: TDbWriteLimit | undefined): TSqlFragment {
+    if (!bound) return where;
+    const quotedTable = quoteTableName(this.resolveTableName());
+    const keys = this._pk().cols.map((c) => qi(c));
+    return writeLimitWhere(pgDialect, quotedTable, keys, where, bound);
+  }
+
   async updateMany(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    const where = buildWhere(filter);
+    const where = this._boundedWhere(buildWhere(filter), opts?.limit);
     const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
@@ -1178,9 +1198,10 @@ export class PostgresAdapter extends BaseDbAdapter {
       data,
       this._replaceColumns(),
       this._table.versionColumnPhysical,
+      this._table.onUpdateIncPhysical,
     );
     // No `opts`: a replace touches every column, so it always bumps.
-    return this.updateOne(filter, full, undefined, expectedVersion);
+    return this.updateOne(filter, full, this._onUpdateIncOps(), expectedVersion);
   }
 
   /** The columns a full replace assigns (`replaceColumnsFor`), built once per table. */
@@ -1197,7 +1218,7 @@ export class PostgresAdapter extends BaseDbAdapter {
   }
 
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
-    return this.updateMany(filter, data);
+    return this.updateMany(filter, data, this._onUpdateIncOps());
   }
 
   // ── CRUD: Delete ──────────────────────────────────────────────────────────
@@ -1227,8 +1248,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     return { deletedCount: result.affectedRows };
   }
 
-  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    return this._deleteWhere(buildWhere(filter));
+  async deleteMany(filter: FilterExpr, opts?: TDbDeleteManyOptions): Promise<TDbDeleteResult> {
+    return this._deleteWhere(this._boundedWhere(buildWhere(filter), opts?.limit));
   }
 
   private async _deleteWhere(where: TSqlFragment): Promise<TDbDeleteResult> {

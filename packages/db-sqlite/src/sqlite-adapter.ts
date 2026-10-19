@@ -29,6 +29,8 @@ import type {
   TDbInsertResult,
   TDbUpdateResult,
   TDbUpdateOptions,
+  TDbDeleteManyOptions,
+  TDbWriteLimit,
   TExistingColumn,
   TColumnDiff,
   TJsonCopyTarget,
@@ -48,6 +50,7 @@ import type {
 import {
   type TGeoSearchControls,
   type TSqlFragment,
+  writeLimitWhere,
   EMPTY_AND,
   orFragment,
   buildPartitionedSelect,
@@ -666,13 +669,29 @@ export class SqliteAdapter extends BaseDbAdapter {
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
 
+  /**
+   * Bounded writes (since 0.1.162) through an ordered, limited rowid subquery
+   * (`rowid IN (SELECT rowid … ORDER BY … LIMIT n)`) — no
+   * `SQLITE_ENABLE_UPDATE_DELETE_LIMIT` build needed.
+   */
+  override supportsWriteLimit(): boolean {
+    return true;
+  }
+
+  /** `where` narrowed to a bounded write's rows, or `where` itself when unbounded. */
+  private _boundedWhere(where: TSqlFragment, bound: TDbWriteLimit | undefined): TSqlFragment {
+    if (!bound) return where;
+    const quotedTable = `"${esc(this.resolveTableName())}"`;
+    return writeLimitWhere(sqliteDialect, quotedTable, ["rowid"], where, bound);
+  }
+
   async updateMany(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
     opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
-    const where = buildWhere(filter);
+    const where = this._boundedWhere(buildWhere(filter), opts?.limit);
     const versionColumn = this._versionColumnFor(opts);
     const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
@@ -700,6 +719,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       data,
       replaceColumnsFor(this._table.fieldDescriptors, this.nativeDefaultFns()),
       versionColumn,
+      this._table.onUpdateIncPhysical,
     );
     const limitedWhere = {
       sql: `rowid = (SELECT rowid FROM "${esc(tableName)}" WHERE ${where.sql} LIMIT 1)`,
@@ -709,7 +729,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       tableName,
       full,
       limitedWhere,
-      undefined,
+      this._onUpdateIncOps(),
       versionColumn,
       expectedVersion,
     );
@@ -728,7 +748,7 @@ export class SqliteAdapter extends BaseDbAdapter {
       this.resolveTableName(),
       data,
       where,
-      undefined,
+      this._onUpdateIncOps(),
       versionColumn,
     );
     this._log(sql, params);
@@ -751,8 +771,8 @@ export class SqliteAdapter extends BaseDbAdapter {
     return { deletedCount: result.changes };
   }
 
-  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
-    const where = buildWhere(filter);
+  async deleteMany(filter: FilterExpr, opts?: TDbDeleteManyOptions): Promise<TDbDeleteResult> {
+    const where = this._boundedWhere(buildWhere(filter), opts?.limit);
     const { sql, params } = buildDelete(this.resolveTableName(), where);
     this._log(sql, params);
     const result = await this._stmt(() =>

@@ -6,6 +6,28 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.162 {#v0-1-162}
+
+### Breaking changes
+
+- **`updateMany` and `replaceMany` validate their payload.** `updateMany(filter, data)` runs the `patch`-mode validator, like `updateOne`; `replaceMany(filter, data)` the `replace`-mode validator without requiring the primary key (the filter picks the rows) — which the docs always promised. A wrong type, `null` on a non-nullable field, an empty `@meta.required` field or a failed `@expect.*` constraint now throws a `ValidatorError` (HTTP 400 through moost-db's validation interceptor) before any statement runs. Before, only foreign keys were checked: such a payload reached the database and failed there (a NOT NULL error, a 500) or was silently coerced (`5` stored as `'5.0'` in a string column). A navigation field in either payload throws `DbError("INVALID_QUERY")`, and `replaceMany` rejects a direct write to the version column, like `replaceOne`. Code that relied on the lax behaviour — or ran its own validator first — can drop the workaround. See [Update Many](/api/crud#update-many).
+- **A versioned touch and `touchMany` set `@db.onUpdate.now`.** A key + `$cas` touch and `touchMany` write the row (the version moves), so they now also set the row's update time (`number.timestamp.updated`) in the same statement. Before, the time stayed unchanged. See [Update Timestamps](/api/defaults#on-update).
+
+### New
+
+- **Bounded `deleteMany` / `updateMany`.** `deleteMany(filter, { limit, sort? })` and `updateMany(filter, data, { limit, sort? })` touch at most `limit` matching rows, the first in `sort` order (default: primary key; the primary key always breaks ties). Loop until the count is `0`. MySQL runs `ORDER BY … LIMIT` natively, PostgreSQL and SQLite one statement with a key subquery, MongoDB and memory read the keys first. Not exposed over HTTP. See [Bounded Writes](/api/crud#bounded-writes).
+- **`@db.onUpdate.inc`** — a per-row change counter: `0` on insert, `+1` in the same statement on every SDK update (version-exempt patches, replaces, touches and `updateMany` included), never settable by clients. Unlike `@db.onUpdate.now` it cannot collide within a millisecond or move backwards. Adding it to a populated table: schema sync creates the column `NOT NULL DEFAULT 0` (MongoDB: sets `0` on the existing documents). Editor completion and hover come with the db plugin; `/meta.type` keeps the annotation. See [Change Counter](/api/defaults#on-update-inc).
+
+### Fixes
+
+- **MongoDB: `$inc` / `$mul` on a missing field.** `updateOne` / `bulkUpdate` (and HTTP `PATCH`) render field ops as an update pipeline, where a missing field produced `null` instead of the value MongoDB's `$inc` / `$mul` operators give (`updateMany` already used the operators). A missing field now counts as `0` on every path — so a document written before a `@db.onUpdate.inc` counter existed starts counting at `1`.
+
+### Custom adapters
+
+- `deleteMany(filter, opts?)` takes an optional `TDbDeleteManyOptions`, and `TDbUpdateOptions` gains `limit` — both are sent only when the adapter's new `supportsWriteLimit()` returns `true` (default `false`: the core emulates the bound with your unbounded methods). See [`supportsWriteLimit()`](/adapters/creating-adapters#supports-write-limit).
+- `replaceOne` / `replaceMany` must increment the table's `@db.onUpdate.inc` columns (`this._table.onUpdateIncPhysical`, helper `this._onUpdateIncOps()`); the core leaves them out of the payload. An adapter that ignores them leaves the counter unchanged on a replace. See [Change counters](/adapters/creating-adapters#change-counters).
+- `@atscript/db-sql-tools`: `buildUpdate` / `buildDelete` take a trailing `orderBy`, `fillReplacePayload` a fourth `skip` list; new `writeLimitWhere` / `writeLimitCount`.
+
 ## 0.1.159 {#v0-1-159}
 
 ### Fixes

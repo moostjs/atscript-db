@@ -49,7 +49,7 @@ Constraints (enforced at compile time):
 ::: tip Auto-bump is mandatory
 Every successful write to a versioned row increments `version` by 1, whether or not `$cas` was supplied. This is the property that makes OCC actually work — if the version column did not auto-increment, opting in to `$cas` would silently degrade to no protection.
 
-The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150). The [update time](./defaults#on-update) such a patch sets (`number.timestamp.updated`) does not count as a write here.
+The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150). The [update time](./defaults#on-update) such a patch sets (`number.timestamp.updated`) and the [change counter](./defaults#on-update-inc) it increments do not count as a write here — use `@db.onUpdate.inc` when you need a token that every write moves, exempt ones included.
 :::
 
 Callers MAY read the version (and SHOULD, in order to pass `$cas`) but **MUST NOT** write it directly. See [Direct-write rejection](#direct-write-rejection).
@@ -134,6 +134,7 @@ const result = await orders.touchMany([
 ```
 
 - **`require: 'all'`** (default): the table counts the matching rows **first** and throws [`CasMismatchError`](#casmismatcherror) (`code === "CAS_MISMATCH"`, `errors[0] = { path: "$cas", message: "touchMany: 2 of 3 rows matched — stale or missing rows" }`) before any write when a row is stale or missing. The bumps then run as `UPDATE … SET version = version + 1 WHERE (pk AND version = ?) OR …` statements in chunks of at most 500 keys inside one adapter transaction; a row that moves between the count and the bump throws the same error and, on SQL engines, the transaction rolls every bump back. The memory adapter and a MongoDB standalone topology run `withTransaction` as a passthrough: there the pre-count covers the common stale case and the residual race window is accepted.
+- A touch writes the row: the same statement sets [`@db.onUpdate.now`](./defaults#on-update) fields and increments [`@db.onUpdate.inc`](./defaults#on-update-inc) counters (since 0.1.162; before, `touchMany` left `@db.onUpdate.now` unchanged).
 - **`require: 'any'`**: no pre-count; whatever matches is bumped and the honest summed `{ matchedCount, modifiedCount }` is returned.
 - Validation (`DbError("INVALID_QUERY")`, before any statement): a table without `@db.column.version` (path `""`), a key missing a primary-key field (`[i].<pk>`), a key with a missing / non-numeric version (`[i].version`), a key carrying any other property (`[i].<prop>`), a duplicate primary key (`[i]`). Empty `keys` → `{ 0, 0 }` without a statement.
 - No `guard`, no `onWrite`, and **not exposed over HTTP** — an app that needs it adds its own route on the controller. `@atscript/moost-db` maps `CAS_MISMATCH` to `409`.

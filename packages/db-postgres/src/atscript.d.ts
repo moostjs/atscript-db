@@ -59,6 +59,7 @@ declare global {
     "db.default.uuid": boolean
     "db.default.now": boolean
     "db.onUpdate.now": boolean
+    "db.onUpdate.inc": boolean
     "db.json": boolean
     "db.ignore": boolean
     "db.encrypted": boolean

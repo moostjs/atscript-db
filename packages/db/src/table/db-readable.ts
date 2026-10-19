@@ -662,6 +662,21 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * Physical column names of the `@db.onUpdate.inc` fields (since 0.1.162):
+   * adapters add `col = col + 1` to every replace. Empty when there are none.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   */
+  public get onUpdateIncPhysical(): readonly string[] {
+    this._ensureBuilt();
+    return (this._onUpdateIncPhysical ??= [...this._meta.onUpdateInc].map(
+      (field) => this._meta.columnMap.get(field) ?? field,
+    ));
+  }
+
+  private _onUpdateIncPhysical?: readonly string[];
+
+  /**
    * Logical paths of the `@db.column.version.exempt` fields, including objects
    * whose direct children are all exempt. A patch that writes only these (and
    * no `$cas`) does not bump the version column. Empty when the table has no
@@ -890,7 +905,7 @@ export class AtscriptDbReadable<
    * `query` with {@link _withPkTieBreak} applied and its `$nulls` resolved
    * ({@link NullsSource.resolveSort}) — a copy when either changes.
    */
-  private _withStableSort(query: Uniquery): Uniquery {
+  protected _withStableSort(query: Uniquery): Uniquery {
     const controls = query.controls as UniqueryControls | undefined;
     const raw = controls?.$nulls;
     const source = this._nulls;

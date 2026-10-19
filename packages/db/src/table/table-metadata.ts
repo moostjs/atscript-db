@@ -263,6 +263,12 @@ export class TableMetadata {
    * @since 0.1.156
    */
   onUpdateNow = new Set<string>();
+  /**
+   * Top-level fields annotated with `@db.onUpdate.inc`: `0` on insert, `+1` in
+   * the same statement on every update and replace.
+   * @since 0.1.162
+   */
+  onUpdateInc = new Set<string>();
   /** Logical path → `@db.column` override (top-level keys only on document storage). */
   columnMap = new Map<string, string>();
   dimensions: string[] = [];
@@ -767,6 +773,21 @@ export class TableMetadata {
       this.onUpdateNow.add(fieldName);
     }
 
+    // @db.onUpdate.inc — a top-level integer column with an implicit `0`
+    // default (schema sync emits NOT NULL DEFAULT 0, inserts fill it), like
+    // the version column.
+    if (metadata.has("db.onUpdate.inc")) {
+      if (fieldName.includes(".")) {
+        throw new Error(
+          `@db.onUpdate.inc on "${fieldName}" must sit on a top-level field of the table`,
+        );
+      }
+      this.onUpdateInc.add(fieldName);
+      if (!this.defaults.has(fieldName)) {
+        this.defaults.set(fieldName, { kind: "value", value: "0" });
+      }
+    }
+
     // @db.ignore
     if (metadata.has("db.ignore")) {
       this.ignoredFields.add(fieldName);
@@ -1078,6 +1099,9 @@ export class TableMetadata {
     }
     if (metadata.has("db.onUpdate.now")) {
       reject("@db.onUpdate.now", "the update time is set after the encryption transform");
+    }
+    if (metadata.has("db.onUpdate.inc")) {
+      reject("@db.onUpdate.inc", "the counter is incremented by the database");
     }
     if (metadata.has("db.default.increment") || metadata.has("db.default.now")) {
       reject(

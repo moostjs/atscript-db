@@ -188,22 +188,20 @@ describe("recursion boundaries", () => {
     expect(payload.items).toEqual([{ x: 1 }, {}, { y: "z" }]);
   });
 
-  it("never drops undefined array ELEMENTS (positional; JSON turns them into null)", async () => {
-    const { table, adapter } = makeTable();
-    await table.updateMany({} as any, { tags: ["a", undefined, "b"] } as any);
-    const [, data] = lastCall(adapter, "updateMany");
-    expect(data.tags).toHaveLength(3);
-    expect(data.tags[1]).toBeUndefined();
+  // `updateMany` validates its payload since 0.1.162, so these two exercise
+  // the clone itself (the write paths all go through it).
+  it("never drops undefined array ELEMENTS (positional; JSON turns them into null)", () => {
+    const out = _cloneWritePayload({ tags: ["a", undefined, "b"] });
+    expect(out.tags).toHaveLength(3);
+    expect((out.tags as unknown[])[1]).toBeUndefined();
   });
 
-  it("leaves class instances (Date, Uint8Array) untouched and by reference", async () => {
-    const { table, adapter } = makeTable();
+  it("leaves class instances (Date, Uint8Array) untouched and by reference", () => {
     const when = new Date("2026-01-01T00:00:00Z");
     const blob = new Uint8Array([1, 2, 3]);
-    await table.updateMany({} as any, { when, blob } as any);
-    const [, data] = lastCall(adapter, "updateMany");
-    expect(data.when).toBe(when);
-    expect(data.blob).toBe(blob);
+    const out = _cloneWritePayload({ when, blob });
+    expect(out.when).toBe(when);
+    expect(out.blob).toBe(blob);
   });
 
   it("never mutates the caller's payload tree", async () => {

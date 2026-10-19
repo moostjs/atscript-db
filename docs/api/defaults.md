@@ -97,17 +97,36 @@ updatedAt: number.timestamp.updated
 editedAt?: number.timestamp
 ```
 
-- **Which writes set it** — patches (`updateOne`, `bulkUpdate`, `updateMany`) and replaces (`replaceOne`, `bulkReplace`, `replaceMany`), including nested relation writes on the related table's own fields, `PATCH` / `PUT` through [moost-db](/http/crud) and `@atscript/db-client`. Inserts (also with `onConflict: 'ignore'`) are left to the field's default.
+- **Which writes set it** — patches (`updateOne`, `bulkUpdate`, `updateMany`), replaces (`replaceOne`, `bulkReplace`, `replaceMany`) and touches (a [versioned touch](/api/versioning#versioned-touch), [`touchMany`](/api/versioning#touch-many) — since 0.1.162), including nested relation writes on the related table's own fields, `PATCH` / `PUT` through [moost-db](/http/crud) and `@atscript/db-client`. Inserts (also with `onConflict: 'ignore'`) are left to the field's default.
 - **The SDK writes the time** — one time per call, in the write's own statement, the same on SQLite, PostgreSQL, MySQL, MongoDB and the in-memory adapter: `updateMany` stamps every matched row with it. No engine trigger or `ON UPDATE` clause is created, so writes made outside atscript-db (raw SQL, other clients) leave the field unchanged. On MySQL you can add [`@db.mysql.onUpdate "CURRENT_TIMESTAMP"`](/adapters/mysql#mysql-specific-annotations) for those as well.
 - **A value in the payload is overridden** — on a patch or a replace the caller cannot set the field (an HTTP client cannot forge it). On insert an explicit value wins, as for every default; strip it in an `onWrite` hook if clients must not choose it.
 - **[Write guards](/api/crud#write-guards)** see the time in a replace's rows; a patch's rows do not carry the row's own update fields — the time is added after the guard, when the patch is known to write something.
-- **A write that changes nothing stays a no-op** — a patch with no other field than the row's key (or the row's own timestamp fields) runs no statement and keeps the stored time. A [versioned touch](/api/versioning#versioned-touch) (key + `$cas` only) and `touchMany` bump the version only.
+- **A write that changes nothing stays a no-op** — a patch with no other field than the row's key (or the row's own timestamp fields) runs no statement and keeps the stored time. A versioned touch (key + `$cas` only) and `touchMany` do write the row, so they set it (before 0.1.162 they bumped the version only).
 - **Nested fields** — `audit.updatedAt` is set when the write carries `audit`: a replace always does, a patch only when it includes the object. In an array of objects every item is set, and every item an array patch adds or updates (`$insert`, `$upsert`, `$replace`, `$update`). An array without [`@expect.array.key`](/api/update-patch#keyed-object-arrays) matches `$upsert` and unique `$insert` items by their whole value, which then includes the new time, so such an item is always added — give the array a key. Below a tuple or a union of several object types the field is not set: the payload's value is stored and required.
 - **Version-exempt patches** — the time is set but does not count as a write for [`@db.column.version.exempt`](/api/versioning#version-exempt): a patch that writes only exempt fields still keeps the version.
 - **Validation** — the field may be omitted on replace (server and db-client), and on insert when it also has a default. `/meta` keeps the annotation so forms can show the field as server-managed.
 - **MySQL** — with `@db.default.now` the column is a `TIMESTAMP`: the time is stored in whole seconds unless the field declares `@db.mysql.type "TIMESTAMP(3)"` (see [Fractional seconds](/adapters/mysql#fractional-seconds)).
 
-`@db.onUpdate.now` requires a `number` field and cannot be combined with `@meta.id`, `@db.column.version`, `@db.encrypted` or `@db.column.derived`.
+`@db.onUpdate.now` requires a `number` field and cannot be combined with `@meta.id`, `@db.column.version`, `@db.onUpdate.inc`, `@db.encrypted` or `@db.column.derived`.
+
+## Change Counter {#on-update-inc}
+
+`@db.onUpdate.inc` (since 0.1.162) is a per-row change counter: `0` on insert, then `+1` in the same statement on every SDK update of the row. Use it as a "did this row change" token for polling and sync — unlike an update time it never collides within a millisecond and never moves backwards when a clock steps:
+
+```atscript
+@db.onUpdate.inc
+rev: number.int
+```
+
+- **Which writes move it** — every write that `@db.onUpdate.now` sets (above), by exactly one per write: patches (including patches that write only [version-exempt](/api/versioning#version-exempt) fields), replaces, a versioned touch, `touchMany`, bounded `updateMany`, HTTP `PATCH` / `PUT`. The engine adds one to the stored value (`rev = rev + 1`, MongoDB `$inc` / `$add`), so concurrent writes never lose an increment.
+- **Inserts** — the value is `0` unless the insert supplies one (an import can carry existing counters). Schema sync creates the column `NOT NULL DEFAULT 0`, so adding the annotation to a populated table backfills `0`.
+- **A value in the payload is ignored** on a patch or a replace — clients cannot set it over HTTP. An empty patch writes nothing and leaves it unchanged.
+- **No compare-and-set, no effect on versioning** — it is not a [`@db.column.version`](/api/versioning): `$cas` does not target it, and it neither makes nor breaks a version-exempt patch.
+- **Not covered** — raw SQL and native foreign-key actions (`ON DELETE SET NULL` run by the engine). Application-level set-null actions (MongoDB, memory) go through `updateMany` and do move it.
+- **Validation and `/meta`** — the field may be omitted on insert and replace (server and db-client); `/meta` keeps the annotation so forms can treat the field as server-managed.
+- **Per row, not per table** — it answers "did this row change since I read it", not "what changed since cursor X" across rows.
+
+`@db.onUpdate.inc` requires a non-optional integer field (`number.int`, or `@expect.int`) at the top level of the table, and cannot be combined with `@meta.id`, `@db.column.version`, `@db.onUpdate.now`, `@db.default*`, `@db.json`, `@db.encrypted` or `@db.column.derived`.
 
 ## Version Defaults
 

@@ -1,7 +1,7 @@
 import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure, isPrimitive } from "@atscript/core";
-import type { SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
+import type { AtscriptDoc, SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
 import {
   getDbTableOwner,
   getParentStruct,
@@ -92,6 +92,57 @@ function validateVersionExempt(token: Token): TMessages {
     }
   }
   return errors;
+}
+
+/**
+ * Compile-time rules of `@db.onUpdate.inc` (since 0.1.162). The runtime
+ * mirror (top level, encryption) is in `TableMetadata`.
+ */
+function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
+  const tag = "@db.onUpdate.inc";
+  const errors = validateFieldBaseType(token, doc, tag, "number");
+  const field = token.parentNode!;
+  const fail = (message: string) => {
+    errors.push({ message, severity: 1, range: token.range });
+  };
+  if (errors.length === 0 && !isIntegerField(field, doc)) {
+    fail(`${tag} requires an integer field — use number.int (or @expect.int)`);
+  }
+  if (field.has("optional")) {
+    fail(`${tag} requires a non-optional field — the counter is always populated (default 0)`);
+  }
+  const struct = getParentStruct(token);
+  if (!struct?.ownerNode || !isInterface(struct.ownerNode)) {
+    fail(`${tag} must sit on a top-level field of the table, not inside a nested object`);
+  }
+  for (const [name, why] of [
+    ["meta.id", "the primary key identifies the row and is never updated"],
+    ["db.column.version", "the version column is already bumped on every update"],
+    ["db.onUpdate.now", "a field is either a time stamp or a counter"],
+    ["db.default", "the counter starts at 0"],
+    ["db.default.increment", "the counter starts at 0"],
+    ["db.default.uuid", "the counter starts at 0"],
+    ["db.default.now", "the counter starts at 0"],
+    ["db.json", "a JSON column is written as one value"],
+  ]) {
+    if (field.countAnnotations(name) > 0) fail(`${tag} cannot coexist with @${name} — ${why}`);
+  }
+  return errors;
+}
+
+/** Whether a numeric field is an integer: `number.int`, an `integer` base or `@expect.int`. */
+function isIntegerField(field: SemanticNode, doc: AtscriptDoc): boolean {
+  const def = field.getDefinition();
+  if (!def || !isRef(def)) return true;
+  const leaf = doc.unwindType(def.id!, def.chain)?.def;
+  if (!leaf || !isPrimitive(leaf)) return true;
+  const ct = leaf.config.type;
+  const base = typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
+  if (base !== "number") return true;
+  if (leaf.tags?.has("int")) return true;
+  // Effective annotations — `@expect.int` on the field or on an alias it refers to.
+  const effective = doc.evalAnnotationsForNode(field) ?? field.annotations ?? [];
+  return effective.some((a) => a.name === "expect.int");
 }
 
 export const dbColumnAnnotations: TAnnotationsTree = {
@@ -637,6 +688,32 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         return errors;
       },
     }),
+
+    inc: new AnnotationSpec({
+      description:
+        "A per-row **change counter**: `0` on insert (unless the insert supplies a value), " +
+        "then `+1` in the same statement on every SDK update of the row — patches " +
+        "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`, including patches that write only " +
+        "`@db.column.version.exempt` fields), replaces (`replaceOne`, `bulkReplace`, `replaceMany`, " +
+        "HTTP `PUT`) and `touchMany`. A value the payload carries is ignored, so clients cannot " +
+        "set it. An empty patch writes nothing and leaves it unchanged. It has no compare-and-set " +
+        "and does not affect `@db.column.version`. Writes outside the SDK (raw SQL, native " +
+        "`ON DELETE SET NULL` actions) do not move it." +
+        "\n\n**Constraints:** a non-optional integer field at the top level of the table; " +
+        "not the primary key, the version column, a `@db.onUpdate.now`, `@db.default*`, " +
+        "`@db.json` or `@db.encrypted` field." +
+        "\n\n**Example:**\n" +
+        "```atscript\n" +
+        "@db.onUpdate.inc\n" +
+        "revision: number.int\n" +
+        "```\n",
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      multiple: false,
+      validate(token, _args, doc) {
+        return validateOnUpdateInc(token, doc);
+      },
+    }),
   },
 
   json: new AnnotationSpec({
@@ -728,6 +805,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         ["db.default.increment", "engine-side defaults bypass the encryption transform"],
         ["db.default.now", "engine-side defaults bypass the encryption transform"],
         ["db.onUpdate.now", "the update time is set after the encryption transform"],
+        ["db.onUpdate.inc", "the counter is incremented by the database"],
         ["db.mongo.search.text", "Atlas Search over ciphertext is impossible"],
         ["db.mongo.search.autocomplete", "Atlas Search over ciphertext is impossible"],
       ];

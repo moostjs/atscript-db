@@ -1,4 +1,4 @@
-import type { DbControls, UniquSelect, TFieldOps } from "@atscript/db";
+import type { DbControls, UniquSelect, TFieldOps, TDbWriteLimit } from "@atscript/db";
 import type { TDbDefaultFn, TDbFieldMeta } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
@@ -312,17 +312,19 @@ export function replaceColumnsFor(
  * when the engine owns its function default — so an UPDATE-based replace never
  * retains a value the caller left out. This is the SQL counterpart of the
  * whole-document replace the memory and MongoDB adapters do natively. The
- * version column is excluded (`buildUpdate` appends the OCC bump itself).
- * Returns a new object; `data` is not mutated.
+ * version column is excluded (`buildUpdate` appends the OCC bump itself), and
+ * so are `skip` columns (`@db.onUpdate.inc` counters, since 0.1.162 — the
+ * statement increments them). Returns a new object; `data` is not mutated.
  */
 export function fillReplacePayload(
   data: Record<string, unknown>,
   columns: readonly TReplaceColumn[],
   versionColumn?: string,
+  skip?: readonly string[],
 ): Record<string, unknown> {
   const full: Record<string, unknown> = { ...data };
   for (const col of columns) {
-    if (col.name === versionColumn || col.name in full) continue;
+    if (col.name === versionColumn || col.name in full || skip?.includes(col.name)) continue;
     full[col.name] = col.useDefault ? SQL_DEFAULT : null;
   }
   return full;
@@ -346,7 +348,11 @@ export function fillReplacePayload(
  *   `AND <col> = ?` to the WHERE clause and pushes the value. Requires
  *   `versionColumn` (CAS targets that column); supplying `expectedVersion`
  *   without `versionColumn` is a programmer error and throws.
+ *
+ * `orderBy` (since 0.1.162) renders `ORDER BY <orderBy>` before the `LIMIT`
+ * (MySQL's bounded `UPDATE`).
  */
+// oxlint-disable-next-line max-params
 export function buildUpdate(
   dialect: SqlDialect,
   table: string,
@@ -356,6 +362,7 @@ export function buildUpdate(
   ops?: TFieldOps,
   versionColumn?: string,
   expectedVersion?: number,
+  orderBy?: string,
 ): TSqlFragment {
   const setClauses: string[] = [];
   const params: unknown[] = [];
@@ -408,6 +415,9 @@ export function buildUpdate(
   }
 
   let sql = `UPDATE ${dialect.quoteTable(table)} SET ${setClauses.join(", ")} WHERE ${whereSql}`;
+  if (orderBy) {
+    sql += ` ORDER BY ${orderBy}`;
+  }
   if (limit !== undefined) {
     sql += ` LIMIT ${limit}`;
   }
@@ -419,15 +429,21 @@ export function buildUpdate(
 }
 
 /**
- * Builds a DELETE ... WHERE statement with optional LIMIT.
+ * Builds a DELETE ... WHERE statement with optional ORDER BY (since 0.1.162)
+ * and LIMIT.
  */
+// oxlint-disable-next-line max-params
 export function buildDelete(
   dialect: SqlDialect,
   table: string,
   where: TSqlFragment,
   limit?: number,
+  orderBy?: string,
 ): TSqlFragment {
   let sql = `DELETE FROM ${dialect.quoteTable(table)} WHERE ${where.sql}`;
+  if (orderBy) {
+    sql += ` ORDER BY ${orderBy}`;
+  }
   if (limit !== undefined) {
     sql += ` LIMIT ${limit}`;
   }
@@ -513,3 +529,38 @@ export function buildKeyViolationCount(
 }
 
 export { buildCreateView } from "./view-builder";
+
+/**
+ * Narrows an UPDATE / DELETE to the first rows of a bounded write
+ * ({@link TDbWriteLimit}, since 0.1.162) on engines without
+ * `UPDATE/DELETE … ORDER BY … LIMIT`: `where AND <key> IN (SELECT <key> FROM
+ * <table> WHERE where ORDER BY … LIMIT n)`. `keyCols` are already-quoted key
+ * expressions (the primary key columns, or SQLite's `rowid`). The filter is
+ * repeated on the outer statement so a row changed out of it meanwhile is
+ * left alone. Unfinalized (`?` placeholders).
+ */
+export function writeLimitWhere(
+  dialect: SqlDialect,
+  quotedTable: string,
+  keyCols: readonly string[],
+  where: TSqlFragment,
+  bound: TDbWriteLimit,
+): TSqlFragment {
+  const cols = keyCols.join(", ");
+  const key = keyCols.length === 1 ? cols : `(${cols})`;
+  const order = orderByList(dialect, bound.sort, bound.nulls);
+  return {
+    sql:
+      `${where.sql} AND ${key} IN (SELECT ${cols} FROM ${quotedTable} WHERE ${where.sql}` +
+      ` ORDER BY ${order} LIMIT ${writeLimitCount(bound)})`,
+    params: [...where.params, ...where.params],
+  };
+}
+
+/** The validated row count of a bounded write — a positive safe integer, rendered inline. */
+export function writeLimitCount(bound: TDbWriteLimit): number {
+  if (!Number.isSafeInteger(bound.limit) || bound.limit < 1) {
+    throw new Error(`Invalid write limit: ${String(bound.limit)}`);
+  }
+  return bound.limit;
+}

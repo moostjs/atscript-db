@@ -490,6 +490,51 @@ export interface TDbUpdateOptions {
    * the option keeps bumping (the pre-0.1.150 behaviour).
    */
   keepVersion?: boolean;
+  /**
+   * Bounded update (`updateMany(filter, data, { limit })`, since 0.1.162):
+   * write at most `limit.limit` rows, the first ones in `limit.sort` order.
+   * Sent only to an adapter whose {@link BaseDbAdapter.supportsWriteLimit}
+   * is `true`; the core emulates it for the others.
+   */
+  limit?: TDbWriteLimit;
+}
+
+/**
+ * The row bound of a bounded `updateMany` / `deleteMany` as the adapter
+ * receives it (since 0.1.162): physical column names, the primary key always
+ * included in `sort` as the final tie-breaker so the order is total.
+ */
+export interface TDbWriteLimit {
+  /** Positive integer — the most rows the statement may touch. */
+  limit: number;
+  /** Physical column → direction. Never empty. */
+  sort: Record<string, 1 | -1>;
+  /** Resolved NULL placement per `sort` key (see `DbControls.$nulls`). */
+  nulls?: DbControls["$nulls"];
+}
+
+/** Per-call options of an adapter `deleteMany` (since 0.1.162). */
+export interface TDbDeleteManyOptions {
+  /** Bounded delete — see {@link TDbWriteLimit}. Sent only when `supportsWriteLimit()`. */
+  limit?: TDbWriteLimit;
+}
+
+/**
+ * Options of `AtscriptDbTable.updateMany` / `deleteMany` (since 0.1.162).
+ * Not exposed over HTTP.
+ */
+export interface TBulkWriteOptions<FlatType = Record<string, unknown>> {
+  /**
+   * Touch at most this many matching rows (a positive integer). Loop until a
+   * call reports `0` to process every match in batches.
+   */
+  limit?: number;
+  /**
+   * The order in which a bounded write picks rows (`$sort` shape). Defaults
+   * to the primary key ascending; the primary key is always appended as the
+   * final tie-breaker. Needs `limit`.
+   */
+  sort?: Partial<Record<keyof FlatType & string, 1 | -1>>;
 }
 
 export interface TDbDeleteResult {
