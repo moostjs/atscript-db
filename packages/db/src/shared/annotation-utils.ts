@@ -23,9 +23,10 @@ import { SEARCH_PROBLEM, searchKindOf } from "./search-fields";
  * a runtime metadata check read this, not the own-only `countAnnotations`.
  * @since 0.1.162
  */
-export function effectiveAnnotationNames(field: SemanticNode, doc: AtscriptDoc): Set<string> {
+export function effectiveAnnotationNames(field: SemanticNode, doc?: AtscriptDoc): Set<string> {
   const names = new Set(field.annotations?.map((a) => a.name));
-  for (const a of doc.evalAnnotationsForNode(field) ?? []) names.add(a.name);
+  // Without a doc (callers built against <= 0.1.161) only the field's own annotations count.
+  for (const a of doc?.evalAnnotationsForNode(field) ?? []) names.add(a.name);
   return names;
 }
 
@@ -37,7 +38,7 @@ export function validateExclusiveWith(
   token: Token,
   selfName: string,
   others: Array<{ key: string; displayName?: string }>,
-  doc: AtscriptDoc,
+  doc?: AtscriptDoc,
 ): TMessages {
   const errors = [] as TMessages;
   const field = token.parentNode!;
@@ -67,7 +68,7 @@ export function validateIncompatible(
   token: Token,
   tag: string,
   pairs: ReadonlyArray<readonly [annotation: string, why: string]>,
-  doc: AtscriptDoc,
+  doc?: AtscriptDoc,
 ): TMessages {
   const effective = effectiveAnnotationNames(token.parentNode!, doc);
   return pairs
