@@ -746,6 +746,16 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
+   * Sets each `@db.onUpdate.inc` counter of a full replace to the old row's
+   * value + 1 (a missing one counts as `0`; since 0.1.162).
+   */
+  private _bumpCounters(target: Record<string, unknown>, oldRow: Record<string, unknown>): void {
+    for (const col of this._table.onUpdateIncPhysical) {
+      target[col] = ((oldRow[col] as number | undefined) ?? 0) + 1;
+    }
+  }
+
+  /**
    * Applies a merge-style update to `row` IN PLACE — the memory analogue of
    * `buildMongoUpdateDoc`:
    *
@@ -857,6 +867,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     // value (mirrors Mongo's `$replaceWith` with `version: $version + 1`).
     const next = cloneValue(data);
     this._bumpVersion(next, row);
+    this._bumpCounters(next, row);
 
     const tuples = this._enforceUniqueIndexes(state, next, key);
     this._commitRow(state, key, row, next, tuples);
@@ -1154,8 +1165,9 @@ export class MemoryAdapter extends BaseDbAdapter {
       return { matchedCount: 0, modifiedCount: 0 };
     }
     const matched = this._selectForWrite(state, filter, undefined, true, sets);
+    const ops = this._onUpdateIncOps();
     for (const { key, row } of matched) {
-      this._commitUpdate(state, key, row, data);
+      this._commitUpdate(state, key, row, data, ops);
     }
     return { matchedCount: matched.length, modifiedCount: matched.length };
   }

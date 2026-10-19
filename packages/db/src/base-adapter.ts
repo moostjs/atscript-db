@@ -47,6 +47,7 @@ import type {
   TDbInsertIgnoreOptions,
   TDbUpdateResult,
   TDbUpdateOptions,
+  TDbDeleteManyOptions,
   TDbDeleteResult,
 } from "./types";
 import type { TFieldOps } from "./ops";
@@ -279,6 +280,31 @@ export abstract class BaseDbAdapter {
       throw new Error("keepVersion cannot combine with expectedVersion");
     }
     return undefined;
+  }
+
+  /**
+   * `@db.onUpdate.inc` columns (physical names, since 0.1.162) as a field-op
+   * increment by one, or `undefined` when the table declares none. A replace
+   * path renders it next to the replacement data (the core leaves these
+   * columns out of the payload); the patch paths get the `$inc` from the core.
+   */
+  protected _onUpdateIncOps(ops?: TFieldOps): TFieldOps | undefined {
+    const cols = this._table.onUpdateIncPhysical;
+    if (cols.length === 0) return ops;
+    const inc: Record<string, number> = { ...ops?.inc };
+    for (const col of cols) inc[col] = 1;
+    return { ...ops, inc };
+  }
+
+  /**
+   * Whether `updateMany` / `deleteMany` render a row bound
+   * ({@link TDbWriteLimit}) natively in one statement (since 0.1.162). When
+   * `false` (the default) the core emulates a bounded write: it reads the
+   * primary keys of the first `limit` matching rows in order, then writes the
+   * rows matching the filter AND those keys.
+   */
+  supportsWriteLimit(): boolean {
+    return false;
   }
 
   /**
@@ -1349,7 +1375,8 @@ export abstract class BaseDbAdapter {
     opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult>;
   abstract replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult>;
-  abstract deleteMany(filter: FilterExpr): Promise<TDbDeleteResult>;
+  /** `opts.limit` — bounded delete, sent only when {@link supportsWriteLimit} (since 0.1.162). */
+  abstract deleteMany(filter: FilterExpr, opts?: TDbDeleteManyOptions): Promise<TDbDeleteResult>;
 
   // ── Schema ────────────────────────────────────────────────────────────────
 

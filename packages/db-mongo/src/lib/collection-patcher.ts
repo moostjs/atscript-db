@@ -123,9 +123,15 @@ export class CollectionPatcher {
   //  Internals
   // ---------------------------------------------------------------------------
 
-  /** Builds a MongoDB aggregation expression for an $inc or $mul field op. */
+  /**
+   * Builds a MongoDB aggregation expression for an $inc or $mul field op. A
+   * missing field counts as `0`, like the `$inc` / `$mul` update operators
+   * (the pipeline `$add` / `$multiply` would yield `null`) — so a document
+   * written before an `@db.onUpdate.inc` counter existed starts counting.
+   */
   private _fieldOpExpr(key: string, op: "inc" | "mul", value: number): Document {
-    return op === "inc" ? { $add: [`$${key}`, value] } : { $multiply: [`$${key}`, value] };
+    const current = { $ifNull: [`$${key}`, 0] };
+    return op === "inc" ? { $add: [current, value] } : { $multiply: [current, value] };
   }
 
   /**

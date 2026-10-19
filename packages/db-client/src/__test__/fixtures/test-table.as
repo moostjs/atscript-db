@@ -108,4 +108,8 @@ export interface UpdatedRow {
 
   @db.onUpdate.now
   editedAt: number.timestamp
+
+  // A change counter (since 0.1.162): server-managed on insert and replace.
+  @db.onUpdate.inc
+  rev: number.int
 }

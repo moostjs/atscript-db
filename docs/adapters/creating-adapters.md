@@ -116,10 +116,14 @@ When the table declares [`@db.column.version`](/api/versioning), `this._table.ve
 
 Use `versionColumnPhysical`, not `versionColumn`: `versionColumn` is the field name clients use in `$cas` and write bodies, and it differs from the stored column under a `@db.column` rename (since 0.1.141). SQL adapters get the bump and the comparison from `buildUpdate` in `@atscript/db-sql-tools` (pass it `versionColumnPhysical` and `expectedVersion`; for a `keepVersion` update pass `versionColumn: undefined`, which drops both the bump and the version predicate), the insert default from the `DEFAULT 0` that schema sync declares, and should pass `versionColumnPhysical` to `fillReplacePayload` so a full replace never resets the column.
 
+#### Change counters (`@db.onUpdate.inc`, since 0.1.162) {#change-counters}
+
+`this._table.onUpdateIncPhysical` lists the stored columns of the table's [`@db.onUpdate.inc`](/api/defaults#on-update-inc) fields (empty when there are none). On patches the core hands you the increment as a regular field op (`ops.inc[col] = 1`), and fills `0` on insert — nothing to do. On **`replaceOne` and `replaceMany`** the core leaves these columns out of `data`, and the adapter must increment them in the same statement: `this._onUpdateIncOps(ops?)` returns `ops` with `inc: { <col>: 1 }` merged in for `buildUpdate`, and SQL adapters pass `onUpdateIncPhysical` as the fourth argument of `fillReplacePayload` so a full replace does not null the column. A document store rebuilding the row (`$replaceWith`) sets each counter to its stored value + 1.
+
 ### Delete
 
 - **`deleteOne(filter)`** — Delete a single record matching the filter. Returns `TDbDeleteResult` with `{ deletedCount }`.
-- **`deleteMany(filter)`** — Delete all records matching the filter.
+- **`deleteMany(filter, opts?)`** — Delete all records matching the filter. `opts.limit` (`TDbWriteLimit`, since 0.1.162) arrives only when `supportsWriteLimit()` returns `true` — see [Bounded writes](#supports-write-limit).
 
 ### Schema
 
@@ -165,6 +169,10 @@ When `true`, the core hands you only entries that matter:
 - The primary-key tie-breaker the core appends never has an entry.
 
 SQL adapters get the rendering from `db-sql-tools` (`orderKeySql` with a placement, driven by the dialect's `nullsSortLargest` / `nullsPlacementSyntax`).
+
+### `supportsWriteLimit()` — since 0.1.162 {#supports-write-limit}
+
+Return `true` when `updateMany` / `deleteMany` can apply a [row bound](/api/crud#bounded-writes) in one statement. The bound arrives as `opts.limit` (`TDbUpdateOptions.limit` on `updateMany`, `TDbDeleteManyOptions.limit` on `deleteMany`): `{ limit, sort, nulls? }` with physical column names, the primary key already appended to `sort` as the tie-breaker. Write at most `limit` matching rows, the first ones in `sort` order (`orderByList` and `writeLimitWhere` in `@atscript/db-sql-tools` render the order and a key-subquery predicate). Default `false`: the core reads the first `limit` keys with `findMany` and calls your unbounded `updateMany` / `deleteMany` with `{ $and: [filter, keys] }`, so a bound works on every adapter without code. MySQL, PostgreSQL and SQLite return `true`.
 
 ### `supportsNativeValueDefaults()` (deprecated)
 

@@ -358,7 +358,7 @@ export abstract class AsReadableController<
    *
    * Annotation whitelist: keeps `meta.*`, `expect.*`, `db.rel.*`, the `db.*`
    * keys the shared db validator plugin reads in db-client (`db.json`,
-   * `db.patch.strategy`, `db.default*`, `db.onUpdate.now`, `db.column.version`,
+   * `db.patch.strategy`, `db.default*`, `db.onUpdate.now` / `.inc`, `db.column.version`,
    * `db.column.derived`) and the client-facing `db.http.path` /
    * `db.writeOnly` / `db.sort.nulls`; strips every other `db.*` (table, column, index, etc.).
    * Override in subclass to customise — keep the validator keys, or client
@@ -376,6 +376,7 @@ export abstract class AsReadableController<
           key === "db.patch.strategy" ||
           key.startsWith("db.default") ||
           key === "db.onUpdate.now" ||
+          key === "db.onUpdate.inc" ||
           key === "db.http.path" ||
           // Clients need the write-only marker: forms render set-only inputs,
           // validators accept the field in writes and never expect it in reads.

@@ -17,6 +17,12 @@ export interface DbValidationContext {
   mode: "insert" | "replace" | "patch";
   /** Flat map from the table — used to check if an array is a top-level array. */
   flatMap?: Map<string, TAtscriptAnnotatedType>;
+  /**
+   * The write picks its rows by a filter, not by the payload's primary key
+   * (`replaceMany(filter, data)`, since 0.1.162): a missing top-level
+   * `@meta.id` is accepted in `replace` mode.
+   */
+  keyless?: boolean;
   /** Precomputed nav field names — used to skip field-op validation inside TO/FROM/VIA relations. */
   navFields?: ReadonlySet<string>;
   /**
@@ -226,7 +232,8 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       // Server-managed fields: defaulted columns, the OCC version column
       // (adapter-initialised to 0 on insert, auto-bumped on every write),
       // derived columns (computed from the row; a payload value is dropped)
-      // and, in a replace, `@db.onUpdate.now` columns (set by the write) —
+      // and, in a replace, `@db.onUpdate.now` columns (set by the write),
+      // `@db.onUpdate.inc` counters (0 on insert, incremented by the write) —
       // single source of truth for both the server validators and db-client.
       const serverManaged =
         has("db.default") ||
@@ -235,8 +242,14 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
         has("db.default.now") ||
         (dbCtx.mode === "replace" && has("db.onUpdate.now")) ||
         meta.has("db.column.version") ||
+        meta.has("db.onUpdate.inc") ||
         meta.has("db.column.derived");
       const hasFK = meta.has("db.rel.FK");
+      // A keyless replace (`replaceMany(filter, data)`) picks its rows by the
+      // filter: the payload need not name the row's own primary key.
+      if (dbCtx.keyless && meta.has("meta.id") && !ctx.path.includes(".")) {
+        return true;
+      }
 
       if (serverManaged || hasFK) {
         // Default/FK fields optional in both modes, EXCEPT top-level PK in replace

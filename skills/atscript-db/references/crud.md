@@ -42,7 +42,7 @@ await users.bulkReplace([{ id: 1, ... }, { id: 2, ... }])
 await users.bulkReplace(rows, { maxDepth: 5 })                    // nested-write recursion override
 ```
 
-Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. `replaceOne` / `bulkReplace` are FULL — omitted optional fields end up `null` in storage on every adapter (since 0.1.128 the SQL adapters assign every column in their `UPDATE`-based replace — `NULL`, or `DEFAULT` for a column whose function default the engine owns; before, an omitted column silently kept its old value on SQLite/PostgreSQL/MySQL). `replaceMany` is NOT a full replace: on every adapter it is a `$set`-style merge of the given columns on each matched row (SQL `UPDATE … SET`, Mongo `updateMany` + `$set`, memory merge) — omitted optional fields KEEP their stored values; versioned tables bump `version` per matched row.
+Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. `replaceOne` / `bulkReplace` are FULL — omitted optional fields end up `null` in storage on every adapter (since 0.1.128 the SQL adapters assign every column in their `UPDATE`-based replace — `NULL`, or `DEFAULT` for a column whose function default the engine owns; before, an omitted column silently kept its old value on SQLite/PostgreSQL/MySQL). `replaceMany` is NOT a full replace: on every adapter it is a `$set`-style merge of the given columns on each matched row (SQL `UPDATE … SET`, Mongo `updateMany` + `$set`, memory merge) — omitted optional fields KEEP their stored values; versioned tables bump `version` per matched row. `replaceMany` validates in `replace` mode WITHOUT requiring the PK (0.1.162; before: no validation at all); nav fields → `INVALID_QUERY`.
 
 ## Updates / patches
 
@@ -56,11 +56,11 @@ await users.bulkUpdate([
 await users.bulkUpdate(rows, { maxDepth: 5 }); // nested-write recursion override
 ```
 
-- Mode `'patch'`: only supplied fields validated (partial).
+- Mode `'patch'`: only supplied fields validated (partial). `updateMany` too since 0.1.162 (before: unvalidated — `null` on a required column hit the DB as a 500); nav fields in its payload → `INVALID_QUERY`.
 - Field ops `$inc/$dec/$mul` atomic at DB level (see `patch.md`). The operand must be FINITE (0.1.148): `$inc(NaN)` / `$mul(Infinity)` → validation error `Field operation operand must be a finite number`.
 - Array ops `$insert/$upsert/$update/$remove/$replace` decompose per-adapter.
 - `undefined` value = key not sent (never in the SET list); `null` = SET NULL (optional columns; typed — since 0.1.128 filters on optional columns accept `null` too, see `queries.md § Null values`). Non-merge nested object: undefined optional leaf ≡ omitted (null-filled); merge block: untouched.
-- `@db.onUpdate.now` / `number.timestamp.updated` fields (0.1.156): every patch and replace (`updateMany` / `replaceMany` too) sets them to one `Date.now()` per call, overriding a payload value; a patch whose only other key is the PK stays empty (below). → [annotations.md § Defaults](annotations.md#defaults)
+- `@db.onUpdate.now` / `number.timestamp.updated` fields (0.1.156): every patch, replace and touch (`updateMany` / `replaceMany` / versioned touch / `touchMany` too — touches since 0.1.162) sets them to one `Date.now()` per call, overriding a payload value; `@db.onUpdate.inc` counters (0.1.162) get `+1` on the same writes; a patch whose only other key is the PK stays empty (below). → [annotations.md § Defaults](annotations.md#defaults)
 - Empty patch (PK only, no `$cas`) → no statement, `{ matchedCount: 1|0, modifiedCount: 0 }`; PK + `$cas` → versioned touch (executes, bumps) — see `versioning.md`. `updateMany(filter, {})` → count only.
 - `touchMany(keys, { require })` (since 0.1.129, versioned tables): batch versioned touch — each key = primary key (composite ok, not a unique index) + version, no payload; `'all'` (default) pre-counts and throws `CasMismatchError` (`CAS_MISMATCH`, 409) on a stale/missing row, bumps in ≤ 500-key `$or` chunks inside one transaction; `'any'` bumps what matches. Not on the REST surface. See `versioning.md § Batch touch`.
 - Nested relation payloads (TO object, FROM/VIA operators) only ever touch rows related to the record being written, and run only for rows the main write matched — rules + error codes in [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143). A TO patch on a missing row returns `{ matchedCount: 0, modifiedCount: 0 }` (≤ 0.1.142 threw `source record not found`).
@@ -137,7 +137,16 @@ For read-modify-write loops use `withOptimisticRetry` ([versioning.md](versionin
 await users.deleteOne(42); // scalar id
 await users.deleteOne({ orderId: 1, productId: 2 }); // composite PK
 await users.deleteMany({ status: "archived" }); // FilterExpr
+// bounded (0.1.162) — loop until 0, NOT until < limit
+while ((await sessions.deleteMany({ expiresAt: { $lt: now } }, { limit: 1000 })).deletedCount) {}
+await tasks.updateMany(
+  { status: "open" },
+  { status: "archived" },
+  { limit: 500, sort: { createdAt: 1 } },
+);
 ```
+
+Bounded `deleteMany` / `updateMany` (`{ limit, sort? }`, 0.1.162): `limit` positive integer else `INVALID_QUERY` (path `limit`); `sort` defaults to PK asc, PK always appended as tie-breaker (last key's direction); `sort` without `limit` → `INVALID_QUERY`; table without PK → `INVALID_QUERY`. MySQL native `ORDER BY … LIMIT`; PG/SQLite one statement with PK/rowid subquery; Mongo/memory/custom adapters read keys then write `filter AND keys` (a round may return < limit under concurrency). App-level cascades pin keys first. NOT exposed over HTTP. Docs: `/api/crud#bounded-writes`.
 
 `deleteOne` triggers referential actions (cascade/setNull/restrict) via the integrity strategy.
 

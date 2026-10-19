@@ -1675,19 +1675,24 @@ export class MongoAdapter extends BaseDbAdapter {
       return { matchedCount: 0, modifiedCount: 0 };
     }
     const versionColumn = this._table.versionColumnPhysical;
+    const counters = this._table.onUpdateIncPhysical;
     this._log("replaceOne", mongoFilter, data);
-    if (versionColumn !== undefined) {
+    if (versionColumn !== undefined || counters.length > 0) {
       // Mongo's plain replaceOne doesn't accept $inc, so use an aggregation
       // pipeline update via $replaceWith — the replacement document is rebuilt
-      // with `version` set to `$<col> + 1`, evaluated atomically server-side.
-      const pipeline = [
-        {
-          $replaceWith: {
-            ...data,
-            [versionColumn]: { $add: [`$${versionColumn}`, 1] },
-          },
-        },
-      ];
+      // with `version` set to `$<col> + 1` (and every `@db.onUpdate.inc`
+      // counter likewise), evaluated atomically server-side.
+      // `$literal`: a stored value is data, never an expression (a string
+      // starting with `$`, an object with `$`-keys).
+      const replacement: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(data)) replacement[key] = { $literal: value };
+      for (const col of counters) {
+        replacement[col] = { $add: [{ $ifNull: [`$${col}`, 0] }, 1] };
+      }
+      if (versionColumn !== undefined) {
+        replacement[versionColumn] = { $add: [`$${versionColumn}`, 1] };
+      }
+      const pipeline = [{ $replaceWith: replacement }];
       return this._wrapUpdate(() =>
         this.collection.updateOne(mongoFilter, pipeline, this._getSessionOpts()),
       );
@@ -1728,7 +1733,11 @@ export class MongoAdapter extends BaseDbAdapter {
   async replaceMany(filter: FilterExpr, data: Record<string, unknown>): Promise<TDbUpdateResult> {
     // MongoDB has no native replaceMany; use updateMany with $set (+ auto-bump
     // version when this table is versioned — sibling of updateMany, no CAS).
-    const updateDoc = buildMongoUpdateDoc(data, undefined, this._table.versionColumnPhysical);
+    const updateDoc = buildMongoUpdateDoc(
+      data,
+      this._onUpdateIncOps(),
+      this._table.versionColumnPhysical,
+    );
     return this._updateMatching(filter, (mongoFilter) => {
       this._log("replaceMany", mongoFilter, updateDoc);
       return this._wrapUpdate(() =>

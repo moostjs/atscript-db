@@ -56,6 +56,8 @@ export {
   fillReplacePayload,
   replaceColumnsFor,
   buildKeyViolationCount,
+  writeLimitWhere,
+  writeLimitCount,
 } from "./sql-builder";
 export {
   sqlStringLiteral,

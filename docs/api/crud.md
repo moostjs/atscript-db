@@ -284,7 +284,7 @@ const result = await users.updateMany(
 // result: { matchedCount: 5, modifiedCount: 5 }
 ```
 
-`updateMany` does not support nested relation operations — only own fields. Every update and replace also sets [`@db.onUpdate.now`](./defaults#on-update) fields (`number.timestamp.updated`) to the current time, overriding a value in the payload. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version. Any other patch bumps each matched row, except [version-exempt](./versioning#version-exempt) ones (`updateMany` never checks the version).
+`updateMany` writes own fields only — a navigation field in the payload throws `DbError("INVALID_QUERY")`. The payload is validated in `patch` mode, like `updateOne` (since 0.1.162): a wrong type, `null` on a non-nullable field, an empty `@meta.required` field or a failed `@expect.*` constraint throws a `ValidatorError` before any statement runs. Every update and replace also sets [`@db.onUpdate.now`](./defaults#on-update) fields (`number.timestamp.updated`) to the current time and increments [`@db.onUpdate.inc`](./defaults#on-update-inc) counters, overriding a value in the payload. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version. Any other patch bumps each matched row, except [version-exempt](./versioning#version-exempt) ones (`updateMany` never checks the version).
 
 ## Replacing Records
 
@@ -321,6 +321,8 @@ const result = await users.replaceMany(
 // result: { matchedCount, modifiedCount }
 ```
 
+The primary key is not required in the payload — the filter picks the rows (since 0.1.162; before, the payload was not validated at all). Navigation fields are rejected, as in `updateMany`.
+
 For replacing many records with **different** payloads (each identified by its primary key), use [`bulkReplace`](#bulk-operations) instead.
 
 ## Deleting Records
@@ -350,6 +352,40 @@ const result = await users.deleteMany({
 ::: info Cascade & Set-Null
 When a deleted record is referenced by other tables via foreign keys, cascade and set-null behaviors are handled automatically based on `@db.rel.onDelete` annotations. See [Relations](/relations/deep-operations) for details.
 :::
+
+### Bounded Writes — `limit` {#bounded-writes}
+
+`deleteMany` and `updateMany` take an optional `{ limit, sort }` (since 0.1.162) that bounds one call to the first `limit` matching rows — for retention sweeps and backfills that should keep each statement, its locks and its replication footprint small:
+
+```typescript
+// delete expired sessions 1000 at a time
+while (
+  (await sessions.deleteMany({ expiresAt: { $lt: Date.now() } }, { limit: 1000 })).deletedCount
+) {}
+
+// archive the 500 oldest open tasks
+await tasks.updateMany(
+  { status: "open" },
+  { status: "archived" },
+  { limit: 500, sort: { createdAt: 1 } },
+);
+```
+
+- **`limit`** — a positive integer; anything else throws `DbError("INVALID_QUERY")` (`errors[0].path === "limit"`). Without it the call is unbounded, as before.
+- **`sort`** — `$sort` shape; it picks which rows go first. The default is the primary key ascending, and the primary key is always appended as the final tie-breaker (in the direction of the last key), so the order is deterministic. `sort` without `limit` throws.
+- **Loop until the count is `0`**, not until it is below `limit`: on engines where the bound is emulated (see below), a concurrent writer can make one round touch fewer rows while matches remain. A round never exceeds `limit`.
+- **Requires a primary key** — a table without one throws `INVALID_QUERY`.
+- **Everything else is unchanged** — filter guards, payload validation, version bumps and exemption, `@db.onUpdate.*` stamps; `$cas` stays rejected on `updateMany`.
+- **Not exposed over HTTP** — moost-db has no bulk delete or filter-update endpoint.
+
+| Adapter         | How the bound runs                                                                                                                                       |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL           | Native `DELETE` / `UPDATE … ORDER BY … LIMIT n` (the unique order keeps it safe for statement-based replication)                                         |
+| PostgreSQL      | One statement re-keyed on the primary key: `… WHERE f AND (pk) IN (SELECT pk … WHERE f ORDER BY … LIMIT n)`                                              |
+| SQLite          | One statement: `… WHERE f AND rowid IN (SELECT rowid … ORDER BY … LIMIT n)`                                                                              |
+| MongoDB, memory | The first `n` keys are read in order, then the write targets the filter **and** those keys (inside the caller's transaction / session when there is one) |
+
+With [application-level cascades](/relations/referential-actions) (MongoDB, memory) a bounded `deleteMany` pins the keys first, inside its transaction: the cascade and the delete act on exactly those rows. Native foreign-key cascades are left to the database.
 
 ## Bulk Operations
 
@@ -468,14 +504,14 @@ await tasks.updateOne({ id: 1, tenant: "other" }, { check: withCheck }); // thro
 
 Tables automatically validate data on every write operation using constraints from your `.as` definitions (`@expect.*` annotations). Validation is purpose-aware:
 
-| Purpose         | Used by                     | Behavior                                                                                          |
-| --------------- | --------------------------- | ------------------------------------------------------------------------------------------------- |
-| `'insert'`      | `insertOne`, `insertMany`   | PK, defaulted, and FK fields become optional                                                      |
-| `'bulkUpdate'`  | `updateOne`, `bulkUpdate`   | Top level is partial; merge-strategy objects partial, replace-strategy objects require all fields |
-| `'bulkReplace'` | `replaceOne`, `bulkReplace` | All non-optional fields required                                                                  |
-| `'patch'`       | Available for manual checks | Fully partial; useful when you need to validate a partial payload yourself                        |
+| Purpose         | Used by                                    | Behavior                                                                                          |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `'insert'`      | `insertOne`, `insertMany`                  | PK, defaulted, and FK fields become optional                                                      |
+| `'bulkUpdate'`  | `updateOne`, `bulkUpdate`, `updateMany`    | Top level is partial; merge-strategy objects partial, replace-strategy objects require all fields |
+| `'bulkReplace'` | `replaceOne`, `bulkReplace`, `replaceMany` | All non-optional fields required (`replaceMany`: except the primary key)                          |
+| `'patch'`       | Available for manual checks                | Fully partial; useful when you need to validate a partial payload yourself                        |
 
-`updateMany` does **not** run a validator on the data payload — only foreign-key references are checked. If you want strict validation of a partial update, build a `'patch'` validator and run it yourself before calling `updateMany`.
+Since 0.1.162 `updateMany` and `replaceMany` validate their payload too (before, only foreign-key references were checked, and a bad value reached the database — a silent coercion or a constraint error). See [Upgrading](/guide/upgrading#v0-1-162).
 
 You can access validators directly for manual checks:
 

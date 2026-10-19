@@ -92,7 +92,7 @@ describe("CollectionPatcher: $-prefixed user values in merge subdoc", () => {
     // version field is caught.
     expect(updateFilter).toHaveLength(1);
     const stage = updateFilter[0] as { $set: Record<string, unknown> };
-    expect(stage.$set.version).toEqual({ $add: ["$version", 1] });
+    expect(stage.$set.version).toEqual({ $add: [{ $ifNull: ["$version", 0] }, 1] });
     expect(stage.$set["password.hash"]).toEqual({ $literal: "$scrypt$NEW" });
   });
 });

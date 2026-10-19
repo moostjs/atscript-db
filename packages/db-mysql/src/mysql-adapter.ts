@@ -29,6 +29,7 @@ import type {
   TDbInsertResult,
   TDbUpdateResult,
   TDbUpdateOptions,
+  TDbDeleteManyOptions,
   TExistingColumn,
   TExistingTableOption,
   TColumnDiff,
@@ -69,6 +70,7 @@ import {
   type TGeoSearchControls,
   type TSqlFragment,
   fillReplacePayload,
+  writeLimitCount,
   geoWindowFromControls,
   chunkInsertRows,
   normalizeGeoPointValue,
@@ -92,6 +94,7 @@ import {
   buildCreateTable,
   buildCreateView,
   buildDelete,
+  writeLimitOrderBy,
   buildInsert,
   buildInsertMany,
   buildSelect,
@@ -1470,6 +1473,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     return { matchedCount: result.affectedRows, modifiedCount: result.changedRows };
   }
 
+  /** Native `UPDATE/DELETE … ORDER BY … LIMIT n` (since 0.1.162). */
+  override supportsWriteLimit(): boolean {
+    return true;
+  }
+
   async updateMany(
     filter: FilterExpr,
     data: Record<string, unknown>,
@@ -1478,13 +1486,16 @@ export class MysqlAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     const where = this._mutationWhere(filter);
     const versionColumn = this._versionColumnFor(opts);
+    const bound = opts?.limit;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
       where,
-      undefined,
+      bound && writeLimitCount(bound),
       ops,
       versionColumn,
+      undefined,
+      bound && writeLimitOrderBy(bound),
     );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -1505,13 +1516,18 @@ export class MysqlAdapter extends BaseDbAdapter {
     // instead of silently merging with the old row.
     const where = this._mutationWhere(filter);
     const versionColumn = this._table.versionColumnPhysical;
-    const full = fillReplacePayload(data, this._replaceColumns(), versionColumn);
+    const full = fillReplacePayload(
+      data,
+      this._replaceColumns(),
+      versionColumn,
+      this._table.onUpdateIncPhysical,
+    );
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       full,
       where,
       1,
-      undefined,
+      this._onUpdateIncOps(),
       versionColumn,
       expectedVersion,
     );
@@ -1541,7 +1557,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       data,
       where,
       undefined,
-      undefined,
+      this._onUpdateIncOps(),
       versionColumn,
     );
     this._log(sql, params);
@@ -1560,9 +1576,15 @@ export class MysqlAdapter extends BaseDbAdapter {
     return { deletedCount: result.affectedRows };
   }
 
-  async deleteMany(filter: FilterExpr): Promise<TDbDeleteResult> {
+  async deleteMany(filter: FilterExpr, opts?: TDbDeleteManyOptions): Promise<TDbDeleteResult> {
     const where = this._mutationWhere(filter);
-    const { sql, params } = buildDelete(this.resolveTableName(), where);
+    const bound = opts?.limit;
+    const { sql, params } = buildDelete(
+      this.resolveTableName(),
+      where,
+      bound && writeLimitCount(bound),
+      bound && writeLimitOrderBy(bound),
+    );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
     return { deletedCount: result.affectedRows };

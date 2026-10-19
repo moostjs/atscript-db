@@ -43,4 +43,11 @@ describe("ClientValidator — number.timestamp.updated is server-managed", () =>
     const v = createClientValidator(meta);
     expect(() => v.validate({ id: 1, audit: {} }, "insert")).toThrow(ClientValidationError);
   });
+
+  it("a @db.onUpdate.inc counter may be omitted on insert and replace (since 0.1.162)", () => {
+    const v = createClientValidator(meta);
+    expect(() => v.validate({ id: 1, audit: {}, editedAt: 1 }, "insert")).not.toThrow();
+    expect(() => v.validate({ id: 1, audit: {} }, "replace")).not.toThrow();
+    expect(() => v.validate({ id: 1, rev: "x" }, "patch")).toThrow(ClientValidationError);
+  });
 });

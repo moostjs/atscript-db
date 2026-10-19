@@ -1,4 +1,10 @@
-import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
+import type {
+  TDbCollation,
+  TDbFieldMeta,
+  TDbForeignKey,
+  TDbWriteLimit,
+  TFieldOps,
+} from "@atscript/db";
 import type { DbControls, TDbReadLock, TResolvedBucket } from "@atscript/db";
 import type {
   AtscriptQueryFieldRef,
@@ -28,6 +34,7 @@ import {
   foreignKeySql,
   arithOverflowError,
   numericOutOfRangeError,
+  orderByList,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -617,6 +624,7 @@ export function buildSelect(
 /**
  * Builds an UPDATE ... SET ... WHERE statement with optional LIMIT.
  */
+// oxlint-disable-next-line max-params
 export function buildUpdate(
   table: string,
   data: Record<string, unknown>,
@@ -625,15 +633,36 @@ export function buildUpdate(
   ops?: TFieldOps,
   versionColumn?: string,
   expectedVersion?: number,
+  orderBy?: string,
 ): TSqlFragment {
-  return _buildUpdate(mysqlDialect, table, data, where, limit, ops, versionColumn, expectedVersion);
+  return _buildUpdate(
+    mysqlDialect,
+    table,
+    data,
+    where,
+    limit,
+    ops,
+    versionColumn,
+    expectedVersion,
+    orderBy,
+  );
 }
 
 /**
  * Builds a DELETE ... WHERE statement with optional LIMIT.
  */
-export function buildDelete(table: string, where: TSqlFragment, limit?: number): TSqlFragment {
-  return _buildDelete(mysqlDialect, table, where, limit);
+export function buildDelete(
+  table: string,
+  where: TSqlFragment,
+  limit?: number,
+  orderBy?: string,
+): TSqlFragment {
+  return _buildDelete(mysqlDialect, table, where, limit, orderBy);
+}
+
+/** `ORDER BY` list of a bounded write (since 0.1.162). */
+export function writeLimitOrderBy(bound: TDbWriteLimit): string {
+  return orderByList(mysqlDialect, bound.sort, bound.nulls);
 }
 
 /**

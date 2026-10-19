@@ -14,7 +14,7 @@ import type { FilterExpr } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import { CasMismatchError, DbError } from "../db-error";
 import type { TGenericLogger } from "../logger";
-import { separateCas, separateFieldOps } from "../ops";
+import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
 import { isVersionExemptPatch } from "../patch/version-exempt";
@@ -60,8 +60,12 @@ import type {
   TInsertOptions,
   TDbInsertResult,
   TDbRemoveGuardContext,
+  TBulkWriteOptions,
   TDbUpdateOptions,
   TDbUpdateResult,
+  TDbWriteLimit,
+  DbQuery,
+  Uniquery,
   TDbWriteAction,
   TDbWriteCheck,
   TDbWriteGuardContext,
@@ -337,6 +341,26 @@ function concurrentChange(): DbError {
 
 /** Hand-off for a version-exempt patch (since 0.1.150) — shared, never mutated. */
 const KEEP_VERSION: TDbUpdateOptions = Object.freeze({ keepVersion: true });
+
+/** `[opts]` when `opts` carries anything — the adapter call shape stays unchanged otherwise. */
+function optsArg(opts: TDbUpdateOptions): [TDbUpdateOptions] | [] {
+  return Object.keys(opts).length > 0 ? [opts] : [];
+}
+
+function invalidQuery(path: string, message: string): DbError {
+  return new DbError("INVALID_QUERY", [{ path, message }]);
+}
+
+/** The rows a bounded `updateMany` / `deleteMany` picks (see `_writeBound`). */
+interface TWriteBound {
+  /** Translated (physical) filter. */
+  filter: FilterExpr;
+  /** Translated read of the picked rows' primary keys (order, limit). */
+  query: DbQuery;
+  limit: number;
+  /** What a `supportsWriteLimit()` adapter receives. */
+  writeLimit: TDbWriteLimit;
+}
 
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
 const TOUCH_MANY_CHUNK = 500;
@@ -692,8 +716,11 @@ export class AtscriptDbTable<
         const items = payloads.map((p, i) => {
           const c = clone(p);
           expectedVersions[i] = separateCas(c, versionColumn);
-          this._stampOnUpdate(c, now, true);
-          return this._applyDefaults(c, now);
+          // Stamps after defaults: `@db.onUpdate.inc` counters (defaulted to 0
+          // for inserts) leave the payload — the adapter increments them.
+          const d = this._applyDefaults(c, now);
+          this._stampOnUpdate(d, now, true);
+          return d;
         });
         // Nav data for the FROM / VIA phases, read from the pruned rows.
         const originals = canNest ? items.map((item) => ({ ...item })) : [];
@@ -999,7 +1026,8 @@ export class AtscriptDbTable<
             isVersionExemptPatch(data, this as AtscriptDbTable)
               ? [KEEP_VERSION]
               : [];
-          this._stampTopLevel(data, now);
+          // A versioned touch (empty + `$cas`) writes the row too.
+          this._stampTopLevel(data, now, expectedVersion !== undefined);
 
           let result: TDbUpdateResult;
           if (this.adapter.supportsNativePatch()) {
@@ -1182,6 +1210,12 @@ export class AtscriptDbTable<
       }
     }
 
+    // A touch writes the row: `@db.onUpdate.now` / `@db.onUpdate.inc` move
+    // with the version (since 0.1.162).
+    const stamps: Record<string, unknown> = {};
+    this._stampTopLevel(stamps, Date.now(), true);
+    const { update, ops } = this._translatePatch(stamps);
+
     return this.adapter.withTransaction(async () => {
       let matchedCount = 0;
       let modifiedCount = 0;
@@ -1191,7 +1225,7 @@ export class AtscriptDbTable<
         // exactly `SET version = version + 1` (Mongo: `$inc`); the table's
         // own `updateMany` short-circuits empty patches on purpose.
         // No TDbUpdateOptions — a touch always bumps.
-        const result = await this.adapter.updateMany({ $or: chunk }, {}, undefined);
+        const result = await this.adapter.updateMany({ $or: chunk }, update, ops);
         matchedCount += result.matchedCount;
         modifiedCount += result.modifiedCount;
       }
@@ -1262,30 +1296,33 @@ export class AtscriptDbTable<
 
   // ── Batch operations ──────────────────────────────────────────────────────
 
+  /**
+   * Patches every row matching `filter` with `data` (own fields only — no
+   * relations, no `$cas`). Since 0.1.162 the payload is validated in `patch`
+   * mode, exactly like {@link updateOne}: a type mismatch, `null` on a
+   * non-nullable field, `@meta.required` or `@expect.*` failures throw a
+   * `ValidatorError` before any statement runs.
+   *
+   * `opts.limit` (since 0.1.162) bounds the write to the first `limit` matching
+   * rows in `opts.sort` order (default: primary key ascending; the primary key
+   * always breaks ties). Loop until `matchedCount === 0` to process every
+   * match in batches. Not exposed over HTTP.
+   */
   public async updateMany(
     filter: FilterExpr<FlatType>,
     data: DbPatch<DataType>,
+    opts?: TBulkWriteOptions<FlatType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
-    await this._integrity.validateForeignKeys(
-      [data as Record<string, unknown>],
-      this._meta,
-      this._fkLookupResolver,
-      this._writeTableResolver,
-      true,
-    );
+    const bound = this._writeBound(filter as FilterExpr, opts);
     const dataCopy = _cloneWritePayload(data);
-    this._meta.stripDerived(dataCopy);
-    const now = Date.now();
-    this._stampOnUpdate(dataCopy, now, false);
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still
     // happens inside the adapter on every versioned UPDATE, unless the patch
     // writes only `@db.column.version.exempt` fields. Reject $cas
     // here so callers fail loud instead of silently losing the predicate.
-    const versionColumn = this.versionColumn;
     if ("$cas" in dataCopy) {
       throw new DbError("INVALID_QUERY", [
         {
@@ -1296,52 +1333,102 @@ export class AtscriptDbTable<
         },
       ]);
     }
+    this._rejectNavWrite(dataCopy, "updateMany");
+    const now = Date.now();
+    this._stampOnUpdate(dataCopy, now, false);
+    validateBatch(this.getValidator("bulkUpdate"), [dataCopy], {
+      mode: "patch",
+      flatMap: this.flatMap,
+      navFields: this._meta.navFields,
+    });
+    await this._integrity.validateForeignKeys(
+      [dataCopy],
+      this._meta,
+      this._fkLookupResolver,
+      this._writeTableResolver,
+      true,
+    );
+    this._meta.stripDerived(dataCopy);
+    const versionColumn = this.versionColumn;
     if (versionColumn !== undefined) {
       assertNoVersionWrites(dataCopy, versionColumn);
     }
     // Version-exempt patch (since 0.1.150): decided on the logical payload,
     // before decomposition (keys only — encryption does not change them).
-    const updateOpts: [TDbUpdateOptions] | [] =
-      versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable)
-        ? [KEEP_VERSION]
-        : [];
+    const updateOpts: TDbUpdateOptions = {};
+    if (versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable)) {
+      updateOpts.keepVersion = true;
+    }
     // An empty patch stays a no-op (below) — no update time without a write.
     this._stampTopLevel(dataCopy, now);
     // Encrypt @db.encrypted fields BEFORE decomposition so the patch carries
     // envelope strings; operator objects on encrypted fields are rejected.
     await this._encryptItems([dataCopy], "patch");
-    // Decompose flattens nested merge-strategy objects into dot-paths so that
-    // separateFieldOps catches nested ops like { account: { failedLoginAttempts: { $inc: 1 } } }.
-    const update = decomposePatch(dataCopy, this as AtscriptDbTable);
-    const ops = separateFieldOps(update);
-    const translatedOps = ops ? this._fieldMapper.translateOpsKeys(ops, this._meta) : undefined;
-    const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
-    const translatedFilter = this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
+    const { update, ops } = this._translatePatch(dataCopy);
+    const translatedFilter =
+      bound?.filter ?? this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
     // Empty patch: nothing to SET (an empty SET list is a SQL syntax error) and
     // a bulk no-op must not bump versions — report the honest match count only.
-    if (translatedOps === undefined && isEmptyObject(translatedUpdate)) {
+    if (ops === undefined && isEmptyObject(update)) {
       const matchedCount = await this.adapter.count({ filter: translatedFilter, controls: {} });
-      return { matchedCount, modifiedCount: 0 };
+      return {
+        matchedCount: bound ? Math.min(matchedCount, bound.limit) : matchedCount,
+        modifiedCount: 0,
+      };
     }
-    return enrichFkViolation(this._meta, () =>
-      this.adapter.updateMany(translatedFilter, translatedUpdate, translatedOps, ...updateOpts),
-    );
+    return enrichFkViolation(this._meta, () => {
+      if (!bound) {
+        return this.adapter.updateMany(translatedFilter, update, ops, ...optsArg(updateOpts));
+      }
+      if (this.adapter.supportsWriteLimit()) {
+        return this.adapter.updateMany(translatedFilter, update, ops, {
+          ...updateOpts,
+          limit: bound.writeLimit,
+        });
+      }
+      return this._pinBoundKeys(bound).then((keys) =>
+        keys
+          ? this.adapter.updateMany(
+              { $and: [translatedFilter, keys] },
+              update,
+              ops,
+              ...optsArg(updateOpts),
+            )
+          : { matchedCount: 0, modifiedCount: 0 },
+      );
+    });
   }
 
+  /**
+   * Replaces the own fields of every row matching `filter` with `data`. The
+   * payload is validated in `replace` mode (since 0.1.162) — every required
+   * field must be present — except the primary key, which the filter
+   * replaces as a row picker.
+   */
   public async replaceMany(
     filter: FilterExpr<FlatType>,
     data: DbRow<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
+    const dataCopy = _cloneWritePayload(data);
+    this._rejectNavWrite(dataCopy, "replaceMany");
+    this._stampOnUpdate(dataCopy, Date.now(), true);
+    validateBatch(this.getValidator("bulkReplace"), [dataCopy], {
+      mode: "replace",
+      navFields: this._meta.navFields,
+      keyless: true,
+    });
     await this._integrity.validateForeignKeys(
-      [data as Record<string, unknown>],
+      [dataCopy],
       this._meta,
       this._fkLookupResolver,
       this._writeTableResolver,
     );
-    const dataCopy = _cloneWritePayload(data);
-    this._stampOnUpdate(dataCopy, Date.now(), true);
+    const versionColumn = this.versionColumn;
+    if (versionColumn !== undefined) {
+      assertNoVersionWrites(dataCopy, versionColumn);
+    }
     await this._encryptItems([dataCopy], "write");
     return enrichFkViolation(this._meta, () =>
       this.adapter.replaceMany(
@@ -1351,39 +1438,177 @@ export class AtscriptDbTable<
     );
   }
 
-  public async deleteMany(filter: FilterExpr<FlatType>): Promise<TDbDeleteResult> {
+  /**
+   * Deletes every row matching `filter` (application-level cascades run first
+   * where the adapter has no native foreign keys).
+   *
+   * `opts.limit` (since 0.1.162) bounds the delete to the first `limit`
+   * matching rows in `opts.sort` order (default: primary key ascending; the
+   * primary key always breaks ties) — for retention sweeps that keep each
+   * statement small. Loop until `deletedCount === 0`, not until it is below
+   * `limit`: a concurrent writer can make one round delete fewer rows while
+   * matches remain. Not exposed over HTTP.
+   */
+  public async deleteMany(
+    filter: FilterExpr<FlatType>,
+    opts?: TBulkWriteOptions<FlatType>,
+  ): Promise<TDbDeleteResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
+    const bound = this._writeBound(filter as FilterExpr, opts);
+    const translate = (f: FilterExpr) => this._fieldMapper.translateFilter(f, this._meta);
     if (this._integrity.needsCascade(this._cascadeResolver, this.tableName)) {
       return remapDeleteFkViolation(this.tableName, () =>
         this.adapter.withTransaction(async () => {
-          const pin = await this._integrity.cascadeBeforeDelete(
-            filter as FilterExpr,
-            this.tableName,
-            this._meta,
-            this._cascadeResolver!,
-            (f) => this._fieldMapper.translateFilter(f, this._meta),
-            this.adapter,
-          );
-          if (pin) {
-            // Delete exactly the rows the cascade ran for (pinned by key):
-            // re-evaluating `filter` now could miss rows whose match depended
-            // on children the cascade just deleted or nulled.
-            let deletedCount = 0;
-            for (const batch of pin) {
-              deletedCount += (await this.adapter.deleteMany(batch)).deletedCount;
-            }
-            return { deletedCount };
-          }
-          return this.adapter.deleteMany(
-            this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
-          );
+          if (!bound) return this._cascadeDelete(filter as FilterExpr, translate);
+          // Pin the keys first: the cascade and the delete act on exactly them.
+          const keys = await this._pinBoundKeys(bound);
+          return keys ? this._cascadeDelete(keys, (f) => f) : { deletedCount: 0 };
         }),
       );
     }
-    return remapDeleteFkViolation(this.tableName, () =>
-      this.adapter.deleteMany(this._fieldMapper.translateFilter(filter as FilterExpr, this._meta)),
+    if (!bound) {
+      return remapDeleteFkViolation(this.tableName, () =>
+        this.adapter.deleteMany(translate(filter as FilterExpr)),
+      );
+    }
+    if (this.adapter.supportsWriteLimit()) {
+      return remapDeleteFkViolation(this.tableName, () =>
+        this.adapter.deleteMany(bound.filter, { limit: bound.writeLimit }),
+      );
+    }
+    return remapDeleteFkViolation(this.tableName, async () => {
+      const keys = await this._pinBoundKeys(bound);
+      return keys ? this.adapter.deleteMany({ $and: [bound.filter, keys] }) : { deletedCount: 0 };
+    });
+  }
+
+  /**
+   * Application-level cascade, then the delete. `translate` maps `filter` to
+   * the adapter's physical filter (identity for an already-physical one).
+   */
+  private async _cascadeDelete(
+    filter: FilterExpr,
+    translate: (f: FilterExpr) => FilterExpr,
+  ): Promise<TDbDeleteResult> {
+    const pin = await this._integrity.cascadeBeforeDelete(
+      filter,
+      this.tableName,
+      this._meta,
+      this._cascadeResolver!,
+      translate,
+      this.adapter,
     );
+    if (pin) {
+      // Delete exactly the rows the cascade ran for (pinned by key):
+      // re-evaluating `filter` now could miss rows whose match depended
+      // on children the cascade just deleted or nulled.
+      let deletedCount = 0;
+      for (const batch of pin) {
+        deletedCount += (await this.adapter.deleteMany(batch)).deletedCount;
+      }
+      return { deletedCount };
+    }
+    return this.adapter.deleteMany(translate(filter));
+  }
+
+  /**
+   * Validates `opts` of a bounded `updateMany` / `deleteMany` and returns the
+   * translated read of the rows it picks (filter, order with the primary-key
+   * tie-breaker, `limit`, primary-key projection), or `undefined` when the
+   * write is unbounded.
+   */
+  private _writeBound(
+    filter: FilterExpr,
+    opts: TBulkWriteOptions<any> | undefined,
+  ): TWriteBound | undefined {
+    const invalid = invalidQuery;
+    if (opts?.limit === undefined) {
+      if (opts?.sort !== undefined)
+        throw invalid("sort", "sort applies to a bounded write only — set limit");
+      return undefined;
+    }
+    const limit = opts.limit;
+    if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
+      throw invalid("limit", `limit must be a positive integer, got ${String(limit)}`);
+    }
+    const pk = this._meta.primaryKeys;
+    if (pk.length === 0) {
+      throw invalid("limit", "a bounded write needs a primary key to order and pin its rows");
+    }
+    let sort: Record<string, 1 | -1>;
+    if (opts.sort !== undefined && Object.keys(opts.sort).length > 0) {
+      sort = {};
+      for (const [field, dir] of Object.entries(opts.sort)) {
+        if (dir !== 1 && dir !== -1)
+          throw invalid(`sort.${field}`, "sort direction must be 1 or -1");
+        sort[field] = dir;
+      }
+      guardPaths(this._meta, this.adapter, { controls: { $sort: sort } });
+    } else {
+      sort = Object.fromEntries(pk.map((field) => [field, 1 as const]));
+    }
+    const query = this._fieldMapper.translateQuery(
+      this._withStableSort({
+        filter,
+        controls: { $sort: sort, $limit: limit, $select: [...pk] },
+      } as Uniquery),
+      this._meta,
+    );
+    const writeLimit: TDbWriteLimit = {
+      limit,
+      sort: query.controls.$sort as Record<string, 1 | -1>,
+    };
+    if (query.controls.$nulls) writeLimit.nulls = query.controls.$nulls;
+    return { filter: query.filter, query, limit, writeLimit };
+  }
+
+  /**
+   * Reads the primary keys of the rows a bounded write picks and returns them
+   * as a physical filter, or `undefined` when none match.
+   */
+  private async _pinBoundKeys(bound: TWriteBound): Promise<FilterExpr | undefined> {
+    const rows = await this.adapter.findMany(bound.query);
+    if (rows.length === 0) return undefined;
+    const cols = this._meta.primaryKeys.map((field) => this._meta.physicalPath(field));
+    if (cols.length === 1) {
+      const col = cols[0]!;
+      return { [col]: { $in: rows.map((row) => row[col]) } } as FilterExpr;
+    }
+    return {
+      $or: rows.map((row) => Object.fromEntries(cols.map((col) => [col, row[col]]))),
+    } as FilterExpr;
+  }
+
+  /** `updateMany` / `replaceMany` write the table's own fields only. */
+  private _rejectNavWrite(data: Record<string, unknown>, method: string): void {
+    for (const navField of this._meta.navFields) {
+      if (data[navField] !== undefined) {
+        throw new DbError("INVALID_QUERY", [
+          {
+            path: navField,
+            message: `${method} writes the table's own fields only — write relations through the keyed methods (updateOne / bulkUpdate / replaceOne / bulkReplace)`,
+          },
+        ]);
+      }
+    }
+  }
+
+  /**
+   * A logical patch → the adapter's physical `{ update, ops }`: nested
+   * merge-strategy objects decomposed into dot-paths (so nested field ops are
+   * caught), field ops separated, keys translated.
+   */
+  private _translatePatch(data: Record<string, unknown>): {
+    update: Record<string, unknown>;
+    ops: TFieldOps | undefined;
+  } {
+    const decomposed = decomposePatch(data, this as AtscriptDbTable);
+    const ops = separateFieldOps(decomposed);
+    return {
+      update: this._fieldMapper.translatePatchKeys(decomposed, this._meta),
+      ops: ops ? this._fieldMapper.translateOpsKeys(ops, this._meta) : undefined,
+    };
   }
 
   // ── Schema operations ─────────────────────────────────────────────────────
@@ -1915,6 +2140,10 @@ export class AtscriptDbTable<
    * them once the patch is known to write something.
    */
   private _stampOnUpdate(data: Record<string, unknown>, now: number, topLevel: boolean): void {
+    // `@db.onUpdate.inc` counters (top-level only): the caller's value is
+    // dropped — a patch gets `$inc: 1` from {@link _stampTopLevel}, a replace
+    // from the adapter (`col = col + 1`).
+    for (const field of this._meta.onUpdateInc) delete data[field];
     for (const field of this._meta.onUpdateNow) {
       if (!field.includes(".")) {
         if (topLevel) data[field] = now;
@@ -1925,12 +2154,17 @@ export class AtscriptDbTable<
     }
   }
 
-  /** Sets the top-level `@db.onUpdate.now` columns of a non-empty patch to `now`. */
-  private _stampTopLevel(data: Record<string, unknown>, now: number): void {
-    if (isEmptyObject(data)) return;
+  /**
+   * Sets the top-level `@db.onUpdate.now` columns of a non-empty patch to
+   * `now` and increments its `@db.onUpdate.inc` counters (`$inc: 1`).
+   * `force`: stamp an empty patch too (a touch writes the row).
+   */
+  private _stampTopLevel(data: Record<string, unknown>, now: number, force = false): void {
+    if (!force && isEmptyObject(data)) return;
     for (const field of this._meta.onUpdateNow) {
       if (!field.includes(".")) data[field] = now;
     }
+    for (const field of this._meta.onUpdateInc) data[field] = { $inc: 1 };
   }
 
   /** {@link _nestedDefaultFillable} per nested default path. */
