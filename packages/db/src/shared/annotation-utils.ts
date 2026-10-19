@@ -55,6 +55,29 @@ export function validateExclusiveWith(
   return errors;
 }
 
+/**
+ * Reports each of `pairs` (`[annotation, why]`) the field carrying `token`
+ * also carries — its own or inherited through its type ref (the field's
+ * effective annotations, what the runtime mirror reads off the metadata):
+ * `${tag} cannot coexist with @${annotation} — ${why}`.
+ * @since 0.1.162
+ */
+export function validateIncompatible(
+  token: Token,
+  tag: string,
+  pairs: ReadonlyArray<readonly [annotation: string, why: string]>,
+  doc: AtscriptDoc,
+): TMessages {
+  const effective = effectiveAnnotationNames(token.parentNode!, doc);
+  return pairs
+    .filter(([name]) => effective.has(name))
+    .map(([name, why]) => ({
+      message: `${tag} cannot coexist with @${name} — ${why}`,
+      severity: 1 as const,
+      range: token.range,
+    }));
+}
+
 /** Whether a prop is a field of a view interface (`@db.view` / `@db.view.for`). */
 export function isViewField(field: SemanticNode): boolean {
   const struct = field.ownerNode;

@@ -1,15 +1,7 @@
 import { AnnotationSpec } from "@atscript/core";
-import type { TAnnotationsTree, TAnnotationSpecConfig } from "@atscript/core";
+import type { TAnnotationsTree } from "@atscript/core";
 
-import { encryptedSearchProblem } from "../../shared/view-validation";
-
-/** Refuses the feature on a field that reads ciphertext (since 0.1.162). */
-function refuseCiphertext(annotation: string): TAnnotationSpecConfig["validate"] {
-  return (token, _args, doc) => {
-    const problem = encryptedSearchProblem(token, doc, annotation);
-    return problem ? [problem] : [];
-  };
-}
+import { refuseCiphertext } from "../../shared/view-validation";
 
 export const dbSearchAnnotations: TAnnotationsTree = {
   search: {

@@ -63,6 +63,7 @@ import { dedupeProjection } from "./projection-dedupe";
 import { hasNullsPlacement, sortStages } from "./mongo-sort";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
+import { dynamicSearchEncryptedMessage } from "./search-messages";
 import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
 import {
   buildMongoFilter,
@@ -985,9 +986,7 @@ export class MongoAdapter extends BaseDbAdapter {
       encrypted !== undefined &&
       [...this._mongoIndexes.values()].some((i) => i.type === "dynamic_text")
     ) {
-      throw new Error(
-        `@db.mongo.search.dynamic indexes every field, including the @db.encrypted field "${encrypted}" — Atlas Search over ciphertext is impossible; use @db.mongo.search.static with @db.mongo.search.text fields`,
-      );
+      throw new Error(dynamicSearchEncryptedMessage(encrypted));
     }
 
     // MongoDB allows ONE text index per collection: a second fulltext index

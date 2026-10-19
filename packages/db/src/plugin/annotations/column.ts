@@ -1,24 +1,32 @@
 import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure, isPrimitive } from "@atscript/core";
-import type { AtscriptDoc, SemanticNode, SemanticRefNode, Token, TMessages } from "@atscript/core";
+import type {
+  AtscriptDoc,
+  SemanticNode,
+  SemanticPrimitiveNode,
+  SemanticRefNode,
+  Token,
+  TMessages,
+} from "@atscript/core";
 import {
+  effectiveAnnotationNames,
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  primitiveBaseType,
   searchFieldVerdict,
   validateFieldBaseType,
+  validateIncompatible,
 } from "../../shared/annotation-utils";
+import { ENCRYPTED_INCOMPATIBLE } from "../../shared/search-fields";
 import { DERIVED_INCOMPATIBLE, JSON_LEAF_TYPES } from "../../shared/derived-rules";
 import {
-  encryptedSearchProblem,
   encryptedTypeSearchProblem,
+  isNavProp,
   jsonChainInfo,
-  viewSourceSealProblem,
+  sealedSearchProblem,
 } from "../../shared/view-validation";
-
-/** Nav-field annotations: a navigation field has no column on this table. */
-const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
 
 /**
  * Compile-time placement rules of `@db.column.version.exempt` (E1–E5, W1, W2).
@@ -40,7 +48,7 @@ function validateVersionExempt(token: Token): TMessages {
   if (field.countAnnotations("meta.id") > 0) {
     fail(`${tag} cannot mark a primary key — it identifies the row and is never patched`);
   }
-  if (NAV_ANNOTATIONS.some((n) => field.countAnnotations(n) > 0)) {
+  if (isNavProp(field)) {
     fail(
       `${tag} cannot mark a navigation field — related rows follow their own table's versioning`,
     );
@@ -99,6 +107,18 @@ function validateVersionExempt(token: Token): TMessages {
   return errors;
 }
 
+/** Annotations a `@db.onUpdate.inc` field cannot carry, with the reason. */
+const ON_UPDATE_INC_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string]> = [
+  ["meta.id", "the primary key identifies the row and is never updated"],
+  ["db.column.version", "the version column is already bumped on every update"],
+  ["db.onUpdate.now", "a field is either a time stamp or a counter"],
+  ["db.default", "the counter starts at 0"],
+  ["db.default.increment", "the counter starts at 0"],
+  ["db.default.uuid", "the counter starts at 0"],
+  ["db.default.now", "the counter starts at 0"],
+  ["db.json", "a JSON column is written as one value"],
+];
+
 /**
  * Compile-time rules of `@db.onUpdate.inc` (since 0.1.162). The runtime
  * mirror (top level, encryption) is in `TableMetadata`.
@@ -120,18 +140,7 @@ function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
   if (!struct?.ownerNode || !isInterface(struct.ownerNode)) {
     fail(`${tag} must sit on a top-level field of the table, not inside a nested object`);
   }
-  for (const [name, why] of [
-    ["meta.id", "the primary key identifies the row and is never updated"],
-    ["db.column.version", "the version column is already bumped on every update"],
-    ["db.onUpdate.now", "a field is either a time stamp or a counter"],
-    ["db.default", "the counter starts at 0"],
-    ["db.default.increment", "the counter starts at 0"],
-    ["db.default.uuid", "the counter starts at 0"],
-    ["db.default.now", "the counter starts at 0"],
-    ["db.json", "a JSON column is written as one value"],
-  ]) {
-    if (field.countAnnotations(name) > 0) fail(`${tag} cannot coexist with @${name} — ${why}`);
-  }
+  errors.push(...validateIncompatible(token, tag, ON_UPDATE_INC_INCOMPATIBLE, doc));
   return errors;
 }
 
@@ -140,14 +149,10 @@ function isIntegerField(field: SemanticNode, doc: AtscriptDoc): boolean {
   const def = field.getDefinition();
   if (!def || !isRef(def)) return true;
   const leaf = doc.unwindType(def.id!, def.chain)?.def;
-  if (!leaf || !isPrimitive(leaf)) return true;
-  const ct = leaf.config.type;
-  const base = typeof ct === "object" ? (ct.kind === "final" ? ct.value : ct.kind) : ct;
-  if (base !== "number") return true;
-  if (leaf.tags?.has("int")) return true;
-  // Effective annotations — `@expect.int` on the field or on an alias it refers to.
-  const effective = doc.evalAnnotationsForNode(field) ?? field.annotations ?? [];
-  return effective.some((a) => a.name === "expect.int");
+  if (primitiveBaseType(leaf) !== "number") return true;
+  if ((leaf as SemanticPrimitiveNode).tags?.has("int")) return true;
+  // `@expect.int` on the field or on an alias it refers to
+  return effectiveAnnotationNames(field, doc).has("expect.int");
 }
 
 export const dbColumnAnnotations: TAnnotationsTree = {
@@ -476,9 +481,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       passedWhenReferred: false,
       multiple: false,
       validate(token, _args, doc) {
-        const sealed =
-          viewSourceSealProblem(token, doc, "@db.column.searchable") ??
-          encryptedSearchProblem(token, doc, "@db.column.searchable");
+        const sealed = sealedSearchProblem(token, doc, "@db.column.searchable");
         if (sealed) return [sealed];
         const verdict = searchFieldVerdict(token.parentNode!, doc);
         if (!("problem" in verdict)) return [];
@@ -801,38 +804,9 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     passedWhenReferred: false,
     multiple: false,
     validate(token, _args, doc) {
-      const errors = [] as TMessages;
-      const field = token.parentNode!;
       const typeProblem = encryptedTypeSearchProblem(token, doc);
-      if (typeProblem) errors.push(typeProblem);
-      const incompatible: Array<[string, string]> = [
-        ["meta.id", "the primary key must be addressable"],
-        ["db.rel.FK", "joins are impossible over ciphertext"],
-        ["db.index.plain", "indexes over ciphertext are meaningless"],
-        ["db.index.unique", "indexes over ciphertext are meaningless"],
-        ["db.index.fulltext", "indexes over ciphertext are meaningless"],
-        ["db.column.searchable", "search over ciphertext is impossible"],
-        ["db.index.geo", "geo indexes over ciphertext are meaningless"],
-        ["db.search.vector", "vector search over ciphertext is impossible"],
-        ["db.search.filter", "search filters need cleartext equality"],
-        ["db.column.version", "the OCC filter needs cleartext equality"],
-        ["db.default.increment", "engine-side defaults bypass the encryption transform"],
-        ["db.default.now", "engine-side defaults bypass the encryption transform"],
-        ["db.onUpdate.now", "the update time is set after the encryption transform"],
-        ["db.onUpdate.inc", "the counter is incremented by the database"],
-        ["db.mongo.search.text", "Atlas Search over ciphertext is impossible"],
-        ["db.mongo.search.autocomplete", "Atlas Search over ciphertext is impossible"],
-      ];
-      for (const [name, why] of incompatible) {
-        if (field.countAnnotations(name) > 0) {
-          errors.push({
-            message: `@db.encrypted cannot coexist with @${name} — ${why}`,
-            severity: 1,
-            range: token.range,
-          });
-        }
-      }
-      return errors;
+      const errors = validateIncompatible(token, "@db.encrypted", ENCRYPTED_INCOMPATIBLE, doc);
+      return typeProblem ? [typeProblem, ...errors] : errors;
     },
   }),
 

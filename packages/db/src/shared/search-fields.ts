@@ -93,3 +93,34 @@ export const ENCRYPTED_SEARCH_FEATURES = [
   "db.mongo.search.text",
   "db.mongo.search.autocomplete",
 ] as const;
+
+/** Why each of {@link ENCRYPTED_SEARCH_FEATURES} cannot sit on an `@db.encrypted` field. */
+const ENCRYPTED_SEARCH_WHY: Readonly<Record<(typeof ENCRYPTED_SEARCH_FEATURES)[number], string>> =
+  {
+    "db.column.searchable": "search over ciphertext is impossible",
+    "db.index.fulltext": "indexes over ciphertext are meaningless",
+    "db.index.geo": "geo indexes over ciphertext are meaningless",
+    "db.search.vector": "vector search over ciphertext is impossible",
+    "db.search.filter": "search filters need cleartext equality",
+    "db.mongo.search.text": "Atlas Search over ciphertext is impossible",
+    "db.mongo.search.autocomplete": "Atlas Search over ciphertext is impossible",
+  };
+
+/**
+ * Annotations an `@db.encrypted` field cannot carry, with the reason — the
+ * compile-time `@db.encrypted` check and the metadata build share it (the
+ * search rows are {@link ENCRYPTED_SEARCH_FEATURES}).
+ * @since 0.1.162
+ */
+export const ENCRYPTED_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string]> = [
+  ["meta.id", "the primary key must be addressable"],
+  ["db.rel.FK", "joins are impossible over ciphertext"],
+  ["db.index.plain", "indexes over ciphertext are meaningless"],
+  ["db.index.unique", "indexes over ciphertext are meaningless"],
+  ...ENCRYPTED_SEARCH_FEATURES.map((key): [string, string] => [key, ENCRYPTED_SEARCH_WHY[key]]),
+  ["db.column.version", "the OCC filter needs cleartext equality"],
+  ["db.default.increment", "engine-side defaults bypass the encryption transform"],
+  ["db.default.now", "engine-side defaults bypass the encryption transform"],
+  ["db.onUpdate.now", "the update time is set after the encryption transform"],
+  ["db.onUpdate.inc", "the counter is incremented by the database"],
+];

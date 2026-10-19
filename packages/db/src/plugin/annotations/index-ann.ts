@@ -2,7 +2,7 @@ import { AnnotationSpec } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 
 import { integerMemberIndexProblem, searchFieldVerdict } from "../../shared/annotation-utils";
-import { encryptedSearchProblem, viewSourceSealProblem } from "../../shared/view-validation";
+import { refuseCiphertext, sealedSearchProblem } from "../../shared/view-validation";
 
 export const dbIndexAnnotations: TAnnotationsTree = {
   index: {
@@ -82,9 +82,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         "```\n",
       validate(token, args, doc): TMessages {
         const field = token.parentNode!;
-        const sealed =
-          viewSourceSealProblem(token, doc, "@db.index.fulltext") ??
-          encryptedSearchProblem(token, doc, "@db.index.fulltext");
+        const sealed = sealedSearchProblem(token, doc, "@db.index.fulltext");
         if (sealed) return [sealed];
         const verdict = searchFieldVerdict(field, doc);
         if ("problem" in verdict) {
@@ -151,10 +149,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
         type: "string",
         description: "Index name. Defaults to the field name.",
       },
-      validate(token, _args, doc): TMessages {
-        const problem = encryptedSearchProblem(token, doc, "@db.index.geo");
-        return problem ? [problem] : [];
-      },
+      validate: refuseCiphertext("@db.index.geo"),
     }),
   },
 };
