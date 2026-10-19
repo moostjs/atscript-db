@@ -22,6 +22,8 @@ import type {
   AtscriptDbView,
   TDbDeleteResult,
   TDbIndex,
+  TIndexChange,
+  TForeignKeyChange,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
   TDbInsertIgnoreOptions,
@@ -96,13 +98,13 @@ import {
   buildAggregateSelect,
   buildAggregateCount,
   defaultValueForType,
-  defaultValueToSqlLiteral,
   geoPointToMysqlInternal,
   isMysqlTimestampColumn,
   mysqlTemporalFsp,
   mysqlBytesPerChar,
   mysqlCharLength,
   mysqlDefaultLiteral,
+  mysqlValueLiteral,
   mysqlGeoDistanceExpr,
   mysqlGeoValueToPoint,
   mysqlIndexPrefix,
@@ -1774,6 +1776,12 @@ export class MysqlAdapter extends BaseDbAdapter {
        ORDER BY c.ORDINAL_POSITION`,
       [tableName, this._schema],
     );
+    // An administrative adapter (no registered readable) has no model
+    const modelDefaults = new Map(
+      ((this._table as typeof this._table | undefined)?.fieldDescriptors ?? [])
+        .filter((f) => f.defaultValue?.kind === "value")
+        .map((f) => [f.physicalName, (f.defaultValue as { value: string }).value]),
+    );
     return rows.map((r) => {
       const column: TExistingColumn = {
         name: r.COLUMN_NAME,
@@ -1785,7 +1793,10 @@ export class MysqlAdapter extends BaseDbAdapter {
             : `${r.COLUMN_TYPE.toUpperCase()} SRID ${r.SRS_ID}`,
         notnull: r.IS_NULLABLE === "NO",
         pk: Boolean(Number(r.IS_PK ?? 0)),
-        dflt_value: normalizeMysqlDefault(r.COLUMN_DEFAULT),
+        dflt_value: reconcileAstralDefault(
+          normalizeMysqlDefault(r.COLUMN_DEFAULT, r.EXTRA),
+          modelDefaults.get(r.COLUMN_NAME),
+        ),
       };
       // `VIRTUAL GENERATED` / `STORED GENERATED` (MySQL and MariaDB) — not
       // `DEFAULT_GENERATED`, which marks an expression default.
@@ -1983,7 +1994,7 @@ export class MysqlAdapter extends BaseDbAdapter {
               if (field && !field.optional && !field.isPrimaryKey) {
                 const fallback =
                   field.defaultValue?.kind === "value"
-                    ? defaultValueToSqlLiteral(field.designType, field.defaultValue.value)
+                    ? mysqlValueLiteral(field.designType, field.defaultValue.value)
                     : defaultValueForType(field.designType);
                 return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
               }
@@ -2106,7 +2117,16 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── Index sync ────────────────────────────────────────────────────────────
 
-  async syncIndexes(): Promise<void> {
+  async syncIndexes(): Promise<TIndexChange[]> {
+    return this._syncIndexes(false);
+  }
+
+  /** The index changes {@link syncIndexes} would make — no DDL. */
+  async planIndexes(): Promise<TIndexChange[]> {
+    return this._syncIndexes(true);
+  }
+
+  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this._table.tableName;
     const schema = this._schema;
 
@@ -2128,7 +2148,19 @@ export class MysqlAdapter extends BaseDbAdapter {
     const renderPart = (column: string, prefix: number | undefined): string =>
       prefix === undefined ? column : `${column}(${prefix})`;
 
-    await this.syncIndexesWithDiff({
+    return this.syncIndexesWithDiff({
+      dryRun,
+      // MySQL requires NOT NULL columns for SPATIAL indexes. Optional
+      // geoPoint fields stay searchable (scan-based) — warn and skip.
+      skipIndex: (index) => {
+        if (index.type !== "geo") return undefined;
+        const fieldMeta = this._table.fieldDescriptors.find(
+          (f) => f.physicalName === index.fields[0]?.name,
+        );
+        return fieldMeta?.optional
+          ? `[mysql] geo index "${index.name}" skipped — SPATIAL indexes require a NOT NULL column; make "${fieldMeta.path}" required to index it`
+          : undefined;
+      },
       listExisting: async () => {
         const rows = await this._exec().all<{
           INDEX_NAME: string;
@@ -2158,17 +2190,6 @@ export class MysqlAdapter extends BaseDbAdapter {
       renderDesiredColumn: (_index, f) => renderPart(f.name, desiredPrefix(f.name)),
       createIndex: async (index: TDbIndex) => {
         if (index.type === "geo") {
-          // MySQL requires NOT NULL columns for SPATIAL indexes. Optional
-          // geoPoint fields stay searchable (scan-based) — warn and skip.
-          const fieldMeta = this._table.fieldDescriptors.find(
-            (f) => f.physicalName === index.fields[0]?.name,
-          );
-          if (fieldMeta?.optional) {
-            this.logger.warn(
-              `[mysql] geo index "${index.name}" skipped — SPATIAL indexes require a NOT NULL column; make "${fieldMeta.path}" required to index it`,
-            );
-            return;
-          }
           const sql = `CREATE SPATIAL INDEX ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} (${qi(index.fields[0].name)})`;
           this._log(sql);
           await this._exec().exec(sql);
@@ -2204,7 +2225,17 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   // ── FK sync ───────────────────────────────────────────────────────────────
 
-  async syncForeignKeys(): Promise<void> {
+  async syncForeignKeys(): Promise<TForeignKeyChange[]> {
+    return this._syncForeignKeys(false);
+  }
+
+  /** The FK changes {@link syncForeignKeys} would make — no DDL. */
+  async planForeignKeys(): Promise<TForeignKeyChange[]> {
+    return this._syncForeignKeys(true);
+  }
+
+  private async _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
+    const changes: TForeignKeyChange[] = [];
     const existingByName = await this._getExistingFkConstraints();
 
     // Build desired FK set (keyed by sorted local column names)
@@ -2215,8 +2246,10 @@ export class MysqlAdapter extends BaseDbAdapter {
 
     // Drop stale FKs (managed ones that no longer match desired)
     for (const [constraintName, columns] of existingByName) {
-      const key = columns.toSorted().join(",");
+      const key = [...columns].toSorted().join(",");
       if (!desiredFkKeys.has(key)) {
+        changes.push({ fields: columns, targetTable: "", action: "drop" });
+        if (dryRun) continue;
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP FOREIGN KEY ${qi(constraintName)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
@@ -2230,11 +2263,14 @@ export class MysqlAdapter extends BaseDbAdapter {
     for (const fk of this._table.foreignKeys.values()) {
       const key = [...fkColumns(fk).fields].toSorted().join(",");
       if (!existingKeys.has(key)) {
+        changes.push({ fields: fkColumns(fk).fields, targetTable: fk.targetTable, action: "add" });
+        if (dryRun) continue;
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
       }
     }
+    return changes;
   }
 
   async dropForeignKeys(fkFieldKeys: string[]): Promise<void> {
@@ -2760,12 +2796,26 @@ export class MysqlAdapter extends BaseDbAdapter {
  * `uuid()`), but the diff engine compares against serialized form (`fn:now`,
  * `fn:uuid`). Without normalization, every table with function defaults
  * produces phantom ALTER diffs on re-plan.
+ *
+ * An expression default (`EXTRA` has `DEFAULT_GENERATED` — the form TEXT /
+ * BLOB / JSON / GEOMETRY columns require) is reported as the printed
+ * expression: possibly parenthesised, a string literal with a charset
+ * introducer, escaped once more as a whole (`_utf8mb4\'it\\\'s\'` for
+ * `'it''s'`). It is unwrapped to the literal's value. The value is compared type-aware by
+ * `sameDefaultValue` (core), so `1` / `0.00` need no rewriting here.
  */
-function normalizeMysqlDefault(value: string | null): string | undefined {
+function normalizeMysqlDefault(value: string | null, extra?: string | null): string | undefined {
   if (value === null) {
     return undefined;
   }
-  const lower = value.toLowerCase();
+  let v = value;
+  const expression = /\bDEFAULT_GENERATED\b/i.test(extra ?? "");
+  if (expression) {
+    while (v.startsWith("(") && v.endsWith(")")) {
+      v = v.slice(1, -1).trim();
+    }
+  }
+  const lower = v.toLowerCase();
   // DEFAULT CURRENT_TIMESTAMP / current_timestamp() / CURRENT_TIMESTAMP(3) → fn:now
   if (/^current_timestamp(?:\(\d?\))?$/.test(lower)) {
     return "fn:now";
@@ -2774,12 +2824,56 @@ function normalizeMysqlDefault(value: string | null): string | undefined {
   if (lower === "uuid()") {
     return "fn:uuid";
   }
+  if (expression) {
+    // The printed expression's UTF-8 bytes come back read as Latin-1
+    // (`ü` → `Ã¼`) — decoded back when that is what they are.
+    v = decodeLatin1Utf8(v);
+    // The printed expression is escaped once more as a whole:
+    // `_utf8mb4\'it\\\'s\'` is the literal `_utf8mb4'it\'s'`.
+    const printed = /^(?:_\w+)?\\'/.test(v) ? v.replace(/\\([\s\S])/g, "$1") : v;
+    const literal = /^(?:_\w+)?'([\s\S]*)'$/.exec(printed);
+    return literal ? unescapeMysqlString(literal[1]) : printed;
+  }
   // Strip enclosing single quotes and un-double escaped quotes
   // MySQL INFORMATION_SCHEMA returns 'it''s active' for DEFAULT 'it''s active'
-  if (value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1).replace(/''/g, "'");
+  if (v.startsWith("'") && v.endsWith("'")) {
+    return v.slice(1, -1).replace(/''/g, "'");
   }
-  return value;
+  return v;
+}
+
+/** `value`'s code units (all ≤ U+00FF) as bytes, decoded as UTF-8 — `value` unchanged otherwise. */
+function decodeLatin1Utf8(value: string): string {
+  // oxlint-disable-next-line no-control-regex
+  if (!/[\u0080-\u00ff]/.test(value) || /[^\u0000-\u00ff]/.test(value)) {
+    return value;
+  }
+  const decoded = Buffer.from(value, "latin1").toString("utf8");
+  return decoded.includes("\uFFFD") ? value : decoded;
+}
+
+/**
+ * INFORMATION_SCHEMA reports a 4-byte character (an emoji) of a literal
+ * default as `?` — the column stores it intact. A live default that is the
+ * model default with each such character as `?` is the model default.
+ */
+function reconcileAstralDefault(
+  live: string | undefined,
+  model: string | undefined,
+): string | undefined {
+  if (live === undefined || model === undefined || live === model || !live.includes("?")) {
+    return live;
+  }
+  return model.replace(/[\u{10000}-\u{10FFFF}]/gu, "?") === live ? model : live;
+}
+
+const MYSQL_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", "0": "\0", Z: "\x1a" };
+
+/** The body of a printed MySQL string literal: `\x` escapes and doubled `''` resolved. */
+function unescapeMysqlString(body: string): string {
+  return body.replace(/\\([\s\S])|''/g, (match, ch: string | undefined) =>
+    ch === undefined ? "'" : (MYSQL_ESCAPES[ch] ?? ch),
+  );
 }
 
 /** Maps generic similarity metric to MySQL 9+ distance function name. */

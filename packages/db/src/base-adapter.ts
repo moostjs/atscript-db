@@ -36,6 +36,8 @@ import type {
   TEnsureTableOptions,
   TPrimaryKeyChange,
   TSyncIndexesOptions,
+  TIndexChange,
+  TForeignKeyChange,
   TReferencingForeignKey,
 } from "./types";
 import type {
@@ -105,6 +107,57 @@ function findTxContext(owner: unknown): TxContext | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * What an adapter hands `BaseDbAdapter.syncIndexesWithDiff`: the three
+ * DB-specific primitives plus how to compare and skip.
+ * @since 0.1.162 (inline before)
+ */
+export interface TIndexDiffOptions {
+  /**
+   * Existing indexes. When `columns` is provided (ordered column names),
+   * plain/unique indexes whose definition no longer matches the model are
+   * dropped and recreated — a name match alone is not enough (e.g. a
+   * composite index that gained or lost a member keeps its name).
+   */
+  listExisting(): Promise<Array<{ name: string; columns?: string[] }>>;
+  createIndex(index: TDbIndex): Promise<void>;
+  dropIndex(name: string): Promise<void>;
+  prefix?: string;
+  shouldSkipType?(type: TDbIndex["type"]): boolean;
+  /**
+   * Renders one desired key part for the drift comparison, so adapters whose
+   * `listExisting` reports more than a bare column name (e.g. MySQL's
+   * `col(255)` key-length prefix) can render the model side identically.
+   * Default: the column name.
+   * @since 0.1.128
+   */
+  renderDesiredColumn?(index: TDbIndex, field: TDbIndex["fields"][number]): string;
+  /**
+   * Index types declared on the model but not supported by this adapter —
+   * warns and skips (models stay portable; sync never errors on these).
+   */
+  warnUnsupportedTypes?: { adapter: string; types: ReadonlyArray<TDbIndex["type"]> };
+  /**
+   * An index the adapter cannot build in this database (e.g. a geo index
+   * without PostGIS): the warning to log, or `undefined` to build it. A
+   * skipped index is not desired — never reported as work to do.
+   * @since 0.1.162
+   */
+  skipIndex?(index: TDbIndex): string | undefined;
+  /**
+   * Prefixed indexes the adapter manages itself, outside the model's
+   * `indexes` (e.g. PostgreSQL's pgvector HNSW indexes) — never dropped as
+   * stale here.
+   * @since 0.1.162
+   */
+  isUnmanaged?(name: string): boolean;
+  /**
+   * Compute the changes only — no DDL (`planIndexes`).
+   * @since 0.1.162
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -785,37 +838,16 @@ export abstract class BaseDbAdapter {
    * }
    * ```
    */
-  protected async syncIndexesWithDiff(opts: {
-    /**
-     * Existing indexes. When `columns` is provided (ordered column names),
-     * plain/unique indexes whose definition no longer matches the model are
-     * dropped and recreated — a name match alone is not enough (e.g. a
-     * composite index that gained or lost a member keeps its name).
-     */
-    listExisting(): Promise<Array<{ name: string; columns?: string[] }>>;
-    createIndex(index: TDbIndex): Promise<void>;
-    dropIndex(name: string): Promise<void>;
-    prefix?: string;
-    shouldSkipType?(type: TDbIndex["type"]): boolean;
-    /**
-     * Renders one desired key part for the drift comparison, so adapters whose
-     * `listExisting` reports more than a bare column name (e.g. MySQL's
-     * `col(255)` key-length prefix) can render the model side identically.
-     * Default: the column name.
-     * @since 0.1.128
-     */
-    renderDesiredColumn?(index: TDbIndex, field: TDbIndex["fields"][number]): string;
-    /**
-     * Index types declared on the model but not supported by this adapter —
-     * warns and skips (models stay portable; sync never errors on these).
-     */
-    warnUnsupportedTypes?: { adapter: string; types: ReadonlyArray<TDbIndex["type"]> };
-  }): Promise<void> {
+  protected async syncIndexesWithDiff(opts: TIndexDiffOptions): Promise<TIndexChange[]> {
     const prefix = opts.prefix ?? "atscript__";
+    const dryRun = opts.dryRun === true;
+    const changes: TIndexChange[] = [];
 
     // List existing indexes, filter to managed ones
     const existing = await opts.listExisting();
-    const managed = existing.filter((i) => i.name.startsWith(prefix));
+    const managed = existing.filter(
+      (i) => i.name.startsWith(prefix) && !(opts.isUnmanaged?.(i.name) ?? false),
+    );
     const existingNames = new Set(managed.map((i) => i.name));
     const existingColumns = new Map(
       managed.filter((i) => i.columns).map((i) => [i.name, i.columns!]),
@@ -827,13 +859,25 @@ export abstract class BaseDbAdapter {
     // INDEX over duplicate rows) must not abort the remaining index
     // maintenance for this table.
     const { attempt, throwIfAny } = createFailureCollector("index sync");
+    /** Records the change; issues `ddl` unless this is a dry run. */
+    const apply = async (change: TIndexChange, label: string, ddl: () => Promise<void>) => {
+      if (dryRun) {
+        changes.push(change);
+        return;
+      }
+      if (await attempt(label, ddl)) {
+        changes.push(change);
+      }
+    };
 
     // Create missing indexes, rebuild definition-drifted ones
     for (const index of this._table.indexes.values()) {
       if (opts.warnUnsupportedTypes?.types.includes(index.type)) {
-        this.logger.warn(
-          `[${opts.warnUnsupportedTypes.adapter}] ${index.type} index "${index.name}" declared but not supported by this adapter — skipped`,
-        );
+        if (!dryRun) {
+          this.logger.warn(
+            `[${opts.warnUnsupportedTypes.adapter}] ${index.type} index "${index.name}" declared but not supported by this adapter — skipped`,
+          );
+        }
         continue;
       }
       if (opts.shouldSkipType?.(index.type)) {
@@ -846,10 +890,22 @@ export abstract class BaseDbAdapter {
         continue;
       }
 
+      // An index the adapter cannot build here (e.g. a geo index without
+      // PostGIS) is never desired — reported once per real sync, not as work.
+      const skipReason = opts.skipIndex?.(index);
+      if (skipReason !== undefined) {
+        if (!dryRun) {
+          this.logger.warn(skipReason);
+        }
+        continue;
+      }
+
       desiredNames.add(index.key);
 
       if (!existingNames.has(index.key)) {
-        await attempt(`create index "${index.key}"`, () => opts.createIndex(index));
+        await apply({ name: index.key, action: "add" }, `create index "${index.key}"`, () =>
+          opts.createIndex(index),
+        );
         continue;
       }
 
@@ -865,10 +921,14 @@ export abstract class BaseDbAdapter {
           (liveColumns.length !== desiredColumns.length ||
             liveColumns.some((c, i) => c !== desiredColumns[i]))
         ) {
-          await attempt(`rebuild index "${index.key}"`, async () => {
-            await opts.dropIndex(index.key);
-            await opts.createIndex(index);
-          });
+          await apply(
+            { name: index.key, action: "rebuild" },
+            `rebuild index "${index.key}"`,
+            async () => {
+              await opts.dropIndex(index.key);
+              await opts.createIndex(index);
+            },
+          );
         }
       }
     }
@@ -876,11 +936,12 @@ export abstract class BaseDbAdapter {
     // Drop stale indexes
     for (const name of existingNames) {
       if (!desiredNames.has(name)) {
-        await attempt(`drop index "${name}"`, () => opts.dropIndex(name));
+        await apply({ name, action: "drop" }, `drop index "${name}"`, () => opts.dropIndex(name));
       }
     }
 
     throwIfAny();
+    return changes;
   }
 
   // ── Search index metadata ─────────────────────────────────────────────────
@@ -1207,12 +1268,23 @@ export abstract class BaseDbAdapter {
 
   /**
    * Synchronizes indexes between the Atscript definitions and the database.
-   * Uses `this._table.indexes` for the full index definitions. Schema sync
+   * Uses `this._table.indexes` for the full index definitions. Returns the
+   * changes it made (since 0.1.162) — schema sync reports them on the run
+   * entry; `void` reports none. Schema sync
    * passes `opts` when safe mode skipped work the indexes depend on (see
    * {@link TSyncIndexesOptions}); an adapter whose indexes do not depend on it
    * ignores them.
    */
-  abstract syncIndexes(opts?: TSyncIndexesOptions): Promise<void>;
+  abstract syncIndexes(opts?: TSyncIndexesOptions): Promise<void | TIndexChange[]>;
+
+  /**
+   * The index changes {@link syncIndexes} would make now — no DDL. Schema
+   * sync's plan reports them (`entry.indexChanges`) and marks the entry
+   * `alter`; a run reports what `syncIndexes` returns. Optional: an adapter
+   * without it plans no index work.
+   * @since 0.1.162
+   */
+  planIndexes?(opts?: TSyncIndexesOptions): Promise<TIndexChange[]>;
 
   /**
    * Ensures the table exists in the database, creating it if needed.
@@ -1239,7 +1311,20 @@ export abstract class BaseDbAdapter {
    */
   afterSyncTable?(): Promise<void>;
 
-  async syncForeignKeys?(): Promise<void>;
+  /**
+   * Synchronizes foreign key constraints between Atscript definitions and
+   * the live table — adds the missing ones, drops the ones the model does
+   * not declare (matched by their local columns). Returns what it changed
+   * (since 0.1.162); schema sync reports it on the run entry.
+   */
+  async syncForeignKeys?(): Promise<void | TForeignKeyChange[]>;
+
+  /**
+   * The changes {@link syncForeignKeys} would make now — no DDL. Schema
+   * sync's plan reports them with the snapshot-based FK diff.
+   * @since 0.1.162
+   */
+  planForeignKeys?(): Promise<TForeignKeyChange[]>;
 
   /**
    * Drops FK constraints identified by their canonical local column key.

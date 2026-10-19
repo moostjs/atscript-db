@@ -160,6 +160,66 @@ describe("MysqlAdapter — schema sync", () => {
       expect(cols[0].dflt_value).toBe("fn:uuid");
     });
 
+    it("unwraps expression defaults (charset introducer, escaped twice) of TEXT / JSON columns", async () => {
+      // As INFORMATION_SCHEMA prints `DEFAULT ('…')` on MySQL 8.0 / 8.4
+      const rows: Array<[string, string, string]> = [
+        ["a", String.raw`_utf8mb4\'it\\\'s long\'`, "it's long"],
+        ["b", String.raw`_utf8mb4\'{"a":1}\'`, '{"a":1}'],
+        ["c", String.raw`_latin1\'[]\'`, "[]"],
+        ["d", String.raw`_utf8mb4\'back\\\\slash\'`, String.raw`back\slash`],
+        ["e", String.raw`_utf8mb4\'x\\ny\'`, "x\ny"],
+        ["f", "('plain')", "plain"],
+        ["g", "(uuid())", "fn:uuid"],
+        // UTF-8 bytes of the printed expression come back read as Latin-1
+        ["h", "_utf8mb4\\'\u00c3\u00bc \u00f0\u009f\u0098\u0080\\'", "\u00fc \u{1F600}"],
+        // …but a real Latin-1-range text that is not UTF-8 stays as is
+        ["i", "_utf8mb4\\'caf\u00e9\\'", "caf\u00e9"],
+      ];
+      const driver = createSyncMockDriver({
+        allResults: new Map([
+          [
+            "INFORMATION_SCHEMA.COLUMNS",
+            rows.map(([name, def]) => ({
+              COLUMN_NAME: name,
+              COLUMN_TYPE: "text",
+              IS_NULLABLE: "NO",
+              IS_PK: 0,
+              COLUMN_DEFAULT: def,
+              EXTRA: "DEFAULT_GENERATED",
+            })),
+          ],
+        ]),
+      });
+      const adapter = new MysqlAdapter(driver);
+      new AtscriptDbTable(UsersTable, adapter);
+
+      const cols = await adapter.getExistingColumns();
+      expect(cols.map((c) => c.dflt_value)).toEqual(rows.map(([, , value]) => value));
+    });
+
+    it("keeps a literal default as is when it is not an expression default", async () => {
+      const driver = createSyncMockDriver({
+        allResults: new Map([
+          [
+            "INFORMATION_SCHEMA.COLUMNS",
+            [
+              {
+                COLUMN_NAME: "note",
+                COLUMN_TYPE: "varchar(20)",
+                IS_NULLABLE: "NO",
+                IS_PK: 0,
+                COLUMN_DEFAULT: "(x)",
+                EXTRA: "",
+              },
+            ],
+          ],
+        ]),
+      });
+      const adapter = new MysqlAdapter(driver);
+      new AtscriptDbTable(UsersTable, adapter);
+      expect((await adapter.getExistingColumns())[0].dflt_value).toBe("(x)");
+    });
+
     it("should strip enclosing single quotes from string defaults", async () => {
       const cannedColumns = [
         {

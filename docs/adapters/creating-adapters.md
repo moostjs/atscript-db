@@ -617,6 +617,27 @@ The helper:
 
 You can override the prefix via the `prefix` option (defaults to `'atscript__'`).
 
+Since 0.1.162 the helper returns the changes it made as `TIndexChange[]` (`{ name, action: 'add' | 'drop' | 'rebuild' }`). If `syncIndexes()` returns them, schema sync reports the work on the run entry and marks it `alter`. A version that returns `void` reports nothing.
+
+To have the plan report index work too, implement the optional `planIndexes()` method. Call the same helper with `dryRun: true`, which computes the changes and issues no DDL:
+
+```typescript
+async syncIndexes() { return this.syncIndexesWithDiff(this.indexDiffOptions()) }
+async planIndexes() { return this.syncIndexesWithDiff({ ...this.indexDiffOptions(), dryRun: true }) }
+```
+
+Two more options keep a converged schema free of false index work:
+
+- `skipIndex(index)` returns a warning for an index this database cannot build, such as a geo index without its extension. The index is then neither created nor reported as missing.
+- `isUnmanaged(name)` excludes prefixed indexes your adapter maintains itself, which are never dropped as stale.
+
+Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list.
+
+Relational adapters can do the same for foreign keys:
+
+- `syncForeignKeys()` returns `TForeignKeyChange[]` (`{ fields, targetTable, action: 'add' | 'drop' }`), with the constraints it added or dropped against the live table.
+- The optional `planForeignKeys()` method computes the same list without DDL.
+
 ## Grouped Queries {#grouped-queries}
 
 ### `aggregate(query)`

@@ -17,22 +17,43 @@ import {
   buildAggregateSelect as _buildAggregateSelect,
   buildAggregateCount as _buildAggregateCount,
   toSqlValue,
-  sqlStringLiteral,
   sqlTimeZoneLiteral,
   refActionToSql,
   defaultValueForType,
-  defaultValueToSqlLiteral,
+  defaultValueToSqlLiteral as sharedDefaultValueToSqlLiteral,
   derivedColumnExpr,
   parseRegexString,
-  jsonDollarPath,
+  quotedJsonPathSegments,
   foreignKeySql,
   arithOverflowError,
   numericOutOfRangeError,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
-// Re-export shared utilities for consumers that import from this package
-export { sqlStringLiteral, refActionToSql, defaultValueForType, defaultValueToSqlLiteral };
+// Re-export shared utilities for consumers that import from this package —
+// the string-literal ones in their MySQL form (backslashes escaped)
+export {
+  mysqlStringLiteral as sqlStringLiteral,
+  refActionToSql,
+  defaultValueForType,
+  mysqlValueLiteral as defaultValueToSqlLiteral,
+};
+
+/**
+ * A MySQL string literal: quotes doubled and backslashes escaped — MySQL
+ * reads `\` as an escape in a string literal (unless the server runs with
+ * `NO_BACKSLASH_ESCAPES`), so the shared `sqlStringLiteral` would drop or
+ * reinterpret them (`'a\b'` stores a backspace, `'x\'` is unterminated).
+ * @since 0.1.162
+ */
+export function mysqlStringLiteral(value: string): string {
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+}
+
+/** `'$."a"."b"'` — the shared JSON path, as a MySQL string literal. */
+function mysqlJsonPath(path: readonly string[]): string {
+  return mysqlStringLiteral(`$.${quotedJsonPathSegments(path).join(".")}`);
+}
 
 // ── MySQL table options (passed to buildCreateTable) ─────────────────────────
 
@@ -95,11 +116,21 @@ function needsExpressionDefault(sqlType: string): boolean {
 }
 
 /**
+ * `defaultValueToSqlLiteral` for MySQL: a string literal also escapes
+ * backslashes, which MySQL reads as escapes (unless `NO_BACKSLASH_ESCAPES`) —
+ * `'a\\b'` would store `a\b` minus one backslash otherwise.
+ */
+export function mysqlValueLiteral(designType: string, value: string): string {
+  const literal = sharedDefaultValueToSqlLiteral(designType, value);
+  return literal.startsWith("'") ? mysqlStringLiteral(value) : literal;
+}
+
+/**
  * Renders a model value default for a column of `sqlType`: the SQL literal,
  * wrapped in the expression form for the types that require it.
  */
 export function mysqlDefaultLiteral(sqlType: string, designType: string, value: string): string {
-  const literal = defaultValueToSqlLiteral(designType, value);
+  const literal = mysqlValueLiteral(designType, value);
   return needsExpressionDefault(sqlType) ? `(${literal})` : literal;
 }
 
@@ -316,6 +347,7 @@ export const mysqlDialect: SqlDialect = {
     return quoteTableName(name);
   },
   unlimitedLimit: "18446744073709551615",
+  stringLiteral: mysqlStringLiteral,
   derivedMergeHint(alias: string) {
     return `/*+ MERGE(${qi(alias)}) */`;
   },
@@ -352,11 +384,11 @@ export const mysqlDialect: SqlDialect = {
   jsonExtract: mysqlJsonExtract,
   // Schema sync's copy out of a JSON text column (since 0.1.155)
   jsonExtractText: (quotedCol, path) => {
-    const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+    const e = `JSON_EXTRACT(${quotedCol}, ${mysqlJsonPath(path)})`;
     return `CASE WHEN JSON_TYPE(${e}) = 'NULL' THEN NULL ELSE JSON_UNQUOTE(${e}) END`;
   },
   jsonExtractValue: (quotedCol, path) => {
-    const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+    const e = `JSON_EXTRACT(${quotedCol}, ${mysqlJsonPath(path)})`;
     return `CASE WHEN JSON_TYPE(${e}) = 'NULL' THEN NULL ELSE ${e} END`;
   },
   jsonFromText: (quotedCol) =>
@@ -380,7 +412,7 @@ const MYSQL_JSON_NUMBER_TYPES = "'INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIM
  * `CAST(… AS JSON)` (not in MariaDB).
  */
 function mysqlJsonExtract(quotedCol: string, path: readonly string[], type: TViewJsonType): string {
-  const e = `JSON_EXTRACT(${quotedCol}, ${jsonDollarPath(path)})`;
+  const e = `JSON_EXTRACT(${quotedCol}, ${mysqlJsonPath(path)})`;
   const t = `JSON_TYPE(${e})`;
   switch (type) {
     case "string": {

@@ -153,12 +153,15 @@ export const queryOpToSql: Record<string, string> = {
 };
 
 /** An inlined SQL literal for a view-predicate value (DDL — no parameters). */
-function predicateLiteral(value: unknown): string {
+function predicateLiteral(
+  value: unknown,
+  stringLiteral: (value: string) => string = sqlStringLiteral,
+): string {
   if (value === null || value === undefined) {
     return "NULL";
   }
   if (typeof value === "string") {
-    return sqlStringLiteral(value);
+    return stringLiteral(value);
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
@@ -185,23 +188,25 @@ function predicateLiteral(value: unknown): string {
 export function queryNodeToSql(
   node: AtscriptQueryNode,
   resolveFieldRef: (ref: AtscriptQueryFieldRef) => string,
+  /** Renders a string value (default `sqlStringLiteral`; MySQL escapes `\\` too). @since 0.1.162 */
+  stringLiteral?: (value: string) => string,
 ): string {
   if ("$and" in node) {
     const children = (node as { $and: AtscriptQueryNode[] }).$and;
     if (children.length === 0) {
       return EMPTY_AND.sql;
     }
-    return children.map((n) => queryNodeToSql(n, resolveFieldRef)).join(" AND ");
+    return children.map((n) => queryNodeToSql(n, resolveFieldRef, stringLiteral)).join(" AND ");
   }
   if ("$or" in node) {
     const children = (node as { $or: AtscriptQueryNode[] }).$or;
     if (children.length === 0) {
       return EMPTY_OR.sql;
     }
-    return `(${children.map((n) => queryNodeToSql(n, resolveFieldRef)).join(" OR ")})`;
+    return `(${children.map((n) => queryNodeToSql(n, resolveFieldRef, stringLiteral)).join(" OR ")})`;
   }
   if ("$not" in node) {
-    return `NOT (${queryNodeToSql((node as { $not: AtscriptQueryNode }).$not, resolveFieldRef)})`;
+    return `NOT (${queryNodeToSql((node as { $not: AtscriptQueryNode }).$not, resolveFieldRef, stringLiteral)})`;
   }
 
   // Comparison
@@ -218,7 +223,7 @@ export function queryNodeToSql(
       if (values.length === 0) {
         return comp.op === "$in" ? EMPTY_OR.sql : EMPTY_AND.sql;
       }
-      const list = values.map((v) => predicateLiteral(v)).join(", ");
+      const list = values.map((v) => predicateLiteral(v, stringLiteral)).join(", ");
       return `${leftSql} ${comp.op === "$in" ? "IN" : "NOT IN"} (${list})`;
     }
     case "$regex": {
@@ -241,5 +246,5 @@ export function queryNodeToSql(
   if (comp.right === null || comp.right === undefined) {
     return comp.op === "$ne" ? `${leftSql} IS NOT NULL` : `${leftSql} IS NULL`;
   }
-  return `${leftSql} ${sqlOp} ${predicateLiteral(comp.right)}`;
+  return `${leftSql} ${sqlOp} ${predicateLiteral(comp.right, stringLiteral)}`;
 }

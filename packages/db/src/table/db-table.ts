@@ -1393,7 +1393,7 @@ export class AtscriptDbTable<
    */
   public async syncIndexes(): Promise<void> {
     this._ensureBuilt();
-    return this.adapter.syncIndexes();
+    await this.adapter.syncIndexes();
   }
 
   /**

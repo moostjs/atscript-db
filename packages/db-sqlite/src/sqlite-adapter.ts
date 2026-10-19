@@ -24,6 +24,7 @@ import type {
   TDbDeleteResult,
   TDbFieldMeta,
   TDbIndex,
+  TIndexChange,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
   TDbInsertResult,
@@ -1193,47 +1194,56 @@ export class SqliteAdapter extends BaseDbAdapter {
     });
   }
 
-  async syncIndexes(): Promise<void> {
-    return this._withExclusiveConnection(async () => {
-      const tableName = this.resolveTableName();
+  async syncIndexes(): Promise<TIndexChange[]> {
+    return this._withExclusiveConnection(() => this._syncIndexes(false));
+  }
 
-      await this.syncIndexesWithDiff({
-        listExisting: async () =>
-          this.driver
-            .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
-            .filter((i) => !i.name.startsWith("sqlite_"))
-            .map((i) => ({
-              name: i.name,
-              columns: this.driver
-                .all<{ name: string | null }>(`PRAGMA index_info("${esc(i.name)}")`)
-                .map((c) => c.name)
-                .filter((n): n is string => n !== null),
-            })),
-        createIndex: async (index: TDbIndex) => {
-          const unique = index.type === "unique" ? "UNIQUE " : "";
-          // Field names are already resolved to physical names by the generic layer
-          const cols = index.fields
-            .map((f) => `"${esc(f.name)}" ${f.sort === "desc" ? "DESC" : "ASC"}`)
-            .join(", ");
-          const sql = `CREATE ${unique}INDEX IF NOT EXISTS "${esc(index.key)}" ON "${esc(tableName)}" (${cols})`;
-          this._log(sql);
-          this.driver.exec(sql);
-        },
-        dropIndex: async (name: string) => {
-          const sql = `DROP INDEX IF EXISTS "${esc(name)}"`;
-          this._log(sql);
-          this.driver.exec(sql);
-        },
-        // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
-        // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
-        shouldSkipType: (type) => type === "fulltext" || type === "geo",
-      });
+  /** The index changes {@link syncIndexes} would make — no DDL. */
+  async planIndexes(): Promise<TIndexChange[]> {
+    return this._syncIndexes(true);
+  }
 
-      // Sync FTS5 virtual tables for fulltext indexes
-      this._syncFtsIndexes(tableName);
+  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
+    const tableName = this.resolveTableName();
 
-      this._syncVecIndexes(tableName);
+    const changes = await this.syncIndexesWithDiff({
+      dryRun,
+      listExisting: async () =>
+        this.driver
+          .all<{ name: string }>(`PRAGMA index_list("${esc(tableName)}")`)
+          .filter((i) => !i.name.startsWith("sqlite_"))
+          .map((i) => ({
+            name: i.name,
+            columns: this.driver
+              .all<{ name: string | null }>(`PRAGMA index_info("${esc(i.name)}")`)
+              .map((c) => c.name)
+              .filter((n): n is string => n !== null),
+          })),
+      createIndex: async (index: TDbIndex) => {
+        const unique = index.type === "unique" ? "UNIQUE " : "";
+        // Field names are already resolved to physical names by the generic layer
+        const cols = index.fields
+          .map((f) => `"${esc(f.name)}" ${f.sort === "desc" ? "DESC" : "ASC"}`)
+          .join(", ");
+        const sql = `CREATE ${unique}INDEX IF NOT EXISTS "${esc(index.key)}" ON "${esc(tableName)}" (${cols})`;
+        this._log(sql);
+        this.driver.exec(sql);
+      },
+      dropIndex: async (name: string) => {
+        const sql = `DROP INDEX IF EXISTS "${esc(name)}"`;
+        this._log(sql);
+        this.driver.exec(sql);
+      },
+      // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
+      // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
+      shouldSkipType: (type) => type === "fulltext" || type === "geo",
     });
+
+    // Sync FTS5 virtual tables for fulltext indexes
+    changes.push(...this._syncFtsIndexes(tableName, dryRun));
+
+    changes.push(...this._syncVecIndexes(tableName, dryRun));
+    return changes;
   }
 
   // ── FTS5 Full-Text Search ─────────────────────────────────────────────────
@@ -1465,7 +1475,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   /**
    * Creates/drops FTS5 virtual tables and sync triggers to match desired fulltext indexes.
    */
-  private _syncFtsIndexes(tableName: string): void {
+  private _syncFtsIndexes(tableName: string, dryRun = false): TIndexChange[] {
+    const changes: TIndexChange[] = [];
     // Integer-only indexes have no FTS5 table (their members are matched by number)
     const ftIndexes = this._getFulltextIndexes().filter(
       (idx) => splitFulltextFields(idx).text.length > 0,
@@ -1484,7 +1495,8 @@ export class SqliteAdapter extends BaseDbAdapter {
     // Drop stale FTS tables
     for (const name of existingFts) {
       if (!desiredFtsTables.has(name)) {
-        this._dropFtsTable(name);
+        changes.push({ name, action: "drop" });
+        if (!dryRun) this._dropFtsTable(name);
       }
     }
 
@@ -1493,13 +1505,18 @@ export class SqliteAdapter extends BaseDbAdapter {
     for (const index of ftIndexes) {
       const ftsTable = this._ftsTableName(index.name);
       if (!existingSet.has(ftsTable)) {
-        this._createFtsTable(tableName, ftsTable, index);
+        changes.push({ name: ftsTable, action: "add" });
+        if (!dryRun) this._createFtsTable(tableName, ftsTable, index);
       } else if (!this._ftsColumnsMatch(ftsTable, index)) {
         // Column drift (e.g. a table built when integer members were indexed as text)
-        this._dropFtsTable(ftsTable);
-        this._createFtsTable(tableName, ftsTable, index);
+        changes.push({ name: ftsTable, action: "rebuild" });
+        if (!dryRun) {
+          this._dropFtsTable(ftsTable);
+          this._createFtsTable(tableName, ftsTable, index);
+        }
       }
     }
+    return changes;
   }
 
   /** Whether an existing FTS5 table has exactly the index's text columns, in order. */
@@ -1872,15 +1889,16 @@ export class SqliteAdapter extends BaseDbAdapter {
   /**
    * Creates/drops vec0 virtual shadow tables and sync triggers to match desired vector fields.
    */
-  private _syncVecIndexes(tableName: string): void {
+  private _syncVecIndexes(tableName: string, dryRun = false): TIndexChange[] {
+    const changes: TIndexChange[] = [];
     if (this._vectorFields.size === 0) {
-      return;
+      return changes;
     }
     if (!this._detectVectorSupport()) {
       this._log(
         "[atscript-db-sqlite] sqlite-vec not available, skipping vec0 shadow table sync (vector fields stored as JSON)",
       );
-      return;
+      return changes;
     }
 
     const desiredVecTables = new Map<
@@ -1901,16 +1919,19 @@ export class SqliteAdapter extends BaseDbAdapter {
 
     for (const name of existingVec) {
       if (!desiredVecTables.has(name)) {
-        this._dropVecTable(name);
+        changes.push({ name, action: "drop" });
+        if (!dryRun) this._dropVecTable(name);
       }
     }
 
     const existingSet = new Set(existingVec);
     for (const [vecTable, { field, meta }] of desiredVecTables.entries()) {
       if (!existingSet.has(vecTable)) {
-        this._createVecTable(tableName, vecTable, field, meta);
+        changes.push({ name: vecTable, action: "add" });
+        if (!dryRun) this._createVecTable(tableName, vecTable, field, meta);
       }
     }
+    return changes;
   }
 
   /** Creates a vec0 virtual shadow table with sync triggers and seeds it from existing rows. */
@@ -2031,9 +2052,10 @@ function normalizeSqliteDefault(value: string | null): string | undefined {
   if (value === null) {
     return undefined;
   }
-  // Strip enclosing single quotes from string literals
-  if (value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1);
+  // Strip enclosing single quotes from string literals and un-double the
+  // escaped quotes (PRAGMA reports DEFAULT 'it''s' as written)
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'");
   }
   return value;
 }

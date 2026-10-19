@@ -86,7 +86,7 @@ export type { TViewReadPlan } from "./table/view-read-plan";
 export { queryReadColumns } from "./query/read-columns";
 export type { TReadColumnsKind } from "./query/read-columns";
 export { BaseDbAdapter, ALL_BUCKET_UNITS, ALL_VIEW_CAPABILITIES } from "./base-adapter";
-export type { TViewCapability } from "./base-adapter";
+export type { TViewCapability, TIndexDiffOptions } from "./base-adapter";
 export { isColumnTypeChanged } from "./schema/column-diff";
 export { fkColumns } from "./schema/fk-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
@@ -170,6 +170,8 @@ export type {
   TDbObjectKind,
   TEnsureTableOptions,
   TSyncIndexesOptions,
+  TIndexChange,
+  TForeignKeyChange,
   TTableResolver,
   TWriteTableResolver,
   AtscriptDbWritable,

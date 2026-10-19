@@ -156,6 +156,9 @@ interface SyncEntry {
   }>; // derived-column rebuilds (drop + add)
   cascadeFrom: string[]; // upstream views whose recreation recreates this unchanged view
 
+  // Since 0.1.162
+  definitionChanged: boolean; // a managed view whose own definition changed (the reason it is recreated)
+
   // Computed properties
   destructive: boolean; // involves drops, type changes, recreation, or a primary-key rebuild
   hasChanges: boolean; // status is not 'in-sync' or 'error'
@@ -259,6 +262,17 @@ for (const entry of plan.entries) {
 ```
 
 Pass a colour adapter (matching the `TSyncColors` shape — `green/red/cyan/yellow/bold/dim/underline`) as the second argument to control styling. Omit it for plain text output suitable for logs.
+
+A `'result'` entry with status `alter` lists every change the run applied. Since 0.1.162 that includes in-place type, nullability and default changes and foreign keys, which earlier releases recorded only on plan entries (or when safe mode skipped them):
+
+```
+  ~ invoices — altered
+      ~ amount: DOUBLE → decimal — type changed
+      ~ amount — default 0.00 → 0
+      + FK(teamId) → teams — added
+```
+
+An `alter` entry is never printed as `— in sync`. A foreign key that is only added makes the run entry `alter` too, as the plan already reported. A managed view whose own definition changed prints `· definition changed`, and its entry has `definitionChanged: true`.
 
 ## Syncing a module namespace
 

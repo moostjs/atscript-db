@@ -60,6 +60,8 @@ describe("[mongo] safe mode and dependent indexes", () => {
     for (const e of [plan.entries[0]!, safe.entries[0]!]) {
       expect(e.skipped).toEqual(["recreate"]);
       expect(e.typeChanges).toEqual([{ column: "code", fromType: "string", toType: "number" }]);
+      // The plan predicts the run's index work: the kept index is none of it
+      expect(e.indexChanges).toEqual([]);
     }
     // The stored strings stay unique
     expect(await filterOf(raw, index)).toEqual({ code: { $type: "string" } });
@@ -85,6 +87,7 @@ describe("[mongo] safe mode and dependent indexes", () => {
     for (const e of [plan.entries[0]!, safe.entries[0]!]) {
       expect(e.skipped).toEqual([]);
       expect(e.pending).toBe(false);
+      expect(e.indexChanges).toEqual([{ name: index, action: "rebuild" }]);
     }
     expect(await filterOf(raw, index)).toEqual({ title: { $type: "string" } });
     expect((await new SchemaSync(space).run([fx.TitleOptional])).status).toBe("up-to-date");

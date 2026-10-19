@@ -12,6 +12,7 @@ import type {
   TReferencingForeignKey,
   TSyncIndexesOptions,
   TTableOptionDiff,
+  TForeignKeyChange,
 } from "../types";
 import type { SyncStore } from "./sync-store";
 import {
@@ -375,6 +376,15 @@ export async function executeSyncTable(
       }
     }
 
+    // Foreign-key changes — applied above (dropped before the column ops,
+    // or carried by the recreate) and below (`syncForeignKeys` adds the
+    // missing ones). Recorded here so the run entry reports them like the
+    // plan, and an add-only change is `alter` there too.
+    if (hasFkChanges && fkDiff && init.status !== "create" && init.status !== "error") {
+      Object.assign(init, describeForeignKeyChanges(fkDiff));
+      init.status = "alter";
+    }
+
     // Apply the table option drift discovery diffed (unified across all paths)
     phase = "Table option sync";
     const optionDiff = facts.optionDiff;
@@ -441,10 +451,28 @@ export async function executeSyncTable(
     // Indexes and foreign keys. DDL here can fail on data conflicts (e.g.
     // CREATE UNIQUE INDEX over duplicate rows).
     phase = "Index/FK sync";
-    await adapter.syncIndexes(keptIndexes(init));
+    const indexChanges = await adapter.syncIndexes(keptIndexes(init));
+    // Reported (and `alter`) on a table that already existed as it is: a
+    // created or recreated table's indexes are part of that.
+    if (
+      Array.isArray(indexChanges) &&
+      indexChanges.length > 0 &&
+      init.status !== "create" &&
+      !init.recreated
+    ) {
+      init.indexChanges = indexChanges;
+      init.status = "alter";
+    }
     // Cycle members add their FKs in the deferred pass, once every member exists.
     if (adapter.syncForeignKeys && !exec.deferForeignKeysTo) {
-      await adapter.syncForeignKeys();
+      const fkChanges = await adapter.syncForeignKeys();
+      if (
+        init.status !== "create" &&
+        !init.recreated &&
+        mergeLiveForeignKeyChanges(init, fkChanges)
+      ) {
+        init.status = "alter";
+      }
     }
     // Post-sync finalization (e.g., reset identity sequences after data migration)
     if (adapter.afterSyncTable) {
@@ -489,8 +517,14 @@ export async function executeDeferredForeignKeys(
     return entry;
   }
   try {
-    await adapter.syncForeignKeys();
-    return entry;
+    const fkChanges = await adapter.syncForeignKeys();
+    if (entry.status === "create" || entry.recreated) {
+      return entry;
+    }
+    const init = entry.toInit();
+    return mergeLiveForeignKeyChanges(init, fkChanges)
+      ? new SyncEntry({ ...init, status: "alter" })
+      : entry;
   } catch (error) {
     const msg = `FK sync failed on ${readable.tableName}: ${(error as Error).message}`;
     deps.logger.error?.(`[schema-sync] ${msg}`);
@@ -640,6 +674,46 @@ function markSkipped(init: TSyncEntryInit, kind: TSyncSkippedWork): void {
  * (MongoDB) have no column constraint to change — they only update the
  * snapshot, even with a `recreateTable`.
  */
+/**
+ * Whether the run (without safe mode) recreates this existing table — an FK
+ * change on an adapter without `syncForeignKeys`, a `'drop'` / `'recreate'`
+ * type change, nullable / default DDL through `recreateTable`, or a key
+ * rebuild without `rebuildPrimaryKey`. The plan predicts no index work for
+ * such a table: the recreate rebuilds every index.
+ */
+export function runRecreatesTable(facts: TTableFacts, safe = false): boolean {
+  const { readable, fkDiff } = facts;
+  const adapter = readable.dbAdapter;
+  if (!adapter.recreateTable) {
+    return false;
+  }
+  if (fkDiff && hasForeignKeyChanges(fkDiff) && !adapter.syncForeignKeys) {
+    return true;
+  }
+  const diff = facts.diff;
+  if (!diff) {
+    return false;
+  }
+  if (diff.typeChanged.length > 0) {
+    const strategy = typeChangeStrategy(readable, diff);
+    if (strategy === "recreate" || (strategy === "drop" && !safe)) {
+      return true;
+    }
+  }
+  // Safe mode skips the other recreates (see `safeModeSkips`)
+  if (safe) {
+    return false;
+  }
+  if (
+    (diff.nullableChanged.length > 0 || diff.defaultChanged.length > 0) &&
+    !adapter.supportsColumnModify &&
+    !!adapter.getExistingColumns
+  ) {
+    return true;
+  }
+  return !!diff.primaryKeyChanged && !adapter.rebuildPrimaryKey;
+}
+
 function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
   return (
     (!!adapter.supportsColumnModify && !!adapter.syncColumns) ||
@@ -652,6 +726,26 @@ function needsDdlForNullableDefaults(adapter: BaseDbAdapter): boolean {
  * the change they depend on — a skipped key rebuild, the columns of a
  * skipped type-change recreate (see `TSyncIndexesOptions`).
  */
+/**
+ * The `syncIndexes` options the run will pass for this table — what the plan
+ * passes `planIndexes`, so both report the same index work.
+ */
+export function plannedIndexOptions(
+  facts: TTableFacts,
+  safe: boolean,
+): TSyncIndexesOptions | undefined {
+  if (!safe) {
+    return undefined;
+  }
+  const diff = afterJsonCopy(facts);
+  return keptIndexes({
+    name: facts.name,
+    status: "alter",
+    skipped: safeModeSkips(facts),
+    typeChanges: diff ? describeTypeChanges(diff) : [],
+  });
+}
+
 function keptIndexes(init: TSyncEntryInit): TSyncIndexesOptions | undefined {
   const skipped = init.skipped ?? [];
   const keepPrimaryKey = skipped.includes("pk-rebuild");
@@ -720,6 +814,95 @@ export function describeJsonMigration(
         : undefined,
     jsonified: migration.jsonify.length > 0 ? migration.jsonify : undefined,
   };
+}
+
+/** Builds a human-readable description of what changed in an FK constraint. */
+function buildFkChangeDetails(
+  desired: { targetTable: string; targetFields: string[]; onDelete?: string; onUpdate?: string },
+  existing: { targetTable: string; targetFields: string[]; onDelete?: string; onUpdate?: string },
+): string {
+  const parts: string[] = [];
+  if (existing.targetTable !== desired.targetTable) {
+    parts.push(`retarget ${existing.targetTable} → ${desired.targetTable}`);
+  }
+  if (
+    [...existing.targetFields].toSorted().join(",") !==
+    [...desired.targetFields].toSorted().join(",")
+  ) {
+    parts.push(`fields ${existing.targetFields.join(",")} → ${desired.targetFields.join(",")}`);
+  }
+  if ((existing.onDelete ?? undefined) !== (desired.onDelete ?? undefined)) {
+    parts.push(`onDelete ${existing.onDelete ?? "noAction"} → ${desired.onDelete ?? "noAction"}`);
+  }
+  if ((existing.onUpdate ?? undefined) !== (desired.onUpdate ?? undefined)) {
+    parts.push(`onUpdate ${existing.onUpdate ?? "noAction"} → ${desired.onUpdate ?? "noAction"}`);
+  }
+  return parts.join(", ");
+}
+
+/**
+ * The plan-shaped summaries of a foreign-key diff (`entry.fkAdded` /
+ * `fkRemoved` / `fkChanged`) — on plan entries and on the run entries that
+ * applied them.
+ */
+export function describeForeignKeyChanges(
+  fkDiff: TForeignKeyDiff,
+): Pick<TSyncEntryInit, "fkAdded" | "fkRemoved" | "fkChanged"> {
+  return {
+    fkAdded: fkDiff.added.map((fk) => ({
+      fields: fkColumns(fk).fields,
+      targetTable: fk.targetTable,
+    })),
+    fkRemoved: fkDiff.removed.map((fk) => ({
+      fields: fk.fields,
+      targetTable: fk.targetTable,
+    })),
+    fkChanged: fkDiff.changed.map((fk) => ({
+      fields: fkColumns(fk.desired).fields,
+      targetTable: fk.desired.targetTable,
+      details: buildFkChangeDetails(
+        { ...fk.desired, targetFields: fkColumns(fk.desired).targetFields },
+        fk.existing,
+      ),
+    })),
+  };
+}
+
+const fkFieldsKey = (fields: readonly string[]): string => fkKey([...fields]);
+
+/**
+ * Folds the live FK changes `syncForeignKeys` / `planForeignKeys` report
+ * into the entry: those the snapshot-based FK diff did not already name
+ * (a constraint dropped or added by hand) join `fkAdded` / `fkRemoved`.
+ * `true` when any was added.
+ */
+export function mergeLiveForeignKeyChanges(
+  init: TSyncEntryInit,
+  changes: void | readonly TForeignKeyChange[],
+): boolean {
+  if (!changes || changes.length === 0) {
+    return false;
+  }
+  const known = new Set(
+    [...(init.fkAdded ?? []), ...(init.fkRemoved ?? []), ...(init.fkChanged ?? [])].map((fk) =>
+      fkFieldsKey(fk.fields),
+    ),
+  );
+  let merged = false;
+  for (const change of changes) {
+    if (known.has(fkFieldsKey(change.fields))) {
+      continue;
+    }
+    known.add(fkFieldsKey(change.fields));
+    const fk = { fields: change.fields, targetTable: change.targetTable };
+    if (change.action === "add") {
+      init.fkAdded = [...(init.fkAdded ?? []), fk];
+    } else {
+      init.fkRemoved = [...(init.fkRemoved ?? []), fk];
+    }
+    merged = true;
+  }
+  return merged;
 }
 
 /** The plan-shaped nullable / default change summaries of a diff. */
@@ -835,13 +1018,16 @@ async function applyColumnDiff(
         );
       } else {
         await dropAndRecreate(adapter, init, name, ensureOpts);
+        init.typeChanges = describeTypeChanges(diff);
       }
     } else if (strategy === "recreate") {
       await recreateKeepingRenames(adapter, diff, init);
+      init.typeChanges = describeTypeChanges(diff);
     } else if (strategy === "modify") {
       // Adapter can handle type changes in-place (e.g. MySQL MODIFY COLUMN)
       // Defer to the single syncColumns call below
       needsSyncColumns = true;
+      init.typeChanges = describeTypeChanges(diff);
       init.status = "alter";
     } else {
       // Defensive copy of the plan rule (`populatePlanFromDiff`): reachable
@@ -872,7 +1058,13 @@ async function applyColumnDiff(
         // Schema-less adapter — just mark as alter; snapshot will be updated
         init.status = "alter";
       }
+      // Applied (MODIFY / recreate / snapshot) — reported on the run entry
+      Object.assign(init, describeNullableDefaults(diff));
     } else if (init.status !== "error") {
+      if (!safe || !needsDdlForNullableDefaults(adapter) || init.recreated) {
+        // Carried by the recreate above, or (schema-less) by the snapshot
+        Object.assign(init, describeNullableDefaults(diff));
+      }
       // An error entry stays an error (its DDL failed or was refused, so the
       // change is pending and the snapshot and hash are withheld); a
       // recreated table already carries the change and keeps `alter`.

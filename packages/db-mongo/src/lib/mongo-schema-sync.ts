@@ -11,6 +11,7 @@ import {
   type TDbObjectKind,
   type TExistingTableOption,
   type TSyncIndexesOptions,
+  type TIndexChange,
 } from "@atscript/db";
 import {
   INDEX_PREFIX,
@@ -520,8 +521,21 @@ const PK_INDEX = mongoIndexKey("unique", "__pk");
 export async function syncIndexesImpl(
   host: TMongoSchemaSyncHost,
   opts?: TSyncIndexesOptions,
-): Promise<void> {
-  await host.ensureCollectionExists();
+  dryRun = false,
+): Promise<TIndexChange[]> {
+  const changes: TIndexChange[] = [];
+  /** Indexes dropped because their definition drifted — their re-creation is a rebuild. */
+  const replaced = new Set<string>();
+  if (dryRun) {
+    const exists = await host.db
+      .listCollections({ name: host.collection.collectionName }, { nameOnly: true })
+      .hasNext();
+    if (!exists) {
+      return changes;
+    }
+  } else {
+    await host.ensureCollectionExists();
+  }
 
   // Merge generic indexes with MongoDB-specific indexes
   const allIndexes = new Map<string, TMongoIndex>();
@@ -667,6 +681,8 @@ export async function syncIndexesImpl(
           indexesToCreate.delete(remote.name);
         } else if (violation !== undefined) {
           indexesToCreate.delete(remote.name);
+          // The run reports this as an error, not as index work
+          if (dryRun) continue;
           await attempt(`replace unique index "${remote.name}"`, () =>
             Promise.reject(
               new Error(
@@ -674,16 +690,30 @@ export async function syncIndexesImpl(
               ),
             ),
           );
+        } else if (dryRun) {
+          replaced.add(remote.name);
         } else {
           host._log("dropIndex", remote.name);
-          await attempt(`drop index "${remote.name}"`, () =>
-            host.collection.dropIndex(remote.name),
-          );
+          if (
+            await attempt(`drop index "${remote.name}"`, () =>
+              host.collection.dropIndex(remote.name),
+            )
+          ) {
+            replaced.add(remote.name);
+          }
         }
       }
     } else {
+      if (dryRun) {
+        changes.push({ name: remote.name, action: "drop" });
+        continue;
+      }
       host._log("dropIndex", remote.name);
-      await attempt(`drop index "${remote.name}"`, () => host.collection.dropIndex(remote.name));
+      if (
+        await attempt(`drop index "${remote.name}"`, () => host.collection.dropIndex(remote.name))
+      ) {
+        changes.push({ name: remote.name, action: "drop" });
+      }
     }
   }
 
@@ -734,7 +764,14 @@ export async function syncIndexesImpl(
         break;
       }
     }
-    await attempt(label, () => host.collection.createIndex(value.fields, indexOptions));
+    const change: TIndexChange = { name: key, action: replaced.has(key) ? "rebuild" : "add" };
+    if (dryRun) {
+      changes.push(change);
+      continue;
+    }
+    if (await attempt(label, () => host.collection.createIndex(value.fields, indexOptions))) {
+      changes.push(change);
+    }
   }
 
   // ── Sync search indexes (Atlas-only, gracefully skipped on standalone) ──
@@ -777,8 +814,12 @@ export async function syncIndexesImpl(
         }
       } else {
         if (remote.status !== "DELETING") {
-          host._log("dropSearchIndex", remote.name);
-          await host.collection.dropSearchIndex(remote.name);
+          if (!dryRun) {
+            host._log("dropSearchIndex", remote.name);
+            await host.collection.dropSearchIndex(remote.name);
+          }
+          // Recorded once done — a failure below is swallowed (Atlas-only API)
+          changes.push({ name: remote.name, action: "drop" });
         }
       }
     }
@@ -788,6 +829,14 @@ export async function syncIndexesImpl(
         case "dynamic_text":
         case "search_text":
         case "vector": {
+          const change: TIndexChange = {
+            name: key,
+            action: toUpdate.has(key) ? "rebuild" : "add",
+          };
+          if (dryRun) {
+            changes.push(change);
+            break;
+          }
           if (toUpdate.has(key)) {
             host._log("updateSearchIndex", key, value.definition);
             await host.collection.updateSearchIndex(key, value.definition);
@@ -799,6 +848,7 @@ export async function syncIndexesImpl(
               definition: value.definition,
             });
           }
+          changes.push(change);
           break;
         }
         default:
@@ -810,6 +860,7 @@ export async function syncIndexesImpl(
   }
 
   throwIfAny();
+  return changes;
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────
