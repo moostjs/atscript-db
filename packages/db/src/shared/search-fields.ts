@@ -95,16 +95,15 @@ export const ENCRYPTED_SEARCH_FEATURES = [
 ] as const;
 
 /** Why each of {@link ENCRYPTED_SEARCH_FEATURES} cannot sit on an `@db.encrypted` field. */
-const ENCRYPTED_SEARCH_WHY: Readonly<Record<(typeof ENCRYPTED_SEARCH_FEATURES)[number], string>> =
-  {
-    "db.column.searchable": "search over ciphertext is impossible",
-    "db.index.fulltext": "indexes over ciphertext are meaningless",
-    "db.index.geo": "geo indexes over ciphertext are meaningless",
-    "db.search.vector": "vector search over ciphertext is impossible",
-    "db.search.filter": "search filters need cleartext equality",
-    "db.mongo.search.text": "Atlas Search over ciphertext is impossible",
-    "db.mongo.search.autocomplete": "Atlas Search over ciphertext is impossible",
-  };
+const ENCRYPTED_SEARCH_WHY: Readonly<Record<(typeof ENCRYPTED_SEARCH_FEATURES)[number], string>> = {
+  "db.column.searchable": "search over ciphertext is impossible",
+  "db.index.fulltext": "indexes over ciphertext are meaningless",
+  "db.index.geo": "geo indexes over ciphertext are meaningless",
+  "db.search.vector": "vector search over ciphertext is impossible",
+  "db.search.filter": "search filters need cleartext equality",
+  "db.mongo.search.text": "Atlas Search over ciphertext is impossible",
+  "db.mongo.search.autocomplete": "Atlas Search over ciphertext is impossible",
+};
 
 /**
  * Annotations an `@db.encrypted` field cannot carry, with the reason — the
