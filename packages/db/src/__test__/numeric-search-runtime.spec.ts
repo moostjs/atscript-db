@@ -175,6 +175,32 @@ describe("base syncIndexesWithDiff — integer-only fulltext", () => {
       );
     }
   });
+
+  it("a `null` skipIndex verdict wins over the deprecated options", async () => {
+    const adapter = new Probe();
+    tableOf(fx.NsrNative, adapter);
+    const warned: string[] = [];
+    const probe = adapter as any;
+    probe.logger = { ...probe.logger, warn: (msg: string) => void warned.push(msg) };
+    const created: string[] = [];
+    const legacyAsked: string[] = [];
+    await adapter.run({
+      listExisting: async () => [],
+      createIndex: async (index: { type: string }) => void created.push(index.type),
+      dropIndex: async () => {},
+      skipIndex: (index: { type: string }) => (index.type === "fulltext" ? null : undefined),
+      shouldSkipType: (type: string) => {
+        legacyAsked.push(type);
+        return false;
+      },
+      warnUnsupportedTypes: { adapter: "legacy", types: ["fulltext"] },
+    });
+    expect(created).not.toContain("fulltext");
+    expect(created.length).toBeGreaterThan(0);
+    // skipped silently: no legacy warning, and the legacy callback never consulted for it
+    expect(warned.filter((m) => m.includes("fulltext index"))).toEqual([]);
+    expect(legacyAsked).not.toContain("fulltext");
+  });
 });
 
 describe("$regex on integer fields — value guard", () => {
