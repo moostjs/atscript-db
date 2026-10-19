@@ -158,6 +158,7 @@ interface SyncEntry {
 
   // Since 0.1.162
   definitionChanged: boolean; // a managed view whose own definition changed (the reason it is recreated)
+  indexChanges: Array<{ name: string; action: "add" | "drop" | "rebuild" }>; // managed index work on an existing table: planned (plan) or done (run); empty for a created or recreated table
 
   // Computed properties
   destructive: boolean; // involves drops, type changes, recreation, or a primary-key rebuild
