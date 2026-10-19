@@ -34,7 +34,7 @@ export interface Account {
 
     @expect.int
     @db.index.plain
-    entityId: number
+    ownerId: number
 
     @db.default.increment
     seq: number
@@ -82,7 +82,7 @@ ${body}
 describe("searchable / fulltext follow @expect.int through a field ref", () => {
   it("accepts @db.column.searchable on a view field over an @expect.int source", async () => {
     expect(
-      await errorsFor(view("    @db.column.searchable\n    entityId: Account.entityId")),
+      await errorsFor(view("    @db.column.searchable\n    ownerId: Account.ownerId")),
     ).toEqual([]);
   });
 
@@ -95,7 +95,7 @@ export interface Link {
 
     @db.index.fulltext 'ft'
     @db.index.plain
-    entityId: Account.entityId
+    ownerId: Account.ownerId
 }
 `;
     expect(await errorsFor(source)).toEqual([]);
