@@ -2,6 +2,7 @@ import {
   ALL_AGGREGATE_FNS,
   ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
+  ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
   isConflict,
@@ -23,6 +24,7 @@ import type {
   TDbUpdateResult,
   TDbUpdateOptions,
   TDbDeleteResult,
+  TDbIsolationLevel,
 } from "@atscript/db";
 // `@atscript/db` does NOT re-export the annotated-type; it comes from the
 // atscript compiler's utils entry (same import `db-space.ts` uses).
@@ -1089,6 +1091,24 @@ export class MemoryAdapter extends BaseDbAdapter {
   /** NULL placement (`$nulls`, `@db.sort.nulls`) — `sortRows` honours it per key. */
   override supportsNullsPlacement(): boolean {
     return true;
+  }
+
+  /**
+   * Locking reads are accepted and ignored inside a `withTransaction` scope
+   * (since 0.1.162) — the in-memory store has no concurrent transactions to
+   * lock rows against.
+   */
+  override supportsReadLocks(): boolean {
+    return true;
+  }
+
+  /** Every level is accepted and ignored (no transaction isolation). @since 0.1.162 */
+  override isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return ALL_ISOLATION_LEVELS;
+  }
+
+  protected override _inherentIsolation(): TDbIsolationLevel {
+    return "serializable";
   }
 
   /** Managed views render nothing (non-goal) — both are accepted like `aggregateFns()`. */

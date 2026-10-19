@@ -3,6 +3,7 @@ import {
   ALL_AGGREGATE_FNS,
   ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
+  ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
   searchIndexNotFoundMessage,
@@ -19,6 +20,7 @@ import type {
   TEnsureTableOptions,
   TFieldOps,
   TReferencingForeignKey,
+  TDbIsolationLevel,
 } from "@atscript/db";
 import type {
   TDbDeleteResult,
@@ -144,6 +146,24 @@ export class SqliteAdapter extends BaseDbAdapter {
   /** `$nulls` / `@db.sort.nulls` NULL placement — `NULLS FIRST` / `NULLS LAST`. */
   override supportsNullsPlacement(): boolean {
     return true;
+  }
+
+  /**
+   * Locking reads are accepted as a no-op (since 0.1.162): every transaction
+   * starts with `BEGIN IMMEDIATE`, which holds the database write lock, so
+   * reads inside it are current and no other writer can run until it ends.
+   */
+  override supportsReadLocks(): boolean {
+    return true;
+  }
+
+  /** Every level — a `BEGIN IMMEDIATE` transaction is serializable. @since 0.1.162 */
+  override isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return ALL_ISOLATION_LEVELS;
+  }
+
+  protected override _inherentIsolation(): TDbIsolationLevel {
+    return "serializable";
   }
 
   /** Computed view columns and first-row joins. */

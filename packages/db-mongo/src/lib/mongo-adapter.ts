@@ -19,6 +19,8 @@ import {
   type TDbInsertIgnoreSlot,
   type TDbUpdateResult,
   type TDbUpdateOptions,
+  type TDbIsolationLevel,
+  type TTransactionOptions,
   type TDbDeleteResult,
   type TSearchIndexInfo,
   type TDbRelation,
@@ -316,13 +318,31 @@ export class MongoAdapter extends BaseDbAdapter {
    * Uses MongoDB's Convenient Transaction API (`session.withTransaction()`).
    * This handles txnNumber management and automatic retry for
    * `TransientTransactionError` / `UnknownTransactionCommitResult`.
+   *
+   * `opts.isolation` (since 0.1.162): a MongoDB transaction reads one
+   * snapshot, which satisfies `'read committed'` and `'repeatable read'`;
+   * `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation
+   * allows write skew), and so does any level on a topology without
+   * transactions (standalone), where `fn` would run without one.
    */
-  override async withTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  override async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
+    const isolation = this._checkIsolation(opts);
     if (this._getTransactionState()) {
       return fn();
     }
-    if (this._txDisabled || !this._client) {
+    const passThrough = (): Promise<T> => {
+      if (isolation) {
+        throw new DbError("ISOLATION_NOT_SUPPORTED", [
+          {
+            path: "isolation",
+            message: `Isolation '${isolation}' needs a MongoDB transaction — this topology (standalone) has none`,
+          },
+        ]);
+      }
       return fn();
+    };
+    if (this._txDisabled || !this._client) {
+      return passThrough();
     }
     try {
       const topology = (this._client as any).topology;
@@ -331,12 +351,12 @@ export class MongoAdapter extends BaseDbAdapter {
         const type = desc?.type;
         if (type === "Single" || type === "Unknown") {
           this._txDisabled = true;
-          return fn();
+          return passThrough();
         }
       }
     } catch {
       this._txDisabled = true;
-      return fn();
+      return passThrough();
     }
 
     const session = this._client.startSession();
@@ -353,6 +373,20 @@ export class MongoAdapter extends BaseDbAdapter {
         /* preserve original error */
       }
     }
+  }
+
+  private static readonly _ISOLATION_LEVELS: ReadonlySet<TDbIsolationLevel> =
+    new Set<TDbIsolationLevel>(["read committed", "repeatable read"]);
+
+  /**
+   * `'read committed'` and `'repeatable read'` — a transaction's snapshot
+   * read satisfies both. No `'serializable'` (snapshot isolation allows
+   * write skew). Locking reads are not supported (`supportsReadLocks()` is
+   * false → `LOCK_NOT_SUPPORTED`): use `$cas` / `withOptimisticRetry`.
+   * @since 0.1.162
+   */
+  override isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return MongoAdapter._ISOLATION_LEVELS;
   }
 
   private static readonly _noSession: Record<string, never> = Object.freeze({}) as Record<

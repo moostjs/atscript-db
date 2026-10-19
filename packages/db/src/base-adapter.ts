@@ -37,6 +37,8 @@ import type {
   TPrimaryKeyChange,
   TSyncIndexesOptions,
   TReferencingForeignKey,
+  TDbIsolationLevel,
+  TTransactionOptions,
 } from "./types";
 import type {
   TDbInsertResult,
@@ -74,6 +76,43 @@ export type TViewCapability = "compute" | "firstJoin";
 
 const NO_VIEW_CAPABILITIES: ReadonlySet<TViewCapability> = new Set();
 
+/**
+ * Every isolation level, weakest first — what an adapter that provides them
+ * all returns from `isolationLevels()`. @since 0.1.162
+ */
+export const ALL_ISOLATION_LEVELS: ReadonlySet<TDbIsolationLevel> = new Set<TDbIsolationLevel>([
+  "read committed",
+  "repeatable read",
+  "serializable",
+]);
+
+const NO_ISOLATION_LEVELS: ReadonlySet<TDbIsolationLevel> = new Set();
+
+/** Strength of each isolation level (higher = stricter). */
+const ISOLATION_RANK: Record<TDbIsolationLevel, number> = {
+  "read committed": 1,
+  "repeatable read": 2,
+  serializable: 3,
+};
+
+/**
+ * Validates `opts.isolation`: `undefined` when none is requested.
+ * @throws DbError `INVALID_QUERY` for an unknown level.
+ */
+function requestedIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
+  const level = opts?.isolation;
+  if (level === undefined) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(ISOLATION_RANK, level)) {
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: "isolation",
+        message: `Unknown isolation level "${String(level)}" — use 'read committed', 'repeatable read' or 'serializable'`,
+      },
+    ]);
+  }
+  return level;
+}
+
 /** Every view capability — what the bundled adapters return from `viewCapabilities()`. @since 0.1.147 */
 export const ALL_VIEW_CAPABILITIES: ReadonlySet<TViewCapability> = new Set<TViewCapability>([
   "compute",
@@ -94,6 +133,8 @@ interface TxContext {
   readonly owner: unknown;
   state: unknown;
   readonly parent: TxContext | undefined;
+  /** The level the transaction was opened with (or the adapter's inherent one); `undefined` = engine default. */
+  readonly isolation?: TDbIsolationLevel;
 }
 const txStorage = new AsyncLocalStorage<TxContext>();
 
@@ -262,15 +303,30 @@ export abstract class BaseDbAdapter {
    * The generic layer handles nesting detection via `AsyncLocalStorage`.
    * Adapters override `_beginTransaction`, `_commitTransaction`, and
    * `_rollbackTransaction` to provide raw DB-specific transaction primitives.
+   *
+   * `opts.isolation` (since 0.1.162) sets the isolation level of the
+   * transaction this call opens — "at least this level". An adapter whose
+   * {@link isolationLevels} lacks it throws `ISOLATION_NOT_SUPPORTED`. A
+   * nested call joins the open transaction; it may request a level only when
+   * that transaction was opened with the same or a stricter one, else it
+   * throws `INVALID_QUERY` (the level of a running transaction cannot change).
    */
-  async withTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
     const owner = this._transactionOwner();
-    if (findTxContext(owner)) {
+    const isolation = this._checkIsolation(opts);
+    const open = findTxContext(owner);
+    if (open) {
+      if (isolation) this._assertJoinIsolation(open.isolation, isolation);
       return fn();
     }
 
-    const ctx: TxContext = { owner, state: undefined, parent: txStorage.getStore() };
-    ctx.state = await this._beginTransaction();
+    const ctx: TxContext = {
+      owner,
+      state: undefined,
+      parent: txStorage.getStore(),
+      isolation: this._inherentIsolation() ?? isolation,
+    };
+    ctx.state = await this._beginTransaction(isolation ? { isolation } : undefined);
     return txStorage.run(ctx, async () => {
       try {
         const result = await fn();
@@ -285,6 +341,97 @@ export abstract class BaseDbAdapter {
         throw error;
       }
     });
+  }
+
+  /**
+   * The isolation levels {@link withTransaction} can open a transaction at
+   * (since 0.1.162). Default: none — a requested level throws
+   * `ISOLATION_NOT_SUPPORTED`. Override and apply the level in
+   * {@link _beginTransaction} (`opts.isolation`).
+   */
+  isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return NO_ISOLATION_LEVELS;
+  }
+
+  /**
+   * The level every transaction of this adapter runs at regardless of the
+   * request (since 0.1.162) — SQLite's `BEGIN IMMEDIATE` is always
+   * serializable. A nested `withTransaction` asking for any level then joins
+   * without error. Default `undefined` (the engine default / what was asked).
+   */
+  protected _inherentIsolation(): TDbIsolationLevel | undefined {
+    return undefined;
+  }
+
+  /**
+   * Validates a `withTransaction` isolation request against
+   * {@link isolationLevels} — the requested level, or `undefined`.
+   * @throws DbError `INVALID_QUERY` (unknown level) / `ISOLATION_NOT_SUPPORTED`.
+   */
+  protected _checkIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
+    const level = requestedIsolation(opts);
+    if (level && !this.isolationLevels().has(level)) {
+      throw new DbError("ISOLATION_NOT_SUPPORTED", [
+        {
+          path: "isolation",
+          message: `${this.constructor.name} cannot run a transaction at isolation level '${level}'`,
+        },
+      ]);
+    }
+    return level;
+  }
+
+  /**
+   * A nested `withTransaction` asked for `requested` while a transaction
+   * opened at `open` runs: fine when `open` is at least as strict.
+   * @throws DbError `INVALID_QUERY` otherwise.
+   */
+  protected _assertJoinIsolation(
+    open: TDbIsolationLevel | undefined,
+    requested: TDbIsolationLevel,
+  ): void {
+    if (open && ISOLATION_RANK[open] >= ISOLATION_RANK[requested]) return;
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: "isolation",
+        message:
+          `A nested withTransaction cannot request isolation '${requested}': the open transaction ` +
+          `runs at ${open ? `'${open}'` : "the engine default"} — set the level on the outermost call`,
+      },
+    ]);
+  }
+
+  /**
+   * Whether the readable layer may pass a row lock on `DbQuery.lock` to
+   * `findOne` / `findMany` (since 0.1.162). Default `false` — a locking read
+   * throws `LOCK_NOT_SUPPORTED`. An adapter whose transaction already
+   * serialises writers may return `true` and ignore the lock.
+   */
+  supportsReadLocks(): boolean {
+    return false;
+  }
+
+  /**
+   * Whether a locking read that fails with `NOWAIT` (`LOCK_TIMEOUT`) leaves
+   * the transaction usable (since 0.1.162). Default `false` (PostgreSQL
+   * aborts the whole transaction on any failed statement). When `true`
+   * (MySQL), a `skipLocked` `findById` / `findOneByRow` that skipped an
+   * id candidate re-checks it with `NOWAIT`; otherwise it checks with a
+   * plain read — which must then never wait for a row lock.
+   */
+  readLockNowaitKeepsTransaction(): boolean {
+    return false;
+  }
+
+  /**
+   * `true` inside a `withTransaction` scope of this adapter's owner — a real
+   * transaction or a pass-through one (adapters without transaction
+   * primitives, such as the in-memory one). Unlike {@link isInTransaction} a
+   * pass-through scope counts. Used to require a scope for locking reads.
+   * @since 0.1.162
+   */
+  inTransactionScope(): boolean {
+    return findTxContext(this._transactionOwner()) !== undefined;
   }
 
   /**
@@ -336,9 +483,10 @@ export abstract class BaseDbAdapter {
 
   /**
    * Starts a raw transaction. Returns opaque state stored in the async context.
-   * Override in adapters that support transactions.
+   * Override in adapters that support transactions. `opts.isolation` (since
+   * 0.1.162) is set only to a level of {@link isolationLevels}.
    */
-  protected async _beginTransaction(): Promise<unknown> {
+  protected async _beginTransaction(_opts?: TTransactionOptions): Promise<unknown> {
     return undefined;
   }
 

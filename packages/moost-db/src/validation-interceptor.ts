@@ -25,6 +25,10 @@ const dbErrorCodeToStatus: Record<string, number> = {
   // zone tables not loaded) — a store-configuration condition, not a bad
   // request. (`BUCKET_NOT_SUPPORTED` stays 400, like `GEO_NOT_SUPPORTED`.)
   BUCKET_TZ_UNAVAILABLE: 501,
+  // The adapter cannot lock rows on read / run the requested isolation level
+  // (e.g. MongoDB) — a capability gap of the store, not a bad request.
+  LOCK_NOT_SUPPORTED: 501,
+  ISOLATION_NOT_SUPPORTED: 501,
 };
 
 function transformValidationError(error: unknown, reply: (response: unknown) => void) {

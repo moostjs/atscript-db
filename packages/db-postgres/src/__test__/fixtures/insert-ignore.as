@@ -99,3 +99,16 @@ export interface IgLog {
 
     qty: number
 }
+
+// Locking-read id resolution (read-lock.live.spec.ts): a numeric unique key a
+// scalar id can also match. Since 0.1.162.
+@db.table 'ig_codes'
+export interface IgCode {
+    @meta.id
+    id: number
+
+    @db.index.unique 'code_idx'
+    code: number
+
+    label: string
+}

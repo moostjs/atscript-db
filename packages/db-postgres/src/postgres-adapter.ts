@@ -3,6 +3,7 @@ import {
   ALL_AGGREGATE_FNS,
   ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
+  ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
   isColumnTypeChanged,
@@ -39,6 +40,8 @@ import type {
   TDbFieldMeta,
   TDbDefaultFn,
   TValueFormatterPair,
+  TDbIsolationLevel,
+  TTransactionOptions,
 } from "@atscript/db";
 import type {
   AggregateFn,
@@ -376,11 +379,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     return this._getTransactionState() as TPgConnection | undefined;
   }
 
-  protected override async _beginTransaction(): Promise<TPgConnection> {
+  protected override async _beginTransaction(opts?: TTransactionOptions): Promise<TPgConnection> {
     const conn = await this.driver.getConnection();
     try {
-      await conn.exec("BEGIN");
-      this._log("BEGIN");
+      const sql = opts?.isolation
+        ? `BEGIN ISOLATION LEVEL ${opts.isolation.toUpperCase()}`
+        : "BEGIN";
+      await conn.exec(sql);
+      this._log(sql);
       return conn;
     } catch (err) {
       conn.release();
@@ -515,6 +521,20 @@ export class PostgresAdapter extends BaseDbAdapter {
   /** `$nulls` / `@db.sort.nulls` NULL placement — `NULLS FIRST` / `NULLS LAST`. */
   override supportsNullsPlacement(): boolean {
     return true;
+  }
+
+  /**
+   * Locking reads: `SELECT … FOR UPDATE` / `FOR SHARE` [`NOWAIT` /
+   * `SKIP LOCKED`]. Under REPEATABLE READ / SERIALIZABLE, locking a row that
+   * changed since the snapshot fails with `SERIALIZATION_FAILURE`. @since 0.1.162
+   */
+  override supportsReadLocks(): boolean {
+    return true;
+  }
+
+  /** Every level, via `BEGIN ISOLATION LEVEL …`. @since 0.1.162 */
+  override isolationLevels(): ReadonlySet<TDbIsolationLevel> {
+    return ALL_ISOLATION_LEVELS;
   }
 
   /** Computed view columns and first-row joins. */
@@ -956,16 +976,17 @@ export class PostgresAdapter extends BaseDbAdapter {
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
     const where = buildWhere(query.filter);
     const controls = { ...query.controls, $limit: 1 };
-    const { sql, params } = buildSelect(this.resolveTableName(), where, controls);
+    const { sql, params } = buildSelect(this.resolveTableName(), where, controls, query.lock);
     this._log(sql, params);
-    return this._exec().get(sql, params);
+    // Contention (a locking read's NOWAIT, a deadlock, a serialization failure) → retryable DbError
+    return this._wrapConstraintError(() => this._exec().get(sql, params));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
-    const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls);
+    const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls, query.lock);
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return this._wrapConstraintError(() => this._exec().all(sql, params));
   }
 
   /**

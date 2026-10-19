@@ -123,3 +123,22 @@ describe("malformed query string → 400 envelope on every read endpoint", () =>
     }
   });
 });
+
+describe("locking reads are never reachable from a URL (since 0.1.162)", () => {
+  it("lock / wait in a query string are a 400 (unknown field / control) — the readable is never called", async () => {
+    const table = makeMockTable();
+    const ctrl = new AsDbController(makeApp(), table);
+    const results = [
+      await ctrl.query("/query?lock=update&wait=nowait").catch((e: unknown) => e),
+      await ctrl.query("/query?$lock=update").catch((e: unknown) => e),
+      await ctrl.query("/query?$wait=skipLocked").catch((e: unknown) => e),
+      await ctrl.getOne("1", "/one/1?$lock=update").catch((e: unknown) => e),
+    ];
+    for (const result of results) {
+      expect(result).toBeInstanceOf(HttpError);
+      expect((result as HttpError).body.statusCode).toBe(400);
+    }
+    expect(table.findMany).not.toHaveBeenCalled();
+    expect(table.findOne).not.toHaveBeenCalled();
+  });
+});

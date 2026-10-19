@@ -128,6 +128,92 @@ async function inTransactionWithRetry<T>(fn: () => Promise<T>, attempts = 3): Pr
 
 `@atscript/moost-db` answers these codes with **503**. To avoid the most common deadlock — ignore-insert rows, then update the ones that already existed — see [`lockConflicts`](/api/crud#insert-ignore-lock).
 
+## Locking reads {#locking-reads}
+
+Since 0.1.162, `findOne`, `findMany` and `findById` take a row lock when you pass `{ lock }`. Use it to "read the current row and keep it until I write" — without a version column, a counter or a touch-then-read workaround:
+
+```typescript
+const adapter = db.getAdapter(Order);
+
+await adapter.withTransaction(async () => {
+  const order = await orders.findById(orderId, { lock: "update" });
+  if (order.status !== "open") throw new Error("Order is closed");
+  await orders.updateOne({ id: orderId, status: "paid" });
+}); // the lock is released at COMMIT / ROLLBACK
+```
+
+A second transaction asking for the same row waits until the first one ends, then reads the committed value.
+
+| Option | Values                                            | Effect                                                                                                                                                                                                        |
+| ------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lock` | `'update'` / `'share'`                            | `'update'` takes an exclusive lock (`SELECT … FOR UPDATE`), so other lockers and writers wait. `'share'` takes a shared lock (`FOR SHARE`): other `'share'` readers proceed, but writers wait.                |
+| `wait` | `'block'` (default) / `'nowait'` / `'skipLocked'` | `'nowait'` fails at once with a retryable `DbError("LOCK_TIMEOUT")` when the row is locked. `'skipLocked'` leaves locked rows out of the result, for queue-style "claim the next free rows". Requires `lock`. |
+
+```typescript
+// claim up to 10 pending jobs no other worker holds
+await adapter.withTransaction(async () => {
+  const batch = await jobs.findMany(
+    { filter: { status: "pending" }, controls: { $sort: { id: 1 }, $limit: 10 } },
+    { lock: "update", wait: "skipLocked" },
+  );
+  // … process and update `batch`
+});
+```
+
+Rules:
+
+- **It needs a transaction.** A lock outside a `withTransaction` scope of the table's adapter throws `INVALID_QUERY`, because a lock held for a single autocommit statement is always a bug.
+- **It works on tables only.** Views and `$groupBy`, aggregate `$select` or `$count` reads throw `INVALID_QUERY`. `count`, `aggregate`, `findManyWithCount` and search reads take no lock option.
+- **`findById` with `'skipLocked'` answers `null` when the row the id names is held.** It never falls through to another identification, so an id that is also a unique-key value of a different row does not return that row.
+- **Only the root rows are locked.** `$with` relations load with plain reads. To lock children, read them with their own locking `findMany`. A `$some` / `$none` filter does not lock the related rows it checks.
+- **Locks last until the outermost transaction ends.** A nested `withTransaction` joins it and adds no savepoint.
+- **It is a server-side option only.** It is the second argument, never a query control, so it cannot arrive over HTTP. In a `moost-db` controller, call it inside `this.withTransaction(fn)` in a custom action.
+
+| Adapter    | Locking read                                                                                                                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | Native `FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`]. Under `repeatable read` or `serializable`, locking a row that changed since the snapshot throws `SERIALIZATION_FAILURE` (retryable).    |
+| MySQL 8    | Native, same syntax. A locking read is a _current_ read: it sees the latest committed row even under the default REPEATABLE READ, where a plain read in the same transaction still sees the snapshot. |
+| SQLite     | Accepted as a no-op. Every transaction starts with `BEGIN IMMEDIATE`, which holds the database write lock, so no other writer can change the row.                                                     |
+| MongoDB    | Throws `LOCK_NOT_SUPPORTED` (`moost-db`: 501). Use [`$cas` / `withOptimisticRetry`](/api/versioning) instead.                                                                                         |
+| Memory     | Accepted and ignored inside a `withTransaction` scope.                                                                                                                                                |
+
+**DOs and DON'Ts**
+
+- **Do** keep a locked transaction short. Never await an HTTP call or other slow I/O while holding a row lock, because every other writer of that row waits for you.
+- **Do** lock by primary key (`findById`, or a filter on the key). On MySQL a filter without an index locks every row the scan touches.
+- **Don't** page a locking read with `$skip`. The rows `$skip` passes over are locked too (PostgreSQL and MySQL lock every row they read), so filter or `$limit` to exactly the rows you need.
+- **Do** lock several rows in one stable order (`$sort` by the primary key) so concurrent transactions don't deadlock. A deadlock that still happens throws `DEADLOCK` — [retry the transaction](#retrying).
+- **Do** use `'nowait'` when waiting is pointless (for example, "someone else is already processing this"). Treat its `LOCK_TIMEOUT` as "busy".
+- **Don't** reach for `isolation` to get fresh reads. Use a locking read: isolation alone takes no lock, so read-then-write still races.
+
+## Isolation level {#isolation}
+
+`withTransaction(fn, { isolation })` (since 0.1.162) opens the transaction at `'read committed'`, `'repeatable read'` or `'serializable'`:
+
+```typescript
+await adapter.withTransaction(
+  async () => {
+    // read-validate-write that must not suffer write skew
+  },
+  { isolation: "serializable" },
+);
+```
+
+- **It means "at least this level".** An engine that always runs stricter satisfies every level.
+- **Set it on the outermost call.** A nested `withTransaction` joins the open transaction. It may name a level only when that transaction was opened at the same or a stricter one; otherwise it throws `INVALID_QUERY`, because a running transaction's level cannot change.
+- **Expect retries at the stricter levels.** PostgreSQL `repeatable read` / `serializable` transactions can fail with `SERIALIZATION_FAILURE`, so [retry the whole callback](#retrying).
+- **Without it** you get the engine default: READ COMMITTED on PostgreSQL, REPEATABLE READ on MySQL.
+
+| Adapter    | `isolation`                                                                                                                                                                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | `BEGIN ISOLATION LEVEL …`                                                                                                                                                                                                                                |
+| MySQL      | `SET TRANSACTION ISOLATION LEVEL …` on the transaction's connection, right before `START TRANSACTION`                                                                                                                                                    |
+| SQLite     | Every level is satisfied: `BEGIN IMMEDIATE` transactions are serializable                                                                                                                                                                                |
+| MongoDB    | `'read committed'` / `'repeatable read'` are satisfied by the transaction's snapshot. `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation allows write skew), and so does any level on a standalone server, which has no transactions. |
+| Memory     | Accepted and ignored                                                                                                                                                                                                                                     |
+
+In a `moost-db` controller, `this.withTransaction(fn, { isolation })` forwards the option.
+
 ## Adapter Behavior
 
 | Adapter    | DML transactions | Transactional DDL | Notes                                                                                                                                                            |
@@ -160,7 +246,7 @@ Schema sync is not one transaction either: each step (`getExistingColumns`, `syn
 
 - Single record operations (already atomic)
 - Deep operations with nested data (auto-wrapped)
-- Read-only queries (no mutations to protect)
+- Read-only queries (no mutations to protect), unless you need a [locking read](#locking-reads)
 
 **Inside a keyed write**, pass `{ guard }` to run validated checks inside the table's own transaction — see [Write guards](/api/crud#write-guards). **In a `moost-db` controller**, override `guardWrite` / `guardRemove` (the override becomes that guard) and use `this.withTransaction(fn)` for custom actions — see [Customization — Write Hooks](/http/customization#write-hooks).
 

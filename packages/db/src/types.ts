@@ -46,6 +46,75 @@ export interface DbQuery {
   controls: DbControls;
   /** Pre-computed query insights (field → operators). Adapters may use this to apply query-time behaviour (e.g. collation). */
   insights?: UniqueryInsights;
+  /**
+   * Row lock the read takes (`findOne` / `findMany` with `{ lock }`; since
+   * 0.1.162). Only ever set on a table read inside a transaction of the
+   * adapter's owner, and only when `supportsReadLocks()` is true. SQL
+   * adapters render `FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`];
+   * an adapter whose transaction already serialises writers may ignore it.
+   */
+  lock?: TDbReadLock;
+}
+
+// ── Locking reads & isolation (since 0.1.162) ──────────────────────────────
+
+/** Lock strength of a locking read: exclusive (`update`) or shared (`share`). */
+export type TDbLockMode = "update" | "share";
+
+/**
+ * What a locking read does when a row is locked by another transaction:
+ * `block` (default) waits for it; `nowait` fails at once with a retryable
+ * `DbError("LOCK_TIMEOUT")`; `skipLocked` leaves the locked rows out of the
+ * result.
+ */
+export type TDbLockWait = "block" | "nowait" | "skipLocked";
+
+/** The resolved row lock handed to the adapter on {@link DbQuery.lock}. */
+export interface TDbReadLock {
+  mode: TDbLockMode;
+  wait: TDbLockWait;
+}
+
+/**
+ * Second argument of `findOne` / `findMany` (and part of the `findById` /
+ * `findOneByRow` options): a locking read. Server-side only — it is never a
+ * query control, so it cannot arrive over HTTP.
+ *
+ * A lock requires a `withTransaction` scope of the table's adapter and a
+ * table (not a view); `$groupBy` / aggregate `$select` / `$count` reads are
+ * rejected. Only the root rows are locked — `$with` relations load with
+ * plain reads. The locks are held until the outermost transaction commits
+ * or rolls back.
+ *
+ * @since 0.1.162
+ */
+export interface TReadLockOptions {
+  /** `'update'` — exclusive row lock (`FOR UPDATE`); `'share'` — shared lock (`FOR SHARE`). */
+  lock?: TDbLockMode;
+  /** Behaviour on a row locked by another transaction (default `'block'`); requires `lock`. */
+  wait?: TDbLockWait;
+}
+
+/**
+ * Transaction isolation level. Semantics are "at least this level": an
+ * engine that always runs stricter (SQLite) satisfies every level.
+ * @since 0.1.162
+ */
+export type TDbIsolationLevel = "read committed" | "repeatable read" | "serializable";
+
+/**
+ * Options of `withTransaction(fn, opts)` (since 0.1.162). Apply to the
+ * outermost call only — a nested call joins the open transaction and may
+ * request an isolation level only when the open transaction was started with
+ * the same or a stricter one (otherwise `INVALID_QUERY`).
+ */
+export interface TTransactionOptions {
+  /**
+   * Isolation level of the transaction. An adapter that cannot provide it
+   * throws `DbError("ISOLATION_NOT_SUPPORTED")`. Omitted: the engine default
+   * (PostgreSQL READ COMMITTED, MySQL REPEATABLE READ).
+   */
+  isolation?: TDbIsolationLevel;
 }
 
 // ── Search Index Metadata ───────────────────────────────────────────────────

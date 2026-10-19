@@ -492,6 +492,8 @@ export interface Issue {
 
 `ON CONFLICT DO NOTHING` takes no lock on a stored conflicting row, so ignore-inserting rows and then updating them in two concurrent transactions does not deadlock. With `lockConflicts: true` ([CRUD](/api/crud#insert-ignore-lock), since 0.1.153) the call first locks the stored rows sharing a key with the batch — one `SELECT … FOR UPDATE … ORDER BY <primary key>` — then inserts; a row a concurrent writer committed in between is skipped by `DO NOTHING` and locked by one more `SELECT … FOR UPDATE` afterwards (under `READ COMMITTED`, the default). Deadlocks (`40P01`), lock timeouts (`55P03`) and serialization failures (`40001`) throw `DbError("DEADLOCK" | "LOCK_TIMEOUT" | "SERIALIZATION_FAILURE")` with `retryable: true` since 0.1.153 ([Transactions](/api/transactions#retrying)).
 
+Locking reads (since 0.1.162) render `SELECT … FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`]. `withTransaction(fn, { isolation })` opens the transaction with `BEGIN ISOLATION LEVEL …`. See [Locking reads](/api/transactions#locking-reads).
+
 ## Limitations
 
 - **No unsigned integer types** — unsigned types are promoted to the next-larger signed type (see [Unsigned Integer Promotion](#unsigned-integer-promotion))

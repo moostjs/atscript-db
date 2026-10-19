@@ -73,6 +73,13 @@ export interface TMysqlConnection {
   exec(sql: string): Promise<void>;
   /** Release this connection back to the pool. */
   release(): void;
+  /**
+   * Close this connection instead of returning it to the pool (since
+   * 0.1.162) — used when its session state cannot be trusted, e.g. a
+   * one-shot `SET TRANSACTION` left pending by a failed
+   * `START TRANSACTION`. Optional: a driver without it gets `release()`.
+   */
+  destroy?(): void;
 }
 
 /**

@@ -73,7 +73,21 @@ export type DbErrorCode =
    * changed since the snapshot). The transaction is aborted — retry it whole.
    * `retryable` is `true`. @since 0.1.153
    */
-  | "SERIALIZATION_FAILURE";
+  | "SERIALIZATION_FAILURE"
+  // ── Locking reads & isolation (since 0.1.162; moost-db maps both to 501) ──
+  /**
+   * The adapter cannot take a row lock on a read (`findOne` / `findMany`
+   * with `{ lock }`) — MongoDB, or an adapter whose `supportsReadLocks()` is
+   * false. Use optimistic concurrency (`$cas`, `withOptimisticRetry`) there.
+   */
+  | "LOCK_NOT_SUPPORTED"
+  /**
+   * The adapter cannot run a transaction at the requested isolation level
+   * (`withTransaction(fn, { isolation })`) — e.g. `serializable` on MongoDB,
+   * any level on a MongoDB without transactions, or an adapter whose
+   * `isolationLevels()` lacks it.
+   */
+  | "ISOLATION_NOT_SUPPORTED";
 
 /** Codes whose operation may succeed when the whole transaction is retried. */
 const RETRYABLE_CODES: ReadonlySet<DbErrorCode> = new Set<DbErrorCode>([

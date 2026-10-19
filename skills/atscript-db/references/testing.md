@@ -63,7 +63,7 @@ function makeTestDb() {
 }
 ```
 
-A unique database name per spec avoids collection collisions across parallel suites. `MongoMemoryReplSet` is required for transactions (`.withTransaction()`).
+A unique database name per spec avoids collection collisions across parallel suites. `MongoMemoryReplSet` is required for transactions (`adapter.withTransaction()`).
 
 ## Seeding fixtures
 
@@ -194,7 +194,7 @@ expect(() => v.validate({ email: "bad" }, "insert")).toThrow();
 
 ```ts
 await expect(
-  users.withTransaction(async () => {
+  users.getAdapter().withTransaction(async () => {
     await users.insertOne({ name: "C" });
     throw new Error("rollback please");
   }),

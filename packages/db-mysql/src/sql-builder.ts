@@ -1,5 +1,5 @@
 import type { TDbCollation, TDbFieldMeta, TDbForeignKey, TFieldOps } from "@atscript/db";
-import type { DbControls, TResolvedBucket } from "@atscript/db";
+import type { DbControls, TDbReadLock, TResolvedBucket } from "@atscript/db";
 import type {
   AtscriptQueryFieldRef,
   TViewColumnMapping,
@@ -609,8 +609,9 @@ export function buildSelect(
   table: TSqlFromSource,
   where: TSqlFragment,
   controls?: DbControls,
+  lock?: TDbReadLock,
 ): TSqlFragment {
-  return _buildSelect(mysqlDialect, table, where, controls);
+  return _buildSelect(mysqlDialect, table, where, controls, lock);
 }
 
 /**
