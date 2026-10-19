@@ -27,7 +27,10 @@ Mark a numeric column as the row's version:
 
 ```atscript
 interface Task {
-    @meta.id @db.default.increment id: int
+    @meta.id
+    @db.default.increment
+    id: int
+
     title: string
     status: 'open' | 'done'
 
@@ -173,7 +176,10 @@ Since 0.1.150. Some columns are derived or reporting data refreshed in the backg
 
 ```atscript
 interface Task {
-    @meta.id @db.default.increment id: int
+    @meta.id
+    @db.default.increment
+    id: int
+
     title: string
 
     @db.column.version
@@ -387,7 +393,10 @@ A classic single-use-credential race — two concurrent consumers must not both 
 
 ```atscript
 interface User {
-    @meta.id @db.default.uuid id: string
+    @meta.id
+    @db.default.uuid
+    id: string
+
     email: string
     backupCodes: string[]
 

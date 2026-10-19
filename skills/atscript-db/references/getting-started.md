@@ -62,7 +62,8 @@ plugins: [ts(), dbPlugin(), PostgresPlugin()]; // adds @db.pg.*
 @db.table 'todos'
 @db.depth.limit 0                           // explicit: reject nested write payloads
 export interface Todo {
-    @meta.id @db.default.increment
+    @meta.id
+    @db.default.increment
     id: number
 
     title: string

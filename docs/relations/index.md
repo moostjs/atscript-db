@@ -82,7 +82,7 @@ If two or more unaliased `@db.rel.FK` fields point to the same target type, Atsc
 
 ## Composite Foreign Keys
 
-When a target table has a composite primary key (multiple `@meta.id` fields), declare one FK per key field. They automatically combine into a single composite foreign key:
+When a target table has a composite primary key (multiple `@meta.id` fields), declare one FK per key field and give them the same alias. They combine into a single composite foreign key:
 
 ```atscript
 @db.table 'order_items'
@@ -90,17 +90,17 @@ export interface OrderItem {
     @meta.id
     id: number
 
-    @db.rel.FK
+    @db.rel.FK 'order'
     orderId: Order.id
 
-    @db.rel.FK
+    @db.rel.FK 'order'
     productId: Order.productId
 
     quantity: number
 }
 ```
 
-Both `orderId` and `productId` reference fields on `Order`, so they form a single composite FK that matches the composite primary key of the `Order` table.
+Both `orderId` and `productId` reference fields on `Order` under the alias `'order'`, so they form a single composite FK that matches the composite primary key of the `Order` table.
 
 ## Complete Example
 

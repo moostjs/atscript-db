@@ -297,9 +297,17 @@ interface Document {
 ```atscript
 @db.table
 interface Task {
+  @meta.id
+  id: number
+
+  status: 'open' | 'done'
+
   @db.rel.FK
   @db.rel.onDelete 'cascade'
   projectId: Project.id
+
+  @db.rel.FK 'parent'
+  parentId?: Task.id
 
   @db.rel.to
   project: Project
@@ -311,7 +319,7 @@ interface Task {
   @db.rel.filterable
   tags: Tag[]
 
-  @db.rel.from
+  @db.rel.from 'parent'
   @db.rel.filter `status = 'open'`
   openSubtasks: Task[]
 }
@@ -419,7 +427,8 @@ Companion type for the `.ref` target — a `string` constrained to `^[A-Z0-9]{2,
 ```atscript
 @db.table 'orders'
 interface Order {
-  @meta.id @db.default.uuid
+  @meta.id
+  @db.default.uuid
   id: string
 
   // Per-row currency: each line carries its own code.
@@ -432,7 +441,8 @@ interface Order {
 
 @db.table 'metrics'
 interface Metric {
-  @meta.id @db.default.uuid
+  @meta.id
+  @db.default.uuid
   id: string
 
   // Single-currency table: literal form, no sibling field.
@@ -487,7 +497,7 @@ These annotations require the `@atscript/db-postgres` plugin. See [PostgreSQL ad
 | `@db.pg.collate` | Interface / Field | `collation` (string) | Native PG collation (overrides portable `@db.column.collate`)      |
 
 ```atscript
-use '@atscript/db-postgres'
+// requires the @atscript/db-postgres plugin in atscript.config
 
 @db.table 'users'
 @db.pg.schema 'auth'
@@ -518,7 +528,7 @@ These annotations require the `@atscript/db-mysql` plugin. See [MySQL adapter](.
 | `@db.mysql.onUpdate` | Field             | `expression` (string) | ON UPDATE expression (e.g., `CURRENT_TIMESTAMP`)                   |
 
 ```atscript
-use '@atscript/db-mysql'
+// requires the @atscript/db-mysql plugin in atscript.config
 
 @db.table 'events'
 @db.mysql.engine 'InnoDB'
@@ -556,7 +566,7 @@ These annotations require the `@atscript/db-mongo` plugin. See [MongoDB adapter]
 When `indexName` is omitted it defaults to `"DEFAULT"` — interface-level and field-level annotations referencing the same name are merged into one Atlas Search index. See [MongoDB adapter — Atlas Search](./mongodb#atlas-search).
 
 ```atscript
-use '@atscript/db-mongo'
+// requires the @atscript/db-mongo plugin in atscript.config
 
 @db.table 'products'
 @db.mongo.collection

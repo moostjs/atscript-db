@@ -676,7 +676,7 @@ Example in a view definition:
 @db.view.for Task
 @db.view.joins Project, `Project.id = Task.projectId`
 @db.view.filter `Task.status != 'done' and Task.priority >= 3`
-type ActiveHighPriorityTasks {
+interface ActiveHighPriorityTasks {
   taskId: Task.id
   title: Task.title
   projectName: Project.name

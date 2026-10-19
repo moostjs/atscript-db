@@ -7,7 +7,9 @@
 ```atscript
 @db.table 'tasks'
 interface Task {
-    @meta.id id: number
+    @meta.id
+    id: number
+
     title: string
 
     @db.rel.FK
@@ -28,13 +30,20 @@ Target must be a chain ref to a `@meta.id` field or a field marked `@db.index.un
 ```atscript
 @db.table 'posts'
 interface Post {
-    @meta.id id: number
+    @meta.id
+    id: number
 
-    @db.rel.FK authorId: User.id
-    @db.rel.to author: User              // single target
+    @db.rel.FK
+    authorId: User.id
 
-    @db.rel.from comments: Comment[]     // other table's FK points here
-    @db.rel.via PostTag tags: Tag[]      // junction table PostTag
+    @db.rel.to
+    author: User              // single target
+
+    @db.rel.from
+    comments: Comment[]     // other table's FK points here
+
+    @db.rel.via PostTag
+    tags: Tag[]      // junction table PostTag
 }
 ```
 
@@ -43,10 +52,17 @@ interface Post {
 `@db.rel.to 'assignee'` targets a specific FK when a table has multiple FKs to the same type:
 
 ```atscript
-@db.rel.FK 'assignee' assigneeId?: User.id
-@db.rel.FK 'reporter' reporterId: User.id
-@db.rel.to 'assignee'  assignee?: User
-@db.rel.to 'reporter'  reporter: User
+@db.rel.FK 'assignee'
+assigneeId?: User.id
+
+@db.rel.FK 'reporter'
+reporterId: User.id
+
+@db.rel.to 'assignee'
+assignee?: User
+
+@db.rel.to 'reporter'
+reporter: User
 ```
 
 ## Referential actions
@@ -124,7 +140,13 @@ ticket?: Ticket
 ```atscript
 @db.table 'posts'
 @db.depth.limit 2
-interface Post { @meta.id id: number, @db.rel.from comments: Comment[] }
+interface Post {
+    @meta.id
+    id: number
+
+    @db.rel.from
+    comments: Comment[]
+}
 ```
 
 ```ts
@@ -162,10 +184,14 @@ A nested write only touches rows related to the record being written. Every rule
 
 ## Composite FK targets
 
-When the target table has a composite PK, chain refs span the composite:
+When the target table has a composite PK, declare one FK per key column under the same alias — together they form one composite FK covering the whole key (a single column of a composite PK is a compile error unless it is `@db.index.unique`):
 
 ```atscript
-@db.rel.FK orderRef: OrderLine.order_product_key    // composite-key unique index name
+@db.rel.FK 'order'
+orderId: Order.id
+
+@db.rel.FK 'order'
+orderProductId: Order.productId
 ```
 
 ## Self-referential relations
@@ -173,10 +199,17 @@ When the target table has a composite PK, chain refs span the composite:
 ```atscript
 @db.table 'categories'
 interface Category {
-    @meta.id id: number
-    @db.rel.FK parentId?: Category.id
-    @db.rel.to parent?: Category
-    @db.rel.from children: Category[]
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    parentId?: Category.id
+
+    @db.rel.to
+    parent?: Category
+
+    @db.rel.from
+    children: Category[]
 }
 ```
 

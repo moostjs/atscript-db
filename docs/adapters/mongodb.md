@@ -378,7 +378,8 @@ Standard MongoDB text search uses the generic `@db.index.fulltext` annotation. T
 @db.table 'articles'
 @db.mongo.collection
 export interface Article {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
 
     @db.index.fulltext 'content_idx'
     title: string
@@ -433,7 +434,9 @@ An integer member of an `@db.index.fulltext` is searched with an Atlas `equals` 
 @db.mongo.collection
 @db.mongo.search.dynamic 'lucene.english', 1
 export interface Product {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
+
     title: string
     description: string
     category: string
@@ -460,7 +463,8 @@ A dynamic mapping indexes every string field, including a sealed `@db.writeOnly`
 @db.mongo.collection
 @db.mongo.search.static 'lucene.english', 0, 'product_search'
 export interface Product {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
 
     @db.mongo.search.text 'lucene.english', 'product_search'
     title: string
@@ -492,7 +496,8 @@ A plain search index matches whole words — `"art"` will not match `"Artem"`. F
 @db.mongo.collection
 @db.mongo.search.static 'lucene.english', 0, 'people'
 export interface User {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
 
     @db.mongo.search.autocomplete 'people'
     username: string
@@ -537,7 +542,8 @@ Each index encodes one behavior. To match the **same field** different ways, dec
 @db.mongo.search.static 'lucene.english', 0, 'users_exact'                    // word match
 @db.mongo.search.static 'lucene.english', 1, 'users_prefix', 'autocomplete'   // typeahead + fuzzy
 export interface User {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
 
     @db.mongo.search.text 'lucene.english', 'users_exact'
     @db.mongo.search.autocomplete 'users_prefix'

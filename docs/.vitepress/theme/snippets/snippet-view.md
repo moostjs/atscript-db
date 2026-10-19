@@ -12,13 +12,13 @@ export interface OrderStats {
   // GROUP BY column
   region: Customer.region
 
-  @db.agg.sum
-  revenue: Order.total
+  @db.agg.sum 'total'
+  revenue: number
 
   @db.agg.count
-  orderCount: Order.id
+  orderCount: number
 
-  @db.agg.avg
-  avgOrder: Order.total
+  @db.agg.avg 'total'
+  avgOrder: number
 }
 ```

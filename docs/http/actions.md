@@ -316,7 +316,8 @@ The interface-level annotation `@db.table.preferredId.uniqueIndex(name?: string)
 @db.table 'users'
 @db.table.preferredId.uniqueIndex 'by_slug'
 interface User {
-    @meta.id @db.default.uuid
+    @meta.id
+    @db.default.uuid
     id: string
     @db.index.unique 'by_slug'
     slug: string

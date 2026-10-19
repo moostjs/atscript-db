@@ -112,7 +112,9 @@ Text:
 @db.mongo.collection
 @db.mongo.search.static 'lucene.english', 1, 'main'
 interface Article {
-    @meta.id _id: mongo.objectId
+    @meta.id
+    _id: mongo.objectId
+
     @db.mongo.search.text 'lucene.english', 'main'
     title: string
     @db.mongo.search.text 'lucene.english', 'main'

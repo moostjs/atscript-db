@@ -67,7 +67,10 @@ Each `DbSpace` instance owns its adapters; create a new space per test to guaran
 ```atscript
 @db.table 'documents'
 interface Document {
-    @meta.id @db.default.uuid id: string
+    @meta.id
+    @db.default.uuid
+    id: string
+
     title: string
 
     @db.search.vector 1536, 'cosine'

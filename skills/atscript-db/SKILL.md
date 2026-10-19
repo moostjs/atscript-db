@@ -60,7 +60,8 @@ pnpm add @atscript/db-client                                 # browser/SSR clien
 @db.table 'todos'
 @db.depth.limit 0
 export interface Todo {
-    @meta.id @db.default.increment
+    @meta.id
+    @db.default.increment
     id: number
     title: string
     @db.default 'false'

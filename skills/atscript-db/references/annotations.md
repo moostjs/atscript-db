@@ -57,7 +57,8 @@ Not legitimate (all mean "remove the annotation"): "reads better in TS", "keep `
 ```atscript
 @db.table 'users'
 interface User {
-    @meta.id @db.default.uuid
+    @meta.id
+    @db.default.uuid
     id: string
     name: string
     status: 'active' | 'archived'
@@ -175,7 +176,8 @@ Runtime: `aggregate()` rejects `sum/avg/min/max` on a `.ref`-tagged field unless
 ```atscript
 @db.table 'orders'
 interface Order {
-    @meta.id @db.default.uuid
+    @meta.id
+    @db.default.uuid
     id: string
     currency: db.currencyCode
     @db.amount.currency.ref 'currency'
@@ -224,7 +226,8 @@ interface OrderLine {
 @db.table 'users'
 @db.table.preferredId.uniqueIndex 'by_slug'
 interface User {
-    @meta.id @db.default.uuid
+    @meta.id
+    @db.default.uuid
     id: string
     @db.index.unique 'by_slug'
     slug: string

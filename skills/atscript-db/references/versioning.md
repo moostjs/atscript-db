@@ -20,7 +20,8 @@ For pure counters use `$inc` ([patch.md](./patch.md#field-ops)) — it's atomic 
 ```atscript
 @db.table 'users'
 interface User {
-    @meta.id @db.default.uuid
+    @meta.id
+    @db.default.uuid
     id: string
     name: string
     @db.column.version

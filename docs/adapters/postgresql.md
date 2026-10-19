@@ -192,7 +192,7 @@ export interface Document {
   title: string
   content: string
 
-  @db.search.vector 1536 "cosine"
+  @db.search.vector 1536, "cosine"
   embedding: number[]
 }
 ```

@@ -81,10 +81,13 @@ Views (0.1.147): first-row joins → correlated subquery in `ON` (`pk = (SELECT 
 ## pgvector
 
 ```atscript
-use '@atscript/db-postgres'
+// requires the @atscript/db-postgres plugin in atscript.config
 @db.table 'documents'
 interface Document {
-    @meta.id @db.default.uuid id: string
+    @meta.id
+    @db.default.uuid
+    id: string
+
     @db.search.vector 1536, 'cosine', 'doc_vec'
     embedding: db.vector
     @db.search.filter 'doc_vec'

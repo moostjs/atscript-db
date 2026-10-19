@@ -57,7 +57,9 @@ Per-field control of nested-object patch semantics. See [validation.md § Valida
 
 ```atscript
 interface User {
-    @meta.id id: number
+    @meta.id
+    id: number
+
     @db.patch.strategy 'merge'
     profile?: Profile     // sub-fields preserved on partial patch
     address: Address      // default replace — required required, optional nulled

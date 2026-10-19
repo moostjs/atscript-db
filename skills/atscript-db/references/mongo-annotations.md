@@ -40,8 +40,8 @@ To use the **same data matched differently**, do not parameterize the query — 
 ```atscript
 @db.table 'users'
 @db.mongo.collection
-@db.mongo.search.static 'lucene.english', 0, 'users_exact'    # word match, no fuzzy
-@db.mongo.search.static 'lucene.english', 1, 'users_prefix'   # typeahead + fuzzy
+@db.mongo.search.static 'lucene.english', 0, 'users_exact'    // word match, no fuzzy
+@db.mongo.search.static 'lucene.english', 1, 'users_prefix'   // typeahead + fuzzy
 export interface User {
     @meta.id
     _id: mongo.objectId
@@ -92,7 +92,7 @@ For vector fields, use the core `db.vector` primitive (registered by `dbPlugin()
 ## Example
 
 ```atscript
-use '@atscript/db-mongo'
+// requires the @atscript/db-mongo plugin in atscript.config
 
 @db.table 'products'
 @db.mongo.collection
