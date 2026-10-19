@@ -12,6 +12,16 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 - **MongoDB: transactions over `directConnection=true`.** On a client connected with `directConnection=true` to a replica-set member, `withTransaction` ran `fn` without a transaction: a thrown error did not roll back its writes, and `withTransaction(fn, { isolation })` threw `ISOLATION_NOT_SUPPORTED`. Transaction support is now read from the server, once per client. If the server is unreachable on first use, `withTransaction` now fails with the connection error instead of running without a transaction, and a `withTransaction` sent to a secondary over `directConnection=true` now opens a real transaction (the server refuses it with `NotWritablePrimary`) instead of running without one. See [Transactions](/adapters/mongodb#transactions).
 
+## 0.1.163 {#v0-1-163}
+
+### Features
+
+- **`isServerStampedOnUpdate(metadata)`** and `SERVER_STAMPED_ON_UPDATE_KEYS` from `@atscript/db/validator`: `true` for `@db.onUpdate.now` and `@db.onUpdate.inc` fields, which the server overwrites on every update — e.g. to show them read-only in an edit form. See [Client-Side Validation](/http/client#validation).
+
+### Fixes
+
+- **Plugins and custom adapters built against 0.1.161 keep working.** The shared annotation helpers (`effectiveAnnotationNames`, `validateExclusiveWith`, `validateIncompatible`) accept a missing `doc` argument and then check the field's own annotations only. The deprecated `shouldSkipType` / `warnUnsupportedTypes` index-diff options work again (a `skipIndex` verdict wins), and `SqlDialect.stringLiteral` is optional — `sqlStringLiteral` is used when it is missing. The 0.1.162 notes below describe the preferred replacements. See [Creating adapters](/adapters/creating-adapters).
+
 ## 0.1.162 {#v0-1-162}
 
 ### Features
