@@ -72,7 +72,6 @@ import {
   type TGeoSearchControls,
   type TSqlFragment,
   fillReplacePayload,
-  writeLimitCount,
   geoWindowFromControls,
   chunkInsertRows,
   normalizeGeoPointValue,
@@ -97,7 +96,7 @@ import {
   buildCreateTable,
   buildCreateView,
   buildDelete,
-  writeLimitOrderBy,
+  writeLimitClause,
   buildInsert,
   buildInsertMany,
   buildSelect,
@@ -510,15 +509,6 @@ export class MysqlAdapter extends BaseDbAdapter {
    * latest committed row even under REPEATABLE READ. @since 0.1.162
    */
   override supportsReadLocks(): boolean {
-    return true;
-  }
-
-  /**
-   * `ER_LOCK_NOWAIT` fails the statement only. (A plain read is no safe
-   * existence probe here: under SERIALIZABLE it is a shared locking read.)
-   * @since 0.1.162
-   */
-  override readLockNowaitKeepsTransaction(): boolean {
     return true;
   }
 
@@ -1149,7 +1139,9 @@ export class MysqlAdapter extends BaseDbAdapter {
         const target = fields.length === 1 ? cols : `(${cols})`;
         const sql = `SELECT ${cols} FROM ${quoteTableName(tableName)} WHERE ${target} IN (${slice.map(() => tuple).join(", ")}) ORDER BY ${cols} FOR UPDATE`;
         this._log(sql, params);
-        await this._wrapConstraintError(() => this._exec().all(sql, params));
+        await this._exec()
+          .all(sql, params)
+          .catch((error: unknown) => this._mapConstraintError(error));
       }
     }
   }
@@ -1283,7 +1275,9 @@ export class MysqlAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     // Contention (a locking read's NOWAIT / lock wait timeout / deadlock) → retryable DbError
-    return this._wrapConstraintError(() => this._exec().get(sql, params));
+    return this._exec()
+      .get(sql, params)
+      .catch((error: unknown) => this._mapConstraintError(error));
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
@@ -1295,7 +1289,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       query.lock,
     );
     this._log(sql, params);
-    return this._wrapConstraintError(() => this._exec().all(sql, params));
+    return this._exec()
+      .all(sql, params)
+      .catch((error: unknown) => this._mapConstraintError(error));
   }
 
   /**
@@ -1494,16 +1490,13 @@ export class MysqlAdapter extends BaseDbAdapter {
   ): Promise<TDbUpdateResult> {
     const where = this._mutationWhere(filter);
     const versionColumn = this._versionColumnFor(opts);
-    const bound = opts?.limit;
     const { sql, params } = buildUpdate(
       this.resolveTableName(),
       data,
       where,
-      bound && writeLimitCount(bound),
+      writeLimitClause(opts?.limit),
       ops,
       versionColumn,
-      undefined,
-      bound && writeLimitOrderBy(bound),
     );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
@@ -1586,12 +1579,10 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async deleteMany(filter: FilterExpr, opts?: TDbDeleteManyOptions): Promise<TDbDeleteResult> {
     const where = this._mutationWhere(filter);
-    const bound = opts?.limit;
     const { sql, params } = buildDelete(
       this.resolveTableName(),
       where,
-      bound && writeLimitCount(bound),
-      bound && writeLimitOrderBy(bound),
+      writeLimitClause(opts?.limit),
     );
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));

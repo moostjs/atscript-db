@@ -12,7 +12,7 @@ import {
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { CasMismatchError, DbError } from "../db-error";
+import { CasMismatchError, DbError, invalidQuery } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
@@ -47,7 +47,7 @@ import {
 } from "../validator";
 import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
-import { ApplicationIntegrity } from "../strategies/application-integrity";
+import { ApplicationIntegrity, pinByPrimaryKey } from "../strategies/application-integrity";
 import type {
   DbPatch,
   DbRow,
@@ -342,42 +342,63 @@ function concurrentChange(): DbError {
 /** Hand-off for a version-exempt patch (since 0.1.150) — shared, never mutated. */
 const KEEP_VERSION: TDbUpdateOptions = Object.freeze({ keepVersion: true });
 
-/** `[opts]` when `opts` carries anything — the adapter call shape stays unchanged otherwise. */
-function optsArg(opts: TDbUpdateOptions): [TDbUpdateOptions] | [] {
-  return Object.keys(opts).length > 0 ? [opts] : [];
-}
-
-function invalidQuery(path: string, message: string): DbError {
-  return new DbError("INVALID_QUERY", [{ path, message }]);
+/**
+ * The trailing `TDbUpdateOptions` rest-arg of an adapter update: `[]` when
+ * there is nothing to pass, so the common call shape stays unchanged.
+ */
+function updateOptsArg(keepVersion: boolean, limit?: TDbWriteLimit): [TDbUpdateOptions] | [] {
+  if (limit) return [keepVersion ? { keepVersion, limit } : { limit }];
+  return keepVersion ? [KEEP_VERSION] : [];
 }
 
 /** Extra attempts of a bounded write that affected no rows while matches remain. */
 const BOUNDED_WRITE_RETRIES = 3;
 
-/** `deletedCount` of a delete result. */
-const deleted = (result: TDbDeleteResult): number => result.deletedCount;
+/**
+ * A bounded write lost its picked rows to concurrent writers on every
+ * attempt while rows still matched — retryable, like other row contention.
+ */
+function boundedWriteContention(): DbError {
+  return new DbError("SERIALIZATION_FAILURE", [
+    {
+      path: "limit",
+      message: `Bounded write: concurrent writers took the picked rows on ${BOUNDED_WRITE_RETRIES + 1} attempts while rows still matched — retry`,
+    },
+  ]);
+}
 
-/** `matchedCount` of an update result. */
-const matched = (result: TDbUpdateResult): number => result.matchedCount;
+/** How a bounded write reads, sums and zeroes its result type. */
+interface TBoundedResult<R> {
+  affected(result: R): number;
+  add(a: R, b: R): R;
+  none(): R;
+}
+
+const DELETE_RESULT: TBoundedResult<TDbDeleteResult> = {
+  affected: (r) => r.deletedCount,
+  add: (a, b) => ({ deletedCount: a.deletedCount + b.deletedCount }),
+  none: () => ({ deletedCount: 0 }),
+};
+
+const UPDATE_RESULT: TBoundedResult<TDbUpdateResult> = {
+  affected: (r) => r.matchedCount,
+  add: (a, b) => ({
+    matchedCount: a.matchedCount + b.matchedCount,
+    modifiedCount: a.modifiedCount + b.modifiedCount,
+  }),
+  none: () => ({ matchedCount: 0, modifiedCount: 0 }),
+};
 
 /** The rows a bounded `updateMany` / `deleteMany` picks (see `_writeBound`). */
 interface TWriteBound {
-  /** Translated (physical) filter. */
-  filter: FilterExpr;
-  /** Translated read of the picked rows' primary keys (order, limit). */
+  /** Translated read of the picked rows' primary keys (filter, order, limit). */
   query: DbQuery;
-  limit: number;
   /** What a `supportsWriteLimit()` adapter receives. */
   writeLimit: TDbWriteLimit;
 }
 
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
 const TOUCH_MANY_CHUNK = 500;
-
-/** `touchMany` input rejection — always `INVALID_QUERY`, path names the key. */
-function invalidTouchKey(path: string, message: string): DbError {
-  return new DbError("INVALID_QUERY", [{ path, message }]);
-}
 
 export class AtscriptDbTable<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
@@ -527,15 +548,11 @@ export class AtscriptDbTable<
       lockConflicts,
     } = (opts ?? {}) as TInternalWriteOptions<DataType> & TInsertOptions<DataType>;
     if (onConflict !== undefined && onConflict !== "error" && onConflict !== "ignore") {
-      throw new DbError("INVALID_QUERY", [
-        { path: "onConflict", message: `Unknown onConflict mode "${String(onConflict)}"` },
-      ]);
+      throw invalidQuery("onConflict", `Unknown onConflict mode "${String(onConflict)}"`);
     }
     const ignore = onConflict === "ignore";
     if (lockConflicts && !ignore) {
-      throw new DbError("INVALID_QUERY", [
-        { path: "lockConflicts", message: 'lockConflicts requires onConflict "ignore"' },
-      ]);
+      throw invalidQuery("lockConflicts", 'lockConflicts requires onConflict "ignore"');
     }
     // Read BEFORE the write opens its own transaction: whether the caller's
     // transaction continues after this call (adapters avoid leaving locks then).
@@ -1029,12 +1046,11 @@ export class AtscriptDbTable<
           // fields are written and no `$cas` asked for → the adapter must not
           // bump (nor check) the version. Decided on the logical patch, keys only.
           // Passed as a trailing rest-arg only when set, so the common call shape is unchanged.
-          const updateOpts: [TDbUpdateOptions] | [] =
+          const updateOpts = updateOptsArg(
             expectedVersion === undefined &&
-            versionColumn !== undefined &&
-            isVersionExemptPatch(data, this as AtscriptDbTable)
-              ? [KEEP_VERSION]
-              : [];
+              versionColumn !== undefined &&
+              isVersionExemptPatch(data, this as AtscriptDbTable),
+          );
           // A versioned touch (empty + `$cas`) writes the row too.
           this._stampTopLevel(data, now, expectedVersion !== undefined);
 
@@ -1163,7 +1179,7 @@ export class AtscriptDbTable<
     this._ensureBuilt();
     const versionField = this._meta.versionField;
     if (versionField === undefined) {
-      throw invalidTouchKey("", "touchMany requires @db.column.version");
+      throw invalidQuery("", "touchMany requires @db.column.version");
     }
     if (keys.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
@@ -1176,20 +1192,20 @@ export class AtscriptDbTable<
       const pair: Record<string, unknown> = {};
       for (const pk of pkFields) {
         if (key[pk] === undefined) {
-          throw invalidTouchKey(`[${i}].${pk}`, `touchMany: each key must carry its "${pk}"`);
+          throw invalidQuery(`[${i}].${pk}`, `touchMany: each key must carry its "${pk}"`);
         }
         pair[pk] = key[pk];
       }
       const version = key[versionField];
       if (typeof version !== "number" || !Number.isFinite(version)) {
-        throw invalidTouchKey(
+        throw invalidQuery(
           `[${i}].${versionField}`,
           `touchMany: each key must carry its expected "${versionField}" (number)`,
         );
       }
       for (const [prop, value] of Object.entries(key)) {
         if (value !== undefined && prop !== versionField && !(prop in pair)) {
-          throw invalidTouchKey(
+          throw invalidQuery(
             `[${i}].${prop}`,
             `touchMany: a touch carries no payload — keys hold the primary key and "${versionField}" only, got "${prop}"`,
           );
@@ -1197,7 +1213,7 @@ export class AtscriptDbTable<
       }
       const identity = JSON.stringify(pair);
       if (seen.has(identity)) {
-        throw invalidTouchKey(`[${i}]`, `touchMany: duplicate key ${identity}`);
+        throw invalidQuery(`[${i}]`, `touchMany: duplicate key ${identity}`);
       }
       seen.add(identity);
       pair[versionField] = version;
@@ -1223,7 +1239,9 @@ export class AtscriptDbTable<
     // with the version (since 0.1.162).
     const stamps: Record<string, unknown> = {};
     this._stampTopLevel(stamps, Date.now(), true);
-    const { update, ops } = this._translatePatch(stamps);
+    const { update, ops } = isEmptyObject(stamps)
+      ? { update: stamps, ops: undefined }
+      : this._translatePatch(stamps);
 
     return this.adapter.withTransaction(async () => {
       let matchedCount = 0;
@@ -1333,14 +1351,11 @@ export class AtscriptDbTable<
     // writes only `@db.column.version.exempt` fields. Reject $cas
     // here so callers fail loud instead of silently losing the predicate.
     if ("$cas" in dataCopy) {
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$cas",
-          message:
-            "$cas is not supported on updateMany — use bulkUpdate with per-row $cas " +
-            "for version-locked batch updates",
-        },
-      ]);
+      throw invalidQuery(
+        "$cas",
+        "$cas is not supported on updateMany — use bulkUpdate with per-row $cas " +
+          "for version-locked batch updates",
+      );
     }
     this._rejectNavWrite(dataCopy, "updateMany");
     const now = Date.now();
@@ -1364,10 +1379,8 @@ export class AtscriptDbTable<
     }
     // Version-exempt patch (since 0.1.150): decided on the logical payload,
     // before decomposition (keys only — encryption does not change them).
-    const updateOpts: TDbUpdateOptions = {};
-    if (versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable)) {
-      updateOpts.keepVersion = true;
-    }
+    const keepVersion =
+      versionColumn !== undefined && isVersionExemptPatch(dataCopy, this as AtscriptDbTable);
     // An empty patch stays a no-op (below) — no update time without a write.
     this._stampTopLevel(dataCopy, now);
     // Encrypt @db.encrypted fields BEFORE decomposition so the patch carries
@@ -1375,46 +1388,27 @@ export class AtscriptDbTable<
     await this._encryptItems([dataCopy], "patch");
     const { update, ops } = this._translatePatch(dataCopy);
     const translatedFilter =
-      bound?.filter ?? this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
+      bound?.query.filter ?? this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
     // Empty patch: nothing to SET (an empty SET list is a SQL syntax error) and
     // a bulk no-op must not bump versions — report the honest match count only.
     if (ops === undefined && isEmptyObject(update)) {
       const matchedCount = await this.adapter.count({ filter: translatedFilter, controls: {} });
       return {
-        matchedCount: bound ? Math.min(matchedCount, bound.limit) : matchedCount,
+        matchedCount: bound ? Math.min(matchedCount, bound.writeLimit.limit) : matchedCount,
         modifiedCount: 0,
       };
     }
     return enrichFkViolation(this._meta, () => {
       if (!bound) {
-        return this.adapter.updateMany(translatedFilter, update, ops, ...optsArg(updateOpts));
-      }
-      if (this.adapter.supportsWriteLimit()) {
-        return this._boundedWrite(
-          bound,
-          () =>
-            this.adapter.updateMany(translatedFilter, update, ops, {
-              ...updateOpts,
-              limit: bound.writeLimit,
-            }),
-          matched,
-          this.adapter.writeLimitIsAtomic(),
+        return this.adapter.updateMany(
+          translatedFilter,
+          update,
+          ops,
+          ...updateOptsArg(keepVersion),
         );
       }
-      return this._boundedWrite(
-        bound,
-        async () => {
-          const keys = await this._pinBoundKeys(bound);
-          return keys
-            ? this.adapter.updateMany(
-                { $and: [translatedFilter, keys] },
-                update,
-                ops,
-                ...optsArg(updateOpts),
-              )
-            : { matchedCount: 0, modifiedCount: 0 };
-        },
-        matched,
+      return this._runBounded(bound, UPDATE_RESULT, (f, limit) =>
+        this.adapter.updateMany(f, update, ops, ...updateOptsArg(keepVersion, limit)),
       );
     });
   }
@@ -1482,72 +1476,78 @@ export class AtscriptDbTable<
         this.adapter.withTransaction(async () => {
           if (!bound) return this._cascadeDelete(filter as FilterExpr, translate);
           // Pin the keys first: the cascade and the delete act on exactly them.
-          return this._boundedWrite(
+          return this._runBounded(
             bound,
-            async () => {
-              const keys = await this._pinBoundKeys(bound);
-              return keys ? this._cascadeDelete(keys, (f) => f) : { deletedCount: 0 };
-            },
-            deleted,
+            DELETE_RESULT,
+            (f) => this._cascadeDelete(f, (pinned) => pinned),
+            false,
           );
         }),
       );
     }
-    if (!bound) {
-      return remapDeleteFkViolation(this.tableName, () =>
-        this.adapter.deleteMany(translate(filter as FilterExpr)),
-      );
-    }
-    if (this.adapter.supportsWriteLimit()) {
-      return remapDeleteFkViolation(this.tableName, () =>
-        this._boundedWrite(
-          bound,
-          () => this.adapter.deleteMany(bound.filter, { limit: bound.writeLimit }),
-          deleted,
-          this.adapter.writeLimitIsAtomic(),
-        ),
-      );
-    }
     return remapDeleteFkViolation(this.tableName, () =>
-      this._boundedWrite(
-        bound,
-        async () => {
-          const keys = await this._pinBoundKeys(bound);
-          return keys
-            ? this.adapter.deleteMany({ $and: [bound.filter, keys] })
-            : { deletedCount: 0 };
-        },
-        deleted,
-      ),
+      bound
+        ? this._runBounded(bound, DELETE_RESULT, (f, limit) =>
+            limit ? this.adapter.deleteMany(f, { limit }) : this.adapter.deleteMany(f),
+          )
+        : this.adapter.deleteMany(translate(filter as FilterExpr)),
     );
   }
 
   /**
-   * Runs a bounded write; when it affected no rows although a row still
-   * matches the filter — a concurrent transaction deleted or changed the rows
-   * it picked between the pick and the write — it runs again, at most
-   * {@link BOUNDED_WRITE_RETRIES} more times. So `0` means nothing matched
-   * (a loop until `0` cannot stop early); fewer than `limit` stays possible.
-   * `atomic` writes (MySQL native) skip the probe.
+   * Runs a bounded write. `native` (default: `supportsWriteLimit()`) hands
+   * `write` the physical filter and the bound; otherwise the primary keys of
+   * the picked rows are read first and `write` gets `filter AND keys` per
+   * key batch (no bound) — a pick that finds nothing writes nothing.
+   *
+   * When the write affected no rows although a row still matches — a
+   * concurrent transaction deleted or changed the picked rows between the
+   * pick and the write — it runs again, at most
+   * {@link BOUNDED_WRITE_RETRIES} more times; an emulated write's next pick
+   * is that check. Rows still matching after the last attempt throw a
+   * retryable `SERIALIZATION_FAILURE`. So `0` means nothing matched (a loop
+   * until `0` cannot stop early); fewer than `limit` stays possible.
+   * A native write whose adapter reports `writeLimitIsAtomic()` is never
+   * re-checked.
    */
-  private async _boundedWrite<R>(
+  private async _runBounded<R>(
     bound: TWriteBound,
-    write: () => Promise<R>,
-    affected: (result: R) => number,
-    atomic = false,
+    result: TBoundedResult<R>,
+    write: (filter: FilterExpr, limit?: TDbWriteLimit) => Promise<R>,
+    native = this.adapter.supportsWriteLimit(),
   ): Promise<R> {
-    let result = await write();
-    if (atomic) return result;
-    for (let retry = 0; retry < BOUNDED_WRITE_RETRIES && affected(result) === 0; retry++) {
-      const { $sort: _sort, $nulls: _nulls, ...controls } = bound.query.controls;
-      const probe = await this.adapter.findMany({
-        ...bound.query,
-        controls: { ...controls, $limit: 1 },
-      });
-      if (probe.length === 0) break;
-      result = await write();
+    const atomic = native && this.adapter.writeLimitIsAtomic();
+    const filter = bound.query.filter;
+    const pkColumns = this._meta.primaryKeys.map((field) => this._meta.physicalPath(field));
+    for (let attempt = 0; ; attempt++) {
+      let out: R;
+      if (native) {
+        out = await write(filter, bound.writeLimit);
+      } else {
+        const rows = await this.adapter.findMany(bound.query);
+        if (rows.length === 0) return result.none();
+        out = result.none();
+        for (const keys of pinByPrimaryKey(rows, pkColumns)) {
+          out = result.add(out, await write({ $and: [filter, keys] }));
+        }
+      }
+      if (atomic || result.affected(out) > 0) return out;
+      const last = attempt === BOUNDED_WRITE_RETRIES;
+      if (native || last) {
+        if (!(await this._boundStillMatches(bound))) return out;
+        if (last) throw boundedWriteContention();
+      }
     }
-    return result;
+  }
+
+  /** Whether any row still matches a bounded write's filter (a one-row key read). */
+  private async _boundStillMatches(bound: TWriteBound): Promise<boolean> {
+    const { $sort: _sort, $nulls: _nulls, ...controls } = bound.query.controls;
+    const probe = await this.adapter.findMany({
+      ...bound.query,
+      controls: { ...controls, $limit: 1 },
+    });
+    return probe.length > 0;
   }
 
   /**
@@ -1589,26 +1589,25 @@ export class AtscriptDbTable<
     filter: FilterExpr,
     opts: TBulkWriteOptions<any> | undefined,
   ): TWriteBound | undefined {
-    const invalid = invalidQuery;
     if (opts?.limit === undefined) {
       if (opts?.sort !== undefined)
-        throw invalid("sort", "sort applies to a bounded write only — set limit");
+        throw invalidQuery("sort", "sort applies to a bounded write only — set limit");
       return undefined;
     }
     const limit = opts.limit;
     if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
-      throw invalid("limit", `limit must be a positive integer, got ${String(limit)}`);
+      throw invalidQuery("limit", `limit must be a positive integer, got ${String(limit)}`);
     }
     const pk = this._meta.primaryKeys;
     if (pk.length === 0) {
-      throw invalid("limit", "a bounded write needs a primary key to order and pin its rows");
+      throw invalidQuery("limit", "a bounded write needs a primary key to order and pin its rows");
     }
     let sort: Record<string, 1 | -1>;
     if (opts.sort !== undefined && Object.keys(opts.sort).length > 0) {
       sort = {};
       for (const [field, dir] of Object.entries(opts.sort)) {
         if (dir !== 1 && dir !== -1)
-          throw invalid(`sort.${field}`, "sort direction must be 1 or -1");
+          throw invalidQuery(`sort.${field}`, "sort direction must be 1 or -1");
         sort[field] = dir;
       }
       guardPaths(this._meta, this.adapter, { controls: { $sort: sort } });
@@ -1627,36 +1626,17 @@ export class AtscriptDbTable<
       sort: query.controls.$sort as Record<string, 1 | -1>,
     };
     if (query.controls.$nulls) writeLimit.nulls = query.controls.$nulls;
-    return { filter: query.filter, query, limit, writeLimit };
-  }
-
-  /**
-   * Reads the primary keys of the rows a bounded write picks and returns them
-   * as a physical filter, or `undefined` when none match.
-   */
-  private async _pinBoundKeys(bound: TWriteBound): Promise<FilterExpr | undefined> {
-    const rows = await this.adapter.findMany(bound.query);
-    if (rows.length === 0) return undefined;
-    const cols = this._meta.primaryKeys.map((field) => this._meta.physicalPath(field));
-    if (cols.length === 1) {
-      const col = cols[0]!;
-      return { [col]: { $in: rows.map((row) => row[col]) } } as FilterExpr;
-    }
-    return {
-      $or: rows.map((row) => Object.fromEntries(cols.map((col) => [col, row[col]]))),
-    } as FilterExpr;
+    return { query, writeLimit };
   }
 
   /** `updateMany` / `replaceMany` write the table's own fields only. */
   private _rejectNavWrite(data: Record<string, unknown>, method: string): void {
     for (const navField of this._meta.navFields) {
       if (data[navField] !== undefined) {
-        throw new DbError("INVALID_QUERY", [
-          {
-            path: navField,
-            message: `${method} writes the table's own fields only — write relations through the keyed methods (updateOne / bulkUpdate / replaceOne / bulkReplace)`,
-          },
-        ]);
+        throw invalidQuery(
+          navField,
+          `${method} writes the table's own fields only — write relations through the keyed methods (updateOne / bulkUpdate / replaceOne / bulkReplace)`,
+        );
       }
     }
   }
@@ -1998,9 +1978,7 @@ export class AtscriptDbTable<
         fk.localFields.forEach((local, i) => {
           const value = target[fk.targetFields[i]!];
           if (item[local] !== undefined && item[local] !== null && !sameKey(item[local], value)) {
-            throw new DbError("INVALID_QUERY", [
-              { path: navField, message: `"${navField}" and "${local}" name different parents` },
-            ]);
+            throw invalidQuery(navField, `"${navField}" and "${local}" name different parents`);
           }
           item[local] = value;
         });
@@ -2014,13 +1992,10 @@ export class AtscriptDbTable<
     for (const [navField, relation] of this._meta.relations) {
       if (relation.direction !== "to") continue;
       if (items.some((item) => item[navField] !== undefined && item[navField] !== null)) {
-        throw new DbError("INVALID_QUERY", [
-          {
-            path: navField,
-            message:
-              'onConflict "ignore" cannot create a related parent record — insert it first or reference it by key',
-          },
-        ]);
+        throw invalidQuery(
+          navField,
+          'onConflict "ignore" cannot create a related parent record — insert it first or reference it by key',
+        );
       }
     }
   }
@@ -2057,9 +2032,7 @@ export class AtscriptDbTable<
         )
       : [];
     if (slots.length !== send.length) {
-      throw new DbError("INVALID_QUERY", [
-        { path: "", message: "Adapter insertManyIgnore must return one slot per input row" },
-      ]);
+      throw invalidQuery("", "Adapter insertManyIgnore must return one slot per input row");
     }
     const insertedIds: unknown[] = [];
     const inserted: number[] = [];
@@ -2093,9 +2066,7 @@ export class AtscriptDbTable<
   ): FilterExpr[] {
     const pkFields = this.primaryKeys;
     if (pkFields.length === 0 && items.length > 0) {
-      throw new DbError("INVALID_QUERY", [
-        { path: "", message: "Write check requires a primary key on the table" },
-      ]);
+      throw invalidQuery("", "Write check requires a primary key on the table");
     }
     return items.map((item, i) => {
       const key: Record<string, unknown> = {};
@@ -2104,12 +2075,10 @@ export class AtscriptDbTable<
         if (value === undefined) value = prepared[i]?.[this._meta.columnMap.get(field) ?? field];
         if (value === undefined && pkFields.length === 1) value = insertedIds[i];
         if (value === undefined || value === null) {
-          throw new DbError("INVALID_QUERY", [
-            {
-              path: field,
-              message: `Write check: cannot resolve the primary key of inserted row [${i}]`,
-            },
-          ]);
+          throw invalidQuery(
+            field,
+            `Write check: cannot resolve the primary key of inserted row [${i}]`,
+          );
         }
         key[field] = value;
       }

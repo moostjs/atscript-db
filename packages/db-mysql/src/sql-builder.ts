@@ -12,7 +12,13 @@ import type {
   TViewJsonType,
   TViewPlan,
 } from "@atscript/db";
-import type { SqlDialect, TGeoCircle, TSqlFragment, TSqlFromSource } from "@atscript/db-sql-tools";
+import type {
+  SqlDialect,
+  TGeoCircle,
+  TSqlFragment,
+  TSqlFromSource,
+  TSqlWriteLimit,
+} from "@atscript/db-sql-tools";
 import {
   buildInsert as _buildInsert,
   buildInsertMany as _buildInsertMany,
@@ -34,6 +40,7 @@ import {
   arithOverflowError,
   numericOutOfRangeError,
   orderByList,
+  writeLimitCount,
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
@@ -642,47 +649,40 @@ export function buildSelect(
 }
 
 /**
- * Builds an UPDATE ... SET ... WHERE statement with optional LIMIT.
+ * Builds an UPDATE ... SET ... WHERE statement with optional [ORDER BY …] LIMIT.
  */
 // oxlint-disable-next-line max-params
 export function buildUpdate(
   table: string,
   data: Record<string, unknown>,
   where: TSqlFragment,
-  limit?: number,
+  limit?: number | TSqlWriteLimit,
   ops?: TFieldOps,
   versionColumn?: string,
   expectedVersion?: number,
-  orderBy?: string,
 ): TSqlFragment {
-  return _buildUpdate(
-    mysqlDialect,
-    table,
-    data,
-    where,
-    limit,
-    ops,
-    versionColumn,
-    expectedVersion,
-    orderBy,
-  );
+  return _buildUpdate(mysqlDialect, table, data, where, limit, ops, versionColumn, expectedVersion);
 }
 
 /**
- * Builds a DELETE ... WHERE statement with optional LIMIT.
+ * Builds a DELETE ... WHERE statement with optional [ORDER BY …] LIMIT.
  */
 export function buildDelete(
   table: string,
   where: TSqlFragment,
-  limit?: number,
-  orderBy?: string,
+  limit?: number | TSqlWriteLimit,
 ): TSqlFragment {
-  return _buildDelete(mysqlDialect, table, where, limit, orderBy);
+  return _buildDelete(mysqlDialect, table, where, limit);
 }
 
-/** `ORDER BY` list of a bounded write (since 0.1.162). */
-export function writeLimitOrderBy(bound: TDbWriteLimit): string {
-  return orderByList(mysqlDialect, bound.sort, bound.nulls);
+/** `ORDER BY … LIMIT n` of a bounded write (since 0.1.162), `undefined` when unbounded. */
+export function writeLimitClause(bound: TDbWriteLimit | undefined): TSqlWriteLimit | undefined {
+  return (
+    bound && {
+      count: writeLimitCount(bound),
+      orderBy: orderByList(mysqlDialect, bound.sort, bound.nulls),
+    }
+  );
 }
 
 /**

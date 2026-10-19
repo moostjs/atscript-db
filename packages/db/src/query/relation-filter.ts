@@ -3,7 +3,7 @@ import type { FilterExpr, RelationOp } from "@uniqu/core";
 import { isRelationOp } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError } from "../db-error";
+import { DbError, invalidQuery } from "../db-error";
 import { findFKEntryForRelation, findRemoteFK, tableNameOf } from "../rel/relation-helpers";
 import { isPlainObject } from "../shared/object";
 import type { TableMetadata } from "../table/table-metadata";
@@ -239,10 +239,6 @@ export interface TRelationFilterOwner {
   _resolveRelationOperand(filter: FilterExpr, depth: number): FilterExpr;
 }
 
-function invalid(path: string, message: string): DbError {
-  return new DbError("INVALID_QUERY", [{ path, message }]);
-}
-
 function notSupported(path: string, message: string): DbError {
   return new DbError("REL_FILTER_NOT_SUPPORTED", [{ path, message }]);
 }
@@ -296,7 +292,7 @@ export function relationStaticFilter(relation: TDbRelation, name = ""): TRelatio
     if (junctionType && (type === junctionType || tableNameOf(type) === junctionName)) {
       return "junction";
     }
-    throw invalid(
+    throw invalidQuery(
       name,
       `@db.rel.filter on "${name}" references a type other than the related type` +
         (junctionType ? " and the junction" : "") +
@@ -311,7 +307,7 @@ export function relationStaticFilter(relation: TDbRelation, name = ""): TRelatio
     const sides = new Set<"target" | "junction">();
     collectSides(conjunct, (ref) => sides.add(sideOf(ref)), name);
     if (sides.size > 1) {
-      throw invalid(
+      throw invalidQuery(
         name,
         `@db.rel.filter on "${name}" has a condition reading both the junction and the related type — split it into separate "and" conditions`,
       );
@@ -346,7 +342,7 @@ function collectSides(
   }
   visit(node.left);
   if (isFieldRef(node.right)) {
-    throw invalid(
+    throw invalidQuery(
       name,
       `@db.rel.filter on "${name}" compares two fields — only field-to-value conditions are supported`,
     );
@@ -410,7 +406,7 @@ export function createRelationFilterHost(
     const meta = owner.getMetadata();
     const relation = meta.relations.get(nav);
     if (!relation) {
-      throw invalid(
+      throw invalidQuery(
         path,
         `"$some" / "$none" are only valid on a navigation relation — "${nav}" is not one`,
       );
@@ -426,7 +422,7 @@ export function createRelationFilterHost(
     let plan: TRelationPlan;
     if (relation.direction === "to") {
       const fk = findFKEntryForRelation(relation, meta.foreignKeys);
-      if (!fk) throw invalid(path, `Relation "${nav}" has no foreign key to filter by`);
+      if (!fk) throw invalidQuery(path, `Relation "${nav}" has no foreign key to filter by`);
       plan = {
         kind: "to",
         relation,
@@ -435,7 +431,7 @@ export function createRelationFilterHost(
       };
     } else if (relation.direction === "from") {
       const fk = findRemoteFK(target.getMetadata(), owner.tableName, relation.alias);
-      if (!fk) throw invalid(path, `Relation "${nav}" has no foreign key to filter by`);
+      if (!fk) throw invalidQuery(path, `Relation "${nav}" has no foreign key to filter by`);
       plan = {
         kind: "from",
         relation,
@@ -456,10 +452,10 @@ export function createRelationFilterHost(
       const fkToThis: TDbForeignKey | undefined = findRemoteFK(junctionMeta, owner.tableName);
       const fkToTarget = findRemoteFK(junctionMeta, tableNameOf(relation.targetType()));
       if (!fkToThis || !fkToTarget) {
-        throw invalid(path, `Relation "${nav}" has no junction foreign keys to filter by`);
+        throw invalidQuery(path, `Relation "${nav}" has no junction foreign keys to filter by`);
       }
       if (fkToThis === fkToTarget) {
-        throw invalid(
+        throw invalidQuery(
           path,
           `Relation "${nav}" is a self-referencing many-to-many — relational predicates cannot tell its two junction keys apart`,
         );
@@ -492,13 +488,16 @@ export function createRelationFilterHost(
       // The caps count server-added predicates too, so their errors name no
       // path (a nav chain could be one the caller never sent).
       if (depth > REL_FILTER_MAX_DEPTH) {
-        throw invalid("", `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`);
+        throw invalidQuery(
+          "",
+          `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`,
+        );
       }
       if (++state.counter.nodes > REL_FILTER_MAX_NODES) {
-        throw invalid("", `At most ${REL_FILTER_MAX_NODES} relational predicates per query`);
+        throw invalidQuery("", `At most ${REL_FILTER_MAX_NODES} relational predicates per query`);
       }
       if (!isPlainObject(inner)) {
-        throw invalid(path, `"${op}" on "${path}" expects a filter object`);
+        throw invalidQuery(path, `"${op}" on "${path}" expects a filter object`);
       }
       const plan = planOf(nav, path);
       relationStaticFilter(plan.relation, path);
@@ -511,7 +510,10 @@ export function createRelationFilterHost(
 
     resolve(nav, _op, inner, depth) {
       if (depth > REL_FILTER_MAX_DEPTH) {
-        throw invalid("", `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`);
+        throw invalidQuery(
+          "",
+          `Relational predicates nest at most ${REL_FILTER_MAX_DEPTH} levels deep`,
+        );
       }
       const plan = planOf(nav, nav);
       const ownerMeta = owner.getMetadata();
@@ -621,7 +623,7 @@ function resolvePredicateMap(
   const host = meta.relationFilters;
   if (!host) {
     if (!meta.navFields.has(key)) {
-      throw invalid(
+      throw invalidQuery(
         key,
         `"$some" / "$none" are only valid on a navigation relation — "${key}" is not one`,
       );
@@ -634,7 +636,7 @@ function resolvePredicateMap(
   const ops: Record<string, unknown> = {};
   for (const [op, operand] of Object.entries(value)) {
     if (!isRelationOp(op)) {
-      throw invalid(key, `Cannot mix "$some" / "$none" with "${op}" on "${key}"`);
+      throw invalidQuery(key, `Cannot mix "$some" / "$none" with "${op}" on "${key}"`);
     }
     ops[op] = isResolvedRelationFilter(operand)
       ? operand

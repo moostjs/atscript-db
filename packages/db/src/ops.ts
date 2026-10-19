@@ -1,4 +1,4 @@
-import { DbError } from "./db-error";
+import { DbError, invalidQuery } from "./db-error";
 
 // ── Field operation helpers ──────────────────────────────────────────────────
 // Pure functions returning JSON-serializable objects.
@@ -239,12 +239,10 @@ export function reconcileCas(
   if (hasCas) {
     expected = separateCas(data, versionColumn)!;
     if (hasVersion && versionValue !== expected) {
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$cas",
-          message: `Ambiguous version: "${versionColumn}" and "$cas.${versionColumn}" differ`,
-        },
-      ]);
+      throw invalidQuery(
+        "$cas",
+        `Ambiguous version: "${versionColumn}" and "$cas.${versionColumn}" differ`,
+      );
     }
   } else {
     expected = versionValue as number;
@@ -269,39 +267,28 @@ export function separateCas(
   // (Rule 12) at the single source of truth instead of duplicating the guard
   // in every write-path caller.
   if (versionColumn === undefined) {
-    throw new DbError("INVALID_QUERY", [
-      {
-        path: "$cas",
-        message: "$cas operator: table has no @db.column.version; cannot use $cas",
-      },
-    ]);
+    throw invalidQuery("$cas", "$cas operator: table has no @db.column.version; cannot use $cas");
   }
 
   const raw = data.$cas;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new DbError("INVALID_QUERY", [
-      { path: "$cas", message: "$cas operator: must be a plain object" },
-    ]);
+    throw invalidQuery("$cas", "$cas operator: must be a plain object");
   }
 
   const map = raw as Record<string, unknown>;
   let foundKey: string | undefined;
   for (const k in map) {
     if (foundKey !== undefined) {
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$cas",
-          message: "$cas operator: expected exactly one entry (v1 single-column CAS)",
-        },
-      ]);
+      throw invalidQuery(
+        "$cas",
+        "$cas operator: expected exactly one entry (v1 single-column CAS)",
+      );
     }
     foundKey = k;
   }
 
   if (foundKey === undefined) {
-    throw new DbError("INVALID_QUERY", [
-      { path: "$cas", message: "$cas operator: must contain a single version entry" },
-    ]);
+    throw invalidQuery("$cas", "$cas operator: must contain a single version entry");
   }
 
   if (versionColumn !== undefined && foundKey !== versionColumn) {

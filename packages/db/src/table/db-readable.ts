@@ -25,7 +25,7 @@ import type {
 import { isAggregateExpr, isAggregateOfExpr, resolveAlias } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError, spaceClosedError } from "../db-error";
+import { DbError, invalidQuery, spaceClosedError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type {
@@ -193,9 +193,15 @@ const LOCK_WAITS: ReadonlySet<TDbLockWait> = new Set<TDbLockWait>([
   "skipLocked",
 ]);
 
-/** The `INVALID_QUERY` a malformed / misplaced locking read throws. */
-function lockError(path: string, message: string): DbError {
-  return new DbError("INVALID_QUERY", [{ path, message }]);
+/** A plain row read — not grouped, aggregated or `$count`. */
+function isRowRead(controls: UniqueryControls | undefined): boolean {
+  if (!controls) return true;
+  if (controls.$count) return false;
+  if (Array.isArray(controls.$groupBy) && controls.$groupBy.length > 0) return false;
+  const select = controls.$select;
+  return !(
+    Array.isArray(select) && select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item))
+  );
 }
 
 /**
@@ -207,9 +213,7 @@ function withGroupBy(query: AggregateQuery): AggregateQuery {
   const controls = (query.controls ?? {}) as Partial<AggregateQuery["controls"]>;
   if (Array.isArray(controls.$groupBy)) return query;
   if (controls.$groupBy !== undefined && controls.$groupBy !== null) {
-    throw new DbError("INVALID_QUERY", [
-      { path: "$groupBy", message: "$groupBy must be an array of field names" },
-    ]);
+    throw invalidQuery("$groupBy", "$groupBy must be an array of field names");
   }
   return { ...query, controls: { ...controls, $groupBy: [] } } as AggregateQuery;
 }
@@ -380,14 +384,11 @@ export class AtscriptDbReadable<
     // text search is adapter-specific (`@db.index.fulltext`, or Mongo's Atlas
     // `@db.mongo.search.*`), so the message does not guess at one.
     const hasVectorIndex = this.adapter.getSearchIndexes().some((i) => i.type === "vector");
-    throw new DbError("INVALID_QUERY", [
-      {
-        path: "$search",
-        message:
-          `Table "${this.tableName}" has no text search index` +
-          (hasVectorIndex ? " — a @db.search.vector index only answers vectorSearch()" : ""),
-      },
-    ]);
+    throw invalidQuery(
+      "$search",
+      `Table "${this.tableName}" has no text search index` +
+        (hasVectorIndex ? " — a @db.search.vector index only answers vectorSearch()" : ""),
+    );
   }
 
   /** Engine-agnostic query-time guards (encrypted-field refs, $geoWithin shape). */
@@ -972,15 +973,7 @@ export class AtscriptDbReadable<
     const sort = controls?.$sort as Record<string, unknown> | undefined;
     if (!sort || typeof sort !== "object") return undefined;
     const keys = Object.keys(sort);
-    if (keys.length === 0 || controls!.$count) return undefined;
-    if (Array.isArray(controls!.$groupBy) && controls!.$groupBy.length > 0) return undefined;
-    const select = controls!.$select;
-    if (
-      Array.isArray(select) &&
-      select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item))
-    ) {
-      return undefined;
-    }
+    if (keys.length === 0 || !isRowRead(controls)) return undefined;
     const pk = this._meta.primaryKeys;
     if (pk.length === 0) return undefined;
     const sorted = new Set(keys.map((key) => this._meta.physicalPath(key)));
@@ -1198,30 +1191,26 @@ export class AtscriptDbReadable<
     const mode = opts?.lock;
     const wait = opts?.wait;
     if (mode === undefined) {
-      if (wait !== undefined) throw lockError("wait", "`wait` requires `lock`");
+      if (wait !== undefined) throw invalidQuery("wait", "`wait` requires `lock`");
       return undefined;
     }
     if (mode !== "update" && mode !== "share") {
-      throw lockError("lock", `Unknown lock mode "${String(mode)}" — use 'update' or 'share'`);
+      throw invalidQuery("lock", `Unknown lock mode "${String(mode)}" — use 'update' or 'share'`);
     }
     if (wait !== undefined && !LOCK_WAITS.has(wait)) {
-      throw lockError(
+      throw invalidQuery(
         "wait",
         `Unknown lock wait "${String(wait)}" — use 'block', 'nowait' or 'skipLocked'`,
       );
     }
     if (this.isView) {
-      throw lockError("lock", `Locking reads run on tables only — "${this.tableName}" is a view`);
+      throw invalidQuery(
+        "lock",
+        `Locking reads run on tables only — "${this.tableName}" is a view`,
+      );
     }
-    const controls = query.controls as UniqueryControls | undefined;
-    const select = controls?.$select;
-    if (
-      controls?.$count ||
-      (Array.isArray(controls?.$groupBy) && controls.$groupBy.length > 0) ||
-      (Array.isArray(select) &&
-        select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item)))
-    ) {
-      throw lockError("lock", "A locking read cannot group, aggregate or $count rows");
+    if (!isRowRead(query.controls as UniqueryControls | undefined)) {
+      throw invalidQuery("lock", "A locking read cannot group, aggregate or $count rows");
     }
     if (!this.adapter.supportsReadLocks()) {
       throw new DbError("LOCK_NOT_SUPPORTED", [
@@ -1232,7 +1221,7 @@ export class AtscriptDbReadable<
       ]);
     }
     if (!this.adapter.inTransactionScope()) {
-      throw lockError(
+      throw invalidQuery(
         "lock",
         "A locking read requires a transaction — run it inside withTransaction() of this table's adapter",
       );
@@ -1262,7 +1251,16 @@ export class AtscriptDbReadable<
     this._ensureBuilt();
     this._guardQuery(query as Uniquery);
     const lock = this._readLock(query as Uniquery, opts);
-    const read = this._translateRead(query as Uniquery);
+    return this._findOne(query as Uniquery, lock) as Promise<DbResponse<
+      DataType,
+      NavType,
+      Q
+    > | null>;
+  }
+
+  /** {@link findOne} of a guarded query with an already validated lock. */
+  private async _findOne(query: Uniquery, lock: TDbReadLock | undefined): Promise<unknown> {
+    const read = this._translateRead(query);
     const result = await this.adapter.findOne(
       lock ? { ...read.translated, lock } : read.translated,
     );
@@ -1270,7 +1268,7 @@ export class AtscriptDbReadable<
       return null;
     }
     const [row] = await this._finishRead([result], read);
-    return row as DbResponse<DataType, NavType, Q>;
+    return row;
   }
 
   /**
@@ -1388,12 +1386,10 @@ export class AtscriptDbReadable<
       const groupBySet = new Set($groupBy);
       for (const item of $select) {
         if (typeof item === "string" && !groupBySet.has(item)) {
-          throw new DbError("INVALID_QUERY", [
-            {
-              path: "$select",
-              message: `Plain field "${item}" in $select must also appear in $groupBy`,
-            },
-          ]);
+          throw invalidQuery(
+            "$select",
+            `Plain field "${item}" in $select must also appear in $groupBy`,
+          );
         }
       }
     }
@@ -1414,9 +1410,7 @@ export class AtscriptDbReadable<
         const verdict = fd && groupSourceVerdict(fd, this._meta, this.adapter);
         // The path guard answers the physical rules; this check is the dimension rule.
         if (verdict ? !verdict.ok && verdict.code === "notDimension" : !dimSet.has(field)) {
-          throw new DbError("INVALID_QUERY", [
-            { path: "$groupBy", message: `Field "${field}" is not a dimension` },
-          ]);
+          throw invalidQuery("$groupBy", `Field "${field}" is not a dimension`);
         }
       }
 
@@ -1428,16 +1422,12 @@ export class AtscriptDbReadable<
           // a representative row (`first` / `last`) reads either too.
           if (item.$fn === "countDistinct" || isFirstLast(item)) {
             if (dimSet.has(item.$field)) continue;
-            throw new DbError("INVALID_QUERY", [
-              {
-                path: "$select",
-                message: `Aggregate field "${item.$field}" is not a dimension or measure`,
-              },
-            ]);
+            throw invalidQuery(
+              "$select",
+              `Aggregate field "${item.$field}" is not a dimension or measure`,
+            );
           }
-          throw new DbError("INVALID_QUERY", [
-            { path: "$select", message: `Aggregate field "${item.$field}" is not a measure` },
-          ]);
+          throw invalidQuery("$select", `Aggregate field "${item.$field}" is not a measure`);
         }
       }
     }
@@ -1452,12 +1442,10 @@ export class AtscriptDbReadable<
         if (!isAggregateExpr(item) || item.$field === "*") continue;
         const refField = quantityRefByField.get(item.$field);
         if (refField && !groupBySet.has(refField)) {
-          throw new DbError("INVALID_QUERY", [
-            {
-              path: "$select",
-              message: `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
-            },
-          ]);
+          throw invalidQuery(
+            "$select",
+            `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
+          );
         }
       }
     }
@@ -1830,19 +1818,15 @@ export class AtscriptDbReadable<
     assertGeoPoint(point, "$center");
     const controls = (query?.controls ?? {}) as Record<string, unknown>;
     if (controls.$sort) {
-      throw new DbError("INVALID_QUERY", [
-        {
-          path: "$sort",
-          message: "geoSearch results are distance-ordered — $sort is not allowed on this path",
-        },
-      ]);
+      throw invalidQuery(
+        "$sort",
+        "geoSearch results are distance-ordered — $sort is not allowed on this path",
+      );
     }
     for (const key of ["$maxDistance", "$minDistance"] as const) {
       const v = controls[key];
       if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
-        throw new DbError("INVALID_QUERY", [
-          { path: key, message: `${key} must be a non-negative number of meters` },
-        ]);
+        throw invalidQuery(key, `${key} must be a non-negative number of meters`);
       }
     }
     this._guardQuery(query);
@@ -1891,9 +1875,11 @@ export class AtscriptDbReadable<
    * missing one).
    *
    * `opts.lock` / `opts.wait` (since 0.1.162) lock the row found — see
-   * {@link TReadLockOptions}. With `wait: 'skipLocked'` a row the id
-   * resolves to that another transaction holds answers `null` — the
-   * resolution never falls through to a lower-precedence identification.
+   * {@link TReadLockOptions}. The id is then resolved to its one row first
+   * (an unlocked read, exactly like {@link resolveRowFilter}) and that row is
+   * read with the lock: with `wait: 'skipLocked'` a row another transaction
+   * holds answers `null` — never a lower-precedence identification naming a
+   * different row.
    *
    * @since 0.1.143
    */
@@ -1905,59 +1891,22 @@ export class AtscriptDbReadable<
   ): Promise<DbResponse<DataType, NavType, Q> | null> {
     this._ensureBuilt();
     const controls = opts?.controls ?? {};
-    const lock: TReadLockOptions | undefined =
-      opts?.lock === undefined && opts?.wait === undefined
-        ? undefined
-        : { lock: opts.lock, wait: opts.wait };
-    // Validate up front — an id with no identification must still fail a misplaced lock.
-    if (lock) this._readLock({ filter: {}, controls } as Uniquery, lock);
-    for (const candidate of this._idCandidates(id, opts)) {
+    const candidates = this._idCandidates(id, opts);
+    if (opts?.lock !== undefined || opts?.wait !== undefined) {
+      // Validated up front — an id with no identification must still fail a misplaced lock.
+      const lock = this._readLock({ filter: {}, controls } as Uniquery, opts);
+      const pinned = await this._pinIdCandidates(candidates, opts?.scope);
+      if (!pinned) return null;
+      const query = { filter: this._andScope(pinned, opts?.scope), controls } as Uniquery;
+      this._guardQuery(query);
+      return this._findOne(query, lock) as Promise<DbResponse<DataType, NavType, Q> | null>;
+    }
+    for (const candidate of candidates) {
       const filter = this._andScope(candidate, opts?.scope);
-      const row = await this.findOne({ filter, controls } as Uniquery<OwnProps, NavType>, lock);
+      const row = await this.findOne({ filter, controls } as Uniquery<OwnProps, NavType>);
       if (row) return row as DbResponse<DataType, NavType, Q>;
-      // `skipLocked` answers "no row" for a row another transaction holds — that row
-      // still wins the id resolution: never fall through to a lower-precedence
-      // candidate (a unique key matching a DIFFERENT row).
-      if (lock?.wait === "skipLocked") {
-        const probed = await this._probeSkippedRow(filter, controls, lock);
-        if (probed !== undefined) return probed as DbResponse<DataType, NavType, Q> | null;
-      }
     }
     return null;
-  }
-
-  /**
-   * After a `skipLocked` read of one id candidate answered "no row": does a
-   * row match it after all (held by another transaction)? `undefined` — no
-   * row, try the next candidate; `null` — the row is held; a row — it was
-   * released meanwhile and is now locked for the caller. Never waits: where
-   * a failed `NOWAIT` statement leaves the transaction usable
-   * (`readLockNowaitKeepsTransaction()`, MySQL) it re-reads with `NOWAIT`
-   * (a plain read could wait under SERIALIZABLE there); elsewhere a plain
-   * read, which takes no lock (PostgreSQL at every level).
-   */
-  private async _probeSkippedRow(
-    filter: FilterExpr,
-    controls: unknown,
-    lock: TReadLockOptions,
-  ): Promise<Record<string, unknown> | null | undefined> {
-    if (this.adapter.readLockNowaitKeepsTransaction()) {
-      try {
-        const row = await this.findOne({ filter, controls } as Uniquery<OwnProps, NavType>, {
-          lock: lock.lock,
-          wait: "nowait",
-        });
-        return row ?? undefined;
-      } catch (error) {
-        if (error instanceof DbError && error.code === "LOCK_TIMEOUT") return null;
-        throw error;
-      }
-    }
-    const probe = this._fieldMapper.translateQuery(
-      { filter, controls: { $limit: 1 } } as Uniquery,
-      this._meta,
-    );
-    return (await this.adapter.findOne(probe)) === null ? undefined : null;
   }
 
   /**

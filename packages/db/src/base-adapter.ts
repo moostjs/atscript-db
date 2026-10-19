@@ -8,7 +8,7 @@ import type {
 
 import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
 
-import { DbError } from "./db-error";
+import { DbError, invalidQuery } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
 import { compositeKey, slicePerGroup } from "./rel/relation-helpers";
 import { fkColumns, fkKey } from "./schema/fk-diff";
@@ -106,13 +106,11 @@ const ISOLATION_RANK: Record<TDbIsolationLevel, number> = {
 function requestedIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
   const level = opts?.isolation;
   if (level === undefined) return undefined;
-  if (!Object.prototype.hasOwnProperty.call(ISOLATION_RANK, level)) {
-    throw new DbError("INVALID_QUERY", [
-      {
-        path: "isolation",
-        message: `Unknown isolation level "${String(level)}" — use 'read committed', 'repeatable read' or 'serializable'`,
-      },
-    ]);
+  if (!ALL_ISOLATION_LEVELS.has(level)) {
+    throw invalidQuery(
+      "isolation",
+      `Unknown isolation level "${String(level)}" — use 'read committed', 'repeatable read' or 'serializable'`,
+    );
   }
   return level;
 }
@@ -351,12 +349,12 @@ export abstract class BaseDbAdapter {
    * path renders it next to the replacement data (the core leaves these
    * columns out of the payload); the patch paths get the `$inc` from the core.
    */
-  protected _onUpdateIncOps(ops?: TFieldOps): TFieldOps | undefined {
+  protected _onUpdateIncOps(): TFieldOps | undefined {
     const cols = this._table.onUpdateIncPhysical;
-    if (cols.length === 0) return ops;
-    const inc: Record<string, number> = { ...ops?.inc };
+    if (cols.length === 0) return undefined;
+    const inc: Record<string, number> = {};
     for (const col of cols) inc[col] = 1;
-    return { ...ops, inc };
+    return { inc };
   }
 
   /**
@@ -473,14 +471,16 @@ export abstract class BaseDbAdapter {
   protected _checkIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
     const level = requestedIsolation(opts);
     if (level && !this.isolationLevels().has(level)) {
-      throw new DbError("ISOLATION_NOT_SUPPORTED", [
-        {
-          path: "isolation",
-          message: `${this.constructor.name} cannot run a transaction at isolation level '${level}'`,
-        },
-      ]);
+      throw this._isolationNotSupported(
+        `${this.constructor.name} cannot run a transaction at isolation level '${level}'`,
+      );
     }
     return level;
+  }
+
+  /** The `ISOLATION_NOT_SUPPORTED` error of a `withTransaction` isolation request. */
+  protected _isolationNotSupported(message: string): DbError {
+    return new DbError("ISOLATION_NOT_SUPPORTED", [{ path: "isolation", message }]);
   }
 
   /**
@@ -493,14 +493,11 @@ export abstract class BaseDbAdapter {
     requested: TDbIsolationLevel,
   ): void {
     if (open && ISOLATION_RANK[open] >= ISOLATION_RANK[requested]) return;
-    throw new DbError("INVALID_QUERY", [
-      {
-        path: "isolation",
-        message:
-          `A nested withTransaction cannot request isolation '${requested}': the open transaction ` +
-          `runs at ${open ? `'${open}'` : "the engine default"} — set the level on the outermost call`,
-      },
-    ]);
+    throw invalidQuery(
+      "isolation",
+      `A nested withTransaction cannot request isolation '${requested}': the open transaction ` +
+        `runs at ${open ? `'${open}'` : "the engine default"} — set the level on the outermost call`,
+    );
   }
 
   /**
@@ -510,18 +507,6 @@ export abstract class BaseDbAdapter {
    * serialises writers may return `true` and ignore the lock.
    */
   supportsReadLocks(): boolean {
-    return false;
-  }
-
-  /**
-   * Whether a locking read that fails with `NOWAIT` (`LOCK_TIMEOUT`) leaves
-   * the transaction usable (since 0.1.162). Default `false` (PostgreSQL
-   * aborts the whole transaction on any failed statement). When `true`
-   * (MySQL), a `skipLocked` `findById` / `findOneByRow` that skipped an
-   * id candidate re-checks it with `NOWAIT`; otherwise it checks with a
-   * plain read — which must then never wait for a row lock.
-   */
-  readLockNowaitKeepsTransaction(): boolean {
     return false;
   }
 

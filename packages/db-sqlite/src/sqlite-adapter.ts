@@ -701,6 +701,11 @@ export class SqliteAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** One writer at a time: the rowid pick and the write run as one statement, never interleaved. */
+  override writeLimitIsAtomic(): boolean {
+    return true;
+  }
+
   /** `where` narrowed to a bounded write's rows, or `where` itself when unbounded. */
   private _boundedWhere(where: TSqlFragment, bound: TDbWriteLimit | undefined): TSqlFragment {
     if (!bound) return where;

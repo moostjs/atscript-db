@@ -71,6 +71,9 @@ export type DbErrorCode =
    * PostgreSQL could not serialize the transaction (`40001`: under
    * `REPEATABLE READ` / `SERIALIZABLE`, e.g. a row locked or updated after it
    * changed since the snapshot). The transaction is aborted — retry it whole.
+   * Also thrown (since 0.1.162, path `limit`) by a bounded `updateMany` /
+   * `deleteMany` whose picked rows concurrent writers kept taking while rows
+   * still matched — retry the call (or its transaction).
    * `retryable` is `true`. @since 0.1.153
    */
   | "SERIALIZATION_FAILURE"
@@ -131,6 +134,11 @@ export function isRetryableDbError(error: unknown): error is DbError {
 /** Whether `error` is a `DbError` with code `CONFLICT` (unique / primary-key violation). */
 export function isConflict(error: unknown): error is DbError {
   return error instanceof DbError && error.code === "CONFLICT";
+}
+
+/** @internal An `INVALID_QUERY` error with a single `{ path, message }` entry. */
+export function invalidQuery(path: string, message: string): DbError {
+  return new DbError("INVALID_QUERY", [{ path, message }]);
 }
 
 /** @internal The error every handle of a closed `DbSpace` throws. */

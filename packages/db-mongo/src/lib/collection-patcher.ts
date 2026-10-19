@@ -40,6 +40,21 @@ export interface TCollectionPatcherContext {
 }
 
 /**
+ * A field's current value in an aggregation pipeline update — a missing field
+ * counts as `0`, like the `$inc` / `$mul` update operators (the pipeline
+ * `$add` / `$multiply` would yield `null`) — so a document written before an
+ * `@db.onUpdate.inc` counter existed starts counting.
+ */
+function fieldOpCurrent(field: string): Document {
+  return { $ifNull: [`$${field}`, 0] };
+}
+
+/** Aggregation expression adding `by` to `field` (an `$inc` in a pipeline update). */
+export function incExpr(field: string, by: number): Document {
+  return { $add: [fieldOpCurrent(field), by] };
+}
+
+/**
  * CollectionPatcher is a small helper that converts a *patch payload* produced
  * by Atscript into a shape that the official MongoDB driver understands – a
  * triple of `(filter, update, options)` to be fed to `collection.updateOne()`.
@@ -123,15 +138,9 @@ export class CollectionPatcher {
   //  Internals
   // ---------------------------------------------------------------------------
 
-  /**
-   * Builds a MongoDB aggregation expression for an $inc or $mul field op. A
-   * missing field counts as `0`, like the `$inc` / `$mul` update operators
-   * (the pipeline `$add` / `$multiply` would yield `null`) — so a document
-   * written before an `@db.onUpdate.inc` counter existed starts counting.
-   */
+  /** Aggregation expression of an `$inc` / `$mul` field op (see {@link fieldOpCurrent}). */
   private _fieldOpExpr(key: string, op: "inc" | "mul", value: number): Document {
-    const current = { $ifNull: [`$${key}`, 0] };
-    return op === "inc" ? { $add: [current, value] } : { $multiply: [current, value] };
+    return op === "inc" ? incExpr(key, value) : { $multiply: [fieldOpCurrent(key), value] };
   }
 
   /**

@@ -64,7 +64,7 @@ import { hasNullsPlacement, sortStages } from "./mongo-sort";
 import { isArrayPath, joinPath } from "./path-utils";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { dynamicSearchEncryptedMessage } from "./search-messages";
-import { CollectionPatcher, type TCollectionPatcherContext } from "./collection-patcher";
+import { CollectionPatcher, incExpr, type TCollectionPatcherContext } from "./collection-patcher";
 import {
   buildMongoFilter,
   buildMongoQuery,
@@ -334,12 +334,9 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     const passThrough = (): Promise<T> => {
       if (isolation) {
-        throw new DbError("ISOLATION_NOT_SUPPORTED", [
-          {
-            path: "isolation",
-            message: `Isolation '${isolation}' needs a MongoDB transaction — this topology (standalone) has none`,
-          },
-        ]);
+        throw this._isolationNotSupported(
+          `Isolation '${isolation}' needs a MongoDB transaction — this topology (standalone) has none`,
+        );
       }
       return fn();
     };
@@ -1687,7 +1684,7 @@ export class MongoAdapter extends BaseDbAdapter {
       const replacement: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(data)) replacement[key] = { $literal: value };
       for (const col of counters) {
-        replacement[col] = { $add: [{ $ifNull: [`$${col}`, 0] }, 1] };
+        replacement[col] = incExpr(col, 1);
       }
       if (versionColumn !== undefined) {
         replacement[versionColumn] = { $add: [`$${versionColumn}`, 1] };

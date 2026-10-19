@@ -247,11 +247,12 @@ export async function checkBoundedComposite(boards: any): Promise<void> {
 /**
  * A bounded write that loses the rows it picked to a concurrent writer runs
  * again while a row still matches (since 0.1.162), at most 3 more times — so
- * `0` means nothing matched and a "loop until 0" cannot stop early. The race
+ * `0` means nothing matched and a "loop until 0" cannot stop early; still
+ * losing after that throws a retryable `SERIALIZATION_FAILURE`. The race
  * is injected into the adapter's write: on the read-keys-first path a
  * "concurrent" delete takes the picked rows right before the write; on a
  * native path the write reports the outcome of a lost race (nothing written).
- * `atomic` (MySQL): the native write never loses rows, so it is not retried.
+ * `atomic` (MySQL, SQLite): the native write never loses rows, so it is not retried.
  */
 export async function checkBoundedRace(tasks: any, atomic = false): Promise<void> {
   const adapter = tasks.getAdapter();
@@ -295,10 +296,18 @@ export async function checkBoundedRace(tasks: any, atomic = false): Promise<void
     expect(upd.matchedCount).toBe(atomic ? 0 : 2);
     expect(attempts).toBe(atomic ? 1 : 2);
 
-    // Always losing: 1 + 3 attempts, then the honest 0 (matches remain)
+    // Always losing: 1 + 3 attempts, then a retryable error (matches remain)
     steals = 100;
     attempts = 0;
-    expect(await tasks.deleteMany({ status: "old" }, { limit: 1 })).toEqual({ deletedCount: 0 });
+    const lost = await tasks.deleteMany({ status: "old" }, { limit: 1 }).then(
+      (result: unknown) => result,
+      (error: unknown) => error,
+    );
+    if (atomic) {
+      expect(lost).toEqual({ deletedCount: 0 });
+    } else {
+      expect(lost).toMatchObject({ code: "SERIALIZATION_FAILURE", retryable: true });
+    }
     expect(attempts).toBe(atomic ? 1 : 4);
     expect((await ids(tasks, { status: "old" })).length).toBeGreaterThan(0);
 

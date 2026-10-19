@@ -59,6 +59,7 @@ export {
   writeLimitWhere,
   writeLimitCount,
 } from "./sql-builder";
+export type { TSqlWriteLimit } from "./sql-builder";
 export {
   sqlStringLiteral,
   unquoteSqlStringLiteral,

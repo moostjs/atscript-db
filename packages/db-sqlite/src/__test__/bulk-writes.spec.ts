@@ -44,6 +44,7 @@ describe("SqliteAdapter — bounded writes, @db.onUpdate.inc, validated bulk pay
       return boards;
     },
     cascade: "native",
+    atomic: true,
   });
 });
 
