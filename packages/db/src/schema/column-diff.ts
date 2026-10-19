@@ -53,6 +53,152 @@ export function isColumnTypeChanged(existingType: string, expectedType: string):
 }
 
 /**
+ * Whether a live column default (as the adapter's introspection normalized
+ * it) and a model default (`serializeDefaultValue`) denote the same value for
+ * `field` — compared in a canonical, type-aware form, because the DDL writes a
+ * literal that differs from the annotation text and the engine reformats it
+ * again: booleans as `1` / `0` (`true` / `1` → `1`), numbers numerically
+ * (`1.0` = `1`, a DECIMAL's `0.00` = `0`), JSON-stored values as parsed,
+ * key-sorted JSON (`{"a": 1}` = `{"a":1}`). With a column type `liveType`
+ * of a fixed scale (`DECIMAL(10,2)`, `NUMERIC(8,3)`) — the type the column
+ * has once synced, i.e. the model's — a model value is also the value the
+ * column stores for it (`2.345` = `2.35`).
+ * Function defaults (`fn:now`, `fn:uuid`, …) and every other value compare as
+ * strings. Exported for adapters that must agree with schema sync.
+ * @since 0.1.162
+ */
+export function sameDefaultValue(
+  field: Pick<TDbFieldMeta, "designType" | "storage">,
+  live: string | undefined,
+  desired: string | undefined,
+  liveType?: string,
+): boolean {
+  if (live === desired) {
+    return true;
+  }
+  if (live === undefined || desired === undefined) {
+    return false;
+  }
+  if (live.startsWith("fn:") || desired.startsWith("fn:")) {
+    return false;
+  }
+  if (isJsonDefault(field)) {
+    const a = canonicalJson(live);
+    return a !== undefined && a === canonicalJson(desired);
+  }
+  switch (field.designType) {
+    case "boolean": {
+      const a = canonicalBoolean(live);
+      return a !== undefined && a === canonicalBoolean(desired);
+    }
+    case "number":
+    case "integer":
+    case "decimal": {
+      return sameNumber(live, desired, liveType);
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+function isJsonDefault(field: Pick<TDbFieldMeta, "designType" | "storage">): boolean {
+  return (
+    field.storage === "json" ||
+    field.designType === "json" ||
+    field.designType === "array" ||
+    field.designType === "object"
+  );
+}
+
+function canonicalBoolean(value: string): "1" | "0" | undefined {
+  const v = value.trim().toLowerCase();
+  if (v === "true" || v === "1") {
+    return "1";
+  }
+  if (v === "false" || v === "0") {
+    return "0";
+  }
+  return undefined;
+}
+
+/** Parsed JSON re-serialized with object keys sorted; `undefined` when not JSON. */
+function canonicalJson(value: string): string | undefined {
+  try {
+    return JSON.stringify(sortKeys(JSON.parse(value)));
+  } catch {
+    return undefined;
+  }
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortKeys);
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).toSorted()) {
+      out[key] = sortKeys((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+const DECIMAL_RE = /^([+-]?)(\d*)(?:\.(\d*))?$/;
+
+const SCALED_TYPE_RE = /^(?:DECIMAL|NUMERIC|DEC|FIXED)\s*\(\s*\d+\s*,\s*(\d+)\s*\)/i;
+
+/**
+ * Numeric equality of two default literals — or, on a column of a fixed
+ * scale (`liveType` `DECIMAL(p,s)` / `NUMERIC(p,s)`), of the live value and
+ * the model value rounded half-up to that scale, as the engine stores it.
+ */
+function sameNumber(live: string, desired: string, liveType: string | undefined): boolean {
+  const l = live.trim();
+  const d = desired.trim();
+  if (l === "" || d === "") {
+    return false;
+  }
+  // Numerically, as the DDL writes it (`String(Number(value))`)
+  const a = Number(l);
+  const b = Number(d);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+  const scale = liveType ? SCALED_TYPE_RE.exec(liveType.trim())?.[1] : undefined;
+  if (scale === undefined) {
+    return false;
+  }
+  const rounded = roundDecimal(d, Number(scale));
+  return rounded !== undefined && Number(rounded) === a;
+}
+
+/** `value` (a plain decimal literal) rounded half-up to `scale` fraction digits, exactly. */
+function roundDecimal(value: string, scale: number): string | undefined {
+  const m = DECIMAL_RE.exec(value);
+  if (!m) {
+    return undefined;
+  }
+  const [, sign, int, frac = ""] = m;
+  if (frac.length <= scale) {
+    return value;
+  }
+  const digits = `${int || "0"}${frac.slice(0, scale)}`;
+  let n = BigInt(digits);
+  if (frac.charCodeAt(scale) >= 53 /* '5' */) {
+    n += 1n;
+  }
+  const str = n.toString().padStart(scale + 1, "0");
+  const head = str.slice(0, str.length - scale);
+  const tail = str.slice(str.length - scale);
+  return `${sign}${head}${scale > 0 ? `.${tail}` : ""}`;
+}
+
+/**
  * Computes the difference between desired schema fields and existing database columns.
  *
  * @param desired - Field descriptors from the Atscript type (after flattening) —
@@ -146,7 +292,14 @@ export function computeColumnDiff(
           fn !== undefined && fn !== "increment" && opts?.nativeDefaultFns?.has(fn) === true;
         if (
           (existingCol.dflt_value !== undefined || missingNative) &&
-          existingCol.dflt_value !== desiredDefault
+          // Rounded to the scale the column has after this sync — the model's
+          // type when it changes (a DECIMAL(10,2) → (10,3) keeps 2.345)
+          !sameDefaultValue(
+            field,
+            existingCol.dflt_value,
+            desiredDefault,
+            typeMapper ? typeMapper(field) : existingCol.type,
+          )
         ) {
           defaultChanged.push({
             field,

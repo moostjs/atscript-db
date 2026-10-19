@@ -1000,6 +1000,32 @@ export interface TSyncIndexesOptions {
   keepColumns?: readonly string[];
 }
 
+/**
+ * One managed index `syncIndexes` creates (`add`), drops (`drop`) or drops
+ * and recreates because its definition drifted (`rebuild`) — returned by
+ * `BaseDbAdapter.syncIndexes` / `planIndexes` and reported on schema-sync
+ * entries (`entry.indexChanges`). `name` is the physical index name (or the
+ * adapter's artifact for it, e.g. SQLite's FTS5 table).
+ * @since 0.1.162
+ */
+export interface TIndexChange {
+  name: string;
+  action: "add" | "drop" | "rebuild";
+}
+
+/**
+ * One foreign key `syncForeignKeys` adds to the live table (missing there,
+ * e.g. dropped by hand) or drops from it (not in the model) — matched by
+ * the sorted local columns. `targetTable` is empty for a dropped constraint
+ * the adapter does not resolve.
+ * @since 0.1.162
+ */
+export interface TForeignKeyChange {
+  fields: string[];
+  targetTable: string;
+  action: "add" | "drop";
+}
+
 /** Result of applying column diff to the database. */
 export interface TSyncColumnResult {
   added: string[];

@@ -31,6 +31,7 @@ import {
   type TDbObjectKind,
   type TPrimaryKeyChange,
   type TSyncIndexesOptions,
+  type TIndexChange,
   type TSyncColumnResult,
   type TDbCollation,
   type TExistingTableOption,
@@ -1786,8 +1787,12 @@ export class MongoAdapter extends BaseDbAdapter {
    * `__pk` index first (`dropIndexesForColumns`).
    */
   async rebuildPrimaryKey(_change: TPrimaryKeyChange): Promise<void> {}
-  override async syncIndexes(opts?: TSyncIndexesOptions): Promise<void> {
+  override async syncIndexes(opts?: TSyncIndexesOptions): Promise<TIndexChange[]> {
     return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts);
+  }
+  /** The index changes {@link syncIndexes} would make — no DDL. */
+  async planIndexes(opts?: TSyncIndexesOptions): Promise<TIndexChange[]> {
+    return syncIndexesImpl(this as any as TMongoSchemaSyncHost, opts, true);
   }
   async syncColumns(diff: TColumnDiff): Promise<TSyncColumnResult> {
     return syncColumnsImpl(this as any as TMongoSchemaSyncHost, diff);

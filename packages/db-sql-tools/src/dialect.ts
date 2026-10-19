@@ -20,6 +20,13 @@ export interface SqlDialect {
   /** SQL literal for unlimited LIMIT (SQLite: '-1', MySQL: '18446744073709551615') */
   unlimitedLimit: string;
   /**
+   * Renders a string as an SQL string literal inlined into DDL (view
+   * predicates). Default: `sqlStringLiteral` (quotes doubled) — a dialect
+   * whose literals treat `\` as an escape (MySQL) escapes it too.
+   * @since 0.1.162
+   */
+  stringLiteral?: (value: string) => string;
+  /**
    * The optimizer hint asking the engine to MERGE the derived table `alias`
    * into the SELECT reading it (MySQL: `/*+ MERGE(\`alias\`) *\/`) — carried
    * by pruned view reads (`viewReadSource`), so the inline definition merges

@@ -115,6 +115,19 @@ describe("queryNodeToSql", () => {
     expect(queryNodeToSql(node, resolveFieldRef)).toBe("[t].[id] = 5");
   });
 
+  it("renders string values with the dialect's literal when given", () => {
+    const node = {
+      left: { table: "t", field: "code" },
+      op: "$in",
+      right: [String.raw`a\b`, "c"],
+    } as any;
+    const mysqlLiteral = (v: string) => `'${v.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+    expect(queryNodeToSql({ $not: node } as any, resolveFieldRef, mysqlLiteral)).toBe(
+      String.raw`NOT ([t].[code] IN ('a\\b', 'c'))`,
+    );
+    expect(queryNodeToSql(node, resolveFieldRef)).toBe(String.raw`[t].[code] IN ('a\b', 'c')`);
+  });
+
   it("renders a string comparison with quote escaping", () => {
     const node = { left: { table: "t", field: "name" }, op: "$eq", right: "O'Brien" };
     expect(queryNodeToSql(node, resolveFieldRef)).toBe("[t].[name] = 'O''Brien'");

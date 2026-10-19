@@ -27,6 +27,8 @@ import type { TFieldOps } from "@atscript/db";
 import type {
   TDbDeleteResult,
   TDbIndex,
+  TIndexChange,
+  TForeignKeyChange,
   TDbInsertManyResult,
   TDbInsertIgnoreSlot,
   TDbInsertIgnoreOptions,
@@ -250,6 +252,9 @@ function truncateBytes(s: string, bytes: number): string {
   }
   return out;
 }
+
+/** Name prefix of the pgvector HNSW indexes (managed outside the model's `indexes`). */
+const PG_VECTOR_INDEX_PREFIX = "atscript__vec_";
 
 /**
  * The name PostgreSQL generates for an unnamed constraint (`makeObjectName`):
@@ -2099,14 +2104,32 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── Index sync ────────────────────────────────────────────────────────────
 
-  async syncIndexes(): Promise<void> {
+  async syncIndexes(): Promise<TIndexChange[]> {
+    return this._syncIndexes(false);
+  }
+
+  /** The index changes {@link syncIndexes} would make — no DDL. */
+  async planIndexes(): Promise<TIndexChange[]> {
+    return this._syncIndexes(true);
+  }
+
+  private async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this._table.tableName;
     const schema = this._schema;
     // Resolve PostGIS availability before index DDL (idempotent; usually
     // already resolved by ensureTable/schema sync).
     await this.prepareTypeMapper();
 
-    await this.syncIndexesWithDiff({
+    /** Every index name on the table (read by `listExisting`) — the vector pass checks it. */
+    let liveNames = new Set<string>();
+    const changes = await this.syncIndexesWithDiff({
+      dryRun,
+      // pgvector HNSW indexes are managed by the vector pass below
+      isUnmanaged: (name) => name.startsWith(PG_VECTOR_INDEX_PREFIX),
+      skipIndex: (index) =>
+        index.type === "geo" && !this._supportsGeo
+          ? `[postgres] geo index "${index.name}" declared but PostGIS is not available — skipped`
+          : undefined,
       listExisting: async () => {
         // ::text cast — pg has no parser for name[], it would arrive as the
         // string "{col1,col2}" and wrongly trip the definition-drift rebuild.
@@ -2123,6 +2146,7 @@ export class PostgresAdapter extends BaseDbAdapter {
            WHERE t.relname = $1 AND n.nspname = COALESCE($2, current_schema())`,
           [tableName, schema],
         );
+        liveNames = new Set(rows.map((r) => r.name));
         return rows.map((r) => ({ name: r.name, columns: r.columns ?? undefined }));
       },
       createIndex: async (index: TDbIndex) => {
@@ -2138,12 +2162,6 @@ export class PostgresAdapter extends BaseDbAdapter {
           return;
         }
         if (index.type === "geo") {
-          if (!this._supportsGeo) {
-            this.logger.warn(
-              `[postgres] geo index "${index.name}" declared but PostGIS is not available — skipped`,
-            );
-            return;
-          }
           const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gist (${qi(index.fields[0].name)})`;
           this._log(sql);
           await this._exec().exec(sql);
@@ -2166,21 +2184,56 @@ export class PostgresAdapter extends BaseDbAdapter {
       },
     });
 
+    // Drop HNSW indexes of vector fields the model no longer has
+    const desiredVector = new Set(
+      this._supportsVector
+        ? [...this._vectorFields.values()].map((v) => `${PG_VECTOR_INDEX_PREFIX}${v.indexName}`)
+        : [],
+    );
+    for (const name of liveNames) {
+      if (name.startsWith(PG_VECTOR_INDEX_PREFIX) && !desiredVector.has(name)) {
+        changes.push({ name, action: "drop" });
+        if (!dryRun) {
+          const sql = `DROP INDEX IF EXISTS ${schema ? `${qi(schema)}.` : ""}${qi(name)}`;
+          this._log(sql);
+          await this._exec().exec(sql);
+        }
+      }
+    }
+
     // Create HNSW vector indexes when pgvector is available
     if (this._supportsVector) {
       for (const [field, vec] of this._vectorFields) {
-        const indexName = `atscript__vec_${vec.indexName}`;
+        const indexName = `${PG_VECTOR_INDEX_PREFIX}${vec.indexName}`;
+        if (liveNames.has(indexName)) {
+          continue;
+        }
+        changes.push({ name: indexName, action: "add" });
+        if (dryRun) {
+          continue;
+        }
         const opsClass = similarityToPgOps(vec.similarity);
         const sql = `CREATE INDEX IF NOT EXISTS ${qi(indexName)} ON ${quoteTableName(this.resolveTableName())} USING hnsw (${qi(field)} ${opsClass})`;
         this._log(sql);
         await this._exec().exec(sql);
       }
     }
+    return changes;
   }
 
   // ── FK sync ───────────────────────────────────────────────────────────────
 
-  async syncForeignKeys(): Promise<void> {
+  async syncForeignKeys(): Promise<TForeignKeyChange[]> {
+    return this._syncForeignKeys(false);
+  }
+
+  /** The FK changes {@link syncForeignKeys} would make — no DDL. */
+  async planForeignKeys(): Promise<TForeignKeyChange[]> {
+    return this._syncForeignKeys(true);
+  }
+
+  private async _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
+    const changes: TForeignKeyChange[] = [];
     const existingByName = await this._getExistingFkConstraints();
 
     // Build desired FK set (keyed by sorted local column names)
@@ -2189,10 +2242,12 @@ export class PostgresAdapter extends BaseDbAdapter {
       desiredFkKeys.add([...fkColumns(fk).fields].toSorted().join(","));
     }
 
-    // Drop stale FKs
+    // Drop stale FKs (managed ones that no longer match desired)
     for (const [constraintName, columns] of existingByName) {
       const key = [...columns].toSorted().join(",");
       if (!desiredFkKeys.has(key)) {
+        changes.push({ fields: columns, targetTable: "", action: "drop" });
+        if (dryRun) continue;
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP CONSTRAINT ${qi(constraintName)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
@@ -2206,11 +2261,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     for (const fk of this._table.foreignKeys.values()) {
       const key = [...fkColumns(fk).fields].toSorted().join(",");
       if (!existingKeys.has(key)) {
+        changes.push({ fields: fkColumns(fk).fields, targetTable: fk.targetTable, action: "add" });
+        if (dryRun) continue;
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
         await this._exec().exec(ddl);
       }
     }
+    return changes;
   }
 
   async dropForeignKeys(fkFieldKeys: string[]): Promise<void> {
@@ -2891,9 +2949,10 @@ function normalizePgDefault(value: string | null, isIdentity: string): string | 
   }
 
   const lower = cleaned.toLowerCase();
-  // Boolean round-trip: PG stores defaults as 'true'/'false', but the schema diff
-  // engine compares against serialized form '1'/'0' (from serializeDefaultValue).
-  // The DDL side (defaultValueToSqlLiteral) converts '1'→'true', '0'→'false' for PG.
+  // Boolean round-trip: PG reports a boolean default as `true` / `false`. The
+  // core diff (`sameDefaultValue`) compares a boolean field's defaults
+  // canonically (`true` / `1` → `1`), so either spelling matches the model's
+  // `@db.default 'true'` / `'1'`; `1` / `0` is kept for older snapshots.
   if (lower === "true") {
     return "1";
   }

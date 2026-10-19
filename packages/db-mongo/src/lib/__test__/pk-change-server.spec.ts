@@ -99,6 +99,8 @@ describe("[mongo] primary-key change that removes the old key field", () => {
     for (const e of [entryOf(plan), entryOf(safe)]) {
       expect(e.pkChange).toEqual({ ...pkChange, rebuild: false });
       expect(e.skipped).toEqual(["pk-rebuild"]);
+      // The kept `__pk` index is no index work — in the plan either
+      expect(e.indexChanges.filter((ic: { name: string }) => ic.name.endsWith("__pk"))).toEqual([]);
     }
     expect(entryOf(safe).pending).toBe(true);
     expect(await pkIndexKey(raw)).toEqual({ id: 1 });

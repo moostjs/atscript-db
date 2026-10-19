@@ -1,4 +1,4 @@
-import type { TDbFieldMeta, TDerivedChangeReason, TTableOptionDiff } from "../types";
+import type { TDbFieldMeta, TDerivedChangeReason, TIndexChange, TTableOptionDiff } from "../types";
 
 // ── Colors ───────────────────────────────────────────────────────────────
 
@@ -147,6 +147,23 @@ export interface TSyncEntryInit {
    * @since 0.1.141
    */
   cascadeFrom?: string[];
+  /**
+   * `true` on a managed view whose own definition changed since the last
+   * sync — the reason it is dropped and recreated. Printed as
+   * `· definition changed`.
+   * @since 0.1.162
+   */
+  definitionChanged?: boolean;
+  /**
+   * Managed indexes created, dropped or rebuilt (definition drift). On a
+   * plan entry: what the run's index sync would do to the live table as it
+   * is now (before the entry's column changes; not planned for a table the
+   * run creates, recreates or renames). On a run entry: what it did — not
+   * reported for a created or recreated table. Either marks the entry
+   * `alter`.
+   * @since 0.1.162
+   */
+  indexChanges?: TIndexChange[];
 }
 
 export class SyncEntry {
@@ -193,6 +210,10 @@ export class SyncEntry {
   readonly refused: boolean;
   /** @since 0.1.141 — see {@link TSyncEntryInit.cascadeFrom}. */
   readonly cascadeFrom: string[];
+  /** @since 0.1.162 — see {@link TSyncEntryInit.definitionChanged}. */
+  readonly definitionChanged: boolean;
+  /** @since 0.1.162 — see {@link TSyncEntryInit.indexChanges}. */
+  readonly indexChanges: TIndexChange[];
 
   constructor(init: TSyncEntryInit) {
     this.name = init.name;
@@ -224,6 +245,8 @@ export class SyncEntry {
     this.dropGroup = init.dropGroup;
     this.refused = init.refused ?? false;
     this.cascadeFrom = init.cascadeFrom ?? [];
+    this.definitionChanged = init.definitionChanged ?? false;
+    this.indexChanges = init.indexChanges ?? [];
   }
 
   /**
@@ -328,14 +351,20 @@ export class SyncEntry {
   }
 
   /**
-   * `! col: t1 → t2 — drop` (plan), or `! type col (t1 → t2) — skipped (safe
-   * mode)` in plan and result when the `'drop'` recreate was skipped.
+   * `! col: t1 → t2 — drop` (plan), `~ col: t1 → t2 — type changed` (result),
+   * or `! type col (t1 → t2) — skipped (safe mode)` in plan and result when
+   * the `'drop'` recreate was skipped.
    */
-  private printTypeChanges(c: TSyncColors): string[] {
+  private printTypeChanges(c: TSyncColors, mode: "plan" | "result"): string[] {
     if (this.skipped.includes("recreate")) {
       return this.typeChanges.map(
         (tc) =>
           `      ${c.yellow(`! type ${tc.column} (${tc.fromType} → ${tc.toType}) — skipped (safe mode)`)}`,
+      );
+    }
+    if (mode === "result") {
+      return this.typeChanges.map(
+        (tc) => `      ${c.yellow(`~ ${tc.column}: ${tc.fromType} → ${tc.toType} — type changed`)}`,
       );
     }
     return this.typeChanges.map((tc) => {
@@ -406,6 +435,45 @@ export class SyncEntry {
     });
   }
 
+  /** `+ FK(a) → t — add` / `- … — remove` / `~ … — details` (plan); `added` / `removed` (result). */
+  private printForeignKeys(c: TSyncColors, mode: "plan" | "result"): string[] {
+    const [add, remove] = mode === "plan" ? ["add", "remove"] : ["added", "removed"];
+    return [
+      ...this.fkAdded.map(
+        (fk) => `      ${c.green(`+ FK(${fk.fields.join(",")}) → ${fk.targetTable} — ${add}`)}`,
+      ),
+      ...this.fkRemoved.map(
+        (fk) =>
+          `      ${c.red(`- FK(${fk.fields.join(",")})${fk.targetTable ? ` → ${fk.targetTable}` : ""} — ${remove}`)}`,
+      ),
+      ...this.fkChanged.map(
+        (fk) =>
+          `      ${c.yellow(`~ FK(${fk.fields.join(",")}) → ${fk.targetTable} — ${fk.details}`)}`,
+      ),
+    ];
+  }
+
+  /** `+ index name — add` / `- … — drop` / `~ … — rebuild` (plan); `added` / `dropped` / `rebuilt` (result). */
+  private printIndexChanges(c: TSyncColors, mode: "plan" | "result"): string[] {
+    return this.indexChanges.map((ic) => {
+      const word =
+        mode === "plan"
+          ? ic.action
+          : { add: "added", drop: "dropped", rebuild: "rebuilt" }[ic.action];
+      if (ic.action === "add") {
+        return `      ${c.green(`+ index ${ic.name} — ${word}`)}`;
+      }
+      return ic.action === "drop"
+        ? `      ${c.red(`- index ${ic.name} — ${word}`)}`
+        : `      ${c.yellow(`~ index ${ic.name} — ${word}`)}`;
+    });
+  }
+
+  /** `· definition changed` — why a managed view is recreated. */
+  private printDefinitionChanged(c: TSyncColors): string[] {
+    return this.definitionChanged ? [`      ${c.dim("· definition changed")}`] : [];
+  }
+
   /** `· after: a, b` (plan only — the executor already runs in this order). */
   private printDependsOn(c: TSyncColors): string[] {
     if (this.dependsOn.length === 0) {
@@ -469,22 +537,15 @@ export class SyncEntry {
         ),
         ...this.columnsToRename.map((r) => `      ${c.yellow(`~ ${r.from} → ${r.to} — rename`)}`),
         ...this.printJsonMigration(c, "plan"),
-        ...this.printTypeChanges(c),
+        ...this.printTypeChanges(c, "plan"),
         ...this.printNullableDefaults(c),
         ...this.printDerivedChanges(c, "plan"),
         ...this.printPkChange(c, "plan"),
         ...this.columnsToDrop.map((col) => `      ${c.red(`- ${col} — drop`)}`),
         ...this.printOptionChanges(c, "plan"),
-        ...this.fkAdded.map(
-          (fk) => `      ${c.green(`+ FK(${fk.fields.join(",")}) → ${fk.targetTable} — add`)}`,
-        ),
-        ...this.fkRemoved.map(
-          (fk) => `      ${c.red(`- FK(${fk.fields.join(",")}) → ${fk.targetTable} — remove`)}`,
-        ),
-        ...this.fkChanged.map(
-          (fk) =>
-            `      ${c.yellow(`~ FK(${fk.fields.join(",")}) → ${fk.targetTable} — ${fk.details}`)}`,
-        ),
+        ...this.printForeignKeys(c, "plan"),
+        ...this.printIndexChanges(c, "plan"),
+        ...this.printDefinitionChanged(c),
         ...this.printCascade(c),
         ...this.printDependsOn(c),
         "",
@@ -525,27 +586,39 @@ export class SyncEntry {
       this.derivedChanges.length > 0 ||
       this.jsonCopies.length > 0 ||
       this.jsonified.length > 0 ||
+      this.typeChanges.length > 0 ||
+      this.nullableChanges.length > 0 ||
+      this.defaultChanges.length > 0 ||
+      this.fkAdded.length > 0 ||
+      this.fkRemoved.length > 0 ||
+      this.fkChanged.length > 0 ||
+      this.indexChanges.length > 0 ||
       this.skipped.length > 0;
 
-    if (hasChanges || this.recreated || this.renamedFrom) {
+    // An `alter` entry is never printed as in sync: one whose work left no
+    // detail on the entry still prints its `— altered` header.
+    if (hasChanges || this.recreated || this.renamedFrom || this.status === "alter") {
       const rlabel = this.recreated ? "recreated" : "altered";
       const renameInfo = this.renamedFrom
         ? ` ${c.yellow(`(renamed from ${this.renamedFrom})`)}`
         : "";
       const color = this.recreated ? (s: string) => c.yellow(s) : (s: string) => c.cyan(s);
-      // Result entries carry type / nullable / default changes only when safe
-      // mode skipped them — printed as skipped, like the plan.
+      // Applied type / nullable / default / FK changes print in applied
+      // wording; the ones safe mode skipped print as skipped, like the plan.
       return [
         `  ${color(`~ ${vp}${label} — ${rlabel}${renameInfo}`)}`,
         ...this.columnsAdded.map((col) => `      ${c.green(`+ ${col} — added`)}`),
         ...this.columnsRenamed.map((col) => `      ${c.yellow(`~ ${col} — renamed`)}`),
         ...this.printJsonMigration(c, "result"),
         ...this.printPkChange(c, "result"),
-        ...this.printTypeChanges(c),
+        ...this.printTypeChanges(c, "result"),
         ...this.printNullableDefaults(c),
         ...this.printDerivedChanges(c, "result"),
         ...this.columnsDropped.map((col) => `      ${c.red(`- ${col} — dropped`)}`),
         ...this.printOptionChanges(c, "result"),
+        ...this.printForeignKeys(c, "result"),
+        ...this.printIndexChanges(c, "result"),
+        ...this.printDefinitionChanged(c),
         ...this.printCascade(c),
         "",
       ];

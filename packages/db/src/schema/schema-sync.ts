@@ -52,6 +52,10 @@ import {
   describeTypeChanges,
   describeJsonMigration,
   describeNullableDefaults,
+  describeForeignKeyChanges,
+  runRecreatesTable,
+  mergeLiveForeignKeyChanges,
+  plannedIndexOptions,
   type TSyncExecutorDeps,
   type TTableFacts,
   type TViewSyncPlan,
@@ -226,30 +230,6 @@ function retain(group: string[], ctx: Pick<TDropGroupContext, "d" | "retained">)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-
-/** Builds a human-readable description of what changed in an FK constraint. */
-function buildFkChangeDetails(
-  desired: { targetTable: string; targetFields: string[]; onDelete?: string; onUpdate?: string },
-  existing: { targetTable: string; targetFields: string[]; onDelete?: string; onUpdate?: string },
-): string {
-  const parts: string[] = [];
-  if (existing.targetTable !== desired.targetTable) {
-    parts.push(`retarget ${existing.targetTable} → ${desired.targetTable}`);
-  }
-  if (
-    [...existing.targetFields].toSorted().join(",") !==
-    [...desired.targetFields].toSorted().join(",")
-  ) {
-    parts.push(`fields ${existing.targetFields.join(",")} → ${desired.targetFields.join(",")}`);
-  }
-  if ((existing.onDelete ?? undefined) !== (desired.onDelete ?? undefined)) {
-    parts.push(`onDelete ${existing.onDelete ?? "noAction"} → ${desired.onDelete ?? "noAction"}`);
-  }
-  if ((existing.onUpdate ?? undefined) !== (desired.onUpdate ?? undefined)) {
-    parts.push(`onUpdate ${existing.onUpdate ?? "noAction"} → ${desired.onUpdate ?? "noAction"}`);
-  }
-  return parts.join(", ");
-}
 
 function sortedUnique(names: Iterable<string>): string[] {
   return [...new Set(names)].toSorted();
@@ -739,6 +719,7 @@ export class SchemaSync {
           renamedFrom: plan.isRenamed ? view.renamedFrom : undefined,
           recreated: viewRecreated(plan) || undefined,
           cascadeFrom: plan.upstreamRecreated,
+          definitionChanged: plan.definitionChanged || undefined,
           // Every inventory source — tables, managed views and external views
           dependsOn: viewSources
             .get(view.tableName)!
@@ -1062,22 +1043,40 @@ export class SchemaSync {
     ) {
       const fkDiff = facts.fkDiff;
       init.status = "alter";
-      init.fkAdded = fkDiff.added.map((fk) => ({
-        fields: fkColumns(fk).fields,
-        targetTable: fk.targetTable,
-      }));
-      init.fkRemoved = fkDiff.removed.map((fk) => ({
-        fields: fk.fields,
-        targetTable: fk.targetTable,
-      }));
-      init.fkChanged = fkDiff.changed.map((fk) => ({
-        fields: fkColumns(fk.desired).fields,
-        targetTable: fk.desired.targetTable,
-        details: buildFkChangeDetails(
-          { ...fk.desired, targetFields: fkColumns(fk.desired).targetFields },
-          fk.existing,
-        ),
-      }));
+      Object.assign(init, describeForeignKeyChanges(fkDiff));
+    }
+
+    // Index work on the live table as it is now — not for a table the run
+    // creates, recreates (it rebuilds every index) or still has to rename
+    // (its indexes are introspected under the new name).
+    if (
+      adapter.planIndexes &&
+      init.status !== "create" &&
+      init.status !== "error" &&
+      // safe mode skips a destructive option change's recreate
+      (safe || !init.recreated) &&
+      !pendingRename &&
+      !runRecreatesTable(facts, safe)
+    ) {
+      // With the options the run passes (safe mode keeps some indexes)
+      const indexChanges = await adapter.planIndexes(plannedIndexOptions(facts, safe));
+      if (indexChanges.length > 0) {
+        init.indexChanges = indexChanges;
+        init.status = "alter";
+      }
+    }
+    // Foreign keys missing from (or extra on) the live table that the
+    // snapshot-based FK diff cannot see — e.g. a constraint dropped by hand.
+    if (
+      adapter.planForeignKeys &&
+      init.status !== "create" &&
+      init.status !== "error" &&
+      (safe || !init.recreated) &&
+      !pendingRename &&
+      !runRecreatesTable(facts, safe) &&
+      mergeLiveForeignKeyChanges(init, await adapter.planForeignKeys())
+    ) {
+      init.status = "alter";
     }
 
     // Primary-key change — the facts pre-flight needs (probed only when it

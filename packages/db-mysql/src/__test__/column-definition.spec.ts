@@ -164,6 +164,9 @@ describe("buildColumnDefinition", () => {
     expect(buildColumnDefinition(json, ctx("modify")).def).toBe("`j` JSON NOT NULL DEFAULT ('{}')");
     expect(mysqlDefaultLiteral("VARCHAR(10)", "string", "it's")).toBe("'it''s'");
     expect(mysqlDefaultLiteral("LONGTEXT", "string", "x")).toBe("('x')");
+    // A backslash is an escape in a MySQL string literal — kept by doubling it
+    expect(mysqlDefaultLiteral("VARCHAR(10)", "string", String.raw`a\b`)).toBe(String.raw`'a\\b'`);
+    expect(mysqlDefaultLiteral("TEXT", "string", String.raw`\'`)).toBe(String.raw`('\\''')`);
     expect(mysqlDefaultLiteral("TINYINT(1)", "boolean", "true")).toBe("1");
   });
 

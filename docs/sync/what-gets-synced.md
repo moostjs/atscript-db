@@ -144,6 +144,8 @@ Changes to `@db.default.*` values are detected when the existing column already 
 
 Some adapters handle default changes in-place; others require table recreation.
 
+Defaults are compared by **value**, not by text (since 0.1.162). The model's `@db.default` and the default the database reports are put in a canonical form for the field's type first: booleans as `1` / `0` (`'true'` matches a reported `1` or `true`), numbers numerically (`'1.0'` matches `1`, a MySQL `DECIMAL(10,2)` reports `'0'` as `0.00` and `'2.345'` as `2.35`), and JSON-stored values (`@db.json`, arrays) as parsed JSON with sorted keys (PostgreSQL `jsonb` reports `{"a": 1}`). Engine quoting is unwrapped too, such as MySQL's `_utf8mb4\'[]\'` for the `DEFAULT ('…')` of a `TEXT` / `JSON` column and SQLite's `'it''s'`. Before 0.1.162 these defaults were reported as changed on every run with `force: true`: MySQL and PostgreSQL re-ran `MODIFY` / `ALTER COLUMN`, and SQLite recreated the table.
+
 ::: info MySQL
 "No model default" is rendered as **no `DEFAULT` clause at all** — never `DEFAULT NULL` (since 0.1.128). A required column added to a populated table is filled through an invented type default that is dropped again immediately, so a later default change never trips over a default the adapter itself invented. See [MySQL — In-Place Column Modification](/adapters/mysql#in-place-column-modification).
 :::
@@ -202,6 +204,36 @@ member, or the column order changed — the index is dropped and recreated to
 match the model. Renaming the index (changing the annotation argument) also
 drops the old index and creates the new one.
 
+### Reported Index Work
+
+Since 0.1.162, index work on a table that already exists is part of the
+entry. It sets the status to `alter`, lists `entry.indexChanges`
+(`{ name, action: 'add' | 'drop' | 'rebuild' }`) and prints one line per index:
+
+```
+  ~ articles — alter
+      + index atscript__plain__by_rank — add
+      - index atscript__plain__by_title — drop
+      ~ index atscript__plain__by_team_rank — rebuild
+```
+
+The run prints the same lines in applied wording (`added` / `dropped` /
+`rebuilt`). Before 0.1.162 this work ran on every forced sync without being
+reported. The plan reads the live table as it is before the run's column
+changes. The plan predicts no index work for a table the run creates,
+recreates (the recreate rebuilds every index) or renames, and the run does
+not list the indexes of such a table either.
+
+A converged schema reports no index work. Only the `atscript__` indexes are
+compared, so engine-made indexes never show up: MySQL's automatic foreign-key
+indexes and SQLite's `sqlite_autoindex_*`. On MySQL, the key-length prefix of
+a text column compares as the model renders it. An index the database cannot
+build is not counted as missing, such as a geo index without PostGIS or a
+MySQL `SPATIAL` index over an optional field. PostgreSQL's pgvector `HNSW`
+indexes are created once rather than rebuilt on every sync. Sort direction is
+not compared. An adapter without index reporting (`planIndexes`, such as the
+memory adapter) plans none.
+
 ### Dropping Indexed Columns
 
 When a column is removed, sync drops the managed indexes that reference it
@@ -236,7 +268,11 @@ other change:
 
 ## Foreign Keys
 
-Foreign key changes are detected by `computeForeignKeyDiff()`, which compares the desired FK constraints (from `@db.rel.FK` annotations) against a stored snapshot. Three change types are tracked:
+Foreign key changes are detected by `computeForeignKeyDiff()`, which compares the desired FK constraints (from `@db.rel.FK` annotations) against the stored snapshot. A change made only in the database is invisible to that diff.
+
+On MySQL and PostgreSQL, every run that executes the table (a schema change, or `force: true`) also checks the live constraints, matched by their local columns. Since 0.1.162 the plan and the run report what that check finds. A constraint dropped by hand is re-added (`+ FK(teamId) → teams — add`), and a constraint the model does not declare is dropped. The check only covers whether a constraint exists on those columns: a target or `ON DELETE` / `ON UPDATE` action edited by hand is not detected. Change the model, or drop the constraint so the next forced run re-creates it. SQLite and MongoDB rely on the snapshot alone.
+
+The snapshot diff tracks three change types:
 
 ### Add
 

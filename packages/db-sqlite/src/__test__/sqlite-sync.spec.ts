@@ -44,6 +44,14 @@ describe("SQLite getExistingColumns + syncColumns", () => {
       expect(nameCol!.type).toBe("TEXT");
     });
 
+    it("un-doubles the quotes of a string default", async () => {
+      driver.exec(`CREATE TABLE "users" ("id" INTEGER PRIMARY KEY, "name" TEXT DEFAULT 'it''s')`);
+      const adapter = new SqliteAdapter(driver);
+      new DbSpace(() => adapter).getTable(UsersTable);
+      const cols = await adapter.getExistingColumns();
+      expect(cols.find((c) => c.name === "name")!.dflt_value).toBe("it's");
+    });
+
     it("should return empty array for non-existent table", async () => {
       const adapter = new SqliteAdapter(driver);
       const space = new DbSpace(() => adapter);

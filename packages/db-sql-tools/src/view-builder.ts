@@ -53,7 +53,7 @@ export function viewAggExpr(
   if (!c.aggFilter) {
     return renderAggCall(c.aggFn, src, c.viewColumn);
   }
-  const predicate = queryNodeToSql(c.aggFilter, resolveFieldRef);
+  const predicate = queryNodeToSql(c.aggFilter, resolveFieldRef, dialect.stringLiteral);
   const call = renderAggCall(
     c.aggFn,
     `CASE WHEN ${predicate} THEN ${star ? "1" : src} END`,
@@ -200,7 +200,7 @@ export function buildViewSelect(
 
   // JOINs — declaration order; a later join may reference an earlier one
   for (const join of plan.joins) {
-    const condition = queryNodeToSql(join.condition, resolveFieldRef);
+    const condition = queryNodeToSql(join.condition, resolveFieldRef, dialect.stringLiteral);
     const keyword = join.kind === "left" ? "LEFT JOIN" : "JOIN";
     const target =
       join.scope === join.targetTable
@@ -214,7 +214,7 @@ export function buildViewSelect(
 
   // WHERE filter
   if (plan.filter) {
-    const whereClause = queryNodeToSql(plan.filter, resolveFieldRef);
+    const whereClause = queryNodeToSql(plan.filter, resolveFieldRef, dialect.stringLiteral);
     sql += ` WHERE ${whereClause}`;
   }
 
@@ -262,7 +262,7 @@ export function buildViewSelect(
           : havingGroupRef(dialect, expr, col.viewColumn);
       };
 
-      const havingClause = queryNodeToSql(plan.having, havingResolver);
+      const havingClause = queryNodeToSql(plan.having, havingResolver, dialect.stringLiteral);
       sql += ` HAVING ${havingClause}`;
     }
   }

@@ -132,6 +132,10 @@ describe("sqlStringLiteral", () => {
     expect(sqlStringLiteral("it's")).toBe("'it''s'");
     expect(sqlStringLiteral("hello")).toBe("'hello'");
   });
+
+  it("escapes backslashes (MySQL reads them as escapes)", () => {
+    expect(sqlStringLiteral(String.raw`a\b'`)).toBe(String.raw`'a\\b'''`);
+  });
 });
 
 // ── DML builders ────────────────────────────────────────────────────────

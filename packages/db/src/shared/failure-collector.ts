@@ -7,7 +7,8 @@
  * hash, and the next boot retries.
  */
 export function createFailureCollector(what: string): {
-  attempt: (label: string, op: () => Promise<unknown>) => Promise<void>;
+  /** Runs `op`; `true` when it succeeded, `false` when its failure was collected. */
+  attempt: (label: string, op: () => Promise<unknown>) => Promise<boolean>;
   throwIfAny: () => void;
 } {
   const failures: string[] = [];
@@ -15,8 +16,10 @@ export function createFailureCollector(what: string): {
     attempt: async (label, op) => {
       try {
         await op();
+        return true;
       } catch (error) {
         failures.push(`${label}: ${(error as Error).message}`);
+        return false;
       }
     },
     throwIfAny: () => {
