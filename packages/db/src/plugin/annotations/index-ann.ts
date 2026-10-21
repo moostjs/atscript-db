@@ -76,6 +76,18 @@ export const dbIndexAnnotations: TAnnotationsTree = {
       ),
       validate(token, args, doc): TMessages {
         const field = token.parentNode!;
+        // `atscript__…` keys alias the declared names (since 0.1.165): a declared
+        // name with that prefix could shadow another index's key.
+        const indexName = args[0]?.text;
+        if (indexName?.startsWith("atscript__")) {
+          return [
+            {
+              message: `@db.index.fulltext name "${indexName}" is reserved — names starting with "atscript__" are internal index keys`,
+              severity: 1,
+              range: args[0]!.range,
+            },
+          ];
+        }
         const sealed = sealedSearchProblem(token, doc, "@db.index.fulltext");
         if (sealed) return [sealed];
         const verdict = searchFieldVerdict(field, doc);

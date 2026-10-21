@@ -5,22 +5,32 @@ import { HttpError } from "@moostjs/event-http";
 export interface THttpErrorEntry {
   path: string;
   message: string;
+  /**
+   * Machine-readable reason of the entry (since 0.1.165) — a `DbError`
+   * entry's code (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`).
+   */
+  code?: string;
+  /** Values the message names, for translating it (since 0.1.165). */
+  params?: Record<string, unknown>;
 }
 
 /**
  * The structured error envelope every `moost-db` rejection uses (since
  * 0.1.128 all of them do): `{ message, statusCode, errors: [{ path, message }] }`
  * — the same shape the validation interceptor renders for `ValidatorError` /
- * `DbError`, so clients parse one format.
+ * `DbError`, so clients parse one format. A `DbError` adds its `code` and
+ * each entry's `code` / `params` (since 0.1.165).
  */
 export function errorEnvelope(
   statusCode: number,
   message: string,
   errors: THttpErrorEntry[],
+  code?: string,
 ): HttpError {
   return new HttpError(statusCode as ConstructorParameters<typeof HttpError>[0], {
     message,
     statusCode,
+    ...(code === undefined ? {} : { code }),
     errors,
   });
 }

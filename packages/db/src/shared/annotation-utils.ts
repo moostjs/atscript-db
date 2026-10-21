@@ -99,6 +99,16 @@ export function primitiveBaseType(def: SemanticNode | undefined): string | undef
 }
 
 /**
+ * `null` in a type expression: the `null` reference or the `null` primitive
+ * (whose `config.type` is `"null"`).
+ */
+export function isNullMember(node: SemanticNode): boolean {
+  return (
+    (isRef(node) && !node.hasChain && node.id === "null") || primitiveBaseType(node) === "null"
+  );
+}
+
+/**
  * Whether a definition is a union with a `null` member — `T | null`, or a
  * ref to an alias of one (compile-time mirror of the runtime nullable union,
  * since 0.1.155).
@@ -109,11 +119,10 @@ export function isNullableUnion(
   depth = 0,
 ): boolean {
   if (!def || depth > 8) return false;
+  if (isNullMember(def)) return true;
   if (isRef(def)) {
-    if (def.id === "null") return true;
     return isNullableUnion(doc.unwindType(def.id!, def.chain)?.def, doc, depth + 1);
   }
-  if (primitiveBaseType(def) === "null") return true;
   const group = def as SemanticNode & {
     isGroup?: boolean;
     op?: string;

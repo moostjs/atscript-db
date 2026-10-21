@@ -22,6 +22,25 @@ export class SyncStore {
     await this.controlTable.ensureTable();
   }
 
+  /**
+   * Runs `fn` in a transaction of the control table's adapter family — the
+   * space's tables on the same driver join it (since 0.1.165, data steps).
+   */
+  async inTransaction<R>(fn: () => Promise<R>): Promise<R> {
+    const { AtscriptControl } = await import("./control.as");
+    return this.space.getAdapter(AtscriptControl).withTransaction(fn);
+  }
+
+  /** Which of `ids` have a control row — one query (since 0.1.165, data steps). */
+  async presentControlIds(ids: readonly string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const rows = (await this.controlTable!.findMany({
+      filter: { _id: { $in: [...ids] } },
+      controls: { $select: ["_id"] },
+    } as never)) as Array<{ _id: string }>;
+    return new Set(rows.map((r) => r._id));
+  }
+
   async readControlValue(_id: string): Promise<string | null> {
     const row = await this.controlTable!.findOne({
       filter: { _id: { $eq: _id } },

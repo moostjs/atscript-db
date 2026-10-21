@@ -29,13 +29,13 @@ Mark a numeric column as the row's version:
 interface Task {
     @meta.id
     @db.default.increment
-    id: int
+    id: number.int
 
     title: string
     status: 'open' | 'done'
 
     @db.column.version
-    version: int
+    version: number.int
 }
 ```
 
@@ -179,12 +179,12 @@ Since 0.1.150. Some columns are derived or reporting data refreshed in the backg
 interface Task {
     @meta.id
     @db.default.increment
-    id: int
+    id: number.int
 
     title: string
 
     @db.column.version
-    version: int
+    version: number.int
 
     @db.column.version.exempt
     score: number
@@ -402,7 +402,7 @@ interface User {
     backupCodes: string[]
 
     @db.column.version
-    version: int
+    version: number.int
 }
 ```
 

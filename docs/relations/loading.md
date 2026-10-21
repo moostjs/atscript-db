@@ -136,6 +136,17 @@ const projects = await projectTable.findMany({
 // projects[0].tasks[0].tags       → Tag[]
 ```
 
+### Dotted paths {#dotted-paths}
+
+A dotted name is the same nesting written short (since 0.1.165; before, it was silently skipped): `"tasks.assignee"` reads as `tasks` with `$with: [{ name: "assignee" }]`, at any depth. The entry's own `filter` / `controls` apply at the last level. Entries naming the same relation merge into one (the first entry's filter and controls win; nested `$with` lists are joined), and the string shorthand works for plain names too:
+
+```typescript
+await projectTable.findMany({
+  controls: { $with: ["owner", { name: "tasks", filter: { done: false } }, "tasks.assignee"] },
+});
+// = owner, and tasks (done = false) with their assignee
+```
+
 There is no hard limit on nesting depth for reads. Each level of nesting adds one or more batched queries, so keep depth reasonable for performance. (Nested **writes** are a separate concern — see [Deep Operations § Depth Control](./deep-operations#depth-control).)
 
 ## Per-Relation Controls

@@ -10,7 +10,6 @@ import {
   isStructure,
   type SemanticQueryComparisonNode,
   type SemanticQueryExprNode,
-  type SemanticRefNode,
   type SemanticStructureNode,
 } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
@@ -24,6 +23,7 @@ import {
 } from "../../shared/annotation-utils";
 import {
   findFKFieldsPointingTo,
+  fkChainRef,
   forEachFieldRef,
   validateQueryScope,
   validateRefArgument,
@@ -56,9 +56,9 @@ function checkCompositeFkCoverage(
   for (const [, sibling] of hostStruct.props) {
     if (sibling.countAnnotations("db.rel.FK") === 0) continue;
     if (getAnnotationAlias(sibling, "db.rel.FK") !== alias) continue;
-    const siblingDef = sibling.getDefinition();
+    const siblingDef = fkChainRef(sibling.getDefinition());
     // A chain into a nested path (`Ref.a.b`) does not cover the key column `a`.
-    if (siblingDef && isRef(siblingDef) && siblingDef.id === refTypeName) {
+    if (siblingDef && siblingDef.id === refTypeName) {
       if (siblingDef.chain.length === 1) covered.add(siblingDef.chain[0].text);
     }
   }
@@ -116,18 +116,18 @@ export const dbRelAnnotations: TAnnotationsTree = {
           });
         }
 
-        // F2: Field type must be a chain reference
-        const definition = field.getDefinition();
-        if (!definition || !isRef(definition) || !(definition as SemanticRefNode).hasChain) {
+        // F2: Field type must be a chain reference (`User.id`, or `User.id | null`
+        // since 0.1.165 — the same optional foreign key as `field?: User.id`)
+        const ref = fkChainRef(field.getDefinition());
+        if (!ref) {
           errors.push({
-            message: `@db.rel.FK requires a chain reference type (e.g. User.id), got scalar type`,
+            message: `@db.rel.FK requires a chain reference type (e.g. User.id or User.id | null), got scalar type`,
             severity: 1,
             range: token.range,
           });
           return errors;
         }
 
-        const ref = definition as SemanticRefNode;
         const refTypeName = ref.id!;
         const chainFields = ref.chain.map((c) => c.text);
 
@@ -196,12 +196,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
               if (prop.countAnnotations("db.rel.FK") === 0) {
                 continue;
               }
-              const def = prop.getDefinition();
-              if (!def || !isRef(def)) {
-                continue;
-              }
-              const r = def as SemanticRefNode;
-              if (!r.hasChain) {
+              const r = fkChainRef(prop.getDefinition());
+              if (!r) {
                 continue;
               }
               if (r.id === refTypeName) {

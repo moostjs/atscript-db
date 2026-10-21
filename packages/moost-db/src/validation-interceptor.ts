@@ -36,7 +36,14 @@ function transformValidationError(error: unknown, reply: (response: unknown) => 
   if (validation) {
     reply(validation);
   } else if (error instanceof DbError) {
-    reply(errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, error.errors));
+    // The engine text an entry keeps in `details` stays server-side (since 0.1.165).
+    const errors = error.errors.map(({ path, message, code, params }) => ({
+      path,
+      message,
+      ...(code === undefined ? {} : { code }),
+      ...(params === undefined ? {} : { params }),
+    }));
+    reply(errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, errors, error.code));
   }
 }
 

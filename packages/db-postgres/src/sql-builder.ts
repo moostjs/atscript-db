@@ -380,8 +380,9 @@ export function buildSelect(
   where: TSqlFragment,
   controls?: DbControls,
   lock?: TDbReadLock,
+  defaultOrder?: TSqlFragment,
 ): TSqlFragment {
-  return _buildSelect(pgDialect, table, where, controls, lock);
+  return _buildSelect(pgDialect, table, where, controls, lock, defaultOrder);
 }
 
 export function buildUpdate(

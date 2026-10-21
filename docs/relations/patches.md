@@ -37,7 +37,7 @@ Operators on 1:N relations (`@db.rel.from`) translate to real database operation
 The following schema is used for FROM examples:
 
 ```atscript
-import { Comment } from './comment.as'
+import { Comment } from './comment'
 
 @db.table 'tasks'
 export interface Task {
@@ -128,8 +128,8 @@ This uses identity-preserving diff-sync — children with matching PKs are updat
 Operators on M:N relations (`@db.rel.via`) manage both the **target records** and the **junction table entries**:
 
 ```atscript
-import { Tag } from './tag.as'
-import { TaskTag } from './task-tag.as'
+import { Tag } from './tag'
+import { TaskTag } from './task-tag'
 
 @db.table 'tasks'
 export interface Task {

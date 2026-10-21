@@ -46,13 +46,14 @@ let Plain: any;
 let Self: any;
 let RefForm: any;
 let VersionedDoc: any;
+let NullableFk: any;
 
 const serializedOf = (type: any) =>
   new ExposedController(makeApp(), makeReadable(type)).serialize() as any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ Dict, Issue, IssueView, Deep, Plain, Self, RefForm, VersionedDoc } =
+  ({ Dict, Issue, IssueView, Deep, Plain, Self, RefForm, VersionedDoc, NullableFk } =
     await import("./fixtures/meta-ref-chain.as"));
   // Simulate the dictionary controller having stamped its public path.
   Dict.metadata.set("db.http.path", "/dicts");
@@ -75,6 +76,19 @@ describe("resolveTerminalRef", () => {
 });
 
 describe("/meta — terminal refs", () => {
+  // Review fix (0.1.165): a nullable FK `X.code | null` carries the same
+  // `ref` / FK marker as `field?: X.code` — value help depends on them.
+  it("a `ref | null` FK serializes the same ref and FK marker as `field?: ref`", () => {
+    const s = serializedOf(NullableFk);
+    const optional = s.type.props.optionalCode;
+    const nullable = s.type.props.nullableCode;
+    expect(optional.ref).toMatchObject({ field: "code", type: { id: "Dict" } });
+    expect(nullable.ref).toEqual(optional.ref);
+    expect(nullable.ref.type.metadata["db.http.path"]).toBe("/dicts");
+    expect(optional.metadata["db.rel.FK"]).toBe("a");
+    expect(nullable.metadata["db.rel.FK"]).toBe("b");
+  });
+
   it("view field one hop from the FK: ref re-pointed to Dict.code, shallow, FK marker inherited", () => {
     const s = serializedOf(IssueView);
     const code = s.type.props.code;

@@ -86,6 +86,8 @@ Since 0.1.148. `DbSpace.close()` calls the optional `dispose?(): void | Promise<
 
 ::: warning Constraint errors must be `DbError`s
 Wrap every write (insert, update, replace, patch, delete) so that a native constraint error is rethrown as `DbError` from `@atscript/db`: a duplicate primary or unique key as `DbError("CONFLICT")`, a foreign-key violation as `DbError("FK_VIOLATION")`. moost-db maps them to 409 / 400, and schema sync relies on `CONFLICT` to recognise a lock held by another pod — a raw driver error there makes `run()` reject when two pods start together (since 0.1.141).
+
+Since 0.1.165 throw them with `constraintViolation(code, hint, rawText)` from `@atscript/db`. The `hint` is what the engine told you, in physical names — `columns` (the violated columns), `name` (the constraint or index name), `primaryKey: true`, or for a delete blocked by referencing rows `referencedBy` (the child table). The table layer resolves it into one entry per logical field with a `code` (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`) and `params`, and keeps `rawText` in `details` — see [Constraint violations](/api/crud#constraint-errors). Give whatever the engine reports; an empty hint still works (an FK violation then lists every foreign key with `params.ambiguous`). A `DbError` built by hand passes through unchanged.
 :::
 
 ::: tip

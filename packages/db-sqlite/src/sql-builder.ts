@@ -279,8 +279,9 @@ export function buildSelect(
   table: TSqlFromSource,
   where: TSqlFragment,
   controls?: DbControls,
+  defaultOrder?: TSqlFragment,
 ): TSqlFragment {
-  return _buildSelect(sqliteDialect, table, where, controls);
+  return _buildSelect(sqliteDialect, table, where, controls, undefined, defaultOrder);
 }
 
 /**

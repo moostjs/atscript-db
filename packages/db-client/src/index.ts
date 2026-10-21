@@ -15,6 +15,8 @@ export {
   ActionTargetError,
   VersionMismatchError,
   TransportError,
+  // A value export since 0.1.165 (before: type-only, the class lived in /validator).
+  ClientValidationError,
 } from "./client-error";
 export type {
   ActionDisabledErrorBody,
@@ -44,12 +46,14 @@ export type {
   ServerError,
   AtscriptClientShape,
   DataOf,
+  ResponseDataOf,
   OwnOf,
   NavOf,
   IdOf,
   ClientResponse,
   PatchOf,
   RowOf,
+  TClientCallOptions,
   TDbQueryTarget,
   // Re-exported from @atscript/db
   DbPatch,
@@ -84,9 +88,4 @@ export type { BucketSeriesOptions, NextBucketOptions } from "@uniqu/core";
 export type { TSerializedAnnotatedType } from "@atscript/typescript/utils";
 
 // Re-export validation types (runtime exports live in @atscript/db-client/validator)
-export type {
-  ClientValidator,
-  ClientValidationError,
-  ClientValidatorOptions,
-  ValidatorMode,
-} from "./validator";
+export type { ClientValidator, ClientValidatorOptions, ValidatorMode } from "./validator";

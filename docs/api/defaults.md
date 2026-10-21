@@ -134,7 +134,7 @@ The [`@db.column.version`](/api/versioning) annotation implies a `0` default —
 
 ```atscript
 @db.column.version
-version: int
+version: number.int
 // Inserted rows get version = 0 automatically.
 // SQL adapters emit DDL with NOT NULL DEFAULT 0 — ALTER TABLE backfills
 // existing rows when the column is added later.

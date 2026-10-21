@@ -77,6 +77,28 @@ export interface TSyncPlan {
   status: "up-to-date" | "changes-needed";
   schemaHash: string;
   entries: SyncEntry[];
+  /**
+   * Ids of the `dataSteps` passed to `planSchema` that have not run yet
+   * (since 0.1.165); a pending step makes the plan `"changes-needed"`.
+   * Absent when no steps were passed.
+   */
+  pendingDataSteps?: string[];
+}
+
+/**
+ * A one-time data step of {@link TSyncOptions.dataSteps} (since 0.1.165) —
+ * a backfill or data fix that must run exactly once per database, after the
+ * schema change it needs.
+ */
+export interface TDataStep {
+  /** Stable, unique id — the step is recorded under it (`data_step:<id>` in `__atscript_control`). */
+  id: string;
+  /**
+   * The step's work. Runs in its own transaction (on adapters with
+   * transactions), the record of the step committed in the same one: a step
+   * that throws is rolled back, not recorded, and runs again on the next sync.
+   */
+  run(space: DbSpace): Promise<void> | void;
 }
 
 export interface TSyncOptions {
@@ -114,6 +136,15 @@ export interface TSyncOptions {
    * - `"silent"` — legacy behavior: outcome is only observable on the result.
    */
   onError?: "throw" | "warn" | "silent";
+  /**
+   * One-time data steps (since 0.1.165), run in order after the schema DDL,
+   * under the sync lock — also when the schema itself is up to date. Each
+   * step runs once per database: once it committed, its id is recorded and
+   * later syncs skip it. A step that throws stops the run (the error is
+   * rethrown after the lock is released); the steps after it stay pending.
+   * Steps do not run when the sync is refused or an entry errored.
+   */
+  dataSteps?: readonly TDataStep[];
 }
 
 export interface TSyncResult {
@@ -129,6 +160,12 @@ export interface TSyncResult {
   status: "up-to-date" | "synced" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
+  /**
+   * The {@link TSyncOptions.dataSteps} this call ran, and those still pending
+   * (a refused or errored run leaves them all pending). Absent when no steps
+   * were passed. @since 0.1.165
+   */
+  dataSteps?: { ran: string[]; pending: string[] };
 }
 
 // ── Internal discovery types ──────────────────────────────────────────────
@@ -303,6 +340,39 @@ function removedBlockers(
 }
 
 // ── SchemaSync ────────────────────────────────────────────────────────────
+
+/** The `__atscript_control` key a data step is recorded under. */
+function dataStepKey(id: string): string {
+  return `data_step:${id}`;
+}
+
+/** The steps as given, after checking their ids are non-empty and unique. */
+function checkDataSteps(steps: readonly TDataStep[] | undefined): readonly TDataStep[] {
+  if (!steps?.length) return [];
+  const seen = new Set<string>();
+  for (const step of steps) {
+    if (typeof step.id !== "string" || step.id === "") {
+      throw new Error("syncSchema: every data step needs a non-empty id");
+    }
+    if (seen.has(step.id)) throw new Error(`syncSchema: duplicate data step id "${step.id}"`);
+    seen.add(step.id);
+  }
+  return steps;
+}
+
+/** `result` with its `dataSteps` report — unchanged when no steps were passed. */
+function withSteps(
+  result: TSyncResult,
+  steps: readonly TDataStep[],
+  ran: readonly string[],
+): TSyncResult {
+  if (steps.length === 0) return result;
+  const done = new Set(ran);
+  return {
+    ...result,
+    dataSteps: { ran: [...ran], pending: steps.map((s) => s.id).filter((id) => !done.has(id)) },
+  };
+}
 
 export class SchemaSync {
   private readonly store: SyncStore;
@@ -504,14 +574,22 @@ export class SchemaSync {
   /**
    * Acquires the sync lock, waiting for a peer that holds it. Resolves
    * `"acquired"`, or `"synced-by-peer"` when a non-forced run finds, after a
-   * wait, that the peer stored this schema's hash. A forced run never
+   * wait, that the peer stored this schema's hash (and `peerDone` agrees —
+   * no data step left pending). A forced run never
    * short-circuits — it waits its turn and runs. Losing the race for a freed
    * lock to another waiter just waits again, within the same `waitTimeoutMs`.
    */
   private async acquireLock(
     podId: string,
     hash: string,
-    opts: { lockTtlMs: number; waitTimeoutMs: number; pollIntervalMs: number; force: boolean },
+    opts: {
+      lockTtlMs: number;
+      waitTimeoutMs: number;
+      pollIntervalMs: number;
+      force: boolean;
+      /** Whether the peer's run left nothing else to do (pending data steps). */
+      peerDone?: () => Promise<boolean>;
+    },
   ): Promise<"acquired" | "synced-by-peer"> {
     const deadline = Date.now() + opts.waitTimeoutMs;
     while (!(await this.store.tryAcquireLock(podId, opts.lockTtlMs))) {
@@ -519,7 +597,11 @@ export class SchemaSync {
       if (!free) {
         throw new Error(`Schema sync lock wait timed out after ${opts.waitTimeoutMs}ms`);
       }
-      if (!opts.force && (await this.store.readHash()) === hash) {
+      if (
+        !opts.force &&
+        (await this.store.readHash()) === hash &&
+        (!opts.peerDone || (await opts.peerDone()))
+      ) {
         return "synced-by-peer";
       }
     }
@@ -549,6 +631,38 @@ export class SchemaSync {
     }
   }
 
+  /** Ids of the steps not recorded yet, in order. */
+  private async pendingDataSteps(steps: readonly TDataStep[]): Promise<string[]> {
+    const done = await this.store.presentControlIds(steps.map((step) => dataStepKey(step.id)));
+    return steps.filter((step) => !done.has(dataStepKey(step.id))).map((step) => step.id);
+  }
+
+  /**
+   * Runs the pending steps in order, each with its record in one transaction.
+   * A throwing step propagates (rolled back, not recorded). Returns the ids run.
+   */
+  private async runDataSteps(
+    steps: readonly TDataStep[],
+    getAbortReason: () => string | undefined,
+  ): Promise<string[]> {
+    const ran: string[] = [];
+    const pending = new Set(await this.pendingDataSteps(steps));
+    for (const step of steps) {
+      if (!pending.has(step.id)) continue;
+      this.assertLockHeld(getAbortReason);
+      await this.store.inTransaction(async () => {
+        await step.run(this.space);
+        await this.store.writeControlValue(
+          dataStepKey(step.id),
+          JSON.stringify({ ranAt: Date.now() }),
+        );
+      });
+      this.logger.info?.(`[schema-sync] data step "${step.id}" applied`);
+      ran.push(step.id);
+    }
+    return ran;
+  }
+
   /**
    * Runs schema synchronization with distributed locking, in three phases:
    *
@@ -574,25 +688,32 @@ export class SchemaSync {
     const safe = opts?.safe ?? false;
     const onError = opts?.onError ?? "warn";
 
+    const steps = checkDataSteps(opts?.dataSteps);
+
     const resolved = await this.resolveAndHash(types);
     const { hash } = resolved;
 
     await this.store.ensureControlTable();
 
-    // Quick check — skip if hash matches
+    // Quick check — skip if hash matches (and no data step is pending)
     if (!force) {
       const storedHash = await this.store.readHash();
       if (storedHash === hash) {
-        return { status: "up-to-date", schemaHash: hash, entries: [] };
+        const pending = await this.pendingDataSteps(steps);
+        if (pending.length === 0) {
+          return withSteps({ status: "up-to-date", schemaHash: hash, entries: [] }, steps, []);
+        }
       }
     }
 
-    // Acquire lock (waiting for a peer that holds it)
+    // Acquire lock (waiting for a peer that holds it). After a wait, a peer
+    // that stored this hash AND ran every step means there is nothing left.
     const lock = await this.acquireLock(podId, hash, {
       lockTtlMs,
       waitTimeoutMs,
       pollIntervalMs,
       force,
+      peerDone: async () => (await this.pendingDataSteps(steps)).length === 0,
     });
     if (lock === "synced-by-peer") {
       return { status: "synced-by-peer", schemaHash: hash, entries: [] };
@@ -606,7 +727,9 @@ export class SchemaSync {
       if (!force) {
         const storedHash = await this.store.readHash();
         if (storedHash === hash) {
-          return { status: "synced-by-peer", schemaHash: hash, entries: [] };
+          const ran = await this.runDataSteps(steps, heartbeat.getAbortReason);
+          const status = ran.length > 0 ? "synced" : "synced-by-peer";
+          return withSteps({ status, schemaHash: hash, entries: [] }, steps, ran);
         }
       }
 
@@ -624,13 +747,17 @@ export class SchemaSync {
           entries: this.buildPlanEntries(d, safe, refusals),
         };
         this.reportOutcome(result, onError);
-        return result;
+        return withSteps(result, steps, []);
       }
 
       // Phase 3 — execute
       const result = await this.execute(d, safe, heartbeat.getAbortReason);
       this.reportOutcome(result, onError);
-      return result;
+      // Data steps need the schema in place: not after an errored entry.
+      const ran = result.entries.some((e) => e.status === "error")
+        ? []
+        : await this.runDataSteps(steps, heartbeat.getAbortReason);
+      return withSteps(result, steps, ran);
     } finally {
       await heartbeat.stop();
       await this.releaseLock(podId);
@@ -1789,8 +1916,9 @@ export class SchemaSync {
    */
   async plan(
     types: readonly TAtscriptAnnotatedType[],
-    opts?: Pick<TSyncOptions, "force" | "safe">,
+    opts?: Pick<TSyncOptions, "force" | "safe" | "dataSteps">,
   ): Promise<TSyncPlan> {
+    const steps = checkDataSteps(opts?.dataSteps);
     const force = opts?.force ?? false;
     const safe = opts?.safe ?? false;
     const resolved = await this.resolveAndHash(types);
@@ -1803,16 +1931,19 @@ export class SchemaSync {
     await this.planLiveWork(d, safe);
 
     const entries = this.buildPlanEntries(d, safe, refusals);
+    const pending = steps.length > 0 ? await this.pendingDataSteps(steps) : undefined;
+    const withPending = (plan: TSyncPlan): TSyncPlan =>
+      pending ? { ...plan, pendingDataSteps: pending } : plan;
 
     // Quick check — skip if hash matches
     if (!force) {
       const storedHash = await this.store.readHash();
-      if (storedHash === hash) {
-        return { status: "up-to-date", schemaHash: hash, entries };
+      if (storedHash === hash && !pending?.length) {
+        return withPending({ status: "up-to-date", schemaHash: hash, entries });
       }
     }
 
-    return { status: "changes-needed", schemaHash: hash, entries };
+    return withPending({ status: "changes-needed", schemaHash: hash, entries });
   }
 
   /** Fallback typeMapper for snapshot-based Path B: compares designType directly, skips unions. */

@@ -25,7 +25,7 @@ interface User {
     id: string
     name: string
     @db.column.version
-    version: int      // server-managed; integer; non-optional; at most one per table
+    version: number.int      // server-managed; integer; non-optional; at most one per table
 }
 ```
 
@@ -44,7 +44,7 @@ The field appears in `findOne` / `findMany` results like any other column. Clien
 
 ```atscript
 @db.column.version
-version: int
+version: number.int
 @db.column.version.exempt
 score: number
 ```
@@ -237,7 +237,7 @@ try {
 
 OCC is opt-in per table. Tables without `@db.column.version` behave exactly as before.
 
-1. Add `@db.column.version version: int` to the `.as` file.
+1. Add `@db.column.version version: number.int` to the `.as` file.
 2. Run schema sync — column is added with `NOT NULL DEFAULT 0`; existing rows backfill to `0`.
 3. Existing call sites that don't pass `$cas` continue to work (last-write-wins, same as today).
 4. Adopt `$cas` / `withOptimisticRetry` at the sites that need it.

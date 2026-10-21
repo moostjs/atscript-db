@@ -63,7 +63,7 @@ interface User {
     name: string
     status: 'active' | 'archived'
     @db.column.version
-    version: int                // server-managed; do not write directly
+    version: number.int                // server-managed; do not write directly
 }
 ```
 

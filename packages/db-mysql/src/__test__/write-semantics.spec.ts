@@ -98,15 +98,13 @@ describe("MysqlAdapter write semantics", () => {
     expect(result).toEqual({ matchedCount: 1, modifiedCount: 1 });
   });
 
-  it("replaceOne hands a native function default back to the engine (`SET col = DEFAULT`)", async () => {
+  it("replaceOne leaves an insert-only `number.timestamp.created` column out", async () => {
     const tokens = new AtscriptDbTable(TokenTable, new MysqlAdapter(driver));
     await tokens.replaceOne({ id: "t-1", label: "x" } as any);
     const [call] = updates();
     expect(call).toBeDefined();
-    // `createdAt` (@db.default.now) is native on MySQL: no param, DEFAULT keyword.
-    expect(call!.sql).toBe(
-      "UPDATE `tokens` SET `id` = ?, `label` = ?, `createdAt` = DEFAULT WHERE `id` = ? LIMIT 1",
-    );
+    // Since 0.1.165 `createdAt` keeps its stored value (before: `` `createdAt` = DEFAULT ``).
+    expect(call!.sql).toBe("UPDATE `tokens` SET `id` = ?, `label` = ? WHERE `id` = ? LIMIT 1");
     expect(call!.params).toEqual(["t-1", "x", "t-1"]);
   });
 });

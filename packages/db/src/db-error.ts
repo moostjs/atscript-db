@@ -99,12 +99,69 @@ const RETRYABLE_CODES: ReadonlySet<DbErrorCode> = new Set<DbErrorCode>([
   "SERIALIZATION_FAILURE",
 ]);
 
+/**
+ * Per-entry reasons of a constraint violation (since 0.1.165), stable
+ * UPPER_SNAKE keys a client can translate (with {@link TDbErrorEntry.params}):
+ * - `UNIQUE` — a unique key (or the primary key) already holds the value;
+ *   params `{ index, fields }` (`index` is the declared unique-index name, or
+ *   `"primaryKey"`);
+ * - `FK_MISSING` — a foreign key names a row that does not exist; params
+ *   `{ fields, target }` (+ `ambiguous: true` when the engine could not tell
+ *   which foreign key failed and every one is listed);
+ * - `FK_RESTRICT` — a delete is blocked by referencing rows; params
+ *   `{ table, referencedBy? }`.
+ */
+export type TDbErrorEntryCode = "UNIQUE" | "FK_MISSING" | "FK_RESTRICT";
+
+/** One entry of {@link DbError.errors}. */
+export interface TDbErrorEntry {
+  /** Logical field path the entry is about (`""` when it concerns the whole row / table). */
+  path: string;
+  /** Human-readable English message. */
+  message: string;
+  /**
+   * Machine-readable reason of this entry (since 0.1.165) — see
+   * {@link TDbErrorEntryCode}. Absent on entries whose reason is the
+   * error's own {@link DbError.code}.
+   */
+  code?: TDbErrorEntryCode | (string & {});
+  /** The values {@link message} names, for rendering it in another language (since 0.1.165). */
+  params?: Record<string, unknown>;
+  /**
+   * The engine's raw text, kept for logs when the message was normalized
+   * (since 0.1.165). Never sent to HTTP clients.
+   */
+  details?: string;
+}
+
+/**
+ * What an adapter could tell about a violated constraint (since 0.1.165) —
+ * the core resolves it against the table's metadata into logical paths
+ * (see {@link constraintViolation}). Physical names throughout.
+ */
+export interface TDbConstraintHint {
+  /** The violated columns, when the engine names them. */
+  columns?: readonly string[];
+  /** The violated constraint / index name, when the engine names it. */
+  name?: string;
+  /** On a blocked delete: the table holding the referencing rows. */
+  referencedBy?: string;
+  /** The violation is the primary key's. */
+  primaryKey?: boolean;
+}
+
 export class DbError extends Error {
   name = "DbError";
 
+  /**
+   * Set by {@link constraintViolation}: what the adapter could tell about the
+   * violated constraint, for the table layer to normalize. @internal
+   */
+  hint?: TDbConstraintHint;
+
   constructor(
     public readonly code: DbErrorCode,
-    public readonly errors: Array<{ path: string; message: string }>,
+    public readonly errors: TDbErrorEntry[],
     message?: string,
   ) {
     super(message ?? errors[0]?.message ?? "Database error");
@@ -134,6 +191,26 @@ export function isRetryableDbError(error: unknown): error is DbError {
 /** Whether `error` is a `DbError` with code `CONFLICT` (unique / primary-key violation). */
 export function isConflict(error: unknown): error is DbError {
   return error instanceof DbError && error.code === "CONFLICT";
+}
+
+/**
+ * The error an adapter throws for an engine unique / foreign-key violation
+ * (since 0.1.165): `CONFLICT` (unique, primary key, blocked delete) or
+ * `FK_VIOLATION`, carrying the engine's `raw` text and whatever `hint` the
+ * engine gave. The table layer rewrites it into one entry per logical field
+ * of the violated constraint, with `code` / `params` and the raw text in
+ * `details`.
+ */
+export function constraintViolation(
+  code: "CONFLICT" | "FK_VIOLATION",
+  hint: TDbConstraintHint,
+  raw: string,
+): DbError {
+  // A provisional path (the first physical column) for callers of the adapter
+  // itself; the table layer replaces the entry.
+  const error = new DbError(code, [{ path: hint.columns?.[0] ?? "", message: raw, details: raw }]);
+  error.hint = hint;
+  return error;
 }
 
 /** @internal An `INVALID_QUERY` error with a single `{ path, message }` entry. */

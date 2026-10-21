@@ -66,7 +66,7 @@ describe("[mongo] @db.index.fulltext executes classic $text (not Atlas $search)"
 
     const pipeline = lastPipeline();
     expect(pipeline).toContainEqual({ $addFields: { _score: { $meta: "textScore" } } });
-    expect(pipeline).toContainEqual({ $sort: { _score: -1 } });
+    expect(pipeline).toContainEqual({ $sort: { _score: -1, _id: 1 } });
   });
 
   it("search() honors a caller-supplied $sort instead of the relevance default", async () => {
@@ -74,7 +74,7 @@ describe("[mongo] @db.index.fulltext executes classic $text (not Atlas $search)"
 
     const pipeline = lastPipeline();
     expect(pipeline).toContainEqual({ $sort: { title: 1 } });
-    expect(pipeline).not.toContainEqual({ $sort: { _score: -1 } });
+    expect(pipeline).not.toContainEqual({ $sort: { _score: -1, _id: 1 } });
   });
 
   it("searchWithCount() uses $text + $facet and projects textScore BEFORE the facet", async () => {

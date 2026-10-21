@@ -6,6 +6,7 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  constraintViolation,
   createChangeRecorder,
   isColumnTypeChanged,
   vectorIndexNotFoundMessage,
@@ -13,6 +14,8 @@ import {
   searchTermInteger,
   describeFulltext,
   defaultFulltextIndex,
+  resolveFulltextIndex,
+  searchIndexNotFoundMessage,
   splitFulltextFields,
   uniqueKeyTuple,
 } from "@atscript/db";
@@ -79,6 +82,7 @@ import {
   SEARCH_SOURCE_ALIAS,
   mapQueryErrors,
   orFragment,
+  searchRankOrder,
   buildKeyViolationCount,
   writeLimitWhere,
   unquoteSqlStringLiteral,
@@ -705,16 +709,30 @@ export class PostgresAdapter extends BaseDbAdapter {
         message: string;
       };
 
-      // Unique constraint violation
+      // Unique constraint violation — the index / constraint name and the
+      // `Key (a, b)=(…)` columns; the table layer resolves them.
       if (err.code === "23505") {
-        const field = this._extractFieldFromConstraint(err.constraint) ?? "";
-        throw new DbError("CONFLICT", [{ path: field, message: err.detail ?? err.message }]);
+        throw constraintViolation(
+          "CONFLICT",
+          {
+            name: err.constraint,
+            columns: keyColumns(err.detail),
+            primaryKey: err.constraint?.endsWith("_pkey"),
+          },
+          err.detail ?? err.message,
+        );
       }
 
-      // FK violation
+      // FK violation — on a write the child's `Key (col)=(…)`; on a delete
+      // the parent's key and the referencing table.
       if (err.code === "23503") {
-        const errors = this._mapFkError(err.detail ?? err.message, err.constraint);
-        throw new DbError("FK_VIOLATION", errors);
+        const detail = err.detail ?? err.message;
+        const referencedBy = detail.match(/is still referenced from table "([^"]+)"/)?.[1];
+        throw constraintViolation(
+          "FK_VIOLATION",
+          referencedBy ? { referencedBy } : { name: err.constraint, columns: keyColumns(detail) },
+          detail,
+        );
       }
 
       // Row-lock contention: retryable (deadlock_detected / lock_not_available)
@@ -724,38 +742,6 @@ export class PostgresAdapter extends BaseDbAdapter {
       }
     }
     throw error;
-  }
-
-  private _extractFieldFromConstraint(constraint?: string): string | undefined {
-    if (!constraint) {
-      return undefined;
-    }
-    // PG auto-generated: tablename_columnname_key (single-column unique)
-    const tableName = this._table.tableName;
-    if (constraint.startsWith(`${tableName}_`) && constraint.endsWith("_key")) {
-      const fieldPart = constraint.slice(tableName.length + 1, -4);
-      // Only return if it matches a known field (avoids mangled names for composite constraints)
-      const fd = this._table.fieldDescriptors.find((f) => f.physicalName === fieldPart);
-      if (fd) {
-        return fd.path;
-      }
-    }
-    return constraint;
-  }
-
-  private _mapFkError(
-    detail: string,
-    constraint?: string,
-  ): Array<{ path: string; message: string }> {
-    // PostgreSQL detail format: Key (col)=(val) or Key (col1, col2)=(val1, val2)
-    const fkMatch = detail.match(/Key \(([^)]+)\)/);
-    if (fkMatch) {
-      // May be composite: "col1, col2" — extract first column
-      const physicalCol = fkMatch[1].split(",")[0].trim();
-      const field = this._table.fieldDescriptors.find((f) => f.physicalName === physicalCol);
-      return [{ path: field?.path ?? physicalCol, message: detail }];
-    }
-    return [{ path: constraint ?? "", message: detail }];
   }
 
   // ── CRUD: Insert ──────────────────────────────────────────────────────────
@@ -2302,7 +2288,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     const { all: ftAll, def: ftDefault } = this._fulltextIndexes();
     for (const index of ftAll) {
       indexes.push({
-        name: index.key,
+        name: index.name,
+        aliases: [index.key],
         description: describeFulltext(index, (names) => `GIN tsvector index on ${names}`),
         type: "text",
         fields: this._indexLogicalPaths(index),
@@ -2333,7 +2320,13 @@ export class PostgresAdapter extends BaseDbAdapter {
       return [];
     }
     const combinedWhere = this._buildSearchWhere(text, query, indexName);
-    const { sql, params } = buildSelect(this.resolveTableName(), combinedWhere, query.controls);
+    const { sql, params } = buildSelect(
+      this.resolveTableName(),
+      combinedWhere,
+      query.controls,
+      undefined,
+      combinedWhere.rank,
+    );
     this._log(sql, params);
     return this._exec().all(sql, params);
   }
@@ -2350,7 +2343,13 @@ export class PostgresAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
 
     const selectPromise = (async () => {
-      const { sql, params } = buildSelect(tableName, combinedWhere, query.controls);
+      const { sql, params } = buildSelect(
+        tableName,
+        combinedWhere,
+        query.controls,
+        undefined,
+        combinedWhere.rank,
+      );
       this._log(sql, params);
       return this._exec().all(sql, params);
     })();
@@ -2370,14 +2369,21 @@ export class PostgresAdapter extends BaseDbAdapter {
     return { data, count };
   }
 
+  /**
+   * The search predicate (AND the request filter) and its relevance order
+   * (`rank`, since 0.1.165) — used as the ORDER BY when the read has no
+   * `$sort`: exact-number hits first, then `ts_rank` over the text members
+   * (per-field weights through `setweight` buckets), then the primary key.
+   * Grouped searches use only the predicate.
+   */
   private _buildSearchWhere(
     text: string,
     query: DbQuery,
     indexName?: string,
-  ): { sql: string; params: unknown[] } {
+  ): { sql: string; params: unknown[]; rank: TSqlFragment } {
     const fulltextIndex = this._getFulltextIndex(indexName);
     if (!fulltextIndex) {
-      throw new Error("No fulltext index found for search");
+      throw new Error(searchIndexNotFoundMessage(indexName));
     }
     const { text: textFields, integer: integerFields } = splitFulltextFields(fulltextIndex);
     const where = buildWhere(query.filter);
@@ -2388,23 +2394,62 @@ export class PostgresAdapter extends BaseDbAdapter {
     // column; int4 = int8 is a btree cross-type operator, so the index stays usable.
     const parts: string[] = [];
     const params: unknown[] = [];
+    const equalities =
+      n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = CAST(? AS BIGINT)`);
+    let textRank: TSqlFragment | undefined;
     if (textFields.length > 0) {
-      const tsvectorExpr = this._buildTsvectorExpr(textFields);
-      parts.push(`to_tsvector('english', ${tsvectorExpr}) @@ plainto_tsquery('english', ?)`);
+      const tsvector = `to_tsvector('english', ${this._buildTsvectorExpr(textFields)})`;
+      parts.push(`${tsvector} @@ plainto_tsquery('english', ?)`);
       params.push(text);
+      textRank = { sql: `${this._buildTsRankExpr(textFields, tsvector)} DESC`, params: [text] };
     }
-    if (n !== undefined) {
-      for (const f of integerFields) {
-        parts.push(`${qi(f.name)} = CAST(? AS BIGINT)`);
-        params.push(n);
-      }
+    for (const eq of equalities) {
+      parts.push(eq);
+      params.push(n);
     }
     // An integer-only index with a term that is not a whole number matches nothing.
     const clause = orFragment(parts, params);
     return {
       sql: where.sql === "1=1" ? clause.sql : `${where.sql} AND ${clause.sql}`,
       params: [...where.params, ...clause.params],
+      rank: searchRankOrder(pgDialect, {
+        exactEqualities: equalities,
+        n,
+        textRank,
+        pkColumns: this._table.primaryKeys.map((key) => this._table.physicalPath(key)),
+      }),
     };
+  }
+
+  /**
+   * `ts_rank(…)` over the text members (one `?` — the search text). Without
+   * per-field weights it ranks `tsvector` — the indexed expression — itself; with them each
+   * member's vector is put in a `setweight` bucket (the distinct weights,
+   * highest first, map to A, B, C, then D for every lower one) and the bucket
+   * weights are passed relative to the highest (`{D, C, B, A}`). The match
+   * predicate keeps the unweighted indexed expression, so the GIN index serves
+   * it unchanged.
+   */
+  private _buildTsRankExpr(fields: TDbIndex["fields"], tsvector: string): string {
+    const query = `plainto_tsquery('english', ?)`;
+    const distinct = [...new Set(fields.map(weightOf))].toSorted((a, b) => b - a);
+    if (distinct.length <= 1) return `ts_rank(${tsvector}, ${query})`;
+    const letters = ["A", "B", "C", "D"] as const;
+    const bucketOf = (w: number) => Math.min(distinct.indexOf(w), 3);
+    const top = distinct[0]!;
+    const bucketWeights = letters.map((_, i) => distinct[Math.min(i, distinct.length - 1)]! / top);
+    const vector = fields
+      .map(
+        (f) =>
+          `setweight(to_tsvector('english', coalesce(${qi(f.name)}, '')), '${letters[bucketOf(weightOf(f))]}')`,
+      )
+      .join(" || ");
+    // ts_rank's weight array is ordered {D, C, B, A}.
+    const array = [...bucketWeights]
+      .toReversed()
+      .map((w) => Number(w.toFixed(6)))
+      .join(", ");
+    return `ts_rank('{${array}}', ${vector}, ${query})`;
   }
 
   /** Builds the tsvector SQL expression for a fulltext index's fields. Must match between index DDL and queries. */
@@ -2414,8 +2459,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {
     const { all, def } = this._fulltextIndexes();
-    if (!indexName) return def;
-    return all.find((index) => index.key === indexName);
+    return indexName ? resolveFulltextIndex(all, indexName) : def;
   }
 
   /** The table's fulltext indexes and the default one, built once per table. */
@@ -3000,4 +3044,15 @@ function similarityToPgOps(similarity: string): string {
 /** Formats a number[] vector as pgvector input: '[1.0, 2.0, ...]'. */
 function vectorToString(vector: number[]): string {
   return `[${vector.join(",")}]`;
+}
+
+/** The columns of a PostgreSQL `Key (a, b)=(…)` detail. */
+function keyColumns(detail: string | undefined): string[] | undefined {
+  const list = detail?.match(/Key \(([^)]+)\)=/)?.[1];
+  return list?.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+}
+
+/** A fulltext member's weight (`@db.index.fulltext 'idx', w`), `1` when unset. */
+function weightOf(f: TDbIndex["fields"][number]): number {
+  return f.weight ?? 1;
 }

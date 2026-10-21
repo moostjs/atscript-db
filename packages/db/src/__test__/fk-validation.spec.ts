@@ -55,7 +55,7 @@ describe("FK Validation", () => {
     seedData();
 
     await expect(posts.insertOne({ title: "Bad Post", authorId: 999 })).rejects.toThrow(
-      "FK constraint violation",
+      "References a non-existent record",
     );
   });
 
@@ -82,7 +82,7 @@ describe("FK Validation", () => {
         { title: "Good Post", authorId: 1 },
         { title: "Bad Post", authorId: 999 },
       ] as any),
-    ).rejects.toThrow("FK constraint violation");
+    ).rejects.toThrow("References a non-existent record");
   });
 
   it("should reject bulkUpdate with non-existent FK value", async () => {
@@ -93,7 +93,7 @@ describe("FK Validation", () => {
     seedData();
 
     await expect(posts.updateOne({ id: 10, authorId: 999 } as any)).rejects.toThrow(
-      "FK constraint violation",
+      "References a non-existent record",
     );
   });
 
@@ -118,7 +118,7 @@ describe("FK Validation", () => {
 
     await expect(
       posts.replaceOne({ id: 10, title: "Replaced", authorId: 999, status: "published" } as any),
-    ).rejects.toThrow("FK constraint violation");
+    ).rejects.toThrow("References a non-existent record");
   });
 
   it("should not validate FK when adapter has native support", async () => {
@@ -155,7 +155,7 @@ describe("FK Validation", () => {
 
     // Invalid: post 999 does not exist
     await expect(comments.insertOne({ body: "Bad comment", postId: 999 })).rejects.toThrow(
-      "FK constraint violation",
+      "References a non-existent record",
     );
   });
 
@@ -177,7 +177,26 @@ describe("FK Validation", () => {
         authorId: 1,
         comments: [{ body: "Bad comment", authorId: 999 }],
       }),
-    ).rejects.toThrow("FK constraint violation");
+    ).rejects.toThrow("References a non-existent record");
+  });
+
+  // Review fix (0.1.165): a nested error's `params.fields` is prefixed like its `path`.
+  it("nested FK errors prefix params.fields like the path", async () => {
+    const space = createSpace();
+    space.getTable(AuthorType);
+    const posts = space.getTable(PostType);
+    seedData();
+    const error = (await posts
+      .insertOne({
+        title: "Post with bad comment",
+        authorId: 1,
+        comments: [{ body: "Bad comment", authorId: 999 }],
+      })
+      .catch((e: unknown) => e)) as DbError;
+    expect(error).toBeInstanceOf(DbError);
+    const entry = error.errors.find((e) => e.code === "FK_MISSING")!;
+    expect(entry.path).toMatch(/^comments.*authorId$/);
+    expect((entry.params as { fields: string[] }).fields).toEqual([entry.path]);
   });
 
   it("should allow deep insert when FROM child has valid FK to third table", async () => {
@@ -214,7 +233,7 @@ describe("FK Validation", () => {
         authorId: 1,
         comments: [{ body: "Bad comment", authorId: 999 }],
       }),
-    ).rejects.toThrow("FK constraint violation");
+    ).rejects.toThrow("References a non-existent record");
   });
 
   it("should prefix error paths with nav field name for nested FROM FK violations", async () => {

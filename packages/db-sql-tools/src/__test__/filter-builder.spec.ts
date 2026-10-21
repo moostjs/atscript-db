@@ -210,7 +210,7 @@ describe("buildWhere", () => {
 
   it("builds a filter with $or", () => {
     const result = buildWhere(mockDialect, {
-      $or: [{ status: "active" }, { status: "pending" }],
+      $or: [{ status: "active" }, { role: "admin" }],
     });
     expect(result.sql).toContain("OR");
   });

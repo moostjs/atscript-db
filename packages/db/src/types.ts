@@ -121,8 +121,20 @@ export interface TTransactionOptions {
 
 /** Describes an available search index exposed by a database adapter. */
 export interface TSearchIndexInfo {
-  /** Index name. Empty string or 'DEFAULT' for the default index. */
+  /**
+   * Index name — the name declared in the model (`@db.index.fulltext 'name'`).
+   * An index with no declared name (a MongoDB dynamic Atlas mapping) is
+   * `'DEFAULT'`.
+   */
   name: string;
+  /**
+   * Other names that resolve to the same index (`$index` / `search(…, name)`),
+   * kept for compatibility: the internal key (`atscript__fulltext__<name>`) on
+   * PostgreSQL and MySQL, and `'DEFAULT'` for MongoDB's default text index.
+   * Deprecated — address an index by {@link name}.
+   * @since 0.1.165
+   */
+  aliases?: string[];
   /** Human-readable label for UI display. */
   description?: string;
   /** Index type: text search or vector similarity search. */
@@ -642,6 +654,16 @@ export interface TDbIndexField {
   integer?: boolean;
 }
 
+/**
+ * One problem {@link AtscriptDbTable.validateRows} found: the row's position
+ * in the input, the field path and the message (since 0.1.165).
+ */
+export interface TValidateRowsError {
+  index: number;
+  path: string;
+  message: string;
+}
+
 export interface TDbIndex {
   /** Unique key used for identity/diffing (e.g., "atscript__plain__email") */
   key: string;
@@ -725,6 +747,12 @@ export interface TDbFieldMeta {
   ignored: boolean;
   /** Default value from @db.default.* */
   defaultValue?: TDbDefaultValue;
+  /**
+   * Set by the insert only — a top-level `number.timestamp.created` (since
+   * 0.1.165). A replace keeps the stored value: SQL adapters leave the
+   * column out of the replace's assignment, document adapters carry it over.
+   */
+  insertOnly?: boolean;
   /**
    * How this field is stored in the database.
    * - 'column': a standard scalar column (default for primitives)
@@ -1204,6 +1232,15 @@ export type TCascadeResolver = (tableName: string) => TCascadeTarget[];
  */
 export interface TFkLookupTarget {
   count(filter: Record<string, unknown>): Promise<number>;
+  /**
+   * The rows matching `filter`, projected to `fields` (since 0.1.165) — lets
+   * `validateRows({ fk: true })` diff existing keys in memory. Optional: a
+   * target without it is counted instead.
+   */
+  find?(
+    filter: Record<string, unknown>,
+    fields: readonly string[],
+  ): Promise<Array<Record<string, unknown>>>;
 }
 
 /**
@@ -1416,6 +1453,17 @@ export interface TInsertOptions<Row = Record<string, unknown>> extends TWriteOpt
    * @since 0.1.153
    */
   lockConflicts?: boolean;
+}
+
+/**
+ * Options of `insertOne` (since 0.1.165): {@link TInsertOptions} plus
+ * `returning` — read the stored row back by its primary key in the insert's
+ * transaction (`true`: every field, server defaults and stamps included; a
+ * field list: those fields) and answer it as `row`. A row skipped by
+ * `onConflict: 'ignore'` answers no `row`.
+ */
+export interface TInsertOneOptions<Row = Record<string, unknown>> extends TInsertOptions<Row> {
+  returning?: true | readonly (keyof Row & string)[];
 }
 
 /**

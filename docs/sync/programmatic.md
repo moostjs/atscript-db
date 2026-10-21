@@ -57,17 +57,18 @@ const sync = new SchemaSync(db, console);
 
 Options for both `syncSchema()` and `sync.run()`:
 
-| Option           | Type             | Default      | Description                                                       |
-| ---------------- | ---------------- | ------------ | ----------------------------------------------------------------- |
-| `force`          | `boolean`        | `false`      | Ignore hash check, always introspect the database                 |
-| `safe`           | `boolean`        | `false`      | Skip destructive operations (column drops, table drops)           |
-| `podId`          | `string`         | Random UUID  | Identifier for distributed locking                                |
-| `lockTtlMs`      | `number`         | `30000`      | Lock time-to-live in milliseconds (auto-extended while sync runs) |
-| `waitTimeoutMs`  | `number`         | `60000`      | Max wait time for another pod's lock                              |
-| `pollIntervalMs` | `number`         | `500`        | Poll interval when waiting for lock release                       |
-| `logger`         | `TGenericLogger` | `NoopLogger` | Logger for sync progress and failures (see below)                 |
+| Option           | Type             | Default      | Description                                                                          |
+| ---------------- | ---------------- | ------------ | ------------------------------------------------------------------------------------ |
+| `force`          | `boolean`        | `false`      | Ignore hash check, always introspect the database                                    |
+| `safe`           | `boolean`        | `false`      | Skip destructive operations (column drops, table drops)                              |
+| `podId`          | `string`         | Random UUID  | Identifier for distributed locking                                                   |
+| `lockTtlMs`      | `number`         | `30000`      | Lock time-to-live in milliseconds (auto-extended while sync runs)                    |
+| `waitTimeoutMs`  | `number`         | `60000`      | Max wait time for another pod's lock                                                 |
+| `pollIntervalMs` | `number`         | `500`        | Poll interval when waiting for lock release                                          |
+| `logger`         | `TGenericLogger` | `NoopLogger` | Logger for sync progress and failures (see below)                                    |
+| `dataSteps`      | `TDataStep[]`    | —            | One-time data steps run after the DDL (since 0.1.165, see [Data steps](#data-steps)) |
 
-The `plan()` method accepts only `force` and `safe`.
+The `plan()` method accepts only `force`, `safe` and `dataSteps`.
 
 ::: warning Pass a logger in production
 Index and FK sync failures (e.g. a unique index over data that already contains duplicates) do **not** throw — they are logged, recorded on the entry (`status: 'error'`, `errors: [...]`), and the schema hash is not persisted so the next boot retries. With the default `NoopLogger` those log lines go nowhere. Pass `{ logger: console }` to `syncSchema()` (or `new SchemaSync(db, console)`) so they surface, or inspect `result.entries` for errored tables after every run.
@@ -82,6 +83,7 @@ interface TSyncPlan {
   status: "up-to-date" | "changes-needed";
   schemaHash: string;
   entries: SyncEntry[];
+  pendingDataSteps?: string[]; // since 0.1.165, when dataSteps were passed
 }
 ```
 
@@ -96,6 +98,7 @@ interface TSyncResult {
   status: "up-to-date" | "synced" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
+  dataSteps?: { ran: string[]; pending: string[] }; // since 0.1.165, when dataSteps were passed
 }
 ```
 
@@ -107,6 +110,29 @@ interface TSyncResult {
 | `'refused'`        | Pre-flight refused the run (since 0.1.128): **no DDL ran**, nothing was persisted, the lock was released. `entries` is the full plan; refused entries are `error` entries with `refused: true` |
 
 `'refused'` follows the `onError` policy like error entries do — `"warn"` (default) logs each refusal at error level and returns, `"throw"` throws after the lock is released, `"silent"` returns. `plan()` reports the same refusals with its status unchanged (`'changes-needed'`).
+
+## Data steps {#data-steps}
+
+Schema sync changes structure only — it never backfills existing rows (a new `@db.default` applies to new rows). For a one-time data change that belongs to a schema change, pass it as a data step (since 0.1.165):
+
+```typescript
+await syncSchema(db, types, {
+  dataSteps: [
+    {
+      id: "2026-10-users-tier", // stable and unique — the step is recorded under it
+      async run(space) {
+        await space.getTable(User).updateMany({ tier: null }, { tier: 3 });
+      },
+    },
+  ],
+});
+```
+
+- Steps run **in order, after the DDL, under the sync lock** — also when the schema itself is up to date, so a step added later runs on the next sync.
+- Each step runs **once per database**: it runs in its own transaction (on adapters with transactions), together with its record in `__atscript_control` (`data_step:<id>`). A step that throws is rolled back and not recorded; the sync throws its error after releasing the lock, the steps after it stay pending, and the next sync runs it again.
+- Steps do not run when the sync is `'refused'` or an entry errored.
+- `result.dataSteps` reports `{ ran, pending }`; `plan()` reports `pendingDataSteps`, and a pending step makes the plan `'changes-needed'`.
+- Never change what a recorded step does — add a new step with a new id. Duplicate or empty ids throw.
 
 ## SyncEntry
 

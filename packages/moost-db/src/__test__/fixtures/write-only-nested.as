@@ -31,3 +31,16 @@ export interface WoNestedChild {
 export interface WoNestedDecorations {
     digest?: string
 }
+
+// Two hops to the sealed leaf — a dotted `$with` (`child.owner`, since 0.1.165).
+@db.table 'wo_nested_grandchildren'
+export interface WoNestedGrandchild {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    childId: WoNestedChild.id
+
+    @db.rel.to
+    child?: WoNestedChild
+}

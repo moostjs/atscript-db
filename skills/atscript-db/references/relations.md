@@ -17,7 +17,7 @@ interface Task {
 }
 ```
 
-Target must be a chain ref to a `@meta.id` field or a field marked `@db.index.unique`. Optional FKs use `?`.
+Target must be a chain ref to a `@meta.id` field or a field marked `@db.index.unique`. Optional FKs use `?` — or `ownerId: User.id | null` (0.1.165; same optional FK, always present in the row type). Only `<chain ref> | null` is accepted: `User.id | string` is still the "requires a chain reference" error.
 
 ## Navigation annotations
 
@@ -94,6 +94,8 @@ await tasks.findMany({
   },
 });
 ```
+
+Dotted names nest (0.1.165; ≤ 0.1.164 silently skipped): `$with: ["tasks.assignee"]` = `tasks` with `$with: [{ name: "assignee" }]`; the entry's own `filter` / `controls` apply at the LAST level; entries for the same relation merge (first entry's filter/controls win, nested lists concatenate); string shorthand works (`$with: ["tasks"]` used to throw). moost-db rewrites `?$with=a.b` into the nested form right after parsing, so checks, seals and row scopes run per level and an unknown segment answers `Unknown relation "b"`.
 
 Adapters with `supportsNativeRelations(): true` can implement JOIN/`$lookup`-based loading; the default is an application-level batch-loader that fires one query per relation, independent of result-set size.
 

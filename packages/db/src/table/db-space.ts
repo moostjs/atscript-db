@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 
+import { fkLookupTargetOf } from "./fk-lookup";
 import { AtscriptDbTable } from "./db-table";
 import { AtscriptDbView, isViewType } from "./db-view";
 import type { AtscriptDbReadable } from "./db-readable";
@@ -356,9 +357,7 @@ export class DbSpace implements AsyncDisposable {
   private _scanFkLookupTarget(tableName: string): TFkLookupTarget | undefined {
     for (const table of this._allTables) {
       if (table.tableName === tableName) {
-        return {
-          count: (filter) => table.count({ filter: filter as any }),
-        };
+        return fkLookupTargetOf(table);
       }
     }
     return undefined;

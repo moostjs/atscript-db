@@ -1,4 +1,4 @@
-import { aliasTargetOf, isNavRelation } from "@atscript/db";
+import { aliasTargetOf, isNavRelation, soleUnionMember } from "@atscript/db";
 import {
   serializeAnnotatedType,
   type TAtscriptAnnotatedType,
@@ -133,16 +133,19 @@ function walk(
       if (!sProp) continue;
       // Nav subtrees expand fully and their FK props are direct hops — skip.
       if (isNavRelation(prop)) continue;
+      // `X.id | null` (since 0.1.165): the union's value member names the
+      // reference — served on the prop like `field?: X.id`'s, for value help.
+      const member = !prop.ref && sProp.ref === undefined ? soleUnionMember(prop) : undefined;
+      if (member?.ref?.field) {
+        const terminal = resolveTerminalRef({ ...prop, ref: member.ref } as TAtscriptAnnotatedType);
+        if (terminal) applyTerminal(sProp, terminal, shallow, true);
+      }
       if (prop.ref?.field && sProp.ref && !("type" in sProp.ref.type)) {
         const terminal = resolveTerminalRef(prop);
         if (terminal) {
           const direct = prop.ref.type();
-          if (terminal.type !== direct || terminal.field !== prop.ref.field) {
-            sProp.ref = { field: terminal.field, type: shallow(terminal.type) };
-          }
-          if (terminal.fk && sProp.metadata["db.rel.FK"] === undefined) {
-            sProp.metadata["db.rel.FK"] = true;
-          }
+          const moved = terminal.type !== direct || terminal.field !== prop.ref.field;
+          applyTerminal(sProp, terminal, shallow, moved);
         }
       }
       walk(sProp, prop, shallow);
@@ -153,5 +156,21 @@ function walk(
     const sType = node.type as { kind: string; of?: TSerializedAnnotatedTypeInner };
     const of = (def.type as unknown as { of?: TAtscriptAnnotatedType }).of;
     if (sType.kind === "array" && sType.of && of) walk(sType.of, of, shallow);
+  }
+}
+
+/**
+ * Points a serialized prop at its terminal field (when `repoint`) and
+ * inherits the chain's FK marker.
+ */
+function applyTerminal(
+  sProp: TSerializedAnnotatedTypeInner,
+  terminal: TTerminalRef,
+  shallow: (type: TAtscriptAnnotatedType) => TShallowTarget,
+  repoint: boolean,
+): void {
+  if (repoint) sProp.ref = { field: terminal.field, type: shallow(terminal.type) };
+  if (terminal.fk && sProp.metadata["db.rel.FK"] === undefined) {
+    sProp.metadata["db.rel.FK"] = true;
   }
 }

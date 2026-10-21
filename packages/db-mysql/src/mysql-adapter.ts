@@ -6,6 +6,7 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  constraintViolation,
   isConflict,
   NoopLogger,
   uniqueKeyTuple,
@@ -17,6 +18,8 @@ import {
   searchTermInteger,
   describeFulltext,
   defaultFulltextIndex,
+  resolveFulltextIndex,
+  searchIndexNotFoundMessage,
   splitFulltextFields,
 } from "@atscript/db";
 import type {
@@ -82,6 +85,7 @@ import {
   mapQueryErrors,
   EMPTY_OR,
   orFragment,
+  searchRankOrder,
   fromSourceHint,
   fromSourceSql,
   viewReadSource,
@@ -700,19 +704,32 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (error && typeof error === "object" && "errno" in error) {
       const err = error as { errno: number; message: string; sqlMessage?: string };
 
-      // Duplicate key (unique constraint)
+      // Duplicate key (unique constraint): the key name; the table layer resolves it.
       if (err.errno === 1062 || err.errno === 1586) {
         // `for key 'table.index'` — the table part may hold any character but `'` (hyphen,
         // non-ASCII, a space); the LAST such clause is the key (the entry may quote one)
         const match = err.message?.match(/^[\s\S]*for key '(?:[^']*\.)?([^'.]+)'/);
-        const field = match?.[1] ?? "";
-        throw new DbError("CONFLICT", [{ path: field, message: err.sqlMessage ?? err.message }]);
+        const name = match?.[1];
+        throw constraintViolation(
+          "CONFLICT",
+          name === "PRIMARY" ? { primaryKey: true } : { name },
+          err.sqlMessage ?? err.message,
+        );
       }
 
-      // FK violation
+      // FK violation: 1452 — a child row names a missing parent (its
+      // `FOREIGN KEY (…)` columns); 1451 — a parent row is still referenced
+      // (the referencing table is the one the clause names).
       if (err.errno === 1451 || err.errno === 1452) {
-        const errors = this._mapFkError(err.message);
-        throw new DbError("FK_VIOLATION", errors);
+        const message = err.sqlMessage ?? err.message;
+        const referencing = message.match(/fails \((?:`[^`]*`\.)?`([^`]+)`/)?.[1];
+        const fk = message.match(/FOREIGN KEY \(([^)]+)\)/)?.[1];
+        const columns = fk?.split(",").map((c) => c.trim().replace(/^`|`$/g, ""));
+        throw constraintViolation(
+          "FK_VIOLATION",
+          err.errno === 1451 ? { referencedBy: referencing } : { columns },
+          message,
+        );
       }
 
       // Row-lock contention: retryable (ER_LOCK_DEADLOCK rolled the whole
@@ -725,16 +742,6 @@ export class MysqlAdapter extends BaseDbAdapter {
       }
     }
     throw error;
-  }
-
-  private _mapFkError(message: string): Array<{ path: string; message: string }> {
-    const fkMatch = message.match(/FOREIGN KEY \(`(\w+)`\)/);
-    if (fkMatch) {
-      const physicalCol = fkMatch[1];
-      const field = this._table.fieldDescriptors.find((f) => f.physicalName === physicalCol);
-      return [{ path: field?.path ?? physicalCol, message }];
-    }
-    return [{ path: "", message }];
   }
 
   // ── CRUD: Insert ──────────────────────────────────────────────────────────
@@ -1257,7 +1264,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       if (!isConflict(error)) throw error;
       // A generated id colliding on PRIMARY (an exhausted AUTO_INCREMENT) is no
       // row-level conflict: the row carried no key, so skipping it would lose data.
-      if (group.generated && error.errors.some((e) => e.path === "PRIMARY")) throw error;
+      if (group.generated && error.hint?.primaryKey === true) throw error;
       return undefined;
     }
   }
@@ -2372,7 +2379,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     const { all: ftAll, def: ftDefault } = this._fulltextIndexes();
     for (const index of ftAll) {
       indexes.push({
-        name: index.key,
+        name: index.name,
+        aliases: [index.key],
         description: describeFulltext(index, (names) => `FULLTEXT index on ${names}`),
         type: "text",
         fields: this._indexLogicalPaths(index),
@@ -2400,7 +2408,13 @@ export class MysqlAdapter extends BaseDbAdapter {
     indexName?: string,
   ): Promise<Array<Record<string, unknown>>> {
     const combinedWhere = this._buildSearchWhere(text, query, indexName);
-    const { sql, params } = buildSelect(this.resolveTableName(), combinedWhere, query.controls);
+    const { sql, params } = buildSelect(
+      this.resolveTableName(),
+      combinedWhere,
+      query.controls,
+      undefined,
+      combinedWhere.rank,
+    );
     this._log(sql, params);
     return this._exec().all(sql, params);
   }
@@ -2414,7 +2428,13 @@ export class MysqlAdapter extends BaseDbAdapter {
     const tableName = this.resolveTableName();
 
     const selectPromise = (async () => {
-      const { sql, params } = buildSelect(tableName, combinedWhere, query.controls);
+      const { sql, params } = buildSelect(
+        tableName,
+        combinedWhere,
+        query.controls,
+        undefined,
+        combinedWhere.rank,
+      );
       this._log(sql, params);
       return this._exec().all(sql, params);
     })();
@@ -2430,23 +2450,36 @@ export class MysqlAdapter extends BaseDbAdapter {
     return { data, count };
   }
 
+  /**
+   * The search predicate (AND the request filter) and its relevance order
+   * (`rank`, since 0.1.165) — used as the ORDER BY when the read has no
+   * `$sort`: exact-number hits first, then `MATCH … AGAINST` relevance, then
+   * the primary key. Grouped searches use only the predicate.
+   */
   private _buildSearchWhere(
     text: string,
     query: DbQuery,
     indexName?: string,
-  ): { sql: string; params: unknown[] } {
+  ): { sql: string; params: unknown[]; rank: TSqlFragment } {
     const fulltextIndex = this._getFulltextIndex(indexName);
     if (!fulltextIndex) {
-      throw new Error("No FULLTEXT index found for search");
+      throw new Error(searchIndexNotFoundMessage(indexName));
     }
     const { text: textFields, integer: integerFields } = splitFulltextFields(fulltextIndex);
     const where = buildWhere(query.filter);
     const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
     const matchCols = textFields.map((f) => qi(f.name)).join(", ");
     const matchClause = `MATCH(${matchCols}) AGAINST(? IN NATURAL LANGUAGE MODE)`;
+    const rank = searchRankOrder(mysqlDialect, {
+      exactEqualities: n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = ?`),
+      n,
+      textRank: textFields.length > 0 ? { sql: `${matchClause} DESC`, params: [text] } : undefined,
+      pkColumns: this._table.primaryKeys.map((key) => this._table.physicalPath(key)),
+    });
     const withWhere = (clause: string, params: unknown[]) => ({
       sql: where.sql === "1=1" ? clause : `${where.sql} AND ${clause}`,
       params: [...where.params, ...params],
+      rank,
     });
 
     if (n === undefined) {
@@ -2491,8 +2524,7 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   private _getFulltextIndex(indexName?: string): TDbIndex | undefined {
     const { all, def } = this._fulltextIndexes();
-    if (!indexName) return def;
-    return all.find((index) => index.key === indexName);
+    return indexName ? resolveFulltextIndex(all, indexName) : def;
   }
 
   /** The table's fulltext indexes and the default one, built once per table. */

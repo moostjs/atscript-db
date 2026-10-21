@@ -17,6 +17,9 @@ declare class Post {
   id: number;
   title: string;
   body: string;
+  // Generated classes declare their nav props as optional fields.
+  author?: Author;
+  tags?: Tag[];
   static __is_atscript_annotated_type: true;
   static type: { __dataType?: Post };
   static __ownProps: { id: number; title: string; body: string };
@@ -53,6 +56,41 @@ describe("Client<T> — generic typing (compile-only assertions)", () => {
       expectTypeOf<Row>().toHaveProperty("title");
       // Listed `$with` relation appears on the row type.
       expectTypeOf<Row>().toHaveProperty("author");
+    }
+  });
+
+  // Since 0.1.165: row fields keep their types on a table with nav props (before,
+  // every field was `unknown` — the response collapsed to an index signature),
+  // and a `$with` names its relation without `as const`, readonly arrays included.
+  it("row fields keep their declared types; $with narrows without as const", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Post>("/api/posts");
+
+      type NoWithRow = Awaited<ReturnType<typeof c.query>>[number];
+      expectTypeOf<NoWithRow["title"]>().toEqualTypeOf<string>();
+      expectTypeOf<NoWithRow["id"]>().toEqualTypeOf<number>();
+      expectTypeOf<NoWithRow>().not.toHaveProperty("author");
+
+      const plain = c.query({ controls: { $with: [{ name: "author" }] } });
+      type Row = Awaited<typeof plain>[number];
+      expectTypeOf<Row["title"]>().toEqualTypeOf<string>();
+      expectTypeOf<Row["author"]>().toEqualTypeOf<Author | undefined>();
+      expectTypeOf<Row>().not.toHaveProperty("tags");
+
+      const ro = c.query({ controls: { $with: [{ name: "tags" }] as const } });
+      type RoRow = Awaited<typeof ro>[number];
+      expectTypeOf<RoRow["tags"]>().toEqualTypeOf<Tag[] | undefined>();
+      expectTypeOf<RoRow>().not.toHaveProperty("author");
+
+      const page = c.pages({ controls: { $with: [{ name: "author" }] } });
+      type PageRow = Awaited<typeof page>["data"][number];
+      expectTypeOf<PageRow["body"]>().toEqualTypeOf<string>();
+      expectTypeOf<PageRow["author"]>().toEqualTypeOf<Author | undefined>();
+
+      const one = c.one(1, { controls: { $with: [{ name: "author" }] } });
+      type OneRow = NonNullable<Awaited<typeof one>>;
+      expectTypeOf<OneRow["title"]>().toEqualTypeOf<string>();
+      expectTypeOf<OneRow["author"]>().toEqualTypeOf<Author | undefined>();
     }
   });
 

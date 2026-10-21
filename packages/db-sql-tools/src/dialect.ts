@@ -486,3 +486,41 @@ export function orFragment(parts: string[], params: unknown[]): TSqlFragment {
   if (parts.length === 0) return EMPTY_OR;
   return { sql: parts.length === 1 ? parts[0]! : `(${parts.join(" OR ")})`, params };
 }
+
+/**
+ * The relevance ORDER BY of a fulltext search with no `$sort` (since 0.1.165):
+ * rows an exact-number equality matched first (`CASE WHEN … THEN 0 ELSE 1 END`,
+ * only next to a text rank — `n` binds each equality once), then `textRank`
+ * (its direction included, e.g. `ts_rank(…) DESC`), then the primary-key
+ * columns ascending (quoted, after `prefix`). Params: the CASE's, then the
+ * text rank's.
+ */
+export function searchRankOrder(
+  dialect: Pick<SqlDialect, "quoteIdentifier">,
+  opts: {
+    /** One `?`-equality per integer member (`"ref_no" = ?`). */
+    exactEqualities: readonly string[];
+    /** The whole-number term, when the search term is one. */
+    n: number | undefined;
+    textRank?: TSqlFragment;
+    pkColumns: readonly string[];
+    /** Prepended to each quoted primary-key column (`t.`). */
+    prefix?: string;
+  },
+): TSqlFragment {
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  const { exactEqualities: eqs, n, textRank } = opts;
+  if (textRank && n !== undefined && eqs.length > 0) {
+    parts.push(`CASE WHEN ${eqs.join(" OR ")} THEN 0 ELSE 1 END`);
+    for (let i = 0; i < eqs.length; i++) params.push(n);
+  }
+  if (textRank) {
+    parts.push(textRank.sql);
+    params.push(...textRank.params);
+  }
+  for (const col of opts.pkColumns) {
+    parts.push(`${opts.prefix ?? ""}${dialect.quoteIdentifier(col)} ASC`);
+  }
+  return { sql: parts.join(", "), params };
+}

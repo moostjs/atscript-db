@@ -1,22 +1,20 @@
 ---
 name: atscript-db
 description: >-
-  Use when working with @atscript/db,
-  @atscript/db-{sqlite,postgres,mysql,mongo,memory},
+  Use when working with @atscript/db, @atscript/db-{sqlite,postgres,mysql,mongo,memory},
   @atscript/db-sql-tools, @atscript/moost-db, @atscript/db-client, or .as models
-  with @db.* annotations. Covers DbSpace, adapter wiring, table/view CRUD, query
-  filters, patch/field/array ops, relations + nested writes, $some/$none
-  relational filters (@db.rel.filterable), views (@db.alias, first-row joins,
-  @db.compute), @db.column.derived, schema sync, BaseDbAdapter subclassing,
-  moost-db REST routes, security hooks (prepareRequest, hasField, guardWrite,
-  checkWrite), actions (disabled reasons, row scope, query targets,
-  @DbActionsFrom), @InputForm, URL query syntax, browser Client, DB validation,
-  OCC ($cas, withOptimisticRetry), @db.encrypted, geo search ($geoWithin),
-  grouped queries ($groupBy, $having), calendar buckets ($bucket, hourly, time
-  zones),
+  with @db.* annotations. Covers DbSpace, adapters, table/view CRUD, filters,
+  patch/field/array ops, relations + nested writes, $some/$none
+  (@db.rel.filterable), views (@db.alias, first-row joins, @db.compute),
+  @db.column.derived, schema sync + dataSteps, BaseDbAdapter, moost-db REST
+  routes, security hooks (prepareRequest, hasField, guardWrite, checkWrite),
+  actions (disabled reasons, row scope, query targets, @DbActionsFrom),
+  @InputForm, URL query syntax, browser Client, validation (validateRows),
+  DbError codes, OCC ($cas, withOptimisticRetry), @db.encrypted, geo search ($geoWithin),
+  $groupBy/$having, calendar buckets ($bucket, hourly, time zones),
   provideDbSpace, @db.space, atscriptModels, planSchema, assertExposed,
-  provideTestDbSpace. Out of scope (moostjs/atscript skill): .as syntax, @meta.*,
-  @expect.*, asc, unplugin.
+  provideTestDbSpace. Out of scope (moostjs/atscript skill): .as syntax,
+  @meta.*, @expect.*, asc, unplugin.
 ---
 
 # atscript-db

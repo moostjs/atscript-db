@@ -254,6 +254,8 @@ Use `$and` when you need multiple conditions on the same field, or just prefer b
 }
 ```
 
+On the SQL adapters an `$or` whose branches include several equalities on one field (`{ id: 1 }`, `{ id: { $eq: 2 } }`, `{ id: { $in: [3, 4] } }`) is rendered as one `IN (…)` (since 0.1.165) — same rows, but a per-row key filter over a large batch no longer exceeds SQLite's expression-depth limit. Composite branches (`{ a: 1, b: 2 }`) keep their `OR`: for a large batch of composite keys, chunk the filter yourself.
+
 ### NOT
 
 Negate a set of conditions:
@@ -438,7 +440,7 @@ await tickets.findMany({
 
 - The `filter` of `findOne`, `findMany`, `count`, `findManyWithCount`, the text / vector / geo search methods, and `aggregate()` (the row filter — never `$having`).
 - `$with` sub-filters, for the related table's own relations — see [Loading Relations](/relations/loading#filtering-parents-by-related-rows).
-- Mutation filters: `updateMany`, `replaceMany`, `deleteMany`, and a row `scope`.
+- Mutation filters: `updateMany`, `replaceMany`, `deleteMany`, and a row `scope`. Their filter type (`MutationFilter`) accepts predicates on nav keys like the read filter (since 0.1.165; before, `deleteMany({ issues: { $some: … } })` failed to typecheck).
 
 Server-side code needs no opt-in. HTTP clients do, per relation — see [Permissions § Relational predicates](/http/permissions#relational-predicates).
 

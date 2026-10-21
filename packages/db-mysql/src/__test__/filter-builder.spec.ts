@@ -155,10 +155,10 @@ describe("buildWhere (MySQL)", () => {
 
   it("should handle $or", () => {
     const { sql, params } = buildWhere({
-      $or: [{ status: "active" }, { status: "pending" }],
+      $or: [{ status: "active" }, { role: "admin" }],
     });
-    expect(sql).toBe("(`status` = ? OR `status` = ?)");
-    expect(params).toEqual(["active", "pending"]);
+    expect(sql).toBe("(`status` = ? OR `role` = ?)");
+    expect(params).toEqual(["active", "admin"]);
   });
 
   it("should handle $not", () => {

@@ -9,6 +9,7 @@ import {
   type Validator,
 } from "@atscript/typescript/utils";
 
+import { fkLookupTargetOf } from "./fk-lookup";
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
@@ -19,7 +20,7 @@ import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver"
 import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
 import { isVersionExemptPatch } from "../patch/version-exempt";
 import { AtscriptDbReadable } from "./db-readable";
-import { enrichFkViolation, remapDeleteFkViolation } from "./error-utils";
+import { normalizeWriteErrors, remapDeleteFkViolation } from "./error-utils";
 import {
   type TNestedWriterHost,
   checkDepthOverflow,
@@ -58,6 +59,7 @@ import type {
   TDbInsertManyIgnoreResult,
   TDbInsertIgnoreOptions,
   TInsertOptions,
+  TInsertOneOptions,
   TDbInsertResult,
   TDbRemoveGuardContext,
   TBulkWriteOptions,
@@ -78,6 +80,9 @@ import type {
   TTouchManyOptions,
   TWriteTableResolver,
   NullableOptional,
+  TValidateRowsError,
+  TDbForeignKey,
+  TFkLookupTarget,
 } from "../types";
 import { findRowsByKeys, pkTupleKey, sameKey, uniqueKeyTuple } from "../shared/keys";
 import { soleUnionMember } from "../shared/union-shape";
@@ -400,6 +405,37 @@ interface TWriteBound {
 /** Upper bound of keys per `touchMany` UPDATE statement (parameter-count safety). */
 const TOUCH_MANY_CHUNK = 500;
 
+/** Distinct FK key tuples per `validateRows` lookup query (well under every bind limit). */
+const FK_LOOKUP_CHUNK = 500;
+
+/** A key tuple's identity for the in-memory diff — scalar-text, so `1` and `"1"` agree like the engine compares them. */
+function fkTupleKey(values: readonly unknown[]): string {
+  return JSON.stringify(values.map((v) => (v instanceof Date ? v.getTime() : String(v))));
+}
+
+/**
+ * The filter of `updateMany` / `replaceMany` / `deleteMany` (since 0.1.165):
+ * the flat field paths with the nav keys taking relational predicates
+ * (`$some` / `$none`), as in the read filter. Before, a nav key was typed as
+ * the flat type's empty value, so a predicate failed to typecheck. A table
+ * without nav props keeps the plain flat filter.
+ */
+export type MutationFilter<
+  FlatType,
+  NavType extends Record<string, unknown>,
+> = string extends keyof NavType
+  ? FilterExpr<FlatType>
+  : FilterExpr<Omit<FlatType, keyof NavType>, NavType>;
+
+/** The write mode a standard validator purpose validates in when called without a context. */
+/** The validator purpose a write mode validates with (`validateRows`, the write paths). */
+const MODE_PURPOSE = { insert: "insert", replace: "bulkReplace", patch: "bulkUpdate" } as const;
+
+const PURPOSE_MODES: Readonly<Record<string, DbValidationContext["mode"]>> = {
+  ...Object.fromEntries(Object.entries(MODE_PURPOSE).map(([mode, purpose]) => [purpose, mode])),
+  patch: "patch",
+};
+
 export class AtscriptDbTable<
   T extends TAtscriptAnnotatedType = TAtscriptAnnotatedType,
   DataType = TAtscriptDataType<T>,
@@ -466,11 +502,180 @@ export class AtscriptDbTable<
    * Adapters may define additional purposes.
    */
   public getValidator(purpose: string): Validator<T, DataType> {
-    if (!this.validators.has(purpose)) {
-      const validator = this._buildValidator(purpose);
+    let validator = this.validators.get(purpose);
+    if (!validator) {
+      validator = this._withDefaultContext(this._buildValidator(purpose), purpose);
       this.validators.set(purpose, validator);
     }
-    return this.validators.get(purpose)!;
+    return validator;
+  }
+
+  /**
+   * A standard purpose's validator called WITHOUT a context validates in that
+   * purpose's write mode (since 0.1.165): `getValidator("insert").validate(row, true)`
+   * accepts what an insert accepts — omitted primary key, defaulted, FK and
+   * navigation fields. Before, the db plugin saw no mode and ran inert while
+   * navigation fields were forced required. An explicit context still wins.
+   */
+  private _withDefaultContext(
+    validator: Validator<T, DataType>,
+    purpose: string,
+  ): Validator<T, DataType> {
+    const mode = PURPOSE_MODES[purpose];
+    if (!mode) return validator;
+    const validate = (value: unknown, safe?: boolean, context?: unknown) =>
+      validator.validate(value, safe, context ?? this._validationCtx(mode));
+    return new Proxy(validator, {
+      get: (target, key) => (key === "validate" ? validate : Reflect.get(target, key, target)),
+    });
+  }
+
+  /** A fresh validation context of a write `mode` — the one its write paths build. */
+  private _validationCtx(mode: DbValidationContext["mode"]): DbValidationContext {
+    this._ensureBuilt();
+    return {
+      mode,
+      navFields: this._meta.navFields,
+      ...(mode === "patch" ? { flatMap: this.flatMap } : {}),
+    };
+  }
+
+  /** {@link normalizeWriteErrors} for this table: its constraint errors normalized against its metadata. */
+  private _normalizeWrite<R>(fn: () => Promise<R>): Promise<R> {
+    return normalizeWriteErrors(this._meta, this.tableName, fn);
+  }
+
+  /**
+   * Validates rows exactly as a write in `mode` would, without writing
+   * (since 0.1.165): each row is cloned, given the defaults / stamps that
+   * write applies, and validated with that write's validator and context.
+   * Returns one `{ index, path, message }` per problem — `[]` when every row
+   * is valid; the caller's rows are not modified.
+   *
+   * `fk: true` also checks that every foreign key names an existing row
+   * (by lookup, on every adapter — native-FK adapters otherwise leave that to
+   * the engine at write time); a missing target is reported on each of the
+   * key's fields. Rows that fail type validation are not looked up.
+   *
+   * @param mode - `'insert'` (default), `'replace'` or `'patch'`.
+   */
+  public async validateRows(
+    rows: ReadonlyArray<Record<string, unknown>>,
+    mode: "insert" | "replace" | "patch" = "insert",
+    opts?: { fk?: boolean },
+  ): Promise<TValidateRowsError[]> {
+    this._ensureBuilt();
+    const validator = this.getValidator(MODE_PURPOSE[mode]);
+    const ctx = this._validationCtx(mode);
+    this._applyDepthCtx(ctx, 0);
+    const now = Date.now();
+    const errors: TValidateRowsError[] = [];
+    const valid: Array<{ index: number; row: Record<string, unknown> }> = [];
+    for (let index = 0; index < rows.length; index++) {
+      const raw = rows[index];
+      let row: unknown = raw;
+      if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+        const clone = _cloneWritePayload(raw);
+        delete clone.$cas;
+        if (mode !== "patch") this._applyDefaults(clone, now);
+        if (mode !== "insert") this._stampOnUpdate(clone, now, mode === "replace");
+        row = clone;
+      }
+      try {
+        if (validator.validate(row, true, ctx)) {
+          valid.push({ index, row: row as Record<string, unknown> });
+          continue;
+        }
+        for (const e of validator.errors) errors.push({ index, path: e.path, message: e.message });
+      } catch (error) {
+        // Depth-limit and other structural refusals the validator throws.
+        errors.push({
+          index,
+          path: (error as { field?: string }).field ?? "",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (opts?.fk && valid.length > 0) {
+      errors.push(...(await this._missingForeignKeys(valid, mode === "patch")));
+      errors.sort((a, b) => a.index - b.index);
+    }
+    return errors;
+  }
+
+  /**
+   * {@link validateRows}' FK lookup: one entry per FK field of each row naming
+   * a missing target. Distinct key tuples are looked up in chunks of
+   * {@link FK_LOOKUP_CHUNK} — reading the target keys that exist (`$in` for a
+   * single-column key, `$or` for a composite one) and diffing in memory, so a
+   * batch never exceeds a bind-parameter limit and a miss costs no extra
+   * query. A lookup target without `find` (a custom resolver) is counted per
+   * chunk, and per tuple only in a chunk that comes up short.
+   */
+  private async _missingForeignKeys(
+    rows: Array<{ index: number; row: Record<string, unknown> }>,
+    partial: boolean,
+  ): Promise<TValidateRowsError[]> {
+    const out: TValidateRowsError[] = [];
+    for (const fk of this._meta.foreignKeys.values()) {
+      const target = this._fkTargetReader(fk);
+      if (!target) continue;
+      // Distinct key tuples → the rows naming them.
+      const byKey = new Map<string, { values: unknown[]; indexes: number[] }>();
+      for (const { index, row } of rows) {
+        if (partial && !fk.fields.some((f) => f in row)) continue;
+        const values = fk.fields.map((f) => row[f]);
+        if (values.some((v) => v === null || v === undefined)) continue;
+        const key = fkTupleKey(values);
+        const entry = byKey.get(key);
+        if (entry) entry.indexes.push(index);
+        else byKey.set(key, { values, indexes: [index] });
+      }
+      const tuples = [...byKey.values()];
+      const tf = fk.targetFields;
+      const filterOf = (values: unknown[]) => Object.fromEntries(tf.map((f, i) => [f, values[i]]));
+      for (let at = 0; at < tuples.length; at += FK_LOOKUP_CHUNK) {
+        const chunk = tuples.slice(at, at + FK_LOOKUP_CHUNK);
+        const filter =
+          tf.length === 1
+            ? { [tf[0]!]: { $in: chunk.map((t) => t.values[0]) } }
+            : { $or: chunk.map((t) => filterOf(t.values)) };
+        let missing: typeof chunk;
+        if (target.find) {
+          const found = new Set(
+            (await target.find(filter, tf)).map((r) => fkTupleKey(tf.map((f) => r[f]))),
+          );
+          missing = chunk.filter((t) => !found.has(fkTupleKey(t.values)));
+        } else {
+          if ((await target.count(filter)) >= chunk.length) continue;
+          missing = [];
+          for (const t of chunk)
+            if ((await target.count(filterOf(t.values))) === 0) missing.push(t);
+        }
+        for (const tuple of missing) {
+          const shown = tuple.values.map((v) => String(v)).join(", ");
+          for (const index of tuple.indexes) {
+            for (const field of fk.fields) {
+              out.push({
+                index,
+                path: field,
+                message: `References a non-existent record in "${fk.targetTable}" (${shown})`,
+              });
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /** How {@link _missingForeignKeys} reads an FK's target table, if it can. */
+  private _fkTargetReader(fk: TDbForeignKey): TFkLookupTarget | undefined {
+    const lookup = this._fkLookupResolver?.(fk.targetTable);
+    if (lookup) return lookup;
+    if (!fk.targetTypeRef || !this._writeTableResolver) return undefined;
+    const table = this._writeTableResolver(fk.targetTypeRef());
+    return table ? fkLookupTargetOf(table) : undefined;
   }
 
   // ── CRUD operations ───────────────────────────────────────────────────────
@@ -481,15 +686,45 @@ export class AtscriptDbTable<
    */
   public async insertOne(
     payload: DbPatch<DataType>,
-    opts: TInsertOptions<DataType> & { onConflict: "ignore" },
+    opts: TInsertOneOptions<DataType> & {
+      onConflict: "ignore";
+      returning: true | readonly (keyof DataType & string)[];
+    },
+  ): Promise<TDbInsertIgnoreResult & { row?: DataType }>;
+  public async insertOne(
+    payload: DbPatch<DataType>,
+    opts: TInsertOneOptions<DataType> & { onConflict: "ignore" },
   ): Promise<TDbInsertIgnoreResult>;
   public async insertOne(
     payload: DbPatch<DataType>,
-    opts?: TInsertOptions<DataType>,
+    opts: TInsertOneOptions<DataType> & { returning: true | readonly (keyof DataType & string)[] },
+  ): Promise<TDbInsertResult & { row: DataType }>;
+  public async insertOne(
+    payload: DbPatch<DataType>,
+    opts?: TInsertOneOptions<DataType>,
   ): Promise<TDbInsertResult>;
   public async insertOne(
     payload: DbPatch<DataType>,
-    opts?: TInsertOptions<DataType>,
+    opts?: TInsertOneOptions<DataType>,
+  ): Promise<TDbInsertResult | TDbInsertIgnoreResult> {
+    const { returning, ...insertOpts } = opts ?? {};
+    if (!returning) return this._insertOneRow(payload, insertOpts);
+    // Read-back by primary key in the insert's transaction (since 0.1.165).
+    return this.adapter.withTransaction(async () => {
+      const result = await this._insertOneRow(payload, insertOpts);
+      if (result.insertedId === undefined) return result;
+      const controls = returning === true ? undefined : { $select: [...returning] };
+      const row = await this.findById(
+        result.insertedId as IdType,
+        controls ? ({ controls } as never) : undefined,
+      );
+      return { ...result, row: row as DataType };
+    });
+  }
+
+  private async _insertOneRow(
+    payload: DbPatch<DataType>,
+    opts: TInsertOptions<DataType>,
   ): Promise<TDbInsertResult | TDbInsertIgnoreResult> {
     const result = await this._insertMany([payload], {
       ...opts,
@@ -568,7 +803,7 @@ export class AtscriptDbTable<
     }
 
     const singleStatement = !ignore && this._isSingleStatementWrite(payloads, depth, guard, check);
-    return enrichFkViolation(this._meta, () =>
+    return this._normalizeWrite(() =>
       this._inWriteTransaction(singleStatement, async () => {
         // Clone (dropping `undefined` props — deep at the root call only, the
         // nested re-entries receive already-pruned subtrees) + apply defaults.
@@ -727,7 +962,7 @@ export class AtscriptDbTable<
     }
 
     const singleStatement = this._isSingleStatementWrite(payloads, depth, guard, check);
-    return enrichFkViolation(this._meta, () =>
+    return this._normalizeWrite(() =>
       this._inWriteTransaction(singleStatement, async () => {
         // Phase 0: Setup — clone (dropping `undefined` props), extract $cas FIRST
         // so OCC state never leaks into _applyDefaults, then apply defaults, then
@@ -912,7 +1147,7 @@ export class AtscriptDbTable<
     }
 
     const singleStatement = this._isSingleStatementWrite(payloads, depth, guard, check);
-    return enrichFkViolation(this._meta, () =>
+    return this._normalizeWrite(() =>
       this._inWriteTransaction(singleStatement, async () => {
         // OCC: extract $cas from each payload BEFORE validation. The strict
         // validator would otherwise reject $cas as an unknown top-level key
@@ -1336,7 +1571,7 @@ export class AtscriptDbTable<
    * match in batches. Not exposed over HTTP.
    */
   public async updateMany(
-    filter: FilterExpr<FlatType>,
+    filter: MutationFilter<FlatType, NavType>,
     data: DbPatch<DataType>,
     opts?: TBulkWriteOptions<FlatType>,
   ): Promise<TDbUpdateResult> {
@@ -1398,7 +1633,7 @@ export class AtscriptDbTable<
         modifiedCount: 0,
       };
     }
-    return enrichFkViolation(this._meta, () => {
+    return this._normalizeWrite(() => {
       if (!bound) {
         return this.adapter.updateMany(
           translatedFilter,
@@ -1420,7 +1655,7 @@ export class AtscriptDbTable<
    * replaces as a row picker.
    */
   public async replaceMany(
-    filter: FilterExpr<FlatType>,
+    filter: MutationFilter<FlatType, NavType>,
     data: DbRow<DataType>,
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
@@ -1444,7 +1679,7 @@ export class AtscriptDbTable<
       assertNoVersionWrites(dataCopy, versionColumn);
     }
     await this._encryptItems([dataCopy], "write");
-    return enrichFkViolation(this._meta, () =>
+    return this._normalizeWrite(() =>
       this.adapter.replaceMany(
         this._fieldMapper.translateFilter(filter as FilterExpr, this._meta),
         this._fieldMapper.prepareForWrite(dataCopy, this._meta, this.adapter),
@@ -1464,7 +1699,7 @@ export class AtscriptDbTable<
    * matches remain. Not exposed over HTTP.
    */
   public async deleteMany(
-    filter: FilterExpr<FlatType>,
+    filter: MutationFilter<FlatType, NavType>,
     opts?: TBulkWriteOptions<FlatType>,
   ): Promise<TDbDeleteResult> {
     this._ensureBuilt();
@@ -2180,6 +2415,10 @@ export class AtscriptDbTable<
     // dropped — a patch gets `$inc: 1` from {@link _stampTopLevel}, a replace
     // from the adapter (`col = col + 1`).
     for (const field of this._meta.onUpdateInc) delete data[field];
+    // `number.timestamp.created` (since 0.1.165): never written after the
+    // insert — the caller's value (or the default a replace just filled in)
+    // is dropped; the adapter keeps the stored one.
+    for (const field of this._meta.insertOnly) delete data[field];
     for (const field of this._meta.onUpdateNow) {
       if (!field.includes(".")) {
         if (topLevel) data[field] = now;
@@ -2398,6 +2637,8 @@ export class AtscriptDbTable<
    * Used by parent tables to validate FROM children before the main insert,
    * ensuring errors are caught before the parent is committed.
    *
+   * @internal Nested-write plumbing — its FK step is a no-op on native-FK
+   * adapters. To validate rows yourself, use {@link validateRows}.
    * @param opts.excludeFkTargetTable - Skip FK validation to this table (the parent).
    */
   public async preValidateItems(

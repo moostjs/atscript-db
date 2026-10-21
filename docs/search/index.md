@@ -99,6 +99,12 @@ const results = await articles.search("typescript tutorial", {
 
 The `search()` method returns records ranked by relevance.
 
+#### Ranking {#ranking}
+
+Without a `$sort`, results come in relevance order on every adapter (since 0.1.165 — before, PostgreSQL and SQLite returned matches in storage order): PostgreSQL ranks with `ts_rank`, SQLite with FTS5 `bm25()`, MySQL by `MATCH … AGAINST`, MongoDB by `textScore`. The weights of `@db.index.fulltext` apply on PostgreSQL, SQLite and MongoDB. When the whole term is a whole number, rows matched by an [integer member](#integer-fields-exact-number-match) come first. The primary key breaks ties (`_id` on MongoDB's classic text index), so offset pages are stable — except an Atlas `$search`, which keeps Atlas's own score order with no tie-breaker. An explicit `$sort` replaces relevance order.
+
+On PostgreSQL the rank recomputes `to_tsvector` for every matched row before `LIMIT` applies (the GIN index serves the match, not the rank), so a broad term over a large table costs a pass over all its matches. Narrow with a filter, or pass a `$sort` on an indexed column when relevance does not matter.
+
 ### Search with Count
 
 For paginated search results:
@@ -113,9 +119,9 @@ console.log(result.data); // matching articles
 console.log(result.count); // total matches
 ```
 
-### Targeting a Specific Index
+### Targeting a Specific Index {#target-an-index}
 
-When a table has multiple fulltext indexes, pass the index name:
+When a table has multiple fulltext indexes, pass the name declared in `@db.index.fulltext`:
 
 ```typescript
 const results = await articles.search(
@@ -128,7 +134,7 @@ const results = await articles.search(
 );
 ```
 
-If omitted, the first available fulltext index is used.
+If omitted, the default index answers: the first one with a text member. `getSearchIndexes()` (and `/meta` `searchIndexes`) list each index under its declared name; older names that still resolve are in the entry's `aliases` — the internal `atscript__fulltext__<name>` key on PostgreSQL and MySQL, `DEFAULT` for MongoDB's default index (since 0.1.165; before, PostgreSQL and MySQL resolved only the key and MongoDB's default index only as `DEFAULT`). Use the declared name. An unknown name throws `Search index "<name>" not found`.
 
 ## Combining Search with Filters
 
@@ -162,12 +168,12 @@ See [HTTP — Advanced](/http/advanced) for the full URL query syntax.
 
 Each adapter maps `@db.index.fulltext` to its native full-text search engine:
 
-| Adapter        | Index type                                    | Search mechanism                       | Per-field weights?                               | Integer members                                             |
-| -------------- | --------------------------------------------- | -------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------- |
-| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`    | `plainto_tsquery()`                    | No — weights in `@db.index.fulltext` are ignored | `OR "col" = CAST(? AS BIGINT)`                              |
-| **MongoDB**    | Classic text index (works on all deployments) | `$text`                                | Yes — field weights                              | `$or` of `$text` and `{ col: { $eq: n, $type: "number" } }` |
-| **SQLite**     | FTS5 virtual table                            | `MATCH`                                | No                                               | `OR "col" = ?` next to the FTS5 `rowid` lookup              |
-| **MySQL**      | `FULLTEXT` index                              | `MATCH ... AGAINST` (natural language) | No                                               | primary-key set of a `UNION` of the `MATCH` and `= n` arms  |
+| Adapter        | Index type                                    | Search mechanism                       | Per-field weights?                                     | Integer members                                             |
+| -------------- | --------------------------------------------- | -------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`    | `plainto_tsquery()`                    | Yes — in the `ts_rank` order (`setweight` buckets A–D) | `OR "col" = CAST(? AS BIGINT)`                              |
+| **MongoDB**    | Classic text index (works on all deployments) | `$text`                                | Yes — field weights                                    | `$or` of `$text` and `{ col: { $eq: n, $type: "number" } }` |
+| **SQLite**     | FTS5 virtual table                            | `MATCH`                                | Yes — `bm25()` column weights                          | `OR "col" = ?` next to the FTS5 `rowid` lookup              |
+| **MySQL**      | `FULLTEXT` index                              | `MATCH ... AGAINST` (natural language) | No                                                     | primary-key set of a `UNION` of the `MATCH` and `= n` arms  |
 
 ::: info
 All adapters expose the same `search()` and `searchWithCount()` API — engine differences are handled internally. See individual adapter pages for engine-specific details and configuration options.

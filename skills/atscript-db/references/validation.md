@@ -25,6 +25,8 @@ const validator = buildDbValidator(UsersType, "insert", adapter.getValidatorPlug
 validator.validate(data); // throws ValidatorError on failure
 ```
 
+On a table: `table.getValidator("insert")` binds its mode when called without a context (0.1.165); `table.validateRows(rows, mode, { fk })` validates rows exactly as a write would — see [crud.md](crud.md#validate-without-writing--validaterows-01165).
+
 `extraPlugins` are prepended — adapters surface these via `getValidatorPlugins()` (e.g. Mongo's `validateMongoIdPlugin`). See the modes table below for behaviour per mode.
 
 ## Client-side

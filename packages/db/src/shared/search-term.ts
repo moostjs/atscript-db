@@ -62,3 +62,17 @@ export function defaultFulltextIndex<T extends Pick<TDbIndex, "fields">>(
 ): T | undefined {
   return indexes.find((i) => splitFulltextFields(i).text.length > 0) ?? indexes[0];
 }
+
+/**
+ * The fulltext index a search names (since 0.1.165): the one DECLARED with
+ * that name (`@db.index.fulltext 'name'`), else the one whose internal key
+ * (`atscript__fulltext__<name>`) it is — a deprecated alias kept for callers
+ * that copied the key from an older `getSearchIndexes()`. `undefined` when
+ * none matches; a search naming no index uses {@link defaultFulltextIndex}.
+ */
+export function resolveFulltextIndex<T extends Pick<TDbIndex, "name" | "key">>(
+  indexes: readonly T[],
+  indexName: string,
+): T | undefined {
+  return indexes.find((i) => i.name === indexName) ?? indexes.find((i) => i.key === indexName);
+}

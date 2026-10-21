@@ -52,7 +52,7 @@ describe("MysqlAdapter — integer fulltext members", () => {
     const call = sqlOf(driver, "MATCH");
     expect(call.sql).toContain(`WHERE \`id\` > ? AND ${MATCH}`);
     expect(call.sql).not.toContain("UNION");
-    expect((call as any).params).toEqual([0, "quokka"]);
+    expect((call as any).params).toEqual([0, "quokka", "quokka"]);
   });
 
   it("a whole-number term unions the primary keys of each arm (single PK)", async () => {
@@ -65,7 +65,7 @@ describe("MysqlAdapter — integer fulltext members", () => {
         "SELECT `id` FROM `ns_items` WHERE `ref_no` = ? UNION " +
         "SELECT `id` FROM `ns_items` WHERE `alt_no` = ?) AS `_atscript_search`)",
     );
-    expect((call as any).params).toEqual([0, "2946", 2946, 2946]);
+    expect((call as any).params).toEqual([0, "2946", 2946, 2946, 2946, 2946, "2946"]);
   });
 
   it("a composite primary key uses a row-value IN", async () => {
@@ -73,7 +73,7 @@ describe("MysqlAdapter — integer fulltext members", () => {
     await table.search("7", {} as any);
     const call = sqlOf(driver, "UNION");
     expect(call.sql).toContain("(`tenant`, `code`) IN (SELECT `tenant`, `code` FROM (");
-    expect((call as any).params).toEqual(["7", 7]);
+    expect((call as any).params).toEqual(["7", 7, 7, "7"]);
   });
 
   it("a table without a primary key falls back to a plain OR", async () => {
@@ -83,7 +83,7 @@ describe("MysqlAdapter — integer fulltext members", () => {
     expect(call.sql).toContain(
       "WHERE (MATCH(`title`) AGAINST(? IN NATURAL LANGUAGE MODE) OR `ref_no` = ?)",
     );
-    expect((call as any).params).toEqual(["7", 7]);
+    expect((call as any).params).toEqual(["7", 7, 7, "7"]);
   });
 
   it("an integer-only index matches by number, and a non-number matches nothing", async () => {

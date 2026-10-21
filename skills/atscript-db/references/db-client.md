@@ -225,9 +225,18 @@ Throws:
 - `ActionUnsupportedError` — `'custom'` processor (UI dispatches the event itself); or `'navigate'` with no browser + no `navigate` option.
 - `ActionDisabledError` — HTTP 409 from server-side gate. `extends ClientError`; adds typed `e.action` / `e.id` / `e.ids` / `e.reason` / `e.reasons` accessors (reasons since 0.1.141; `e.message` is the reason when one exists). See [actions.md § Server-side gate](actions.md#server-side-gate).
 - `VersionMismatchError` — HTTP 409 from OCC `$cas` mismatch. `extends ClientError`; adds typed `e.currentVersion: number` accessor. Auto-dispatched when the server response body has `kind: "version_mismatch"`. See [versioning.md § Handling 409](versioning.md#handling-409).
-- `ClientError` — server non-2xx (other). `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works. Non-JSON error body → `e.body = { message, statusCode }` with `message` = statusText or `HTTP <status>` (never empty).
-- `TransportError` (since 0.1.129) — NO server verdict: `fetch` rejected (network, DNS, CORS, `AbortError`) or a 2xx body was not JSON. `e.method`, `e.url`, standard `e.cause` (an abort keeps `cause.name === "AbortError"`). Does NOT extend `ClientError`. A write may have committed — reload the row before retrying a non-idempotent write.
+- `ClientValidationError` — preflight failure (no request sent). Since 0.1.165 `extends ClientError` (`status` 400, `body: { message, statusCode: 400, errors }`, `preflight: true`) and a RUNTIME export of `@atscript/db-client` (same class as `/validator`) — an `instanceof ClientError` branch catches it too; check it FIRST or test `e.preflight`.
+- `ClientError` — server non-2xx (other). `ClientError<B>` (0.1.165) types a body with own fields; `ServerError` admits extra keys, `body.code` = the `DbError` code, `errors[i].code` / `.params` per entry. `ActionDisabledError` and `VersionMismatchError` extend `ClientError`, so a generic catch still works. Non-JSON error body → `e.body = { message, statusCode }` with `message` = statusText or `HTTP <status>` (never empty).
+- `TransportError` (since 0.1.129) — NO server verdict: `fetch` rejected (network, DNS, CORS, `AbortError`) or a 2xx body was not JSON. `e.method`, `e.url`, standard `e.cause`, `e.aborted` (0.1.165 — `true` for an `AbortError` / `TimeoutError` cause: a cancelled request, not a lost one). Does NOT extend `ClientError`. A write may have committed — reload the row before retrying a non-idempotent write.
 - `TypeError` — client-side shape validation (non-object on row, non-array on rows).
+
+## Per-call `signal` (0.1.165)
+
+Last optional arg `{ signal }` on `query`, `count`, `aggregate`, `pages`, `geoSearch`, `geoPages`, `one`, `insert` (merged with `onConflict`), `update`, `replace`, `remove` → passed to `fetch`. Abort → `TransportError` with `aborted: true`. `meta()` takes none (shared promise).
+
+## Row typing (0.1.165)
+
+Rows of a table WITH nav props keep their field types (≤ 0.1.164 every field was `unknown` — `DataOf`'s `Record` widening collapsed `Omit`). `query`/`pages`/`one`/`geo*` take a `const Q`: `$with: [{ name: "author" }]` narrows without `as const`; readonly arrays and the string shorthand narrow too. Unlisted relations are absent from the row type.
 
 ## Typed filters
 

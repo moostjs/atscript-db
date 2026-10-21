@@ -74,21 +74,37 @@ function filterOptionsOf(host: TMongoSearchHost | TMongoGeoHost): TMongoFilterOp
 // ── Exported functions ───────────────────────────────────────────────────────
 
 /**
- * Returns available search indexes as generic metadata for UI. The text
- * default is the `DEFAULT` entry (an alias of the index `search()` answers
- * with when none is named); the vector default is the first vector index.
+ * Returns available search indexes as generic metadata for UI. Each index is
+ * listed once, by its declared name; the text default (the index `search()`
+ * answers with when none is named) carries `isDefault` and lists `DEFAULT` —
+ * which also resolves — as an alias (since 0.1.165). Only an index without a
+ * name of its own (a dynamic Atlas mapping) is listed as `DEFAULT`. The vector
+ * default is the first vector index.
  */
+/** Classic `$text` relevance order: `textScore` descending, `_id` breaking ties (since 0.1.165). */
+const RELEVANCE_SORT: Document = { $sort: { _score: -1, _id: 1 } };
+
 export function getSearchIndexesImpl(host: TMongoSearchHost): TSearchIndexInfo[] {
   const result: TSearchIndexInfo[] = [];
+  const indexes = host.getMongoSearchIndexes();
+  const textDefault = indexes.get(DEFAULT_INDEX_NAME);
+  // The text default is also listed by a name of its own — its DEFAULT entry is then an alias.
+  let defaultListedByName = false;
+  for (const [name, index] of indexes) {
+    if (index === textDefault && name !== DEFAULT_INDEX_NAME) defaultListedByName = true;
+  }
   let firstVector = true;
-  for (const [name, index] of host.getMongoSearchIndexes()) {
+  for (const [name, index] of indexes) {
     const isVector = index.type === "vector";
+    const aliased = !isVector && index === textDefault && name !== DEFAULT_INDEX_NAME;
+    if (name === DEFAULT_INDEX_NAME && defaultListedByName) continue;
     result.push({
       name,
+      ...(aliased ? { aliases: [DEFAULT_INDEX_NAME] } : {}),
       description: `${index.type} index`,
       type: isVector ? ("vector" as const) : ("text" as const),
       fields: searchIndexPaths(host, index),
-      isDefault: isVector ? firstVector : name === DEFAULT_INDEX_NAME,
+      isDefault: isVector ? firstVector : index === textDefault,
     });
     if (isVector) firstVector = false;
   }
@@ -818,8 +834,9 @@ async function runSearchPipeline(
   if (sorted.length > 0) {
     pipeline.push(...sorted);
   } else if (classicText) {
-    // Default to relevance order, mirroring Atlas $search's implicit ordering.
-    pipeline.push({ $sort: { _score: -1 } });
+    // Default to relevance order, mirroring Atlas $search's implicit ordering;
+    // `_id` breaks ties so pages never overlap (since 0.1.165).
+    pipeline.push(RELEVANCE_SORT);
   }
   if (controls.$skip) {
     pipeline.push({ $skip: controls.$skip });
@@ -872,7 +889,7 @@ async function runSearchWithCountPipeline(
 
   const { stages: dataStages, cleanup } = sortStages(controls);
   if (dataStages.length === 0 && classicText) {
-    dataStages.push({ $sort: { _score: -1 } });
+    dataStages.push(RELEVANCE_SORT);
   }
   if (controls.$skip) {
     dataStages.push({ $skip: controls.$skip });

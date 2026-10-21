@@ -13,6 +13,8 @@ import {
   type ValidatorMode,
 } from "@atscript/db/validator";
 
+import { ClientValidationError } from "./client-error";
+
 import type { MetaResponse } from "./types";
 
 export type { DbValidationContext, ValidatorMode } from "@atscript/db/validator";
@@ -140,21 +142,7 @@ export class ClientValidator {
   }
 }
 
-/**
- * Structured validation error thrown before HTTP requests when client-side
- * validation fails.
- */
-export class ClientValidationError extends Error {
-  readonly errors: Array<{ path: string; message: string }>;
-
-  constructor(errors: Array<{ path: string; message: string }>) {
-    const msg =
-      errors.length === 1 ? errors[0].message : `Validation failed with ${errors.length} errors`;
-    super(msg);
-    this.name = "ClientValidationError";
-    this.errors = errors;
-  }
-}
+export { ClientValidationError };
 
 /**
  * Create a {@link ClientValidator} from a meta response (or promise).

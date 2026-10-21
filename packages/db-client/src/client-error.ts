@@ -1,24 +1,50 @@
-import type { ServerError } from "./types";
+import type { ServerError, ServerErrorEntry } from "./types";
 
 /**
  * Error thrown by `Client` when the server responds with a non-2xx status code.
  * Captures the HTTP status and the structured error body from moost-db.
  */
-export class ClientError extends Error {
+export class ClientError<B extends ServerError = ServerError> extends Error {
   override name = "ClientError";
 
   constructor(
     /** HTTP status code (e.g. 400, 404, 409, 500). */
     public readonly status: number,
-    /** Structured error response from the server. */
-    public readonly body: ServerError,
+    /**
+     * Structured error response from the server. `B` (since 0.1.165) types a
+     * body that carries fields of its own: `new ClientError<QuotaBody>(…)`,
+     * `(e as ClientError<QuotaBody>).body.quota`.
+     */
+    public readonly body: B,
   ) {
     super(body.message || `HTTP ${status}`);
   }
 
   /** Shortcut to structured validation/DB errors from the server. */
-  get errors() {
+  get errors(): ServerErrorEntry[] {
     return this.body.errors ?? [];
+  }
+}
+
+/**
+ * Thrown before the request is sent when the client-side preflight
+ * (`validator` option, `ClientValidator`) rejects a write. A
+ * {@link ClientError} since 0.1.165 — status `400`, `body` shaped like the
+ * server's validation envelope (`{ message, statusCode: 400, errors }`) — so
+ * one `instanceof ClientError` branch handles a preflight failure and the
+ * server's 400 alike; `preflight` (`true`) tells them apart. The same class
+ * is exported from `@atscript/db-client` and `@atscript/db-client/validator`.
+ */
+export class ClientValidationError extends ClientError {
+  override name = "ClientValidationError";
+
+  /** `true`: the request never left the client. */
+  readonly preflight = true as const;
+
+  constructor(errors: Array<{ path: string; message: string }>) {
+    const message =
+      errors.length === 1 ? errors[0]!.message : `Validation failed with ${errors.length} errors`;
+    super(400, { message, statusCode: 400, errors });
   }
 }
 
@@ -180,6 +206,16 @@ export class TransportError extends Error {
     cause?: unknown,
   ) {
     super(`${method} ${url}: ${detail}`, { cause });
+  }
+
+  /**
+   * `true` when the request was cancelled — its `cause` is an `AbortError`
+   * (an aborted `signal`) or a `TimeoutError` (`AbortSignal.timeout`) —
+   * rather than a network failure. @since 0.1.165
+   */
+  get aborted(): boolean {
+    const name = (this.cause as { name?: unknown } | undefined)?.name;
+    return name === "AbortError" || name === "TimeoutError";
   }
 }
 

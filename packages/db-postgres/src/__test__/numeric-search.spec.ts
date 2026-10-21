@@ -48,7 +48,8 @@ describe("PostgresAdapter — integer fulltext members", () => {
     expect(call.sql).toContain(
       `"id" > $1 AND (${TS} @@ plainto_tsquery('english', $2) OR "ref_no" = CAST($3 AS BIGINT) OR "alt_no" = CAST($4 AS BIGINT))`,
     );
-    expect(call.params).toEqual([0, "2946", 2946, 2946]);
+    // Then the relevance order (no $sort): exact-number hits, ts_rank, the key.
+    expect(call.params).toEqual([0, "2946", 2946, 2946, 2946, 2946, "2946"]);
   });
 
   it("a non-integer term keeps the text predicate only", async () => {
@@ -57,7 +58,7 @@ describe("PostgresAdapter — integer fulltext members", () => {
     const call = driver.calls.find((c) => c.sql.includes("plainto_tsquery"))!;
     expect(call.sql).toContain(`WHERE ${TS} @@ plainto_tsquery('english', $1)`);
     expect(call.sql).not.toContain("BIGINT");
-    expect(call.params).toEqual(["quokka"]);
+    expect(call.params).toEqual(["quokka", "quokka"]); // the second one ranks
   });
 
   it("an integer-only index matches by number and nothing else", async () => {

@@ -9,7 +9,7 @@ import {
   ALL_VIEW_CAPABILITIES,
   ALL_BUCKET_UNITS,
   BaseDbAdapter,
-  DbError,
+  constraintViolation,
   getPath,
   uniqueKeyTuple,
   type DbQuery,
@@ -1059,9 +1059,10 @@ export class MongoAdapter extends BaseDbAdapter {
             index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
           ),
         };
-        if (index === defaultFulltext) {
-          defaultIndex = converted;
-        } else if (!this._searchIndexesMap.has(index.name)) {
+        if (index === defaultFulltext) defaultIndex = converted;
+        // Every fulltext index — the default one too (since 0.1.165) — is
+        // addressable by its declared name; `DEFAULT` stays an alias.
+        if (!this._searchIndexesMap.has(index.name)) {
           this._searchIndexesMap.set(index.name, converted);
         }
       }
@@ -1374,8 +1375,16 @@ export class MongoAdapter extends BaseDbAdapter {
   /** Rethrows a duplicate-key (11000) server error as `CONFLICT`, anything else as is. */
   private _mapConstraintError(error: unknown): never {
     if (error instanceof MongoServerError && error.code === 11000) {
-      const field = error.keyPattern ? (Object.keys(error.keyPattern)[0] ?? "") : "";
-      throw new DbError("CONFLICT", [{ path: field, message: error.message }]);
+      // Every key of the violated index (since 0.1.165; before, only the first);
+      // the table layer resolves them into logical paths.
+      throw constraintViolation(
+        "CONFLICT",
+        {
+          columns: error.keyPattern ? Object.keys(error.keyPattern) : undefined,
+          name: error.message.match(/index: (\S+) dup key/)?.[1],
+        },
+        error.message,
+      );
     }
     throw error;
   }
@@ -1654,18 +1663,23 @@ export class MongoAdapter extends BaseDbAdapter {
     }
     const versionColumn = this._table.versionColumnPhysical;
     const counters = this._table.onUpdateIncPhysical;
+    const keep = this._table.insertOnlyPhysical;
     this._log("replaceOne", mongoFilter, data);
-    if (versionColumn !== undefined || counters.length > 0) {
+    if (versionColumn !== undefined || counters.length > 0 || keep.length > 0) {
       // Mongo's plain replaceOne doesn't accept $inc, so use an aggregation
       // pipeline update via $replaceWith — the replacement document is rebuilt
       // with `version` set to `$<col> + 1` (and every `@db.onUpdate.inc`
-      // counter likewise), evaluated atomically server-side.
+      // counter likewise), evaluated atomically server-side. Insert-only
+      // fields (`number.timestamp.created`, since 0.1.165) keep `$<col>`.
       // `$literal`: a stored value is data, never an expression (a string
       // starting with `$`, an object with `$`-keys).
       const replacement: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(data)) replacement[key] = { $literal: value };
       for (const col of counters) {
         replacement[col] = incExpr(col, 1);
+      }
+      for (const col of keep) {
+        replacement[col] = `$${col}`;
       }
       if (versionColumn !== undefined) {
         replacement[versionColumn] = { $add: [`$${versionColumn}`, 1] };

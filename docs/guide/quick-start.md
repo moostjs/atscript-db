@@ -257,7 +257,7 @@ export interface Category {
 Then update `todo.as` to reference it:
 
 ```atscript
-import { Category } from './category.as'
+import { Category } from './category'
 
 @db.table 'todos'
 export interface Todo {

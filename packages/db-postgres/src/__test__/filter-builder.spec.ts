@@ -72,9 +72,10 @@ describe("buildWhere (PostgreSQL)", () => {
   });
 
   it("handles $or", () => {
-    const where = buildWhere({ $or: [{ name: "A" }, { name: "B" }] });
+    // Different fields: one field's equalities collapse into IN (since 0.1.165).
+    const where = buildWhere({ $or: [{ name: "A" }, { email: "B" }] });
     const result = finalizeParams(pgDialect, where);
-    expect(result.sql).toBe('("name" = $1 OR "name" = $2)');
+    expect(result.sql).toBe('("name" = $1 OR "email" = $2)');
     expect(result.params).toEqual(["A", "B"]);
   });
 

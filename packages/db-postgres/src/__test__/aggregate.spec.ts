@@ -329,14 +329,13 @@ describe("PostgresAdapter aggregate + $search", () => {
   });
 
   // Same resolution rules as the leaf `search()`: `$index` names the index by
-  // its registry key, which is what `getSearchIndexes()` advertises.
+  // its declared name, which is what `getSearchIndexes()` advertises (since
+  // 0.1.165; the registry key stays an alias).
   it("$index selects the named search index, exactly as search() resolves it", async () => {
     const driver = createMockDriver({ allResult: [] });
     const adapter = new PostgresAdapter(driver);
     const table = new AtscriptDbTable(UsersTable, adapter);
-    expect(adapter.getSearchIndexes().map((i) => i.name)).toContain(
-      "atscript__fulltext__search_idx",
-    );
+    expect(adapter.getSearchIndexes().map((i) => i.name)).toContain("search_idx");
 
     await table.aggregate({
       filter: {},
@@ -356,7 +355,7 @@ describe("PostgresAdapter aggregate + $search", () => {
         filter: {},
         controls: { $groupBy: ["status"], $search: "hello", $index: "nope_idx" },
       } as any),
-    ).rejects.toThrow("No fulltext index found for search");
+    ).rejects.toThrow('Search index "nope_idx" not found');
   });
 
   it("no $search leaves the grouped SQL byte-identical, and a blank term is no term", async () => {

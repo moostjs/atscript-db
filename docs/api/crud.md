@@ -40,6 +40,19 @@ Write payloads are typed as `DbPatch<Row>` (insert / patch: every key optional) 
 `insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`.
 :::
 
+#### Read the stored row back: `returning` {#insert-returning}
+
+Pass `returning` to get the row as stored — server defaults, `number.timestamp.created` / `.updated` and the version included — read by its primary key in the insert's transaction (since 0.1.165):
+
+```typescript
+const { insertedId, row } = await users.insertOne(
+  { email: "alice@example.com", name: "Alice" },
+  { returning: true }, // or a field list: ["id", "createdAt"]
+);
+```
+
+With `onConflict: 'ignore'`, a skipped row answers `{ conflict: true }` and no `row`. `returning` is an `insertOne` option only.
+
 ### Insert Many
 
 Insert multiple records in a single transaction:
@@ -292,6 +305,8 @@ const result = await users.updateMany(
 
 Replace an entire record by primary key. Unlike `updateOne`, **all fields must be provided** — missing fields are not preserved: an omitted optional column becomes `NULL` (absent on document stores) on every adapter. Since 0.1.128 this holds on SQLite, PostgreSQL and MySQL too — their `UPDATE`-based replace now assigns every column (a column whose function default the engine owns, e.g. a native `@db.default.now`, is reset to its `DEFAULT`); before, an omitted column silently kept its old value there.
 
+**A top-level `number.timestamp.created` is the exception** (since 0.1.165, also as `number.timestamp.created | null`): it is written by the insert only. A nested one (`audit: { at: number.timestamp.created }`) is part of its object and is replaced with it. A replace keeps the stored value whether or not the payload carries the field, and no replace or patch (`updateOne`, `updateMany`, `replaceMany`, HTTP `PUT` / `PATCH`) can overwrite it. Before 0.1.165 a replace that left it out reset it to the current time.
+
 ```typescript
 const result = await users.replaceOne({
   id: 1,
@@ -514,7 +529,19 @@ Tables automatically validate data on every write operation using constraints fr
 
 Since 0.1.162 `updateMany` and `replaceMany` validate their payload too (before, only foreign-key references were checked, and a bad value reached the database — a silent coercion or a constraint error). See [Upgrading](/guide/upgrading#v0-1-162).
 
-You can access validators directly for manual checks:
+To validate rows the way a write would — without writing them (imports, dry runs) — use `validateRows` (since 0.1.165). Each row is cloned, given the defaults and stamps that write applies, and validated; the result lists every problem with the row's index, `[]` when all rows are valid:
+
+```typescript
+const problems = await users.validateRows(rows); // mode: "insert" (default) | "replace" | "patch"
+// [{ index: 3, path: "email", message: "Required field" }, ...]
+
+const withFks = await users.validateRows(rows, "insert", { fk: true });
+// also: { index, path: "teamId", message: 'References a non-existent record in "teams" (7)' }
+```
+
+`fk: true` looks every non-null foreign key up — on every adapter, also those that leave foreign keys to the engine at write time. Rows that already failed type validation are not looked up. The lookup reads the existing target keys in chunks of 500 distinct keys, so its cost grows with the number of distinct keys, not with missing ones, and large batches stay under every bind-parameter limit. The caller's rows are not modified.
+
+For a single object, the validators are available directly. Called without a context, a standard purpose's validator validates in that write's mode (since 0.1.165 — before, `getValidator("insert")` rejected rows without their primary key, defaulted, foreign-key or navigation fields):
 
 ```typescript
 const validator = users.getValidator("insert");
@@ -524,6 +551,8 @@ if (!validator.validate(data, true)) {
   // [{ path: 'email', message: 'Required field' }, ...]
 }
 ```
+
+`getValidator` does not apply defaults; `validateRows` does.
 
 ## Error Handling
 
@@ -569,6 +598,26 @@ try {
 ```
 
 Each error includes an `errors` array with `{ path, message }` entries for detailed diagnostics.
+
+### Constraint violations {#constraint-errors}
+
+A unique or foreign-key violation — whether the engine or the core reports it — has one entry per field of the violated constraint, each with a `code` and `params` for translating it (since 0.1.165). Match on the code, not on the message text; the engine's own text is kept in the entry's `details` for logs (moost-db never sends it to clients).
+
+| Entry `code`  | Error `code`   | `params`                                                                                    | When                                                                                         |
+| ------------- | -------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `UNIQUE`      | `CONFLICT`     | `{ index, fields }` (`index`: the declared unique-index name, or `"primaryKey"`)            | A unique key or the primary key already holds the value — compound keys: one entry per field |
+| `FK_MISSING`  | `FK_VIOLATION` | `{ fields, target }` (+ `ambiguous: true` when the adapter could not tell which key failed) | A foreign key names a row that does not exist — only the failing key's fields                |
+| `FK_RESTRICT` | `CONFLICT`     | `{ table, referencedBy?, fields? }`                                                         | A delete is blocked by referencing rows (`path` is the table name)                           |
+
+```typescript
+catch (err) {
+  if (err instanceof DbError && err.code === "CONFLICT") {
+    for (const e of err.errors) {
+      if (e.code === "UNIQUE") form.setError(e.path, t("unique", e.params));
+    }
+  }
+}
+```
 
 ### Error Paths in Nested Data
 

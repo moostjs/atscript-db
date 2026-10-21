@@ -677,6 +677,20 @@ protected override async checkWrite(ctx: TDbWriteCheckContext) {
 - **Don't** rely on the rollback when `ctx.transactional` is `false` (standalone MongoDB, the memory adapter): validate before the write in [`guardWrite`](#guardwrite) there.
 - Nested writes a deep payload performs on related tables do not re-run it.
 
+**Recipe — a per-tenant row cap.** There is no built-in row-cap option; enforce "at most N rows per tenant" in `checkWrite`, after the insert, inside its transaction. Counting after the write (rather than before it in `guardWrite`) counts what was actually stored — rows skipped by `?$onConflict=ignore` are not counted:
+
+```typescript
+protected override async checkWrite(ctx: TDbWriteCheckContext) {
+  if (ctx.action !== "insert" && ctx.action !== "insertMany") return;
+  const tenant = currentTenant();
+  if ((await ctx.count({ tenantId: tenant.id })) > tenant.maxRows) {
+    throw new HttpError(409, { message: "Row limit reached", statusCode: 409, code: "row_cap", limit: tenant.maxRows });
+  }
+}
+```
+
+The cap is only as strong as the transaction: on adapters where `ctx.transactional` is `false` concurrent inserts can overshoot it, and two concurrent transactions may each see the count before the other commits — under PostgreSQL / MySQL default isolation, lock a per-tenant row first (a [locking read](/api/transactions#locking-reads)) when the cap must be exact.
+
 ### withTransaction {#withtransaction}
 
 `this.withTransaction(fn)` runs `fn` inside the bound table's adapter transaction — the same nesting rules as [`adapter.withTransaction`](/api/transactions). Use it for custom routes and actions that must be atomic across several table operations:

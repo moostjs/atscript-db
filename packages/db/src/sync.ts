@@ -59,7 +59,7 @@ export async function syncSchema(
 export async function planSchema(
   space: DbSpace,
   types: readonly TAtscriptAnnotatedType[],
-  opts?: Pick<TSyncOptions, "force" | "safe">,
+  opts?: Pick<TSyncOptions, "force" | "safe" | "dataSteps">,
 ): Promise<TSyncPlan> {
   const sync = new SchemaSync(space);
   return sync.plan(types, opts);
@@ -67,6 +67,7 @@ export async function planSchema(
 
 export { SchemaSync, SyncEntry, readStoredSnapshot } from "./schema/schema-sync";
 export type {
+  TDataStep,
   TSyncOptions,
   TSyncResult,
   TSyncPlan,

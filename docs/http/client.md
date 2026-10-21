@@ -306,6 +306,20 @@ const orders = await client.query({
 });
 ```
 
+The row type narrows by the `$with` you pass — no `as const` needed (since 0.1.165): `orders[0].customer` is typed, relations you did not list are absent from the type, and the row's own fields keep their declared types. (Before 0.1.165, on a table with navigation properties every field was typed `unknown`, and a `$with` needed `as const`.)
+
+## Cancelling a request {#signal}
+
+Every read and write method takes a last, optional `{ signal }` (since 0.1.165) — `query`, `count`, `aggregate`, `pages`, `geoSearch`, `geoPages`, `one`, `insert`, `update`, `replace`, `remove`:
+
+```typescript
+const ctrl = new AbortController();
+const rows = users.query({ filter: { status: "active" } }, { signal: ctrl.signal });
+ctrl.abort(); // rows rejects with a TransportError whose `aborted` is true
+```
+
+An aborted request rejects with a [`TransportError`](#transport-error) whose `aborted` is `true` (also for `AbortSignal.timeout()`); a network failure has `aborted: false`. `meta()` is shared by every call of the client and takes no signal.
+
 ## Write Operations {#writes}
 
 Write methods are available when the server uses `AsDbController` (not `AsDbReadableController`).
@@ -804,6 +818,20 @@ try {
 
 `one()` is the exception — it returns `null` on 404 instead of throwing.
 
+A `DbError` reaches the client with its code (since 0.1.165): `e.body.code` is `CONFLICT`, `FK_VIOLATION`, …, and each entry of `e.errors` carries a `code` (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`) and `params` to build a translated message from — see [Constraint violations](/api/crud#constraint-errors).
+
+A handler may answer an error body with fields of its own (`quota`, `tier`, …). `ServerError` admits extra fields, and `ClientError<B>` types them (since 0.1.165):
+
+```typescript
+interface QuotaBody extends ServerError {
+  code: "quota_reached";
+  limit: number;
+}
+if (e instanceof ClientError && e.body.code === "quota_reached") {
+  const { limit } = (e as ClientError<QuotaBody>).body;
+}
+```
+
 When the error response is not JSON (a proxy or gateway page), `e.body` is `{ message, statusCode }` with `message` = the HTTP status text, or `HTTP <status>` when the response carries none (HTTP/2 has no status text) — `e.body.message` is never empty.
 
 ### `TransportError` — no server verdict {#transport-error}
@@ -829,7 +857,7 @@ try {
 }
 ```
 
-`TransportError` does not extend `ClientError`; it exposes `method`, `url` and the standard `cause`.
+`TransportError` does not extend `ClientError`; it exposes `method`, `url`, the standard `cause`, and `aborted` (since 0.1.165) — `true` when the request was cancelled through a [`signal`](#signal) rather than lost.
 
 ## Client-Side Validation {#validation}
 
@@ -839,6 +867,8 @@ Write methods (`insert`, `update`, `replace`) automatically validate data client
 // Throws ClientValidationError before sending the request
 await users.insert({ name: 123 }); // name must be string
 ```
+
+`ClientValidationError` is a [`ClientError`](#errors) (since 0.1.165): `status` `400`, `body` shaped like the server's validation envelope (`{ message, statusCode: 400, errors }`), and `preflight: true` — so one `instanceof ClientError` branch shows field errors from the preflight and from the server alike. It is exported from `@atscript/db-client` (and, as the same class, from `@atscript/db-client/validator`).
 
 Access the validator directly for form generation or custom validation:
 
@@ -926,7 +956,7 @@ All error classes — generic and action-specific — are exported as runtime va
 - `TransportError` — no server verdict: `fetch` rejected, or a 2xx body was not JSON. `method`, `url`, `cause`. Does **not** extend `ClientError`. See [TransportError](#transport-error).
 - `ActionNotFoundError` — `Client.action(name)` called with a name not present in `/meta`.
 - `ActionUnsupportedError` — `processor: 'custom'`, or `processor: 'navigate'` with no browser env and no `navigate` option; also `actionOnQuery()` on an action without `queryTarget`.
-- `ClientValidationError` (type) — thrown by client-side validation on `insert` / `update` / `replace` before sending. Type export — the runtime class lives in `@atscript/db-client/validator`.
+- `ClientValidationError extends ClientError` — thrown by client-side validation on `insert` / `update` / `replace` before sending: `status` 400, `preflight: true` (since 0.1.165 a runtime export of the main entry; before, type-only and not a `ClientError`).
 
 ```typescript
 import {
@@ -935,8 +965,8 @@ import {
   ActionDisabledError,
   ActionNotFoundError,
   ActionUnsupportedError,
+  ClientValidationError,
 } from "@atscript/db-client";
-import type { ClientValidationError } from "@atscript/db-client";
 ```
 
 ### Action error body shape

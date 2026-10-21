@@ -9,6 +9,7 @@ export {
   nullsOrderSql,
   nullsPlacementOf,
   quotedJsonPathSegments,
+  searchRankOrder,
 } from "./dialect";
 export {
   renderArith,

@@ -6,6 +6,7 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  constraintViolation,
   createChangeRecorder,
   searchIndexNotFoundMessage,
   vectorIndexNotFoundMessage,
@@ -57,6 +58,7 @@ import {
   writeLimitWhere,
   EMPTY_AND,
   orFragment,
+  searchRankOrder,
   buildPartitionedSelect,
   orderByList,
   stripPartitionRowNumber,
@@ -467,24 +469,52 @@ export class SqliteAdapter extends BaseDbAdapter {
    * Wraps a write operation to catch native SQLite constraint errors
    * and rethrow as structured `DbError`.
    */
-  private _wrapConstraintError<R>(fn: () => R): R {
+  private _wrapConstraintError<R>(fn: () => R, row?: Record<string, unknown>): R {
     try {
       return fn();
     } catch (error: unknown) {
       if (error instanceof Error) {
         if (error.message.includes("FOREIGN KEY constraint failed")) {
-          throw new DbError("FK_VIOLATION", [{ path: "", message: error.message }]);
+          // SQLite never names the failing key: probe the written row's keys
+          // (since 0.1.165; before, every FK field was reported).
+          const columns = row ? this._probeFkViolation(row) : undefined;
+          throw constraintViolation("FK_VIOLATION", columns ? { columns } : {}, error.message);
         }
-        const uniqueMatch = error.message.match(/UNIQUE constraint failed:\s*\S+\.(\S+)/);
-        if (uniqueMatch) {
-          throw new DbError("CONFLICT", [{ path: uniqueMatch[1], message: error.message }]);
-        }
-        if (error.message.includes("UNIQUE constraint failed")) {
-          throw new DbError("CONFLICT", [{ path: "", message: error.message }]);
+        // `UNIQUE constraint failed: t.a, t.b` — every column of the key
+        // (since 0.1.165; before, the capture kept `a,` of a compound key).
+        const unique = error.message.match(/UNIQUE constraint failed:\s*(.+)$/);
+        if (unique) {
+          const columns = unique[1]!
+            .split(",")
+            .map((c) => c.trim().replace(/^.*\./, ""))
+            .filter(Boolean);
+          throw constraintViolation("CONFLICT", { columns }, error.message);
         }
       }
       throw error;
     }
+  }
+
+  /**
+   * The physical columns of the first foreign key whose (non-null) value in
+   * `row` names no target row — what SQLite's `FOREIGN KEY constraint
+   * failed` leaves out. Runs only on that error path.
+   */
+  private _probeFkViolation(row: Record<string, unknown>): string[] | undefined {
+    for (const fk of this._table.foreignKeys.values()) {
+      const columns = fk.physicalFields ?? fk.fields;
+      const values = columns.map((c) => row[c]);
+      if (values.some((v) => v === null || v === undefined)) continue;
+      const targets = fk.physicalTargetFields ?? fk.targetFields;
+      const where = targets.map((c) => `"${esc(c)}" = ?`).join(" AND ");
+      const sql = `SELECT 1 AS hit FROM "${esc(fk.targetTable)}" WHERE ${where} LIMIT 1`;
+      try {
+        if (!this.driver.get(sql, values)) return [...columns];
+      } catch {
+        // A probe failure leaves the error unattributed.
+      }
+    }
+    return undefined;
   }
 
   // ── CRUD: Insert ───────────────────────────────────────────────────────────
@@ -493,7 +523,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const { sql, params } = this._insertSql.build(this.resolveTableName(), data);
     this._log(sql, params);
     const result = await this._stmt(() =>
-      this._wrapConstraintError(() => this.driver.run(sql, params)),
+      this._wrapConstraintError(() => this.driver.run(sql, params), data),
     );
     return { insertedId: this._resolveInsertedId(data, result.lastInsertRowid) };
   }
@@ -514,7 +544,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         for (const row of data) {
           const { sql, params } = this._insertSql.build(tableName, row);
           this._log(sql, params);
-          const result = this._wrapConstraintError(() => this.driver.run(sql, params));
+          const result = this._wrapConstraintError(() => this.driver.run(sql, params), row);
           out.push(this._resolveInsertedId(row, result.lastInsertRowid));
         }
         return out;
@@ -544,7 +574,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         const params = built.params;
         this._log(sql, params);
         const result = await this._stmt(() =>
-          this._wrapConstraintError(() => this.driver.run(sql, params)),
+          this._wrapConstraintError(() => this.driver.run(sql, params), row),
         );
         slots.push(
           result.changes === 0
@@ -687,7 +717,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     const result = await this._stmt(() =>
-      this._wrapConstraintError(() => this.driver.run(sql, params)),
+      this._wrapConstraintError(() => this.driver.run(sql, params), data),
     );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
@@ -724,7 +754,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const { sql, params } = buildUpdate(this.resolveTableName(), data, where, ops, versionColumn);
     this._log(sql, params);
     const result = await this._stmt(() =>
-      this._wrapConstraintError(() => this.driver.run(sql, params)),
+      this._wrapConstraintError(() => this.driver.run(sql, params), data),
     );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
@@ -763,7 +793,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     const result = await this._stmt(() =>
-      this._wrapConstraintError(() => this.driver.run(sql, params)),
+      this._wrapConstraintError(() => this.driver.run(sql, params), full),
     );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
@@ -781,7 +811,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     );
     this._log(sql, params);
     const result = await this._stmt(() =>
-      this._wrapConstraintError(() => this.driver.run(sql, params)),
+      this._wrapConstraintError(() => this.driver.run(sql, params), data),
     );
     return { matchedCount: result.changes, modifiedCount: result.changes };
   }
@@ -1327,35 +1357,63 @@ export class SqliteAdapter extends BaseDbAdapter {
       return [];
     }
     const plan = this._searchPlan(text, indexName);
-    if (!plan.join) {
-      // A numeric branch (or no text members): the predicate form through the shared builder.
+    const controls = query.controls || {};
+    const sorted = orderByList(sqliteDialect, controls.$sort, controls.$nulls, "t.");
+    if (!plan.join && (sorted || plan.textFields === 0)) {
+      // A numeric branch (or no text members) with its own order: the
+      // predicate form through the shared builder (an integer-only index
+      // orders by the primary key).
       const { sql, params } = buildSelect(
         this.resolveTableName(),
         andWhere(plan.predicate, buildWhere(query.filter)),
         query.controls,
+        searchRankOrder(sqliteDialect, { ...plan.exact, pkColumns: this._pkColumns() }),
       );
       this._log(sql, params);
       return this._stmt(() => this.driver.all(sql, params));
     }
-    const base = this._buildFtsBase(text, query.filter, indexName);
-    const controls = query.controls || {};
 
-    // Projection
+    const fts = this._ftsTableName(plan.index.name);
+    let head: string;
+    let params: unknown[];
+    let textRank: TSqlFragment;
+    if (plan.join) {
+      const base = this._buildFtsBase(text, query.filter, plan.index);
+      head = base.fromWhere;
+      params = [...base.params];
+      textRank = { sql: `${this._bm25Expr(`fts."${esc(fts)}"`, plan.index)} ASC`, params: [] };
+    } else {
+      // Text matches next to exact-number hits, ranked: the MATCH runs ONCE
+      // (materialized — a correlated per-row bm25 lookup re-ran it for every
+      // hit, quadratic in the matches) and is joined back by rowid.
+      const where = buildPrefixedWhere("t", query.filter);
+      const eqs = plan.exact.exactEqualities.map((eq) => `t.${eq}`);
+      head =
+        `FROM "${esc(this.resolveTableName())}" AS t LEFT JOIN m ON m.__atscript_r = t.rowid` +
+        ` WHERE (m.__atscript_r IS NOT NULL OR ${eqs.join(" OR ")})` +
+        (where.sql === "1=1" ? "" : ` AND (${where.sql})`);
+      params = [quoteFtsTerm(text), ...eqs.map(() => plan.exact.n), ...where.params];
+      textRank = { sql: "m.__atscript_s ASC", params: [] };
+    }
+    const order = sorted
+      ? { sql: sorted, params: [] as unknown[] }
+      : searchRankOrder(sqliteDialect, {
+          exactEqualities: plan.join ? [] : plan.exact.exactEqualities.map((eq) => `t.${eq}`),
+          n: plan.exact.n,
+          textRank,
+          pkColumns: this._pkColumns(),
+          prefix: "t.",
+        });
+
     let cols = "t.*";
     if (controls.$select?.asArray?.length) {
       cols = controls.$select.asArray.map((c: string) => `t."${esc(c)}"`).join(", ");
     }
-
-    let sql = `SELECT ${cols} ${base.fromWhere}`;
-    const params = [...base.params];
-
-    // Sort
-    const orderBy = orderByList(sqliteDialect, controls.$sort, controls.$nulls, "t.");
-    if (orderBy) {
-      sql += ` ORDER BY ${orderBy}`;
-    }
-
-    // Limit / Offset
+    const cte = plan.join
+      ? ""
+      : `WITH m AS MATERIALIZED (SELECT rowid AS __atscript_r, ${this._bm25Expr(`"${esc(fts)}"`, plan.index)} AS __atscript_s FROM "${esc(fts)}" WHERE "${esc(fts)}" MATCH ?) `;
+    let sql = `${cte}SELECT ${cols} ${head} ORDER BY ${order.sql}`;
+    params.push(...order.params);
     if (controls.$limit !== undefined) {
       sql += ` LIMIT ?`;
       params.push(controls.$limit);
@@ -1387,7 +1445,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     let countSql: string;
     let countParams: unknown[];
     if (plan.join) {
-      const base = this._buildFtsBase(text, query.filter, indexName);
+      const base = this._buildFtsBase(text, query.filter, plan.index);
       countSql = `SELECT COUNT(*) as cnt ${base.fromWhere}`;
       countParams = base.params;
     } else {
@@ -1463,10 +1521,18 @@ export class SqliteAdapter extends BaseDbAdapter {
   private _searchPlan(
     text: string,
     indexName?: string,
-  ): { predicate: TSqlFragment; join: boolean } {
+  ): {
+    index: TDbIndex;
+    predicate: TSqlFragment;
+    join: boolean;
+    textFields: number;
+    /** The exact-number arm for {@link searchRankOrder}: one equality per integer member. */
+    exact: { exactEqualities: string[]; n: number | undefined };
+  } {
     const index = this._resolveFtsIndex(indexName);
     const { text: textFields, integer: integerFields } = splitFulltextFields(index);
     const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
+    const equalities = n === undefined ? [] : integerFields.map((f) => `"${esc(f.name)}" = ?`);
     const parts: string[] = [];
     const params: unknown[] = [];
     if (textFields.length > 0) {
@@ -1474,17 +1540,35 @@ export class SqliteAdapter extends BaseDbAdapter {
       parts.push(`rowid IN (SELECT rowid FROM ${quoted} WHERE ${quoted} MATCH ?)`);
       params.push(quoteFtsTerm(text));
     }
-    if (n !== undefined) {
-      for (const f of integerFields) {
-        parts.push(`"${esc(f.name)}" = ?`);
-        params.push(n);
-      }
+    for (const eq of equalities) {
+      parts.push(eq);
+      params.push(n);
     }
     // An integer-only index with a term that is not a whole number matches nothing.
     return {
+      index,
       predicate: orFragment(parts, params),
       join: textFields.length > 0 && n === undefined,
+      textFields: textFields.length,
+      exact: { exactEqualities: equalities, n },
     };
+  }
+
+  /**
+   * `bm25(<hidden column>[, w…])` over an index's text members (lower = better). The
+   * per-column weights follow the FTS5 table's column order; omitted when
+   * every member has the default weight.
+   */
+  private _bm25Expr(hidden: string, index: TDbIndex): string {
+    const weights = splitFulltextFields(index).text.map((f) => f.weight ?? 1);
+    return weights.every((w) => w === 1)
+      ? `bm25(${hidden})`
+      : `bm25(${hidden}, ${weights.map((w) => String(w)).join(", ")})`;
+  }
+
+  /** The physical primary-key columns — the relevance tie-breaker. */
+  private _pkColumns(): string[] {
+    return this._table.primaryKeys.map((key) => this._table.physicalPath(key));
   }
 
   /**
@@ -1494,9 +1578,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   private _buildFtsBase(
     text: string,
     filter: FilterExpr,
-    indexName?: string,
+    ftsIndex: TDbIndex,
   ): { fromWhere: string; params: unknown[] } {
-    const ftsIndex = this._resolveFtsIndex(indexName);
     const ftsTable = this._ftsTableName(ftsIndex.name);
     const tableName = this.resolveTableName();
     const where = buildPrefixedWhere("t", filter);

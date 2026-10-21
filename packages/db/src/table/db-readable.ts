@@ -1,3 +1,4 @@
+import { nestDottedWith } from "../shared/with-nesting";
 import {
   isAnnotatedType,
   type FlatOf,
@@ -98,11 +99,16 @@ interface TReadPlan {
 }
 
 /**
- * Extracts nav prop names from a query's `$with` array.
+ * Extracts nav prop names from a query's `$with` array — mutable or readonly
+ * (`as const`, since 0.1.165), object entries or the string shorthand.
  * Returns `never` when `$with` is absent → all nav props stripped from response.
  */
-type ExtractWith<Q> = Q extends { controls: { $with: Array<{ name: infer N extends string }> } }
-  ? N
+type ExtractWith<Q> = Q extends { controls: { $with: ReadonlyArray<infer E> } }
+  ? E extends { name: infer N extends string }
+    ? N
+    : E extends string
+      ? E
+      : never
   : never;
 
 /**
@@ -684,12 +690,29 @@ export class AtscriptDbReadable<
    */
   public get onUpdateIncPhysical(): readonly string[] {
     this._ensureBuilt();
-    return (this._onUpdateIncPhysical ??= [...this._meta.onUpdateInc].map(
-      (field) => this._meta.columnMap.get(field) ?? field,
-    ));
+    return (this._onUpdateIncPhysical ??= this._physicalNames(this._meta.onUpdateInc));
   }
 
   private _onUpdateIncPhysical?: readonly string[];
+
+  /**
+   * Physical column names of the insert-only fields (`number.timestamp.created`,
+   * since 0.1.165): a full replace keeps their stored values. Empty when
+   * there are none.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   */
+  public get insertOnlyPhysical(): readonly string[] {
+    this._ensureBuilt();
+    return (this._insertOnlyPhysical ??= this._physicalNames(this._meta.insertOnly));
+  }
+
+  private _insertOnlyPhysical?: readonly string[];
+
+  /** The physical columns of a set of top-level logical fields. */
+  private _physicalNames(fields: ReadonlySet<string>): readonly string[] {
+    return [...fields].map((field) => this._meta.columnMap.get(field) ?? field);
+  }
 
   /**
    * Logical paths of the `@db.column.version.exempt` fields, including objects
@@ -876,8 +899,17 @@ export class AtscriptDbReadable<
    */
   private _translateRead(query: Uniquery | undefined): TReadPlan {
     let readQuery = (query ?? {}) as Uniquery;
-    const controls = readQuery.controls as UniqueryControls | undefined;
-    const withRelations = controls?.$with as WithRelation[] | undefined;
+    let controls = readQuery.controls as UniqueryControls | undefined;
+    let withRelations = controls?.$with as WithRelation[] | undefined;
+    if (withRelations?.length) {
+      // `$with: ["a.b"]` → `a($with=b)` (since 0.1.165; before, it was skipped).
+      const nested = nestDottedWith(withRelations);
+      if (nested !== withRelations) {
+        withRelations = nested;
+        controls = { ...controls, $with: nested } as UniqueryControls;
+        readQuery = { ...readQuery, controls } as Uniquery;
+      }
+    }
     let widened: string[] = [];
     if (withRelations?.length && controls?.$select) {
       const widen = this._widenSelectForWith(controls.$select, withRelations);
@@ -2163,7 +2195,11 @@ export class AtscriptDbReadable<
     withRelations: WithRelation[],
   ): Promise<void> {
     const { loadRelationsImpl } = await import("../rel/relation-loader");
-    return loadRelationsImpl(rows, withRelations, this as any as TRelationLoaderHost);
+    return loadRelationsImpl(
+      rows,
+      nestDottedWith(withRelations),
+      this as any as TRelationLoaderHost,
+    );
   }
 
   /**

@@ -44,6 +44,29 @@ Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deploymen
 
 `TSyncResult.status`: `'up-to-date' | 'synced' | 'synced-by-peer' | 'refused'` (`refused` since 0.1.128). `plan()` status stays `'up-to-date' | 'changes-needed'` — refusals appear there as `error` entries with `refused: true`, so `--dry-run` shows them.
 
+## One-time data steps (0.1.165)
+
+```ts
+await syncSchema(db, models, {
+  dataSteps: [
+    {
+      id: "2026-10-users-tier",
+      run: async (space) => {
+        await space.getTable(User).updateMany({ tier: null }, { tier: 3 });
+      },
+    },
+  ],
+});
+```
+
+| #   | Rule                                                                                                                                                                                                                                   |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Runs after the DDL, under the sync lock, in declared order — also when the schema hash matches (a step added later runs next sync).                                                                                                    |
+| 2   | Once per database: each step + its record (`data_step:<id>` in `__atscript_control`) commit in ONE transaction (adapter with transactions). A throwing step rolls back, stays pending, and the sync rethrows after releasing the lock. |
+| 3   | Never runs on a `refused` sync or when an entry errored.                                                                                                                                                                               |
+| 4   | `result.dataSteps = { ran, pending }`; `planSchema(db, models, { dataSteps })` → `pendingDataSteps` and `changes-needed` while any is pending.                                                                                         |
+| 5   | Ids: non-empty, unique (else throws). Never edit a recorded step — add a new id.                                                                                                                                                       |
+
 ## Dry-run plan (`planSchema`)
 
 ```ts

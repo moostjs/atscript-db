@@ -57,16 +57,15 @@ describe("FK error paths use logical field names", () => {
     }
   });
 
-  it("should include all FK fields in the error", async () => {
+  // Since 0.1.165 the failing key is probed (SQLite's error never names it):
+  // only `projectId` is reported — before, every FK field was.
+  it("should report only the failing FK field", async () => {
     try {
       await taskTable.insertOne({ id: 1, title: "test", projectId: 999 });
       expect.unreachable("Should have thrown");
     } catch (error) {
       const err = error as DbError;
-      const paths = err.errors.map((e) => e.path);
-      // Both FK fields should be reported (projectId and reviewerId)
-      expect(paths).toContain("projectId");
-      expect(paths).toContain("reviewerId");
+      expect(err.errors.map((e) => [e.path, e.code])).toEqual([["projectId", "FK_MISSING"]]);
     }
   });
 });

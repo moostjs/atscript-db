@@ -268,6 +268,12 @@ export class TableMetadata {
    */
   onUpdateNow = new Set<string>();
   /**
+   * Top-level `number.timestamp.created` fields (since 0.1.165): set by the
+   * insert only — a replace keeps the stored value, a replace or patch
+   * payload's value is dropped.
+   */
+  insertOnly = new Set<string>();
+  /**
    * Top-level fields annotated with `@db.onUpdate.inc`: `0` on insert, `+1` in
    * the same statement on every update and replace.
    * @since 0.1.162
@@ -791,6 +797,9 @@ export class TableMetadata {
     // @db.onUpdate.now
     if (metadata.has("db.onUpdate.now")) {
       this.onUpdateNow.add(fieldName);
+    } else if (!fieldName.includes(".") && hasPrimitiveTag(fieldType, "created")) {
+      // `number.timestamp.created` (top level): written by the insert only (since 0.1.165)
+      this.insertOnly.add(fieldName);
     }
 
     // @db.onUpdate.inc — a top-level integer column with an implicit `0`
@@ -849,9 +858,11 @@ export class TableMetadata {
     if (metadata.has("db.rel.FK")) {
       const raw = metadata.get("db.rel.FK");
       const alias = (raw === true ? undefined : raw) as string | undefined;
-      if (fieldType.ref) {
-        const targetTable = tableNameOf(fieldType.ref.type());
-        const targetField = fieldType.ref.field;
+      // `Target.id | null` names its target through the union's value member (since 0.1.165).
+      const fkRef = fieldType.ref ?? soleUnionMember(fieldType)?.ref;
+      if (fkRef) {
+        const targetTable = tableNameOf(fkRef.type());
+        const targetField = fkRef.field;
         const key = alias || `__auto_${fieldName}`;
         const existing = this.foreignKeys.get(key);
         if (existing) {
@@ -862,7 +873,7 @@ export class TableMetadata {
             fields: [fieldName],
             targetTable,
             targetFields: [targetField],
-            targetTypeRef: fieldType.ref.type,
+            targetTypeRef: fkRef.type,
             alias,
           });
         }
@@ -1542,6 +1553,7 @@ export class TableMetadata {
         isGeoPoint: isGeoPointType(colType) || undefined,
         derived: this.derivedFields.get(path),
         computed: computedMeta(rootType, path),
+        insertOnly: this.insertOnly.has(path) || undefined,
       });
     }
 
@@ -1849,4 +1861,16 @@ function computedMeta(
   return computed
     ? { operands: Object.freeze(computed.operands), via: Object.freeze(computed.via) }
     : undefined;
+}
+
+/**
+ * Whether the column of `type` is the tagged primitive: the type itself, or
+ * the one value member of `T | null` ({@link columnUnionBase}). Not a
+ * reference to another field (`a: Other.createdAt` does not share its
+ * semantics), nor a wider union (`number.timestamp.created | string`).
+ */
+function hasPrimitiveTag(type: TAtscriptAnnotatedType, tag: string): boolean {
+  if (type.ref?.field) return false;
+  const column = columnUnionBase(type) ?? type;
+  return (column.type as { tags?: ReadonlySet<string> }).tags?.has(tag) === true;
 }

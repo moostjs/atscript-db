@@ -56,16 +56,18 @@ describe("MongoAdapter search capability", () => {
   // since 0.1.143 — the logical fields each index reads + the default of each type.
   it("publishes each index's logical fields and the per-type default", () => {
     expect(adapterFor(fixtures.CapBoth).getSearchIndexes()).toEqual([
+      // Since 0.1.165 the default text index is listed by its declared name.
+      expect.objectContaining({
+        name: "cap_both_fts",
+        aliases: ["DEFAULT"],
+        type: "text",
+        fields: ["title"],
+        isDefault: true,
+      }),
       expect.objectContaining({
         name: "embedding",
         type: "vector",
         fields: ["embedding"],
-        isDefault: true,
-      }),
-      expect.objectContaining({
-        name: "DEFAULT",
-        type: "text",
-        fields: ["title"],
         isDefault: true,
       }),
     ]);
@@ -82,11 +84,10 @@ describe("MongoAdapter search capability", () => {
     expect(
       adapterFor(Member)
         .getSearchIndexes()
-        .map((i) => [i.name, i.fields, i.isDefault]),
+        .map((i) => [i.name, i.fields, i.isDefault, i.aliases]),
     ).toEqual([
-      ["members_exact", ["username"], false],
-      ["members_prefix", ["username"], false],
-      ["DEFAULT", ["username"], true],
+      ["members_exact", ["username"], true, ["DEFAULT"]],
+      ["members_prefix", ["username"], false, undefined],
     ]);
     expect(adapterFor(Person).getSearchIndexes()[0]).toMatchObject({
       name: "people",

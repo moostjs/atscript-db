@@ -15,8 +15,9 @@ export {
   isRetryableDbError,
   aggregateFailure,
   aggregateExpressionsNotSupported,
+  constraintViolation,
 } from "./db-error";
-export type { DbErrorCode } from "./db-error";
+export type { DbErrorCode, TDbErrorEntry, TDbErrorEntryCode, TDbConstraintHint } from "./db-error";
 export { DbEncryption } from "./encryption";
 export type { TDbEncryptionOptions } from "./encryption";
 export { assertGeoPoint, guardFilter, guardQuery, guardAggregate } from "./query/query-guards";
@@ -76,11 +77,16 @@ export {
   describeFulltext,
   defaultFulltextIndex,
 } from "./shared/search-term";
+// ── Since 0.1.165 ────────────────────────────────────────────────────────────
+export { resolveFulltextIndex } from "./shared/search-term";
+export { nestDottedWith } from "./shared/with-nesting";
+export { soleUnionMember } from "./shared/union-shape";
 export { searchMemberKind } from "./shared/search-fields";
 export type { TSearchMemberKind } from "./shared/search-fields";
 
 export type { DbResponse } from "./table/db-readable";
 export { AtscriptDbTable } from "./table/db-table";
+export type { MutationFilter } from "./table/db-table";
 export { AtscriptDbView, isAtscriptDbView, isViewType } from "./table/db-view";
 export type { TViewColumnMapping, TViewJsonType } from "./table/db-view";
 // ── Since 0.1.153: view read pruning ─────────────────────────────────────────
@@ -133,6 +139,7 @@ export type {
   TDbInsertIgnoreSlot,
   TDbInsertIgnoreOptions,
   TInsertOptions,
+  TInsertOneOptions,
   TDbUpdateResult,
   TDbUpdateOptions,
   TDbWriteLimit,
@@ -140,6 +147,7 @@ export type {
   TBulkWriteOptions,
   TDbDeleteResult,
   TDbIndex,
+  TValidateRowsError,
   TDbIndexField,
   TDbDefaultValue,
   TIdDescriptor,

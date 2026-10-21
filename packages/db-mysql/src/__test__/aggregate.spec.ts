@@ -484,9 +484,8 @@ describe("MysqlAdapter aggregate + $search", () => {
     const driver = createMockDriver({ allResult: [] });
     const adapter = new MysqlAdapter(driver);
     const table = new AtscriptDbTable(UsersTable, adapter);
-    expect(adapter.getSearchIndexes().map((i) => i.name)).toContain(
-      "atscript__fulltext__search_idx",
-    );
+    // Declared name since 0.1.165 (the registry key below stays an alias).
+    expect(adapter.getSearchIndexes().map((i) => i.name)).toContain("search_idx");
 
     await table.aggregate({
       filter: {},
@@ -504,7 +503,7 @@ describe("MysqlAdapter aggregate + $search", () => {
         filter: {},
         controls: { $groupBy: ["status"], $search: "hello", $index: "nope_idx" },
       } as any),
-    ).rejects.toThrow("No FULLTEXT index found for search");
+    ).rejects.toThrow('Search index "nope_idx" not found');
   });
 
   it("no $search leaves the grouped SQL byte-identical, and a blank term is no term", async () => {

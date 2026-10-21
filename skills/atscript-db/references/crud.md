@@ -44,6 +44,16 @@ await users.bulkReplace(rows, { maxDepth: 5 })                    // nested-writ
 
 Server validates with mode `'replace'` — all non-optional non-defaulted fields must be present. `replaceOne` / `bulkReplace` are FULL — omitted optional fields end up `null` in storage on every adapter (since 0.1.128 the SQL adapters assign every column in their `UPDATE`-based replace — `NULL`, or `DEFAULT` for a column whose function default the engine owns; before, an omitted column silently kept its old value on SQLite/PostgreSQL/MySQL). `replaceMany` is NOT a full replace: on every adapter it is a `$set`-style merge of the given columns on each matched row (SQL `UPDATE … SET`, Mongo `updateMany` + `$set`, memory merge) — omitted optional fields KEEP their stored values; versioned tables bump `version` per matched row. `replaceMany` validates in `replace` mode WITHOUT requiring the PK (0.1.162; before: no validation at all); nav fields → `INVALID_QUERY`.
 
+TOP-LEVEL `number.timestamp.created` (incl. `| null`) is INSERT-ONLY (0.1.165; nested ones, e.g. `audit.at`, are replaced with their object): every replace (`replaceOne` / `bulkReplace` / `replaceMany` / HTTP `PUT`) keeps the stored value, and a replace or patch payload's value is DROPPED (no forging). ≤ 0.1.164 a replace omitting it reset it to now. SQL adapters leave the column out of the replace (`TDbFieldMeta.insertOnly`), Mongo maps it to `$<col>` in `$replaceWith`, memory carries it over.
+
+## `insertOne` returning (0.1.165)
+
+`insertOne(row, { returning: true | ["id", "createdAt"] })` → `{ insertedId, row }` — read back by PK in the insert's transaction (defaults, stamps, version included). With `onConflict: "ignore"` a skipped row → `{ conflict: true }`, no `row`. `insertOne` only. Not exposed over HTTP.
+
+## Validate without writing — `validateRows` (0.1.165)
+
+`await table.validateRows(rows, mode = "insert" | "replace" | "patch", { fk? })` → `[{ index, path, message }]` (`[]` = all valid). Clones each row, applies the defaults/stamps of that write, validates with its validator + context. `fk: true` looks every non-null FK up on EVERY adapter (native-FK adapters otherwise only fail at write time). Use it for imports / dry runs — `preValidateItems` is `@internal`. `getValidator("insert" | "bulkReplace" | "bulkUpdate" | "patch")` called WITHOUT a context now validates in that mode (≤ 0.1.164 rejected rows missing PK / defaults / FKs / nav fields); it applies no defaults.
+
 ## Updates / patches
 
 ```ts
@@ -245,12 +255,22 @@ try {
 } catch (e) {
   if (e instanceof DbError) {
     e.code; // 'CONFLICT' | 'FK_VIOLATION' | 'NOT_FOUND' | 'CASCADE_CYCLE' | 'INVALID_QUERY' | 'DEPTH_EXCEEDED' | …
-    e.errors; // Array<{ path: string; message: string }>
+    e.errors; // Array<{ path, message, code?, params?, details? }>
   }
 }
 ```
 
-Other codes: `SPACE_CLOSED` (0.1.148 — the `DbSpace` was closed, see [getting-started.md](getting-started.md#closing-a-space-01148); moost-db 503), `ON_CONFLICT_NOT_SUPPORTED` (0.1.148, 400). `CONFLICT` = unique violation OR (0.1.143) a nested write naming a related row outside the record's relation — see [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143). Moost controllers (`moost-db`) map `CONFLICT → 409` and every other `DbError` code → 400. `ValidatorError → 400`. Body shape: `{ statusCode, message, errors }`.
+Constraint violations (0.1.165) — one entry PER FIELD of the violated constraint; match on `entry.code`, never on message text (messages changed in 0.1.165; engine text is in `details`, never sent over HTTP):
+
+| Entry `code`  | `DbError.code` | `params`                                                        | Notes                                                                                   |
+| ------------- | -------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `UNIQUE`      | `CONFLICT`     | `{ index, fields }` — `index` = declared name or `"primaryKey"` | compound key → one entry per field (≤ 0.1.164: `householdId,` / index name / `PRIMARY`) |
+| `FK_MISSING`  | `FK_VIOLATION` | `{ fields, target }` (+ `ambiguous: true`)                      | only the failing key (SQLite probes it; ≤ 0.1.164 every FK field)                       |
+| `FK_RESTRICT` | `CONFLICT`     | `{ table, referencedBy?, fields? }`                             | blocked delete; `path` = table name                                                     |
+
+Custom adapters: throw `constraintViolation(code, { columns?, name?, referencedBy?, primaryKey? }, rawText)` (from `@atscript/db`, physical names) and let the table layer normalize.
+
+Other codes: `SPACE_CLOSED` (0.1.148 — the `DbSpace` was closed, see [getting-started.md](getting-started.md#closing-a-space-01148); moost-db 503), `ON_CONFLICT_NOT_SUPPORTED` (0.1.148, 400). `CONFLICT` = unique violation OR (0.1.143) a nested write naming a related row outside the record's relation — see [relations.md § Nested-write integrity](relations.md#nested-write-integrity-01143). Moost controllers (`moost-db`) map `CONFLICT → 409` and every other `DbError` code → 400. `ValidatorError → 400`. Body shape: `{ statusCode, message, code, errors }` — `code` = the `DbError` code, entries carry `code` / `params` (0.1.165).
 
 ## Search
 
@@ -262,6 +282,8 @@ await users.vectorSearchWithCount(vector, q)            // { data, count }
 ```
 
 Guard with `users.isSearchable()` / `users.isVectorSearchable()` — adapters without override throw.
+
+Fulltext (0.1.165): the 3rd arg / `$index` is the DECLARED `@db.index.fulltext` name on every adapter; old names (`atscript__fulltext__<name>` on PG/MySQL, `DEFAULT` on Mongo) still resolve and are listed in `getSearchIndexes()[i].aliases`. Unknown → `Search index "<n>" not found`. No `$sort` → relevance order on every adapter (PG `ts_rank` + weights, SQLite `bm25` + weights, MySQL `MATCH`, Mongo `textScore`), exact-number hits first, PK tie-break (Mongo classic `_id`; Atlas `$search` has none); `$sort` replaces it. PG cost: `to_tsvector` recomputed per matched row before LIMIT — narrow broad terms with a filter.
 
 `controls.$select` on `vectorSearch*` / `geoSearch*` projects exactly like `findMany` (inclusion + exclusion, nested paths) on every adapter; ≤ 0.1.142 the SQL adapters returned every column (incl. `@db.writeOnly`, also over HTTP `$vector` / `/geo`).
 

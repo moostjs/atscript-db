@@ -50,7 +50,15 @@ Not every relationship is mandatory. Use `?` to make a foreign key nullable — 
 ```atscript
 @db.rel.FK
 assigneeId?: User.id
+
+// the same optional foreign key, always present in the row type (since 0.1.165)
+@db.rel.FK
+reviewerId: User.id | null
 ```
+
+`Target.id | null` is accepted only with a single chain reference: a union with another type (`User.id | string`) is still refused.
+
+`/meta` serves both forms with the same `ref` and FK marker. The atscript-ui value-help picker reads the `| null` form only from its next release; until then, declare UI-facing optional foreign keys with `?`.
 
 This is common for fields like "assignee" or "reviewer" where a record may not have a related parent yet. See [Loading Relations — Nullable FK Lifecycle](./loading#nullable-fk-lifecycle) for how null FKs behave at query time.
 

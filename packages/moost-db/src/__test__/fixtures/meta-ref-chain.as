@@ -75,3 +75,16 @@ export interface VersionedDoc {
     @db.column 'doc_slug'
     slug: string
 }
+
+// `Dict.code | null` and `Dict.code?` are the same optional FK (since 0.1.165).
+@db.table 'nullable_fk'
+export interface NullableFk {
+    @meta.id
+    id: number
+
+    @db.rel.FK 'a'
+    optionalCode?: Dict.code
+
+    @db.rel.FK 'b'
+    nullableCode: Dict.code | null
+}

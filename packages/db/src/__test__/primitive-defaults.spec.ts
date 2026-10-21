@@ -383,7 +383,10 @@ describe("number.timestamp.updated", () => {
 
       await events.replaceOne({ ...noUpdated, audit: {} } as any);
       const replaced = lastCall(mock, "replaceOne").args[1];
-      expect(replaced.createdAt).toBe(replaced.updatedAt);
+      // Since 0.1.165 `number.timestamp.created` is insert-only: a replace
+      // leaves it out (the adapter keeps the stored value).
+      expect(replaced.createdAt).toBeUndefined();
+      expect(replaced.updatedAt).toBe(replaced.audit.at);
     } finally {
       clock.mockRestore();
     }

@@ -342,6 +342,54 @@ describe("text / vector / geo index gating through hasField", () => {
     expect(search).toHaveBeenCalledTimes(1);
   });
 
+  // Since 0.1.165 adapters report declared names and list the old names as
+  // `aliases` — a request naming an alias is gated as the index it resolves to.
+  it("an index alias resolves to its index (and inherits its visibility)", async () => {
+    HIDDEN = new Set(["secretNote"]);
+    const { c, table, search } = await accounts();
+    table.getSearchIndexes.mockReturnValue([
+      {
+        name: "txt_idx",
+        aliases: ["atscript__fulltext__txt_idx"],
+        type: "text",
+        fields: ["title", "secretNote"],
+        isDefault: true,
+      },
+      {
+        name: "note_idx",
+        aliases: ["atscript__fulltext__note_idx"],
+        type: "text",
+        fields: ["note"],
+      },
+    ]);
+    await c.query("?$search=n1&$index=atscript__fulltext__note_idx");
+    expect(search).toHaveBeenCalledTimes(1);
+    const hidden = await c.query("?$search=zebra&$index=atscript__fulltext__txt_idx");
+    expect(errorsOf(hidden)).toEqual([
+      { path: "$index", message: 'Search index "atscript__fulltext__txt_idx" not found' },
+    ]);
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  // Review fix: a declared name wins over another index's alias (the order
+  // the core resolves `$index` in), so the gate checks the index that runs.
+  it("a declared name is matched before an alias of another index", async () => {
+    HIDDEN = new Set(["secretNote"]);
+    const { c, table, search } = await accounts();
+    table.getSearchIndexes.mockReturnValue([
+      {
+        name: "txt_idx",
+        aliases: ["note_idx"],
+        type: "text",
+        fields: ["secretNote"],
+        isDefault: true,
+      },
+      { name: "note_idx", type: "text", fields: ["note"] },
+    ]);
+    await c.query("?$search=n1&$index=note_idx");
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
   it("SECURITY: a hidden DEFAULT text index answers like no index — never a native search over it", async () => {
     HIDDEN = new Set(["secretNote"]);
     const { c, search, findMany, aggregate } = await accounts();
@@ -638,17 +686,20 @@ describe("$with relation names are checked at every level (hasField on the full 
     expect((r as HttpError).body).toMatchObject(unknown("owner", "(none)"));
   });
 
+  // Since 0.1.165 a dotted name IS its nested form (`owner.org` →
+  // `owner($with=org)`), so it answers exactly like it: the failing level's
+  // relation name and that level's visible relations.
   it("dotted names check every segment the same way", async () => {
     HIDDEN = new Set(["owner.org"]);
     const c = await tasks();
     expect(((await c.query("?$with=owner.org")) as HttpError).body).toMatchObject(
-      unknown("owner.org", "(none)"),
+      unknown("org", "(none)"),
     );
     expect(((await c.query("?$with=owner.nope")) as HttpError).body).toMatchObject(
-      unknown("owner.nope", "(none)"),
+      unknown("nope", "(none)"),
     );
     expect(((await c.query("?$with=title.x")) as HttpError).body).toMatchObject(
-      unknown("title.x", "owner"),
+      unknown("title", "owner"),
     );
   });
 

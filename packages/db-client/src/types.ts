@@ -163,11 +163,40 @@ export interface PageResult<T> {
   count: number;
 }
 
-/** Server error response shape (matches moost-db error transform). */
+/**
+ * Per-call options of the `Client` read / write methods (since 0.1.165).
+ */
+export interface TClientCallOptions {
+  /**
+   * Cancels the request. An aborted request rejects with a `TransportError`
+   * whose `aborted` is `true` (the `AbortError` is its `cause`).
+   */
+  signal?: AbortSignal;
+}
+
+/** One entry of a server error's `errors` list. */
+export interface ServerErrorEntry {
+  path: string;
+  message: string;
+  /** Machine-readable reason (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`, …). @since 0.1.165 */
+  code?: string;
+  /** Values the message names, for translating it. @since 0.1.165 */
+  params?: Record<string, unknown>;
+  details?: unknown[];
+}
+
+/**
+ * Server error response shape (matches moost-db error transform). Open to
+ * extra fields (since 0.1.165): a handler's own error body (`quota`, `tier`,
+ * …) reads without a cast — type it with `ClientError<B>`.
+ */
 export interface ServerError {
   message: string;
   statusCode: number;
-  errors?: Array<{ path: string; message: string; details?: unknown[] }>;
+  /** The `DbError` code (`CONFLICT`, `FK_VIOLATION`, …) or a handler's own. @since 0.1.165 */
+  code?: string;
+  errors?: ServerErrorEntry[];
+  [key: string]: unknown;
 }
 
 // ── Type Helpers ────────────────────────────────────────────────────────────
@@ -193,6 +222,19 @@ export type DataOf<T> = T extends { type: { __dataType?: infer D } }
       ? I
       : Record<string, unknown>
     : D & Record<string, unknown>
+  : Record<string, unknown>;
+
+/**
+ * The row type a read answers with: {@link DataOf} without its
+ * `Record<string, unknown>` widening, which would make `DbResponse`'s
+ * `Omit` collapse every field to `unknown` (since 0.1.165).
+ */
+export type ResponseDataOf<T> = T extends { type: { __dataType?: infer D } }
+  ? unknown extends D
+    ? T extends new (...a: any[]) => infer I
+      ? I
+      : Record<string, unknown>
+    : D
   : Record<string, unknown>;
 
 /**
@@ -230,7 +272,7 @@ export type IdOf<T> = T extends { __pk: infer PK } ? PK : unknown;
  * short-circuits to the data type. `$actions` / `$disabledReasons` are always
  * optional — the server emits them only when the request set `?$actions=true`.
  */
-export type ClientResponse<T, Q> = DbResponse<DataOf<T>, NavOf<T>, Q> & {
+export type ClientResponse<T, Q> = DbResponse<ResponseDataOf<T>, NavOf<T>, Q> & {
   /**
    * Server-evaluated per-row availability for `'row'` and `'rows'`-level
    * actions. Each entry is the `name` of an action that is NOT disabled for

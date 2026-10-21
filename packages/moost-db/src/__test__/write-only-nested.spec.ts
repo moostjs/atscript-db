@@ -3,6 +3,8 @@ import { createAdapter as createMemory } from "@atscript/db-memory";
 import { createAdapter as createSqlite } from "@atscript/db-sqlite";
 import type { DbSpace } from "@atscript/db";
 
+import { HttpError } from "@moostjs/event-http";
+
 import { AsDbController } from "../as-db.controller";
 import { DbDecorations } from "../decorations/db-decorations.decorator";
 import { createMockApp, prepareFixtures } from "./test-utils";
@@ -18,10 +20,11 @@ import { createMockApp, prepareFixtures } from "./test-utils";
 let WoNestedOwner: any;
 let WoNestedChild: any;
 let WoNestedDecorations: any;
+let WoNestedGrandchild: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ WoNestedOwner, WoNestedChild, WoNestedDecorations } =
+  ({ WoNestedOwner, WoNestedChild, WoNestedDecorations, WoNestedGrandchild } =
     await import("./fixtures/write-only-nested.as"));
 });
 
@@ -42,15 +45,19 @@ describe.each([
     spaces.push(space);
     const owners = space.getTable(WoNestedOwner);
     const children = space.getTable(WoNestedChild);
+    const grandchildren = space.getTable(WoNestedGrandchild);
     if (sql) {
       await space.getAdapter(WoNestedOwner).ensureTable();
       await space.getAdapter(WoNestedChild).ensureTable();
+      await space.getAdapter(WoNestedGrandchild).ensureTable();
     }
     await owners.insertMany([{ id: 1, title: "t", secret: { ...SECRET } }] as never);
     await children.insertMany([{ id: 1, ownerId: 1 }] as never);
+    await grandchildren.insertMany([{ id: 1, childId: 1 }] as never);
     return {
       owners: new AsDbController(createMockApp(), owners as any),
       children: new AsDbController(createMockApp(), children as any),
+      grandchildren: new AsDbController(createMockApp(), grandchildren as any),
     };
   }
 
@@ -83,6 +90,41 @@ describe.each([
     expect(rows[0].owner.secret).toEqual({ salt: "S" });
     const all = rowsOf(await children.query("?$with=owner"));
     expect(all[0].owner.secret).toEqual({ salt: "S" });
+  });
+
+  // Since 0.1.165 a dotted `$with` loads (as its nested form) — and is sealed
+  // and vetoed per level exactly like the nested form.
+  it("dotted $with: the leaf two hops away stays sealed; filtering on it is refused", async () => {
+    const { grandchildren } = await boot();
+    const rows = rowsOf(await grandchildren.query("?$with=child.owner"));
+    expect(rows[0].child.owner.secret).toEqual({ salt: "S" });
+    const sub = rowsOf(await grandchildren.query("?$with=child.owner($select=secret)"));
+    expect(sub[0].child.owner.secret).toEqual({ salt: "S" });
+    const probe = await grandchildren.query("?$with=child.owner(secret.hash=H)").catch((e) => e);
+    expect(probe).toBeInstanceOf(HttpError);
+    expect((probe as HttpError).body.statusCode).toBe(400);
+  });
+
+  it("dotted $with reaches the controller's overlays already nested (one level per relation)", async () => {
+    const space = create();
+    spaces.push(space);
+    const seen: unknown[] = [];
+    class Ctrl extends AsDbController {
+      protected override validateControls(controls: Record<string, unknown>, type: any) {
+        seen.push(JSON.parse(JSON.stringify(controls.$with ?? null)));
+        return super.validateControls(controls, type);
+      }
+    }
+    const ctrl = new Ctrl(createMockApp(), space.getTable(WoNestedGrandchild) as any);
+    await ctrl.query("?$with=child.owner($select=title)").catch(() => undefined);
+    expect(seen[0]).toEqual([
+      {
+        name: "child",
+        controls: {
+          $with: [{ name: "owner", filter: {}, controls: { $select: ["title"] }, insights: {} }],
+        },
+      },
+    ]);
   });
 
   it("a parent `requires` naming a write-only descendant is refused at boot", async () => {

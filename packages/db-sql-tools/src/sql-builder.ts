@@ -146,6 +146,8 @@ export function buildInsertMany(
  * Builds a SELECT statement with optional sort, limit, offset, projection.
  * `table` may be a derived source (a pruned view read, since 0.1.153).
  * `lock` (since 0.1.162) appends a row-locking clause — see {@link readLockSql}.
+ * `defaultOrder` (since 0.1.165) is the ORDER BY list used when `$sort` orders
+ * nothing — a search's relevance order; its params bind after the WHERE's.
  */
 export function buildSelect(
   dialect: SqlDialect,
@@ -153,6 +155,7 @@ export function buildSelect(
   where: TSqlFragment,
   controls?: DbControls,
   lock?: TDbReadLock,
+  defaultOrder?: TSqlFragment,
 ): TSqlFragment {
   const cols = buildProjection(dialect, controls?.$select);
   let sql = `SELECT ${fromSourceHint(table)}${cols} FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
@@ -161,6 +164,9 @@ export function buildSelect(
   const orderBy = orderByList(dialect, controls?.$sort, controls?.$nulls);
   if (orderBy) {
     sql += ` ORDER BY ${orderBy}`;
+  } else if (defaultOrder?.sql) {
+    sql += ` ORDER BY ${defaultOrder.sql}`;
+    params.push(...defaultOrder.params);
   }
 
   if (controls?.$limit !== undefined) {
@@ -306,7 +312,9 @@ export interface TReplaceColumn {
  * and an omitted PK must never be nulled or re-defaulted. Static value
  * defaults are filled SDK-side before the adapter sees the row, so only
  * native function defaults are flagged. Ignored and derived descriptors in
- * `fields` are skipped, so `fieldDescriptors` works too.
+ * `fields` are skipped, so `fieldDescriptors` works too. Insert-only columns
+ * (`number.timestamp.created`, since 0.1.165) are left out: a replace keeps
+ * their stored value.
  */
 export function replaceColumnsFor(
   fields: readonly TDbFieldMeta[],
@@ -314,7 +322,8 @@ export function replaceColumnsFor(
 ): TReplaceColumn[] {
   const out: TReplaceColumn[] = [];
   for (const fd of fields) {
-    if (fd.ignored || fd.isPrimaryKey || fd.derived) continue;
+    // Insert-only columns (`number.timestamp.created`) keep their stored value (since 0.1.165).
+    if (fd.ignored || fd.isPrimaryKey || fd.derived || fd.insertOnly) continue;
     const def = fd.defaultValue;
     out.push({
       name: fd.physicalName,

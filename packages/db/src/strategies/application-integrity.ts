@@ -4,6 +4,7 @@ import type { FilterExpr } from "@uniqu/core";
 
 import { type BaseDbAdapter } from "../base-adapter";
 import { DbError } from "../db-error";
+import { fkMissingEntries, fkRestrictEntry } from "../table/error-utils";
 import { UniquSelect } from "../query/uniqu-select";
 import type { TableMetadata } from "../table/table-metadata";
 import type {
@@ -122,12 +123,12 @@ export class ApplicationIntegrity extends IntegrityStrategy {
         if (count < expectedCount) {
           const sample = firstValues.slice(0, 3).join(", ");
           const suffix = firstValues.length > 3 ? `, ... (${firstValues.length} total)` : "";
-          throw new DbError("FK_VIOLATION", [
-            {
-              path: fk.fields.join(", "),
-              message: `FK constraint violation: "${fk.fields.join(", ")}" references non-existent record in "${fk.targetTable}" (values: ${sample}${suffix})`,
-            },
-          ]);
+          // One entry per FK field (since 0.1.165; before, one entry whose
+          // path joined the fields: "a, b").
+          throw new DbError(
+            "FK_VIOLATION",
+            fkMissingEntries(fk.fields, fk.targetTable, `values: ${sample}${suffix}`),
+          );
         }
       });
     }
@@ -268,10 +269,11 @@ export class ApplicationIntegrity extends IntegrityStrategy {
             target.count(childFilter).then((count) => {
               if (count > 0) {
                 throw new DbError("CONFLICT", [
-                  {
-                    path: tableName,
-                    message: `Cannot delete from "${tableName}": ${count} record(s) in "${target.childTable}" (${target.fk.fields.join(", ")}) reference it (RESTRICT)`,
-                  },
+                  fkRestrictEntry(tableName, {
+                    referencedBy: target.childTable,
+                    count,
+                    fields: target.fk.fields,
+                  }),
                 ]);
               }
             }),

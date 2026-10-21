@@ -5,6 +5,7 @@ import {
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
   DbError,
+  constraintViolation,
   isConflict,
   DbSpace,
   containsRelationFilter,
@@ -359,14 +360,13 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Builds the duplicate-primary-key {@link DbError}. The reported `path` is the
-   * physical `@meta.id` name, falling back to the first (logical) primary key,
-   * then `""`. Centralized so the insert and re-key paths raise an identical
-   * CONFLICT.
+   * Builds the duplicate-primary-key {@link DbError} — a primary-key hint the
+   * table layer turns into the key's logical paths. Centralized so the insert
+   * and re-key paths raise an identical CONFLICT.
    */
   private _pkConflict(): DbError {
-    const path = this._table.metaIdPhysical ?? this._table.primaryKeys[0] ?? "";
-    return new DbError("CONFLICT", [{ path, message: "Duplicate primary key" }]);
+    // The table layer resolves the hint into the key's logical paths (since 0.1.165).
+    return constraintViolation("CONFLICT", { primaryKey: true }, "Duplicate primary key");
   }
 
   /**
@@ -592,12 +592,11 @@ export class MemoryAdapter extends BaseDbAdapter {
     return state.uniqueIndexes.map((index) => {
       const tuple = uniqueTupleKey(index, row);
       if (tuple !== undefined && tupleTaken(index, tuple, excludeKey)) {
-        throw new DbError("CONFLICT", [
-          {
-            path: index.fields[0] ?? index.name,
-            message: `Duplicate value for unique index "${index.name}"`,
-          },
-        ]);
+        throw constraintViolation(
+          "CONFLICT",
+          { name: index.name, columns: index.fields },
+          `Duplicate value for unique index "${index.name}"`,
+        );
       }
       return tuple;
     });
@@ -756,6 +755,17 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
+   * Carries the old row's insert-only values (`number.timestamp.created`)
+   * over to a full replace (since 0.1.165).
+   */
+  private _keepInsertOnly(target: Record<string, unknown>, oldRow: Record<string, unknown>): void {
+    for (const col of this._table.insertOnlyPhysical) {
+      if (col in oldRow) target[col] = oldRow[col];
+      else delete target[col];
+    }
+  }
+
+  /**
    * Applies a merge-style update to `row` IN PLACE — the memory analogue of
    * `buildMongoUpdateDoc`:
    *
@@ -868,6 +878,7 @@ export class MemoryAdapter extends BaseDbAdapter {
     const next = cloneValue(data);
     this._bumpVersion(next, row);
     this._bumpCounters(next, row);
+    this._keepInsertOnly(next, row);
 
     const tuples = this._enforceUniqueIndexes(state, next, key);
     this._commitRow(state, key, row, next, tuples);

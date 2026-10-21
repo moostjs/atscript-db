@@ -12,7 +12,9 @@ import type {
   TDbActionInfo,
   TMetaResponse,
   Uniquery,
+  WithRelation,
 } from "@atscript/db";
+import { nestDottedWith } from "@atscript/db";
 import { Get, HttpError, httpKind, prerenderJson } from "@moostjs/event-http";
 import { current, Moost, Param, useControllerContext, type TConsoleBase } from "moost";
 import { parseUrl } from "@uniqu/url";
@@ -617,12 +619,14 @@ export abstract class AsReadableController<
    * an unhandled 500. Quote such values: `?name='json-w1'`.
    */
   protected parseUrlOr400(queryString: string): ReturnType<typeof parseUrl> {
+    let parsed: ReturnType<typeof parseUrl>;
     try {
-      return parseUrl(queryString);
+      parsed = parseUrl(queryString);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw badRequest("", `Malformed query string: ${detail}`);
     }
+    return nestParsedWith(parsed);
   }
 
   /**
@@ -967,4 +971,34 @@ function applyMetaHeaders(response: TMetaHttpResponse, caching: TDbMetaHttpCachi
     }
   }
   response.setHeader(varyKey, tokens.join(", "));
+}
+
+/**
+ * A dotted `$with` (`$with=a.b(…)`) rewritten into its nested form
+ * (`$with=a($with=b(…))`) right after parsing (since 0.1.165), so every
+ * per-level step — relation-name checks, write-only vetoes, seals, row-scope
+ * overlays — sees one relation per level. The intermediate levels get the
+ * `$with` insight their nested form records. Unchanged when no entry is dotted.
+ */
+function nestParsedWith(parsed: ReturnType<typeof parseUrl>): ReturnType<typeof parseUrl> {
+  const controls = parsed.controls as Record<string, unknown> | undefined;
+  const withRels = controls?.$with;
+  if (!Array.isArray(withRels) || withRels.length === 0) return parsed;
+  const nested = nestDottedWith(withRels as WithRelation[]);
+  if (nested === withRels) return parsed;
+  const insights = parsed.insights as Map<string, Set<string>> | undefined;
+  if (insights) {
+    // Keys added below are prefixes already carrying `$with`: re-visiting them is a no-op.
+    for (const path of insights.keys()) {
+      if (!insights.get(path)?.has("$with")) continue;
+      const segments = path.split(".");
+      for (let i = 1; i < segments.length; i++) {
+        const prefix = segments.slice(0, i).join(".");
+        let ops = insights.get(prefix);
+        if (!ops) insights.set(prefix, (ops = new Set()));
+        ops.add("$with");
+      }
+    }
+  }
+  return { ...parsed, controls: { ...controls, $with: nested } } as ReturnType<typeof parseUrl>;
 }

@@ -644,8 +644,9 @@ export function buildSelect(
   where: TSqlFragment,
   controls?: DbControls,
   lock?: TDbReadLock,
+  defaultOrder?: TSqlFragment,
 ): TSqlFragment {
-  return _buildSelect(mysqlDialect, table, where, controls, lock);
+  return _buildSelect(mysqlDialect, table, where, controls, lock, defaultOrder);
 }
 
 /**

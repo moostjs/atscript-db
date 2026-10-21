@@ -58,8 +58,9 @@ Each `DbSpace` instance owns its adapters; create a new space per test to guaran
 
 ## FTS5 specifics
 
-- `@db.index.fulltext 'search', 3` on one field + `@db.index.fulltext 'search', 1` on another → one FTS5 virtual table backing both with rank weighting.
-- `search('term', query, indexName)` calls `SELECT rowid FROM <fts> WHERE <fts> MATCH 'term' ORDER BY rank`; the outer query applies `filter` / `$sort` / pagination.
+- `@db.index.fulltext 'search', 3` on one field + `@db.index.fulltext 'search', 1` on another → one FTS5 virtual table backing both; the weights feed `bm25()`.
+- `search('term', query, indexName)` joins the FTS5 table on `rowid`; no `$sort` → `ORDER BY bm25(<fts>, w…), <pk>` (0.1.165; ≤ 0.1.164 rowid order); a whole-number term ranks exact-number hits first. `$sort` replaces it.
+- Raw SQL against an FTS5 table: better-sqlite3 binds JS integers as REAL and FTS5 ignores `rowid = ?` with a REAL value (returns every match) — write `rowid = CAST(? AS INTEGER)` or bind a `BigInt`. atscript-db's own queries never bind a rowid.
 - `isSearchable()` → `true` when any `@db.index.fulltext` is declared (an integer-only index counts, but has no FTS5 table).
 
 ## sqlite-vec / vec0 specifics

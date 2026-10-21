@@ -1,6 +1,7 @@
 import path from "path";
 
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
+import { DbError } from "@atscript/db";
 import { prepareFixtures as prepare } from "@atscript/typescript/test-utils";
 import dbPlugin from "@atscript/db/plugin";
 import MysqlPlugin from "../plugin/index";
@@ -96,4 +97,14 @@ export function createMockDriver(
     },
     async close(): Promise<void> {},
   };
+}
+
+/** The `DbError` a write rejects with (fails the test when it resolves or throws something else). */
+export async function caught(p: Promise<unknown>): Promise<DbError> {
+  const error = await p.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(error).toBeInstanceOf(DbError);
+  return error as DbError;
 }

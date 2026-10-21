@@ -54,6 +54,7 @@ import type {
   PageResult,
   PatchOf,
   RowOf,
+  TClientCallOptions,
   TDbQueryTarget,
 } from "./types";
 
@@ -64,6 +65,8 @@ type Response<T, Q> = ClientResponse<T, Q>;
 /** A read row: the response over the own fields plus the declared decorations `D`, each optional. */
 type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
 type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+/** Per-request transport options of the private request helpers. */
+type TRequestOptions = { allowEmpty?: boolean; signal?: AbortSignal };
 
 /**
  * HTTP client for moost-db REST endpoints.
@@ -135,10 +138,11 @@ export class Client<
    * The response type narrows by the literal `$with` array in `query` —
    * relations not listed in `$with` are stripped from the row type.
    */
-  async query<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
+  async query<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
+    opts?: TClientCallOptions,
   ): Promise<DecoratedRow<T, Q, D>[]> {
-    return this._get("query", query as Uniquery) as Promise<DecoratedRow<T, Q, D>[]>;
+    return this._get("query", query as Uniquery, opts?.signal) as Promise<DecoratedRow<T, Q, D>[]>;
   }
 
   // ── GET /query ($count) ────────────────────────────────────────────────────
@@ -146,11 +150,15 @@ export class Client<
   /**
    * `GET /query` with `$count: true` — returns record count.
    */
-  async count(query?: { filter?: Uniquery<Own<T>, Nav<T>>["filter"] }): Promise<number> {
-    return this._get("query", {
-      ...query,
-      controls: { $count: true },
-    } as Uniquery) as Promise<number>;
+  async count(
+    query?: { filter?: Uniquery<Own<T>, Nav<T>>["filter"] },
+    opts?: TClientCallOptions,
+  ): Promise<number> {
+    return this._get(
+      "query",
+      { ...query, controls: { $count: true } } as Uniquery,
+      opts?.signal,
+    ) as Promise<number>;
   }
 
   // ── GET /query ($groupBy) ──────────────────────────────────────────────────
@@ -174,6 +182,7 @@ export class Client<
    */
   async aggregate<const Q extends AggregateQuery<Own<T>>>(
     query: Q & ValidGroupBy<Own<T>, Q>,
+    opts?: TClientCallOptions,
   ): Promise<
     Q["controls"]["$select"] extends readonly (
       | string
@@ -185,7 +194,7 @@ export class Client<
       ? AggregateResult<Own<T>, Q["controls"]["$select"]>[]
       : Record<string, unknown>[]
   > {
-    return this._get("query", query as unknown as Uniquery) as Promise<any>;
+    return this._get("query", query as unknown as Uniquery, opts?.signal) as Promise<any>;
   }
 
   // ── GET /pages ─────────────────────────────────────────────────────────────
@@ -196,15 +205,17 @@ export class Client<
    * Response rows narrow by the literal `$with` array — same algebra as
    * {@link query}.
    */
-  async pages<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
+  async pages<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
     page = 1,
     size = 10,
+    opts?: TClientCallOptions,
   ): Promise<PageResult<DecoratedRow<T, Q, D>>> {
-    return this._get("pages", {
-      ...query,
-      controls: { ...query?.controls, $page: page, $size: size },
-    } as Uniquery) as Promise<PageResult<DecoratedRow<T, Q, D>>>;
+    return this._get(
+      "pages",
+      { ...query, controls: { ...query?.controls, $page: page, $size: size } } as Uniquery,
+      opts?.signal,
+    ) as Promise<PageResult<DecoratedRow<T, Q, D>>>;
   }
 
   // ── GET /geo ───────────────────────────────────────────────────────────────
@@ -218,29 +229,36 @@ export class Client<
    * in `query.controls`; filter / `$select` / `$with` / `$skip` / `$limit`
    * compose as usual.
    */
-  async geoSearch<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
+  async geoSearch<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     point: [number, number],
     query?: Q,
+    opts?: TClientCallOptions,
   ): Promise<Array<DecoratedRow<T, Q, D> & { $distance: number }>> {
-    return this._get("geo", {
-      ...query,
-      controls: { ...query?.controls, $center: point.join(",") },
-    } as Uniquery) as Promise<Array<DecoratedRow<T, Q, D> & { $distance: number }>>;
+    return this._get(
+      "geo",
+      { ...query, controls: { ...query?.controls, $center: point.join(",") } } as Uniquery,
+      opts?.signal,
+    ) as Promise<Array<DecoratedRow<T, Q, D> & { $distance: number }>>;
   }
 
   /**
    * `GET /geo` with `$page` / `$size` — paginated distance-ranked search.
    */
-  async geoPages<Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
+  async geoPages<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     point: [number, number],
     query?: Q,
     page = 1,
     size = 10,
+    opts?: TClientCallOptions,
   ): Promise<PageResult<DecoratedRow<T, Q, D> & { $distance: number }>> {
-    return this._get("geo", {
-      ...query,
-      controls: { ...query?.controls, $center: point.join(","), $page: page, $size: size },
-    } as Uniquery) as Promise<PageResult<DecoratedRow<T, Q, D> & { $distance: number }>>;
+    return this._get(
+      "geo",
+      {
+        ...query,
+        controls: { ...query?.controls, $center: point.join(","), $page: page, $size: size },
+      } as Uniquery,
+      opts?.signal,
+    ) as Promise<PageResult<DecoratedRow<T, Q, D> & { $distance: number }>>;
   }
 
   // ── GET /one/:id ───────────────────────────────────────────────────────────
@@ -252,18 +270,17 @@ export class Client<
    * `query.controls` — same algebra as {@link query}.
    */
   async one<
-    Q extends { controls?: DecoratedControls<T, D> } = {
+    const Q extends { controls?: DecoratedControls<T, D> } = {
       controls?: DecoratedControls<T, D>;
     },
-  >(id: Id<T>, query?: Q): Promise<DecoratedRow<T, Q, D> | null> {
+  >(id: Id<T>, query?: Q, opts?: TClientCallOptions): Promise<DecoratedRow<T, Q, D> | null> {
     const controlStr = query?.controls
       ? buildUrl({ controls: query.controls as UniqueryControls })
       : "";
-    return this._getOrNull<Q>(this._idUrl("one", id, controlStr)) as Promise<DecoratedRow<
-      T,
-      Q,
-      D
-    > | null>;
+    return this._getOrNull<Q>(
+      this._idUrl("one", id, controlStr),
+      opts?.signal,
+    ) as Promise<DecoratedRow<T, Q, D> | null>;
   }
 
   // ── POST / ─────────────────────────────────────────────────────────────────
@@ -272,30 +289,33 @@ export class Client<
    * `POST /` — insert one record. The version column (if any) is optional —
    * the server initialises it; `$cas` is rejected (no meaning on insert).
    */
-  async insert(data: PatchOf<T>): Promise<TDbInsertResult>;
+  async insert(data: PatchOf<T>, opts?: TClientCallOptions): Promise<TDbInsertResult>;
   /**
    * `POST /` — insert many records.
    */
-  async insert(data: PatchOf<T>[]): Promise<TDbInsertManyResult>;
+  async insert(data: PatchOf<T>[], opts?: TClientCallOptions): Promise<TDbInsertManyResult>;
   /**
    * `POST /?$onConflict=ignore` — insert one record, skipping it when it
    * collides on the primary key or a unique index (since 0.1.148).
    */
-  async insert(data: PatchOf<T>, opts: { onConflict: "ignore" }): Promise<TDbInsertIgnoreResult>;
+  async insert(
+    data: PatchOf<T>,
+    opts: TClientCallOptions & { onConflict: "ignore" },
+  ): Promise<TDbInsertIgnoreResult>;
   /**
    * `POST /?$onConflict=ignore` — insert many records, skipping the ones that
    * collide; the result reports inserted and skipped input indices (since 0.1.148).
    */
   async insert(
     data: PatchOf<T>[],
-    opts: { onConflict: "ignore" },
+    opts: TClientCallOptions & { onConflict: "ignore" },
   ): Promise<TDbInsertManyIgnoreResult>;
   async insert(
     data: PatchOf<T> | PatchOf<T>[],
-    opts?: { onConflict?: "ignore" },
+    opts?: TClientCallOptions & { onConflict?: "ignore" },
   ): Promise<unknown> {
     const query = opts?.onConflict === "ignore" ? "?$onConflict=ignore" : "";
-    return this._request("POST", query, await this._prepareWrite(data, "insert"));
+    return this._request("POST", query, await this._prepareWrite(data, "insert"), opts);
   }
 
   // ── PATCH / ────────────────────────────────────────────────────────────────
@@ -309,11 +329,15 @@ export class Client<
    * {@link VersionMismatchError}; a PK-only body with a version is a real
    * write (the server bumps the version).
    */
-  async update(data: PatchOf<T> | PatchOf<T>[]): Promise<TDbUpdateResult> {
+  async update(
+    data: PatchOf<T> | PatchOf<T>[],
+    opts?: TClientCallOptions,
+  ): Promise<TDbUpdateResult> {
     return this._request(
       "PATCH",
       "",
       await this._prepareWrite(data, "patch"),
+      opts,
     ) as Promise<TDbUpdateResult>;
   }
 
@@ -323,11 +347,12 @@ export class Client<
    * `PUT /` — full replace one or many records by primary key. Same OCC
    * shapes as {@link update}; the version column itself is optional.
    */
-  async replace(data: RowOf<T> | RowOf<T>[]): Promise<TDbUpdateResult> {
+  async replace(data: RowOf<T> | RowOf<T>[], opts?: TClientCallOptions): Promise<TDbUpdateResult> {
     return this._request(
       "PUT",
       "",
       await this._prepareWrite(data, "replace"),
+      opts,
     ) as Promise<TDbUpdateResult>;
   }
 
@@ -336,8 +361,13 @@ export class Client<
   /**
    * `DELETE /:id` or `DELETE /?k1=v1&k2=v2` — remove a record by primary key.
    */
-  async remove(id: Id<T>): Promise<TDbDeleteResult> {
-    return this._request("DELETE", this._idUrl("", id)) as Promise<TDbDeleteResult>;
+  async remove(id: Id<T>, opts?: TClientCallOptions): Promise<TDbDeleteResult> {
+    return this._request(
+      "DELETE",
+      this._idUrl("", id),
+      undefined,
+      opts,
+    ) as Promise<TDbDeleteResult>;
   }
 
   // ── GET /meta ──────────────────────────────────────────────────────────────
@@ -549,7 +579,7 @@ export class Client<
 
   private _postQueryTarget(action: TDbActionInfo, body: unknown): Promise<unknown> {
     const path = action.queryTarget?.url ?? action.value;
-    return this._requestUrl("POST", `${this._baseUrl}${path}`, body, true);
+    return this._requestUrl("POST", `${this._baseUrl}${path}`, body, { allowEmpty: true });
   }
 
   /**
@@ -706,7 +736,7 @@ export class Client<
   }
 
   private _postAction(action: TDbActionInfo, body: unknown): Promise<unknown> {
-    return this._requestUrl("POST", `${this._baseUrl}${action.value}`, body, true);
+    return this._requestUrl("POST", `${this._baseUrl}${action.value}`, body, { allowEmpty: true });
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
@@ -735,18 +765,21 @@ export class Client<
     return query ? `${path}?${query}` : path;
   }
 
-  private async _getOrNull<Q>(endpoint: string): Promise<Response<T, Q> | null> {
+  private async _getOrNull<Q>(
+    endpoint: string,
+    signal?: AbortSignal,
+  ): Promise<Response<T, Q> | null> {
     try {
-      return (await this._request("GET", endpoint)) as Response<T, Q>;
+      return (await this._request("GET", endpoint, undefined, { signal })) as Response<T, Q>;
     } catch (e) {
       if (e instanceof ClientError && e.status === 404) return null;
       throw e;
     }
   }
 
-  private async _get(endpoint: string, query?: Uniquery): Promise<unknown> {
+  private async _get(endpoint: string, query?: Uniquery, signal?: AbortSignal): Promise<unknown> {
     const qs = query ? buildUrl(query) : "";
-    return this._request("GET", `${endpoint}${qs ? `?${qs}` : ""}`);
+    return this._request("GET", `${endpoint}${qs ? `?${qs}` : ""}`, undefined, { signal });
   }
 
   private async _resolveHeaders(): Promise<Record<string, string>> {
@@ -834,8 +867,13 @@ export class Client<
     return { body, etag };
   }
 
-  private _request(method: THttpMethod, endpoint: string, body?: unknown): Promise<unknown> {
-    return this._requestUrl(method, this._endpointUrl(endpoint), body);
+  private _request(
+    method: THttpMethod,
+    endpoint: string,
+    body?: unknown,
+    opts?: TRequestOptions,
+  ): Promise<unknown> {
+    return this._requestUrl(method, this._endpointUrl(endpoint), body, opts);
   }
 
   /** `baseUrl + path` joined with an endpoint relative to this controller (`""`, `meta`, `?q`…). */
@@ -849,15 +887,16 @@ export class Client<
     method: THttpMethod,
     url: string,
     body?: unknown,
-    allowEmpty = false,
+    opts?: TRequestOptions,
   ): Promise<unknown> {
     const headers: Record<string, string> = { ...(await this._resolveHeaders()) };
     const init: RequestInit = { method, headers };
+    if (opts?.signal) init.signal = opts.signal;
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return this._send(url, init, allowEmpty);
+    return this._send(url, init, opts?.allowEmpty === true);
   }
 
   private async _send(url: string, init: RequestInit, allowEmpty: boolean): Promise<unknown> {

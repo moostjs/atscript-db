@@ -198,6 +198,12 @@ export interface TDbDecorateContext {
 export interface TDbIndexFieldPaths {
   /** The name a request addresses the index by (`$index` for text and geo, `$vector` for vector). */
   name: string;
+  /**
+   * Other names that address the same index (the adapter's deprecated
+   * `TSearchIndexInfo.aliases`); omitted when there are none.
+   * @since 0.1.165
+   */
+  aliases?: readonly string[];
   type: "text" | "vector" | "geo";
   /**
    * Logical field paths the index reads. An index whose coverage cannot be
@@ -1122,14 +1128,16 @@ export class AsDbReadableController<
   private _searchIndexFieldPaths(): TDbIndexFieldPaths[] {
     const advertised =
       typeof this.readable.getSearchIndexes === "function" ? this.readable.getSearchIndexes() : [];
-    const out = advertised.map(
-      (info): TDbIndexFieldPaths => ({
+    const out = advertised.map((info): TDbIndexFieldPaths => {
+      const entry: TDbIndexFieldPaths = {
         name: info.name,
         type: info.type === "vector" ? "vector" : "text",
         fields: info.fields ?? this._invertibleFields,
         isDefault: info.isDefault === true,
-      }),
-    );
+      };
+      if (info.aliases?.length) entry.aliases = info.aliases;
+      return entry;
+    });
     // An adapter that flags no default: its `DEFAULT`-named index (document
     // adapters alias their default there), else the first of that type.
     for (const type of ["text", "vector"] as const) {
@@ -1243,7 +1251,10 @@ export class AsDbReadableController<
     }
     if (!this.readable.isSearchable()) return undefined; // the searchable-column fallback
     if (name) {
-      const entry = this.indexFieldPaths().find((e) => e.type === "text" && e.name === name);
+      // Declared names first, then aliases — the core's `$index` resolution order.
+      const text = this.indexFieldPaths().filter((e) => e.type === "text");
+      const entry =
+        text.find((e) => e.name === name) ?? text.find((e) => e.aliases?.includes(name) === true);
       if (!entry || !this._indexVisible(entry)) {
         return badRequest("$index", searchIndexNotFoundMessage(name));
       }

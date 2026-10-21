@@ -141,6 +141,12 @@ The adapter creates a companion `articles__fts__<indexName>` virtual table and t
 const results = await articles.search("database optimization", {});
 ```
 
+Without a `$sort`, results are ordered by FTS5 `bm25()` (with the index's per-field weights), then the primary key (since 0.1.165; before, in rowid order).
+
+::: warning Raw SQL against FTS5 tables: bind rowids as integers
+better-sqlite3 binds a JavaScript integer as `REAL`, and FTS5 silently ignores a `rowid = ?` constraint whose value is `REAL` — the query returns every match. atscript-db's own queries never bind a rowid (they join on `rowid`), but in your own SQL write `rowid = CAST(? AS INTEGER)` or bind a `BigInt`.
+:::
+
 ::: info Search term syntax
 The `$search` text is quoted before it reaches FTS5's `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are searched as plain text). Words are AND-ed; a `"quoted phrase"` stays a phrase; a trailing `*` is a prefix match (`quok*`). FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, column filters) are not available through `$search`.
 :::

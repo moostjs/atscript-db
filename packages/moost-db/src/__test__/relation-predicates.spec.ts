@@ -419,6 +419,19 @@ describe("the gate", () => {
     expect(rows[0].ticket?.issues[0].ticket?.status).toBe("open");
   });
 
+  // Since 0.1.165 a dotted `$with` is the nested form (before: silently dropped).
+  it("a dotted $with loads exactly like its nested form", async () => {
+    const { controller } = bind();
+    const dotted = (await controller.query(
+      "?$with=ticket.issues.ticket($select=status)&$sort=id",
+    )) as Array<{ id: number; ticket?: { issues: Array<{ ticket?: { status: string } }> } }>;
+    const nested = await controller.query(
+      "?$with=ticket($with=issues($with=ticket($select=status)))&$sort=id",
+    );
+    expect(dotted[0].ticket?.issues[0].ticket?.status).toBe("open");
+    expect(dotted).toEqual(nested);
+  });
+
   it("at most REL_FILTER_CLIENT_MAX_NODES (8) predicates per request, $with sub-filters included", async () => {
     const { controller } = bind(AsDbReadableController, "teams");
     expect(await controller.query(`?${manyPredicates(8)}`)).toEqual([]);

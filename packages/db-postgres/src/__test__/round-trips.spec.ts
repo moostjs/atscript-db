@@ -140,7 +140,7 @@ describe("[postgres] per-table memos", () => {
     a.length = 0;
     expect(adapter.getSearchIndexes()).toEqual(b);
     expect(b.map((i) => [i.name, i.type, i.isDefault])).toEqual([
-      ["atscript__fulltext__cap_both_ft", "text", true],
+      ["cap_both_ft", "text", true],
       ["embedding", "vector", true],
     ]);
     expect(adapter.isSearchable()).toBe(true);

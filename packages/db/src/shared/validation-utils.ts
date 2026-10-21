@@ -12,9 +12,16 @@ import type {
   TMessages,
   TQueryScope,
 } from "@atscript/core";
-import { isInterface, isQueryComparison, isQueryLogical, isRef, isStructure } from "@atscript/core";
+import {
+  isGroup,
+  isInterface,
+  isQueryComparison,
+  isQueryLogical,
+  isRef,
+  isStructure,
+} from "@atscript/core";
 
-import { getAnnotationAlias } from "./annotation-utils";
+import { getAnnotationAlias, isNullMember } from "./annotation-utils";
 import { DB_ENTITY_ANNOTATIONS } from "./derived-rules";
 
 /** Options of {@link validateRefArgument}. */
@@ -160,6 +167,24 @@ export interface TFKFieldMatch {
 }
 
 /**
+ * The chain reference (`User.id`) an `@db.rel.FK` field's type names, else
+ * `undefined`. `User.id | null` names it too (since 0.1.165) — the same
+ * optional foreign key as `field?: User.id`; any other union does not.
+ */
+export function fkChainRef(def: SemanticNode | undefined): SemanticRefNode | undefined {
+  if (def && isRef(def))
+    return (def as SemanticRefNode).hasChain ? (def as SemanticRefNode) : undefined;
+  if (!def || !isGroup(def) || def.op !== "|") return undefined;
+  const members = def.unwrap();
+  const values = members.filter((m) => !isNullMember(m));
+  if (values.length !== 1 || values.length === members.length) return undefined;
+  const [only] = values;
+  return only && isRef(only) && (only as SemanticRefNode).hasChain
+    ? (only as SemanticRefNode)
+    : undefined;
+}
+
+/**
  * Find all `@db.rel.FK` fields on a type that reference `targetTypeName`.
  * Resolves `extends` to include inherited fields.
  */
@@ -195,13 +220,8 @@ export function findFKFieldsPointingTo(
       continue;
     }
 
-    const def = prop.getDefinition();
-    if (!def || !isRef(def)) {
-      continue;
-    }
-
-    const ref = def as SemanticRefNode;
-    if (!ref.hasChain) {
+    const ref = fkChainRef(prop.getDefinition());
+    if (!ref) {
       continue;
     }
 

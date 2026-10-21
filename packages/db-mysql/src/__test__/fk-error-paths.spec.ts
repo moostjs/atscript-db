@@ -117,15 +117,19 @@ describe("MysqlAdapter — FK error mapping", () => {
       expect(error).toBeInstanceOf(DbError);
       const dbErr = error as DbError;
       expect(dbErr.code).toBe("CONFLICT");
-      expect(dbErr.errors[0].path).toBe("PRIMARY");
+      // Since 0.1.165 the key is resolved: PRIMARY → the primary-key field.
+      expect(dbErr.errors[0].path).toBe("id");
+      expect(dbErr.errors[0].params).toEqual({ index: "primaryKey", fields: ["id"] });
     }
   });
 
+  // The key name lands in `params.index` (since 0.1.165): PRIMARY resolves to
+  // the primary key, an unknown key keeps the engine's name.
   it.each([
-    ["order-items.PRIMARY", "PRIMARY"],
-    ["tbl_ü.PRIMARY", "PRIMARY"],
+    ["order-items.PRIMARY", "primaryKey"],
+    ["tbl_ü.PRIMARY", "primaryKey"],
     ["my table.email-idx", "email-idx"],
-    ["PRIMARY", "PRIMARY"],
+    ["PRIMARY", "primaryKey"],
   ])("extracts the key name of a duplicate on %s", async (key, expected) => {
     const message = `Duplicate entry "x' for key 'y" for key '${key}'`;
     const err = Object.assign(new Error(message), { errno: 1062, sqlMessage: message });
@@ -133,7 +137,7 @@ describe("MysqlAdapter — FK error mapping", () => {
     const error = await table
       .insertOne({ id: 1, title: "Test", projectId: 1 } as any)
       .catch((e: unknown) => e);
-    expect((error as DbError).errors[0].path).toBe(expected);
+    expect((error as DbError).errors[0].params?.index).toBe(expected);
   });
 
   it("should use physical column when FK column has no logical mapping", async () => {
@@ -161,7 +165,7 @@ describe("MysqlAdapter — FK error mapping", () => {
 
   it("should enrich empty-path FK errors with FK field names from metadata", async () => {
     // When the adapter can't extract a field from the error message,
-    // the table layer's _enrichFkViolation fills in all FK field names.
+    // the table layer normalizes it (normalizeWriteErrors).
     const err = Object.assign(new Error("FK violation"), {
       errno: 1452,
       sqlMessage: "A foreign key constraint fails (unrecognizable format)",

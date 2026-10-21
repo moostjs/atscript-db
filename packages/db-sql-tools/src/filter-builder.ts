@@ -294,5 +294,139 @@ export function buildWhere(
     opts || containsRelationFilter(filter)
       ? createFilterVisitor(dialect, { ...opts, aliasSeq: opts?.aliasSeq ?? { n: 0 } })
       : getVisitor(dialect);
-  return walkFilter(filter, visitor) ?? EMPTY_AND;
+  return walkFilter(collapseOrEqualities(filter), visitor) ?? EMPTY_AND;
+}
+
+/**
+ * Rewrites every `$or` whose branches include several equalities on ONE
+ * field (`{ f: v }`, `{ f: { $eq: v } }`, `{ f: { $in: [...] } }`, v a
+ * non-null scalar, all of one JS type) into one `{ f: { $in: [...] } }`
+ * branch (since 0.1.165).
+ * Same rows, but one predicate instead of an OR chain whose depth grows with
+ * the batch: SQLite refuses an expression tree deeper than 1000, which a
+ * per-row key filter over a large batch reached. Composite, null, operator
+ * and lone branches are kept as they are. Returns `filter` itself when
+ * nothing changes.
+ */
+export function collapseOrEqualities(filter: FilterExpr): FilterExpr {
+  if (!filter || typeof filter !== "object") return filter;
+  const node = filter as Record<string, unknown>;
+  let out: Record<string, unknown> | undefined;
+  const and = node.$and;
+  if (Array.isArray(and)) {
+    const next = collapseEach(and);
+    if (next !== and) (out ??= { ...node }).$and = next;
+  }
+  const or = node.$or;
+  if (Array.isArray(or)) {
+    let next = collapseEach(or);
+    if (next.length > 1 && mayRepeatField(next)) next = mergeEqualityBranches(next);
+    if (next !== or) (out ??= { ...node }).$or = next;
+  }
+  const not = node.$not;
+  if (not && typeof not === "object") {
+    const next = collapseOrEqualities(not as FilterExpr);
+    if (next !== not) (out ??= { ...node }).$not = next;
+  }
+  return (out ?? filter) as FilterExpr;
+}
+
+/** `list` with each object child collapsed — the same array when none changed (copied on the first change). */
+function collapseEach(list: unknown[]): unknown[] {
+  let copy: unknown[] | undefined;
+  for (let i = 0; i < list.length; i++) {
+    const child = list[i];
+    const next =
+      child && typeof child === "object" ? collapseOrEqualities(child as FilterExpr) : child;
+    if (next !== child) (copy ??= list.slice())[i] = next;
+  }
+  return copy ?? list;
+}
+
+/** The sole key of a one-key, non-operator branch — allocation-free. */
+function soleField(branch: unknown): string | undefined {
+  if (!branch || typeof branch !== "object" || Array.isArray(branch)) return undefined;
+  let field: string | undefined;
+  for (const key in branch) {
+    if (field !== undefined) return undefined;
+    field = key;
+  }
+  return field === undefined || field.startsWith("$") ? undefined : field;
+}
+
+/**
+ * Cheap pre-check for {@link mergeEqualityBranches}: whether two branches
+ * share a sole field (long lists go straight to the merge pass).
+ */
+function mayRepeatField(branches: readonly unknown[]): boolean {
+  if (branches.length > 64) return true;
+  for (let i = 1; i < branches.length; i++) {
+    const field = soleField(branches[i]);
+    if (field === undefined) continue;
+    for (let j = 0; j < i; j++) if (soleField(branches[j]) === field) return true;
+  }
+  return false;
+}
+
+/** The `$or` branches with the equalities of each repeated field merged into one `$in`. */
+function mergeEqualityBranches(branches: unknown[]): unknown[] {
+  const eqs = branches.map(equalityOf);
+  // Per field: how many branches, and the literals' JS type — `"mixed"` once
+  // they differ: MySQL compares `col IN (1, 'a')` as strings, unlike
+  // `col = 1 OR col = 'a'`.
+  const fields = new Map<string, { count: number; type?: string; values?: unknown[] }>();
+  for (const eq of eqs) {
+    if (!eq) continue;
+    let entry = fields.get(eq.field);
+    if (!entry) fields.set(eq.field, (entry = { count: 0 }));
+    entry.count++;
+    for (const v of eq.values) {
+      const t = typeof v;
+      entry.type = entry.type === undefined || entry.type === t ? t : "mixed";
+    }
+  }
+  const merges = (field: string) => {
+    const entry = fields.get(field)!;
+    return entry.count > 1 && entry.type !== "mixed";
+  };
+  if (!eqs.some((eq) => eq && merges(eq.field))) return branches;
+  const out: unknown[] = [];
+  for (let i = 0; i < branches.length; i++) {
+    const eq = eqs[i];
+    if (!eq || !merges(eq.field)) {
+      out.push(branches[i]);
+      continue;
+    }
+    const entry = fields.get(eq.field)!;
+    if (!entry.values) {
+      entry.values = [];
+      out.push({ [eq.field]: { $in: entry.values } });
+    }
+    entry.values.push(...eq.values);
+  }
+  return out;
+}
+
+/** `{ field, values }` of a one-field equality branch, else `undefined`. */
+function equalityOf(branch: unknown): { field: string; values: unknown[] } | undefined {
+  if (!branch || typeof branch !== "object" || Array.isArray(branch)) return undefined;
+  const keys = Object.keys(branch);
+  if (keys.length !== 1 || keys[0]!.startsWith("$")) return undefined;
+  const field = keys[0]!;
+  const value = (branch as Record<string, unknown>)[field];
+  if (isScalar(value)) return { field, values: [value] };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const ops = Object.keys(value);
+  if (ops.length !== 1) return undefined;
+  const operand = (value as Record<string, unknown>)[ops[0]!];
+  if (ops[0] === "$eq" && isScalar(operand)) return { field, values: [operand] };
+  if (ops[0] === "$in" && Array.isArray(operand) && operand.every(isScalar)) {
+    return { field, values: operand };
+  }
+  return undefined;
+}
+
+function isScalar(value: unknown): boolean {
+  const t = typeof value;
+  return t === "string" || t === "number" || t === "boolean" || t === "bigint";
 }

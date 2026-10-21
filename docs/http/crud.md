@@ -591,6 +591,30 @@ Built-in write failures are **thrown** as `HttpError` (since 0.1.128) rather tha
 
 Validation runs automatically on `POST`, `PUT`, and `PATCH` using the constraints defined in your `.as` schema.
 
+**Constraint error example.** A `DbError` envelope carries the error's `code` and, on constraint violations, a `code` and `params` per entry (since 0.1.165) — one entry per field of the violated key; see [Constraint violations](/api/crud#constraint-errors). The engine's own text never reaches the client.
+
+```json
+{
+  "message": "The combination of \"householdId\", \"name\" must be unique",
+  "statusCode": 409,
+  "code": "CONFLICT",
+  "errors": [
+    {
+      "path": "householdId",
+      "message": "The combination of \"householdId\", \"name\" must be unique",
+      "code": "UNIQUE",
+      "params": { "index": "household_name", "fields": ["householdId", "name"] }
+    },
+    {
+      "path": "name",
+      "message": "The combination of \"householdId\", \"name\" must be unique",
+      "code": "UNIQUE",
+      "params": { "index": "household_name", "fields": ["householdId", "name"] }
+    }
+  ]
+}
+```
+
 ## Query Validation
 
 Invalid query parameters return `400` errors with descriptive messages:
