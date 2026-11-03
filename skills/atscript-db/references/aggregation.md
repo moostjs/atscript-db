@@ -33,7 +33,9 @@ await orders.aggregate({
 | `$skip` / `$limit`  | Page over groups.                                                                                                                                                                             |
 | `$count`            | `[{ count: N }]` = groups surviving `$having` (since 0.1.129).                                                                                                                                |
 | `$search`, `$index` | Not declared on the type (ride the `$`-key pass-through) — text search applied BEFORE grouping (since 0.1.130), see below.                                                                    |
-| `$with`             | Not allowed (HTTP 400).                                                                                                                                                                       |
+| `$from`             | Inner grouped query whose rows this one aggregates — two-level aggregate (0.1.168), see below.                                                                                                |
+| `$with`             | Not allowed (HTTP 400; `aggregate()` rejects a non-empty one since 0.1.168).                                                                                                                  |
+| anything else       | `INVALID_QUERY` / 400 `Unknown aggregate control "$x"` (0.1.168; before: silently ignored → wrong numbers). `$actions` on HTTP `/query` is tolerated and ignored.                             |
 
 ## Invariants
 
@@ -81,7 +83,7 @@ await issues.aggregate({
 | 14  | Expression = number \| name \| `{ $op: '+'\|'-'\|'*'\|'/', $args:[a,b] }` \| unary `{ $op:'-', $args:[a] }` \| `{ $op:'coalesce', $args:[a,b,…] }` — `@db.compute` semantics: IEEE double, NULL propagates, `/` by 0 → `null`. `$as` required; ≤ 64 nodes, depth ≤ 16, ≤ 256 once aliases are inlined; at least one name.                                                     |
 | 15  | Row-level `{ $fn: sum\|avg\|min\|max, $expr, $as }` names FIELDS; group-level `{ $expr, $as }` names ALIASES of numeric entries (acyclic) or numeric `$groupBy` fields. No inline aggregates (`sum(a)/count(*)`): name each, then combine. Operands must be `number` — not decimal / timestamp / string / boolean / JSON / encrypted (`ENC_FIELD_AGG`). Grouped queries ONLY. |
 | 16  | `first` / `last` read a scalar field of ONE representative row per group, ordered by `$rowOrder` (PK appended; NULL key smallest; ties → lowest PK); a NULL on that row is returned. `$rowOrder` is required with them, rejected without. Strict tables: row-level operands = measures, `$rowOrder` keys = dimension or measure.                                              |
-| 17  | `supportsAggregateExpressions()` (default `false`) else `AGG_EXPR_NOT_SUPPORTED` (400); `first`/`last` in `aggregateFns()` else `AGG_FN_NOT_SUPPORTED`. All built-in adapters support both. No per-aggregate `$where` and no per-row computed values on plain reads → a view (`@db.agg.*` with condition, `@db.compute`).                                                     |
+| 17  | `supportsAggregateExpressions()` (default `false`) else `AGG_EXPR_NOT_SUPPORTED` (400); `first`/`last` in `aggregateFns()` else `AGG_FN_NOT_SUPPORTED`. All built-in adapters support both. Per-aggregate conditions: `$where` (0.1.168, below). No per-row computed values on plain reads → a view (`@db.compute`).                                                          |
 | 18  | Reserved aliases (0.1.148): the prefix `__as_` (the engine's own columns) and `_id` (the group key of document stores) are `INVALID_QUERY` in any alias, on every adapter. PostgreSQL `first` / `last` of a native array column picks through `MIN` over the array.                                                                                                           |
 
 Full rules, error messages and per-adapter notes: [docs → Grouped Queries](https://db.atscript.dev/api/aggregation#arithmetic-expressions).
@@ -89,6 +91,40 @@ Full rules, error messages and per-adapter notes: [docs → Grouped Queries](htt
 Operators are binary only (shared with `@db.compute`). For a long expression in code use `parseArith(text)` — re-exported from `@atscript/db` (0.1.168): `{ $fn: "sum", $expr: parseArith("small*1 + medium*2.5 + large*4"), $as: "load" }`. Syntax-only (`SyntaxError` with offset); limits checked at query time.
 
 URL: `sum(price*qty):revenue`, `expr(est/open):avgEst` (write `+` as `%2B`), `first(title):oldest`, `$rowOrder=raisedAt,-id`. Types: `AggregateOfExpr`, `SelectArithExpr`, `ArithExpr` (`@uniqu/core`); expression aliases are `number | null`, first/last = the field's type. `/meta`: `aggregateExpressions`, `fields[P].numeric`, `fields[P].groupable` (since 0.1.148: `true` exactly when `$groupBy` on P passes the gate — physically filterable, and on a table with dimensions a dimension; a distinct-values picker `$groupBy=f&$select=f` needs `filterable ∧ groupable`).
+
+## Field lists, conditions, two-level aggregates (since 0.1.168)
+
+```ts
+await orders.aggregate({
+  filter: { status: "paid" },
+  controls: {
+    $from: {
+      // inner level: groups the filtered rows
+      $groupBy: ["region", "customerId"],
+      $select: [
+        { $fn: "sum", $field: "amount", $as: "spent" },
+        { $fn: "countDistinct", $field: ["productId", "variant"], $as: "items" }, // field list
+      ],
+    },
+    $groupBy: ["region"], // outer level: reads inner columns only
+    $select: [
+      "region",
+      { $fn: "avg", $field: "spent", $as: "avgSpent" },
+      { $fn: "count", $field: "*", $where: { items: { $gt: 1 } }, $as: "multi" }, // condition
+    ],
+  },
+});
+```
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 19  | Field list: `countDistinct` only (non-empty, no repeats, no `*`); a row with ANY null field is not counted (every adapter). Default key `countDistinct_a_b`; URL `countDistinct(a,b)`. Each field checked like an aggregate field (visibility, `ENC_FIELD_AGG`, strict mode, quantity refs). Distinctness: MySQL/PG follow the column collation, SQLite/Mongo/memory compare exactly. Adapter flag `supportsDistinctFieldLists()` else `AGG_FIELD_LIST_NOT_SUPPORTED`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 20  | `$where` (a filter, `$as` REQUIRED) on any aggregate or `{ $fn, $expr }` — NOT on `first`/`last` (`INVALID_QUERY`), not on buckets. Only matching rows count — EXACTLY the rows the same filter returns on that adapter: `agg(f, x\|w) ≡ agg(f ∧ w, x)` (NULL/missing, `$ne`/`$nin`/`$not` and array fields read as that adapter's filter reads them: SQL — a NULL comparison is never true; Mongo/memory — `$ne: v` matches missing, `{ tags: "a" }` matches an array holding `"a"`); an always-false condition (`$in: []`, `$or: []`) aggregates no row; a count over none is `0`, `sum`/`avg`/`min`/`max` `null`. URL `sum(amount\|status=paid):paid`. Fields gated EXACTLY like filter fields: hidden → `Unknown field`, writeOnly / filter-policy refusals, encrypted → `ENC_FIELD_FILTER`, value types. No `$some`/`$none`/`$geoWithin` inside (`INVALID_QUERY`). Flag `supportsConditionalAggregates()` else `AGG_WHERE_NOT_SUPPORTED`. |
+| 21  | `$from` = inner level: `$groupBy` (required, non-empty), `$select`, `$having`, `$rowOrder`, `$nulls` ONLY; the query `filter` / `$search` feed it. Root = outer level: reads INNER COLUMNS only (inner `$groupBy` keys + inner aliases) — a table field that is not one → `AGG_NESTED_UNKNOWN_COLUMN`. Outer `$having`/`$sort` name outer result columns. Outer may group by an inner alias and bucket an inner timestamp column (timestamp key or `min`/`max`/`first`/`last` of one); strict mode does not apply to it. No outer `$groupBy` = one row. Depth 2; no `$with`.                                                                                                                                                                                                                                                                                                                                                                   |
+| 22  | Inner level is validated like a standalone grouped query FIRST (visibility, writeOnly, encryption, strict), then the level rules (codes `AGG_NESTED_DEPTH` / `_CONTROL` / `_UNGROUPED` / `_DUPLICATE_COLUMN` / `_UNKNOWN_COLUMN` / `_NOT_NUMERIC` on the error entries). `$from` on `findMany`/`count`/`/pages`/`$with`/query targets/value-help → rejected. Flag `supportsNestedAggregates()` else `AGG_NESTED_NOT_SUPPORTED`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 23  | All three run on every bundled adapter; `/meta`: `distinctFieldLists`, `conditionalAggregates`, `nestedAggregates`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+Full rules: [docs → Two-Level Aggregates](https://db.atscript.dev/api/two-level-aggregates), [Conditional aggregates](https://db.atscript.dev/api/aggregation#conditional-aggregates).
 
 ## `$search` on an aggregate query (since 0.1.130)
 
@@ -103,7 +139,8 @@ Search narrows the ROWS, `$groupBy` shapes what is left — the adapter applies 
 ```ts
 import type { AggregateQuery, AggregateExpr, AggregateResult } from "@atscript/db/agg";
 import { resolveAlias, isAggregateExpr, isBucketExpr, assertAggregateFn } from "@atscript/db/agg";
-import { evaluateExpr } from "@atscript/db"; // shared expression evaluator (adapter authors)
+import { evaluateExpr, aggregateColumns } from "@atscript/db"; // adapter authors: expression evaluator, an aggregate's columns
+import type { NestedAggregateQuery, NestedAggregateResult, ValidNested } from "@uniqu/core"; // two-level typing
 ```
 
 ## References

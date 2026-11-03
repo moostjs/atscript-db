@@ -106,7 +106,7 @@ export { fkColumns, fkKey } from "./schema/fk-diff";
 export { ALL_AGGREGATE_FNS } from "./query/aggregate-fns";
 export { DbSpace } from "./table/db-space";
 export type { TAdapterFactory, TDbSpaceOptions } from "./table/db-space";
-export { UniquSelect } from "./query/uniqu-select";
+export { UniquSelect, aggregateColumns } from "./query/uniqu-select";
 export type { TExprAggregate, TFirstLast, TRowOrderKey } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { isVersionExemptPatch } from "./patch/version-exempt";
@@ -308,6 +308,13 @@ export {
 } from "./query/buckets";
 export type { TResolvedBucket, TBucketFieldSource } from "./query/buckets";
 export { numericOperandProblem } from "./query/aggregate-expr";
+// ── Two-level aggregates, aggregate controls (since 0.1.168) ─────────────────
+export {
+  AGGREGATE_CONTROLS,
+  checkAggregateControls,
+  holdsNumbers,
+  resolveNestedOrThrow,
+} from "./query/nested-aggregate";
 export type {
   BucketExpr,
   BucketUnit,

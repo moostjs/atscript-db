@@ -293,6 +293,32 @@ describe("SqliteAdapter aggregate + $search (FTS5)", () => {
     }
   });
 
+  // ── two-level aggregates (since 0.1.168) ───────────────────────────────
+
+  const perCategory = (extra: Record<string, unknown> = {}) =>
+    table.aggregate({
+      filter: {},
+      controls: {
+        $from: { $groupBy: ["category"], $select: [CNT] },
+        $select: [
+          { $fn: "sum", $field: "cnt", $as: "total" },
+          { $fn: "count", $field: "*", $as: "categories" },
+        ],
+        ...extra,
+      } as any,
+    });
+
+  it("a two-level aggregate searches the rows its inner level groups", async () => {
+    expect(await perCategory({ $search: "machine" })).toEqual([{ total: 3, categories: 2 }]);
+    expect(driver.last().sql).toContain("MATCH ?");
+    expect(await perCategory()).toEqual([{ total: 6, categories: 3 }]);
+  });
+
+  it("a two-level aggregate with a blank $search answers no rows, and $count 0", async () => {
+    expect(await perCategory({ $search: "   " })).toEqual([]);
+    expect(await perCategory({ $search: "   ", $count: true })).toEqual([{ count: 0 }]);
+  });
+
   // ── $index ─────────────────────────────────────────────────────────────
 
   describe("$index", () => {

@@ -18,6 +18,7 @@ import { numericTypeProblem } from "../shared/numeric-operand";
 import type { TableMetadata } from "../table/table-metadata";
 import type { TDbFieldMeta } from "../types";
 import { isJsonValueField } from "./buckets";
+import { aggregateColumns } from "./uniqu-select";
 
 /**
  * Output aliases of the computed `$select` entries of a grouped query —
@@ -107,7 +108,8 @@ function boundedArithNames(expr: unknown): string[] {
  */
 export function entryFields(item: unknown): string[] {
   if (typeof item === "string") return [item];
-  if (isAggregateExpr(item)) return item.$field === "*" ? [] : [item.$field];
+  // `countDistinct` may list several fields (each is a path of its own)
+  if (isAggregateExpr(item)) return [...aggregateColumns(item)];
   if (isAggregateOfExpr(item)) return boundedArithNames(item.$expr);
   if (isBucketExpr(item)) return [item.$field];
   return [];
@@ -170,7 +172,10 @@ export function checkAggregateExprs(
   for (const item of select as unknown[]) {
     if (isAggregateExpr(item)) {
       const counts = item.$fn === "count" || item.$fn === "countDistinct";
-      numericAlias.set(resolveAlias(item), counts || numericField(item.$field));
+      numericAlias.set(
+        resolveAlias(item),
+        counts || (typeof item.$field === "string" && numericField(item.$field)),
+      );
     } else if (isAggregateOfExpr(item) || isSelectArithExpr(item)) {
       numericAlias.set(item.$as, true);
     }
@@ -217,11 +222,13 @@ export function checkAggregateExprs(
 
   for (const item of select as unknown[]) {
     if (!isFirstLast(item)) continue;
-    const fd = fdOf(item.$field);
+    // (a field list is `countDistinct`'s only)
+    const field = item.$field as string;
+    const fd = fdOf(field);
     if (fd && (isJsonValueField(fd) || fd.designType === "array")) {
       issues.push({
         path: "$select",
-        message: `${item.$fn}("${item.$field}") needs a scalar field — not a JSON value or array`,
+        message: `${item.$fn}("${field}") needs a scalar field — not a JSON value or array`,
       });
     }
   }

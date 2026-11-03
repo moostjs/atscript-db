@@ -14,7 +14,10 @@ import { notNullExpr } from "./mongo-view-expr";
  *   skip null / missing values);
  * - `countDistinct(f)` → `{ $addToSet: { $ifNull: [f, "$$REMOVE"] } }`, a
  *   SET of the non-null values (`$$REMOVE` adds nothing) the caller turns
- *   into its size with {@link distinctCountExpr}.
+ *   into its size with {@link distinctCountExpr}; over a field list
+ *   (`countDistinct` only — the caller rejects any other `fn`), the SET of
+ *   the rows' value arrays, a row with any null / missing field (or failing
+ *   `where`) adding nothing.
  *
  * `where` (a conditional aggregate's row predicate, an aggregation
  * expression) swaps the source for `{ $cond: [where, src, null] }` — the
@@ -22,25 +25,33 @@ import { notNullExpr } from "./mongo-view-expr";
  * the counts `{ $sum: { $cond: [where (and not null), 1, 0] } }`.
  *
  * @param fn - The aggregate function (re-asserted: `INVALID_QUERY` when unknown).
- * @param src - The source operand (`"$path"`), or `"*"` for `count(*)`.
+ * @param src - The source operand (`"$path"` or an expression), `"*"` for
+ *   `count(*)`, or a list of `"$path"` operands for `countDistinct`.
  * @param where - Row predicate of a conditional aggregate.
  * @param path - Error path of the re-assertion.
  */
 export function buildAccumulator(
   fn: unknown,
-  src: string,
+  src: unknown,
   where?: Document,
   path?: string,
 ): Document {
   assertAggregateFn(fn, path);
+  if (Array.isArray(src)) {
+    const counted = [
+      ...src.map((field) => notNullExpr(field)),
+      ...(where !== undefined ? [where] : []),
+    ];
+    return { $addToSet: { $cond: [{ $and: counted }, src, "$$REMOVE"] } };
+  }
   if (fn === "count") {
     if (src === "*") {
-      return { $sum: where ? { $cond: [where, 1, 0] } : 1 };
+      return { $sum: where !== undefined ? { $cond: [where, 1, 0] } : 1 };
     }
-    const counted = where ? { $and: [where, notNullExpr(src)] } : notNullExpr(src);
+    const counted = where !== undefined ? { $and: [where, notNullExpr(src)] } : notNullExpr(src);
     return { $sum: { $cond: [counted, 1, 0] } };
   }
-  const value = where ? { $cond: [where, src, null] } : src;
+  const value = where !== undefined ? { $cond: [where, src, null] } : src;
   return fn === "countDistinct"
     ? { $addToSet: { $ifNull: [value, "$$REMOVE"] } }
     : { [`$${fn}`]: value };

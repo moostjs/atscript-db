@@ -1,5 +1,6 @@
 import type { DbQuery } from "../types";
 import { isResolvedRelationFilter } from "./relation-filter";
+import { aggregateColumns } from "./uniqu-select";
 
 /**
  * What a read renders: rows (`findOne` / `findMany` / per-partition pages),
@@ -70,6 +71,13 @@ export function queryReadColumns(
   kind: TReadColumnsKind,
   partitionBy?: readonly string[],
 ): Set<string> | undefined {
+  // A two-level aggregate reads the table through its inner level only (the
+  // same filter); the root controls read inner columns.
+  const inner = kind === "aggregate" ? query.controls?.$from : undefined;
+  if (inner) {
+    return queryReadColumns({ ...query, controls: inner }, kind, partitionBy);
+  }
+
   const out = new Set<string>();
   if (!collectFilter(query.filter, out)) return undefined;
   if (kind === "count") return out;
@@ -100,10 +108,13 @@ export function queryReadColumns(
   for (const key of groupBy) out.add(key);
   for (const bucket of select?.buckets ?? []) out.add(bucket.field);
   for (const expr of select?.aggregates ?? []) {
-    if (expr.$field !== "*") out.add(expr.$field);
+    for (const column of aggregateColumns(expr)) out.add(column);
+    // a conditional aggregate reads its condition's columns too
+    if (expr.$where !== undefined && !collectFilter(expr.$where, out)) return undefined;
   }
   for (const e of select?.exprAggregates ?? []) {
     for (const name of e.names) out.add(name);
+    if (e.where !== undefined && !collectFilter(e.where, out)) return undefined;
   }
   for (const e of select?.exprs ?? []) {
     for (const name of e.names) out.add(name);

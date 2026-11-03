@@ -116,6 +116,41 @@ describe("MongoDB view read pruning — pipelines", () => {
     expect(lookups(pipeline)).toEqual(["vp_statuses"]);
   });
 
+  it("two-level and conditional aggregates run pruned, keeping the lookups their columns read", async () => {
+    // the inner condition reads a joined column (customers → regions); the outer level reads inner columns only
+    const query = {
+      filter: {},
+      controls: {
+        $from: {
+          $groupBy: ["status", "customerName"],
+          $select: [
+            { $fn: "count", $field: "*", $as: "n" },
+            {
+              $fn: "sum",
+              $field: "amount",
+              $where: { regionName: { $exists: true } },
+              $as: "inRegion",
+            },
+          ],
+        },
+        $groupBy: ["status"],
+        $select: [
+          "status",
+          { $fn: "sum", $field: "n", $as: "orders" },
+          { $fn: "sum", $field: "inRegion", $as: "inRegion" },
+          { $fn: "count", $field: "*", $where: { inRegion: null }, $as: "noRegion" },
+        ],
+        $sort: { status: 1 },
+      },
+    };
+    const { label, pipeline } = await pipelineOf(() => view().aggregate(query as never));
+    expect(label).toBe("aggregate (pruned view)");
+    expect(lookups(pipeline)).toEqual(["vp_customers", "vp_regions", "vp_statuses"]);
+    const stored = await plain.getView(fx.VpOrderView as never).aggregate(query as never);
+    expect(stored.length).toBeGreaterThan(0);
+    expect(await view().aggregate(query as never)).toEqual(stored);
+  });
+
   it("stages naming a dropped column fall back to the stored view", () => {
     const query = {
       filter: {},

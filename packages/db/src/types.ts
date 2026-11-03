@@ -41,6 +41,13 @@ export type {
 /** Controls with resolved projection. Used in the adapter interface. */
 export interface DbControls extends Omit<_UniqueryControls, "$select" | "$rowOrder"> {
   $select?: UniquSelect;
+  /**
+   * The inner level of a two-level aggregate (since 0.1.168; only on adapters
+   * whose `supportsNestedAggregates()` is true): a grouped aggregate over the
+   * query's filtered rows whose `$select` lists every inner column. The root
+   * controls aggregate its rows — see `BaseDbAdapter.supportsNestedAggregates`.
+   */
+  $from?: DbControls;
 }
 
 /** Query object with resolved projection. Passed to adapter methods. */
@@ -317,6 +324,31 @@ export interface TMetaResponse {
    * @since 0.1.148
    */
   aggregateExpressions?: boolean;
+  /**
+   * Whether the endpoint accepts a conditional aggregate (`$where` on an
+   * aggregate `$select` entry, URL `sum(amount|status=paid):paid`) — see
+   * `BaseDbAdapter.supportsConditionalAggregates()`. The condition's fields
+   * must be filterable (`fields[P].filterable`).
+   *
+   * @since 0.1.168
+   */
+  conditionalAggregates?: boolean;
+  /**
+   * Whether the endpoint accepts `countDistinct` over several fields (URL
+   * `countDistinct(a,b):pairs`) — see `BaseDbAdapter.supportsDistinctFieldLists()`.
+   *
+   * @since 0.1.168
+   */
+  distinctFieldLists?: boolean;
+  /**
+   * Whether the endpoint accepts a two-level aggregate (`$from`, URL
+   * `$from=($groupBy=…&$select=…)`) — the adapter's
+   * `BaseDbAdapter.supportsNestedAggregates()`, unless the controller turned
+   * it off.
+   *
+   * @since 0.1.168
+   */
+  nestedAggregates?: boolean;
   /**
    * Present (true) when the adapter honours a requested NULL placement in
    * sorts: the `$nulls` control (URL suffix `$sort=-amount:last`) and the

@@ -397,6 +397,13 @@ export const mysqlDialect: SqlDialect = {
     `IF(JSON_VALID(${quotedCol}), ${quotedCol}, JSON_QUOTE(${quotedCol}))`,
   // DOUBLE (not DECIMAL): no `div_precision_increment` rounding (MySQL 8.0.17+)
   castDouble: (expr: string) => `CAST(${expr} AS DOUBLE)`,
+  // No aggregate FILTER clause: a conditional aggregate's argument is
+  // `CASE WHEN "c" THEN x END` (since 0.1.168).
+  conditionalAggregate: "case",
+  // Native multi-column COUNT(DISTINCT), which skips a row with any NULL
+  // column; a condition gates each column (since 0.1.168).
+  countDistinctColumns: (columns, when) =>
+    `COUNT(DISTINCT ${columns.map((c) => (when ? `CASE WHEN ${when} THEN ${c} END` : c)).join(", ")})`,
   createViewPrefix: "CREATE OR REPLACE VIEW",
 };
 

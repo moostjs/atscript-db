@@ -159,6 +159,26 @@ A `@db.column.derived` operand field whose source is hidden answers `Unknown fie
 
 **Permission layers.** [`prepareRequest`](./customization#preparerequest) receives the parsed client filter as `ctx.filter`, so a policy can resolve the relations its predicates touch alongside `ctx.controls.$with` (check `ctx.hasRelationFilters` first — reading `ctx.filter` copies it). With `@aooth/arbac-moost`, a client predicate on relation `R` is allowed exactly when the request's `$with` relation policy allows `R`, and the related table's row scope is conjoined into the operand through `transformRelationFilter` — see the [Aooth docs](https://aooth.moost.org).
 
+## Aggregates {#aggregates}
+
+Since 0.1.168 grouped queries carry three more shapes; each is gated like the parts of a plain read it resembles:
+
+| Shape                                         | Gate                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A condition — `sum(amount\|status=paid):paid` | Its fields are filter fields: [`hasField`](./customization#hasfield), `@db.writeOnly`, encryption and the table's filter policy apply exactly as to the request filter. A hidden field answers `Unknown field`, like a nonexistent one.                                                                                                                                                                                                                                           |
+| A field list — `countDistinct(a,b)`           | Each field is an aggregate field, checked on its own.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| A two-level aggregate — `$from=( … )`         | The inner level is gated like a standalone grouped query. A hidden field in either level answers `Unknown field`, never `AGG_NESTED_NOT_NUMERIC`, so the error does not reveal a hidden field's type. [`validateControls`](./customization#validatecontrols) also runs for the inner level. An outer condition or order (`$where`, `$sort`, `$rowOrder`) on an inner `$groupBy` field meets that field's filter / sort policy, as the same condition or order would on the table. |
+
+To turn two-level aggregates off — for every caller or per request — override `nestedAggregates()`:
+
+```typescript
+protected override nestedAggregates(): boolean {
+  return currentScopes().allowsNestedAggregates // a 400 AGG_NESTED_NOT_SUPPORTED otherwise
+}
+```
+
+`/meta.nestedAggregates` follows it when it is constant; a per-request answer should prune `/meta` in [`applyMetaOverlay`](./customization#applymetaoverlay) too. Value-help endpoints, `/pages` and query targets have no aggregates: `$groupBy`, `$from`, conditions and field lists are a 400 there.
+
 ## Relationship to `actions[]`
 
 `crud` and `actions[]` are sibling fields on `/meta` with distinct dispatch

@@ -47,6 +47,14 @@ export type {
   WeekStart,
 };
 
+export type {
+  AggregateStage,
+  NestedAggregateQuery,
+  NestedAggregateResult,
+  StageRow,
+  ValidNested,
+} from "@uniqu/core";
+
 // ── Re-export CRUD result types from @atscript/db ───────────────────────────
 
 export type {

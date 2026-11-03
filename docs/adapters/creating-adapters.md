@@ -717,6 +717,20 @@ class MyAdapter extends BaseDbAdapter {
 
 `assertAggregateFn` accepts every known function, `countDistinct` included; its type `TDbAggregateFn` is uniqu's full `AggregateFn`. `AGG_FN_SQL` from `@atscript/db-sql-tools` maps only the single-name functions — `countDistinct` renders as `COUNT(DISTINCT x)`.
 
+### Conditions, field lists and two-level aggregates {#nested-aggregates}
+
+```typescript
+supportsConditionalAggregates(): boolean // default false
+supportsDistinctFieldLists(): boolean // default false
+supportsNestedAggregates(): boolean // default false
+```
+
+Each opts in to one shape (since 0.1.168). Without it the core rejects the query before `aggregate()` is called — `AGG_WHERE_NOT_SUPPORTED`, `AGG_FIELD_LIST_NOT_SUPPORTED`, `AGG_NESTED_NOT_SUPPORTED` — and moost-db advertises the flags as `/meta.conditionalAggregates`, `distinctFieldLists` and `nestedAggregates`. SQL adapters built on `buildAggregateSelect` / `buildAggregateCount` get all three by setting the dialect's `conditionalAggregate` (`"filter"` or `"case"`) and `countDistinctColumns`.
+
+- **Conditions.** `controls.$select.aggregates[i].$where` and `exprAggregates[i].where` are filters translated like the query filter (physical names, storage values; never `$some` / `$none` or `$geoWithin`, never on `first` / `last`). Aggregate exactly the rows your adapter's filter returns for the same condition (`aggregate(f, x | w)` must equal `aggregate(f ∧ w, x)`, NULL handling included); a `sum` over no matching value is `null`, a count `0`. Keep an always-false condition (`$in: []`, `$or: []`) a condition — never drop it. Use `aggregateColumns(expr)` (from `@atscript/db`) to read an aggregate's columns.
+- **Field lists.** A `countDistinct` `$field` may be a `string[]` of physical columns: count distinct combinations, skipping a row with any `NULL` column.
+- **Two-level aggregates.** `controls.$from` is the inner level's `DbControls` — its `$select` lists every inner column (each `$groupBy` key, then the computed entries); run it over the query's filter and the root `$search`. The root controls aggregate its rows and read inner columns: a key by its physical name, a computed column by its alias. Outer calendar buckets read an inner column (`bucket.fd` is the timestamp field it holds), and an outer `rowOrder` ends with the inner `$groupBy` columns.
+
 ### Aggregate expressions {#aggregate-expressions}
 
 ```typescript

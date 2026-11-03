@@ -15,6 +15,13 @@ export interface THttpErrorEntry {
 }
 
 /**
+ * The message of a two-level aggregate (`$from`) an endpoint does not take
+ * (internal — not exported from the package).
+ */
+export const NESTED_NOT_SUPPORTED_MESSAGE =
+  "Two-level aggregates ($from) are not supported on this endpoint";
+
+/**
  * The structured error envelope every `moost-db` rejection uses (since
  * 0.1.128 all of them do): `{ message, statusCode, errors: [{ path, message }] }`
  * — the same shape the validation interceptor renders for `ValidatorError` /

@@ -1,14 +1,14 @@
 import { buildUrl } from "@uniqu/url/builder";
 import type {
-  AggregateExpr,
-  AggregateOfExpr,
   AggregateQuery,
   AggregateResult,
-  BucketExpr,
-  SelectArithExpr,
+  ComputedExpr,
+  NestedAggregateQuery,
+  NestedAggregateResult,
   Uniquery,
   UniqueryControls,
   ValidGroupBy,
+  ValidNested,
 } from "@uniqu/core";
 import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
@@ -78,6 +78,16 @@ type SingleInsertOf<T> = [keyof InsertOf<T>] extends [never]
   : InsertOf<T>;
 /** The stored row `insert(row, { returning: true })` answers: the `one()` row shape. */
 type InsertedRow<T, D> = DecoratedRow<T, Record<never, never>, D>;
+/** A two-level aggregate query: one with `controls.$from`. */
+type NestedShape = { controls: { $from: object } };
+/** The compile-time check an aggregate query must pass: two-level or flat. */
+type AggregateCheck<T, Q> = Q extends NestedShape ? ValidNested<T, Q> : ValidGroupBy<T, Q>;
+/** The rows `aggregate()` answers for query `Q`. */
+type AggregateRows<T, Q extends AggregateQuery<T> | NestedAggregateQuery<T>> = Q extends NestedShape
+  ? NestedAggregateResult<T, Q>[]
+  : Q["controls"]["$select"] extends readonly (string | ComputedExpr)[]
+    ? AggregateResult<T, Q["controls"]["$select"]>[]
+    : Record<string, unknown>[];
 
 /**
  * HTTP client for moost-db REST endpoints.
@@ -190,21 +200,21 @@ export class Client<
    * numeric entries or numeric `$groupBy` fields (`number | null`). `first` / `last`
    * read a representative row ordered by `$rowOrder`. The URL forms are `expr(a/b):x`,
    * `sum(a*b):x`, `first(f):x` and `$rowOrder=f,-id`.
+   *
+   * Since 0.1.168 (server: `/meta` `distinctFieldLists`, `conditionalAggregates`,
+   * `nestedAggregates`):
+   * - `{ $fn: 'countDistinct', $field: ['a', 'b'] }` counts distinct combinations (a row
+   *   with any NULL field is not counted); URL `countDistinct(a,b)`;
+   * - `{ $fn, $field, $where, $as }` aggregates only the rows matching `$where` (a typed
+   *   filter); URL `sum(amount|status=paid):paid`;
+   * - a query with `controls.$from` is a two-level aggregate: `$from` groups the filtered
+   *   rows, the root controls aggregate its rows and name its columns (its `$groupBy`
+   *   keys and aliases) — typed by `ValidNested`, rows by `NestedAggregateResult`.
    */
-  async aggregate<const Q extends AggregateQuery<Own<T>>>(
-    query: Q & ValidGroupBy<Own<T>, Q>,
+  async aggregate<const Q extends AggregateQuery<Own<T>> | NestedAggregateQuery<Own<T>>>(
+    query: Q & AggregateCheck<Own<T>, Q>,
     opts?: TClientCallOptions,
-  ): Promise<
-    Q["controls"]["$select"] extends readonly (
-      | string
-      | AggregateExpr
-      | BucketExpr
-      | AggregateOfExpr
-      | SelectArithExpr
-    )[]
-      ? AggregateResult<Own<T>, Q["controls"]["$select"]>[]
-      : Record<string, unknown>[]
-  > {
+  ): Promise<AggregateRows<Own<T>, Q>> {
     return this._get("query", query as unknown as Uniquery, opts?.signal) as Promise<any>;
   }
 

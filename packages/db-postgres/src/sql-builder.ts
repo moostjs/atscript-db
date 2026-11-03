@@ -202,6 +202,12 @@ export const pgDialect: SqlDialect = {
   anyValue: pgAnyValue,
   // No MIN / MAX over a boolean
   booleanAggregates: { min: "BOOL_AND", max: "BOOL_OR" },
+  // Conditional aggregates: `SUM(x) FILTER (WHERE "c")` (since 0.1.168)
+  conditionalAggregate: "filter",
+  // A row value with a NULL field is not NULL itself (COUNT would count it):
+  // only rows whose every column is set form a combination (since 0.1.168).
+  countDistinctColumns: (columns) =>
+    `COUNT(DISTINCT CASE WHEN ${columns.map((c) => `${c} IS NOT NULL`).join(" AND ")} THEN (${columns.join(", ")}) END)`,
   /**
    * SQLSTATE 22003 (`numeric_value_out_of_range`), a double overflow in
    * aggregate arithmetic, is `INVALID_QUERY`; SQLSTATE 22023

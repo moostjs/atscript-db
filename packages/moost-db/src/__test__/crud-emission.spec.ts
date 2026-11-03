@@ -21,7 +21,8 @@ describe("/meta crud — per-base-class emission", () => {
     const ctrl = new Ctrl(makeApp().app, makeTable() as never);
     const meta = await ctrl.meta();
     expect(Object.keys(meta.crud).toSorted()).toEqual(["one", "pages", "query"]);
-    expect(meta.crud.query).toEqual([...QUERY_CONTROLS]);
+    // `from` only while `/query` takes two-level aggregates — this readable's adapter does not
+    expect(meta.crud.query).toEqual(QUERY_CONTROLS.filter((c) => c !== "from"));
     expect(meta.crud.pages).toEqual([...PAGES_CONTROLS]);
     expect(meta.crud.one).toEqual([...ONE_CONTROLS]);
   });
@@ -65,6 +66,9 @@ describe("/meta crud — per-base-class emission", () => {
     const ctrl = new AsJsonValueHelpController(valueHelpType(), [], makeApp().app);
     const meta = await ctrl.meta();
     expect(Object.keys(meta.crud).toSorted()).toEqual(["one", "pages", "query"]);
-    expect(meta.crud.query).toEqual([...QUERY_CONTROLS]);
+    // value-help serves rows only: no aggregate control (since 0.1.168)
+    expect(meta.crud.query).toEqual(
+      QUERY_CONTROLS.filter((c) => !["groupBy", "rowOrder", "from"].includes(c)),
+    );
   });
 });

@@ -502,6 +502,21 @@ export class MysqlAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** Conditional aggregates (`$where` on an aggregate `$select` entry). */
+  override supportsConditionalAggregates(): boolean {
+    return true;
+  }
+
+  /** `countDistinct` over several fields. */
+  override supportsDistinctFieldLists(): boolean {
+    return true;
+  }
+
+  /** Two-level aggregates (`$from`): the inner level is a derived table. */
+  override supportsNestedAggregates(): boolean {
+    return true;
+  }
+
   /** `$nulls` / `@db.sort.nulls` NULL placement — a leading `(col IS NULL)` key where the native order differs. */
   override supportsNullsPlacement(): boolean {
     return true;
@@ -1340,8 +1355,11 @@ export class MysqlAdapter extends BaseDbAdapter {
       : buildWhere(query.filter);
     // A grouped search reads the search index of the view's own name
     const tableName = search ? this.resolveTableName() : this._readSource(query, "aggregate");
-    for (const bucket of query.controls.$select?.buckets ?? []) {
-      await this._ensureBucketZone(bucket.tz);
+    // (both levels of a two-level aggregate may bucket)
+    for (const select of [query.controls.$select, query.controls.$from?.$select]) {
+      for (const bucket of select?.buckets ?? []) {
+        await this._ensureBucketZone(bucket.tz);
+      }
     }
 
     if (query.controls.$count) {

@@ -362,9 +362,10 @@ export function guardHavingValues(
       if (isAggregateOfExpr(item) || isSelectArithExpr(item)) {
         aliases.set(item.$as, NUMBER);
       } else if (isAggregateExpr(item)) {
-        const fd = SOURCE_VALUE_FNS.has(item.$fn)
-          ? meta.descriptorByPath.get(item.$field)
-          : undefined;
+        const fd =
+          SOURCE_VALUE_FNS.has(item.$fn) && typeof item.$field === "string"
+            ? meta.descriptorByPath.get(item.$field)
+            : undefined;
         const counts = item.$fn === "count" || item.$fn === "countDistinct";
         aliases.set(resolveAlias(item), fd ? valueTypeOf(meta, fd) : counts ? INTEGER : NUMBER);
       } else if (isBucketExpr(item)) {

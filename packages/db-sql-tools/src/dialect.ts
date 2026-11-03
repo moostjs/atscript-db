@@ -161,6 +161,29 @@ export interface SqlDialect {
    */
   anyValue?(expr: string, field: TDbFieldMeta | undefined): string;
   /**
+   * How a conditional aggregate (`$where`) renders its condition — a boolean
+   * column of the aggregate's row source, already quoted:
+   * - `"filter"` — `SUM(x) FILTER (WHERE "c")` (PostgreSQL, SQLite 3.30+);
+   * - `"case"` — the argument is `CASE WHEN "c" THEN x END` (`COUNT(*)` →
+   *   `COUNT(CASE WHEN "c" THEN 1 END)`) — MySQL.
+   *
+   * Absent: the builders reject a condition (`AGG_WHERE_NOT_SUPPORTED`).
+   * @since 0.1.168
+   */
+  conditionalAggregate?: "filter" | "case";
+  /**
+   * `COUNT(DISTINCT …)` over several already rendered columns: the number of
+   * distinct combinations, a row with ANY NULL column not counted. `when`
+   * (a rendered condition, `"case"` dialects only) gates each column.
+   * MySQL: `COUNT(DISTINCT a, b)`; PostgreSQL: a row value guarded by
+   * `IS NOT NULL` (a row with a NULL field is not NULL itself); SQLite:
+   * `json_array(a, b)`, guarded the same way.
+   *
+   * Absent: the builders reject a field list (`AGG_FIELD_LIST_NOT_SUPPORTED`).
+   * @since 0.1.168
+   */
+  countDistinctColumns?(columns: readonly string[], when?: string): string;
+  /**
    * Maps a driver error of a grouped query to the `DbError` it means — a
    * numeric overflow (`arithOverflowError` when the query has arithmetic
    * expressions, else `numericOutOfRangeError`), an unknown calendar-bucket
@@ -373,8 +396,10 @@ export async function mapQueryErrors<R>(
   try {
     return await fn();
   } catch (error: unknown) {
-    const select = controls?.$select;
-    const arithmetic = !!(select?.exprAggregates?.length || select?.exprs?.length);
+    // Either level of a two-level aggregate may compute
+    const arithmetic = [controls?.$select, controls?.$from?.$select].some(
+      (select) => !!(select?.exprAggregates?.length || select?.exprs?.length),
+    );
     throw dialect.mapQueryError?.(error, arithmetic) ?? error;
   }
 }

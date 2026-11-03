@@ -20,7 +20,7 @@ import { current, Moost, Param, useControllerContext, type TConsoleBase } from "
 import { parseUrl } from "@uniqu/url";
 
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
-import { insightError, unknownInsight } from "./http-errors";
+import { insightError, NESTED_NOT_SUPPORTED_MESSAGE, unknownInsight } from "./http-errors";
 import {
   GeoControlsDto,
   GetOneControlsDto,
@@ -146,8 +146,13 @@ const DEFAULT_META_VARY: readonly string[] = ["Authorization", "Cookie"];
 type TMetaHttpResponse = NonNullable<ReturnType<typeof readHttpResponse>>;
 const readHttpResponse = () => current().get(httpKind.keys.response);
 
-/** Control DTO a {@link AsReadableController.validateControls} call checks against. @since 0.1.143 (`"geo"`) */
-export type TDbControlsType = "query" | "pages" | "getOne" | "geo";
+/**
+ * Control DTO a {@link AsReadableController.validateControls} call checks
+ * against. `"geo"` since 0.1.143; `"nested"` since 0.1.168 — the inner level
+ * (`$from`) of a two-level aggregate on a DB controller's `/query`, validated
+ * on its own so a per-control policy sees its `$groupBy` / `$select` too.
+ */
+export type TDbControlsType = "query" | "pages" | "getOne" | "geo" | "nested";
 
 /**
  * A read request as {@link AsReadableController.parseRequest} hands it back.
@@ -532,14 +537,10 @@ export abstract class AsReadableController<
     controls: Record<string, unknown>,
     type: TDbControlsType,
   ): string | undefined {
-    // Aggregate queries (presence of `$groupBy`) bypass the base DTO check —
-    // `$groupBy` and aggregate-mode `$select` (carrying `AggregateExpr` objects)
-    // don't match `QueryControlsDto`; the adapter aggregate builder validates
-    // them downstream. Subclass overrides still fire, since this is the hook
-    // for per-control authorization (e.g. `$groupBy: false`).
-    if (type === "query" && controls.$groupBy !== undefined) {
-      return undefined;
-    }
+    // No aggregate bypass here (since 0.1.168): an endpoint without aggregates
+    // (value-help) answers `$groupBy`, `$from` or an aggregate `$select` with
+    // the DTO's 400 instead of ignoring them. The DB controllers validate their
+    // aggregate controls in their own override.
     let v: Validator<any>;
     switch (type) {
       case "query":
@@ -551,6 +552,9 @@ export abstract class AsReadableController<
       case "geo":
         v = this.geoControlsValidator;
         break;
+      case "nested":
+        // only a DB controller's `/query` has an inner aggregate level
+        return NESTED_NOT_SUPPORTED_MESSAGE;
       default:
         v = this.getOneControlsValidator;
     }

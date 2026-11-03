@@ -754,6 +754,57 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter renders a conditional aggregate — `$where` on an
+   * aggregate `$select` entry (`{ $fn, $field, $where, $as }`, `{ $fn, $expr,
+   * $where, $as }`): only the rows matching the condition are aggregated.
+   * Default `false` (fail-closed): the core rejects such a query with
+   * `AGG_WHERE_NOT_SUPPORTED` before dispatch. An adapter returning `true`
+   * receives the condition translated like the query filter (physical names,
+   * storage values; never a relational predicate or `$geoWithin`) on
+   * `controls.$select.aggregates[i].$where` and `.exprAggregates[i].where`.
+   * moost-db advertises it as `/meta.conditionalAggregates`.
+   *
+   * @since 0.1.168
+   */
+  supportsConditionalAggregates(): boolean {
+    return false;
+  }
+
+  /**
+   * Whether this adapter renders `countDistinct` over several fields
+   * (`{ $fn: 'countDistinct', $field: ['a', 'b'] }`): the number of distinct
+   * combinations, a row with any NULL field not counted (SQL's
+   * `COUNT(DISTINCT a, b)`). Default `false` (fail-closed): the core rejects
+   * it with `AGG_FIELD_LIST_NOT_SUPPORTED` before dispatch. An adapter
+   * returning `true` meets a `string[]` `$field` (physical names) in
+   * `controls.$select.aggregates`. moost-db advertises it as
+   * `/meta.distinctFieldLists`.
+   *
+   * @since 0.1.168
+   */
+  supportsDistinctFieldLists(): boolean {
+    return false;
+  }
+
+  /**
+   * Whether this adapter runs a two-level aggregate (`controls.$from`): an
+   * aggregate over the rows of an inner grouped aggregate. Default `false`
+   * (fail-closed): the core rejects it with `AGG_NESTED_NOT_SUPPORTED` before
+   * dispatch. An adapter returning `true` receives `controls.$from` — the
+   * inner level's controls, run over the query's filter (and `$search`) and
+   * listing every inner column in its `$select` (each `$groupBy` key, then
+   * the computed entries) — and root controls that read those columns: an
+   * inner key by its physical name, a computed column by its alias. The
+   * inner level has no `$sort` / `$skip` / `$limit` / `$count`; the root has
+   * no `$with`. moost-db advertises it as `/meta.nestedAggregates`.
+   *
+   * @since 0.1.168
+   */
+  supportsNestedAggregates(): boolean {
+    return false;
+  }
+
+  /**
    * Whether this adapter honours a requested NULL placement: `controls.$nulls`
    * (PHYSICAL `$sort` keys → `'first'` / `'last'`, or computed aliases on a
    * grouped read) and `TRowOrderKey.nulls` on the `first` / `last` row

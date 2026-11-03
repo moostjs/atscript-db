@@ -227,6 +227,11 @@ describe("query targets — the envelope", () => {
       "$select=id",
       "$vector=x&$search=a",
       "$with=ticketKey",
+      // aggregate controls are a /query's only: a target never runs them (since 0.1.168)
+      "$from=($groupBy=status&$select=count(*):n)",
+      "$select=sum(id|status=open):n",
+      "$select=countDistinct(status,title)",
+      "$groupBy=status",
     ]) {
       const res = await query("close", q);
       expect(res.status, q).toBe(400);

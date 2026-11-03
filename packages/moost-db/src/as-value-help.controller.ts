@@ -14,7 +14,12 @@ import {
   registerAsValueHelpController,
 } from "./actions/controller-registry";
 import { AsReadableController } from "./as-readable.controller";
-import { ONE_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "./permissions/crud-controls";
+import {
+  AGGREGATE_ONLY_CONTROLS,
+  ONE_CONTROLS,
+  PAGES_CONTROLS,
+  QUERY_CONTROLS,
+} from "./permissions/crud-controls";
 
 /**
  * A value-help projection: the parsed `$select` (inclusion list, or a
@@ -381,7 +386,8 @@ export abstract class AsValueHelpController<
   protected override buildCrud(): TCrudPermissions {
     return {
       ...super.buildCrud(),
-      query: [...QUERY_CONTROLS],
+      // value-help serves rows only: no aggregate controls (since 0.1.168)
+      query: QUERY_CONTROLS.filter((c) => !AGGREGATE_ONLY_CONTROLS.has(c)),
       pages: [...PAGES_CONTROLS],
       one: [...ONE_CONTROLS],
     };

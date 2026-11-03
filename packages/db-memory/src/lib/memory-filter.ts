@@ -75,7 +75,7 @@ export function valuesEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Mirror of `mongo-filter.ts`'s `parseRegexString`: normalize a `$regex` value
+ * Mirror of `mongo-view-expr.ts`'s `parseRegexString`: normalize a `$regex` value
  * (or a bare `RegExp`) into a `{ pattern, flags }` pair. Accepts a `RegExp`
  * instance, a `/pattern/flags` string literal, or a plain string (treated as
  * the literal pattern with no flags).

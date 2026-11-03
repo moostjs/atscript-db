@@ -9,7 +9,7 @@ import type {
   Uniquery,
   UniqueryControls,
 } from "@uniqu/core";
-import { isAggregateExpr, isBucketExpr } from "@uniqu/core";
+import { isAggregateExpr, isAggregateOfExpr, isBucketExpr } from "@uniqu/core";
 
 import { resolveAlias } from "../agg";
 import type { BaseDbAdapter } from "../base-adapter";
@@ -61,6 +61,20 @@ export interface TReadControls {
  * translation computes it again for an exclusion projection; no state
  * travels through the adapter).
  */
+/**
+ * How one grouped level names its operands physically (see
+ * `physicalComputed`): the column of a name, its descriptor, a condition
+ * translated like that level's filter, the level's computed aliases, and the
+ * physical columns that identify a row (the `$rowOrder` tie-break).
+ */
+interface TComputedNames {
+  column(name: string): string;
+  fdOf(name: string): TDbFieldMeta | undefined;
+  condition(where: FilterExpr): FilterExpr;
+  aliases: ReadonlySet<string>;
+  tieBreak: readonly string[];
+}
+
 interface TDerivedReadPlan {
   /** Derived fields to fill from their source after the read: name → source path segments. */
   fill: Array<[name: string, source: readonly string[]]>;
@@ -287,7 +301,18 @@ export abstract class FieldMappingStrategy {
       fd: meta.descriptorByPath.get(b.field)!,
     }));
     const select = controls.$select && this.physicalSelect(controls.$select, meta);
-    const computed = this.physicalComputed(meta, aliases, exprs, rowOrder, controls.$select);
+    const computed = this.physicalComputed(
+      {
+        column: (name) => this.physicalPath(name, meta),
+        fdOf: (name) => meta.descriptorByPath.get(name),
+        condition: (where) => this.translateFilter(where, meta),
+        aliases,
+        tieBreak: meta.primaryKeys.map((pk) => this.physicalPath(pk, meta)),
+      },
+      exprs,
+      rowOrder,
+      controls.$select,
+    );
     return {
       filter: this.translateFilter((query.filter ?? {}) as FilterExpr, meta),
       controls: {
@@ -306,6 +331,109 @@ export abstract class FieldMappingStrategy {
           ? this.translateHaving(controls.$having, meta, aliases)
           : undefined,
       },
+      insights: query.insights,
+    };
+  }
+
+  /**
+   * A two-level aggregate (since 0.1.168): `inner` is the translated inner
+   * level (its `$select` lists every inner column); the root controls read
+   * inner columns — an inner `$groupBy` field by the name the inner rows
+   * carry it under (its physical path, as the inner level groups it), an
+   * inner alias as is. `columns` are the inner columns by logical name,
+   * `resolution` uniqu's `resolveNested` answer. Conditions (`$where`,
+   * `$having`) keep alias keys and translate field keys like a filter.
+   * `first` / `last` rows are ordered by `$rowOrder`, then by every inner
+   * `$groupBy` entry (which identify an inner row).
+   */
+  translateNestedAggregate(
+    query: AggregateQuery,
+    meta: TableMetadata,
+    inner: DbQuery,
+    columns: ReadonlyMap<string, { kind: "key" | "computed"; fd?: TDbFieldMeta }>,
+    resolution: {
+      outer: {
+        buckets: readonly ResolvedBucket[];
+        exprs: readonly ResolvedSelectExpr[];
+        rowOrder?: readonly ResolvedRowOrderKey[];
+      };
+    },
+  ): DbQuery {
+    const controls = query.controls;
+    const renames = this.renamesPaths(meta);
+    const col = (name: string) =>
+      renames && columns.get(name)?.kind === "key" ? this.physicalPath(name, meta) : name;
+    const outerAliases = computedAliases(controls.$select);
+    // Names of conditions that are no table field: inner computed columns and outer aliases.
+    const notFields = new Set(outerAliases);
+    for (const [name, source] of columns) if (source.kind === "computed") notFields.add(name);
+    const condition = (filter: unknown) =>
+      this.translateHaving(filter as FilterExpr, meta, notFields);
+    const { buckets, exprs, rowOrder } = resolution.outer;
+
+    const select = (controls.$select as unknown[] | undefined)?.map((item: unknown) => {
+      if (typeof item === "string") return col(item);
+      if (isAggregateExpr(item)) {
+        const field =
+          typeof item.$field === "string"
+            ? item.$field === "*"
+              ? "*"
+              : col(item.$field)
+            : item.$field.map(col);
+        return {
+          ...item,
+          $as: resolveAlias(item),
+          $field: field,
+          ...(item.$where !== undefined && { $where: condition(item.$where) }),
+        };
+      }
+      if (isBucketExpr(item)) return { ...item, $as: resolveAlias(item), $field: col(item.$field) };
+      return item;
+    });
+
+    const computed = this.physicalComputed(
+      {
+        column: col,
+        fdOf: (name) => columns.get(name)?.fd,
+        condition,
+        aliases: outerAliases,
+        // An inner row is identified by its inner `$groupBy` entries: the final tie-break.
+        tieBreak: (inner.controls.$groupBy as string[] | undefined) ?? [],
+      },
+      exprs,
+      rowOrder,
+      controls.$select as AggregateControls["$select"],
+    );
+    const physicalBuckets: TResolvedBucket[] = buckets.map((b) => ({
+      ...b,
+      field: col(b.field),
+      fd: columns.get(b.field)!.fd!,
+    }));
+    const result = (name: string) => (outerAliases.has(name) ? name : col(name));
+    const renameKeys = <V>(record: Record<string, V> | undefined) =>
+      record &&
+      Object.fromEntries(Object.entries(record).map(([key, value]) => [result(key), value]));
+
+    return {
+      filter: inner.filter,
+      controls: {
+        ...controls,
+        $with: undefined,
+        $rowOrder: undefined,
+        $from: inner.controls,
+        $groupBy: ((controls.$groupBy ?? []) as string[]).map(result),
+        $select: select
+          ? new UniquSelect(
+              select as UniqueryControls["$select"],
+              undefined,
+              physicalBuckets,
+              computed,
+            )
+          : undefined,
+        $sort: renameKeys(controls.$sort as Record<string, 1 | -1> | undefined),
+        $nulls: renameKeys(controls.$nulls as Record<string, NullsPlacement> | undefined),
+        $having: controls.$having ? condition(controls.$having) : undefined,
+      } as DbControls,
       insights: query.insights,
     };
   }
@@ -342,14 +470,15 @@ export abstract class FieldMappingStrategy {
   }
 
   /**
-   * The arithmetic and `$rowOrder` parts of a grouped query with PHYSICAL
-   * names: a row-level operand is a column; a group-level operand stays an
-   * alias, or becomes the physical name of a `$groupBy` field. The primary
-   * key is appended to the order as the final ascending tie-break.
+   * The arithmetic and `$rowOrder` parts of a grouped level with PHYSICAL
+   * names (`names` maps them — the table, or the inner columns of a
+   * two-level aggregate): a row-level operand is a column; a group-level
+   * operand stays an alias, or becomes the physical name of a `$groupBy`
+   * field. `names.tieBreak` is appended to the order as the final ascending
+   * tie-break.
    */
   private physicalComputed(
-    meta: TableMetadata,
-    aliases: ReadonlySet<string>,
+    names: TComputedNames,
     exprs: readonly ResolvedSelectExpr[],
     rowOrder: readonly ResolvedRowOrderKey[] | undefined,
     select: AggregateControls["$select"],
@@ -357,36 +486,47 @@ export abstract class FieldMappingStrategy {
     // The columns a `min` / `max` / `first` / `last` reads, with their descriptors
     // (an adapter whose engine cannot aggregate a type directly needs the type).
     const sources = new Map<string, TDbFieldMeta>();
+    // The conditions of row-level expression aggregates, by alias (translated like the filter).
+    const exprWheres = new Map<string, FilterExpr>();
     for (const item of select ?? []) {
+      if (isAggregateOfExpr(item) && item.$where !== undefined) {
+        exprWheres.set(item.$as, names.condition(item.$where as FilterExpr));
+      }
+      // (a field list is `countDistinct`'s only)
       if (!isAggregateExpr(item) || !SOURCE_VALUE_FNS.has(item.$fn)) continue;
-      const fd = meta.descriptorByPath.get(item.$field);
-      if (fd) sources.set(this.physicalPath(item.$field, meta), fd);
+      const fd = typeof item.$field === "string" ? names.fdOf(item.$field) : undefined;
+      if (fd) sources.set(names.column(item.$field as string), fd);
     }
     const exprAggregates: TExprAggregate[] = [];
     const groupExprs: TSelectExpr[] = [];
     for (const e of exprs) {
-      const names = new Set<string>();
+      const operands = new Set<string>();
       const node = arithToExprNode(e.expr, (name) => {
-        const resolved =
-          e.level === "group" && aliases.has(name) ? name : this.physicalPath(name, meta);
-        names.add(resolved);
+        const resolved = e.level === "group" && names.aliases.has(name) ? name : names.column(name);
+        operands.add(resolved);
         return resolved;
       });
       if (e.level === "row") {
-        exprAggregates.push({ fn: e.fn!, alias: e.alias, expr: node, names: [...names] });
+        const where = exprWheres.get(e.alias);
+        exprAggregates.push({
+          fn: e.fn!,
+          alias: e.alias,
+          expr: node,
+          names: [...operands],
+          ...(where !== undefined && { where }),
+        });
       } else {
-        groupExprs.push({ alias: e.alias, expr: node, names: [...names] });
+        groupExprs.push({ alias: e.alias, expr: node, names: [...operands] });
       }
     }
     let order: TRowOrderKey[] | undefined;
     if (rowOrder?.length) {
       order = rowOrder.map((k) => ({
-        column: this.physicalPath(k.field, meta),
+        column: names.column(k.field),
         desc: k.desc,
         ...(k.nulls && { nulls: k.nulls }),
       }));
-      for (const pk of meta.primaryKeys) {
-        const column = this.physicalPath(pk, meta);
+      for (const column of names.tieBreak) {
         if (!order.some((k) => k.column === column)) order.push({ column, desc: false });
       }
     }
@@ -405,21 +545,40 @@ export abstract class FieldMappingStrategy {
     select: NonNullable<UniqueryControls["$select"]>,
     meta: TableMetadata,
   ): NonNullable<UniqueryControls["$select"]> {
-    if (!this.renamesPaths(meta)) return select;
+    const renames = this.renamesPaths(meta);
     if (Array.isArray(select)) {
       return select.map((item: unknown) => {
-        if (typeof item === "string") return this.physicalPath(item, meta);
-        if (isAggregateExpr(item) || isBucketExpr(item)) {
-          if (item.$field === "*") return item;
+        if (typeof item === "string") return renames ? this.physicalPath(item, meta) : item;
+        if (isAggregateExpr(item)) {
+          let next = item;
+          if (renames && item.$field !== "*") {
+            // a `countDistinct` field list: each name is a path of its own
+            const field =
+              typeof item.$field === "string"
+                ? this.physicalPath(item.$field, meta)
+                : item.$field.map((f) => this.physicalPath(f, meta));
+            if (String(field) !== String(item.$field)) {
+              next = { ...item, $as: resolveAlias(item), $field: field } as typeof item;
+            }
+          }
+          // A condition reads the row like the filter does: the same translation
+          // (physical names, storage values), whatever the adapter's paths.
+          if (item.$where !== undefined) {
+            next = {
+              ...next,
+              $where: this.translateFilter(item.$where as FilterExpr, meta),
+            } as typeof item;
+          }
+          return next;
+        }
+        if (isBucketExpr(item) && renames) {
           const physical = this.physicalPath(item.$field, meta);
-          if (physical === item.$field) return item;
-          return isAggregateExpr(item)
-            ? { ...item, $as: resolveAlias(item), $field: physical }
-            : { ...item, $field: physical };
+          return physical === item.$field ? item : { ...item, $field: physical };
         }
         return item;
       }) as NonNullable<UniqueryControls["$select"]>;
     }
+    if (!renames) return select;
     const translated: Record<string, 0 | 1> = {};
     for (const [key, flag] of Object.entries(select as Record<string, 0 | 1>)) {
       translated[this.physicalPath(key, meta)] = flag;

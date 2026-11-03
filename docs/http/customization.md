@@ -218,7 +218,7 @@ This catches every reference to a restricted field — whether in a filter (`sal
 
 ### validateControls {#validatecontrols}
 
-Validates the parsed controls of a read (`type`: `query`, `pages`, `geo`, `getOne`) against the endpoint's controls DTO — the hook for per-control authorization. Override it, call `super`, then add rules; return a string to reject with HTTP `400`. It may also rewrite `controls` in place, for example to conjoin a related table's row scope into each `$with` entry:
+Validates the parsed controls of a read (`type`: `query`, `pages`, `geo`, `getOne`, `nested`) against the endpoint's controls DTO — the hook for per-control authorization. An aggregate `/query` is checked against the [aggregate controls](./advanced#groupby) instead (an unknown one is a 400, since 0.1.168), and the inner level of a [two-level aggregate](/api/two-level-aggregates) is passed again on its own with `type: "nested"` — so a rule on `$groupBy` or `$select` sees the inner level's too (the root's name inner columns). Override it, call `super`, then add rules; return a string to reject with HTTP `400`. It may also rewrite `controls` in place, for example to conjoin a related table's row scope into each `$with` entry:
 
 ```typescript
 protected validateControls(controls: Record<string, unknown>, type: TDbControlsType) {

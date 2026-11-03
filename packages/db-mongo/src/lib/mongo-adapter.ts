@@ -417,8 +417,11 @@ export class MongoAdapter extends BaseDbAdapter {
       }
       const stages = emptyGroupStages(query, row, forCount);
       const probe = buildMatchedProbe(query, searchStage, this._predicateFilterOpts);
+      // (the probe of a two-level aggregate runs the inner `$group`: `aggregateOptions`)
       const run = (pipeline: Document[]) =>
-        wrapInvalidQuery(() => this.aggregatePipeline(pipeline).toArray());
+        wrapInvalidQuery(() =>
+          this.aggregatePipeline(pipeline, aggregateOptions(pipeline)).toArray(),
+        );
       // `$having` is evaluated by the server on the empty group — alongside
       // the probe (one round trip), or after it inside a transaction.
       const [matched, applied] = this.isInTransaction()
@@ -532,6 +535,28 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
   override supportsAggregateExpressions(): boolean {
+    return true;
+  }
+
+  /**
+   * Conditional aggregates (`$where`): the condition as an aggregation
+   * expression inside each accumulator (`$cond`), in SQL's three-valued logic
+   * (`whereToExpr`). @since 0.1.168
+   */
+  override supportsConditionalAggregates(): boolean {
+    return true;
+  }
+
+  /** `countDistinct` over a field list: `$addToSet` of the value arrays, then `$size`. @since 0.1.168 */
+  override supportsDistinctFieldLists(): boolean {
+    return true;
+  }
+
+  /**
+   * Two-level aggregates (`$from`): the inner level's grouped stages, then the
+   * outer level's over their documents, in one pipeline (`allowDiskUse`). @since 0.1.168
+   */
+  override supportsNestedAggregates(): boolean {
     return true;
   }
 

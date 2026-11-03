@@ -233,6 +233,7 @@ const schemaApiSidebar = [
       { text: "CRUD Operations", link: "/api/crud" },
       { text: "Queries & Filters", link: "/api/queries" },
       { text: "Grouped Queries", link: "/api/aggregation" },
+      { text: "Two-Level Aggregates", link: "/api/two-level-aggregates" },
       { text: "Calendar Buckets", link: "/api/calendar-buckets" },
       { text: "Update & Patch", link: "/api/update-patch" },
       { text: "Optimistic Concurrency", link: "/api/versioning" },

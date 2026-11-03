@@ -9,6 +9,18 @@ import type { SqlDialect } from "./dialect";
 export interface TSqlDerivedSource {
   readonly sql: string;
   readonly hint: string;
+  /**
+   * Bind parameters of `sql` (`?` placeholders, in text order) — set only by
+   * the aggregate builders for the inner level of a two-level aggregate, which
+   * place them where the source renders. Other builders take parameter-free
+   * sources. @since 0.1.168
+   */
+  readonly params?: readonly unknown[];
+}
+
+/** The bind parameters of `source` (a table name has none). */
+export function fromSourceParams(source: TSqlFromSource): readonly unknown[] {
+  return typeof source === "string" ? [] : (source.params ?? []);
 }
 
 /**

@@ -17,21 +17,9 @@ import type { Document, Filter } from "mongodb";
 import { BSONRegExp } from "mongodb";
 
 import { correlate } from "./lookup-join";
-import { fieldCompareExpr } from "./mongo-view-expr";
+import { fieldCompareExpr, integerRegexExpr, parseRegexString } from "./mongo-view-expr";
 
 const EMPTY: Filter<any> = {};
-
-function parseRegexString(value: unknown): { pattern: string; flags: string } {
-  if (value instanceof RegExp) {
-    return { pattern: value.source, flags: value.flags };
-  }
-  const str = String(value);
-  const match = str.match(/^\/(.+)\/([gimsuy]*)$/);
-  if (match) {
-    return { pattern: match[1]!, flags: match[2]! };
-  }
-  return { pattern: str, flags: "" };
-}
 
 /**
  * Earth radius in meters used by MongoDB's `$centerSphere` radians conversion
@@ -56,24 +44,8 @@ const mongoVisitor: FilterVisitor<Filter<any>> = {
         : { [field]: { $regex: pattern } };
     }
     if (op === INTEGER_REGEX_OP) {
-      // A pattern over the DECIMAL TEXT of an integer field. The inner
-      // `$convert` to long is required (a double prints as `1e+16`); a
-      // non-numeric / missing value converts to null → `$regexMatch` is false.
-      const { pattern, flags } = parseRegexString(value);
-      const options = flags.replace(/[^imsx]/g, "");
-      return {
-        $expr: {
-          $regexMatch: {
-            input: {
-              $toString: {
-                $convert: { input: `$${field}`, to: "long", onError: null, onNull: null },
-              },
-            },
-            regex: pattern,
-            ...(options ? { options } : {}),
-          },
-        },
-      };
+      // A pattern over the DECIMAL TEXT of an integer field.
+      return { $expr: integerRegexExpr(`$${field}`, value) };
     }
     if (op === "$geoWithin") {
       // Circle predicate (core-validated shape: { center: [lng, lat], radius: meters }).

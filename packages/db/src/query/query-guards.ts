@@ -241,6 +241,8 @@ export interface TGuardedQuery {
     $having?: unknown;
     $rowOrder?: unknown;
     $nulls?: unknown;
+    /** The inner level of a two-level aggregate (since 0.1.168). */
+    $from?: unknown;
   };
 }
 
@@ -564,6 +566,13 @@ export interface TQueryPathRefs {
    * walker would treat it as a field named `$…` — reject instead of 500.
    */
   unsupportedOperator?: string;
+  /**
+   * A two-level aggregate (`controls.$from` is an object, since 0.1.168):
+   * every list holds the INNER level's paths (with the query filter) — the
+   * table paths the query reads. The root controls name inner columns, not
+   * table paths; uniqu's `resolveNested` checks them (after the paths here).
+   */
+  nested?: boolean;
 }
 
 function collectFilterKeys(
@@ -611,6 +620,17 @@ function collectFilterKeys(
  * Entry shapes are not checked here — see `normalizeComputedSelect`.
  */
 export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQueryPathRefs {
+  // A two-level aggregate reads the table through its inner level only: the
+  // root controls name inner columns (see `TQueryPathRefs.nested`).
+  const stage = (query.controls as { $from?: unknown } | undefined)?.$from;
+  if (isPlainObject(stage)) {
+    const inner = collectQueryPaths(
+      { filter: query.filter, controls: { ...stage, $from: undefined } },
+      true,
+    );
+    inner.nested = true;
+    return inner;
+  }
   const refs: TQueryPathRefs = {
     filter: [],
     sort: [],
@@ -621,21 +641,17 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
     bucket: [],
     aggregateMode: false,
   };
-  collectFilterKeys(
-    query.filter,
-    (path, value) => {
-      const predicate = filterPredicateOf(value);
-      refs.filter.push(
-        predicate === "relation"
-          ? { path, predicate, relation: relationOpsOf(value) }
-          : isNullTest(value)
-            ? { path, predicate, nullTest: true }
-            : { path, predicate },
-      );
-    },
-    undefined,
-    refs,
-  );
+  const pushFilterRef = (path: string, value: unknown) => {
+    const predicate = filterPredicateOf(value);
+    refs.filter.push(
+      predicate === "relation"
+        ? { path, predicate, relation: relationOpsOf(value) }
+        : isNullTest(value)
+          ? { path, predicate, nullTest: true }
+          : { path, predicate },
+    );
+  };
+  collectFilterKeys(query.filter, pushFilterRef, undefined, refs);
   const controls = (query.controls ?? {}) as Record<string, unknown>;
   const rawGroupBy = controls.$groupBy;
   const groupBy = Array.isArray(rawGroupBy)
@@ -657,6 +673,11 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
       } else if (isAggregateExpr(item) || isAggregateOfExpr(item)) {
         aliases.add(resolveAlias(item));
         refs.aggregate.push(...entryFields(item));
+        // A conditional aggregate's `$where` reads the table like the filter
+        // does, so its keys are filter entries (same capability gate).
+        if (item.$where !== undefined) {
+          collectFilterKeys(item.$where, pushFilterRef, undefined, refs);
+        }
       } else if (isSelectArithExpr(item)) {
         aliases.add(item.$as);
       } else if (isBucketExpr(item)) {
@@ -981,6 +1002,11 @@ export function guardQuery(
   if (!query) {
     return;
   }
+  // A two-level aggregate is `aggregate()`'s only: a read that ignored `$from`
+  // would run its root controls against the table (since 0.1.168).
+  if (query.controls?.$from !== undefined) {
+    throw pathError("$from", "$from is only valid in an aggregate query");
+  }
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);
   resolveComputedSelect(query.controls, meta, false);
@@ -1037,6 +1063,10 @@ export function guardAggregate(
   const { buckets } = computed;
   guardFilter(meta, adapter, query.filter as FilterExpr | undefined);
   const controls = query.controls;
+  // Capabilities and shapes of conditional aggregates / field lists first:
+  // the path guard below then meets only conditions it may gate.
+  const wheres = guardAggregateEntries(adapter, controls.$select);
+  for (const where of wheres) guardFilter(meta, adapter, where);
   if (meta.encryptedFields.size > 0) {
     for (const field of controls.$groupBy ?? []) {
       if (isEncryptedRef(meta, field)) {
@@ -1065,6 +1095,7 @@ export function guardAggregate(
     guardSort(meta, controls.$sort);
   }
   const refs = guardPaths(meta, adapter, query as TGuardedQuery, true);
+  for (const where of wheres) guardFilterValues(meta, where);
   guardAggregateFns(adapter, controls.$select);
   guardAggregateExpressions(adapter, controls.$select);
   checkAggregateExprs(meta, query, computed.exprs, computed.rowOrder);
@@ -1074,6 +1105,123 @@ export function guardAggregate(
     throw new DbError("INVALID_QUERY", [having]);
   }
   guardHavingValues(meta, controls);
+}
+
+/**
+ * The per-entry rules of conditional aggregates (`$where`) and
+ * `countDistinct` field lists, before the path guard (since 0.1.168):
+ *
+ * - a `$where` needs `supportsConditionalAggregates()` (`AGG_WHERE_NOT_SUPPORTED`),
+ *   a field list `supportsDistinctFieldLists()` (`AGG_FIELD_LIST_NOT_SUPPORTED`);
+ * - `first` / `last` take no `$where` (`INVALID_QUERY`);
+ * - a `$where` holds no relational predicate (`$some` / `$none`) and no
+ *   `$geoWithin` (`INVALID_QUERY`) — it is a condition on the row's own
+ *   columns.
+ *
+ * Returns the conditions (`$where` filters) of the `$select`, in order.
+ *
+ * @internal Also run for the outer level of a two-level aggregate.
+ */
+export function guardAggregateEntries(adapter: BaseDbAdapter, select: unknown): FilterExpr[] {
+  const wheres: FilterExpr[] = [];
+  if (!Array.isArray(select)) return wheres;
+  for (const item of select as unknown[]) {
+    if (!isAggregateExpr(item) && !isAggregateOfExpr(item)) continue;
+    const alias = resolveAlias(item);
+    if (
+      isAggregateExpr(item) &&
+      Array.isArray(item.$field) &&
+      !adapter.supportsDistinctFieldLists()
+    ) {
+      throw new DbError("AGG_FIELD_LIST_NOT_SUPPORTED", [
+        {
+          path: "$select",
+          message: `countDistinct over several fields ("${alias}") is not supported by this adapter`,
+        },
+      ]);
+    }
+    if (item.$where === undefined) continue;
+    if (!adapter.supportsConditionalAggregates()) {
+      throw new DbError("AGG_WHERE_NOT_SUPPORTED", [
+        {
+          path: "$select",
+          message: `Conditional aggregates ($where on "${alias}") are not supported by this adapter`,
+        },
+      ]);
+    }
+    if (item.$fn === "first" || item.$fn === "last") {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: "$select",
+          message: `${item.$fn}() takes no $where ("${alias}") — narrow the rows with the query filter`,
+        },
+      ]);
+    }
+    const unsupported = whereOperatorProblem(item.$where);
+    if (unsupported) {
+      throw new DbError("INVALID_QUERY", [
+        { path: "$select", message: `$where of "${alias}": ${unsupported}` },
+      ]);
+    }
+    wheres.push(item.$where as FilterExpr);
+  }
+  return wheres;
+}
+
+/**
+ * The adapter rules of the OUTER level of a two-level aggregate (since
+ * 0.1.168), after uniqu's `resolveNested` resolved it against the inner
+ * columns: conditions and field lists ({@link guardAggregateEntries}), the
+ * adapter's aggregate functions and arithmetic, its calendar-bucket units,
+ * and a `$having` without relational predicates or `$geoWithin` (it names
+ * result columns).
+ *
+ * @internal
+ */
+export function guardNestedOuter(
+  adapter: BaseDbAdapter,
+  controls: { $select?: unknown; $having?: unknown },
+  resolution: { outer: { buckets: readonly ResolvedBucket[] } },
+): void {
+  guardAggregateEntries(adapter, controls.$select);
+  guardAggregateFns(adapter, controls.$select as AggregateQuery["controls"]["$select"]);
+  guardAggregateExpressions(adapter, controls.$select as AggregateQuery["controls"]["$select"]);
+  const having = whereOperatorProblem(controls.$having);
+  if (having) throw new DbError("INVALID_QUERY", [{ path: "$having", message: having }]);
+  const buckets = resolution.outer.buckets;
+  if (buckets.length > 0 && adapter.calendarBucketUnits().size === 0) {
+    throw new DbError("BUCKET_NOT_SUPPORTED", [
+      { path: "$select", message: "Calendar buckets are not supported by this adapter" },
+    ]);
+  }
+  guardBucketUnits(adapter, buckets);
+}
+
+/** Why a `$where` cannot run — a relational predicate or `$geoWithin` — or `undefined`. */
+function whereOperatorProblem(where: unknown): string | undefined {
+  if (!isPlainObject(where)) return undefined;
+  for (const [key, value] of Object.entries(where)) {
+    if (key === "$and" || key === "$or") {
+      if (!Array.isArray(value)) continue;
+      for (const child of value) {
+        const problem = whereOperatorProblem(child);
+        if (problem) return problem;
+      }
+      continue;
+    }
+    if (key === "$not") {
+      const problem = whereOperatorProblem(value);
+      if (problem) return problem;
+      continue;
+    }
+    if (hasRelationOp(value)) {
+      return `relational predicates ($some / $none) are not supported in a condition — "${key}"`;
+    }
+    if (isPlainObject(value) && "$geoWithin" in value) {
+      return `$geoWithin is not supported in a condition — "${key}"`;
+    }
+  }
+  return undefined;
 }
 
 /**

@@ -533,6 +533,21 @@ export class PostgresAdapter extends BaseDbAdapter {
     return true;
   }
 
+  /** Conditional aggregates (`$where` on an aggregate `$select` entry). */
+  override supportsConditionalAggregates(): boolean {
+    return true;
+  }
+
+  /** `countDistinct` over several fields. */
+  override supportsDistinctFieldLists(): boolean {
+    return true;
+  }
+
+  /** Two-level aggregates (`$from`): the inner level is a derived table. */
+  override supportsNestedAggregates(): boolean {
+    return true;
+  }
+
   /** `$nulls` / `@db.sort.nulls` NULL placement — `NULLS FIRST` / `NULLS LAST`. */
   override supportsNullsPlacement(): boolean {
     return true;

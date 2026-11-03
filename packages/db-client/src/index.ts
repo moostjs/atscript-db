@@ -78,6 +78,11 @@ export type {
   TypedWithRelation,
   ValidGroupBy,
   WeekStart,
+  AggregateStage,
+  NestedAggregateQuery,
+  NestedAggregateResult,
+  StageRow,
+  ValidNested,
 } from "./types";
 
 // Calendar-bucket label helpers (from @uniqu/core): list or step through

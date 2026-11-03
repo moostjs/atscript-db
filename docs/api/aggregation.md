@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-`table.aggregate()` groups rows and computes counts, distinct counts, sums, averages, minimums, maximums, [arithmetic over them](#arithmetic-expressions) and [representative-row values](#representative-row-first-last) at query time — the ad-hoc counterpart of [aggregation views](/views/aggregation-views), whose shape is fixed in the schema.
+`table.aggregate()` groups rows and computes counts, distinct counts, sums, averages, minimums, maximums, [arithmetic over them](#arithmetic-expressions), [conditional aggregates](#conditional-aggregates) and [representative-row values](#representative-row-first-last) at query time — the ad-hoc counterpart of [aggregation views](/views/aggregation-views), whose shape is fixed in the schema.
 
 ```typescript
 const revenue = await orders.aggregate({
@@ -36,12 +36,13 @@ The same query over HTTP is `GET /orders/query?status=paid&$groupBy=region&$sele
 | `$select`           | What each result row carries: plain fields (each must also appear in `$groupBy`), aggregate entries `{ $fn, $field, $as? }`, [expression entries](#arithmetic-expressions) `{ $expr, $as }` / `{ $fn, $expr, $as }`, calendar-bucket entries `{ $bucket, … }`. |
 | `$rowOrder`         | The order of the rows **inside each group** that [`first` / `last`](#representative-row-first-last) read (since 0.1.148). Same shape as `$sort`. Required with `first` / `last`, rejected without them.                                                        |
 | `$having`           | A filter on the groups — its keys must be aggregate aliases, bucket aliases or `$groupBy` fields.                                                                                                                                                              |
-| `$sort`             | Orders the groups by a grouped field or an alias.                                                                                                                                                                                                              |
+| `$sort`, `$nulls`   | Orders the groups by a grouped field or an alias; `$nulls` sets [NULL placement](./queries#nulls) per `$sort` key.                                                                                                                                             |
 | `$skip` / `$limit`  | Pages over the groups.                                                                                                                                                                                                                                         |
 | `$count`            | Returns `[{ count: N }]` — the number of groups that survive `$having`.                                                                                                                                                                                        |
 | `$search`, `$index` | Text search applied to the rows **before** grouping, so a rollup describes exactly the rows the same search lists.                                                                                                                                             |
+| `$from`             | An inner grouped query whose rows this query aggregates — a [two-level aggregate](./two-level-aggregates) (since 0.1.168).                                                                                                                                     |
 
-`$with` is not available on grouped queries.
+`$with` is not available on grouped queries. Any other control is rejected with `Unknown aggregate control "$x"` (since 0.1.168 — before, an unknown control was ignored and the query ran without it).
 
 ## Aggregate functions
 
@@ -56,6 +57,7 @@ An aggregate entry is `{ $fn, $field, $as? }`. The semantics are the SQL ones on
 | `min`           | any field      | Smallest non-null value                                                                                              |
 | `max`           | any field      | Largest non-null value                                                                                               |
 | `countDistinct` | any field      | Number of distinct non-null values (since 0.1.136). `'*'` is rejected                                                |
+| `countDistinct` | a field list   | Number of distinct combinations; a row with any NULL field is not counted ([since 0.1.168](#distinct-combinations))  |
 | `first`         | a scalar field | The field's value on the group's first row, ordered by [`$rowOrder`](#representative-row-first-last) (since 0.1.148) |
 | `last`          | a scalar field | The field's value on the group's last row, ordered by `$rowOrder`                                                    |
 
@@ -183,6 +185,60 @@ const oldest = await issues.aggregate({
 
 How it runs, for index planning: SQL adapters render a `FIRST_VALUE(col) OVER (PARTITION BY <group keys> ORDER BY <$rowOrder, key>)` derived table (`last` over the reversed order) that carries only the columns the query reads, then aggregate its columns per group — SQLite 3.25+, MySQL 8.0+, any PostgreSQL; MongoDB sorts the matching rows by `$rowOrder` before `$group` and takes `$first` / `$last`; the memory adapter keeps the best row per group. An index on `(group key, $rowOrder fields…, primary key)` serves them.
 
+## Distinct combinations {#distinct-combinations}
+
+`countDistinct` takes a list of fields (since 0.1.168): it counts the distinct combinations of their values, and a row where **any** listed field is `NULL` is not counted — SQL's `COUNT(DISTINCT a, b)` rule, on every adapter.
+
+```typescript
+const pairs = await orders.aggregate({
+  filter: {},
+  controls: {
+    $groupBy: ["region"],
+    $select: [
+      "region",
+      { $fn: "countDistinct", $field: ["customerId", "productId"], $as: "pairs" },
+    ],
+  },
+});
+```
+
+Distinctness follows the comparison the adapter uses for each value, as for a single field: MySQL follows the columns' collations (a default `*_ci` collation counts `('A', 1)` and `('a', 1)` once), PostgreSQL the columns' collations, while SQLite compares the combination exactly (case-sensitive, whatever the column collation), and MongoDB and memory compare exactly too.
+
+Only `countDistinct` takes a list (non-empty, no repeated field, no `'*'`). The default key joins the fields with `_` — `countDistinct_customerId_productId`; URL `countDistinct(customerId,productId)`. Each listed field is checked like a single aggregate field (visibility, encryption, strict mode). An adapter without support fails with `AGG_FIELD_LIST_NOT_SUPPORTED`; [`/meta.distinctFieldLists`](/http/crud#get-meta) says which.
+
+## Conditional aggregates {#conditional-aggregates}
+
+`$where` on an aggregate entry restricts it to the rows matching a filter (since 0.1.168) — several conditional counts and sums in one pass instead of one query per condition:
+
+```typescript
+const funnel = await orders.aggregate({
+  filter: { createdAt: { $gte: since } },
+  controls: {
+    $groupBy: ["region"],
+    $select: [
+      "region",
+      { $fn: "count", $field: "*", $as: "orders" },
+      { $fn: "count", $field: "*", $where: { status: "paid" }, $as: "paid" },
+      { $fn: "sum", $field: "amount", $where: { status: "paid" }, $as: "revenue" },
+      { $fn: "countDistinct", $field: "customerId", $where: { status: "paid" }, $as: "buyers" },
+      {
+        $fn: "sum",
+        $expr: { $op: "*", $args: ["price", "qty"] },
+        $where: { returned: false },
+        $as: "kept",
+      },
+    ],
+  },
+});
+```
+
+- `$where` is a filter in the [query filter language](./queries) and takes `$as` (required). It works on every aggregate (`count`, `sum`, `avg`, `min`, `max`, `countDistinct`, a field list) and on `{ $fn, $expr }`; not on `first` / `last`, and not on a calendar bucket.
+- A condition selects exactly the rows the same filter returns on that adapter — `aggregate(f, x | w)` aggregates what `aggregate(f ∧ w, x)` does. A row the same filter would not return does not contribute; how `NULL` and missing values, `$ne`, `$nin` and `$not` read follows the adapter's filter (on SQL a `NULL` comparison is never true; on MongoDB and memory `$ne: v` matches a missing value). A `count` over no matching row is `0`; `sum`, `avg`, `min`, `max` are `null`.
+- Its fields pass the same checks as the query filter: unknown or hidden fields, `@db.writeOnly`, encrypted fields (`ENC_FIELD_FILTER`), the table's filter policy and value types. Relational predicates (`$some` / `$none`) and `$geoWithin` are not available in a condition.
+- The alias is an ordinary aggregate alias: use it in `$having`, `$sort` and expressions.
+
+URL: `fn(field|<filter>):alias` — `sum(amount|status=paid):revenue`, `count(*|status=paid&qty>1):n`. An adapter without support fails with `AGG_WHERE_NOT_SUPPORTED`; [`/meta.conditionalAggregates`](/http/crud#get-meta) says which.
+
 ## Ungrouped queries {#ungrouped}
 
 An ungrouped query (`$groupBy: []`, or no `$groupBy` at all — over HTTP an aggregate `$select` without `$groupBy`, [since 0.1.155](/http/advanced#ungrouped)) is one group on every adapter, so over no matching row it returns **one row**: counts `0`, every other aggregate, `first` / `last` and the expressions over them `null`. With `$count: true` such a query answers `{ count: 1 }` (the one aggregated row), or `{ count: 0 }` when a `$having` filters it out — the number of rows the data query returns.
@@ -217,8 +273,11 @@ Grouped queries are checked before any SQL or pipeline is built. Failures throw 
 | `*` on any aggregate other than `count`, e.g. `sum(*)` or `countDistinct(*)`                        | `Aggregate "sum" needs a field — only count accepts *`                                         |
 | A `$groupBy` entry that is not a string                                                             | `Unsupported $groupBy entry at index i — expected a field name or bucket alias`                |
 | A path that does not resolve to stored data (JSON descendant on SQL, etc.)                          | see [path validation](/api/queries#nested-field-filters)                                       |
+| A control other than the ones [above](#the-query)                                                   | `Unknown aggregate control "$x"`                                                               |
+| A `$where` on `first` / `last`                                                                      | `first() takes no $where ("x") — narrow the rows with the query filter`                        |
+| A relational predicate or `$geoWithin` in a `$where`                                                | `$where of "x": relational predicates ($some / $none) are not supported in a condition — …`    |
 
-A known function the adapter does not render (`aggregateFns()`) fails with `DbError("AGG_FN_NOT_SUPPORTED")` — also HTTP 400 — and message `Aggregate function "countDistinct" is not supported by this adapter`. An [expression](#arithmetic-expressions) on an adapter that does not render them fails with `DbError("AGG_EXPR_NOT_SUPPORTED")` (HTTP 400, `Aggregate expressions are not supported by this adapter`); [`/meta.aggregateExpressions`](/http/crud#get-meta) says which. The expression and `$rowOrder` rules have their own messages, listed [above](#arithmetic-expressions). [`/meta.aggregateFns`](/http/crud#get-meta) lists the functions an adapter supports. An `@db.encrypted` field in `$groupBy` or an aggregate fails with `ENC_FIELD_AGG`. Calendar buckets add their own rules — see [Calendar Buckets — Errors](./calendar-buckets#errors).
+A known function the adapter does not render (`aggregateFns()`) fails with `DbError("AGG_FN_NOT_SUPPORTED")` — also HTTP 400 — and message `Aggregate function "countDistinct" is not supported by this adapter`. An [expression](#arithmetic-expressions) on an adapter that does not render them fails with `DbError("AGG_EXPR_NOT_SUPPORTED")` (HTTP 400, `Aggregate expressions are not supported by this adapter`); [`/meta.aggregateExpressions`](/http/crud#get-meta) says which. The expression and `$rowOrder` rules have their own messages, listed [above](#arithmetic-expressions). [`/meta.aggregateFns`](/http/crud#get-meta) lists the functions an adapter supports. An `@db.encrypted` field in `$groupBy` or an aggregate fails with `ENC_FIELD_AGG`, in a `$where` with `ENC_FIELD_FILTER`. A [field list](#distinct-combinations), a [condition](#conditional-aggregates) or a [two-level aggregate](./two-level-aggregates) on an adapter that does not render it fails with `AGG_FIELD_LIST_NOT_SUPPORTED`, `AGG_WHERE_NOT_SUPPORTED` or `AGG_NESTED_NOT_SUPPORTED` (HTTP 400). Calendar buckets add their own rules — see [Calendar Buckets — Errors](./calendar-buckets#errors).
 
 ::: warning Malformed entries are rejected since 0.1.132
 Up to 0.1.131 an unrecognized `$select` entry (for example `{ $fn: "sum" }` without `$field`) or a non-string `$groupBy` entry was silently dropped, so the query ran without it.
@@ -230,10 +289,12 @@ Grouped queries run on every adapter, with the semantics above.
 
 - **Memory** — since 0.1.132 (earlier versions threw `INVALID_QUERY`). Groups are computed in process over one snapshot, in provider mode too. See [Memory — Grouped queries](/adapters/memory#grouped-queries).
 - **Expressions and `first` / `last`** (since 0.1.148) run on every bundled adapter — SQLite, PostgreSQL, MySQL, MongoDB and memory. See each adapter page: [SQLite](/adapters/sqlite#aggregate-expressions), [PostgreSQL](/adapters/postgresql#aggregate-expressions), [MySQL](/adapters/mysql#aggregate-expressions), [MongoDB](/adapters/mongodb#aggregate-expressions), [Memory](/adapters/memory#grouped-queries).
+- **Field lists, conditions and two-level aggregates** (since 0.1.168) run on every bundled adapter, SQLite, PostgreSQL, MySQL, MongoDB and memory.
 - **MongoDB** — `@db.column`-renamed fields work in `$groupBy`, aggregate fields, `$sort` and `$having` since 0.1.132; earlier versions mapped them to the wrong document keys.
 
 ## See also
 
+- [Two-Level Aggregates](./two-level-aggregates) — aggregate the rows of a grouped query (`$from`)
 - [Calendar Buckets](./calendar-buckets) — group by hour, day, week, month, quarter or year
 - [Aggregation in URLs](/http/advanced#groupby) — `$groupBy`, `$having` and `fn(field):alias` over HTTP
 - [HTTP Client — aggregate](/http/client#aggregate) — typed grouped queries from the browser

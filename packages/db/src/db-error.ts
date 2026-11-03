@@ -36,6 +36,22 @@ export type DbErrorCode =
    * (moost-db: 400). @since 0.1.148
    */
   | "AGG_EXPR_NOT_SUPPORTED"
+  /**
+   * The adapter's `supportsConditionalAggregates()` is false and an aggregate
+   * `$select` entry carries a `$where` (moost-db: 400). @since 0.1.168
+   */
+  | "AGG_WHERE_NOT_SUPPORTED"
+  /**
+   * The adapter's `supportsDistinctFieldLists()` is false and a
+   * `countDistinct` lists several fields (moost-db: 400). @since 0.1.168
+   */
+  | "AGG_FIELD_LIST_NOT_SUPPORTED"
+  /**
+   * The adapter's `supportsNestedAggregates()` is false, or the HTTP endpoint
+   * turned two-level aggregates off, and the query has a `$from` (moost-db:
+   * 400). @since 0.1.168
+   */
+  | "AGG_NESTED_NOT_SUPPORTED"
   // ── Relational filter predicates ($some / $none) ──
   /**
    * The adapter (or the table's wiring) cannot run a relational predicate:

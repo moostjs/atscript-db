@@ -107,13 +107,18 @@ export function resolveComputedSelect(
   const res = resolveBuckets(controls, {
     aggregate,
     fns: SUPPORTED_AGGREGATE_FNS,
-    isField: (name) =>
-      fields.flatMap.has(name) || fields.navFields.has(name) || fields.physicalNames.has(name),
+    isField: tableNamePredicate(fields),
   });
   if (!res.ok || idIssues.length > 0) {
     throw new DbError("INVALID_QUERY", [...idIssues, ...(res.ok ? [] : res.issues)]);
   }
   return { buckets: res.buckets, exprs: res.exprs, rowOrder: res.rowOrder };
+}
+
+/** The names a computed alias may not shadow on this table (uniqu's `isField`). */
+export function tableNamePredicate(fields: TBucketFieldSource): (name: string) => boolean {
+  return (name) =>
+    fields.flatMap.has(name) || fields.navFields.has(name) || fields.physicalNames.has(name);
 }
 
 /** The normalized computed `$select` entries of a grouped query — see {@link resolveComputedSelect}. */

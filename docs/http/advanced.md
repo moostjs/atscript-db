@@ -361,6 +361,36 @@ curl "http://localhost:3000/issues/query?status=open&\$groupBy=ticketId&\$select
 
 Every operand is checked like any other aggregate source — a field the caller cannot see answers `Unknown field`, a write-only field is refused, and the numeric rule (`number` only, not decimal or timestamp) is a `400`. `/meta` advertises `aggregateExpressions`, the numeric operands (`fields[path].numeric`) and `first` / `last` in `aggregateFns`. Semantics, rules and errors: [Grouped Queries — Arithmetic expressions](/api/aggregation#arithmetic-expressions) and [Representative row](/api/aggregation#representative-row-first-last); URL grammar: [Computed entries](./query-syntax#computed-entries-grouped-queries).
 
+### Distinct combinations and conditions {#conditional}
+
+`countDistinct(a,b)` counts distinct combinations of several fields — a row with any `null` field is not counted — and `fn(field|<filter>):alias` aggregates only the rows matching the filter after `|` (since 0.1.168):
+
+```bash
+curl "http://localhost:3000/orders/query?\$groupBy=region&\$select=region,countDistinct(customerId,productId):pairs,count(*|status=paid):paid,sum(amount|status=paid&qty>1):bulkRevenue&\$sort=-paid"
+```
+
+The text after the first `|` is a filter in the URL filter syntax; `:alias` is required with it. `/meta` advertises `distinctFieldLists` and `conditionalAggregates`. Semantics and errors: [Distinct combinations](/api/aggregation#distinct-combinations) and [Conditional aggregates](/api/aggregation#conditional-aggregates).
+
+### Two-level aggregates ($from) {#from}
+
+`$from=( … )` holds an inner grouped query; the rest of the query aggregates its rows (since 0.1.168):
+
+```bash
+curl "http://localhost:3000/orders/query?status=paid&\$from=(\$groupBy=region,customerId&\$select=sum(amount):spent,count(*):orders)&\$groupBy=region&\$select=region,count(*):customers,avg(spent):avgSpent&\$sort=-avgSpent"
+```
+
+```json
+[
+  { "region": "EU", "customers": 42, "avgSpent": 212.4 },
+  { "region": "US", "customers": 87, "avgSpent": 177.2 }
+]
+```
+
+- Inside the parentheses go `$groupBy` (required), `$select`, `$having`, `$rowOrder` and `$nulls`, `&`-separated. Filter terms are not allowed there: the request filter narrows the rows the inner level groups.
+- `$from` is rejected on `/pages`, inside `$with`, in [query targets](./query-targets) and on value-help endpoints; on an adapter without support it is a `400` `AGG_NESTED_NOT_SUPPORTED`. `/meta.nestedAggregates` says whether the endpoint takes it.
+
+Semantics and errors: [Two-Level Aggregates](/api/two-level-aggregates).
+
 ### Calendar Buckets
 
 Group a timestamp field by hour, day, week, month, quarter or year in a time zone with `bucket(field,unit[,tz][,weekStart]):alias` in `$select`, and list the alias in `$groupBy` (since 0.1.132):
@@ -383,6 +413,7 @@ Each label is the `YYYY-MM-DD` local date the period starts on — for `hour` th
 ::: warning Restrictions
 
 - **Cannot combine with `$with`** — using `$groupBy` and `$with` together returns `400`
+- Only [aggregate controls](/api/aggregation#the-query) are accepted (plus `$actions`, which grouped rows ignore); any other is a `400` `Unknown aggregate control "$x"` (since 0.1.168)
 - Plain fields in `$select` must also appear in `$groupBy`
 - Rows with a `null` or missing grouped value form one group on every adapter (since 0.1.132 — MongoDB used to split them into two groups)
 - `$having` keys must be aggregate aliases or `$groupBy` fields — `$having=region>1` on a non-grouped column returns `400` with `$having key "region" must be an aggregate alias or a $groupBy field` (since 0.1.128)

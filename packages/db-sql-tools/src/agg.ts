@@ -1,5 +1,17 @@
-import { type AggregateExpr, BUCKET_UNITS, WEEK_STARTS, walkFilter } from "@uniqu/core";
-import { DbError, type DbControls, type TResolvedBucket, type UniquSelect } from "@atscript/db";
+import {
+  type AggregateExpr,
+  BUCKET_UNITS,
+  type FilterExpr,
+  WEEK_STARTS,
+  walkFilter,
+} from "@uniqu/core";
+import {
+  DbError,
+  aggregateColumns,
+  type DbControls,
+  type TResolvedBucket,
+  type UniquSelect,
+} from "@atscript/db";
 import { assertAggregateFn, resolveAlias, type TDbAggregateFn } from "@atscript/db/agg";
 
 import { sqlTimeZoneLiteral } from "./common";
@@ -12,8 +24,14 @@ import {
   orderKeySql,
 } from "./dialect";
 import { renderArith } from "./arith";
-import { createFilterVisitor } from "./filter-builder";
-import { fromSourceHint, fromSourceSql, type TSqlFromSource } from "./from-source";
+import { buildWhere, createFilterVisitor } from "./filter-builder";
+import {
+  fromSourceHint,
+  fromSourceParams,
+  fromSourceSql,
+  type TSqlDerivedSource,
+  type TSqlFromSource,
+} from "./from-source";
 
 /**
  * SQL function name of each single-name aggregate. `countDistinct` is not a
@@ -61,13 +79,102 @@ function pickSql(
   return bool ? `${bool}(${sql})` : renderAggCall(fn, sql);
 }
 
-/** The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)` / `COUNT(DISTINCT "region")`. */
-function aggFnSql(dialect: SqlDialect, select: UniquSelect | undefined, expr: AggregateExpr) {
-  if (expr.$field === "*") return renderAggCall(expr.$fn, "*");
-  const field = dialect.quoteIdentifier(expr.$field);
-  return expr.$fn === "min" || expr.$fn === "max"
-    ? pickSql(dialect, select, expr.$fn as "min" | "max", expr.$field, field)
-    : renderAggCall(expr.$fn, field);
+/**
+ * `call(arg)` restricted to the rows whose condition column `when` (quoted)
+ * is true — `<call> FILTER (WHERE <when>)`, or the argument wrapped in
+ * `CASE WHEN <when> THEN <arg> END` (`*` → `1`) on a `"case"` dialect — or
+ * plain `call(arg)` without a condition.
+ */
+function conditional(
+  dialect: SqlDialect,
+  arg: string,
+  when: string | undefined,
+  call: (arg: string) => string,
+): string {
+  if (when === undefined) return call(arg);
+  if (dialect.conditionalAggregate === "filter") return `${call(arg)} FILTER (WHERE ${when})`;
+  return call(`CASE WHEN ${when} THEN ${arg === "*" ? "1" : arg} END`);
+}
+
+/**
+ * The bare aggregate call, e.g. `SUM("amount")` / `COUNT(*)` /
+ * `COUNT(DISTINCT "region")`; `when` is the quoted condition column of a
+ * conditional aggregate. A `countDistinct` over a field list renders
+ * {@link SqlDialect.countDistinctColumns}.
+ */
+function aggFnSql(
+  dialect: SqlDialect,
+  select: UniquSelect | undefined,
+  expr: AggregateExpr,
+  when?: string,
+) {
+  const field = expr.$field as string | readonly string[];
+  if (typeof field !== "string") {
+    assertAggregateFn(expr.$fn);
+    if (expr.$fn !== "countDistinct" || !dialect.countDistinctColumns) {
+      throw new DbError("AGG_FIELD_LIST_NOT_SUPPORTED", [
+        {
+          path: "$select",
+          message: "countDistinct over several fields is not supported by this adapter",
+        },
+      ]);
+    }
+    const columns = field.map((f) => dialect.quoteIdentifier(f));
+    if (when === undefined) return dialect.countDistinctColumns(columns);
+    return dialect.conditionalAggregate === "filter"
+      ? `${dialect.countDistinctColumns(columns)} FILTER (WHERE ${when})`
+      : dialect.countDistinctColumns(columns, when);
+  }
+  if (field === "*") return conditional(dialect, "*", when, (arg) => renderAggCall(expr.$fn, arg));
+  const quoted = dialect.quoteIdentifier(field);
+  return conditional(dialect, quoted, when, (arg) =>
+    expr.$fn === "min" || expr.$fn === "max"
+      ? pickSql(dialect, select, expr.$fn as "min" | "max", field, arg)
+      : renderAggCall(expr.$fn, arg),
+  );
+}
+
+/** Prefix of the row source's condition columns (one per conditional aggregate). */
+const CONDITION_PREFIX = "__as_w";
+
+/** The conditional aggregates of a level: alias → its condition column, and the columns in order. */
+interface TConditions {
+  /** Alias of a conditional aggregate → its condition column (quoted). */
+  whenOf: ReadonlyMap<string, string>;
+  /** The condition columns of the row source, in order: `(<filter>) AS "<name>"`. */
+  columns: ReadonlyArray<{ name: string; where: FilterExpr }>;
+}
+
+/**
+ * The conditions of a level's conditional aggregates (`$where`): each one is
+ * a boolean column of the aggregate's row source (`__as_w0`, …), so the
+ * aggregate renders parameter-free and the condition's bind parameters stay
+ * where the row source renders them. `undefined` without any.
+ */
+function conditionsOf(
+  dialect: SqlDialect,
+  select: UniquSelect | undefined,
+): TConditions | undefined {
+  const entries: Array<{ alias: string; where: FilterExpr }> = [];
+  for (const expr of select?.aggregates ?? []) {
+    if (expr.$where !== undefined) entries.push({ alias: resolveAlias(expr), where: expr.$where });
+  }
+  for (const e of select?.exprAggregates ?? []) {
+    if (e.where !== undefined) entries.push({ alias: e.alias, where: e.where });
+  }
+  if (entries.length === 0) return undefined;
+  if (!dialect.conditionalAggregate) {
+    throw new DbError("AGG_WHERE_NOT_SUPPORTED", [
+      { path: "$select", message: "Conditional aggregates are not supported by this adapter" },
+    ]);
+  }
+  const whenOf = new Map<string, string>();
+  const columns = entries.map(({ alias, where }, i) => {
+    const name = `${CONDITION_PREFIX}${i}`;
+    whenOf.set(alias, dialect.quoteIdentifier(name));
+    return { name, where };
+  });
+  return { whenOf, columns };
 }
 
 const BUCKET_UNIT_SET: ReadonlySet<string> = new Set(BUCKET_UNITS);
@@ -137,15 +244,28 @@ const firstLastColumn = (i: number) => `__as_fl${i}`;
  * those (in dependency order, operands cast to double). A grouped column
  * renders as its quoted name.
  */
-function aliasSqlMap(dialect: SqlDialect, controls: DbControls): Map<string, string> {
+function aliasSqlMap(
+  dialect: SqlDialect,
+  controls: DbControls,
+  conditions: TConditions | undefined,
+): Map<string, string> {
   const map = new Map<string, string>();
   const select = controls.$select;
   const quote = (name: string) => dialect.quoteIdentifier(name);
   for (const expr of select?.aggregates ?? []) {
-    map.set(resolveAlias(expr), aggFnSql(dialect, select, expr));
+    const alias = resolveAlias(expr);
+    map.set(alias, aggFnSql(dialect, select, expr, conditions?.whenOf.get(alias)));
   }
   for (const e of select?.exprAggregates ?? []) {
-    map.set(e.alias, renderAggCall(e.fn, renderArith(dialect, e.expr, quote)));
+    map.set(
+      e.alias,
+      conditional(
+        dialect,
+        renderArith(dialect, e.expr, quote),
+        conditions?.whenOf.get(e.alias),
+        (arg) => renderAggCall(e.fn, arg),
+      ),
+    );
   }
   (select?.firstLast ?? []).forEach((fl, i) => {
     // constant within its group: any value of it, whatever the column type
@@ -188,11 +308,12 @@ interface THaving extends TSqlFragment {
 function havingClause(
   dialect: SqlDialect,
   controls: DbControls,
+  conditions: TConditions | undefined,
   aliasSql?: ReadonlyMap<string, string>,
 ): THaving | undefined {
   const having = controls.$having;
   if (!having) return undefined;
-  const exprByAlias = aliasSql ?? aliasSqlMap(dialect, controls);
+  const exprByAlias = aliasSql ?? aliasSqlMap(dialect, controls, conditions);
   const refs = new Set<string>();
   const visitor = createFilterVisitor(dialect, {
     columnRef: (field) => {
@@ -225,13 +346,23 @@ function groupByClause(dialect: SqlDialect, controls: DbControls): string {
     : "";
 }
 
-/** Whether any of the HAVING keys is a `first` / `last` alias, or an expression over one. */
-function readsFirstLast(select: UniquSelect | undefined, refs: ReadonlySet<string>): boolean {
-  if (!select?.firstLast) return false;
-  const firstLast = new Set(select.firstLast.map((fl) => fl.alias));
-  const names = new Map((select.exprs ?? []).map((e) => [e.alias, e.names] as const));
+/**
+ * Whether any of the HAVING keys is a `first` / `last` alias or a conditional
+ * aggregate's — values only the row source carries — or an expression over one.
+ */
+function readsRowSource(
+  select: UniquSelect | undefined,
+  conditions: TConditions | undefined,
+  refs: ReadonlySet<string>,
+): boolean {
+  const targets = new Set([
+    ...(select?.firstLast ?? []).map((fl) => fl.alias),
+    ...(conditions?.whenOf.keys() ?? []),
+  ]);
+  if (targets.size === 0) return false;
+  const names = new Map((select?.exprs ?? []).map((e) => [e.alias, e.names] as const));
   const visit = (name: string, seen: Set<string>): boolean => {
-    if (firstLast.has(name)) return true;
+    if (targets.has(name)) return true;
     const deps = names.get(name);
     if (!deps || seen.has(name)) return false;
     seen.add(name);
@@ -257,7 +388,7 @@ function rowColumns(controls: DbControls): string[] {
   for (const bucket of select?.buckets ?? []) columns.add(bucket.field);
   for (const field of select?.asArray ?? []) columns.add(field);
   for (const expr of select?.aggregates ?? []) {
-    if (expr.$field !== "*") columns.add(expr.$field);
+    for (const column of aggregateColumns(expr)) columns.add(column);
   }
   for (const e of select?.exprAggregates ?? []) {
     for (const name of e.names) columns.add(name);
@@ -267,12 +398,18 @@ function rowColumns(controls: DbControls): string[] {
 
 /**
  * The row source of an aggregate: `FROM <table> WHERE <where>`; with `first` /
- * `last` (and `withRows`) a derived table instead — the table's rows that
- * pass the WHERE, only the columns {@link rowColumns} lists, plus one
+ * `last` or conditional aggregates (and `withRows`) a derived table instead —
+ * the table's rows that pass the WHERE, only the columns {@link rowColumns}
+ * lists, plus one boolean `(<condition>) AS "__as_w<i>"` column per
+ * conditional aggregate (rendered by the filter compiler, so a condition
+ * means what the same filter means) and one
  * `FIRST_VALUE(col) OVER (PARTITION BY <group keys> ORDER BY <rowOrder>)`
- * column per entry (`last` over the reversed order). Each group then reads its
- * representative row's value as an aggregate (constant within the group). The
- * WHERE moves inside unchanged, so the bind parameters keep their order.
+ * column per `first` / `last` entry (`last` over the reversed order). Each
+ * group then reads its representative row's value as an aggregate (constant
+ * within the group). The WHERE moves inside unchanged.
+ *
+ * `params` are the source's bind parameters in text order: the conditions',
+ * the FROM source's (the inner level of a two-level aggregate), the WHERE's.
  */
 function aggSource(
   dialect: SqlDialect,
@@ -280,19 +417,27 @@ function aggSource(
   where: TSqlFragment,
   controls: DbControls,
   withRows: boolean,
-): { hint: string; sql: string } {
+  conditions: TConditions | undefined,
+): { hint: string; sql: string; params: unknown[] } {
   const quotedTable = fromSourceSql(dialect, table);
-  const firstLast = controls.$select?.firstLast;
-  const rowOrder = controls.$select?.rowOrder;
-  if (!withRows || !firstLast?.length || !rowOrder?.length) {
-    return { hint: fromSourceHint(table), sql: `FROM ${quotedTable} WHERE ${where.sql}` };
+  const tableParams = fromSourceParams(table);
+  const select = controls.$select;
+  const rowOrder = select?.rowOrder;
+  const firstLast = withRows && rowOrder?.length ? (select?.firstLast ?? []) : [];
+  const flags = withRows ? (conditions?.columns ?? []) : [];
+  if (firstLast.length === 0 && flags.length === 0) {
+    return {
+      hint: fromSourceHint(table),
+      sql: `FROM ${quotedTable} WHERE ${where.sql}`,
+      params: [...tableParams, ...where.params],
+    };
   }
   const groupBy = controls.$groupBy as string[] | undefined;
   const partition = groupBy?.length
     ? `PARTITION BY ${groupBy.map((key) => groupKeySql(dialect, controls, key)).join(", ")} `
     : "";
   const order = (reverse: boolean) =>
-    rowOrder
+    (rowOrder ?? [])
       .map((k) =>
         // `last` reads the forward order reversed — its NULL placement too.
         orderKeySql(
@@ -303,8 +448,14 @@ function aggSource(
         ),
       )
       .join(", ");
+  const flagParams: unknown[] = [];
   const columns = [
     ...rowColumns(controls).map((column) => dialect.quoteIdentifier(column)),
+    ...flags.map(({ name, where: condition }) => {
+      const predicate = buildWhere(dialect, condition);
+      flagParams.push(...predicate.params);
+      return `(${predicate.sql}) AS ${dialect.quoteIdentifier(name)}`;
+    }),
     ...firstLast.map((fl, i) => {
       const col = dialect.quoteIdentifier(firstLastColumn(i));
       return `FIRST_VALUE(${dialect.quoteIdentifier(fl.column)}) OVER (${partition}ORDER BY ${order(fl.fn === "last")}) AS ${col}`;
@@ -313,7 +464,33 @@ function aggSource(
   return {
     hint: "",
     sql: `FROM (SELECT ${fromSourceHint(table)}${columns.join(", ")} FROM ${quotedTable} WHERE ${where.sql}) AS ${dialect.quoteIdentifier(ROWS_ALIAS)}`,
+    params: [...flagParams, ...tableParams, ...where.params],
   };
+}
+
+/** Alias of the derived table a two-level aggregate's outer level reads its inner rows from. */
+const INNER_ALIAS = "__as_inner";
+
+/**
+ * The outer level of a two-level aggregate as a single-level build's
+ * arguments: the inner level as its FROM source (`(<inner aggregate>) AS
+ * "__as_inner"`, its bind parameters kept in order), no WHERE, and the
+ * controls without their inner level.
+ */
+function outerLevel(
+  dialect: SqlDialect,
+  table: TSqlFromSource,
+  where: TSqlFragment,
+  controls: DbControls,
+): [TSqlFromSource, TSqlFragment, DbControls] {
+  const { $from: innerControls, ...outer } = controls;
+  const inner = aggregateSelectRaw(dialect, table, where, innerControls as DbControls);
+  const source: TSqlDerivedSource = {
+    sql: `(${inner.sql}) AS ${dialect.quoteIdentifier(INNER_ALIAS)}`,
+    hint: "",
+    params: inner.params,
+  };
+  return [source, EMPTY_AND, outer];
 }
 
 /**
@@ -322,9 +499,14 @@ function aggSource(
  * SELECT lists the plain grouped columns, then `<bucket expr> AS "alias"`
  * per calendar bucket, then every computed alias (aggregates, row-level
  * expression aggregates, `first` / `last`, group-level expressions — the
- * order of `UniquSelect.computedAliases`). Bucket expressions are
- * parameter-free, so the bind parameters are exactly those of the same query
- * without buckets (WHERE, HAVING, LIMIT, OFFSET).
+ * order of `UniquSelect.computedAliases`). Bucket expressions and the
+ * aggregates are parameter-free (a condition is a column of the row source),
+ * so the bind parameters follow the text: the row source's (conditions, the
+ * inner level, WHERE), HAVING, LIMIT, OFFSET.
+ *
+ * A two-level aggregate (`controls.$from`, since 0.1.168) reads the inner
+ * level's rows: `SELECT … FROM (<inner aggregate>) AS "__as_inner" …` — its
+ * columns are the inner `$groupBy` keys and aliases.
  */
 export function buildAggregateSelect(
   dialect: SqlDialect,
@@ -332,7 +514,21 @@ export function buildAggregateSelect(
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
+  return finalizeParams(dialect, aggregateSelectRaw(dialect, table, where, controls));
+}
+
+/** {@link buildAggregateSelect} with positional `?` placeholders (not yet numbered). */
+function aggregateSelectRaw(
+  dialect: SqlDialect,
+  table: TSqlFromSource,
+  where: TSqlFragment,
+  controls: DbControls,
+): TSqlFragment {
+  if (controls.$from) {
+    return aggregateSelectRaw(dialect, ...outerLevel(dialect, table, where, controls));
+  }
   const select = controls.$select;
+  const conditions = conditionsOf(dialect, select);
   const selectParts: string[] = [];
 
   // Dimension fields (plain strings from $select)
@@ -348,26 +544,27 @@ export function buildAggregateSelect(
   // other expressions and HAVING alike.
   let aliasSql: Map<string, string> | undefined;
   if (select?.exprAggregates || select?.firstLast || select?.exprs) {
-    aliasSql = aliasSqlMap(dialect, controls);
+    aliasSql = aliasSqlMap(dialect, controls, conditions);
     for (const alias of select.computedAliases) {
       selectParts.push(`${aliasSql.get(alias)} AS ${dialect.quoteIdentifier(alias)}`);
     }
   } else {
     for (const expr of select?.aggregates ?? []) {
+      const alias = resolveAlias(expr);
       selectParts.push(
-        `${aggFnSql(dialect, select, expr)} AS ${dialect.quoteIdentifier(resolveAlias(expr))}`,
+        `${aggFnSql(dialect, select, expr, conditions?.whenOf.get(alias))} AS ${dialect.quoteIdentifier(alias)}`,
       );
     }
   }
 
   const cols = selectParts.length > 0 ? selectParts.join(", ") : "*";
 
-  const source = aggSource(dialect, table, where, controls, true);
+  const source = aggSource(dialect, table, where, controls, true, conditions);
   let sql = `SELECT ${source.hint}${cols} ${source.sql}${groupByClause(dialect, controls)}`;
-  const params = [...where.params];
+  const params = [...source.params];
 
   // HAVING
-  const having = havingClause(dialect, controls, aliasSql);
+  const having = havingClause(dialect, controls, conditions, aliasSql);
   if (having) {
     sql += having.sql;
     params.push(...having.params);
@@ -381,7 +578,7 @@ export function buildAggregateSelect(
   // a column (a bucket or expression alias may not — uniqu rejects that).
   if (controls.$sort) {
     const nullTest = (col: string) => () => {
-      aliasSql ??= aliasSqlMap(dialect, controls);
+      aliasSql ??= aliasSqlMap(dialect, controls, conditions);
       return aliasSql.get(col) ?? dialect.quoteIdentifier(col);
     };
     const orderParts: string[] = [];
@@ -415,7 +612,7 @@ export function buildAggregateSelect(
     params.push(controls.$skip);
   }
 
-  return finalizeParams(dialect, { sql, params });
+  return { sql, params };
 }
 
 /**
@@ -423,8 +620,9 @@ export function buildAggregateSelect(
  * survive `$having` when one is given (the same predicate the row query
  * renders, so `$count` agrees with the row set). Returns `{ count: N }` when
  * executed. The rows come straight from the table, unless `$having` reads a
- * `first` / `last` value (or an expression over one): only then the window
- * derived table is built.
+ * `first` / `last` value or a conditional aggregate (or an expression over
+ * one): only then the derived row source is built. A two-level aggregate
+ * counts its outer groups over the inner level's rows.
  */
 export function buildAggregateCount(
   dialect: SqlDialect,
@@ -432,8 +630,12 @@ export function buildAggregateCount(
   where: TSqlFragment,
   controls: DbControls,
 ): TSqlFragment {
+  if (controls.$from) {
+    return buildAggregateCount(dialect, ...outerLevel(dialect, table, where, controls));
+  }
   const groupFields = controls.$groupBy as string[] | undefined;
-  const having = havingClause(dialect, controls);
+  const conditions = conditionsOf(dialect, controls.$select);
+  const having = havingClause(dialect, controls, conditions);
   const countCol = `COUNT(*) AS ${dialect.quoteIdentifier("count")}`;
   if (!groupFields?.length && !having) {
     // Ungrouped aggregates are ONE result row whatever the input (even none): that is
@@ -446,14 +648,18 @@ export function buildAggregateCount(
     }
     // No aggregates at all — just count all matching rows
     const sql = `SELECT ${fromSourceHint(table)}${countCol} FROM ${fromSourceSql(dialect, table)} WHERE ${where.sql}`;
-    return finalizeParams(dialect, { sql, params: where.params });
+    return finalizeParams(dialect, {
+      sql,
+      params: [...fromSourceParams(table), ...where.params],
+    });
   }
   const from = aggSource(
     dialect,
     table,
     where,
     controls,
-    !!having && readsFirstLast(controls.$select, having.refs),
+    !!having && readsRowSource(controls.$select, conditions, having.refs),
+    conditions,
   );
   const groupBy = groupByClause(dialect, controls);
 
@@ -470,5 +676,5 @@ export function buildAggregateCount(
     inner = bucketSelectParts(dialect, controls).join(", ") || "1";
   }
   const sql = `SELECT ${countCol} FROM (SELECT ${from.hint}${inner} ${from.sql}${groupBy}${having?.sql ?? ""}) AS ${dialect.quoteIdentifier("_groups")}`;
-  return finalizeParams(dialect, { sql, params: [...where.params, ...(having?.params ?? [])] });
+  return finalizeParams(dialect, { sql, params: [...from.params, ...(having?.params ?? [])] });
 }

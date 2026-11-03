@@ -6,18 +6,53 @@
  * containing $groupBy, $select (with AggregateExpr), $having, $sort, etc.
  */
 
-import { evaluateExpr, type DbQuery, type TResolvedBucket } from "@atscript/db";
-import { type AggregateExpr, type BucketUnit, resolveAlias } from "@atscript/db/agg";
+import {
+  DbError,
+  aggregateColumns,
+  evaluateExpr,
+  type DbControls,
+  type DbQuery,
+  type FilterExpr,
+  type TResolvedBucket,
+} from "@atscript/db";
+import {
+  type AggregateExpr,
+  type BucketUnit,
+  assertAggregateFn,
+  resolveAlias,
+} from "@atscript/db/agg";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 import type { Document } from "mongodb";
 import { buildAccumulator, distinctCountExpr } from "./lib/mongo-accumulator";
 import { buildMongoFilter, mongoFilterStages, type TMongoFilterOptions } from "./lib/mongo-filter";
 import { rowOrderStages, sortStages } from "./lib/mongo-sort";
-import { exprToMongo, notNullExpr, orNull } from "./lib/mongo-view-expr";
+import { exprToMongo, orNull, whereToExpr } from "./lib/mongo-view-expr";
 
-/** Maps an AggregateExpr to its MongoDB `$group` accumulator (see `buildAccumulator`). */
-function toAccumulator(expr: AggregateExpr): Document {
-  return buildAccumulator(expr.$fn, expr.$field === "*" ? "*" : `$${expr.$field}`);
+/** The condition of a conditional aggregate as an aggregation expression, or `undefined`. */
+function conditionOf(where: unknown): Document | undefined {
+  return where === undefined ? undefined : whereToExpr(where as FilterExpr);
+}
+
+/**
+ * Maps an AggregateExpr to its MongoDB `$group` accumulator (see
+ * `buildAccumulator`), restricted to the rows `where` matches. A field list
+ * (since 0.1.168) is `countDistinct`'s only.
+ */
+function toAccumulator(expr: AggregateExpr, where: Document | undefined): Document {
+  if (typeof expr.$field === "string") {
+    return buildAccumulator(expr.$fn, expr.$field === "*" ? "*" : `$${expr.$field}`, where);
+  }
+  assertAggregateFn(expr.$fn);
+  if (expr.$fn !== "countDistinct") {
+    throw new DbError("INVALID_QUERY", [
+      {
+        path: "$select",
+        message: `${expr.$fn}() takes one field — only countDistinct takes a list`,
+      },
+    ]);
+  }
+  const fields = aggregateColumns(expr).map((field) => `$${field}`);
+  return buildAccumulator(expr.$fn, fields, where);
 }
 
 /** An operand of query-time arithmetic: the field as a double (IEEE, like the SQL adapters). */
@@ -107,10 +142,33 @@ export function bucketExpression(b: TResolvedBucket): Document {
 // ── Pipeline ─────────────────────────────────────────────────────────────────
 
 /**
- * Builds the common prefix stages: [search] + $match + $group._id from groupBy
- * fields. Shared by both full aggregate and count pipelines.
- * `groupKeys` maps each `$groupBy` key (a field path or a calendar-bucket
- * alias) to its `_id` sub-key.
+ * The stages yielding the rows a grouped level aggregates: `[search →]
+ * $match(filter)` — or, for a two-level aggregate (`controls.$from`, since
+ * 0.1.168), those followed by the INNER level's grouped stages, whose
+ * projected documents (every inner column: `$groupBy` keys at their paths,
+ * computed aliases at the top) are the outer level's rows.
+ *
+ * `searchStage` is the resolved text-search stage (classic `$text` `$match`, or
+ * an Atlas `$search`). Both MUST be the pipeline's FIRST stage, hence its
+ * position in front of the filter `$match`. Resolving it needs adapter state,
+ * so the caller passes it in and this module stays a pure translation.
+ */
+function sourceStages(
+  query: DbQuery,
+  searchStage: Document | undefined,
+  filterOptions: TMongoFilterOptions | undefined,
+): Document[] {
+  // Relational predicates (since 0.1.147) add their `$lookup`s here, before `$group`.
+  const filterStages = mongoFilterStages(query.filter, filterOptions);
+  const rows = searchStage ? [searchStage, ...filterStages] : filterStages;
+  const inner = query.controls?.$from;
+  return inner ? buildGroupedStages(inner, rows, true) : rows;
+}
+
+/**
+ * The `$group._id` of a level from its `$groupBy`. `groupKeys` maps each
+ * `$groupBy` key (a field path or a calendar-bucket alias) to its `_id`
+ * sub-key.
  *
  * Every key is stored positionally inside `_id` (`k0`, `k1`, …) — internal
  * names that never collide — and projected back under its own name:
@@ -122,28 +180,12 @@ export function bucketExpression(b: TResolvedBucket): Document {
  * null value form ONE null group (SQL semantics) that projects back as
  * `f: null` — a bare `'$f'` would split them into `_id: {}` and
  * `_id: { f: null }`. A bucket alias is grouped by {@link bucketExpression}.
- *
- * `searchStage` is the resolved text-search stage (classic `$text` `$match`, or
- * an Atlas `$search`). Both MUST be the pipeline's FIRST stage, hence its
- * position in front of the filter `$match`. Resolving it needs adapter state,
- * so the caller passes it in and this module stays a pure translation.
  */
-function buildPrefix(
-  query: DbQuery,
-  searchStage: Document | undefined,
-  filterOptions: TMongoFilterOptions | undefined,
-): {
-  pipeline: Document[];
+function groupIdOf(controls: DbControls): {
   groupId: Document;
   groupKeys: Array<[path: string, idKey: string]>;
-  controls: DbQuery["controls"];
 } {
-  const controls = query.controls || {};
   const groupBy = (controls.$groupBy ?? []) as string[];
-  // Relational predicates (since 0.1.147) add their `$lookup`s here, before `$group`.
-  const filterStages = mongoFilterStages(query.filter, filterOptions);
-  const pipeline: Document[] = searchStage ? [searchStage, ...filterStages] : filterStages;
-
   const groupId: Document = {};
   const groupKeys: Array<[string, string]> = [];
   for (const [index, key] of groupBy.entries()) {
@@ -152,39 +194,34 @@ function buildPrefix(
     groupId[idKey] = bucket ? bucketExpression(bucket) : orNull(`$${key}`);
     groupKeys.push([key, idKey]);
   }
-
-  return { pipeline, groupId, groupKeys, controls };
+  return { groupId, groupKeys };
 }
 
 /**
- * The stages every grouped query shares: `[search →] $match(filter)` →
+ * The stages of one grouped level, appended to `pipeline` — a fresh array of
+ * its source rows' stages ({@link sourceStages}), returned:
  * `$group` (dimensions + accumulators) → `$project` (flatten `_id`, keep
  * aliases) → `$match($having)`. The row pipeline appends sort/skip/limit, the
  * count pipeline appends `$count`, so both see exactly the same group set —
  * including the same `$search` narrowing, which is why the stage is threaded
- * through this single seam instead of being appended by each caller.
+ * through this single seam instead of being appended by each caller. The
+ * inner level of a two-level aggregate is built here too.
  *
  * With `accumulators: false` only the `$group._id` dimensions are emitted
  * (no accumulators, no `$project`, no `$having`) — the cheapest shape for a
  * plain group count, where no alias has to be resolvable.
  */
 function buildGroupedStages(
-  query: DbQuery,
-  {
-    accumulators,
-    searchStage,
-    filterOptions,
-  }: { accumulators: boolean; searchStage?: Document; filterOptions?: TMongoFilterOptions },
-): {
-  pipeline: Document[];
-  controls: DbQuery["controls"];
-} {
-  const { pipeline, groupId, groupKeys, controls } = buildPrefix(query, searchStage, filterOptions);
+  controls: DbControls,
+  pipeline: Document[],
+  accumulators: boolean,
+): Document[] {
+  const { groupId, groupKeys } = groupIdOf(controls);
 
   const groupStage: Document = { _id: groupId };
   if (!accumulators) {
     pipeline.push({ $group: groupStage });
-    return { pipeline, controls };
+    return pipeline;
   }
 
   // `first` / `last`: order the rows BEFORE grouping (the portable `$sort` +
@@ -203,29 +240,32 @@ function buildGroupedStages(
     project[field] = `$_id.${idKey}`;
   }
   // `$sum` of no (non-null) value is 0 in MongoDB, NULL in SQL and the memory
-  // adapter: count the values next to the sum and project null over none.
-  const nullWhenEmpty = (alias: string, nonNull: Document): Document => {
+  // adapter: count the values next to the sum and project null over none. A
+  // conditional sum counts only the values of the rows its condition matches.
+  const nullWhenEmpty = (alias: string, value: unknown, where: Document | undefined): Document => {
     const count = `${NON_NULL_PREFIX}${alias}`;
-    groupStage[count] = { $sum: { $cond: [nonNull, 1, 0] } };
+    groupStage[count] = buildAccumulator("count", value, where);
     return { $cond: [{ $eq: [`$${count}`, 0] }, null, `$${alias}`] };
   };
   for (const expr of controls.$select?.aggregates ?? []) {
     const alias = resolveAlias(expr);
-    groupStage[alias] = toAccumulator(expr);
+    const where = conditionOf(expr.$where);
+    groupStage[alias] = toAccumulator(expr, where);
     // countDistinct accumulates a set — `$project` turns it into its size, so
     // `$having` and `$sort` (which run after it) compare a number.
     project[alias] =
       expr.$fn === "countDistinct"
         ? distinctCountExpr(`$${alias}`)
         : expr.$fn === "sum"
-          ? nullWhenEmpty(alias, notNullExpr(`$${expr.$field}`))
+          ? nullWhenEmpty(alias, `$${expr.$field as string}`, where)
           : 1;
   }
   for (const e of controls.$select?.exprAggregates ?? []) {
     // sum / avg / min / max over a per-row expression: IEEE double, NULL / ÷0 → null
     const value = exprToMongo(e.expr, asDouble);
-    groupStage[e.alias] = { [`$${e.fn}`]: value };
-    project[e.alias] = e.fn === "sum" ? nullWhenEmpty(e.alias, notNullExpr(value)) : 1;
+    const where = conditionOf(e.where);
+    groupStage[e.alias] = buildAccumulator(e.fn, value, where);
+    project[e.alias] = e.fn === "sum" ? nullWhenEmpty(e.alias, value, where) : 1;
   }
   for (const fl of firstLast) {
     groupStage[fl.alias] = { [`$${fl.fn}`]: orNull(`$${fl.column}`) };
@@ -246,14 +286,16 @@ function buildGroupedStages(
     pipeline.push({ $match: buildMongoFilter(controls.$having) });
   }
 
-  return { pipeline, controls };
+  return pipeline;
 }
 
 /**
  * Builds a full MongoDB aggregation pipeline for GROUP BY queries.
  *
  * Pipeline: [search →] $match → $group → $project → $match(having) → $sort →
- * $skip → $limit
+ * $skip → $limit. A two-level aggregate (`controls.$from`, since 0.1.168)
+ * runs the inner level's `$group` → `$project` → `$match(having)` first; the
+ * outer stages group its documents (no filter, no search of their own).
  *
  * `searchStage` is the resolved `$search` / `$text` stage (see
  * `buildAggregateSearchStage`); unlike the leaf runner this path adds no
@@ -265,11 +307,12 @@ export function buildAggregatePipeline(
   searchStage?: Document,
   filterOptions?: TMongoFilterOptions,
 ): Document[] {
-  const { pipeline, controls } = buildGroupedStages(query, {
-    accumulators: true,
-    searchStage,
-    filterOptions,
-  });
+  const controls = query.controls ?? {};
+  const pipeline = buildGroupedStages(
+    controls,
+    sourceStages(query, searchStage, filterOptions),
+    true,
+  );
 
   // Group keys / aliases are top-level after `$project`; `$nulls` places NULL among them.
   const { stages, cleanup } = sortStages(controls);
@@ -320,9 +363,12 @@ export function buildMatchedProbe(
   searchStage?: Document,
   filterOptions?: TMongoFilterOptions,
 ): Document[] {
-  const { pipeline } = buildPrefix(query, searchStage, filterOptions);
-  pipeline.push({ $limit: 1 }, { $project: { _id: 1 } });
-  return pipeline;
+  // (a two-level aggregate: any INNER row — its `$having` applied)
+  return [
+    ...sourceStages(query, searchStage, filterOptions),
+    { $limit: 1 },
+    { $project: { _id: 1 } },
+  ];
 }
 
 /**
@@ -357,11 +403,14 @@ export function emptyGroupStages(
 /**
  * `allowDiskUse` for a pipeline that sorts before it groups (`first` / `last`
  * order every matching row by `$rowOrder` first, which may exceed the
- * in-memory sort limit); `undefined` otherwise.
+ * in-memory sort limit), and for a two-level aggregate (two `$group` stages:
+ * the outer one groups every inner group, since 0.1.168); `undefined`
+ * otherwise.
  */
 export function aggregateOptions(pipeline: Document[]): { allowDiskUse: true } | undefined {
   const group = pipeline.findIndex((stage) => "$group" in stage);
-  return pipeline.slice(0, group < 0 ? 0 : group).some((stage) => "$sort" in stage)
+  const twoLevel = pipeline.findLastIndex((stage) => "$group" in stage) > group;
+  return twoLevel || pipeline.slice(0, group < 0 ? 0 : group).some((stage) => "$sort" in stage)
     ? { allowDiskUse: true }
     : undefined;
 }
@@ -383,11 +432,12 @@ export function buildCountPipeline(
   searchStage?: Document,
   filterOptions?: TMongoFilterOptions,
 ): Document[] {
-  const { pipeline } = buildGroupedStages(query, {
-    accumulators: Boolean(query.controls?.$having),
-    searchStage,
-    filterOptions,
-  });
+  const controls = query.controls ?? {};
+  const pipeline = buildGroupedStages(
+    controls,
+    sourceStages(query, searchStage, filterOptions),
+    Boolean(controls.$having),
+  );
   pipeline.push({ $count: "count" });
   return pipeline;
 }

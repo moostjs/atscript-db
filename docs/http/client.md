@@ -223,6 +223,32 @@ const queue = await issues.aggregate({
 
 Offer expression operands from `meta.fields[path].numeric` (and check `meta.aggregateExpressions`).
 
+[Field lists, conditions and two-level aggregates](/api/aggregation#conditional-aggregates) (since 0.1.168) are typed too. A `$where` is a filter on the model's fields — or, at the outer level of a two-level query, on the inner columns; a query with `controls.$from` is checked with `ValidNested` — an outer name that is not an inner column is a type error — and its rows are typed from the inner columns (`NestedAggregateResult`):
+
+```typescript
+const spend = await orders.aggregate({
+  filter: { status: "paid" },
+  controls: {
+    $from: {
+      $groupBy: ["region", "customerId"],
+      $select: [
+        { $fn: "sum", $field: "amount", $as: "spent" },
+        { $fn: "countDistinct", $field: ["productId", "variant"], $as: "items" },
+      ],
+    },
+    $groupBy: ["region"],
+    $select: [
+      "region",
+      { $fn: "avg", $field: "spent", $as: "avgSpent" },
+      { $fn: "count", $field: "*", $where: { items: { $gt: 1 } }, $as: "multiItem" },
+    ],
+  },
+});
+// spend[0].region is string, spend[0].avgSpent is number
+```
+
+Check `meta.distinctFieldLists`, `meta.conditionalAggregates` and `meta.nestedAggregates` before offering them. `NestedAggregateQuery`, `NestedAggregateResult`, `StageRow`, `AggregateStage` and `ValidNested` are re-exported from `@atscript/db-client`.
+
 `$groupBy: []` is the ungrouped aggregate: one row over the whole filtered set (since 0.1.155 against moost-db — the request carries the aggregate `$select` and no `$groupBy`). Plain fields cannot be selected then:
 
 ```typescript

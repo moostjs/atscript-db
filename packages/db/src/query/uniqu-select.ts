@@ -1,4 +1,4 @@
-import type { AggregateExpr, NullsPlacement, UniqueryControls } from "@uniqu/core";
+import type { AggregateExpr, FilterExpr, NullsPlacement, UniqueryControls } from "@uniqu/core";
 import { isAggregateExpr, resolveAlias } from "@uniqu/core";
 import type { AtscriptExprNode } from "@atscript/typescript/utils";
 
@@ -13,6 +13,12 @@ export interface TExprAggregate {
   expr: AtscriptExprNode;
   /** The distinct physical columns the expression reads. */
   names: readonly string[];
+  /**
+   * Conditional aggregate (`$where`, since 0.1.168): only the rows matching
+   * this filter (translated: physical names, storage values) are aggregated.
+   * Only reaches adapters whose `supportsConditionalAggregates()` is true.
+   */
+  where?: FilterExpr;
 }
 
 /** A group-level expression: leaves name aliases of other entries or grouped columns. */
@@ -86,6 +92,13 @@ export class UniquSelect {
    * `undefined` when there are none or the `$select` is object form.
    * `first` / `last` are listed separately ({@link firstLast}), so an adapter
    * written before them never meets one here.
+   *
+   * Since 0.1.168 an entry may carry a `$where` (a conditional aggregate:
+   * translated like the query filter — physical names, storage values) on an
+   * adapter whose `supportsConditionalAggregates()` is true, and a
+   * `countDistinct` may name a `string[]` of physical columns on an adapter
+   * whose `supportsDistinctFieldLists()` is true (a row with any NULL column
+   * is not counted). Use {@link aggregateColumns} to read either form.
    */
   readonly aggregates: AggregateExpr[] | undefined;
   /** The `first` / `last` entries of an array-form `$select` (since 0.1.148); `undefined` when none. */
@@ -151,7 +164,12 @@ export class UniquSelect {
     if (Array.isArray(raw)) {
       for (const item of raw as unknown[]) {
         if (isFirstLast(item)) {
-          firstLast.push({ fn: item.$fn, column: item.$field, alias: resolveAlias(item) });
+          // (a field list is `countDistinct`'s only — the normalizer rejects it elsewhere)
+          firstLast.push({
+            fn: item.$fn,
+            column: item.$field as string,
+            alias: resolveAlias(item),
+          });
         } else if (isAggregateExpr(item)) {
           aggregates.push(item);
         }
@@ -244,4 +262,16 @@ export class UniquSelect {
   bucketByAlias(key: string): TResolvedBucket | undefined {
     return this.buckets?.find((b) => b.alias === key);
   }
+}
+
+/**
+ * The columns an aggregate reads, as a list: `[]` for `count(*)`, the field
+ * list of a `countDistinct` over several fields, else the one `$field`.
+ *
+ * @since 0.1.168
+ */
+export function aggregateColumns(expr: Pick<AggregateExpr, "$field">): readonly string[] {
+  const field = expr.$field as string | readonly string[];
+  if (typeof field === "string") return field === "*" ? [] : [field];
+  return field;
 }

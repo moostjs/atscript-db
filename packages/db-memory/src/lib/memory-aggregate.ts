@@ -1,4 +1,5 @@
 import {
+  aggregateColumns,
   evaluateExpr,
   stableJson,
   type DbControls,
@@ -29,7 +30,16 @@ type TRow = Record<string, unknown>;
  *   `@uniqu/core` kernel label (the SQLite UDF runs the same kernel);
  * - `sum` / `avg` over no numeric value are `null`; `min` / `max` order with
  *   the `$sort` comparator; `countDistinct` counts distinct non-null values
- *   by group identity (below); any other `$fn` is `INVALID_QUERY`;
+ *   by group identity (below) — over a field list (since 0.1.168), distinct
+ *   combinations, a row with any null / missing field not counted; any other
+ *   `$fn` is `INVALID_QUERY`;
+ * - a conditional aggregate (`$where`, since 0.1.168) feeds its accumulator
+ *   only the rows its condition matches — the adapter's own filter predicate
+ *   ({@link buildMemoryPredicate}), so it reads like the query filter;
+ * - a two-level aggregate (`controls.$from`, since 0.1.168) groups the rows
+ *   of its inner level (this function over `$from`) by the outer controls —
+ *   every inner column (an inner `$groupBy` key at its path, an inner alias
+ *   at the top) is read like a field of a table row;
  * - group identity is type-tagged: `1` and `"1"` never share a group (a
  *   number and a bigint of one value do), `Date`s group by instant, JSON
  *   values by a key-order-independent serialization;
@@ -38,6 +48,8 @@ type TRow = Record<string, unknown>;
  *   object-valued leaves copied so no store-owned value escapes.
  */
 export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow[] {
+  // Two-level aggregate: the outer level reads the inner level's rows.
+  if (controls.$from) rows = aggregateRows(rows, controls.$from);
   const $select = controls.$select;
   const groupBy = (controls.$groupBy as string[] | undefined) ?? [];
   // Every accumulated per-group value, in `UniquSelect.computedAliases` order
@@ -46,11 +58,11 @@ export function aggregateRows(rows: readonly TRow[], controls: DbControls): TRow
   const entries: Array<{ alias: string; create: () => TAccumulator }> = [
     ...($select?.aggregates ?? []).map((expr) => ({
       alias: resolveAlias(expr),
-      create: accumulatorFactory(expr),
+      create: conditional(accumulatorFactory(expr), expr.$where as FilterExpr | undefined),
     })),
     ...($select?.exprAggregates ?? []).map((e) => ({
       alias: e.alias,
-      create: exprAccumulatorFactory(e),
+      create: conditional(exprAccumulatorFactory(e), e.where),
     })),
     ...($select?.firstLast ?? []).map((fl) => ({
       alias: fl.alias,
@@ -235,6 +247,27 @@ function numericValue(value: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * An accumulator fed only the rows `where` matches (a conditional aggregate,
+ * since 0.1.168) — `create` unchanged without a condition.
+ */
+function conditional(
+  create: () => TAccumulator,
+  where: FilterExpr | undefined,
+): () => TAccumulator {
+  if (where === undefined) return create;
+  const matches = buildMemoryPredicate(where);
+  return () => {
+    const acc = create();
+    return {
+      add: (row) => {
+        if (matches(row)) acc.add(row);
+      },
+      result: () => acc.result(),
+    };
+  };
+}
+
 /** `sum` / `avg` / `min` / `max` over a per-row arithmetic expression; NULL results are skipped like NULL fields. */
 function exprAccumulatorFactory(e: TExprAggregate): () => TAccumulator {
   const readers = new Map(e.names.map((name) => [name, pathReader(name)] as const));
@@ -309,12 +342,40 @@ function fnAccumulator(
 }
 
 /**
+ * `countDistinct` over a field list: distinct combinations by their
+ * length-prefixed {@link identityToken}s (type-tagged — `1` and `"1"`
+ * differ; no value forges a separator); a row with any null / missing field
+ * is not counted (SQL's `COUNT(DISTINCT a, b)`).
+ */
+function distinctListFactory(fields: readonly string[]): () => TAccumulator {
+  const readers = fields.map((field) => pathReader(field));
+  return () => {
+    const seen = new Set<string>();
+    return {
+      add: (row) => {
+        let identity = "";
+        for (const read of readers) {
+          const v = read(row);
+          if (v == null) return;
+          const token = identityToken(v);
+          identity += `${token.length}:${token}`;
+        }
+        seen.add(identity);
+      },
+      result: () => seen.size,
+    };
+  };
+}
+
+/**
  * Resolves a plain aggregate (`first` / `last` are {@link firstLastFactory}'s)
- * to an accumulator factory (one accumulator per group). Validated up front,
- * so an unknown `$fn` is rejected even when there are no rows.
+ * to an accumulator factory (one accumulator per group; a `$where` is applied
+ * by {@link conditional}). Validated up front, so an unknown `$fn` is
+ * rejected even when there are no rows.
  */
 function accumulatorFactory(expr: AggregateExpr): () => TAccumulator {
   assertAggregateFn(expr.$fn);
+  if (typeof expr.$field !== "string") return distinctListFactory(aggregateColumns(expr));
   const field = expr.$field;
   const read = pathReader(field);
   if (expr.$fn === "count") {

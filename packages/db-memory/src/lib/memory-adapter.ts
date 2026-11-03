@@ -1082,7 +1082,9 @@ export class MemoryAdapter extends BaseDbAdapter {
    * pure {@link aggregateRows} engine, so provider (read-through) mode works
    * unchanged. SQL-adapter semantics: null and missing group together,
    * `sum` / `avg` over no numeric value are `null`, `$count` counts the groups
-   * that survive `$having`.
+   * that survive `$having`. Conditional aggregates, `countDistinct` field
+   * lists and two-level aggregates (`$from`, over the same snapshot) run in
+   * the engine too (since 0.1.168).
    *
    * `$search` never reaches here: this adapter is not searchable, so the core
    * rejects a grouped search before dispatch.
@@ -1107,6 +1109,21 @@ export class MemoryAdapter extends BaseDbAdapter {
 
   /** Arithmetic in an aggregate `$select` (`{ $expr }`, `{ $fn, $expr }`). */
   override supportsAggregateExpressions(): boolean {
+    return true;
+  }
+
+  /** Conditional aggregates (`$where`) — the memory filter predicate over each row. @since 0.1.168 */
+  override supportsConditionalAggregates(): boolean {
+    return true;
+  }
+
+  /** `countDistinct` over a field list — distinct combinations by type-tagged identity. @since 0.1.168 */
+  override supportsDistinctFieldLists(): boolean {
+    return true;
+  }
+
+  /** Two-level aggregates (`$from`) — the grouping engine over its own output rows. @since 0.1.168 */
+  override supportsNestedAggregates(): boolean {
     return true;
   }
 

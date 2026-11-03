@@ -20,10 +20,12 @@ import type {
 } from "@atscript/db";
 import type { AtscriptDbTable } from "@atscript/db";
 import {
+  AGGREGATE_CONTROLS,
   DbError,
   andFilters,
   checkHavingKeys,
   collectQueryPaths,
+  holdsNumbers,
   geoIndexNotFoundMessage,
   normalizeComputedSelect,
   searchIndexNotFoundMessage,
@@ -36,6 +38,7 @@ import { Get, HttpError, MoostHttp, Query, Url } from "@moostjs/event-http";
 import { current, routeParamsKey, useRouteParams, type EventContext } from "@wooksjs/event-core";
 import { useBody } from "@wooksjs/http-body";
 import { Inherit, Inject, Moost, Optional, Param, useControllerContext } from "moost";
+import { isPlainObject, resolveAlias, resolveNested, type InnerColumn } from "@uniqu/core";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
@@ -129,7 +132,7 @@ import {
   snapshotClientWith,
   type TClientWithSnapshot,
 } from "./relation-predicates";
-import { badRequest, validatorErrorToHttp } from "./http-errors";
+import { badRequest, NESTED_NOT_SUPPORTED_MESSAGE, validatorErrorToHttp } from "./http-errors";
 import { dbErrorToHttp } from "./validation-interceptor";
 import { controllerOf } from "./actions/controller-access";
 
@@ -268,8 +271,32 @@ function routedController(ctx: EventContext): unknown {
  * `undefined` (aggregate mode iff `$groupBy`).
  */
 function computedMode(parsed: { controls?: object }): true | undefined {
-  const select = (parsed.controls as { $select?: unknown } | undefined)?.$select;
+  const controls = parsed.controls as { $select?: unknown; $from?: unknown } | undefined;
+  // A two-level aggregate is an aggregate, whatever its outer `$select` holds (since 0.1.168)
+  if (controls?.$from !== undefined) return true;
+  const select = controls?.$select;
   return (Array.isArray(select) && select.some((item) => typeof item !== "string")) || undefined;
+}
+
+/** The aliases of the computed entries of a `$select` (buckets, aggregates, expressions). */
+function computedAliasNames(select: unknown): Set<string> {
+  const out = new Set<string>();
+  for (const item of Array.isArray(select) ? select : []) {
+    if (item !== null && typeof item === "object") {
+      const alias = resolveAlias(item as never) as unknown;
+      if (typeof alias === "string" && alias) out.add(alias);
+    }
+  }
+  return out;
+}
+
+/** The 400 of a `$from` the adapter (or the endpoint's switch) does not take. */
+function nestedNotSupported(): HttpError {
+  return dbErrorToHttp(
+    new DbError("AGG_NESTED_NOT_SUPPORTED", [
+      { path: "$from", message: NESTED_NOT_SUPPORTED_MESSAGE },
+    ]),
+  );
 }
 
 /** The 400 of a filter / sort on a `@db.writeOnly` field. */
@@ -718,6 +745,147 @@ export class AsDbReadableController<
   }
 
   /**
+   * The DB controllers' controls check: an aggregate `/query` (`$groupBy`
+   * present) takes the aggregate controls only — `$groupBy`, `$select`,
+   * `$having`, `$sort`, `$nulls`, `$rowOrder`, `$skip`, `$limit`, `$count`,
+   * `$search`, `$index`, `$from` (and `$actions`, which grouped rows never
+   * carry) — and answers any other `$`-control with a 400 rather than ignoring it (since 0.1.168; before, the aggregate path
+   * skipped the controls check). `"nested"` (the inner level of a two-level
+   * aggregate) is accepted here — its shape is uniqu's `resolveNested`'s.
+   * Every other request is checked against its DTO. Override (call `super`)
+   * for per-control authorization; the override sees `"nested"` too.
+   */
+  protected override validateControls(
+    controls: Record<string, unknown>,
+    type: TDbControlsType,
+  ): string | undefined {
+    if (type === "nested") return undefined;
+    if (type === "query" && controls.$groupBy !== undefined) {
+      for (const [key, value] of Object.entries(controls)) {
+        // `$actions` asks for row actions, which grouped rows never carry: no effect on the answer.
+        if (value !== undefined && key !== "$actions" && !AGGREGATE_CONTROLS.has(key)) {
+          return `Unknown aggregate control "${key}"`;
+        }
+      }
+      return undefined;
+    }
+    return super.validateControls(controls, type);
+  }
+
+  /**
+   * Whether `/query` accepts a two-level aggregate (`$from`) — the switch a
+   * permission layer overrides to turn them off (per request, if it likes;
+   * prune `/meta.nestedAggregates` with `applyMetaOverlay` then). Default
+   * `true`; the adapter must support them too
+   * (`supportsNestedAggregates()`), else `$from` is a 400
+   * `AGG_NESTED_NOT_SUPPORTED` either way.
+   *
+   * @since 0.1.168
+   */
+  protected nestedAggregates(): boolean {
+    return true;
+  }
+
+  /**
+   * A boolean capability of the readable — `false` when it lacks the method
+   * (guarded: partial-mock readables in specs omit the methods).
+   */
+  private _readableSays(
+    method:
+      | "supportsConditionalAggregates"
+      | "supportsDistinctFieldLists"
+      | "supportsNestedAggregates"
+      | "supportsNullsPlacement",
+  ): boolean {
+    const readable = this.readable as Partial<AtscriptDbReadable>;
+    return typeof readable[method] === "function" && readable[method]!();
+  }
+
+  /** {@link nestedAggregates} and the adapter's capability. */
+  private _nestedAggregatesOn(): boolean {
+    return this.nestedAggregates() && this._readableSays("supportsNestedAggregates");
+  }
+
+  /**
+   * uniqu's `resolveNested` over a two-level aggregate, after the inner
+   * level's capability gate: `isNumericField` answers for visible fields only
+   * (a hidden field is `undefined`, never revealing its type), so an outer
+   * `sum` / arithmetic / bucket over an inner column known not to hold
+   * numbers is a 400 with uniqu's `AGG_NESTED_*` code.
+   */
+  private _checkNested(controls: Record<string, unknown>): HttpError | undefined {
+    const isVisible = this.fieldVisibility.isVisible;
+    const descriptors = new Map(this.readable.fieldDescriptors.map((fd) => [fd.path, fd]));
+    const capabilities = this.capabilities;
+    const res = resolveNested(controls, {
+      isField: (name) =>
+        this.readable.flatMap.has(name) ||
+        capabilities.navFields.has(name) ||
+        capabilities.physicalNames.has(name),
+      isNumericField: (field) => {
+        if (!isVisible(field)) return undefined;
+        const fd = descriptors.get(field);
+        return fd ? holdsNumbers(fd) : undefined;
+      },
+    });
+    if (!res.ok) return this._nestedError(res);
+    return this._checkOuterPolicy(controls, res.columns);
+  }
+
+  /**
+   * The outer level of a two-level aggregate reading an inner `$groupBy` FIELD
+   * (a table field's values) in a condition or an order: the field's own
+   * filter / sort gate applies — the table's `filterable` / `sortable`
+   * `'manual'` policy included — exactly as a one-level filter / `$sort` on it
+   * would meet. Inner aliases are computed columns, not fields: only the
+   * resolved `'key'` columns are.
+   */
+  private _checkOuterPolicy(
+    controls: Record<string, unknown>,
+    columns: readonly InnerColumn[],
+  ): HttpError | undefined {
+    const keys = new Set(columns.filter((c) => c.kind === "key").map((c) => c.name));
+    if (keys.size === 0) return undefined;
+    const outerAliases = computedAliasNames(controls.$select);
+    const isVisible = this.fieldVisibility.isVisible;
+    const capabilities = this.capabilities;
+    for (const item of (controls.$select as unknown[] | undefined) ?? []) {
+      const where = (item as { $where?: unknown } | null)?.$where;
+      if (where === undefined) continue;
+      for (const ref of collectQueryPaths({ filter: where as FilterExpr }).filter) {
+        if (!keys.has(ref.path)) continue;
+        const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
+        if (verdict) return badRequest(verdict.path, verdict.message);
+      }
+    }
+    const ordered = [
+      ...Object.keys((controls.$sort as object | undefined) ?? {}).filter(
+        (k) => !outerAliases.has(k),
+      ),
+      ...Object.keys((controls.$rowOrder as object | undefined) ?? {}),
+    ];
+    for (const key of ordered) {
+      if (!keys.has(key)) continue;
+      const verdict = capabilities.check(key, "sort", isVisible);
+      if (verdict) return badRequest(verdict.path, verdict.message);
+    }
+    return undefined;
+  }
+
+  /** A failed `resolveNested` as the 400 the core answers (`INVALID_QUERY`, each issue coded). */
+  private _nestedError(res: ReturnType<typeof resolveNested>): HttpError | undefined {
+    if (res.ok) return undefined;
+    return dbErrorToHttp(
+      new DbError(
+        "INVALID_QUERY",
+        res.issues.map(({ path, message, code }) =>
+          code ? { path, message, code } : { path, message },
+        ),
+      ),
+    );
+  }
+
+  /**
    * Structural capability gate (since 0.1.128): walks the PARSED query —
    * filter tree, `$sort`, `$select`, `$groupBy`, `$having`, aggregate
    * `$field`s — and checks every root path against {@link capabilities}, the
@@ -833,12 +1001,24 @@ export class AsDbReadableController<
    */
   protected checkComputedSelect(controls: object | undefined): HttpError | undefined {
     const capabilities = this.capabilities;
+    const stage = (controls as { $from?: unknown } | undefined)?.$from;
+    if (stage !== undefined && !isPlainObject(stage)) {
+      // a malformed `$from`: uniqu's coded answer (it reads no schema)
+      return this._nestedError(resolveNested(controls as Record<string, unknown>));
+    }
     try {
-      normalizeComputedSelect(controls, {
-        flatMap: this.readable.flatMap,
-        physicalNames: capabilities.physicalNames,
-        navFields: capabilities.navFields,
-      });
+      // A two-level aggregate: the table is read by its inner level, a grouped
+      // query of its own (the root names inner columns — resolved by
+      // `resolveNested` after the capability gate, see `_checkNested`).
+      normalizeComputedSelect(
+        stage === undefined ? controls : stage,
+        {
+          flatMap: this.readable.flatMap,
+          physicalNames: capabilities.physicalNames,
+          navFields: capabilities.navFields,
+        },
+        stage === undefined ? undefined : true,
+      );
     } catch (error) {
       // Only the query-shape verdict is a 400; anything else (a closed space's
       // SPACE_CLOSED from reading the field map, …) keeps its own mapping.
@@ -863,6 +1043,10 @@ export class AsDbReadableController<
     const nav = this.capabilities.navFields;
     for (const [key] of insights) {
       if (key === "*") continue;
+      // uniqu's marker of a control it could not read (a malformed `$where`,
+      // a `$from` inside `$with`, …): no field starts with `$` — fail closed
+      // (since 0.1.168).
+      if (key.startsWith("$")) return unknownInsight(insights, key);
       const dot = key.indexOf(".");
       if (dot === -1) continue;
       if (!nav.has(key.slice(0, dot))) continue;
@@ -894,6 +1078,7 @@ export class AsDbReadableController<
     // Aggregates — grouped or not (an aggregate `$select`) — are `/query`'s
     // (since 0.1.155 one 400 naming the reason; before, the controls DTO rejected both).
     if (type === "pages" && (controls?.$groupBy !== undefined || computedMode(parsed))) {
+      // (`$from` counts: computedMode)
       return badRequest(
         controls?.$groupBy === undefined ? "$select" : "$groupBy",
         "Aggregate queries are only valid on /query",
@@ -907,6 +1092,18 @@ export class AsDbReadableController<
     const controlsError = this.validateControls(controls, type);
     if (controlsError) {
       return new HttpError(400, controlsError);
+    }
+    // The inner level of a two-level aggregate is validated on its own, so a
+    // per-control policy (an override of `validateControls`) sees its
+    // `$groupBy` / `$select` too — the root's name inner columns (since 0.1.168).
+    if (type === "query" && isPlainObject(controls.$from)) {
+      const nestedError = this.validateControls(
+        controls.$from as Record<string, unknown>,
+        "nested",
+      );
+      if (nestedError) {
+        return new HttpError(400, nestedError);
+      }
     }
     const withRelations = controls.$with as Array<{ name: string }> | undefined;
     const unknown = withRelations?.length
@@ -2643,7 +2840,13 @@ export class AsDbReadableController<
    * query 400 where the leaf list happily returns rows: a new divergence, in
    * the same shape as the one this whole path exists to remove.
    */
-  private _aggregateControls(controls: Record<string, unknown>): Record<string, unknown> {
+  private _aggregateControls(input: Record<string, unknown>): Record<string, unknown> {
+    let controls = input;
+    if (input.$actions !== undefined) {
+      // grouped rows carry no row actions (see `validateControls`)
+      const { $actions: _actions, ...rest } = input;
+      controls = rest;
+    }
     if (controls.$search === undefined || this._nativeSearch(controls)) {
       return controls;
     }
@@ -3271,6 +3474,11 @@ export class AsDbReadableController<
       controls.$groupBy = [];
     }
     const aggregate = computed || !!(controls.$groupBy as string[] | undefined)?.length;
+    // Two-level aggregates: the adapter's capability and this endpoint's switch
+    // (a permission layer may turn them off), before anything reads `$from`.
+    if (controls.$from !== undefined && !this._nestedAggregatesOn()) {
+      return nestedNotSupported();
+    }
     if (aggregate && (controls.$with as unknown[])?.length) {
       return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
     }
@@ -3317,6 +3525,12 @@ export class AsDbReadableController<
       : this.checkCapabilities(parsed);
     if (gateError) {
       return gateError;
+    }
+    // Both levels of a two-level aggregate, AFTER the inner level passed the
+    // capability gate: a numeric answer describes visible fields only.
+    if (controls.$from !== undefined) {
+      const nestedError = this._checkNested(controls);
+      if (nestedError) return nestedError;
     }
     const clientFilter = await this._relationOverlay(parsed);
 
@@ -4222,17 +4436,24 @@ export class AsDbReadableController<
       aggregateFns: [...capabilities.aggregateFns],
       // Arithmetic in an aggregate `$select`; operands are `fields[P].numeric`.
       aggregateExpressions: capabilities.aggregateExpressions,
+      // Conditional aggregates (`$where`), countDistinct over a field list and
+      // two-level aggregates (`$from`; the endpoint may turn them off) — since 0.1.168.
+      conditionalAggregates: this._readableSays("supportsConditionalAggregates"),
+      distinctFieldLists: this._readableSays("supportsDistinctFieldLists"),
+      nestedAggregates: this._nestedAggregatesOn(),
       // NULL placement in `$sort` / `$rowOrder` (`$nulls`, `:first` / `:last`); omitted when unsupported.
-      // (guarded like `hasField`: partial-mock readables in specs omit the method)
-      ...(typeof this.readable.supportsNullsPlacement === "function" &&
-        this.readable.supportsNullsPlacement() && { nullsPlacement: true }),
+      ...(this._readableSays("supportsNullsPlacement") && { nullsPlacement: true }),
     };
   }
 
   protected override buildCrud(): TCrudPermissions {
     return {
       ...super.buildCrud(),
-      query: [...QUERY_CONTROLS],
+      // `from` only while `/query` takes two-level aggregates (since 0.1.168); the
+      // other aggregate-only controls (`AGGREGATE_ONLY_CONTROLS`) always apply here
+      query: this._nestedAggregatesOn()
+        ? [...QUERY_CONTROLS]
+        : QUERY_CONTROLS.filter((c) => c !== "from"),
       pages: [...PAGES_CONTROLS],
       one: [...ONE_CONTROLS],
       ...(this._isGeoSearchable() ? { geo: [...GEO_CONTROLS] } : {}),

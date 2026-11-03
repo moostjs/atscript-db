@@ -22,7 +22,20 @@ export const QUERY_CONTROLS: readonly string[] = [
   "groupBy",
   // `$rowOrder` — the row order `first()` / `last()` read (URL grammar, grouped queries; since 0.1.148)
   "rowOrder",
+  // `$from` — the inner level of a two-level aggregate (since 0.1.168)
+  "from",
 ];
+
+/**
+ * The `crud.query` controls only an aggregate `/query` takes — a value-help
+ * endpoint drops them all; a db readable drops just `from` while two-level
+ * aggregates are off. Internal: not exported from the package.
+ */
+export const AGGREGATE_ONLY_CONTROLS: ReadonlySet<string> = new Set([
+  "groupBy",
+  "rowOrder",
+  "from",
+]);
 
 export const PAGES_CONTROLS: readonly string[] = ["filter", ...dtoControls(PagesControlsDto)];
 

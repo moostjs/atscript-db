@@ -203,6 +203,13 @@ export const sqliteDialect: SqlDialect = {
   castDouble: (expr: string) => `CAST(${expr} AS REAL)`,
   // `NULLS FIRST` / `NULLS LAST` — SQLite ≥ 3.30 (better-sqlite3 bundles a newer one).
   nullsPlacementSyntax: true,
+  // Conditional aggregates: `SUM(x) FILTER (WHERE "c")` — SQLite ≥ 3.30 (since 0.1.168)
+  conditionalAggregate: "filter",
+  // One distinct value per combination (no string concatenation, so no
+  // separator can collide); `json_array` of a NULL is not NULL, so a row with
+  // any NULL column is left out explicitly (since 0.1.168).
+  countDistinctColumns: (columns) =>
+    `COUNT(DISTINCT CASE WHEN ${columns.map((c) => `${c} IS NOT NULL`).join(" AND ")} THEN json_array(${columns.join(", ")}) END)`,
   createViewPrefix: "CREATE VIEW IF NOT EXISTS",
 };
 

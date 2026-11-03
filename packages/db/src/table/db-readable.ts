@@ -23,7 +23,7 @@ import type {
   Uniquery,
   WithRelation,
 } from "@uniqu/core";
-import { isAggregateExpr, isAggregateOfExpr, resolveAlias } from "@uniqu/core";
+import { isAggregateExpr, isAggregateOfExpr, isBucketExpr, resolveAlias } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
 import { DbError, invalidQuery, spaceClosedError } from "../db-error";
@@ -69,6 +69,7 @@ import type { DbEncryption } from "../encryption";
 import {
   assertGeoPoint,
   guardAggregate,
+  guardNestedOuter,
   guardFilter,
   guardPaths,
   groupSourceVerdict,
@@ -80,7 +81,16 @@ import {
   type TRelationFilterOwner,
   type TRelGuardState,
 } from "../query/relation-filter";
-import { resolveComputedSelect } from "../query/buckets";
+import { resolveComputedSelect, type TComputedSelect } from "../query/buckets";
+import {
+  checkAggregateControls,
+  checkOuterBucketSources,
+  innerAggregateQuery,
+  innerColumnSources,
+  metaIsNumericField,
+  resolveNestedOrThrow,
+} from "../query/nested-aggregate";
+import { aggregateColumns } from "../query/uniqu-select";
 import { computedAliases } from "../query/aggregate-expr";
 import { NullsSource } from "../query/nulls";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
@@ -222,6 +232,26 @@ function withGroupBy(query: AggregateQuery): AggregateQuery {
     throw invalidQuery("$groupBy", "$groupBy must be an array of field names");
   }
   return { ...query, controls: { ...controls, $groupBy: [] } } as AggregateQuery;
+}
+
+/**
+ * The inner level of a two-level aggregate with every plain `$groupBy` key
+ * listed in its `$select` (after validation): each is an inner column the
+ * outer level may read, whether the request selected it or not.
+ */
+function withInnerKeys(query: AggregateQuery): AggregateQuery {
+  const { $groupBy, $select } = query.controls;
+  const select = ($select ?? []) as unknown[];
+  const listed = new Set(select.filter((item): item is string => typeof item === "string"));
+  const bucketAliases = new Set(
+    select.filter((item) => isBucketExpr(item)).map((item) => resolveAlias(item as never)),
+  );
+  const keys = $groupBy.filter((key) => !listed.has(key) && !bucketAliases.has(key));
+  if (keys.length === 0) return query;
+  return {
+    ...query,
+    controls: { ...query.controls, $select: [...keys, ...select] as typeof $select },
+  };
 }
 
 /**
@@ -1388,17 +1418,30 @@ export class AtscriptDbReadable<
    * Executes an aggregate query with GROUP BY and aggregate functions.
    *
    * Validates:
+   * - the controls: only aggregate controls (`$groupBy`, `$select`,
+   *   `$having`, `$sort`, `$nulls`, `$rowOrder`, `$skip`, `$limit`, `$count`,
+   *   `$search`, `$index`, `$from`; `$with` only empty) — anything else is
+   *   `INVALID_QUERY` (since 0.1.168)
    * - `$select` computed entries and calendar buckets (the shared normalizer,
    *   `normalizeComputedSelect`: shapes, unit, zone, alias, grouping)
    * - Plain fields in $select are a subset of $groupBy
    * - When dimensions/measures are defined (strict mode): $groupBy fields
    *   must be dimensions, aggregate $field values must be measures (or '*';
-   *   a `countDistinct` field may also be a dimension)
+   *   a `countDistinct` field — each of a field list — may also be a dimension)
+   * - conditional aggregates (`$where`) and `countDistinct` field lists: the
+   *   adapter's `supportsConditionalAggregates()` / `supportsDistinctFieldLists()`,
+   *   and a condition's fields pass the same rules as the filter's (since 0.1.168)
    * - the path guard (a bucket source must pass `bucketSourceVerdict` —
    *   timestamp type, no JSON ancestor, a dimension in strict mode, an
    *   adapter with calendar buckets), the adapter's aggregate functions
    *   (`AGG_FN_NOT_SUPPORTED`) and calendar-bucket units
    *   (`BUCKET_NOT_SUPPORTED`)
+   *
+   * A query with `controls.$from` is a two-level aggregate (since 0.1.168):
+   * the inner level is validated as a standalone grouped query over the
+   * filter, then uniqu's `resolveNested` resolves both levels; the outer
+   * level reads inner columns only. Needs `supportsNestedAggregates()`
+   * (`AGG_NESTED_NOT_SUPPORTED`).
    *
    * Translates field names, delegates to adapter.aggregate(),
    * then reverse-maps and applies fromStorage formatters on results.
@@ -1406,6 +1449,90 @@ export class AtscriptDbReadable<
   public async aggregate(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
     this._ensureBuilt();
     query = withGroupBy(query);
+    checkAggregateControls(query.controls as unknown as Record<string, unknown>);
+    if ((query.controls as { $from?: unknown }).$from !== undefined) {
+      return this._aggregateNested(query);
+    }
+    const checked = this._checkAggregate(query);
+    if (checked.empty) return checked.empty;
+    const { computed } = checked;
+    const { $select } = query.controls;
+
+    // NULL placement of `$sort` / `$rowOrder` keys (since 0.1.153)
+    const ordered = this._aggregateNulls(query, computed.rowOrder);
+
+    // Translate and delegate
+    const dbQuery = this._fieldMapper.translateAggregateQuery(
+      ordered.query,
+      this._meta,
+      computed.buckets,
+      computed.exprs,
+      ordered.rowOrder,
+    );
+    const results = await this.adapter.aggregate(dbQuery);
+
+    // Aggregate rows take the same reverse path as regular rows (since
+    // 0.1.128): physical → logical names, fromStorage formatters, boolean /
+    // decimal / JSON coercion of grouped columns, and a flattened leaf
+    // (`stats__views`) nests as `{ stats: { views } }`. Keys that are not
+    // columns — aggregate aliases such as `total` or `count_star`, calendar
+    // bucket labels — are kept out of the column path (see
+    // {@link _fromAggregateRead}): an alias named like a column is the alias's
+    // value, never formatted as that column. Rows an adapter already returns
+    // nested (MongoDB) pass through unchanged. A grouped derived field on a
+    // document adapter is filled from its source path (the grouped dimension)
+    // and the source pruned (since 0.1.141).
+    return this._fromAggregateRead(
+      results,
+      query.controls,
+      this._aliasFields($select),
+      computedAliases($select),
+    );
+  }
+
+  /**
+   * Aggregate rows through {@link _fromRead}, with the computed columns
+   * (`aliases`) kept out of the column path: an alias named like a column
+   * (`count(*):paid` next to a boolean `paid`, an alias equal to a renamed
+   * column's physical name) is the alias's value, never formatted, coerced or
+   * renamed as that column. `aliasFields` (a `min` / `max` / `first` / `last`
+   * of a boolean or decimal field) are coerced like their field after.
+   */
+  private _fromAggregateRead(
+    rows: Record<string, unknown>[],
+    controls: TReadControls,
+    aliasFields: ReadonlyMap<string, TDbFieldMeta>,
+    aliases: ReadonlySet<string>,
+  ): Record<string, unknown>[] {
+    if (aliases.size === 0) return this._fromRead(rows, controls, aliasFields);
+    const kept = rows.map((row) => {
+      const values: Array<[string, unknown]> = [];
+      for (const alias of aliases) {
+        if (Object.hasOwn(row, alias)) {
+          values.push([alias, row[alias]]);
+          delete row[alias];
+        }
+      }
+      return values;
+    });
+    const out = this._fromRead(rows, controls);
+    out.forEach((row, i) => {
+      for (const [alias, value] of kept[i]!) row[alias] = value;
+    });
+    if (aliasFields.size) coerceAliasValues(out, aliasFields);
+    return out;
+  }
+
+  /**
+   * Every rule of one grouped level read as a standalone query (the single
+   * level of an aggregate, or the inner level of a two-level one) — see
+   * {@link aggregate}. `empty` is the answer of a blank-but-present `$search`
+   * (no rows), when the query must not run.
+   */
+  private _checkAggregate(query: AggregateQuery): {
+    computed: TComputedSelect;
+    empty?: Array<Record<string, unknown>>;
+  } {
     const { $groupBy, $select } = query.controls;
 
     // Computed-entry shapes + calendar buckets, before any rule reads `$select`
@@ -1448,18 +1575,22 @@ export class AtscriptDbReadable<
 
       if ($select) {
         for (const item of $select) {
-          if (!isAggregateExpr(item) || item.$field === "*" || measSet.has(item.$field)) continue;
-          // Counting distinct values is a question about a dimension as much
-          // as a measure ("how many regions sold"), so either may be counted;
-          // a representative row (`first` / `last`) reads either too.
-          if (item.$fn === "countDistinct" || isFirstLast(item)) {
-            if (dimSet.has(item.$field)) continue;
-            throw invalidQuery(
-              "$select",
-              `Aggregate field "${item.$field}" is not a dimension or measure`,
-            );
+          if (!isAggregateExpr(item)) continue;
+          // Each field of a `countDistinct` field list is checked on its own.
+          for (const field of aggregateColumns(item)) {
+            if (measSet.has(field)) continue;
+            // Counting distinct values is a question about a dimension as much
+            // as a measure ("how many regions sold"), so either may be counted;
+            // a representative row (`first` / `last`) reads either too.
+            if (item.$fn === "countDistinct" || isFirstLast(item)) {
+              if (dimSet.has(field)) continue;
+              throw invalidQuery(
+                "$select",
+                `Aggregate field "${field}" is not a dimension or measure`,
+              );
+            }
+            throw invalidQuery("$select", `Aggregate field "${field}" is not a measure`);
           }
-          throw invalidQuery("$select", `Aggregate field "${item.$field}" is not a measure`);
         }
       }
     }
@@ -1471,13 +1602,15 @@ export class AtscriptDbReadable<
     if ($select && quantityRefByField.size > 0) {
       const groupBySet = new Set($groupBy);
       for (const item of $select) {
-        if (!isAggregateExpr(item) || item.$field === "*") continue;
-        const refField = quantityRefByField.get(item.$field);
-        if (refField && !groupBySet.has(refField)) {
-          throw invalidQuery(
-            "$select",
-            `Aggregate "${item.$fn}(${item.$field})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
-          );
+        if (!isAggregateExpr(item)) continue;
+        for (const field of aggregateColumns(item)) {
+          const refField = quantityRefByField.get(field);
+          if (refField && !groupBySet.has(refField)) {
+            throw invalidQuery(
+              "$select",
+              `Aggregate "${item.$fn}(${aggregateColumns(item).join(", ")})" requires "${refField}" in $groupBy — quantity-ref-tagged fields must be grouped by their dimension`,
+            );
+          }
         }
       }
     }
@@ -1490,50 +1623,97 @@ export class AtscriptDbReadable<
     if (typeof searchTerm === "string" && searchTerm) {
       this._ensureSearchable();
       if (!searchTerm.trim()) {
-        return query.controls.$count ? [{ count: 0 }] : [];
+        return { computed, empty: query.controls.$count ? [{ count: 0 }] : [] };
       }
     }
 
     // Encrypted-field guards: $groupBy / aggregate refs / $having / filter,
     // then the path guard and the adapter's calendar-bucket units.
     guardAggregate(this._meta, this.adapter, query, computed);
-
-    // NULL placement of `$sort` / `$rowOrder` keys (since 0.1.153)
-    const ordered = this._aggregateNulls(query, computed.rowOrder);
-
-    // Translate and delegate
-    const dbQuery = this._fieldMapper.translateAggregateQuery(
-      ordered.query,
-      this._meta,
-      buckets,
-      computed.exprs,
-      ordered.rowOrder,
-    );
-    const results = await this.adapter.aggregate(dbQuery);
-
-    // Aggregate rows take the same reverse path as regular rows (since
-    // 0.1.128): physical → logical names, fromStorage formatters, boolean /
-    // decimal / JSON coercion of grouped columns, and a flattened leaf
-    // (`stats__views`) nests as `{ stats: { views } }`. Keys that are not
-    // columns — aggregate aliases such as `total` or `count_star`, calendar
-    // bucket labels — are copied as-is by both strategies; an aggregate alias
-    // that collides with a physical column name is treated as that column (as
-    // the formatter rule always did). A bucket alias never collides (the
-    // normalizer rejects it), so no formatter ever touches a label. Rows an
-    // adapter already returns nested (MongoDB) pass through unchanged. A
-    // grouped derived field on a document adapter is filled from its source
-    // path (the grouped dimension) and the source pruned (since 0.1.141).
-    return this._fromRead(results, query.controls, this._aliasFields($select));
+    return { computed };
   }
 
   /**
-   * A grouped read's `$nulls` resolved for its `$sort` keys (computed aliases
-   * take a request entry only) and its `$rowOrder` keys — see
-   * {@link NullsSource}.
+   * A two-level aggregate (`controls.$from`, since 0.1.168) — see
+   * {@link aggregate}. Order: the shape of both levels (uniqu's
+   * `resolveNested` without schema answers), the inner level as a standalone
+   * grouped query (capabilities, encryption, strict mode — the gate a hidden
+   * or unusable field meets), `resolveNested` again with the numeric answers
+   * of the schema, then the outer level's adapter rules (aggregate functions,
+   * arithmetic, conditions, field lists, calendar buckets over inner
+   * timestamp columns).
+   */
+  private async _aggregateNested(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
+    if (!this.adapter.supportsNestedAggregates()) {
+      throw new DbError("AGG_NESTED_NOT_SUPPORTED", [
+        {
+          path: "$from",
+          message: "Two-level aggregates ($from) are not supported by this adapter",
+        },
+      ]);
+    }
+    const controls = query.controls as unknown as Record<string, unknown>;
+    resolveNestedOrThrow(controls, this._meta);
+
+    const inner = withGroupBy(innerAggregateQuery(query));
+    const checked = this._checkAggregate(inner);
+    // a blank `$search`: no rows — answered for the ROOT (its `$count`)
+    if (checked.empty) return controls.$count ? [{ count: 0 }] : [];
+
+    const resolution = resolveNestedOrThrow(controls, this._meta, metaIsNumericField(this._meta));
+    const stage = controls.$from as Record<string, unknown>;
+    const columns = innerColumnSources(stage, this._meta);
+    guardNestedOuter(this.adapter, controls, resolution);
+    checkOuterBucketSources(resolution, columns);
+
+    // The inner level lists every inner column: its plain `$groupBy` keys
+    // join its `$select` (the outer level may read any of them).
+    const innerOrdered = this._aggregateNulls(withInnerKeys(inner), checked.computed.rowOrder);
+    const innerQuery = this._fieldMapper.translateAggregateQuery(
+      innerOrdered.query,
+      this._meta,
+      checked.computed.buckets,
+      checked.computed.exprs,
+      innerOrdered.rowOrder,
+    );
+    // The outer `$sort` keys that are inner `$groupBy` fields take their
+    // `@db.sort.nulls` like any grouped field; any other key (an alias) a
+    // request entry only.
+    const sortKeys = Object.keys(
+      (query.controls.$sort as Record<string, unknown> | undefined) ?? {},
+    );
+    const sortAliases = new Set(sortKeys.filter((name) => columns.get(name)?.kind !== "key"));
+    const outer = this._aggregateNulls(query, undefined, sortAliases).query;
+    const dbQuery = this._fieldMapper.translateNestedAggregate(
+      outer,
+      this._meta,
+      innerQuery,
+      columns,
+      resolution,
+    );
+    const results = await this.adapter.aggregate(dbQuery);
+    // The outer computed columns, and outer keys that are inner computed columns, are no table columns.
+    const aliases = computedAliases(outer.controls.$select);
+    for (const key of outer.controls.$groupBy) {
+      if (columns.get(key)?.kind === "computed") aliases.add(key);
+    }
+    return this._fromAggregateRead(
+      results,
+      outer.controls,
+      this._aliasFields(outer.controls.$select, (field) => columns.get(field)?.fd),
+      aliases,
+    );
+  }
+
+  /**
+   * A grouped read's `$nulls` resolved for its `$sort` keys (`aliases`,
+   * the computed ones by default, take a request entry only) and its
+   * `$rowOrder` keys — see {@link NullsSource}.
    */
   private _aggregateNulls(
     query: AggregateQuery,
     rowOrder: ResolvedRowOrderKey[] | undefined,
+    aliases?: ReadonlySet<string>,
   ): { query: AggregateQuery; rowOrder: ResolvedRowOrderKey[] | undefined } {
     const controls = query.controls;
     const source = this._nulls;
@@ -1541,7 +1721,7 @@ export class AtscriptDbReadable<
     const nulls = source.resolveSort(
       controls.$sort,
       controls.$nulls,
-      computedAliases(controls.$select),
+      aliases ?? computedAliases(controls.$select),
     );
     const next: AggregateQuery["controls"] = { ...controls };
     if (nulls) next.$nulls = nulls;
@@ -1552,13 +1732,19 @@ export class AtscriptDbReadable<
   /**
    * The computed aliases of one source field that is a boolean or a decimal —
    * `min` / `max` / `first` / `last` — with that field's descriptor: the
-   * aggregate row's value is coerced like the column's own on read.
+   * aggregate row's value is coerced like the column's own on read. `fdOf`
+   * names the source (a table field; an inner column at the outer level of a
+   * two-level aggregate).
    */
-  private _aliasFields(select: AggregateQuery["controls"]["$select"]): Map<string, TDbFieldMeta> {
+  private _aliasFields(
+    select: AggregateQuery["controls"]["$select"],
+    fdOf: (field: string) => TDbFieldMeta | undefined = (field) =>
+      this._meta.descriptorByPath.get(field),
+  ): Map<string, TDbFieldMeta> {
     const out = new Map<string, TDbFieldMeta>();
     for (const item of (select ?? []) as unknown[]) {
       if (!isAggregateExpr(item) || !SOURCE_VALUE_FNS.has(item.$fn)) continue;
-      const fd = this._meta.descriptorByPath.get(item.$field);
+      const fd = typeof item.$field === "string" ? fdOf(item.$field) : undefined;
       if (fd && (fd.designType === "boolean" || fd.designType === "decimal")) {
         out.set(resolveAlias(item), fd);
       }
@@ -1586,6 +1772,21 @@ export class AtscriptDbReadable<
   /** Whether the adapter renders aggregate arithmetic (proxies adapter capability). @since 0.1.148 */
   public supportsAggregateExpressions(): boolean {
     return this.adapter.supportsAggregateExpressions();
+  }
+
+  /** Whether the adapter renders conditional aggregates (`$where`; proxies adapter capability). @since 0.1.168 */
+  public supportsConditionalAggregates(): boolean {
+    return this.adapter.supportsConditionalAggregates();
+  }
+
+  /** Whether the adapter renders `countDistinct` over a field list (proxies adapter capability). @since 0.1.168 */
+  public supportsDistinctFieldLists(): boolean {
+    return this.adapter.supportsDistinctFieldLists();
+  }
+
+  /** Whether the adapter runs two-level aggregates (`$from`; proxies adapter capability). @since 0.1.168 */
+  public supportsNestedAggregates(): boolean {
+    return this.adapter.supportsNestedAggregates();
   }
 
   /** Aggregate functions the adapter renders (proxies adapter capability). @since 0.1.136 */
