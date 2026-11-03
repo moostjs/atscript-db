@@ -76,7 +76,7 @@ beforeAll(async () => {
     { id: 3, name: "Cid", address: { city: "Paris" }, managerId: 2, settings: { level: 7 } },
     { id: 4, name: "Dan", address: { city: "Nowhere" }, managerId: 1 },
   ] as never);
-});
+}, 60_000);
 
 afterAll(async () => {
   await client?.close();
