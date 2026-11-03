@@ -49,6 +49,7 @@ describe("/meta — defaults below a tuple / union of several types", () => {
     expect(validator.validate({ ...row, steps: [{}, { note: "n" }] }, true)).toBe(false);
     expect(validator.errors[0]!.path).toBe("steps.0.at");
     expect(validator.validate({ ...row, pay: { kind: "card" } }, true)).toBe(false);
-    expect(validator.errors[0]!.path).toBe("pay");
+    // `kind` tags the union, so the error points into the card branch (atscript >= 0.2.4)
+    expect(validator.errors[0]!.path).toBe("pay.at");
   });
 });
