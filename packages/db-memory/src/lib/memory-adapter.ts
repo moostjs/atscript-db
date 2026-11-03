@@ -1203,25 +1203,44 @@ export class MemoryAdapter extends BaseDbAdapter {
    * Records the model's `unique` indexes for insert-time enforcement. Idempotent
    * (replaces the recorded set). Non-unique index types are ignored — an
    * in-memory scan needs no plain/fulltext/geo index to answer queries.
+   *
+   * A unique index the stored rows already break is not recorded and the call
+   * throws `CONFLICT` naming it — as `CREATE UNIQUE INDEX` fails over
+   * duplicates on SQL — after recording the indexes that hold.
    */
   async syncIndexes(): Promise<void> {
+    const state = this._state();
     const uniqueIndexes: RecordedUniqueIndex[] = [];
+    const broken: RecordedUniqueIndex[] = [];
     for (const index of this._table.indexes.values()) {
       if (index.type !== "unique") {
         continue;
       }
-      uniqueIndexes.push(
-        recordUniqueIndex(
-          index.name,
-          index.fields.map((f) => f.name),
-          new Set(index.fields.filter((f) => f.optional).map((f) => f.name)),
-        ),
+      const recorded = recordUniqueIndex(
+        index.name,
+        index.fields.map((f) => f.name),
+        new Set(index.fields.filter((f) => f.optional).map((f) => f.name)),
       );
+      let holds = true;
+      for (const [key, row] of state.rows) {
+        const tuple = uniqueTupleKey(recorded, row);
+        if (tuple === undefined) continue;
+        if (recorded.entries.has(tuple)) {
+          holds = false;
+          break;
+        }
+        recorded.entries.set(tuple, new Set([key]));
+      }
+      (holds ? uniqueIndexes : broken).push(recorded);
     }
-    const state = this._state();
     state.uniqueIndexes = uniqueIndexes;
-    for (const [key, row] of state.rows) {
-      indexRow(uniqueIndexes, key, row);
+    const [first] = broken;
+    if (first) {
+      throw constraintViolation(
+        "CONFLICT",
+        { name: first.name, columns: first.fields },
+        `Cannot create unique index ${broken.map((i) => `"${i.name}"`).join(", ")}: stored rows hold duplicate values`,
+      );
     }
   }
 

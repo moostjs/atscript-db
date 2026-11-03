@@ -116,6 +116,8 @@ Versioned writes support compare-and-set via `$cas` / `expectedVersion`. A stale
 
 Unique indexes (recorded from the model at sync time) and primary keys are enforced on every write; a collision raises `DbError('CONFLICT')`. Present-only (partial) semantics apply when an optional index member is absent — matching SQL's `NULLS DISTINCT`.
 
+A unique index that the rows already stored break is not recorded (since 0.1.168): sync reports the table as an `error` entry naming the index and withholds the schema hash, the way `CREATE UNIQUE INDEX` fails over duplicates on SQL. Fix the rows — for example in a [`beforeConstraints` data step](/sync/programmatic#data-steps-before-constraints) — and the next sync records it. Before 0.1.168 the index was recorded over the duplicates.
+
 ### Single-Snapshot Count
 
 `findManyWithCount` computes the data page and the total count from one filtered snapshot, so the count never disagrees with the page — important for provider-backed reads where two separate reads could otherwise observe different snapshots.

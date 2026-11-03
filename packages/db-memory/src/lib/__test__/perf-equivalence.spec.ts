@@ -414,21 +414,20 @@ describe("MemoryAdapter writes/reads ≡ the scan-based model", () => {
     }
   });
 
-  it("re-records existing rows on syncIndexes (duplicates already stored keep conflicting)", async () => {
+  it("re-records existing rows on syncIndexes (stored duplicates: see unique-index-existing-rows.spec)", async () => {
     space = createTestSpace();
     adapter = space.getAdapter(fx.IgItem);
     await adapter.ensureTable();
     await adapter.insertMany([
       { id: 1, sku: "a", qty: 1 },
-      { id: 2, sku: "a", qty: 1 },
+      { id: 2, sku: "b", qty: 1 },
     ]);
     await adapter.syncIndexes();
-    // Row 1 changing its own sku still collides with row 2's "a" — and back.
-    expect(await outcome(() => adapter.updateOne({ id: 1 }, { qty: 2 }))).toBe(
+    // Row 1 keeps its own "a"; taking row 2's "b" or inserting a new "a" collides
+    expect(await outcome(() => adapter.updateOne({ id: 1 }, { qty: 2 }))).toBeUndefined();
+    expect(await outcome(() => adapter.updateOne({ id: 1 }, { sku: "b" }))).toBe(
       'Duplicate value for unique index "sku_idx"',
     );
-    await adapter.deleteOne({ id: 2 });
-    expect(await outcome(() => adapter.updateOne({ id: 1 }, { qty: 2 }))).toBeUndefined();
     expect(await outcome(() => adapter.insertOne({ id: 3, sku: "a", qty: 1 }))).toBe(
       'Duplicate value for unique index "sku_idx"',
     );

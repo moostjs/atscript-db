@@ -194,7 +194,7 @@ export interface Document {
 }
 ```
 
-Allowed dimension values (whitelisted by the annotation): `256`, `384`, `512`, `768`, `1024`, `1536`, `2048`, `3072`, `4096`, `6144`, `8192`, `16384`. Similarity options: `cosine` (default), `euclidean`, `dotProduct`.
+`dimensions` is any positive integer matching your embedding model ([Vector Search](/search/vector-search)). Similarity options: `cosine` (default), `euclidean`, `dotProduct`.
 
 #### Storage
 

@@ -109,7 +109,6 @@ const hits = await docs.vectorSearch(queryVec, {
 - Vector field is stored in the main table as `BLOB` (`Float32Array.buffer`). `formatValue` round-trips between JS `number[]` and the BLOB transparently.
 - Each `@db.search.vector` field gets a vec0 shadow virtual table named `<table>__vec__<indexName>` (where `indexName` defaults to the field name).
 - Three AFTER triggers on the main table keep the shadow in lockstep: `__ai` (insert), `__au` (update — delete-then-insert; vec0 has no upsert), `__ad` (delete). Sync is transactional with the parent write.
-- Dimensions whitelist: see [annotations.md](annotations.md) (`@db.search.vector`).
 - `similarity` maps to vec0 `distance_metric`: `cosine → cosine`, `euclidean → l2`, `dotProduct → cosine` (sqlite-vec has no native dot product — normalize vectors and use cosine).
 
 ### Search semantics

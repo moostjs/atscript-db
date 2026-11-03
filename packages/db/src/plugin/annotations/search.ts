@@ -1,7 +1,34 @@
 import { AnnotationSpec, annotationExample } from "@atscript/core";
-import type { TAnnotationsTree } from "@atscript/core";
+import type { TAnnotationsTree, TMessages, Token } from "@atscript/core";
 
-import { refuseCiphertext } from "../../shared/view-validation";
+import { encryptedSearchProblem, refuseCiphertext } from "../../shared/view-validation";
+
+/** Common embedding sizes, offered by completion; any positive integer is accepted. */
+const COMMON_DIMENSIONS = [
+  "256",
+  "384",
+  "512",
+  "768",
+  "1024",
+  "1536",
+  "2048",
+  "3072",
+  "4096",
+  "6144",
+  "8192",
+  "16384",
+];
+
+function dimensionsProblem(arg: Token | undefined): TMessages[number] | undefined {
+  if (!arg) return undefined;
+  const num = Number(arg.text);
+  if (Number.isInteger(num) && num > 0) return undefined;
+  return {
+    message: `@db.search.vector dimensions must be a positive integer, got '${arg.text}'`,
+    severity: 1,
+    range: arg.range,
+  };
+}
 
 export const dbSearchAnnotations: TAnnotationsTree = {
   search: {
@@ -18,7 +45,11 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "embedding: db.vector",
         ),
         nodeType: ["prop"],
-        validate: refuseCiphertext("@db.search.vector"),
+        validate: (token, args, doc) =>
+          [
+            dimensionsProblem(args[0]),
+            encryptedSearchProblem(token, doc, "@db.search.vector"),
+          ].filter((m) => m !== undefined),
         passedWhenReferred: false,
         multiple: false,
         argument: [
@@ -27,21 +58,9 @@ export const dbSearchAnnotations: TAnnotationsTree = {
             name: "dimensions",
             type: "number",
             description:
-              "The **number of dimensions in the vector** (must match your embedding model output).",
-            values: [
-              "256",
-              "384",
-              "512",
-              "768",
-              "1024",
-              "1536",
-              "2048",
-              "3072",
-              "4096",
-              "6144",
-              "8192",
-              "16384",
-            ],
+              "The **number of dimensions in the vector** — a positive integer that must match your embedding model output.\n\n" +
+              `**Common sizes:** ${COMMON_DIMENSIONS.join(", ")}.`,
+            valueScope: () => COMMON_DIMENSIONS.map((value) => ({ value })),
           },
           {
             optional: true,

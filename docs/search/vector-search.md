@@ -33,12 +33,8 @@ The annotation takes up to three arguments:
 | `similarity` | string | No       | Distance metric: `"cosine"` (default), `"euclidean"`, or `"dotProduct"`                               |
 | `indexName`  | string | No       | Index name — defaults to the field name                                                               |
 
-::: tip Allowed dimensions
-`dimensions` must be one of the whitelisted sizes that real-world embedding models actually emit:
-
-`256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 16384`
-
-Any other value is rejected at compile time. Common choices: 384 (Sentence-Transformers MiniLM), 768 (BERT, Cohere `embed-multilingual-v3.0`), 1024 (Cohere `embed-english-v3.0`), 1536 (OpenAI `text-embedding-3-small`, `text-embedding-ada-002`), 3072 (OpenAI `text-embedding-3-large`).
+::: tip Dimensions
+`dimensions` is any positive integer — the size of your embedding model's output. Anything else (`0`, `-1`, `1.5`) is rejected at compile time. Editor completion offers the common sizes `256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 16384`; before 0.1.168 only these were accepted. Common choices: 384 (Sentence-Transformers MiniLM), 768 (BERT, Cohere `embed-multilingual-v3.0`), 1024 (Cohere `embed-english-v3.0`), 1536 (OpenAI `text-embedding-3-small`, `text-embedding-ada-002`), 3072 (OpenAI `text-embedding-3-large`).
 :::
 
 The field type can be `db.vector` (a semantic alias for `number[]`) or `number[]` directly.

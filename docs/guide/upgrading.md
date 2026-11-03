@@ -16,6 +16,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **Schema sync resumes after a failed `beforeConstraints` step**, and `renameTable` on every adapter is a no-op when the old table is gone and the new one exists.
 - **Typed patch operators.** `DbPatch<Row>` (and the client's `PatchOf<T>`) types `{ $inc | $dec | $mul }` on number fields, the array operators on top-level array fields, and `$cas`. See [Typed operators](/api/update-patch#typed-operators).
 - **`parseArith`** is re-exported from `@atscript/db`, for aggregate `$expr` entries written as text. See [Arithmetic expressions](/api/aggregation#arithmetic-expressions).
+- **`@db.search.vector` takes any embedding size.** `dimensions` is any positive integer (`8`, `1000`, `1280` …); the common sizes stay as editor completion. Before, a size outside `256 … 16384` failed the build. See [Vector Search](/search/vector-search).
 - **db-client** loads `@atscript/typescript/utils` only when `getActionForm()` first needs it, so importing the client keeps it out of an app's first chunk.
 
 ### Breaking & behaviour changes
@@ -25,6 +26,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
   - a key the model does not declare is now a type error in `insertOne` / `updateOne` / `replaceOne` / `client.insert` / `client.update` / `client.replace` payloads (before, the index signature let it through);
   - inserts no longer type `$cas` or field operators (both were rejected at runtime);
   - db-client's `insert()` takes `InsertOf<T>` (new export) instead of `PatchOf<T>`; overloads now list the array form first.
+- **Memory adapter: a unique index over stored duplicates is refused.** Sync reports the table as an `error` entry naming the index (hash withheld) instead of recording the index over the duplicates; fix the rows and the next sync records it. See [Unique & primary-key enforcement](/adapters/memory#unique-primary-key-enforcement).
 - **`$update` / `$remove` helpers** (`@atscript/db/ops`) take the element type as given (`$remove(["a"])` on a string array); the payload type checks it.
 
 ### Custom adapters

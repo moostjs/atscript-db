@@ -637,7 +637,7 @@ The junction must be a `@db.table`. `@db.rel.via` cannot be combined with `@db.r
 
 ### Vector Search
 
-Mark a field with `@db.search.vector <dimensions>, "<similarity>"`. The dimensions must match the embedding model output and must be one of: `256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 16384`.
+Mark a field with `@db.search.vector <dimensions>, "<similarity>"`. The dimensions are a positive integer that must match the embedding model output ([Vector Search](/search/vector-search)).
 
 ```atscript
 @db.table 'documents'
