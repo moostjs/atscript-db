@@ -684,7 +684,7 @@ protected override async checkWrite(ctx: TDbWriteCheckContext) {
   if (ctx.action !== "insert" && ctx.action !== "insertMany") return;
   const tenant = currentTenant();
   if ((await ctx.count({ tenantId: tenant.id })) > tenant.maxRows) {
-    throw new HttpError(409, { message: "Row limit reached", statusCode: 409, code: "row_cap", limit: tenant.maxRows });
+    throw new HttpError(409, { message: "Row limit reached", code: "row_cap", limit: tenant.maxRows });
   }
 }
 ```
