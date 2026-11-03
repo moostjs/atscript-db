@@ -270,7 +270,7 @@ Since 0.1.143 an overridden `hasField` also gates the database's **indexes**, wh
 | `$search` + `$index=<name>` (native text search)    | like a nonexistent index: `400 Search index "<name>" not found`                                                                                                  |
 | `$search` without `$index` (the default text index) | like no index at all: `400 No search index available` (since 0.1.147 — it used to fall back to the substring search, see [Upgrading](/guide/upgrading#v0-1-147)) |
 | `$search` + `$vector[=<name>]`                      | like a nonexistent vector index: `400 Vector index "<name>" not found` (`No vector index available` without a name), before `computeEmbedding` runs              |
-| `GET /geo` (default geo index, or `$index=<name>`)  | like a missing geo index — the same 400 the core answers for an unknown one                                                                                      |
+| `GET /geo` (default geo index, or `$index=<name>`)  | like a missing geo index — the same `400` with `code: "GEO_INDEX_MISSING"` the core answers for an unknown one (the `code` since 0.1.166)                        |
 
 Unknown index names get the same answers on a controller that overrides `hasField`, so the reply reveals nothing. A **`@db.column.derived`** field follows its source: it is visible only while its source path is (a derived copy of `settings.apiKey` disappears with `settings`), and one whose source is hidden is sealed out of every read projection for that request, exactly like a `@db.writeOnly` field — in joined `$with` rows too (the source is checked as `rel.<source>`) — and is never loaded for an action's `requiredFields`.
 
@@ -726,6 +726,24 @@ Since 0.1.128 every built-in write failure is **thrown** as an `HttpError` — `
 | SQLite transaction-gate wait timeout                       | 503                   | n/a                                               |
 | Success (POST / PUT / PATCH / DELETE)                      | 201 / 200 / 200 / 200 | committed                                         |
 
+The success statuses are those of moost 0.7 / wooks 0.8 (since 0.1.165; before, `PUT` answered `201` and `PATCH` / `DELETE` `202`).
+
+#### Answering like the core — `dbErrorToHttp` {#dberrortohttp}
+
+Since 0.1.166. A permission layer that should answer exactly as the core would — a hidden thing reported like a missing one — builds the same `DbError` and throws (or returns) `dbErrorToHttp(error)` from `@atscript/moost-db`. It produces the `HttpError` the validation interceptor sends for a thrown `DbError`: the status for its code (as in [Error Handling](./crud#error-handling)), the message, the error's `code`, and each entry's `path`, `message`, `code` and `params` (never `details`).
+
+```typescript
+import { DbError, geoIndexNotFoundMessage } from "@atscript/db";
+import { dbErrorToHttp } from "@atscript/moost-db";
+
+// e.g. in prepareRequest: the caller may not use the geo index `name`
+throw dbErrorToHttp(
+  new DbError("GEO_INDEX_MISSING", [
+    { path: name, message: geoIndexNotFoundMessage(this.readable.tableName, name) },
+  ]),
+);
+```
+
 ## Metadata Hook
 
 ### meta {#meta}
@@ -804,6 +822,8 @@ protected override metaHttpCaching() {
 | -------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
 | `cacheControl` | `"private, no-cache"`         | `Cache-Control` value. A `Cache-Control` already set (e.g. by an interceptor) is kept. |
 | `vary`         | `["Authorization", "Cookie"]` | Merged into an existing `Vary` header (case-insensitive; `*` is left alone).           |
+
+A request with `If-None-Match: *` gets `304` whatever `metaHttpCaching()` returns (wooks 0.8 answers `*` for every `GET` `200`, since 0.1.165); with `false`, a real ETag is never matched.
 
 `TDbMetaHttpCaching` is exported from `@atscript/moost-db`. Keep `Vary` covering whatever identifies the caller (an API-key header, a tenant header). An after-interceptor that replaces the response body turns the ETag off for that response.
 

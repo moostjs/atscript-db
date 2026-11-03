@@ -6,7 +6,16 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.166 {#v0-1-166}
+
+### Fixes
+
+- **moost-db: a hidden geo index answers with `code: "GEO_INDEX_MISSING"`.** Under an overridden [`hasField`](/http/customization#hasfield), `GET /geo` on a geo index that reads a hidden field answered `400` without the envelope's `code`, while an unknown index answered with it. Both now get the same `400` envelope, `code` included, so the reply reveals nothing about the hidden index.
+- **`dbErrorToHttp(error)`** (from `@atscript/moost-db`) returns the `HttpError` a request gets when the core throws that `DbError`: same status, message, `code` and per-entry `code` / `params`. A permission layer that answers "like the core would" builds the `DbError` and returns this. See [Thrown errors](/http/customization#thrown-errors).
+
 ## 0.1.165 {#v0-1-165}
+
+**Requires `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.2.1**, and for `@atscript/moost-db` **`moost` / `@moostjs/event-http` 0.7 with `@wooksjs/*` 0.8** (the peer ranges of this release). Upgrade them together.
 
 ### Features
 
@@ -32,6 +41,9 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 - **A plain `export type Admin = User` is `User`.** With `@atscript/typescript` 0.2 a bare alias is its target at runtime (the same object), so it carries `User`'s `db.table` and `isDbEntityType(Admin)` is `true`; `db.get(Admin)` is the `users` table (before, it opened a table named `Admin`). `syncSchema` / `planSchema` list and hash a type once when an inventory names it twice, so `Object.values(models).filter(isDbEntityType)` still syncs each table once. A `@db.alias` type and a field typed with a table still carry no entity annotations. See [Syncing a module namespace](/sync/programmatic#syncing-a-module-namespace).
 - **moost-db on moost 0.7 / wooks 0.8:** a successful `PUT`, `PATCH` or `DELETE` answers `200` (was `201` / `202` / `202`); `POST` stays `201`. `/meta` with `If-None-Match: *` answers `304` whatever `metaHttpCaching()` returns (wooks 0.8 answers `*` for every `GET` `200`); with `metaHttpCaching()` returning `false` a real ETag is still never matched. See [Customization](/http/customization#metahttpcaching).
 - **SQL adapters render an `$or` of one field's equalities as `IN (…)`** — same rows, but a large per-row key filter no longer fails with SQLite's "Expression tree is too large".
+- **Custom adapters: constraint errors.** Throw unique / foreign-key violations with `constraintViolation(code, hint, rawText)` from `@atscript/db` so the table layer can build the per-field entries with `code` / `params`. A `DbError` built by hand still passes through unchanged, without entry codes. See [Creating adapters](/adapters/creating-adapters).
+- **Custom adapters: insert-only columns.** `replaceOne` / `replaceMany` receive `data` without the table's `number.timestamp.created` columns. Keep the stored value: SQL adapters building the column list with `replaceColumnsFor` already do; a document store rebuilding the row copies `this._table.insertOnlyPhysical` from the stored row. See [Insert-only columns](/adapters/creating-adapters#insert-only-columns).
+- **Custom adapters: search index names and order.** Resolve `search(text, query, indexName)` by the declared name first (`resolveFulltextIndex(indexes, name)` also accepts an older internal key), list each index under its declared name in `getSearchIndexes()` with older names in `aliases`, and without a `$sort` return rows in relevance order — `searchRankOrder()` from `@atscript/db-sql-tools` builds that `ORDER BY` for SQL adapters. See [Text search](/adapters/creating-adapters#text-search).
 
 ## 0.1.164 {#v0-1-164}
 

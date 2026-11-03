@@ -51,6 +51,8 @@ pnpm add @atscript/moost-db @moostjs/event-http moost       # REST
 pnpm add @atscript/db-client                                 # browser/SSR client
 ```
 
+Peers (0.1.165+): `@atscript/core` / `@atscript/typescript` / `unplugin-atscript` 0.2.1+; moost-db: `moost` / `@moostjs/event-http` 0.7 + `@wooksjs/*` 0.8.
+
 ## Quick start
 
 ```atscript

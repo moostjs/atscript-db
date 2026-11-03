@@ -83,6 +83,8 @@ updatedAt: number.timestamp
 
 The annotations apply wherever the field's type is `number.timestamp.created` / `number.timestamp.updated`: directly, through a type alias (`type Created = number.timestamp.created`), as `number.timestamp.created | null`, and on a field of an embedded object. They do not apply to a field that references another field (`createdAt: Order.createdAt` copies the type, not the default), to a member of another union (`number.timestamp.created | string`), to a tuple item or to an array element. An explicit `@db.default` on the field wins (for an `updated` field it replaces the insert value only; updates still set the time).
 
+A top-level `number.timestamp.created` is insert-only (since 0.1.165): a replace keeps the stored value and no replace or patch payload can change it — see [Replace One](./crud#replace-one).
+
 Before 0.1.155 (atscript 0.1.104) the default was not applied to `number.timestamp.created` fields, and before 0.1.156 (atscript 0.1.106) `number.timestamp.updated` was neither filled nor set — see [Upgrading](/guide/upgrading#v0-1-156) for the schema change it brings.
 
 ## Update Timestamps {#on-update}
