@@ -84,6 +84,39 @@ describe("GET /query with an aggregate $select and no $groupBy", () => {
     ]);
   });
 
+  it("takes every aggregate entry of the core's ungrouped query: an expression, group-level arithmetic, first / last, a condition", async () => {
+    const ctrl = bind();
+    expect(
+      await ctrl.query(
+        "/query?$select=sum(amount*cost):value,sum(amount):total,count(*):n,expr(total/n):avg,sum(amount|status=paid):paid",
+      ),
+    ).toEqual([{ value: 600, total: 100, n: 4, avg: 25, paid: 70 }]);
+    expect(
+      await ctrl.query("/query?$select=first(amount):lo,last(amount):hi&$rowOrder=cost"),
+    ).toEqual([{ lo: 10, hi: 40 }]);
+    // over no matching row: one row, the expressions null
+    expect(
+      await ctrl.query("/query?status=none&$select=count(*):n,sum(amount*cost):value"),
+    ).toEqual([{ n: 0, value: null }]);
+    // the same as the core's `$groupBy: []`
+    expect(
+      await orders().aggregate({
+        filter: {},
+        controls: {
+          $groupBy: [],
+          $select: [{ $fn: "sum", $expr: { $op: "*", $args: ["amount", "cost"] }, $as: "value" }],
+        },
+      }),
+    ).toEqual([{ value: 600 }]);
+  });
+
+  it("arithmetic or a calendar bucket without an aggregate stays a grouped-only entry (400)", async () => {
+    for (const qs of ["$select=expr(amount*2):x", "$select=bucket(id,day):d"]) {
+      const err = await rejected(bind().query(`/query?${qs}`));
+      expect(errorsOf(err)[0].message, qs).toMatch(/only valid in grouped queries/);
+    }
+  });
+
   it("an explicit $groupBy still groups", async () => {
     const rows = await bind().query(
       "/query?$groupBy=status&$select=status,sum(amount):total&$sort=status",

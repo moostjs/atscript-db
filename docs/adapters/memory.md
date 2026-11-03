@@ -161,7 +161,7 @@ Schema sync provisions an in-memory `__atscript_control` table, takes the distri
 Leaf-comparison semantics are **JS-native and documented — deliberately not claimed identical to the SQL engines**. Call these out when moving a model between adapters:
 
 - **Regex** — a JS `RegExp`, honoring `/pat/flags`. Not translated to SQL `LIKE`.
-- **Null model** — Mongo-like. `{ f: null }` / `$eq: null` matches both an explicit `null` **and** a missing field; `$ne` matches only concrete, present values.
+- **Null model** — Mongo-like. `{ f: null }` / `$eq: null` matches both an explicit `null` **and** a missing field; `$ne` matches only concrete, present values. A `$gt` / `$gte` / `$lt` / `$lte` against `null` matches no row, as on SQL and MongoDB (since 0.1.168; before, `null` compared as `0`, so `{ amount: { $gt: null } }` matched every positive amount).
 - **`$exists`** — "holds a value", the same on every adapter: `$exists: true` ⇔ `$ne: null`, `$exists: false` ⇔ `$eq: null`. Before 0.1.132 a key holding `null` counted as present; it now counts as absent. See [Existence](/api/queries#existence).
 - **Ordering** — JS-native (`<` / `>`); strings compare by code point. There is **no collation** or locale awareness.
 - **Ties and unsorted reads** — rows that tie on every `$sort` key are ordered by the primary key, compared by value, in the direction of the last `$sort` key. This is the same [tie-breaker](/api/queries#tie-breaker) every adapter gets, and it also applies to a direct adapter call. Before 0.1.153 ties always went by the primary key ascending, compared as text, so `10` came before `9`. A read without `$sort` returns rows in insertion order (stored mode).

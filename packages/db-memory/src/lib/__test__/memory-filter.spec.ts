@@ -156,6 +156,15 @@ describe("$gt / $gte / $lt / $lte", () => {
     expect(match({ age: { $gt: 18 } }, { age: null })).toBe(false);
     expect(match({ age: { $lt: 18 } }, { age: null })).toBe(false);
   });
+
+  it("never matches against a null operand (why: as on SQL and MongoDB — JS would read null as 0)", () => {
+    for (const op of ["$gt", "$gte", "$lt", "$lte"]) {
+      for (const age of [-5, 0, 21, "x", null]) {
+        expect(match({ age: { [op]: null } } as FilterExpr, { age }), `${op} ${age}`).toBe(false);
+      }
+      expect(match({ age: { [op]: null } } as FilterExpr, {}), op).toBe(false);
+    }
+  });
 });
 
 describe("$in / $nin", () => {

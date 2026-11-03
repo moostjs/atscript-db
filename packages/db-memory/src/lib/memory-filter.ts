@@ -204,10 +204,12 @@ function toOrdinal(v: unknown): number {
 
 /**
  * `$gt`/`$gte`/`$lt`/`$lte`. A missing or `null` field never matches an
- * ordering comparison. `Date` operands are normalized to epoch millis; all
- * other comparisons use plain JS ordering (numbers numerically, strings
- * lexicographically) — NO collation or locale awareness. This intentionally
- * differs from SQL engines' collated ordering.
+ * ordering comparison, and neither does a `null` operand — the visitor
+ * compiles that to "no match" before reaching here (SQL's UNKNOWN, MongoDB's
+ * type bracketing — JS would read it as `0`). `Date` operands are
+ * normalized to epoch millis; all other comparisons use plain JS ordering
+ * (numbers numerically, strings lexicographically) — NO collation or locale
+ * awareness. This intentionally differs from SQL engines' collated ordering.
  */
 function evalRelational(fieldValue: unknown, op: string, value: unknown): boolean {
   if (fieldValue === undefined || fieldValue === null) {
@@ -292,6 +294,8 @@ const memoryVisitor: FilterVisitor<Predicate> = {
       case "$gte":
       case "$lt":
       case "$lte":
+        // A `null` operand never matches (see {@link evalRelational}).
+        if (value == null) return () => false;
         return (row) => evalRelational(read(row), op, value);
 
       // Membership: true iff the field equals some array element.

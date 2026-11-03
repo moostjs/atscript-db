@@ -38,7 +38,14 @@ import { Get, HttpError, MoostHttp, Query, Url } from "@moostjs/event-http";
 import { current, routeParamsKey, useRouteParams, type EventContext } from "@wooksjs/event-core";
 import { useBody } from "@wooksjs/http-body";
 import { Inherit, Inject, Moost, Optional, Param, useControllerContext } from "moost";
-import { isPlainObject, resolveAlias, resolveNested, type InnerColumn } from "@uniqu/core";
+import {
+  isAggregateExpr,
+  isAggregateOfExpr,
+  isPlainObject,
+  resolveAlias,
+  resolveNested,
+  type InnerColumn,
+} from "@uniqu/core";
 
 import { registerAsDbReadableController } from "./actions/controller-registry";
 import type { IdValidationSource } from "./actions/id-validation";
@@ -276,6 +283,21 @@ function computedMode(parsed: { controls?: object }): true | undefined {
   if (controls?.$from !== undefined) return true;
   const select = controls?.$select;
   return (Array.isArray(select) && select.some((item) => typeof item !== "string")) || undefined;
+}
+
+/**
+ * `$groupBy: []` (an aggregate `$select` without `$groupBy` on `/query`) with at
+ * least one aggregate entry — the core's ungrouped aggregate. Arithmetic or a
+ * bucket alone stays a grouped-only entry.
+ */
+function isUngroupedAggregate(controls: object | undefined): boolean {
+  const c = controls as { $groupBy?: unknown; $select?: unknown } | undefined;
+  return (
+    Array.isArray(c?.$groupBy) &&
+    c.$groupBy.length === 0 &&
+    Array.isArray(c.$select) &&
+    c.$select.some((item) => isAggregateExpr(item) || isAggregateOfExpr(item))
+  );
 }
 
 /** The aliases of the computed entries of a `$select` (buckets, aggregates, expressions). */
@@ -1017,7 +1039,7 @@ export class AsDbReadableController<
           physicalNames: capabilities.physicalNames,
           navFields: capabilities.navFields,
         },
-        stage === undefined ? undefined : true,
+        stage !== undefined || isUngroupedAggregate(controls) || undefined,
       );
     } catch (error) {
       // Only the query-shape verdict is a 400; anything else (a closed space's
