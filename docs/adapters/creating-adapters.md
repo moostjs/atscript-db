@@ -461,7 +461,7 @@ Full table recreation with data migration. Used when structural changes cannot b
 
 #### `renameTable(oldName)`
 
-Rename the table from `oldName` to the adapter's current table name. Used when `@db.table.renamed` is present.
+Rename the table from `oldName` to the adapter's current table name. Used when `@db.table.renamed` is present. Make it a no-op when `oldName` no longer exists and the new name does (since 0.1.168 the built-in adapters do): a run that renamed the table and then stopped — a failing data step, a crash — retries the rename on the next sync.
 
 #### `afterSyncTable()`
 
@@ -656,6 +656,8 @@ Two more options keep a converged schema free of false index work:
 - `skipIndex(index)` names an index this helper does not build. Return a warning string for an index this database cannot build, such as a geo index without its extension; the warning is logged on a real sync. Return `null` to skip silently, for example an index type your adapter builds itself. Return `undefined` to build the index. A skipped index is neither created nor reported as missing.
 - `isUnmanaged(name)` excludes prefixed indexes your adapter maintains itself, which are never dropped as stale.
 
+`renderDesiredDefinition(index)` (since 0.1.168) compares what a column list does not show. Return the part of the definition you care about, rendered the way `listExisting` reports it in an entry's `definition` (for example the text search configuration of a fulltext index); when both are defined and differ, the helper drops and recreates the index. Return `undefined` to skip the comparison.
+
 Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list. `createChangeRecorder(dryRun, attempt?)` (from `@atscript/db`) records such changes: its `apply(change, label, op)` runs `op` unless `dryRun` is set, then records `change`.
 
 ### Foreign key sync helper
@@ -784,6 +786,8 @@ Override these methods to add text search and vector similarity search capabilit
 #### `search(text, query, indexName?)`
 
 Full-text search. Receives the search text, a standard `DbQuery` for additional filtering/pagination, and an optional index name to target a specific search index. Build a search query using your database's text search capabilities (e.g., PostgreSQL `ts_query`, MongoDB `$text`, MySQL `MATCH...AGAINST`).
+
+**Fulltext language and match (since 0.1.168).** A fulltext `TDbIndex` may carry `language` (one of `DB_FULLTEXT_LANGUAGES`, from `@db.index.fulltext.language`) and `match` (`"all"` | `"any"`, from `@db.index.fulltext.match`). Unset means your engine's default — keep it, so existing indexes are not rebuilt. Apply `language` where your engine has a per-index or per-query language, rebuild the index when it changes (the language is part of the schema snapshot, so a change re-runs schema sync), and log a warning on sync when you cannot honour it. Apply `match` to the predicate of every search entry point. See [Language and term matching](/search/#language-and-match) for what the built-in adapters do.
 
 **Integer fulltext members (since 0.1.150).** A fulltext `TDbIndex` may carry fields with `integer: true` (`TDbIndexField.integer`) — integer columns matched by exact number, never part of your engine's text index. Keep them out of text DDL (`splitFulltextFields(index)` returns `{ text, integer }`), keep them in the index's `fields` (and `getSearchIndexes()[].fields`) so visibility gating works, and when `searchTermInteger(text)` returns a number, OR `member = n` into the predicate you build for `search()`, `searchWithCount()` and the grouped `$search` aggregate alike (the same predicate everywhere keeps counts and rows in agreement). An index with no text member must create no physical artifact (the base `syncIndexesWithDiff` already skips it) and, for a term that is not a whole number, must match nothing. SQL adapters also get `$regex` on integer columns for free: the core rewrites it to the internal `INTEGER_REGEX_OP` (`"$integerRegex"`), which `createFilterVisitor` renders through the optional `SqlDialect.integerText(quotedExpr)` (the canonical decimal text of the column; default `CAST(<col> AS TEXT)`). Non-SQL adapters must handle `INTEGER_REGEX_OP` in their filter visitor: a regex over the decimal text of an integral number.
 

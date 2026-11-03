@@ -57,16 +57,16 @@ const sync = new SchemaSync(db, console);
 
 Options for both `syncSchema()` and `sync.run()`:
 
-| Option           | Type             | Default      | Description                                                                          |
-| ---------------- | ---------------- | ------------ | ------------------------------------------------------------------------------------ |
-| `force`          | `boolean`        | `false`      | Ignore hash check, always introspect the database                                    |
-| `safe`           | `boolean`        | `false`      | Skip destructive operations (column drops, table drops)                              |
-| `podId`          | `string`         | Random UUID  | Identifier for distributed locking                                                   |
-| `lockTtlMs`      | `number`         | `30000`      | Lock time-to-live in milliseconds (auto-extended while sync runs)                    |
-| `waitTimeoutMs`  | `number`         | `60000`      | Max wait time for another pod's lock                                                 |
-| `pollIntervalMs` | `number`         | `500`        | Poll interval when waiting for lock release                                          |
-| `logger`         | `TGenericLogger` | `NoopLogger` | Logger for sync progress and failures (see below)                                    |
-| `dataSteps`      | `TDataStep[]`    | —            | One-time data steps run after the DDL (since 0.1.165, see [Data steps](#data-steps)) |
+| Option           | Type             | Default      | Description                                                                                                                                                 |
+| ---------------- | ---------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `force`          | `boolean`        | `false`      | Ignore hash check, always introspect the database                                                                                                           |
+| `safe`           | `boolean`        | `false`      | Skip destructive operations (column drops, table drops)                                                                                                     |
+| `podId`          | `string`         | Random UUID  | Identifier for distributed locking                                                                                                                          |
+| `lockTtlMs`      | `number`         | `30000`      | Lock time-to-live in milliseconds (auto-extended while sync runs)                                                                                           |
+| `waitTimeoutMs`  | `number`         | `60000`      | Max wait time for another pod's lock                                                                                                                        |
+| `pollIntervalMs` | `number`         | `500`        | Poll interval when waiting for lock release                                                                                                                 |
+| `logger`         | `TGenericLogger` | `NoopLogger` | Logger for sync progress and failures (see below)                                                                                                           |
+| `dataSteps`      | `TDataStep[]`    | —            | One-time data steps run after the DDL, or before the constraints with `phase: "beforeConstraints"` (since 0.1.165 / 0.1.168, see [Data steps](#data-steps)) |
 
 The `plan()` method accepts only `force`, `safe` and `dataSteps`.
 
@@ -133,6 +133,30 @@ await syncSchema(db, types, {
 - Steps do not run when the sync is `'refused'` or an entry errored.
 - `result.dataSteps` reports `{ ran, pending }`; `plan()` reports `pendingDataSteps`, and a pending step makes the plan `'changes-needed'`.
 - Never change what a recorded step does — add a new step with a new id. Duplicate or empty ids throw.
+
+### Fix rows before a new constraint {#data-steps-before-constraints}
+
+A new `@db.index.unique` or `@db.rel.FK` cannot be created over rows that break it, and a default step runs after the DDL — too late to merge the duplicates first. Give the step `phase: "beforeConstraints"` (since 0.1.168):
+
+```typescript
+await syncSchema(db, types, {
+  dataSteps: [
+    {
+      id: "2026-11-merge-duplicate-codes",
+      phase: "beforeConstraints",
+      async run(space) {
+        // the tables and their new columns exist; the new unique index does not yet
+        await mergeDuplicateCodes(space.getTable(Product));
+      },
+    },
+  ],
+});
+```
+
+- A `beforeConstraints` step runs after every table and its new columns exist, before any table's indexes and foreign keys are synced; views are not synced yet either.
+- All `beforeConstraints` steps run before the `"after"` (default) ones. When the schema is already up to date they simply run first.
+- A `beforeConstraints` step that throws (rolled back, not recorded) stops the run there. What the run already applied — renamed and created tables, new columns — is recorded; every table still waiting for its indexes and foreign keys gets an `error` entry (`Data step "<id>" failed: …`), views are not synced (a view this run dropped to change it stays dropped), removed tables are not dropped, and the schema hash is withheld. The sync then throws the step's error after releasing the lock. The next sync picks up from there: it runs the step again and applies the constraints and views. A renamed table is not renamed twice: when the old name is gone and the new one exists, the adapters treat the rename as done.
+- On SQLite a new foreign key rebuilds the table during the DDL, **before** the step runs — the rows are copied with foreign-key checks off, and SQLite never checks existing rows against a new constraint. Dangling references survive that rebuild, so clear them in the step anyway. The step still runs before the new unique indexes. Other values of `phase` throw.
 
 ## SyncEntry
 

@@ -34,6 +34,8 @@ import type {
   TDerivedColumn,
   TDbFieldMeta,
   TDbForeignKey,
+  TDbFulltextLanguage,
+  TDbFulltextMatch,
   TDbIndex,
   TDbIndexField,
   TDbRelation,
@@ -634,6 +636,7 @@ export class TableMetadata {
       ...this.preferredId,
       ...this.originalMetaIdFields,
     ]);
+    this._applyFulltextOptions(type);
     this._finalizeIndexes();
 
     this._finalizeVersionExempt();
@@ -1744,6 +1747,46 @@ export class TableMetadata {
           );
         }
         field.integer = true;
+      }
+    }
+  }
+
+  /**
+   * `@db.index.fulltext.language` / `.match` (since 0.1.168): an option with
+   * an index name sets that fulltext index, one without sets every fulltext
+   * index the named ones leave alone.
+   */
+  private _applyFulltextOptions(type: TAtscriptAnnotatedType): void {
+    for (const [option, argName] of [
+      ["language", "language"],
+      ["match", "mode"],
+    ] as const) {
+      const entries = (type.metadata.get(`db.index.fulltext.${option}` as never) ?? []) as Array<
+        string | { language?: string; mode?: string; index?: string }
+      >;
+      if (entries.length === 0) continue;
+      const fulltext = [...this.indexes.values()].filter((i) => i.type === "fulltext");
+      let tableWide: string | undefined;
+      const named = new Map<string, string>();
+      for (const entry of entries) {
+        const value = typeof entry === "string" ? entry : entry[argName];
+        const target = typeof entry === "string" ? undefined : entry.index;
+        if (value === undefined) continue;
+        if (target === undefined) {
+          tableWide = value;
+        } else if (fulltext.some((i) => i.name === target)) {
+          named.set(target, value);
+        } else {
+          throw new Error(
+            `@db.index.fulltext.${option} names the index "${target}", but the interface declares no @db.index.fulltext "${target}"`,
+          );
+        }
+      }
+      for (const index of fulltext) {
+        const value = named.get(index.name) ?? tableWide;
+        if (value === undefined) continue;
+        if (option === "language") index.language = value as TDbFulltextLanguage;
+        else index.match = value as TDbFulltextMatch;
       }
     }
   }

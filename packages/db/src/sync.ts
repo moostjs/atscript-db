@@ -68,6 +68,7 @@ export async function planSchema(
 export { SchemaSync, SyncEntry, readStoredSnapshot } from "./schema/schema-sync";
 export type {
   TDataStep,
+  TDataStepPhase,
   TSyncOptions,
   TSyncResult,
   TSyncPlan,

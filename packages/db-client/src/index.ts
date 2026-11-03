@@ -51,11 +51,13 @@ export type {
   NavOf,
   IdOf,
   ClientResponse,
+  InsertOf,
   PatchOf,
   RowOf,
   TClientCallOptions,
   TDbQueryTarget,
   // Re-exported from @atscript/db
+  DbInsert,
   DbPatch,
   DbRow,
   TDbInsertResult,

@@ -71,6 +71,48 @@ Rules:
 - Ordering of a mixed text + number result is adapter-defined (MongoDB ranks text hits first); pass `$sort` for a stable order.
 - Every entry point — `search()`, `searchWithCount()`, `/query`, `/pages`, `$count`, grouped `$search` aggregates, query targets and `resolveQuery` — applies the same predicate, so counts and rows agree.
 
+### Language and term matching {#language-and-match}
+
+_Since 0.1.168._ Two interface-level annotations tune a fulltext index. Without an index name they apply to every `@db.index.fulltext` index of the interface; with one, to that index (a named one wins over the table-wide one):
+
+```atscript
+@db.table 'articles'
+@db.index.fulltext.language "russian"
+@db.index.fulltext.match "any", "title_idx"
+export interface Article {
+    @meta.id
+    id: number
+
+    @db.index.fulltext "title_idx"
+    title: string
+
+    @db.index.fulltext "body_idx"
+    body: string
+}
+```
+
+**`@db.index.fulltext.language "<language>", "<index>"?`** sets the text language — which words share a stem and which are stop words. The values are `none` (no stemming, no stop words), `danish`, `dutch`, `english`, `finnish`, `french`, `german`, `hungarian`, `italian`, `norwegian`, `portuguese`, `romanian`, `russian`, `spanish`, `swedish` and `turkish`; the editor completes them. Without it each database keeps its default.
+
+| Adapter        | What the language does                                                                                                                                                       | Default                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| **PostgreSQL** | The text search configuration of the index and of every query (`none` → `simple`).                                                                                           | `english`                |
+| **MongoDB**    | The text index's `default_language`.                                                                                                                                         | `english`                |
+| **SQLite**     | `english` builds the FTS5 table with the Porter stemmer. FTS5 has no other stemmer: any other language indexes words unstemmed (`unicode61`) and schema sync logs a warning. | `unicode61`, no stemming |
+| **MySQL**      | Ignored, with a warning at schema sync: `FULLTEXT` has no per-index language.                                                                                                | the server's stop words  |
+
+Changing the language rebuilds the index on the next schema sync (PostgreSQL, MongoDB, SQLite). An index without the annotation keeps the index it has.
+
+**`@db.index.fulltext.match "all" | "any", "<index>"?`** decides whether a search needs every term or any term:
+
+| Adapter        | `"all"`                                                                                                             | `"any"`                                                             | Without the annotation  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------- |
+| **PostgreSQL** | `websearch_to_tsquery` with the text as typed (terms AND-ed)                                                        | `websearch_to_tsquery` with the terms OR-ed (a leading `-` dropped) | `plainto_tsquery` (all) |
+| **SQLite**     | FTS5 terms AND-ed                                                                                                   | FTS5 terms OR-ed                                                    | all                     |
+| **MySQL**      | `IN BOOLEAN MODE`, every word required (`+word`) except short and stop words                                        | natural-language mode                                               | any                     |
+| **MongoDB**    | each word (split on punctuation) becomes a phrase, so every word is required (matched as written, without stemming) | `$text` as typed                                                    | any                     |
+
+Results stay in [relevance order](#ranking). Under `match "all"` PostgreSQL reads the web-search syntax: a `"quoted phrase"`, `or` between words, `-word` to exclude; under `"any"` a leading `-` is dropped, since one excluded term OR-ed with the others would match nearly every row. On MySQL, words shorter than 3 characters and InnoDB's default stop words stay optional under `"all"` — the server does not index them, so requiring one would match nothing; a server with a larger `innodb_ft_min_token_size` or its own stop-word list can still miss such words.
+
 ## Programmatic API
 
 ### Checking Capabilities
@@ -168,12 +210,12 @@ See [HTTP — Advanced](/http/advanced) for the full URL query syntax.
 
 Each adapter maps `@db.index.fulltext` to its native full-text search engine:
 
-| Adapter        | Index type                                    | Search mechanism                       | Per-field weights?                                     | Integer members                                             |
-| -------------- | --------------------------------------------- | -------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
-| **PostgreSQL** | GIN index on `to_tsvector('english', ...)`    | `plainto_tsquery()`                    | Yes — in the `ts_rank` order (`setweight` buckets A–D) | `OR "col" = CAST(? AS BIGINT)`                              |
-| **MongoDB**    | Classic text index (works on all deployments) | `$text`                                | Yes — field weights                                    | `$or` of `$text` and `{ col: { $eq: n, $type: "number" } }` |
-| **SQLite**     | FTS5 virtual table                            | `MATCH`                                | Yes — `bm25()` column weights                          | `OR "col" = ?` next to the FTS5 `rowid` lookup              |
-| **MySQL**      | `FULLTEXT` index                              | `MATCH ... AGAINST` (natural language) | No                                                     | primary-key set of a `UNION` of the `MATCH` and `= n` arms  |
+| Adapter        | Index type                                    | Search mechanism                                                    | Per-field weights?                                     | Integer members                                             |
+| -------------- | --------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+| **PostgreSQL** | GIN index on `to_tsvector('<language>', ...)` | `plainto_tsquery()` (`websearch_to_tsquery()` under `match`)        | Yes — in the `ts_rank` order (`setweight` buckets A–D) | `OR "col" = CAST(? AS BIGINT)`                              |
+| **MongoDB**    | Classic text index (works on all deployments) | `$text`                                                             | Yes — field weights                                    | `$or` of `$text` and `{ col: { $eq: n, $type: "number" } }` |
+| **SQLite**     | FTS5 virtual table                            | `MATCH`                                                             | Yes — `bm25()` column weights                          | `OR "col" = ?` next to the FTS5 `rowid` lookup              |
+| **MySQL**      | `FULLTEXT` index                              | `MATCH ... AGAINST` (natural language; boolean under `match "all"`) | No                                                     | primary-key set of a `UNION` of the `MATCH` and `= n` arms  |
 
 ::: info
 All adapters expose the same `search()` and `searchWithCount()` API — engine differences are handled internally. See individual adapter pages for engine-specific details and configuration options.
@@ -185,10 +227,10 @@ MongoDB Atlas goes beyond word matching with **autocomplete/typeahead**, query-t
 
 The `$search` text is passed to the engine, so each engine's own operator syntax applies:
 
-- **SQLite (FTS5)** — the term is quoted before it reaches `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are plain text). Words are AND-ed; a `"quoted phrase"` stays a phrase; a trailing `*` on a word is a prefix match (`quok*`). `AND` / `OR` / `NOT` / `NEAR` and column filters are **not** operators — they are searched as words.
+- **SQLite (FTS5)** — the term is quoted before it reaches `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are plain text). Words are AND-ed (OR-ed under `match "any"`); a `"quoted phrase"` stays a phrase; a trailing `*` on a word is a prefix match (`quok*`). `AND` / `OR` / `NOT` / `NEAR` and column filters are **not** operators — they are searched as words.
 - **MongoDB (`$text`)** — operators apply natively: `-word` excludes a word, `"a phrase"` matches the phrase, and a plain list of words matches **any** of them (OR). A term made only of a negation (`-word`) matches nothing by itself; the integer equality branch is unaffected.
-- **PostgreSQL** — `plainto_tsquery`: words are AND-ed, punctuation is ignored.
-- **MySQL** — natural-language mode: relevance-ranked, words OR-ed, short and stop words ignored.
+- **PostgreSQL** — `plainto_tsquery`: words are AND-ed, punctuation is ignored. Under [`match`](#language-and-match), `websearch_to_tsquery`: `"phrase"`, `or`, `-word`.
+- **MySQL** — natural-language mode: relevance-ranked, words OR-ed, short and stop words ignored. Under `match "all"`, boolean mode with every word required; the user's own `+ - < > ( ) ~ * " @` are text.
 
 ## Next Steps
 

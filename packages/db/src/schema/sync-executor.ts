@@ -118,6 +118,24 @@ export interface TTableExecOptions {
    * a statement fails before `syncForeignKeys` re-adds them.
    */
   preDroppedFks?: string[];
+  /**
+   * Leave the index / foreign-key work (and `afterSyncTable`) to a later
+   * {@link executeTableConstraints} call: the table's remaining work is handed
+   * here. Set when `beforeConstraints` data steps run in between (since 0.1.168).
+   */
+  deferConstraints?: (work: TDeferredConstraints) => void;
+}
+
+/**
+ * A table whose index / foreign-key work was deferred by
+ * {@link TTableExecOptions.deferConstraints}: what
+ * {@link executeTableConstraints} needs to finish it.
+ */
+export interface TDeferredConstraints {
+  facts: TTableFacts;
+  exec: TTableExecOptions;
+  /** FK keys dropped before this point — named by an error entry. */
+  droppedFks: string[];
 }
 
 // ── View definition change check ─────────────────────────────────────────
@@ -448,57 +466,108 @@ export async function executeSyncTable(
       return new SyncEntry(init);
     }
 
-    // Indexes and foreign keys. DDL here can fail on data conflicts (e.g.
-    // CREATE UNIQUE INDEX over duplicate rows).
+    if (exec.deferConstraints) {
+      exec.deferConstraints({ facts, exec, droppedFks });
+      return new SyncEntry(init);
+    }
     phase = "Index/FK sync";
-    const indexChanges = await adapter.syncIndexes(keptIndexes(init));
-    // Reported (and `alter`) on a table that already existed as it is: a
-    // created or recreated table's indexes are part of that.
-    if (
-      Array.isArray(indexChanges) &&
-      indexChanges.length > 0 &&
-      init.status !== "create" &&
-      !init.recreated
-    ) {
-      init.indexChanges = indexChanges;
-      init.status = "alter";
-    }
-    // Cycle members add their FKs in the deferred pass, once every member exists.
-    if (adapter.syncForeignKeys && !exec.deferForeignKeysTo) {
-      const fkChanges = await adapter.syncForeignKeys();
-      if (
-        init.status !== "create" &&
-        !init.recreated &&
-        mergeLiveForeignKeyChanges(init, fkChanges)
-      ) {
-        init.status = "alter";
-      }
-    }
-    // Post-sync finalization (e.g., reset identity sequences after data migration)
-    if (adapter.afterSyncTable) {
-      await adapter.afterSyncTable();
-    }
+    await applyTableConstraints(facts, init, exec);
   } catch (error) {
-    const dropped =
-      droppedFks.length > 0
-        ? ` Dropped foreign keys before the failure: ${droppedFks.join(", ")} — the ones still in the model are re-added by the next run's syncForeignKeys.`
-        : "";
-    const reason = (error as Error).message;
-    // Engine messages (PostgreSQL, MySQL) end without a period — keep the note a separate sentence.
-    const sep = dropped && !/[.!?]$/.test(reason) ? "." : "";
-    const msg = `${phase} failed on ${name}: ${reason}${sep}${dropped}`;
-    deps.logger.error?.(`[schema-sync] ${msg}`);
-    const planned = planTableInit(facts, safe, exec.dependsOn);
-    return new SyncEntry({
-      ...planned,
-      status: "error",
-      errors: [...(planned.errors ?? []), msg],
-      renamedFrom: init.renamedFrom,
-      recreated: false,
-    });
+    return tableStepFailed(error, phase, { facts, exec, droppedFks }, init, safe, deps);
   }
 
   return new SyncEntry(init);
+}
+
+/**
+ * Indexes, foreign keys and `afterSyncTable` of one table — the tail of
+ * {@link executeSyncTable}. DDL here can fail on data conflicts (e.g.
+ * CREATE UNIQUE INDEX over duplicate rows).
+ */
+async function applyTableConstraints(
+  facts: TTableFacts,
+  init: TSyncEntryInit,
+  exec: TTableExecOptions,
+): Promise<void> {
+  const adapter = facts.readable.dbAdapter;
+  const indexChanges = await adapter.syncIndexes(keptIndexes(init));
+  // Reported (and `alter`) on a table that already existed as it is: a
+  // created or recreated table's indexes are part of that.
+  if (
+    Array.isArray(indexChanges) &&
+    indexChanges.length > 0 &&
+    init.status !== "create" &&
+    !init.recreated
+  ) {
+    init.indexChanges = indexChanges;
+    init.status = "alter";
+  }
+  // Cycle members add their FKs in the deferred pass, once every member exists
+  // (a deferred-constraints pass runs after every table, so it adds them here).
+  if (adapter.syncForeignKeys && (!exec.deferForeignKeysTo || exec.deferConstraints)) {
+    const fkChanges = await adapter.syncForeignKeys();
+    if (
+      init.status !== "create" &&
+      !init.recreated &&
+      mergeLiveForeignKeyChanges(init, fkChanges)
+    ) {
+      init.status = "alter";
+    }
+  }
+  // Post-sync finalization (e.g., reset identity sequences after data migration)
+  if (adapter.afterSyncTable) {
+    await adapter.afterSyncTable();
+  }
+}
+
+/**
+ * Finishes a table whose constraints {@link executeSyncTable} deferred
+ * (`beforeConstraints` data steps ran in between, since 0.1.168). A failure
+ * turns the entry into an error entry, like the same failure inside
+ * `executeSyncTable`.
+ */
+export async function executeTableConstraints(
+  entry: SyncEntry,
+  work: TDeferredConstraints,
+  safe: boolean,
+  deps: TSyncExecutorDeps,
+): Promise<SyncEntry> {
+  if (entry.status === "error") return entry;
+  const init = entry.toInit();
+  try {
+    await applyTableConstraints(work.facts, init, work.exec);
+  } catch (error) {
+    return tableStepFailed(error, "Index/FK sync", work, init, safe, deps);
+  }
+  return new SyncEntry(init);
+}
+
+/** The error entry of a table step that failed in `phase`. */
+function tableStepFailed(
+  error: unknown,
+  phase: string,
+  { facts, exec, droppedFks }: TDeferredConstraints,
+  init: TSyncEntryInit,
+  safe: boolean,
+  deps: TSyncExecutorDeps,
+): SyncEntry {
+  const dropped =
+    droppedFks.length > 0
+      ? ` Dropped foreign keys before the failure: ${droppedFks.join(", ")} — the ones still in the model are re-added by the next run's syncForeignKeys.`
+      : "";
+  const reason = (error as Error).message;
+  // Engine messages (PostgreSQL, MySQL) end without a period — keep the note a separate sentence.
+  const sep = dropped && !/[.!?]$/.test(reason) ? "." : "";
+  const msg = `${phase} failed on ${facts.name}: ${reason}${sep}${dropped}`;
+  deps.logger.error?.(`[schema-sync] ${msg}`);
+  const planned = planTableInit(facts, safe, exec.dependsOn);
+  return new SyncEntry({
+    ...planned,
+    status: "error",
+    errors: [...(planned.errors ?? []), msg],
+    renamedFrom: init.renamedFrom,
+    recreated: false,
+  });
 }
 
 /**

@@ -10,7 +10,7 @@ pnpm add @atscript/db-sqlite better-sqlite3        # pick exactly one adapter
 pnpm add @atscript/db-memory                       # …or the in-memory adapter (no driver — tests / runtime surfaces)
 ```
 
-Adapters and their peer deps:
+Adapters and their peer deps (the SQL adapters bring `@atscript/db-sql-tools` themselves since 0.1.168):
 
 | Adapter                 | Peer                                                      |
 | ----------------------- | --------------------------------------------------------- |

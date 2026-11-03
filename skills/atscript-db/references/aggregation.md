@@ -86,6 +86,8 @@ await issues.aggregate({
 
 Full rules, error messages and per-adapter notes: [docs → Grouped Queries](https://db.atscript.dev/api/aggregation#arithmetic-expressions).
 
+Operators are binary only (shared with `@db.compute`). For a long expression in code use `parseArith(text)` — re-exported from `@atscript/db` (0.1.168): `{ $fn: "sum", $expr: parseArith("small*1 + medium*2.5 + large*4"), $as: "load" }`. Syntax-only (`SyntaxError` with offset); limits checked at query time.
+
 URL: `sum(price*qty):revenue`, `expr(est/open):avgEst` (write `+` as `%2B`), `first(title):oldest`, `$rowOrder=raisedAt,-id`. Types: `AggregateOfExpr`, `SelectArithExpr`, `ArithExpr` (`@uniqu/core`); expression aliases are `number | null`, first/last = the field's type. `/meta`: `aggregateExpressions`, `fields[P].numeric`, `fields[P].groupable` (since 0.1.148: `true` exactly when `$groupBy` on P passes the gate — physically filterable, and on a table with dimensions a dimension; a distinct-values picker `$groupBy=f&$select=f` needs `filterable ∧ groupable`).
 
 ## `$search` on an aggregate query (since 0.1.130)

@@ -6,6 +6,32 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.168 {#v0-1-168}
+
+### Features
+
+- **Fulltext language and term matching.** `@db.index.fulltext.language "russian"` and `@db.index.fulltext.match "all" | "any"` on the interface (optionally naming one index) set the text language and whether a search needs every term. PostgreSQL uses the language as the text search configuration and switches to `websearch_to_tsquery` under `match`; MongoDB sets the text index's `default_language`; SQLite uses the Porter stemmer for `english`; MySQL ignores the language with a warning and runs `match "all"` in boolean mode. A changed language rebuilds the index on the next sync. Indexes without the annotations are unchanged. See [Language and term matching](/search/#language-and-match).
+- **Data steps before new constraints.** A data step with `phase: "beforeConstraints"` runs after the tables and their new columns exist and before indexes and foreign keys are synced, so it can merge the rows a new `@db.index.unique` or `@db.rel.FK` would reject. See [Fix rows before a new constraint](/sync/programmatic#data-steps-before-constraints).
+- **`Prefer: return=representation` on `POST /`, opt-in per controller.** Override `returnRepresentation()` to return `true` (default `false`: the header is ignored) and a single-object insert answers the stored row as `row`, read as `GET /one` would answer the caller (`prepareRequest` runs again with `endpoint: "one"` — authorize that call with the caller's read grant). A failed read-back leaves the plain result. The client sends it with `insert(row, { returning: true })`. See [Get the stored row back](/http/crud#post-insert-representation).
+- **Schema sync resumes after a failed `beforeConstraints` step**, and `renameTable` on every adapter is a no-op when the old table is gone and the new one exists.
+- **Typed patch operators.** `DbPatch<Row>` (and the client's `PatchOf<T>`) types `{ $inc | $dec | $mul }` on number fields, the array operators on top-level array fields, and `$cas`. See [Typed operators](/api/update-patch#typed-operators).
+- **`parseArith`** is re-exported from `@atscript/db`, for aggregate `$expr` entries written as text. See [Arithmetic expressions](/api/aggregation#arithmetic-expressions).
+- **db-client** loads `@atscript/typescript/utils` only when `getActionForm()` first needs it, so importing the client keeps it out of an app's first chunk.
+
+### Breaking & behaviour changes
+
+- **`@atscript/db-sql-tools` is a dependency of the SQL adapters, no longer a peer.** `@atscript/db-sqlite`, `@atscript/db-postgres` and `@atscript/db-mysql` install the matching version themselves. If your app lists `@atscript/db-sql-tools` only to satisfy the old peer, remove it from your `package.json`; a custom adapter that imports it keeps its own dependency.
+- **Write payload types accept interfaces and are stricter.** `DbInsert<Row>` (new) types inserts, `DbPatch<Row>` updates and `DbRow<Row>` replaces; none of them intersects `Record<string, unknown>` any more. So a value of an interface type — the generated model type or your own `interface Product` — now fits `insertOne(product)` / `client.insert(product)`, and on an untyped table or `Client` any object fits. On a typed table:
+  - a key the model does not declare is now a type error in `insertOne` / `updateOne` / `replaceOne` / `client.insert` / `client.update` / `client.replace` payloads (before, the index signature let it through);
+  - inserts no longer type `$cas` or field operators (both were rejected at runtime);
+  - db-client's `insert()` takes `InsertOf<T>` (new export) instead of `PatchOf<T>`; overloads now list the array form first.
+- **`$update` / `$remove` helpers** (`@atscript/db/ops`) take the element type as given (`$remove(["a"])` on a string array); the payload type checks it.
+
+### Custom adapters
+
+- `renameTable(oldName)` should be a no-op when `oldName` is gone and the new table exists — the next sync retries a rename whose run stopped before recording it. See [`renameTable`](/adapters/creating-adapters).
+- `TDbIndex.language` / `TDbIndex.match` and `DB_FULLTEXT_LANGUAGES` / `DB_FULLTEXT_MATCH_MODES` (from `@atscript/db`); `TIndexDiffOptions.renderDesiredDefinition` with a `definition` on `listExisting` entries rebuilds an index whose definition drifted. See [Creating adapters — text search](/adapters/creating-adapters).
+
 ## 0.1.166 {#v0-1-166}
 
 ### Fixes

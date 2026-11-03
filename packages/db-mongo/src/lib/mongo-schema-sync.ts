@@ -48,6 +48,7 @@ export interface TMongoSchemaSyncHost {
           designType?: string;
           integer?: boolean;
         }>;
+        language?: string;
       }
     >;
     readonly flatMap: ReadonlyMap<string, TAtscriptAnnotatedType>;
@@ -290,6 +291,8 @@ export async function recreateTableImpl(host: TMongoSchemaSyncHost): Promise<voi
 
 export async function renameTableImpl(host: TMongoSchemaSyncHost, oldName: string): Promise<void> {
   const newName = host.resolveTableName(false);
+  // Already renamed by an earlier run that stopped before recording it.
+  if (!(await getObjectKindImpl(host, oldName)) && (await getObjectKindImpl(host, newName))) return;
   host._log("renameTable", oldName, "→", newName);
   await host.db.renameCollection(oldName, newName);
   host.clearCollectionCache();
@@ -584,6 +587,7 @@ export async function syncIndexesImpl(
       fields,
       weights,
       ...(partialFilterExpression ? { partialFilterExpression } : {}),
+      ...(index.type === "fulltext" && index.language ? { defaultLanguage: index.language } : {}),
     });
   }
 
@@ -662,13 +666,15 @@ export async function syncIndexesImpl(
         // listIndexes() reports the same { field: 1 } key, so the old index
         // would be silently kept and the new options never applied.
         const wantedCollation = indexCollation(host, local);
+        // A text index: its language (`@db.index.fulltext.language`, since 0.1.168)
         const optionsMatch =
-          local.type === "text" ||
-          ((local.type === "unique") === (remote.unique === true) &&
-            partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression) &&
-            (sameCollation(wantedCollation, remote.collation) ||
-              (!wantedCollation &&
-                sameCollation(remote.collation, await collectionDefaultCollation()))));
+          local.type === "text"
+            ? textLanguage(local.defaultLanguage) === textLanguage(remote.default_language)
+            : (local.type === "unique") === (remote.unique === true) &&
+              partialFilterEqual(local.partialFilterExpression, remote.partialFilterExpression) &&
+              (sameCollation(wantedCollation, remote.collation) ||
+                (!wantedCollation &&
+                  sameCollation(remote.collation, await collectionDefaultCollation())));
         // Replacing a unique index with one the current data violates (e.g.
         // values that differ only by case under a new 'nocase' collation)
         // would drop the constraint and fail the rebuild: keep it, report.
@@ -749,7 +755,11 @@ export async function syncIndexesImpl(
       case "text": {
         host._log("createIndex (text)", key, value.fields);
         label = `create text index "${key}"`;
-        indexOptions = { weights: value.weights, name: key };
+        indexOptions = {
+          weights: value.weights,
+          name: key,
+          ...(value.defaultLanguage ? { default_language: value.defaultLanguage } : {}),
+        };
         break;
       }
       case "2dsphere": {
@@ -1112,4 +1122,9 @@ function vectorFieldsMatch(
     }
   }
   return true;
+}
+
+/** A text index's language as MongoDB applies it: `english` when none is set. */
+function textLanguage(language: string | undefined): string {
+  return language ?? "english";
 }

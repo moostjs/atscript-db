@@ -148,8 +148,10 @@ better-sqlite3 binds a JavaScript integer as `REAL`, and FTS5 silently ignores a
 :::
 
 ::: info Search term syntax
-The `$search` text is quoted before it reaches FTS5's `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are searched as plain text). Words are AND-ed; a `"quoted phrase"` stays a phrase; a trailing `*` is a prefix match (`quok*`). FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, column filters) are not available through `$search`.
+The `$search` text is quoted before it reaches FTS5's `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are searched as plain text). Words are AND-ed (OR-ed under `@db.index.fulltext.match "any"`); a `"quoted phrase"` stays a phrase; a trailing `*` is a prefix match (`quok*`). FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, column filters) are not available through `$search`.
 :::
+
+**Language** (since 0.1.168): `@db.index.fulltext.language "english"` builds the FTS5 table with `tokenize='porter unicode61'`, so `run` finds `running`. FTS5 ships no stemmer for other languages: with any other language words are indexed unstemmed (FTS5's default `unicode61`, which folds case for every script) and schema sync logs a warning. Changing the language recreates the FTS5 table. See [Language and term matching](/search/#language-and-match).
 
 **Integer members** are left out of the FTS5 table (SQLite stores integers in `REAL` columns, so FTS5 would index `29461277.0` and a term `0` would match every row). They are matched by exact number instead: `(rowid IN (SELECT rowid FROM <fts> WHERE <fts> MATCH ?) OR "ref_no" = ?)`, which SQLite serves from the FTS5 lookup and the member's btree. A text-only search keeps the JOIN form. An index of integer members only creates no FTS5 table. Schema sync compares an existing FTS5 table's columns with the index's text members and recreates it on drift (for example, a table built before integers were excluded). See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
 
@@ -258,7 +260,18 @@ SQLite does not support `ALTER COLUMN` for type changes. When schema sync detect
 2. Copies data from the old table (with `COALESCE` for new NOT NULL columns)
 3. Drops the old table and renames the new one into place
 
-Since 0.1.138 these steps run in one transaction: a step that fails rolls them all back, so the table keeps its rows and its full-text and vector indexes. Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
+Since 0.1.138 these steps run in one transaction: a step that fails rolls them all back, so the table keeps its rows and its full-text and vector indexes.
+
+::: tip Copy the database before a migration
+`VACUUM INTO` writes a consistent copy of a live database to a new file, on every SQLite driver and without stopping writers. Take one before a schema sync that rebuilds tables or runs [data steps](/sync/programmatic#data-steps), so you can go back:
+
+```typescript
+driver.exec(`VACUUM INTO '/backups/app-${Date.now()}.db'`);
+await syncSchema(db, types, { dataSteps });
+```
+
+The target file must not exist yet. There is no adapter API for it — run it on the driver you created.
+::: Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
 
 ### In-Memory Databases
 

@@ -10,11 +10,7 @@ import type {
   UniqueryControls,
   ValidGroupBy,
 } from "@uniqu/core";
-import {
-  deserializeAnnotatedType,
-  type TAtscriptAnnotatedType,
-  type TSerializedAnnotatedType,
-} from "@atscript/typescript/utils";
+import type { TAtscriptAnnotatedType, TSerializedAnnotatedType } from "@atscript/typescript/utils";
 import type {
   TDbActionInfo,
   TDbActionTargetSummary,
@@ -48,6 +44,7 @@ import type {
   DecoratedControls,
   DecoratedQuery,
   IdOf,
+  InsertOf,
   MetaResponse,
   NavOf,
   OwnOf,
@@ -66,7 +63,21 @@ type Response<T, Q> = ClientResponse<T, Q>;
 type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
 type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 /** Per-request transport options of the private request helpers. */
-type TRequestOptions = { allowEmpty?: boolean; signal?: AbortSignal };
+type TRequestOptions = {
+  allowEmpty?: boolean;
+  signal?: AbortSignal;
+  /** Extra headers of this request only. */
+  headers?: Record<string, string>;
+};
+/**
+ * One insert row for `returning`: an untyped client's row is any `object`,
+ * which an array would match too — there it is any non-array object.
+ */
+type SingleInsertOf<T> = [keyof InsertOf<T>] extends [never]
+  ? Record<string, any> & { readonly [Symbol.iterator]?: never }
+  : InsertOf<T>;
+/** The stored row `insert(row, { returning: true })` answers: the `one()` row shape. */
+type InsertedRow<T, D> = DecoratedRow<T, Record<never, never>, D>;
 
 /**
  * HTTP client for moost-db REST endpoints.
@@ -285,37 +296,62 @@ export class Client<
 
   // ── POST / ─────────────────────────────────────────────────────────────────
 
-  /**
-   * `POST /` — insert one record. The version column (if any) is optional —
-   * the server initialises it; `$cas` is rejected (no meaning on insert).
-   */
-  async insert(data: PatchOf<T>, opts?: TClientCallOptions): Promise<TDbInsertResult>;
+  // Array overloads come first: on an untyped client a row is any `object`,
+  // which an array would match too.
   /**
    * `POST /` — insert many records.
    */
-  async insert(data: PatchOf<T>[], opts?: TClientCallOptions): Promise<TDbInsertManyResult>;
-  /**
-   * `POST /?$onConflict=ignore` — insert one record, skipping it when it
-   * collides on the primary key or a unique index (since 0.1.148).
-   */
-  async insert(
-    data: PatchOf<T>,
-    opts: TClientCallOptions & { onConflict: "ignore" },
-  ): Promise<TDbInsertIgnoreResult>;
+  async insert(data: InsertOf<T>[], opts?: TClientCallOptions): Promise<TDbInsertManyResult>;
   /**
    * `POST /?$onConflict=ignore` — insert many records, skipping the ones that
    * collide; the result reports inserted and skipped input indices (since 0.1.148).
    */
   async insert(
-    data: PatchOf<T>[],
+    data: InsertOf<T>[],
     opts: TClientCallOptions & { onConflict: "ignore" },
   ): Promise<TDbInsertManyIgnoreResult>;
+  /**
+   * `POST /` with `Prefer: return=representation` — insert one record and
+   * get the stored row back as `row` (since 0.1.168): server defaults and
+   * stamps included, shaped as `one()` would answer it. `row` is absent when
+   * the server could not apply the preference (the caller may not read the
+   * row, or a skipped conflict).
+   */
   async insert(
-    data: PatchOf<T> | PatchOf<T>[],
-    opts?: TClientCallOptions & { onConflict?: "ignore" },
+    data: SingleInsertOf<T>,
+    opts: TClientCallOptions & { returning: true },
+  ): Promise<TDbInsertResult & { row?: InsertedRow<T, D> }>;
+  /**
+   * `POST /?$onConflict=ignore` with `Prefer: return=representation` — as
+   * above; a skipped row answers `{ conflict: true }` without `row`.
+   */
+  async insert(
+    data: SingleInsertOf<T>,
+    opts: TClientCallOptions & { returning: true; onConflict: "ignore" },
+  ): Promise<TDbInsertIgnoreResult & { row?: InsertedRow<T, D> }>;
+  /**
+   * `POST /` — insert one record. The version column (if any) is optional —
+   * the server initialises it; `$cas` is rejected (no meaning on insert).
+   */
+  async insert(data: InsertOf<T>, opts?: TClientCallOptions): Promise<TDbInsertResult>;
+  /**
+   * `POST /?$onConflict=ignore` — insert one record, skipping it when it
+   * collides on the primary key or a unique index (since 0.1.148).
+   */
+  async insert(
+    data: InsertOf<T>,
+    opts: TClientCallOptions & { onConflict: "ignore" },
+  ): Promise<TDbInsertIgnoreResult>;
+  async insert(
+    data: InsertOf<T> | InsertOf<T>[],
+    opts?: TClientCallOptions & { onConflict?: "ignore"; returning?: true },
   ): Promise<unknown> {
     const query = opts?.onConflict === "ignore" ? "?$onConflict=ignore" : "";
-    return this._request("POST", query, await this._prepareWrite(data, "insert"), opts);
+    const headers = opts?.returning ? { Prefer: "return=representation" } : undefined;
+    return this._request("POST", query, await this._prepareWrite(data, "insert"), {
+      signal: opts?.signal,
+      headers,
+    });
   }
 
   // ── PATCH / ────────────────────────────────────────────────────────────────
@@ -620,10 +656,13 @@ export class Client<
   private _loadActionForm(url: string): Promise<TAtscriptAnnotatedType> {
     let p = this._formCache.get(url);
     if (!p) {
-      const loading: Promise<TAtscriptAnnotatedType> = (
-        this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>
-      )
-        .then((schema) => deserializeAnnotatedType(schema))
+      // Loaded on demand, like the preflight validator, so importing the
+      // client keeps `@atscript/typescript/utils` out of an app's first chunk.
+      const loading: Promise<TAtscriptAnnotatedType> = Promise.all([
+        this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>,
+        import("@atscript/typescript/utils"),
+      ])
+        .then(([schema, { deserializeAnnotatedType }]) => deserializeAnnotatedType(schema))
         .catch((err) => {
           if (this._formCache.get(url) === loading) this._formCache.delete(url);
           throw err;
@@ -889,7 +928,7 @@ export class Client<
     body?: unknown,
     opts?: TRequestOptions,
   ): Promise<unknown> {
-    const headers: Record<string, string> = { ...(await this._resolveHeaders()) };
+    const headers: Record<string, string> = { ...(await this._resolveHeaders()), ...opts?.headers };
     const init: RequestInit = { method, headers };
     if (opts?.signal) init.signal = opts.signal;
     if (body !== undefined) {

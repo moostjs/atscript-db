@@ -39,6 +39,7 @@ await app.init();
 
 ## Insert ignore and closing spaces (0.1.148) {#insert-ignore-and-closing-spaces-01148}
 
+- **`Prefer: return=representation`** (0.1.168) — OPT-IN: `protected returnRepresentation() { return true }` (default `false` → header ignored, plain result, no `Preference-Applied`). Then a single-object `POST /` → `{ insertedId, row }` + `Preference-Applied: return=representation`. `row` = what `GET /one/<id>` answers the caller: `prepareRequest` runs AGAIN with `endpoint: "one"` (it MUST authorize by `ctx.endpoint` = the READ grant; a layer keyed on the current handler would leak the row to an insert-only caller — don't opt in then), then the `/one` pipeline (read projection, row overlay, decorations; `resolveRowIds` gets the text id `"7"`). Read fails (HttpError: no read grant / outside overlay; any other error: logged warn) → plain `{ insertedId }`, insert stands, no header. Array body / skipped conflict → ignored. Client: `insert(row, { returning: true })`.
 - **`POST /?$onConflict=ignore`** — skip rows colliding on the PK / a unique index. Object body → `{ insertedId?, conflict }`, array body → `{ insertedCount, insertedIds, inserted, conflicts }` (index-based; same 2xx status even when all rows conflicted). `$onConflict` ∈ `error` (default) | `ignore`; other value or any other `$` control on POST → 400. Nested TO-parent payload / validation / NOT NULL / FK errors → 400/409 as for a plain insert. `guardWrite` / `checkWrite` run as usual (guard sees every submitted row). `prepareRequest` gets `ctx.onConflict === "ignore"` on `endpoint: "insert"` — throw to refuse the mode. `/meta.crud.insert` = `["onConflict"]` when the adapter supports it (`supportsInsertIgnore()`). Existence disclosure = an input index only (no row data, no constraint name).
 - **`closeDbSpaces()`** (`@atscript/moost-db`) closes every distinct `provideDbSpace()`-registered space (`AggregateError` on failures) and clears the registry. NOT hooked into `Moost.dispose()` (the registry outlives app instances; Vite HMR reloads would close the live connection) — wire it into your shutdown: `app.disposeOnSignals()` + a DI singleton `@MoostDispose() close() { return closeDbSpaces() }`; one space: `await app.dispose(); await space.close()`. Requests after close → `DbError("SPACE_CLOSED")` → 503.
 
@@ -217,6 +218,10 @@ export class UsersController extends AsDbController<typeof User> {
     const n = await ctx.count({ $and: [{ $or: [...ctx.filters] }, { tenantId: useTenant() }] });
     if (n !== ctx.filters.length) throw new HttpError(403);
   }
+  // Per-tenant row cap (no built-in option): count AFTER the insert, inside its tx —
+  // rows skipped by ?$onConflict=ignore are not counted. Exact only under a lock / serial writer.
+  //   if (ctx.action === "insert" || ctx.action === "insertMany")
+  //     if ((await ctx.count({ tenantId })) > maxRows) throw new HttpError(409, { message: "Row limit reached", code: "row_cap" });
   protected authorizeForm(name: string, actionNames: readonly string[]) {
     return actionNames.some((a) => mayRun(a)); // false → 404 like an unknown form
   }

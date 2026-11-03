@@ -14,6 +14,7 @@ import type {
   WeekStart,
 } from "@uniqu/core";
 import type {
+  DbInsert,
   DbPatch,
   DbResponse,
   DbRow,
@@ -59,17 +60,30 @@ export type {
 
 // ── Write payload aliases (since 0.1.128) ───────────────────────────────────
 
-export type { DbPatch, DbRow };
+export type { DbInsert, DbPatch, DbRow };
 
 /**
- * Write payload for `insert()` / `update()`: every key optional, optional
- * columns additionally accept `null` (explicit NULL). `$cas` is accepted on
- * `update()` / `replace()` through the open index signature.
+ * Write payload for `insert()` (since 0.1.168): every key optional, optional
+ * columns additionally accept `null` (explicit NULL). A value of the model's
+ * interface type fits; on an untyped client any object does.
  */
-export type PatchOf<T> = DbPatch<DataOf<T>>;
+export type InsertOf<T> = DbInsert<ResponseDataOf<T>>;
 
-/** Write payload for `replace()`: full row; optional columns additionally accept `null`. */
-export type RowOf<T> = DbRow<DataOf<T>>;
+/**
+ * Write payload for `update()`: every key optional, optional columns
+ * additionally accept `null` (explicit NULL). Number fields also take
+ * `{ $inc | $dec | $mul: n }`, top-level arrays the array operators
+ * (`$insert`, `$remove`, …) and the payload a `$cas` version check (since
+ * 0.1.168). A value of the model's interface type fits; on an untyped client
+ * any object does.
+ */
+export type PatchOf<T> = DbPatch<ResponseDataOf<T>>;
+
+/**
+ * Write payload for `replace()`: full row; optional columns additionally
+ * accept `null`, `$cas` checks the version. On an untyped client any object fits.
+ */
+export type RowOf<T> = DbRow<ResponseDataOf<T>>;
 
 // ── Client Options ──────────────────────────────────────────────────────────
 

@@ -37,6 +37,7 @@ import {
   executeSyncTable,
   executeSyncView,
   executeDeferredForeignKeys,
+  executeTableConstraints,
   planViewSync,
   dropOutdatedView,
   viewPlanStatus,
@@ -57,6 +58,7 @@ import {
   mergeLiveForeignKeyChanges,
   plannedIndexOptions,
   columnDiffOptions,
+  type TDeferredConstraints,
   type TSyncExecutorDeps,
   type TTableFacts,
   type TViewSyncPlan,
@@ -90,9 +92,23 @@ export interface TSyncPlan {
  * a backfill or data fix that must run exactly once per database, after the
  * schema change it needs.
  */
+/** When a {@link TDataStep} runs relative to the schema DDL (since 0.1.168). */
+export type TDataStepPhase = "after" | "beforeConstraints";
+
 export interface TDataStep {
   /** Stable, unique id — the step is recorded under it (`data_step:<id>` in `__atscript_control`). */
   id: string;
+  /**
+   * When the step runs (since 0.1.168):
+   * - `"after"` (default) — after all the schema DDL (tables, indexes,
+   *   foreign keys, views);
+   * - `"beforeConstraints"` — after the tables and their new columns exist,
+   *   but before the indexes and foreign keys are synced, so the step can
+   *   merge or fix rows a new `@db.index.unique` or `@db.rel.FK` would reject.
+   *   Views are not synced yet either. Several `beforeConstraints` steps run
+   *   in their order, all before the constraints.
+   */
+  phase?: TDataStepPhase;
   /**
    * The step's work. Runs in its own transaction (on adapters with
    * transactions), the record of the step committed in the same one: a step
@@ -143,6 +159,11 @@ export interface TSyncOptions {
    * later syncs skip it. A step that throws stops the run (the error is
    * rethrown after the lock is released); the steps after it stay pending.
    * Steps do not run when the sync is refused or an entry errored.
+   * A step with `phase: "beforeConstraints"` (since 0.1.168) runs before the
+   * indexes and foreign keys are synced — see {@link TDataStep.phase}; when
+   * it throws, the run records what it applied (tables, renames, columns),
+   * errors the entries still waiting for constraints, skips views and drops,
+   * withholds the hash and rethrows — the next sync runs the step again.
    */
   dataSteps?: readonly TDataStep[];
 }
@@ -342,6 +363,26 @@ function removedBlockers(
 // ── SchemaSync ────────────────────────────────────────────────────────────
 
 /** The `__atscript_control` key a data step is recorded under. */
+/** A data step's own failure (not a lock loss), carrying the step's id and its error. */
+class DataStepFailure {
+  constructor(
+    readonly stepId: string,
+    readonly error: unknown,
+  ) {}
+}
+
+/** The pending `beforeConstraints` steps `execute()` runs, the ids it ran, and a failure. */
+interface TEarlySteps {
+  steps: readonly TDataStep[];
+  ran: string[];
+  failure?: DataStepFailure;
+}
+
+/** Rethrows a data step's own error as is (a lock loss passes through). */
+function rethrowStepError(error: unknown): never {
+  throw error instanceof DataStepFailure ? error.error : error;
+}
+
 function dataStepKey(id: string): string {
   return `data_step:${id}`;
 }
@@ -355,9 +396,18 @@ function checkDataSteps(steps: readonly TDataStep[] | undefined): readonly TData
       throw new Error("syncSchema: every data step needs a non-empty id");
     }
     if (seen.has(step.id)) throw new Error(`syncSchema: duplicate data step id "${step.id}"`);
+    if (step.phase !== undefined && step.phase !== "after" && step.phase !== "beforeConstraints") {
+      throw new Error(
+        `syncSchema: data step "${step.id}" has an unknown phase "${String(step.phase)}" (expected "after" or "beforeConstraints")`,
+      );
+    }
     seen.add(step.id);
   }
-  return steps;
+  // `beforeConstraints` steps first: when no DDL runs, that is their order too.
+  return [
+    ...steps.filter((step) => step.phase === "beforeConstraints"),
+    ...steps.filter((step) => step.phase !== "beforeConstraints"),
+  ];
 }
 
 /** `result` with its `dataSteps` report — unchanged when no steps were passed. */
@@ -648,18 +698,36 @@ export class SchemaSync {
     steps: readonly TDataStep[],
     getAbortReason: () => string | undefined,
   ): Promise<string[]> {
-    const ran: string[] = [];
+    if (steps.length === 0) return [];
     const pending = new Set(await this.pendingDataSteps(steps));
+    return this.applyDataSteps(
+      steps.filter((step) => pending.has(step.id)),
+      getAbortReason,
+    );
+  }
+
+  /**
+   * Runs already-filtered pending steps in order (see {@link runDataSteps}).
+   * A step's own failure comes back as a {@link DataStepFailure}.
+   */
+  private async applyDataSteps(
+    steps: readonly TDataStep[],
+    getAbortReason: () => string | undefined,
+  ): Promise<string[]> {
+    const ran: string[] = [];
     for (const step of steps) {
-      if (!pending.has(step.id)) continue;
       this.assertLockHeld(getAbortReason);
-      await this.store.inTransaction(async () => {
-        await step.run(this.space);
-        await this.store.writeControlValue(
-          dataStepKey(step.id),
-          JSON.stringify({ ranAt: Date.now() }),
-        );
-      });
+      try {
+        await this.store.inTransaction(async () => {
+          await step.run(this.space);
+          await this.store.writeControlValue(
+            dataStepKey(step.id),
+            JSON.stringify({ ranAt: Date.now() }),
+          );
+        });
+      } catch (error) {
+        throw new DataStepFailure(step.id, error);
+      }
       this.logger.info?.(`[schema-sync] data step "${step.id}" applied`);
       ran.push(step.id);
     }
@@ -730,7 +798,9 @@ export class SchemaSync {
       if (!force) {
         const storedHash = await this.store.readHash();
         if (storedHash === hash) {
-          const ran = await this.runDataSteps(steps, heartbeat.getAbortReason);
+          const ran = await this.runDataSteps(steps, heartbeat.getAbortReason).catch(
+            rethrowStepError,
+          );
           const status = ran.length > 0 ? "synced" : "synced-by-peer";
           return withSteps({ status, schemaHash: hash, entries: [] }, steps, ran);
         }
@@ -753,13 +823,30 @@ export class SchemaSync {
         return withSteps(result, steps, []);
       }
 
-      // Phase 3 — execute
-      const result = await this.execute(d, safe, heartbeat.getAbortReason);
-      this.reportOutcome(result, onError);
+      // Phase 3 — execute. Pending `beforeConstraints` steps run inside it,
+      // between the table DDL and the index / foreign-key work.
+      const earlySteps = steps.filter((step) => step.phase === "beforeConstraints");
+      const earlyPending = new Set(
+        earlySteps.length > 0 ? await this.pendingDataSteps(earlySteps) : [],
+      );
+      const early: TEarlySteps = {
+        steps: earlySteps.filter((step) => earlyPending.has(step.id)),
+        ran: [],
+      };
+      const result = await this.execute(d, safe, heartbeat.getAbortReason, early);
+      // The step's own error is thrown below — the entries it errored are reported, not thrown.
+      this.reportOutcome(result, early.failure && onError === "throw" ? "warn" : onError);
+      // A failed `beforeConstraints` step: the run persisted what it applied
+      // (the next sync resumes from there); its error is the run's error.
+      if (early.failure) throw early.failure.error;
       // Data steps need the schema in place: not after an errored entry.
-      const ran = result.entries.some((e) => e.status === "error")
-        ? []
-        : await this.runDataSteps(steps, heartbeat.getAbortReason);
+      const ran = early.ran;
+      if (!result.entries.some((e) => e.status === "error")) {
+        const late = steps.filter((step) => step.phase !== "beforeConstraints");
+        ran.push(
+          ...(await this.runDataSteps(late, heartbeat.getAbortReason).catch(rethrowStepError)),
+        );
+      }
       return withSteps(result, steps, ran);
     } finally {
       await heartbeat.stop();
@@ -1559,6 +1646,7 @@ export class SchemaSync {
     d: TDiscovery,
     safe: boolean,
     getAbortReason: () => string | undefined,
+    early: TEarlySteps = { steps: [], ran: [] },
   ): Promise<TSyncResult> {
     const { hash, allReadables } = d;
     const deps = this.buildExecutorDeps();
@@ -1659,11 +1747,20 @@ export class SchemaSync {
     //    tables children-first. Removed tables in safe mode are retained.
     const deferred: Array<{ readable: AtscriptDbReadable; index: number }> = [];
     const drops: TDropGroupContext = { d, retained, droppedNames };
+    /**
+     * With `beforeConstraints` data steps pending, every table's index /
+     * foreign-key work waits here (by its entry's index) until they ran.
+     */
+    const constraintWork =
+      early.steps.length > 0 ? new Map<number, TDeferredConstraints>() : undefined;
+    /** Set when a `beforeConstraints` step failed: the rest of the walk applies nothing new. */
+    let failedStep: string | undefined;
     for (const step of this.orderedSteps(d)) {
       this.assertLockHeld(getAbortReason);
       switch (step.kind) {
         case "drop": {
-          if (safe) {
+          // After a failed `beforeConstraints` step nothing more is dropped.
+          if (safe || failedStep !== undefined) {
             retain(step.group, drops);
           } else {
             entries.push(...(await this.dropRemovedGroup(step.group, drops)));
@@ -1680,6 +1777,7 @@ export class SchemaSync {
           // predicted. Otherwise the executor applies the facts; a DDL
           // failure inside comes back as an error entry (snapshot and hash
           // withheld) and the run continues with the next step.
+          const index = entries.length;
           const entry =
             t.planEntry.status === "error"
               ? new SyncEntry(planTableInit(t, safe, dependsOn))
@@ -1687,6 +1785,7 @@ export class SchemaSync {
                   deferForeignKeysTo: step.cycle,
                   dependsOn,
                   preDroppedFks: preDroppedFks.get(t.name),
+                  deferConstraints: constraintWork && ((work) => constraintWork.set(index, work)),
                 });
           // The executor sets `renamedFrom` only once `renameTable` ran; the
           // plan entry carries the pending rename whether or not it ran.
@@ -1694,13 +1793,40 @@ export class SchemaSync {
           if (t.pendingRename && !renamed) {
             stillUnderOldName.set(t.name, { name: t.pendingRename, isView: false });
           }
-          if (step.cycle) {
-            deferred.push({ readable: t.readable, index: entries.length });
+          if (step.cycle && !constraintWork) {
+            deferred.push({ readable: t.readable, index });
           }
           entries.push(entry);
           break;
         }
         case "deferred-fks": {
+          if (constraintWork) {
+            // Every table exists with its columns: the `beforeConstraints`
+            // steps run now (not after an errored entry — they stay
+            // pending), then each table's indexes and foreign keys.
+            if (!entries.some((e) => e.status === "error")) {
+              try {
+                early.ran = await this.applyDataSteps(early.steps, getAbortReason);
+              } catch (error) {
+                if (!(error instanceof DataStepFailure)) throw error;
+                // The DDL so far stays recorded (tracked list, the snapshots
+                // of finished entries); the constraints, views and the hash
+                // wait for the next sync, which runs the step again.
+                early.failure = error;
+                failedStep = `Data step "${error.stepId}" failed: ${(error.error as Error)?.message ?? String(error.error)} — indexes and foreign keys not applied`;
+                this.logger.error?.(`[schema-sync] ${failedStep}`);
+                for (const index of constraintWork.keys()) {
+                  entries[index] = entries[index].withError(failedStep);
+                }
+                break;
+              }
+            }
+            for (const [index, work] of constraintWork) {
+              this.assertLockHeld(getAbortReason);
+              entries[index] = await executeTableConstraints(entries[index], work, safe, deps);
+            }
+            break;
+          }
           for (const { readable, index } of deferred) {
             this.assertLockHeld(getAbortReason);
             entries[index] = await executeDeferredForeignKeys(readable, entries[index], deps);
@@ -1710,7 +1836,9 @@ export class SchemaSync {
         case "view": {
           const view = d.views[step.index];
           const planned = d.viewEntries[step.index];
-          let msg = failedViews.get(view.tableName);
+          let msg =
+            failedViews.get(view.tableName) ??
+            (failedStep === undefined ? undefined : `Not synced: ${failedStep}`);
           if (msg === undefined) {
             const failedUpstream = d.viewSources
               .get(view.tableName)!

@@ -11,6 +11,9 @@ import type {
   UniqueryInsights,
   WithRelation,
 } from "@uniqu/core";
+import type { TDbCas, TDbFieldOp } from "./ops";
+import type { TArrayPatch } from "./patch/patch-types";
+import type { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "./shared/fulltext-options";
 import type { UniquSelect } from "./query/uniqu-select";
 import type { TableMetadata } from "./table/table-metadata";
 
@@ -673,7 +676,24 @@ export interface TDbIndex {
   type: TDbIndexType;
   /** Ordered list of fields in the index. */
   fields: TDbIndexField[];
+  /**
+   * Fulltext only: the text language of `@db.index.fulltext.language`
+   * (since 0.1.168). Unset — the adapter's default.
+   */
+  language?: TDbFulltextLanguage;
+  /**
+   * Fulltext only: whether a search needs every term (`"all"`) or any term
+   * (`"any"`), from `@db.index.fulltext.match` (since 0.1.168). Unset — the
+   * adapter's default.
+   */
+  match?: TDbFulltextMatch;
 }
+
+/** A language of `@db.index.fulltext.language` ({@link DB_FULLTEXT_LANGUAGES}, since 0.1.168). */
+export type TDbFulltextLanguage = (typeof DB_FULLTEXT_LANGUAGES)[number];
+
+/** `@db.index.fulltext.match`: every term (`"all"`) or any term (`"any"`). */
+export type TDbFulltextMatch = (typeof DB_FULLTEXT_MATCH_MODES)[number];
 
 // ── Default Value Types ─────────────────────────────────────────────────────
 
@@ -1279,21 +1299,62 @@ export interface TDbRelation {
 // ── Write semantics (Group B: payload aliases + validated-stage guard contexts) ──
 
 /**
- * Write payload for insert / patch paths: every key optional, and optional
+ * `true` when `D` carries no field list (an untyped table: `unknown`, or a
+ * string-indexed record) — its write payloads accept any object.
+ */
+type TDbOpenData<D> = unknown extends D ? true : string extends keyof D ? true : false;
+
+/** A column value on a write: optional columns additionally accept `null`. */
+type TDbWriteValue<V> = undefined extends V ? V | null : V;
+
+/** A write payload: `Closed` for a typed table, any object for an untyped one. */
+type TDbWritePayload<D, Closed> = TDbOpenData<D> extends true ? object : Closed;
+
+/**
+ * The array patch operators a top-level array column takes in a patch (since
+ * 0.1.168). `$update` / `$remove` match object elements by their
+ * `@expect.array.key` fields and primitive elements by value. A `@db.json`
+ * array is stored whole: send the new array, the operators are rejected.
+ */
+export type TDbArrayOps<E> = TArrayPatch<E[]>;
+
+/** A column value in a patch: the value, a numeric operator on number columns, array operators on arrays. */
+type TDbPatchValue<V> =
+  | TDbWriteValue<V>
+  | (NonNullable<V> extends number ? TDbFieldOp : never)
+  | (NonNullable<V> extends ReadonlyArray<infer E> ? TDbArrayOps<E> : never);
+
+/**
+ * Write payload for inserts (since 0.1.168): every key optional, and optional
  * columns additionally accept `null` (an explicit NULL — `undefined` means
  * "absent" and is dropped before the row reaches defaults or validation).
+ * No field operators and no `$cas`. A value of the table's own interface type
+ * fits; on an untyped table any object does.
  */
-export type DbPatch<D> = {
-  [K in keyof D]?: undefined extends D[K] ? D[K] | null : D[K];
-} & Record<string, unknown>;
+export type DbInsert<D> = TDbWritePayload<D, { [K in keyof D]?: TDbWriteValue<D[K]> }>;
+
+/**
+ * Write payload for patch paths: every key optional, and optional columns
+ * additionally accept `null` (an explicit NULL). Since 0.1.168 a number
+ * column also takes `$inc` / `$dec` / `$mul` ({@link TDbFieldOp}), a
+ * top-level array column the array operators ({@link TDbArrayOps}), and the
+ * payload a `$cas` version check. A value of the table's own interface type
+ * fits; on an untyped table any object does.
+ */
+export type DbPatch<D> = TDbWritePayload<
+  D,
+  { [K in keyof D]?: TDbPatchValue<D[K]> } & { $cas?: TDbCas }
+>;
 
 /**
  * Write payload for full-row replace paths: required keys stay required,
- * optional columns additionally accept `null` (explicit NULL).
+ * optional columns additionally accept `null` (explicit NULL); `$cas` checks
+ * the version. On an untyped table any object fits.
  */
-export type DbRow<D> = {
-  [K in keyof D]: undefined extends D[K] ? D[K] | null : D[K];
-} & Record<string, unknown>;
+export type DbRow<D> = TDbWritePayload<
+  D,
+  { [K in keyof D]: TDbWriteValue<D[K]> } & { $cas?: TDbCas }
+>;
 
 /** Built-in write actions a moost-db `AsDbController` endpoint performs. */
 export type TDbWriteAction =

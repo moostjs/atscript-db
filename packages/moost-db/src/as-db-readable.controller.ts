@@ -3657,6 +3657,28 @@ export class AsDbReadableController<
   }
 
   /**
+   * The row `GET /one/<id>` would answer the caller, for a write that asked
+   * for its representation (`Prefer: return=representation`, since 0.1.168):
+   * {@link prepareRequest} runs again with `endpoint: "one"`, then the `/one`
+   * pipeline, with the id in the form `/one` receives it (text). `undefined`
+   * when that read answers or throws an error (no read grant, outside the read
+   * overlay, a failing hook) — the write it follows is already committed, so
+   * the failure is logged, not answered.
+   */
+  protected async _readRepresentation(id: unknown): Promise<DataType | undefined> {
+    try {
+      const { parsed, controls } = await this.parseRequest("one", "");
+      const row = await this._readOne(urlIdForm(id), parsed, controls);
+      return row instanceof HttpError ? undefined : row;
+    } catch (error) {
+      if (!(error instanceof HttpError)) {
+        this.logger.warn(`Prefer: return=representation — the read-back failed: ${String(error)}`);
+      }
+      return undefined;
+    }
+  }
+
+  /**
    * The shared `/one` pipeline: validation + capability gate (since 0.1.128
    * on the composite form too — an unknown `$select` path used to reach the
    * driver there), the sealed projection, the row read and its augmentation.
@@ -4260,3 +4282,11 @@ function mergeDelegatedActions(
 // `instanceof` probe can find this class without forming an import cycle
 // through the actions module.
 registerAsDbReadableController(AsDbReadableController);
+
+/** An id as the `/one` routes receive it: `/one/:id` text, or `/one?k=v` text values. */
+function urlIdForm(id: unknown): string | Record<string, unknown> {
+  if (id !== null && typeof id === "object") {
+    return Object.fromEntries(Object.entries(id).map(([k, v]) => [k, String(v)]));
+  }
+  return String(id);
+}

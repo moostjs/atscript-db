@@ -20,12 +20,16 @@ describe("[memory] syncSchema dataSteps — waiting pods", () => {
   it("a waiting pod returns synced-by-peer without taking the lock", async () => {
     const space = createTestSpace();
     const lockWrites: unknown[] = [];
+    let aLocked = false;
     const { insertMany } = Object.getOwnPropertyDescriptors(MemoryAdapter.prototype);
     const spy = vi.spyOn(MemoryAdapter.prototype, "insertMany").mockImplementation(function (
       this: MemoryAdapter,
       rows: Array<Record<string, unknown>>,
     ) {
-      for (const row of rows) if (row.lockedBy === "pod-b") lockWrites.push(row);
+      for (const row of rows) {
+        if (row.lockedBy === "pod-b") lockWrites.push(row);
+        if (row.lockedBy === "pod-a") aLocked = true;
+      }
       return (insertMany!.value as MemoryAdapter["insertMany"]).call(this, rows);
     });
     const steps = [{ id: "slow", run: () => new Promise<void>((r) => setTimeout(r, 150)) }];
@@ -34,7 +38,9 @@ describe("[memory] syncSchema dataSteps — waiting pods", () => {
       podId: "pod-a",
       pollIntervalMs: 10,
     });
-    await new Promise((r) => setTimeout(r, 40));
+    // Start pod-b once pod-a holds the lock (a fixed delay raced on a busy machine).
+    await vi.waitFor(() => expect(aLocked).toBe(true), { interval: 5, timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 10));
     const b = syncSchema(space, [fx.CioNote], {
       dataSteps: steps,
       podId: "pod-b",

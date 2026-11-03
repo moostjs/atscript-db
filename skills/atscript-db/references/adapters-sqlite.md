@@ -62,6 +62,8 @@ Each `DbSpace` instance owns its adapters; create a new space per test to guaran
 - `search('term', query, indexName)` joins the FTS5 table on `rowid`; no `$sort` → `ORDER BY bm25(<fts>, w…), <pk>` (0.1.165; ≤ 0.1.164 rowid order); a whole-number term ranks exact-number hits first. `$sort` replaces it.
 - Raw SQL against an FTS5 table: better-sqlite3 binds JS integers as REAL and FTS5 ignores `rowid = ?` with a REAL value (returns every match) — write `rowid = CAST(? AS INTEGER)` or bind a `BigInt`. atscript-db's own queries never bind a rowid.
 - `isSearchable()` → `true` when any `@db.index.fulltext` is declared (an integer-only index counts, but has no FTS5 table).
+- `@db.index.fulltext.language "english"` (0.1.168) → `tokenize='porter unicode61'` (stemming); any other language → default `unicode61`, unstemmed, sync warning. Tokenizer drift → FTS5 table recreated. `@db.index.fulltext.match "any"` → terms OR-ed (default AND).
+- Pre-migration copy: `driver.exec("VACUUM INTO '/backups/x.db'")` (every SQLite driver, live db, target must not exist) before a `syncSchema` that recreates tables or runs data steps. No adapter API.
 
 ## sqlite-vec / vec0 specifics
 

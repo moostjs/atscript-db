@@ -42,6 +42,9 @@
     "test": "vp test",
     "check": "vp check"
   },
+  "dependencies": {
+    "@atscript/db-sql-tools": "workspace:^"
+  },
   "devDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/typescript": "catalog:",
@@ -54,7 +57,6 @@
   "peerDependencies": {
     "@atscript/core": "catalog:",
     "@atscript/db": "workspace:^",
-    "@atscript/db-sql-tools": "workspace:^",
     "@atscript/typescript": "catalog:",
     "@uniqu/core": "catalog:",
     "better-sqlite3": ">=11.0.0"

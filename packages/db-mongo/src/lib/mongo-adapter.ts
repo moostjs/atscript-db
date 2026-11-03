@@ -1058,6 +1058,7 @@ export class MongoAdapter extends BaseDbAdapter {
           weights: Object.fromEntries(
             index.fields.filter((f) => f.weight && !f.integer).map((f) => [f.name, f.weight!]),
           ),
+          ...(index.match ? { match: index.match } : {}),
         };
         if (index === defaultFulltext) defaultIndex = converted;
         // Every fulltext index — the default one too (since 0.1.165) — is

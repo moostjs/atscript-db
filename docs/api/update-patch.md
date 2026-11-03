@@ -461,6 +461,21 @@ await table.updateOne({
 
 Operators are always applied in order: **remove → update → upsert → insert**.
 
+## Typed operators {#typed-operators}
+
+_Since 0.1.168._ The update payload type `DbPatch<Row>` (`updateOne`, `bulkUpdate`, `updateMany`, and `PatchOf<T>` of the [HTTP client](/http/client)) types the operators of top-level fields, so no cast is needed:
+
+- a `number` field takes the number or `{ $inc | $dec | $mul: n }` (the helpers' return type `TDbFieldOp`);
+- an array field takes the array or the array operators (`TDbArrayOps<Element>`: `$replace` / `$insert` / `$upsert` take elements, `$update` / `$remove` take partial elements — or the values themselves for an array of primitives);
+- the payload takes `$cas`.
+
+```typescript
+await jobs.updateOne({ id, attempts: { $inc: 1 } }); // was a type error
+await jobs.updateOne({ id, tags: { $insert: ["urgent"] }, $cas: { version: 3 } });
+```
+
+An operator on a field of another type is a type error (`{ title: { $inc: 1 } }`), and inserts (`DbInsert<Row>`) take no operators and no `$cas`. The types cannot tell a `@db.json` array from a plain one — the operators on a `@db.json` array are rejected [at runtime](#json-fields). Operators inside nested objects (merge strategy) are not typed; build those payloads as `DbPatch<Row>` with a cast.
+
 ## `maxDepth` Option
 
 `bulkUpdate` and `bulkReplace` (and through them, `updateOne` / `replaceOne`) accept an optional second argument that caps how deep the runtime is allowed to recurse into nested relation payloads:

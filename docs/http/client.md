@@ -357,7 +357,14 @@ const many = await users.insert(
 // { insertedCount, insertedIds, inserted, conflicts } — one slot per input row, by index
 ```
 
-Payloads are typed as `PatchOf<T>` — every key optional, optional columns also accept `null` (explicit NULL). On a versioned table the `version` column is server-managed: leave it out (preflight accepts its absence since 0.1.128) — a value passes through and is stored as sent. `$cas` is rejected on insert with a `ClientValidationError` at path `$cas`.
+Pass `{ returning: true }` (since 0.1.168) to get the stored row back — server defaults and stamps included, shaped as [`one()`](#one) answers it — in the same request. It sends `Prefer: return=representation` ([details](./crud#post-insert-representation)); `row` is absent when the server did not apply it (the controller has not opted in, the caller may not read the row, a skipped conflict):
+
+```typescript
+const { insertedId, row } = await users.insert({ name: "Alice" }, { returning: true });
+row?.createdAt; // typed like a one() row
+```
+
+Payloads are typed as `InsertOf<T>` (since 0.1.168; `PatchOf<T>` before) — every key optional, optional columns also accept `null` (explicit NULL). A value of an interface type fits, the generated model type or your own (`users.insert(user)` with `user: User`); on an untyped `Client` any object does. On a versioned table the `version` column is server-managed: leave it out (preflight accepts its absence since 0.1.128) — a value passes through and is stored as sent. `$cas` is rejected on insert with a `ClientValidationError` at path `$cas`.
 
 ### update {#update}
 
@@ -374,7 +381,7 @@ await users.update([
 ]);
 ```
 
-Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$dec`, `$mul`.
+Supports [field operations](/api/update-patch#field-operations) like `$inc`, `$dec`, `$mul`. Payloads are typed as `PatchOf<T>`: every key optional, and since 0.1.168 the [operators are typed](/api/update-patch#typed-operators) (`{ id, attempts: { $inc: 1 } }`, `{ id, tags: { $insert: ["x"] } }`, `$cas`) and an interface-typed value fits.
 
 For tables with `@db.column.version`, round-trip the `version` field — the server auto-lifts it to `$cas` and returns `409` on conflict. See [OCC over HTTP](./crud#occ-over-http) and the [versioning guide](/api/versioning).
 

@@ -313,6 +313,45 @@ A single-object body answers `{ "insertedId": 2, "conflict": false }`, or `{ "co
 - [`GET /meta`](#get-meta) lists the mode as `crud.insert: ["onConflict"]` when the adapter supports it. [`prepareRequest`](./customization) receives `onConflict: "ignore"` on the `insert` endpoint, so a controller can refuse it.
 - The [client](./client) sends it as `client.insert(rows, { onConflict: "ignore" })`.
 
+#### Get the stored row back: `Prefer: return=representation` {#post-insert-representation}
+
+Since 0.1.168. **Opt-in per controller.** On a controller whose `returnRepresentation()` returns `true`, a single-object `POST /` with the header `Prefer: return=representation` answers the stored row as `row` next to `insertedId` — server defaults, stamps and the version included — and the header `Preference-Applied: return=representation`. It saves the read-back request after an insert. By default (`false`) the header is ignored: the plain result, no `Preference-Applied`.
+
+```typescript
+@TableController(todosTable)
+export class TodosController extends AsDbController<typeof Todo> {
+  // Only when prepareRequest authorizes by ctx.endpoint (see below)
+  protected override returnRepresentation() {
+    return true;
+  }
+}
+```
+
+```bash
+curl -X POST http://localhost:3000/todos/ \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '{"title": "Buy milk"}'
+```
+
+```json
+{
+  "insertedId": 7,
+  "row": {
+    "id": 7,
+    "title": "Buy milk",
+    "status": "open",
+    "createdAt": 1762160000000,
+    "version": 0
+  }
+}
+```
+
+- `row` is exactly what [`GET /one/7`](#get-one) would answer the same caller: [`prepareRequest`](./customization#preparerequest) runs a second time with `endpoint: "one"`, then the `/one` read applies the read projection and the row overlay, and `resolveRowIds` gets the id in its `/one/:id` text form (`"7"`). A permission layer **must** authorize that call by `ctx.endpoint` — the read grant, not the insert grant — before you opt in.
+- When that read fails — the caller has no read grant (`prepareRequest` throws), the new row is outside its read overlay, or a hook throws (logged as a warning) — the insert stands and the response is the plain `{ insertedId }`, without `Preference-Applied`. A denied read-back never turns the committed insert into an error.
+- An array body, and a single row skipped by `?$onConflict=ignore`, ignore the preference.
+- The [client](./client#insert) sends it as `client.insert(row, { returning: true })`.
+
 ## Updating Records
 
 ### PUT / {#put-replace}

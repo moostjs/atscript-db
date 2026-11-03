@@ -440,7 +440,9 @@ function buildSearchStage(
             : { $or: equalities };
       return { stage: { $match: match }, classicText: false };
     }
-    const textMatch = { $text: { $search: text } };
+    const textMatch = {
+      $text: { $search: index.match === "all" ? mongoRequireEveryTerm(text) : text },
+    };
     return {
       stage: { $match: equalities.length > 0 ? { $or: [textMatch, ...equalities] } : textMatch },
       classicText: true,
@@ -960,4 +962,27 @@ async function runSearchWithMeta(
   }
   const total = (metaRows[0]?.count as { total?: unknown } | undefined)?.total;
   return { data, count: Number(total ?? 0) };
+}
+
+/**
+ * A `$text` search with every word required (`@db.index.fulltext.match
+ * "all"`, since 0.1.168): each word becomes a phrase — MongoDB AND-s phrases,
+ * matching them as written (no stemming). A `"quoted phrase"` stays one phrase;
+ * a word is split on non-letter, non-digit characters first.
+ */
+export function mongoRequireEveryTerm(text: string): string {
+  const parts: string[] = [];
+  for (const match of text.matchAll(/"([^"]*)"|(\S+)/g)) {
+    if (match[1] !== undefined) {
+      const phrase = match[1].replace(/["\\]/g, " ").trim();
+      if (phrase) parts.push(`"${phrase}"`);
+      continue;
+    }
+    // A word is split on everything but letters and digits (`e-mail`, `quok*`,
+    // `-dog`): each piece becomes its own required phrase.
+    for (const piece of match[2]!.split(/[^\p{L}\p{N}]+/u)) {
+      if (piece) parts.push(`"${piece}"`);
+    }
+  }
+  return parts.join(" ");
 }

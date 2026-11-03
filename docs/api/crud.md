@@ -34,7 +34,7 @@ const result = await users.insertOne({
 
 Fields with `@db.default.*` annotations (`@db.default.increment`, `@db.default.uuid`, `@db.default.now`, or `@db.default 'value'`) are applied automatically — you can omit them from the input. An `undefined` value counts as omitted (since 0.1.128); `null` is an explicit NULL — see [Defaults](/api/defaults#how-defaults-interact-with-inserts).
 
-Write payloads are typed as `DbPatch<Row>` (insert / patch: every key optional) and `DbRow<Row>` (replace: required keys stay required); both accept `null` on optional columns. Defaults are applied before validation: static `@db.default 'x'` values are filled on every adapter, function defaults (`now` / `uuid` / `increment`) only when the adapter does not generate them natively (since 0.1.128; before, SQL adapters left static defaults to the DDL `DEFAULT` clause). To see or enrich the defaulted, validated rows before they are written, pass a [write guard](#write-guards).
+Write payloads are typed as `DbInsert<Row>` (insert: every key optional), `DbPatch<Row>` (update: every key optional, plus [field operators](/api/update-patch#typed-operators) and `$cas`) and `DbRow<Row>` (replace: required keys stay required, plus `$cas`); all accept `null` on optional columns. A value of an interface type fits them — the generated model type or your own `interface Product` (since 0.1.168; before, a payload type with an index signature rejected interfaces). An untyped table takes any object. `DbInsert` makes every field optional, so it does not catch a missing required field or a field the server sets (a `@db.default.increment` key, a timestamp stamp) — validation at insert does. Defaults are applied before validation: static `@db.default 'x'` values are filled on every adapter, function defaults (`now` / `uuid` / `increment`) only when the adapter does not generate them natively (since 0.1.128; before, SQL adapters left static defaults to the DDL `DEFAULT` clause). To see or enrich the defaulted, validated rows before they are written, pass a [write guard](#write-guards).
 
 ::: info `insertedId` typing
 `insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`.
@@ -553,6 +553,29 @@ if (!validator.validate(data, true)) {
 ```
 
 `getValidator` does not apply defaults; `validateRows` does.
+
+### Stored JSON values under a tightened type {#tightened-json}
+
+Every write validates the whole value it carries, so tightening a nested type stored in a `@db.json` column (a new `@expect.maxLength`, a narrower union, a renamed property) makes the next write of an old row fail — for example an update that carries the stored value back unchanged. Rewrite the stored rows once, with a [data step](/sync/programmatic#data-steps) that ships with the schema change:
+
+```typescript
+await syncSchema(db, types, {
+  dataSteps: [
+    {
+      id: "2026-11-shorten-comment-text",
+      async run(space) {
+        const posts = space.getTable(Post);
+        for (const post of await posts.findMany({ filter: {}, controls: {} })) {
+          const comments = post.comments.map((c) => ({ ...c, text: c.text.slice(0, 2000) }));
+          await posts.updateOne({ id: post.id, comments });
+        }
+      },
+    },
+  ],
+});
+```
+
+To write a row exactly as given — a legacy row in a test, a migration that must bypass the model — use the adapter: `space.getAdapter(Post).insertOne(row)`. It applies no defaults, no validation and no encryption, and takes the row as stored: physical column names (`@db.column`) and, on the SQL adapters, a nested object as its flattened `parent__child` columns.
 
 ## Error Handling
 

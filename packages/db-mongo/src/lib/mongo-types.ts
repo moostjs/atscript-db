@@ -22,6 +22,10 @@ export interface TPlainIndex {
    * unique indexes (all fields required) and non-unique indexes.
    */
   partialFilterExpression?: Record<string, unknown>;
+  /** Text indexes: `@db.index.fulltext.language` → the index's `default_language` (since 0.1.168). */
+  defaultLanguage?: string;
+  /** Text indexes: `@db.index.fulltext.match` (since 0.1.168). */
+  match?: "all" | "any";
 }
 
 export interface TSearchIndex {

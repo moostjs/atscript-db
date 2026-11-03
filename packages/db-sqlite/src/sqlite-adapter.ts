@@ -110,7 +110,7 @@ import {
 } from "./tx-gate";
 import type { TSqliteDriver } from "./types";
 import { registerBucketFunction } from "./calendar-bucket";
-import { quoteFtsTerm } from "./fts-term";
+import { ftsLanguageWarning, ftsTokenizer, ftsTokenizerMatch, quoteFtsTerm } from "./fts-term";
 
 /**
  * SQLite adapter for {@link AtscriptDbTable}.
@@ -1216,6 +1216,11 @@ export class SqliteAdapter extends BaseDbAdapter {
   async renameTable(oldName: string): Promise<void> {
     return this._stmt(() => {
       const newName = this.resolveTableName();
+      // Already renamed by an earlier run that stopped before recording it.
+      const exists = (name: string) =>
+        this.driver.get(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, [name]) !==
+        null;
+      if (!exists(oldName) && exists(newName)) return;
       const ddl = `ALTER TABLE "${esc(oldName)}" RENAME TO "${esc(newName)}"`;
       this._log(ddl);
       this.driver.exec(ddl);
@@ -1392,7 +1397,11 @@ export class SqliteAdapter extends BaseDbAdapter {
         `FROM "${esc(this.resolveTableName())}" AS t LEFT JOIN m ON m.__atscript_r = t.rowid` +
         ` WHERE (m.__atscript_r IS NOT NULL OR ${eqs.join(" OR ")})` +
         (where.sql === "1=1" ? "" : ` AND (${where.sql})`);
-      params = [quoteFtsTerm(text), ...eqs.map(() => plan.exact.n), ...where.params];
+      params = [
+        quoteFtsTerm(text, plan.index.match),
+        ...eqs.map(() => plan.exact.n),
+        ...where.params,
+      ];
       textRank = { sql: "m.__atscript_s ASC", params: [] };
     }
     const order = sorted
@@ -1538,7 +1547,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     if (textFields.length > 0) {
       const quoted = `"${esc(this._ftsTableName(index.name))}"`;
       parts.push(`rowid IN (SELECT rowid FROM ${quoted} WHERE ${quoted} MATCH ?)`);
-      params.push(quoteFtsTerm(text));
+      params.push(quoteFtsTerm(text, index.match));
     }
     for (const eq of equalities) {
       parts.push(eq);
@@ -1587,7 +1596,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     let fromWhere = `FROM "${esc(tableName)}" AS t`;
     fromWhere += ` JOIN "${esc(ftsTable)}" AS fts ON t.rowid = fts.rowid`;
     fromWhere += ` WHERE fts."${esc(ftsTable)}" MATCH ?`;
-    const params: unknown[] = [quoteFtsTerm(text)];
+    const params: unknown[] = [quoteFtsTerm(text, ftsIndex.match)];
 
     if (where.sql !== "1=1") {
       fromWhere += ` AND (${where.sql})`;
@@ -1607,27 +1616,34 @@ export class SqliteAdapter extends BaseDbAdapter {
       (idx) => splitFulltextFields(idx).text.length > 0,
     );
     const desiredFtsTables = new Set(ftIndexes.map((idx) => this._ftsTableName(idx.name)));
+    if (!dryRun) {
+      for (const index of ftIndexes) {
+        const warning = ftsLanguageWarning(index);
+        if (warning) this.logger.warn(warning);
+      }
+    }
 
     // Existing FTS virtual tables for this content table (not their _data, _idx shadow tables)
-    const existingFts = this._listShadowTables(tableName, "fts");
+    const existingFts = this._shadowTableSql(tableName, "fts");
 
     // Drop stale FTS tables
-    for (const name of existingFts) {
+    for (const name of existingFts.keys()) {
       if (!desiredFtsTables.has(name)) {
         await apply({ name, action: "drop" }, name, () => this._dropFtsTable(name));
       }
     }
 
     // Create missing FTS tables
-    const existingSet = new Set(existingFts);
     for (const index of ftIndexes) {
       const ftsTable = this._ftsTableName(index.name);
-      if (!existingSet.has(ftsTable)) {
+      const liveSql = existingFts.get(ftsTable);
+      if (liveSql === undefined) {
         await apply({ name: ftsTable, action: "add" }, ftsTable, () =>
           this._createFtsTable(tableName, ftsTable, index),
         );
-      } else if (!this._ftsColumnsMatch(ftsTable, index)) {
-        // Column drift (e.g. a table built when integer members were indexed as text)
+      } else if (!this._ftsColumnsMatch(ftsTable, index) || !ftsTokenizerMatch(liveSql, index)) {
+        // Column drift (e.g. a table built when integer members were indexed as
+        // text) or a changed `@db.index.fulltext.language` tokenizer
         await apply({ name: ftsTable, action: "rebuild" }, ftsTable, () => {
           this._dropFtsTable(ftsTable);
           this._createFtsTable(tableName, ftsTable, index);
@@ -1654,7 +1670,9 @@ export class SqliteAdapter extends BaseDbAdapter {
     const fieldList = fieldNames.join(", ");
 
     // Create external-content FTS5 virtual table
-    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid')`;
+    const tokenizer = ftsTokenizer(index);
+    const tokenize = tokenizer ? `, tokenize='${tokenizer}'` : "";
+    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid'${tokenize})`;
     this._log(createSql);
     this.driver.exec(createSql);
 
@@ -1696,13 +1714,20 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   /** Lists FTS5/vec0 shadow virtual tables for a content table. */
   private _listShadowTables(tableName: string, kind: "fts" | "vec"): string[] {
-    return this.driver
-      .all<{ name: string; sql: string }>(
-        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
-        [`${tableName}__${kind}__%`],
-      )
-      .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
-      .map((r) => r.name);
+    return [...this._shadowTableSql(tableName, kind).keys()];
+  }
+
+  /** {@link _listShadowTables} with each virtual table's `CREATE` statement. */
+  private _shadowTableSql(tableName: string, kind: "fts" | "vec"): Map<string, string> {
+    return new Map(
+      this.driver
+        .all<{ name: string; sql: string }>(
+          `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE ?`,
+          [`${tableName}__${kind}__%`],
+        )
+        .filter((r) => r.sql.startsWith("CREATE VIRTUAL TABLE"))
+        .map((r) => [r.name, r.sql]),
+    );
   }
 
   /** Drops all FTS virtual tables and triggers for a content table. */

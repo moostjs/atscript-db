@@ -108,6 +108,23 @@ const queue = await issues.aggregate({
 | `{ $fn, $expr, $as }` | **Row-level.** Numeric **fields** of the row. `$fn` is `sum`, `avg`, `min` or `max`; the expression is evaluated per row, then aggregated.                                     | `number \| null` |
 | `{ $expr, $as }`      | **Group-level.** The **aliases** of other numeric `$select` entries (aggregates, `first` / `last`, other expressions) and numeric `$groupBy` fields. Evaluated after grouping. | `number \| null` |
 
+Operators are binary, so a long sum is a nested tree. Build it from text with `parseArith` (re-exported from `@atscript/db` since 0.1.168; the HTTP form already takes text) — the usual precedence and parentheses apply, and the result is the same node tree:
+
+```typescript
+import { parseArith } from "@atscript/db";
+
+// Σ weight × parcels over four sizes — 15 nodes written as one line
+const load = parseArith("small*1 + medium*2.5 + large*4 + pallets*40");
+await shipments.aggregate({
+  controls: {
+    $groupBy: ["warehouseId"],
+    $select: ["warehouseId", { $fn: "sum", $expr: load, $as: "load" }],
+  },
+});
+```
+
+`parseArith` checks the syntax only (a `SyntaxError` with the offset); node and depth limits and name resolution are checked when the query runs, as for a hand-built tree.
+
 `$as` is required on both. An expression is a number literal, a name, or a node: `{ $op: '+' \| '-' \| '*' \| '/', $args: [a, b] }`, unary minus `{ $op: '-', $args: [a] }`, or `{ $op: 'coalesce', $args: [a, b, …] }`. This is the grammar of [`@db.compute`](/views/computed-columns) and it has the same semantics on every adapter:
 
 - values are IEEE double (`7 / 2` is `3.5`);

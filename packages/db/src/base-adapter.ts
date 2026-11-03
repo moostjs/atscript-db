@@ -162,7 +162,7 @@ export interface TIndexDiffOptions {
    * dropped and recreated — a name match alone is not enough (e.g. a
    * composite index that gained or lost a member keeps its name).
    */
-  listExisting(): Promise<Array<{ name: string; columns?: string[] }>>;
+  listExisting(): Promise<Array<{ name: string; columns?: string[]; definition?: string }>>;
   createIndex(index: TDbIndex): Promise<void>;
   dropIndex(name: string): Promise<void>;
   prefix?: string;
@@ -174,6 +174,15 @@ export interface TIndexDiffOptions {
    * @since 0.1.128
    */
   renderDesiredColumn?(index: TDbIndex, field: TDbIndex["fields"][number]): string;
+  /**
+   * The part of an index's definition the column list does not show, as the
+   * adapter renders it for {@link listExisting}'s `definition` (e.g. the
+   * text search configuration of a PostgreSQL fulltext index). When both
+   * sides are defined and differ, the index is dropped and recreated.
+   * `undefined` — not compared.
+   * @since 0.1.168
+   */
+  renderDesiredDefinition?(index: TDbIndex): string | undefined;
   /**
    * An index this diff does not build: a string — the warning to log (e.g. a
    * geo index without PostGIS); `null` — skipped silently (e.g. an index type
@@ -204,6 +213,11 @@ export interface TIndexDiffOptions {
    * @since 0.1.162
    */
   dryRun?: boolean;
+}
+
+/** Same column names in the same order. */
+function sameColumns(live: readonly string[], desired: readonly string[]): boolean {
+  return live.length === desired.length && live.every((c, i) => c === desired[i]);
 }
 
 /** Skip verdict of the deprecated `shouldSkipType` / `warnUnsupportedTypes` options. */
@@ -1064,6 +1078,9 @@ export abstract class BaseDbAdapter {
     const existingColumns = new Map(
       managed.filter((i) => i.columns).map((i) => [i.name, i.columns!]),
     );
+    const existingDefinitions = new Map(
+      managed.filter((i) => i.definition !== undefined).map((i) => [i.name, i.definition!]),
+    );
 
     const desiredNames = new Set<string>();
 
@@ -1102,27 +1119,32 @@ export abstract class BaseDbAdapter {
         continue;
       }
 
-      // Definition drift check — only for column-list index types; fulltext
-      // and other expression-backed indexes don't introspect to plain columns
-      if (index.type === "plain" || index.type === "unique") {
-        const liveColumns = existingColumns.get(index.key);
-        const desiredColumns = index.fields.map(
-          (f) => opts.renderDesiredColumn?.(index, f) ?? f.name,
+      // Drift → drop and recreate: the part of the definition the column list
+      // does not show (since 0.1.168), or the column list itself — only for
+      // column-list index types; fulltext and other expression-backed indexes
+      // don't introspect to plain columns
+      const liveDefinition = existingDefinitions.get(index.key);
+      const desiredDefinition = opts.renderDesiredDefinition?.(index);
+      const liveColumns = existingColumns.get(index.key);
+      const drifted =
+        (liveDefinition !== undefined &&
+          desiredDefinition !== undefined &&
+          liveDefinition !== desiredDefinition) ||
+        ((index.type === "plain" || index.type === "unique") &&
+          liveColumns !== undefined &&
+          !sameColumns(
+            liveColumns,
+            index.fields.map((f) => opts.renderDesiredColumn?.(index, f) ?? f.name),
+          ));
+      if (drifted) {
+        await apply(
+          { name: index.key, action: "rebuild" },
+          `rebuild index "${index.key}"`,
+          async () => {
+            await opts.dropIndex(index.key);
+            await opts.createIndex(index);
+          },
         );
-        if (
-          liveColumns &&
-          (liveColumns.length !== desiredColumns.length ||
-            liveColumns.some((c, i) => c !== desiredColumns[i]))
-        ) {
-          await apply(
-            { name: index.key, action: "rebuild" },
-            `rebuild index "${index.key}"`,
-            async () => {
-              await opts.dropIndex(index.key);
-              await opts.createIndex(index);
-            },
-          );
-        }
       }
     }
 

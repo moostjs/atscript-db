@@ -71,13 +71,13 @@ export function $upsert<T>(items: T[]): { $upsert: T[] } {
   return { $upsert: items };
 }
 
-/** Update existing items matched by key. */
-export function $update<T>(items: Partial<T>[]): { $update: Partial<T>[] } {
+/** Update existing items matched by key (pass partial elements: key fields plus the changes). */
+export function $update<T>(items: T[]): { $update: T[] } {
   return { $update: items };
 }
 
-/** Remove items matched by key or value. */
-export function $remove<T>(items: Partial<T>[]): { $remove: Partial<T>[] } {
+/** Remove items matched by key (partial elements) or by value (primitive elements). */
+export function $remove<T>(items: T[]): { $remove: T[] } {
   return { $remove: items };
 }
 

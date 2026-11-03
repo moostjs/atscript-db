@@ -52,6 +52,8 @@ The weight defaults to `1` when omitted. Weighted full-text search is supported 
 A member may also be an **integer** field, matched by exact number instead of by the text index. Rules (index-backing, accepted types, term syntax): [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
 
 ::: tip
+The text language and whether a search needs every term or any term are set on the interface with `@db.index.fulltext.language` and `@db.index.fulltext.match` (since 0.1.168) — see [Language and term matching](/search/#language-and-match).
+
 `@db.index.fulltext` sets up the index in the database. For search usage (querying against full-text indexes), see [Text Search](/search/).
 :::
 

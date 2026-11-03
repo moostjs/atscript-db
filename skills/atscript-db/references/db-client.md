@@ -30,6 +30,9 @@ await users.aggregate({ controls: { $groupBy: ["role"], $select: [...] } });
 
 await users.insert({ name: "Alice", email: "a@e.com" });
 await users.insert([{ ... }, { ... }]); // array body → insertMany
+await users.insert(row, { returning: true }); // (0.1.168) Prefer: return=representation → { insertedId, row? } (row = what one() answers; absent when the controller did not opt in via returnRepresentation() or the read-back failed). Single row only: an array with returning = type error
+// Write types (0.1.168): insert → InsertOf<T>, update → PatchOf<T> (typed $inc/$dec/$mul on numbers, array ops on top-level arrays, $cas), replace → RowOf<T>.
+// No Record<string, unknown> index signature: an interface value fits (`users.insert(user)` with `user: User`); untyped Client → any object; undeclared keys on a typed Client = type error.
 await users.update({ id: 1, status: "active" }); // PATCH
 await users.update({ id: 1, $cas: { version: row.version } }); // SDK shape → sent as { id, version } (since 0.1.128); PK-only = versioned touch (bumps)
 await users.replace({ id: 1, ...full }); // PUT — version column optional (server-managed)

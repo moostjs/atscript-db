@@ -2178,6 +2178,10 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   async renameTable(oldName: string): Promise<void> {
     const newName = this.resolveTableName();
+    // Already renamed by an earlier run that stopped before recording it.
+    if (!(await this.getObjectKind(oldName)) && (await this.getObjectKind(this._table.tableName))) {
+      return;
+    }
     const ddl = `RENAME TABLE ${quoteTableName(oldName)} TO ${quoteTableName(newName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
@@ -2201,6 +2205,15 @@ export class MysqlAdapter extends BaseDbAdapter {
   protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this._table.tableName;
     const schema = this._schema;
+    if (!dryRun) {
+      for (const index of this._table.indexes.values()) {
+        if (index.type === "fulltext" && index.language !== undefined) {
+          this.logger.warn(
+            `[mysql] fulltext index "${index.name}": @db.index.fulltext.language "${index.language}" is ignored — MySQL FULLTEXT has no per-index language`,
+          );
+        }
+      }
+    }
 
     // Key-length prefixes are a function of the MAPPED column type and the
     // table charset (MySQL has no column-level charset annotation). Live key
@@ -2469,11 +2482,14 @@ export class MysqlAdapter extends BaseDbAdapter {
     const where = buildWhere(query.filter);
     const n = integerFields.length > 0 ? searchTermInteger(text) : undefined;
     const matchCols = textFields.map((f) => qi(f.name)).join(", ");
-    const matchClause = `MATCH(${matchCols}) AGAINST(? IN NATURAL LANGUAGE MODE)`;
+    // `@db.index.fulltext.match "all"` (since 0.1.168): boolean mode, every word required
+    const all = fulltextIndex.match === "all";
+    const matchClause = `MATCH(${matchCols}) AGAINST(? IN ${all ? "BOOLEAN" : "NATURAL LANGUAGE"} MODE)`;
+    const term = all ? mysqlRequireEveryTerm(text) : text;
     const rank = searchRankOrder(mysqlDialect, {
       exactEqualities: n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = ?`),
       n,
-      textRank: textFields.length > 0 ? { sql: `${matchClause} DESC`, params: [text] } : undefined,
+      textRank: textFields.length > 0 ? { sql: `${matchClause} DESC`, params: [term] } : undefined,
       pkColumns: this._table.primaryKeys.map((key) => this._table.physicalPath(key)),
     });
     const withWhere = (clause: string, params: unknown[]) => ({
@@ -2485,7 +2501,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (n === undefined) {
       // Text only — keeps the FULLTEXT access path (and its relevance order).
       // An integer-only index with a term that is not a whole number matches nothing.
-      return textFields.length === 0 ? withWhere(EMPTY_OR.sql, []) : withWhere(matchClause, [text]);
+      return textFields.length === 0 ? withWhere(EMPTY_OR.sql, []) : withWhere(matchClause, [term]);
     }
 
     const keys = this._table.primaryKeys.map((key) => qi(this._table.physicalPath(key)));
@@ -2495,7 +2511,7 @@ export class MysqlAdapter extends BaseDbAdapter {
         ...(textFields.length > 0 ? [matchClause] : []),
         ...integerFields.map((f) => `${qi(f.name)} = ?`),
       ];
-      const params = [...(textFields.length > 0 ? [text] : []), ...integerFields.map(() => n)];
+      const params = [...(textFields.length > 0 ? [term] : []), ...integerFields.map(() => n)];
       const or = orFragment(parts, params);
       return withWhere(or.sql, or.params);
     }
@@ -2509,7 +2525,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     const params: unknown[] = [];
     if (textFields.length > 0) {
       arms.push(`SELECT ${keyList} FROM ${table} WHERE ${matchClause}`);
-      params.push(text);
+      params.push(term);
     }
     for (const f of integerFields) {
       arms.push(`SELECT ${keyList} FROM ${table} WHERE ${qi(f.name)} = ?`);
@@ -2948,4 +2964,42 @@ function similarityToMysqlFn(similarity: string): string {
 /** Formats a number[] vector as MySQL's STRING_TO_VECTOR input: '[1.0, 2.0, ...]'. */
 function vectorToString(vector: number[]): string {
   return `[${vector.join(",")}]`;
+}
+
+/** InnoDB's default full-text stop words (`INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD`). */
+const INNODB_DEFAULT_STOPWORDS: ReadonlySet<string> = new Set(
+  "a about an are as at be by com de en for from how i in is it la of on or that the this to was what when where who will with und www".split(
+    " ",
+  ),
+);
+
+/**
+ * A search text as a boolean-mode `AGAINST` term with every word required
+ * (`@db.index.fulltext.match "all"`, since 0.1.168): `+word` per word, a
+ * `"quoted phrase"` stays one required phrase, a trailing `*` keeps its prefix
+ * meaning. The user's own boolean operators (`+ - < > ( ) ~ * " @`) are text,
+ * not syntax. A word InnoDB does not index by default — shorter than 3
+ * characters (`innodb_ft_min_token_size`) or on its default stop-word list —
+ * stays optional: requiring it would match no row.
+ */
+export function mysqlRequireEveryTerm(text: string): string {
+  const parts: string[] = [];
+  for (const match of text.matchAll(/"([^"]*)"|(\S+)/g)) {
+    const phrase = match[1];
+    if (phrase !== undefined) {
+      const clean = phrase.trim();
+      if (clean) parts.push(`+"${clean}"`);
+      continue;
+    }
+    const word = match[2]!;
+    const core = word.replace(/\*+$/, "");
+    const pieces = core.split(/[+\-<>()~*"@]+/).filter(Boolean);
+    // A trailing `*` keeps its prefix meaning on the last piece.
+    pieces.forEach((piece, i) => {
+      const star = i === pieces.length - 1 && core.length < word.length ? "*" : "";
+      const required = [...piece].length >= 3 && !INNODB_DEFAULT_STOPWORDS.has(piece.toLowerCase());
+      parts.push(`${required ? "+" : ""}${piece}${star}`);
+    });
+  }
+  return parts.join(" ");
 }

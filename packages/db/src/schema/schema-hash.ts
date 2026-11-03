@@ -52,6 +52,8 @@ interface TIndexSnapshot {
   key: string;
   type: string;
   fields: Array<{ name: string; sort: string; integer?: true }>;
+  /** Fulltext `@db.index.fulltext.language` (since 0.1.168) — absent when unset, so older hashes hold. */
+  language?: string;
 }
 
 export interface TForeignKeySnapshot {
@@ -236,15 +238,20 @@ export function computeTableSnapshot(
   const fields = extractFieldSnapshots(readable, typeMapper);
 
   const indexes: TIndexSnapshot[] = [...readable.indexes.values()]
-    .map((idx) => ({
-      key: idx.key,
-      type: idx.type,
-      fields: idx.fields.map((f) => ({
-        name: f.name,
-        sort: f.sort,
-        ...(f.integer ? { integer: true as const } : {}),
-      })),
-    }))
+    .map((idx) =>
+      Object.assign(
+        {
+          key: idx.key,
+          type: idx.type,
+          fields: idx.fields.map((f) => ({
+            name: f.name,
+            sort: f.sort,
+            ...(f.integer ? { integer: true as const } : {}),
+          })),
+        },
+        idx.language ? { language: idx.language } : {},
+      ),
+    )
     .toSorted((a, b) => a.key.localeCompare(b.key));
 
   // Physical column names (`@db.column` renames applied) — compared with the

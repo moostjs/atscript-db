@@ -110,7 +110,8 @@ interface Document {
 ## tsvector FTS
 
 - `@db.index.fulltext 'search', 2` on two fields → one GIN expression index over their concatenated tsvector (no generated column). An integer member is left out of it (exact-number `OR`); an integer-only index creates nothing.
-- `search(term, query, 'search')` matches with `plainto_tsquery('english', …)` (words AND-ed). No `$sort` → `ORDER BY ts_rank(…) DESC, <pk>` (0.1.165; ≤ 0.1.164 unordered); per-field weights apply to the rank via `setweight` buckets A–D (the GIN index keeps the unweighted expression — no rebuild; the rank recomputes `to_tsvector` per matched row before LIMIT). Index addressed by its DECLARED name; `atscript__fulltext__<name>` is an alias (≤ 0.1.164 only the key resolved).
+- `@db.index.fulltext.language` (0.1.168) = the text search config of index AND query (`none` → `simple`, unset → `english`); a changed config is detected from `pg_get_indexdef` and the index rebuilt. `@db.index.fulltext.match` → `websearch_to_tsquery` (`all`: text as typed; `any`: terms joined with `or`, leading `-` dropped).
+- `search(term, query, 'search')` matches with `plainto_tsquery('english', …)` (words AND-ed) when no `match` is set. No `$sort` → `ORDER BY ts_rank(…) DESC, <pk>` (0.1.165; ≤ 0.1.164 unordered); per-field weights apply to the rank via `setweight` buckets A–D (the GIN index keeps the unweighted expression — no rebuild; the rank recomputes `to_tsvector` per matched row before LIMIT). Index addressed by its DECLARED name; `atscript__fulltext__<name>` is an alias (≤ 0.1.164 only the key resolved).
 
 ## Known limits
 

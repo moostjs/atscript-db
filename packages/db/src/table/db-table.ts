@@ -50,6 +50,7 @@ import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
 import { ApplicationIntegrity, pinByPrimaryKey } from "../strategies/application-integrity";
 import type {
+  DbInsert,
   DbPatch,
   DbRow,
   TCascadeResolver,
@@ -138,15 +139,16 @@ function _hasOperatorKeys(value: unknown): boolean {
  * them are kept by reference too. The caller's payload tree is never mutated.
  * @internal exported for the core spec only — not part of the package surface.
  */
-export function _cloneWritePayload(source: Record<string, unknown>): Record<string, unknown> {
+export function _cloneWritePayload(source: object): Record<string, unknown> {
   if (typeof source !== "object" || source === null) {
     // Mirrors the former `{ ...p }` clone: a null / primitive payload becomes an
     // (empty) object the validator rejects with a proper ValidatorError.
     return { ...(source as unknown as object) };
   }
+  const src = source as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source)) {
-    const value = source[key];
+  for (const key of Object.keys(src)) {
+    const value = src[key];
     if (value === undefined) continue;
     out[key] = _cloneWriteValue(value);
   }
@@ -176,10 +178,11 @@ function _cloneWriteValue(value: unknown): unknown {
  * the root call already deep-pruned the whole tree, so only the row's own
  * keys are (re-)pruned — no recursion, no per-level re-cloning of subtrees.
  */
-function _shallowPrunedClone(source: Record<string, unknown>): Record<string, unknown> {
+function _shallowPrunedClone(source: object): Record<string, unknown> {
+  const src = source as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const key in source) {
-    const value = source[key];
+  for (const key in src) {
+    const value = src[key];
     if (value !== undefined) out[key] = value;
   }
   return out;
@@ -685,26 +688,26 @@ export class AtscriptDbTable<
    * nested creation support.
    */
   public async insertOne(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts: TInsertOneOptions<DataType> & {
       onConflict: "ignore";
       returning: true | readonly (keyof DataType & string)[];
     },
   ): Promise<TDbInsertIgnoreResult & { row?: DataType }>;
   public async insertOne(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts: TInsertOneOptions<DataType> & { onConflict: "ignore" },
   ): Promise<TDbInsertIgnoreResult>;
   public async insertOne(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts: TInsertOneOptions<DataType> & { returning: true | readonly (keyof DataType & string)[] },
   ): Promise<TDbInsertResult & { row: DataType }>;
   public async insertOne(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts?: TInsertOneOptions<DataType>,
   ): Promise<TDbInsertResult>;
   public async insertOne(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts?: TInsertOneOptions<DataType>,
   ): Promise<TDbInsertResult | TDbInsertIgnoreResult> {
     const { returning, ...insertOpts } = opts ?? {};
@@ -723,7 +726,7 @@ export class AtscriptDbTable<
   }
 
   private async _insertOneRow(
-    payload: DbPatch<DataType>,
+    payload: DbInsert<DataType>,
     opts: TInsertOptions<DataType>,
   ): Promise<TDbInsertResult | TDbInsertIgnoreResult> {
     const result = await this._insertMany([payload], {
@@ -754,22 +757,22 @@ export class AtscriptDbTable<
    * filters — see {@link TWriteOptions}.
    */
   public async insertMany(
-    payloads: Array<DbPatch<DataType>>,
+    payloads: Array<DbInsert<DataType>>,
     opts: TInsertOptions<DataType> & { onConflict: "ignore" },
   ): Promise<TDbInsertManyIgnoreResult>;
   public async insertMany(
-    payloads: Array<DbPatch<DataType>>,
+    payloads: Array<DbInsert<DataType>>,
     opts?: TInsertOptions<DataType>,
   ): Promise<TDbInsertManyResult>;
   public async insertMany(
-    payloads: Array<DbPatch<DataType>>,
+    payloads: Array<DbInsert<DataType>>,
     opts?: TInsertOptions<DataType>,
   ): Promise<TDbInsertManyResult | TDbInsertManyIgnoreResult> {
     return this._insertMany(payloads, opts);
   }
 
   private async _insertMany(
-    payloads: Array<DbPatch<DataType>>,
+    payloads: Array<DbInsert<DataType>>,
     opts?: TInsertOptions<DataType>,
   ): Promise<TDbInsertManyResult | TDbInsertManyIgnoreResult> {
     this._ensureBuilt();

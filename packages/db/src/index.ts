@@ -1,5 +1,6 @@
 export { AtscriptDbReadable, resolveDesignType } from "./table/db-readable";
 export { DEFAULT_DB_SPACE } from "./shared/consts";
+export { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "./shared/fulltext-options";
 export { TableMetadata } from "./table/table-metadata";
 export { FieldMappingStrategy, DocumentFieldMapper } from "./strategies/field-mapping";
 export type { TReadControls } from "./strategies/field-mapping";
@@ -158,6 +159,8 @@ export type {
   TValueFormatterPair,
   TDbStorageType,
   TDbIndexType,
+  TDbFulltextLanguage,
+  TDbFulltextMatch,
   TDbCollation,
   TDbDefaultFn,
   TDbForeignKey,
@@ -209,7 +212,9 @@ export type {
   AggregateControls,
   AggregateQuery,
   AggregateResult,
+  DbInsert,
   DbPatch,
+  TDbArrayOps,
   DbRow,
   TDbWriteAction,
   TDbWriteGuardContext,
@@ -240,6 +245,10 @@ export type { FilterVisitor } from "@uniqu/core";
 
 // ── Relational filter predicates ($some / $none, since 0.1.147) ─────────────
 export { isRelationOp, RELATION_OPS } from "@uniqu/core";
+// Text form of an arithmetic `$expr` (`"a*2 + b"` → node tree), for aggregate
+// `$select` entries built in code (since 0.1.168).
+export { parseArith } from "@uniqu/core";
+export type { ArithExpr } from "@uniqu/core";
 export type { RelationOp } from "@uniqu/core";
 export {
   ResolvedRelationFilter,

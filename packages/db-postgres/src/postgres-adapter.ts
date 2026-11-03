@@ -5,6 +5,7 @@ import {
   ALL_BUCKET_UNITS,
   ALL_ISOLATION_LEVELS,
   BaseDbAdapter,
+  DB_FULLTEXT_LANGUAGES,
   DbError,
   constraintViolation,
   createChangeRecorder,
@@ -2074,6 +2075,8 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   async renameTable(oldName: string): Promise<void> {
     const newName = this._table.tableName;
+    // Already renamed by an earlier run that stopped before recording it.
+    if (!(await this.getObjectKind(oldName)) && (await this.getObjectKind(newName))) return;
     const ddl = `ALTER TABLE ${quoteTableName(oldName)} RENAME TO ${qi(newName)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
@@ -2123,8 +2126,12 @@ export class PostgresAdapter extends BaseDbAdapter {
       listExisting: async () => {
         // ::text cast — pg has no parser for name[], it would arrive as the
         // string "{col1,col2}" and wrongly trip the definition-drift rebuild.
-        const rows = await this._exec().all<{ name: string; columns: string[] | null }>(
-          `SELECT i.relname AS name,
+        const rows = await this._exec().all<{
+          name: string;
+          columns: string[] | null;
+          def: string | null;
+        }>(
+          `SELECT i.relname AS name, pg_get_indexdef(x.indexrelid) AS def,
                   (SELECT array_agg(a.attname::text ORDER BY k.ord)
                    FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
@@ -2137,8 +2144,16 @@ export class PostgresAdapter extends BaseDbAdapter {
           [tableName, schema],
         );
         liveNames = new Set(rows.map((r) => r.name));
-        return rows.map((r) => ({ name: r.name, columns: r.columns ?? undefined }));
+        return rows.map((r) => ({
+          name: r.name,
+          columns: r.columns ?? undefined,
+          // A fulltext index's text search configuration (`to_tsvector('russian'::regconfig, …)`)
+          definition: tsConfigOfIndexDef(r.def),
+        }));
       },
+      // `@db.index.fulltext.language` changed → rebuild (since 0.1.168)
+      renderDesiredDefinition: (index) =>
+        index.type === "fulltext" ? pgTextSearchConfig(index) : undefined,
       createIndex: async (index: TDbIndex) => {
         if (index.type === "fulltext") {
           // GIN index on tsvector expression (text members only — integer
@@ -2146,7 +2161,7 @@ export class PostgresAdapter extends BaseDbAdapter {
           const textFields = splitFulltextFields(index).text;
           if (textFields.length === 0) return;
           const tsvectorExpr = this._buildTsvectorExpr(textFields);
-          const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gin(to_tsvector('english', ${tsvectorExpr}))`;
+          const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gin(to_tsvector('${pgTextSearchConfig(index)}', ${tsvectorExpr}))`;
           this._log(sql);
           await this._exec().exec(sql);
           return;
@@ -2398,10 +2413,16 @@ export class PostgresAdapter extends BaseDbAdapter {
       n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = CAST(? AS BIGINT)`);
     let textRank: TSqlFragment | undefined;
     if (textFields.length > 0) {
-      const tsvector = `to_tsvector('english', ${this._buildTsvectorExpr(textFields)})`;
-      parts.push(`${tsvector} @@ plainto_tsquery('english', ?)`);
-      params.push(text);
-      textRank = { sql: `${this._buildTsRankExpr(textFields, tsvector)} DESC`, params: [text] };
+      const config = pgTextSearchConfig(fulltextIndex);
+      const tsvector = `to_tsvector('${config}', ${this._buildTsvectorExpr(textFields)})`;
+      const { fn, term } = pgTsQuery(fulltextIndex, text);
+      const tsquery = `${fn}('${config}', ?)`;
+      parts.push(`${tsvector} @@ ${tsquery}`);
+      params.push(term);
+      textRank = {
+        sql: `${this._buildTsRankExpr(textFields, tsvector, config, tsquery)} DESC`,
+        params: [term],
+      };
     }
     for (const eq of equalities) {
       parts.push(eq);
@@ -2430,8 +2451,12 @@ export class PostgresAdapter extends BaseDbAdapter {
    * predicate keeps the unweighted indexed expression, so the GIN index serves
    * it unchanged.
    */
-  private _buildTsRankExpr(fields: TDbIndex["fields"], tsvector: string): string {
-    const query = `plainto_tsquery('english', ?)`;
+  private _buildTsRankExpr(
+    fields: TDbIndex["fields"],
+    tsvector: string,
+    config: string,
+    query: string,
+  ): string {
     const distinct = [...new Set(fields.map(weightOf))].toSorted((a, b) => b - a);
     if (distinct.length <= 1) return `ts_rank(${tsvector}, ${query})`;
     const letters = ["A", "B", "C", "D"] as const;
@@ -2441,7 +2466,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const vector = fields
       .map(
         (f) =>
-          `setweight(to_tsvector('english', coalesce(${qi(f.name)}, '')), '${letters[bucketOf(weightOf(f))]}')`,
+          `setweight(to_tsvector('${config}', coalesce(${qi(f.name)}, '')), '${letters[bucketOf(weightOf(f))]}')`,
       )
       .join(" || ");
     // ts_rank's weight array is ordered {D, C, B, A}.
@@ -3050,6 +3075,42 @@ function vectorToString(vector: number[]): string {
 function keyColumns(detail: string | undefined): string[] | undefined {
   const list = detail?.match(/Key \(([^)]+)\)=/)?.[1];
   return list?.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+}
+
+/**
+ * The text search configuration of a fulltext index: its
+ * `@db.index.fulltext.language` (`none` → `simple`), `english` when unset.
+ * Inlined into DDL and queries, so only the closed language list passes.
+ */
+function pgTextSearchConfig(index: TDbIndex): string {
+  const language = index.language;
+  if (language === undefined) return "english";
+  if (!(DB_FULLTEXT_LANGUAGES as readonly string[]).includes(language)) {
+    throw new Error(`Unsupported fulltext language "${language}" on index "${index.name}"`);
+  }
+  return language === "none" ? "simple" : language;
+}
+
+/** The configuration of a `to_tsvector('<config>'::regconfig, …)` index definition, else `undefined`. */
+function tsConfigOfIndexDef(def: string | null): string | undefined {
+  return def ? /to_tsvector\('([a-z_]+)'::regconfig/i.exec(def)?.[1] : undefined;
+}
+
+/**
+ * The tsquery function and its text for a search: `plainto_tsquery` (every
+ * word) by default; `websearch_to_tsquery` under `@db.index.fulltext.match`
+ * (since 0.1.168) — `"any"` OR-s the terms (quoted phrases kept whole, no
+ * `-` exclusions).
+ */
+function pgTsQuery(index: TDbIndex, text: string): { fn: string; term: string } {
+  if (index.match === undefined) return { fn: "plainto_tsquery", term: text };
+  if (index.match === "all") return { fn: "websearch_to_tsquery", term: text };
+  // A leading `-` is websearch's NOT: OR-ed with the other terms it would
+  // match nearly every row, so in `any` mode it is part of the word.
+  const terms = [...text.matchAll(/"[^"]*"|\S+/g)]
+    .map((m) => m[0].replace(/^-+/, ""))
+    .filter(Boolean);
+  return { fn: "websearch_to_tsquery", term: terms.join(" or ") };
 }
 
 /** A fulltext member's weight (`@db.index.fulltext 'idx', w`), `1` when unset. */

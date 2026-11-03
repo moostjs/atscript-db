@@ -238,6 +238,8 @@ SELECT * FROM `articles`
 WHERE `published` = ? AND MATCH(`title`, `body`) AGAINST(? IN NATURAL LANGUAGE MODE)
 ```
 
+`@db.index.fulltext.match "all"` (since 0.1.168) searches `IN BOOLEAN MODE` with every word required (`+word`; a `"phrase"` stays one required phrase; the user's own boolean operators are text). Words shorter than 3 characters and InnoDB's default stop words (`the`, `is`, `on`, …) stay optional, because the server does not index them; with a larger `innodb_ft_min_token_size` or a custom stop-word list a required word the server skips can still make the search match nothing. `@db.index.fulltext.language` has no effect: `FULLTEXT` has no per-index language, and schema sync logs a warning. See [Language and term matching](/search/#language-and-match).
+
 **Integer members** cannot live in a FULLTEXT index (MySQL error 1283) and are left out of it; they are matched by exact number instead. A text-only search keeps the shape above (MySQL's relevance order applies). When the whole search term is a whole number and the table has a primary key, the adapter combines each arm's access path as a primary-key set, because an `OR` next to `MATCH` would force a full scan:
 
 ```sql

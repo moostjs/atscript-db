@@ -44,6 +44,8 @@ declare global {
     "db.index.plain": ({ name?: string, sort?: string })[]
     "db.index.unique": (string | true)[]
     "db.index.fulltext": ({ name?: string, weight?: number })[]
+    "db.index.fulltext.language": ({ language: string, index?: string })[]
+    "db.index.fulltext.match": ({ mode: string, index?: string })[]
     "db.index.geo": string | true
     "db.column": string
     "db.column.renamed": string

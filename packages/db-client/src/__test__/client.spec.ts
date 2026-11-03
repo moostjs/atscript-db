@@ -333,6 +333,24 @@ describe("Client", () => {
     expect(writeCall[0]).toBe("/api/users");
   });
 
+  it("insert with { returning: true } sends Prefer: return=representation (since 0.1.168)", async () => {
+    fetchFn = mockFetch({ insertedId: 7, row: { id: 7, name: "A", status: "active" } });
+    const client = new Client<typeof import("./fixtures/test-table.as").User>("/api/users", {
+      fetch: fetchFn,
+    });
+    const result = await client.insert({ name: "A", status: "active" }, { returning: true });
+    expect(result.row?.name).toBe("A");
+    const writeCall = fetchFn.mock.calls.find(
+      (c: string[]) => !(c[0] as string).endsWith("/meta"),
+    )!;
+    expect(writeCall[1].headers.Prefer).toBe("return=representation");
+
+    fetchFn = mockFetch({ insertedId: 8 });
+    await new Client("/api/users", { fetch: fetchFn }).insert({ name: "B", status: "active" });
+    const plain = fetchFn.mock.calls.find((c: string[]) => !(c[0] as string).endsWith("/meta"))!;
+    expect(plain[1].headers.Prefer).toBeUndefined();
+  });
+
   it("insert array sends POST with array body", async () => {
     fetchFn = mockFetch({ insertedCount: 2, insertedIds: ["a", "b"] });
     const client = new Client("/api/users", { fetch: fetchFn });

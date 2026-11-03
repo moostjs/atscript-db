@@ -3,6 +3,8 @@ import type {
   AtscriptDbTable,
   FilterExpr,
   TCrudPermissions,
+  TDbInsertIgnoreResult,
+  TDbInsertResult,
   TDbRemoveGuardContext,
   TDbUpdateResult,
   TDbWriteAction,
@@ -13,14 +15,33 @@ import type {
   TWriteOptions,
 } from "@atscript/db";
 import { DbError, isEmptyObject, isPlainObject, reconcileCas } from "@atscript/db";
-import { Body, Delete, HttpError, Patch, Post, Put, Query, Url } from "@moostjs/event-http";
-import { Inherit, Inject, Moost, Optional, Param } from "moost";
+import {
+  Body,
+  Delete,
+  Header,
+  HttpError,
+  httpKind,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Url,
+} from "@moostjs/event-http";
+import { current, Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
 import { TABLE_DEF } from "./decorators";
 import { badRequest, errorEnvelope } from "./http-errors";
 
 const SHAPE_MESSAGE = "Expected an object";
+
+const RETURN_REPRESENTATION = /^return\s*=\s*"?representation"?$/i;
+
+/** `Prefer: return=representation` among the header's comma-separated preferences (RFC 7240). */
+function prefersRepresentation(prefer: string | undefined): boolean {
+  if (!prefer) return false;
+  return prefer.split(",").some((p) => RETURN_REPRESENTATION.test(p.split(";")[0]!.trim()));
+}
 
 /**
  * Shape gate (since 0.1.128): a write body must be a plain object (single
@@ -340,9 +361,21 @@ export class AsDbController<
    * `{ insertedId?, conflict }` for an object body and
    * `{ insertedCount, insertedIds, inserted, conflicts }` for an array body.
    * Any other `$` control on POST answers 400.
+   *
+   * `Prefer: return=representation` (since 0.1.168, object body) adds the
+   * stored row as `row` — exactly what `GET /one/<insertedId>` would answer
+   * the caller ({@link prepareRequest} runs again with `endpoint: "one"`,
+   * then the `/one` read pipeline) — and the `Preference-Applied` header,
+   * on a controller whose {@link returnRepresentation} returns `true`. The
+   * preference is ignored otherwise, for an array body, a skipped conflict,
+   * or when that read fails (the row stays out; the insert stands).
    */
   @Post("")
-  async insert(@Body() payload: unknown, @Url() url?: string): Promise<unknown> {
+  async insert(
+    @Body() payload: unknown,
+    @Url() url?: string,
+    @Header("prefer") prefer?: string,
+  ): Promise<unknown> {
     const { controls } = await this.parseRequest("insert", url ?? "");
     const onConflict = this._readOnConflict(controls);
     assertWriteShape(payload);
@@ -354,7 +387,32 @@ export class AsDbController<
       return this.table.insertMany(rows as never, ...(args as []));
     }
     const row = await this._writeBody("insert", payload, false);
-    return this.table.insertOne(row as never, ...(args as []));
+    const result = (await this.table.insertOne(row as never, ...(args as []))) as
+      | TDbInsertResult
+      | TDbInsertIgnoreResult;
+    if (
+      result.insertedId === undefined ||
+      !this.returnRepresentation() ||
+      !prefersRepresentation(prefer)
+    ) {
+      return result;
+    }
+    const stored = await this._readRepresentation(result.insertedId);
+    if (stored === undefined) return result;
+    current().get(httpKind.keys.response)?.setHeader("preference-applied", "return=representation");
+    return { ...result, row: stored };
+  }
+
+  /**
+   * Whether `POST /` answers `Prefer: return=representation` with the stored
+   * row (since 0.1.168). Off by default: the read-back runs inside the insert
+   * request, and a permission layer must authorize it as a read. Return
+   * `true` only when your {@link prepareRequest} authorizes by `ctx.endpoint`
+   * — it runs a second time with `endpoint: "one"` for the read-back, and
+   * that call must apply the caller's READ grant, not the insert grant.
+   */
+  protected returnRepresentation(): boolean {
+    return false;
   }
 
   /** The only POST control: `$onConflict` (`error` | `ignore`). Anything else `$…` → 400. */

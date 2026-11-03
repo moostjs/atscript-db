@@ -65,7 +65,7 @@ export class OrdersController extends AsDbController<typeof Order> {
 }
 ```
 
-It runs exactly once per request, before anything else looks at the request:
+It runs once per request, before anything else looks at the request — twice on one kind of request: a `POST /` with `Prefer: return=representation` on a controller that [opts in](./crud#post-insert-representation) runs it again with `endpoint: "one"` for the read-back:
 
 | Endpoint                                               | `ctx.endpoint`                          | When                                                                  | `ctx.controls`      |
 | ------------------------------------------------------ | --------------------------------------- | --------------------------------------------------------------------- | ------------------- |
@@ -80,6 +80,7 @@ On `query`, `pages` and `geo`, `ctx.filter` (since 0.1.147) carries the parsed c
 Value-help controllers call it too (`query`, `pages`, `one`). [Actions](./actions#preparerequest-on-actions) run it before anything reads their ids, rows or row overlay, so a permission layer needs no separate action guard. Every built-in route enters through `parseRequest(endpoint, url?)`: with a URL it parses the query string, coerces boolean controls (`$actions=true`) and hands the parsed controls to `prepareRequest`; without one (writes, `meta`) it only runs the hook. Custom routes you add to a subclass should do the same — `const { parsed, controls } = await this.parseRequest("query", url)`, or `await this.parseRequest("insert")`.
 
 - **Do** throw to deny — an `HttpError` for a specific status; the request aborts with it.
+- **Do** authorize by `ctx.endpoint`, not by the handler that runs. Under a write handler, `endpoint: "one"` is the representation read-back of an insert: it MUST apply the caller's read grant. A layer that keys its decision on the current handler (the insert) would hand an insert-only caller the row — keep [`returnRepresentation()`](./crud#post-insert-representation) off for such a layer.
 - **Do** mutate `ctx.controls` if you must rewrite a read — the rest of the pipeline validates what you leave.
 - **Don't** do per-row work here — it runs once per request; row-level policy belongs in [`transformFilter`](#transformfilter) / [`guardWrite`](#guardwrite) / [`checkWrite`](#checkwrite).
 

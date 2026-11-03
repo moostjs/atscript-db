@@ -229,7 +229,10 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
 
   it("a failing schema call releases the gate", async () => {
     await parents.ensureTable();
-    await expect(parentsAdapter().renameTable("no_such_table")).rejects.toThrow(/no such table/);
+    // (renameTable from a missing table is a no-op since 0.1.168 — the new one exists)
+    await expect(parentsAdapter().dropColumns(["no_such_column"])).rejects.toThrow(
+      /no such column/,
+    );
     expect(gate().held).toBe(false);
     await parentsAdapter().withTransaction(async () => parentsAdapter().insertOne({ name: "p" }));
     expect(inner.all(`SELECT * FROM "pf_parents"`)).toHaveLength(1);
