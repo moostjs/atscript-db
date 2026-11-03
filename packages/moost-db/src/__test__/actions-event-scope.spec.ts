@@ -165,7 +165,8 @@ describe("action row overlay resolving a FOR_EVENT dependency (real HTTP)", () =
     expect((await call("GET", "one/1")).status).toBe(200);
     expect((await call("GET", "one/3")).status).toBe(404);
     expect((await call("DELETE", "3")).status).toBe(404);
-    expect((await call("DELETE", "1")).status).toBe(202);
+    // wooks 0.8: a DELETE with a body defaults to 200 (was 202)
+    expect((await call("DELETE", "1")).status).toBe(200);
     expect(await table.count({ filter: {} } as never)).toBe(2);
   });
 });

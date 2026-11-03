@@ -108,7 +108,7 @@ describe("TableMetadata — derived fields", () => {
 
 describe("TableMetadata — runtime mirror of the compile-time rules", () => {
   /** A hand-built table type (as the compiler emits one). */
-  function table(name: string, define: (h: ReturnType<typeof $>) => unknown): any {
+  function table(name: string, define: (h: ReturnType<typeof $>, T: any) => unknown): any {
     class T {
       static __is_atscript_annotated_type = true;
       static type = {};
@@ -116,7 +116,7 @@ describe("TableMetadata — runtime mirror of the compile-time rules", () => {
       static id = name;
     }
     const handle = $("object", T);
-    define(handle);
+    define(handle, T);
     handle.annotate("db.table", name.toLowerCase());
     return T;
   }
@@ -140,7 +140,7 @@ describe("TableMetadata — runtime mirror of the compile-time rules", () => {
         .prop("payload", jsonPayload())
         .prop(
           "customerId",
-          $().refTo(Other, ["payload", "customer", "id"]).annotate("db.column.derived", true).$type,
+          $().ref(Other, ["payload", "customer", "id"]).annotate("db.column.derived", true).$type,
         ),
     );
     failsWith(
@@ -150,37 +150,30 @@ describe("TableMetadata — runtime mirror of the compile-time rules", () => {
   });
 
   it("rejects a path through an array, outside a JSON field, or with an incompatible annotation", () => {
-    let viaArray: any;
-    viaArray = table("RmArr", (h) =>
-      h.prop("payload", jsonPayload()).prop(
-        "tag",
-        $()
-          .refTo(() => viaArray, ["payload", "tags"])
-          .annotate("db.column.derived", true).$type,
-      ),
+    const viaArray = table("RmArr", (h, T) =>
+      h
+        .prop("payload", jsonPayload())
+        .prop("tag", $().ref(T, ["payload", "tags"]).annotate("db.column.derived", true).$type),
     );
     failsWith(viaArray, 'crosses the array "payload.tags"');
 
-    let notJson: any;
-    notJson = table("RmFlat", (h) =>
-      h.prop("address", $("object").prop("city", str()).$type).prop(
-        "city",
-        $()
-          .refTo(() => notJson, ["address", "city"])
-          .annotate("db.column.derived", true).$type,
-      ),
+    const notJson = table("RmFlat", (h, T) =>
+      h
+        .prop("address", $("object").prop("city", str()).$type)
+        .prop("city", $().ref(T, ["address", "city"]).annotate("db.column.derived", true).$type),
     );
     failsWith(notJson, 'path "address.city" does not read inside a @db.json field');
 
-    let withDefault: any;
-    withDefault = table("RmDef", (h) =>
-      h.prop("payload", jsonPayload()).prop(
-        "customerId",
-        $()
-          .refTo(() => withDefault, ["payload", "customer", "id"])
-          .annotate("db.column.derived", true)
-          .annotate("db.default", "x").$type,
-      ),
+    const withDefault = table("RmDef", (h, T) =>
+      h
+        .prop("payload", jsonPayload())
+        .prop(
+          "customerId",
+          $()
+            .ref(T, ["payload", "customer", "id"])
+            .annotate("db.column.derived", true)
+            .annotate("db.default", "x").$type,
+        ),
     );
     failsWith(withDefault, "cannot coexist with @db.default");
   });

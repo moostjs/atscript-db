@@ -724,7 +724,7 @@ Since 0.1.128 every built-in write failure is **thrown** as an `HttpError` — `
 | DELETE of a missing row (guard ran, `current()` = null)    | 404                   | committed with no match                           |
 | DELETE with an id that resolves to no filter               | 404                   | not opened, guard not called                      |
 | SQLite transaction-gate wait timeout                       | 503                   | n/a                                               |
-| Success (POST / PUT / PATCH / DELETE)                      | 201 / 201 / 202 / 202 | committed                                         |
+| Success (POST / PUT / PATCH / DELETE)                      | 201 / 200 / 200 / 200 | committed                                         |
 
 ## Metadata Hook
 

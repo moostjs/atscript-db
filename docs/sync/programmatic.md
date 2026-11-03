@@ -303,7 +303,7 @@ An `alter` entry is never printed as `— in sync`. A foreign key that is only a
 
 ## Syncing a module namespace
 
-A compiled `.as` module exports more than its tables — helper interfaces, `@db.alias` types, plain type aliases. `isDbEntityType` (from `@atscript/db`, since 0.1.141) keeps only what a `DbSpace` accepts: types whose own declaration carries `@db.table`, `@db.view` or `@db.view.for`. It turns a namespace into an inventory:
+A compiled `.as` module exports more than its tables — helper interfaces, `@db.alias` types, plain type aliases. `isDbEntityType` (from `@atscript/db`, since 0.1.141) keeps only what a `DbSpace` accepts: types whose own declaration carries `@db.table`, `@db.view` or `@db.view.for`. A plain `export type Admin = User` is `User` itself (since `@atscript/typescript` 0.2), so it passes too; the sync lists and hashes each type once, however many export names it has. It turns a namespace into an inventory:
 
 ```typescript
 import { isDbEntityType } from "@atscript/db";

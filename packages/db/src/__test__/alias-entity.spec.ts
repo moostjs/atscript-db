@@ -8,9 +8,10 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 
 // Since 0.1.141 the entity annotations (`@db.table`, `@db.schema`,
 // `@db.depth.limit`, `@db.view.*`, …) stay on the declaring interface: a
-// `@db.alias`, a plain `export type X = Table` and a field typed with a table
-// no longer carry them, so none of those is a second DB entity of the same
-// table at runtime.
+// `@db.alias` and a field typed with a table no longer carry them, so neither
+// is a second DB entity of the same table at runtime. A plain
+// `export type X = Table` is `Table` itself (@atscript/typescript 0.2): the
+// same entity under a second export name, synced once.
 
 const ENTITY_KEYS = ["db.table", "db.schema", "db.depth.limit"] as const;
 
@@ -28,13 +29,16 @@ describe("entity annotations do not travel across references", () => {
     expect(ae.AeCustomer.metadata.get("db.depth.limit")).toBe(1);
   });
 
-  it("a @db.alias and a plain type alias of the table carry none", () => {
+  it("a @db.alias carries none", () => {
     for (const key of ENTITY_KEYS) {
       expect(ae.AeParent.metadata.has(key), `AeParent ${key}`).toBe(false);
-      expect(ae.AeBuyer.metadata.has(key), `AeBuyer ${key}`).toBe(false);
     }
     expect(ae.AeParent.metadata.has("db.alias")).toBe(true);
-    expect(ae.AeBuyer.metadata.size).toBe(0);
+  });
+
+  it("a plain type alias of the table is the table itself", () => {
+    expect(ae.AeBuyer).toBe(ae.AeCustomer);
+    expect(space().get(ae.AeBuyer).tableName).toBe("ae_customers");
   });
 
   it("nav props, FK chain refs and table-typed fields carry none", () => {
@@ -53,11 +57,10 @@ describe("entity annotations do not travel across references", () => {
     }
   });
 
-  it("isDbEntityType: tables and views only — never an alias or a table-typed reference", () => {
+  it("isDbEntityType: tables and views only — never a @db.alias or a table-typed reference", () => {
     expect(isDbEntityType(ae.AeCustomer)).toBe(true);
     expect(isDbEntityType(ae.AeOrder)).toBe(true);
     expect(isDbEntityType(ae.AeParent)).toBe(false);
-    expect(isDbEntityType(ae.AeBuyer)).toBe(false);
     expect(isDbEntityType(ae.AeOrderNote)).toBe(false);
     expect(isDbEntityType(ae.AeOrder.type.props.get("customer"))).toBe(false);
     expect(isDbEntityType(undefined)).toBe(false);
@@ -119,14 +122,14 @@ describe("schema sync over a module namespace", () => {
 
   it("isDbEntityType filters a namespace down to its tables and views", async () => {
     const models = Object.values(ae).filter(isDbEntityType);
-    expect(models.map((m) => m.id ?? "").toSorted((a, b) => a.localeCompare(b))).toEqual([
-      "AeCustomer",
-      "AeOrder",
-    ]);
+    // AeBuyer is AeCustomer under a second export name
+    expect(new Set(models)).toEqual(new Set([ae.AeCustomer, ae.AeOrder]));
     const plan = await planSchema(space(), models);
     expect(plan.entries.map((e) => e.name).toSorted((a, b) => a.localeCompare(b))).toEqual([
       "ae_customers",
       "ae_orders",
     ]);
+    const tablesOnly = await planSchema(space(), [ae.AeCustomer, ae.AeOrder]);
+    expect(plan.schemaHash).toBe(tablesOnly.schemaHash);
   });
 });

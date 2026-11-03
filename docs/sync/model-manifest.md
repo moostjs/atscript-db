@@ -45,7 +45,7 @@ export const modelsBySpace = {
 } as const;
 ```
 
-Selection rule: every export whose own declaration carries `@db.table` or `@db.view` — the same rule the [`asc db sync` CLI](./cli) uses for discovery. A `@db.alias`, a plain `export type Admin = User` and an interface that merely references a table are not entities (since 0.1.141 they carry no `db.table` metadata either); [`isDbEntityType`](./programmatic#syncing-a-module-namespace) is the runtime form of the rule. Colliding export names across `.as` files are alias-deduplicated in the imports (`import { User as User_1 } from …`).
+Selection rule: every export whose own declaration carries `@db.table` or `@db.view` — the same rule the [`asc db sync` CLI](./cli) uses for discovery. A `@db.alias`, a plain `export type Admin = User` and an interface that merely references a table are not entities. At runtime a `@db.alias` and an interface referencing a table carry no `db.table` metadata (since 0.1.141), and a plain alias is the table itself (since `@atscript/typescript` 0.2); [`isDbEntityType`](./programmatic#syncing-a-module-namespace) is the runtime form of the rule. Colliding export names across `.as` files are alias-deduplicated in the imports (`import { User as User_1 } from …`).
 
 ## The manifest is an inventory, not an action
 

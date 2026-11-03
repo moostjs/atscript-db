@@ -396,7 +396,10 @@ export class SchemaSync {
     const tables: AtscriptDbReadable[] = [];
     const views: AtscriptDbView[] = [];
     const externalViews: AtscriptDbView[] = [];
-    for (const type of types) {
+    // A plain `export type Admin = User` is `User` itself (@atscript/typescript
+    // 0.2), so a filtered module namespace lists that type once per export
+    // name — sync and hash each type once.
+    for (const type of new Set(types)) {
       // A @db.alias type names a join scope inside view definitions — never
       // an object to sync (a namespace of models may list it).
       if (aliasTargetOf(type)) continue;

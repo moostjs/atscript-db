@@ -414,10 +414,10 @@ Policy is **presence-based**, not enforced. There is no `428 Precondition Requir
 
 | Request (row at version 4)                       | Response                                                     |
 | ------------------------------------------------ | ------------------------------------------------------------ |
-| `PATCH { id, version: 4 }`                       | `202 { matchedCount: 1, modifiedCount: 1 }`, row → version 5 |
+| `PATCH { id, version: 4 }`                       | `200 { matchedCount: 1, modifiedCount: 1 }`, row → version 5 |
 | `PATCH { id, version: 3 }` (stale)               | `409 version_mismatch`, `currentVersion: 4`                  |
 | `PATCH { id: 999, version: 4 }` (missing)        | `404`                                                        |
-| `PATCH { id }` / `PATCH { id: 999 }`             | `202 { 1, 0 }` / `202 { 0, 0 }`, version unchanged           |
+| `PATCH { id }` / `PATCH { id: 999 }`             | `200 { 1, 0 }` / `200 { 0, 0 }`, version unchanged           |
 | `PATCH { id, $cas: { version: 3 } }`             | `409` (raw `$cas` accepted)                                  |
 | `PATCH { id, version: 4, $cas: { version: 3 } }` | `400` at path `$cas`                                         |
 

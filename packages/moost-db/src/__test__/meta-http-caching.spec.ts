@@ -229,8 +229,18 @@ describe("/meta HTTP caching", () => {
         return false;
       }
     }
-    const { get } = await boot(OptOut, await accountsTable());
-    const res = await get({ "if-none-match": "*" });
+    const table = await accountsTable();
+    const plainEtag = await (async () => {
+      class Plain extends AsDbController {}
+      const { get } = await boot(Plain, table);
+      return (await get()).headers.get("etag")!;
+    })();
+    clearGlobalWooks();
+    getMoostInfact()._cleanup();
+    const { get } = await boot(OptOut, table);
+    // The tag the default controller serves for these same bytes. Not `*`:
+    // since wooks 0.8 `If-None-Match: *` answers 304 for any GET 200.
+    const res = await get({ "if-none-match": plainEtag });
     expect(res.status).toBe(200);
     expect(res.headers.get("etag")).toBeNull();
     expect(res.headers.get("cache-control")).toBeNull();

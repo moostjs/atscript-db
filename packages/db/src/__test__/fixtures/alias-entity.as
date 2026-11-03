@@ -1,6 +1,7 @@
 // Entity annotations stay on the declaring interface (since 0.1.141): a
-// @db.alias, a plain type alias and a field typed with a table carry none —
-// only the table itself is a DB entity at runtime.
+// @db.alias and a field typed with a table carry none — only the table itself
+// is a DB entity at runtime. A plain type alias is the table itself
+// (@atscript/typescript 0.2).
 
 @db.table 'ae_customers'
 @db.schema 'sales'
@@ -32,7 +33,7 @@ export interface AeOrder {
 @db.alias AeCustomer
 export type AeParent = AeCustomer
 
-// A plain alias of the table type — not a table either
+// A plain alias of the table type — the table itself, under a second name
 export type AeBuyer = AeCustomer
 
 // A plain interface whose fields are typed with a table
