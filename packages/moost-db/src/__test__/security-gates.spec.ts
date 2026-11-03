@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vite-plus/test";
-import type { AtscriptDbTable, DbSpace, TDbWriteCheckContext } from "@atscript/db";
+import {
+  DbError,
+  type AtscriptDbTable,
+  type DbSpace,
+  type TDbWriteCheckContext,
+} from "@atscript/db";
 import { createAdapter } from "@atscript/db-memory";
 import { HttpError } from "@moostjs/event-http";
 
@@ -13,6 +18,7 @@ import {
 } from "./actions-test-utils";
 import { DbRowActions } from "../actions/db-actions.decorator";
 import { unknownRelationError } from "../http-errors";
+import { dbErrorToHttp } from "../validation-interceptor";
 import { GEO_CONTROLS, PAGES_CONTROLS, QUERY_CONTROLS } from "../permissions/crud-controls";
 import {
   createMockApp as makeApp,
@@ -488,6 +494,29 @@ describe("text / vector / geo index gating through hasField", () => {
       { path: "home", message: 'Geo index "home" not found on table "sg_accounts"' },
     ]);
     expect(geoSearch).not.toHaveBeenCalled();
+  });
+
+  it("SECURITY: a hidden geo index answers with the core's own error — code and message included", async () => {
+    HIDDEN = new Set(["home"]);
+    const { c, geoSearch } = await accounts();
+    geoSearch.mockRestore();
+    // A nonexistent index: the core's DbError, rendered as the interceptor does.
+    const missing = await c.geo("?$center=1,2&$index=nope").then(
+      (v) => v,
+      (e: unknown) => e,
+    );
+    expect(missing).toBeInstanceOf(DbError);
+    const expected = JSON.parse(
+      JSON.stringify(dbErrorToHttp(missing as DbError).body).replaceAll("nope", "home"),
+    );
+    const hidden = (await c.geo("?$center=1,2&$index=home")) as HttpError;
+    expect(hidden.body).toEqual(expected);
+    expect(hidden.body).toMatchObject({ statusCode: 400, code: "GEO_INDEX_MISSING" });
+    // The default index hidden: the core's "declares no geo index" error, coded alike.
+    expect(((await c.geo("?$center=1,2")) as HttpError).body).toMatchObject({
+      statusCode: 400,
+      code: "GEO_INDEX_MISSING",
+    });
   });
 
   it("/geo on an adapter without geo support: a hidden geo index still answers like a missing one", async () => {

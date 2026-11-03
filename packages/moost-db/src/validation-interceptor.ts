@@ -1,4 +1,5 @@
 import { DbError } from "@atscript/db";
+import type { HttpError } from "@moostjs/event-http";
 import { defineInterceptor, Intercept, TInterceptorPriority } from "moost";
 
 import { errorEnvelope, validatorErrorToHttp } from "./http-errors";
@@ -31,19 +32,28 @@ const dbErrorCodeToStatus: Record<string, number> = {
   ISOLATION_NOT_SUPPORTED: 501,
 };
 
+/**
+ * The HTTP answer of a `DbError` — what a request gets when the core throws it.
+ * A permission layer answering "like the core would" builds the same `DbError`
+ * and returns this, so the two answers cannot drift apart.
+ */
+export function dbErrorToHttp(error: DbError): HttpError {
+  // The engine text an entry keeps in `details` stays server-side (since 0.1.165).
+  const errors = error.errors.map(({ path, message, code, params }) => ({
+    path,
+    message,
+    ...(code === undefined ? {} : { code }),
+    ...(params === undefined ? {} : { params }),
+  }));
+  return errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, errors, error.code);
+}
+
 function transformValidationError(error: unknown, reply: (response: unknown) => void) {
   const validation = validatorErrorToHttp(error);
   if (validation) {
     reply(validation);
   } else if (error instanceof DbError) {
-    // The engine text an entry keeps in `details` stays server-side (since 0.1.165).
-    const errors = error.errors.map(({ path, message, code, params }) => ({
-      path,
-      message,
-      ...(code === undefined ? {} : { code }),
-      ...(params === undefined ? {} : { params }),
-    }));
-    reply(errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, errors, error.code));
+    reply(dbErrorToHttp(error));
   }
 }
 

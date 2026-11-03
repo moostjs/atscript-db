@@ -130,6 +130,7 @@ import {
   type TClientWithSnapshot,
 } from "./relation-predicates";
 import { badRequest, validatorErrorToHttp } from "./http-errors";
+import { dbErrorToHttp } from "./validation-interceptor";
 import { controllerOf } from "./actions/controller-access";
 
 /** Gate positions checked after the filter entries, in order; `refs[op]` are their paths. */
@@ -1235,9 +1236,14 @@ export class AsDbReadableController<
         name === undefined
           ? geoIndexes.find((e) => e.isDefault)
           : geoIndexes.find((e) => e.name === name);
-      // A nonexistent geo index is the core's own 400 — the same wording.
+      // A hidden geo index answers exactly like a nonexistent one: the core's own
+      // `GEO_INDEX_MISSING` error, through the same mapping (code included).
       if (entry && !this._indexVisible(entry)) {
-        return badRequest(name ?? "", geoIndexNotFoundMessage(this.readable.tableName, name));
+        return dbErrorToHttp(
+          new DbError("GEO_INDEX_MISSING", [
+            { path: name ?? "", message: geoIndexNotFoundMessage(this.readable.tableName, name) },
+          ]),
+        );
       }
     }
     if (!controls.$search) return undefined;
