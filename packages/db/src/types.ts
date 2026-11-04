@@ -1212,7 +1212,12 @@ export interface AtscriptDbWritable {
   ): Promise<TDbInsertResult>;
   insertMany(
     payloads: Array<Record<string, unknown>>,
-    opts?: { maxDepth?: number; _depth?: number },
+    opts?: {
+      maxDepth?: number;
+      _depth?: number;
+      /** @internal Receives the rows as written (defaults applied), aligned with `insertedIds`. */
+      _insertedRows?: Array<Record<string, unknown>>;
+    },
   ): Promise<TDbInsertManyResult>;
   replaceOne(
     payload: Record<string, unknown>,
@@ -1231,6 +1236,12 @@ export interface AtscriptDbWritable {
     opts?: { maxDepth?: number; _depth?: number; _ownedBy?: TNestedOwner },
   ): Promise<TDbUpdateResult>;
   findOne(query: unknown): Promise<Record<string, unknown> | null>;
+  /**
+   * @internal Whether an insert fills `field`'s default in the SDK (a value
+   * default, or a function default the adapter does not generate natively) —
+   * so the written row carries it. Absent → treated as `false`.
+   */
+  fillsDefaultOnInsert?(field: string): boolean;
   count(query: { filter: Record<string, unknown> }): Promise<number>;
   deleteMany(filter: unknown): Promise<TDbDeleteResult>;
   /** Pre-validate items (type + FK constraints) without inserting them. */

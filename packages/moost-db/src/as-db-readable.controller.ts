@@ -3896,15 +3896,20 @@ export class AsDbReadableController<
    * The row `GET /one/<id>` would answer the caller, for a write that asked
    * for its representation (`Prefer: return=representation`, since 0.1.168):
    * {@link prepareRequest} runs again with `endpoint: "one"`, then the `/one`
-   * pipeline, with the id in the form `/one` receives it (text). `undefined`
-   * when that read answers or throws an error (no read grant, outside the read
-   * overlay, a failing hook) — the write it follows is already committed, so
-   * the failure is logged, not answered.
+   * pipeline, with the id in the form `/one` receives it (text) — an object id
+   * (a composite primary key, since 0.1.169) as `GET /one?k=v` takes it, through
+   * {@link extractIdShape}. `undefined` when that read answers or throws an
+   * error (no read grant, outside the read overlay, a failing hook) — the write
+   * it follows is already committed, so the failure is logged, not answered.
    */
   protected async _readRepresentation(id: unknown): Promise<DataType | undefined> {
     try {
       const { parsed, controls } = await this.parseRequest("one", "");
-      const row = await this._readOne(urlIdForm(id), parsed, controls);
+      // A plain object (a composite key) as `/one?k=v` text values; anything
+      // else — a class instance such as an `ObjectId` included — as `/one/:id` text.
+      const idShape = isPlainObject(id) ? this.extractIdShape(textValues(id)) : String(id);
+      if (idShape instanceof HttpError) return undefined;
+      const row = await this._readOne(idShape, parsed, controls);
       return row instanceof HttpError ? undefined : row;
     } catch (error) {
       if (!(error instanceof HttpError)) {
@@ -4526,10 +4531,7 @@ function mergeDelegatedActions(
 // through the actions module.
 registerAsDbReadableController(AsDbReadableController);
 
-/** An id as the `/one` routes receive it: `/one/:id` text, or `/one?k=v` text values. */
-function urlIdForm(id: unknown): string | Record<string, unknown> {
-  if (id !== null && typeof id === "object") {
-    return Object.fromEntries(Object.entries(id).map(([k, v]) => [k, String(v)]));
-  }
-  return String(id);
+/** A key object's values as text — the form `/one?k=v` receives them in. */
+function textValues(id: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(id).map(([k, v]) => [k, String(v)]));
 }

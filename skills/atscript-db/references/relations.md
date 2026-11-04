@@ -161,6 +161,13 @@ await posts.insertOne({
 
 Server runs nested writes in the same transaction as the parent; on failure the whole operation rolls back.
 
+Nested-write key linking (0.1.169):
+
+- **Insert linking** (TO / FROM / VIA): each FK field gets the field it REFERENCES in the row AS WRITTEN (after the write guard + defaults + TO phase); PK parts (generated ones included) from the inserted id. The payload's own FK value is OVERWRITTEN. Nested arrays are read after the guard (insert + replace, as patch). Was: unique-field FK got the row's id, composite FK unset, TO uuid-defaulted unique field unset (payload FK survived).
+- **Fail closed** → `FK_VIOLATION`, checked before ANY write (TO phase included) when the referenced field is absent from the row — a non-key field only the DB fills (increment, native uuid/now) counts as absent. Exception: a generated PK part the insert does not report (SQLite composite increment, MySQL multi-row) is found after the insert → rolled back.
+- **VIA existing target**: an entry with the target's WHOLE PK is linked by its STORED referenced value, read before any write (entry's own differing value → `INVALID_QUERY`; missing target → `FK_VIOLATION`; insert, replace and patch).
+- **Replace / patch limits**: FROM / VIA children only via a single-field FK to the parent PK (VIA: and to the target PK) → else `INVALID_QUERY` before any write (was: silently skipped for composite parents, PK written into a unique-field FK). Composite junction FKs → `INVALID_QUERY` (was skipped). Replace TO object must carry the referenced field (`INVALID_QUERY`). Patch addressed by a unique field: nested FROM/VIA written under the stored row's PK (was silently dropped).
+
 ### Nested-write integrity (0.1.143)
 
 A nested write only touches rows related to the record being written. Every rule below is checked as a planning step BEFORE the call's first write (one read per relation for the whole batch) → a rejection never leaves a partial write, even without transactions (memory, standalone Mongo). Planned FROM children are then written through filters pinned to their parent (`{ pk, fk: parentPK }`) — a child re-parented between plan and write matches nothing → `CONFLICT`, rolled back (no in-phase re-checks).

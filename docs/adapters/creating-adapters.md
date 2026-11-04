@@ -91,8 +91,12 @@ Since 0.1.165 throw them with `constraintViolation(code, hint, rawText)` from `@
 :::
 
 ::: tip
-Use `this._resolveInsertedId(data, dbGeneratedId)` in your `insertOne` implementation to return the correct inserted ID. It prefers the user-supplied primary key value from the data over the DB-generated fallback (e.g., `RETURNING id`, `lastInsertRowid`).
-:::
+Use `this._resolveInsertedId(data, dbGeneratedId, generated?)` in your insert methods to return the correct inserted ID. It prefers the user-supplied primary key value from the data over the DB-generated fallback (e.g., `RETURNING id`, `lastInsertRowid`). On a composite primary key (since 0.1.169):
+
+- it returns the primary-key object keyed by logical field names, each part in read form (your `formatValue` `fromStorage` applied);
+- each part comes from `data`, else from `generated` — the server-assigned column values you know exactly for that row (a `RETURNING` row), by physical column name;
+- a part found in neither yields `undefined` for the whole id; `dbGeneratedId` is never used for a composite key.
+  :::
 
 ### Read
 

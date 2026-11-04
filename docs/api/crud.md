@@ -37,8 +37,31 @@ Fields with `@db.default.*` annotations (`@db.default.increment`, `@db.default.u
 Write payloads are typed as `DbInsert<Row>` (insert: every key optional), `DbPatch<Row>` (update: every key optional, plus [field operators](/api/update-patch#typed-operators) and `$cas`) and `DbRow<Row>` (replace: required keys stay required, plus `$cas`); all accept `null` on optional columns. A value of an interface type fits them — the generated model type or your own `interface Product` (since 0.1.168; before, a payload type with an index signature rejected interfaces). An untyped table takes any object. `DbInsert` makes every field optional, so it does not catch a missing required field or a field the server sets (a `@db.default.increment` key, a timestamp stamp) — validation at insert does. Defaults are applied before validation: static `@db.default 'x'` values are filled on every adapter, function defaults (`now` / `uuid` / `increment`) only when the adapter does not generate them natively (since 0.1.128; before, SQL adapters left static defaults to the DDL `DEFAULT` clause). To see or enrich the defaulted, validated rows before they are written, pass a [write guard](#write-guards).
 
 ::: info `insertedId` typing
-`insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`.
+`insertedId` is typed as `unknown` (the PK type isn't always inferable — UUID, ObjectId, composite, etc.). Cast it to your PK type when you need a typed value: `result.insertedId as number`, or `as { orderId: number; productId: number }` for a [composite key](#insert-composite-id).
 :::
+
+#### Composite primary keys {#insert-composite-id}
+
+On a table with a composite primary key (several `@meta.id` fields), `insertedId` is the **primary-key object**, keyed by field name (since 0.1.169). `insertMany` reports one such object per row in `insertedIds`, and so do the [`onConflict: "ignore"`](#insert-ignore) results. A single-field key keeps its scalar id.
+
+```typescript
+// @meta.id orderId: number, @meta.id productId: number
+const { insertedId } = await orderLines.insertOne({ orderId: 1, productId: 2, qty: 3 });
+// insertedId: { orderId: 1, productId: 2 }
+await orderLines.findById(insertedId); // the row just inserted
+```
+
+A key part the database generates (a `@db.default.increment` part, or a native `uuid` default) is in the object when the adapter learns its value from the insert:
+
+| Adapter    | Generated key part                                                                                    |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| PostgreSQL | Always — read from `RETURNING`.                                                                       |
+| MongoDB    | Always — the adapter allocates increments itself.                                                     |
+| Memory     | Always — the adapter allocates increments itself.                                                     |
+| MySQL      | When the row was written by a one-row `INSERT` (every `insertOne`); not for rows of a batched insert. |
+| SQLite     | Never — SQLite generates no value for one part of a composite key.                                    |
+
+Each part is reported in the form a read answers (a MySQL `DATETIME` part as epoch ms), so it is the value `findById` and `GET /one?…` take. On MySQL an explicit `0` in an `AUTO_INCREMENT` part counts as generated. When a part is unknown, the row reports **no id** (`insertedId: undefined`, an `undefined` entry in `insertedIds`) rather than a wrong one, and `returning` answers no `row`. Read such a row back by a unique field instead. See [Upgrading](/guide/upgrading#v0-1-169) for what changed in 0.1.169.
 
 #### Read the stored row back: `returning` {#insert-returning}
 

@@ -29,6 +29,7 @@ import {
   batchInsertNestedTo,
   batchInsertNestedFrom,
   batchInsertNestedVia,
+  planNestedInsertLinks,
   batchReplaceNestedTo,
   batchReplaceNestedFrom,
   batchReplaceNestedVia,
@@ -58,6 +59,8 @@ import type {
   TDbInsertManyResult,
   TDbInsertIgnoreResult,
   TDbInsertManyIgnoreResult,
+  TDbDefaultFn,
+  TDbDefaultValue,
   TDbInsertIgnoreOptions,
   TInsertOptions,
   TInsertOneOptions,
@@ -85,7 +88,13 @@ import type {
   TDbForeignKey,
   TFkLookupTarget,
 } from "../types";
-import { findRowsByKeys, pkTupleKey, sameKey, uniqueKeyTuple } from "../shared/keys";
+import {
+  findRowsByKeys,
+  insertedIdPart,
+  pkTupleKey,
+  sameKey,
+  uniqueKeyTuple,
+} from "../shared/keys";
 import { soleUnionMember } from "../shared/union-shape";
 import { findAncestorInSet, isEmptyObject, isPlainObject } from "../shared/object";
 
@@ -198,6 +207,12 @@ type TInternalWriteOptions<Row> = TWriteOptions<Row> & {
    * `strict` that matches nothing is a concurrent re-parenting → `CONFLICT`.
    */
   _ownedBy?: TNestedOwner;
+  /**
+   * Nested TO / VIA target inserts: receives the rows as written (defaults
+   * applied, after the TO phase), aligned with `insertedIds` — the source of a
+   * referenced unique field the SDK filled in.
+   */
+  _insertedRows?: Array<Record<string, unknown>>;
 };
 
 /** The stored row a write item targets (`null` = none), pinned once per call. */
@@ -784,6 +799,7 @@ export class AtscriptDbTable<
       check,
       onConflict,
       lockConflicts,
+      _insertedRows,
     } = (opts ?? {}) as TInternalWriteOptions<DataType> & TInsertOptions<DataType>;
     if (onConflict !== undefined && onConflict !== "error" && onConflict !== "ignore") {
       throw invalidQuery("onConflict", `Unknown onConflict mode "${String(onConflict)}"`);
@@ -814,9 +830,6 @@ export class AtscriptDbTable<
         const now = Date.now();
         let items = payloads.map((p) => this._applyDefaults(clone(p), now));
         if (ignore) this._linkToByKeyInIgnoreMode(items);
-        // Nav data for the FROM / VIA phases, read from the pruned rows (nav
-        // fields are stripped from `items` before the main insert).
-        let originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         // Validate full payload (including nav fields) before any writes.
         // Depth is only enforced at the root call — nested-writer re-entries
@@ -841,13 +854,22 @@ export class AtscriptDbTable<
           validateBatch(validator, items, ctx);
         }
 
+        // Nav data for the FROM / VIA phases, read from the rows as the guard
+        // left them (nav fields are stripped from `items` before the main
+        // insert). Their LINK KEYS come from `items` / the inserted ids instead.
+        let originals = canNest ? items.map((item) => ({ ...item })) : [];
+
         // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
         await this._encryptItems(items, "write");
 
         if (ignore) this._rejectNestedToInIgnoreMode(items);
 
-        // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
+        // Every nested link must be resolvable — checked (and existing VIA
+        // targets read) BEFORE any write, the TO phase included.
         const host = this as any as TNestedWriterHost;
+        const viaLinks = canNest ? await planNestedInsertLinks(host, originals, items) : undefined;
+
+        // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
         if (canNest) {
           await batchInsertNestedTo(host, items, maxDepth, depth);
         }
@@ -873,7 +895,7 @@ export class AtscriptDbTable<
         // Catches errors early (before the parent is committed), essential for
         // adapters without transaction support.
         if (canNest) {
-          await preValidateNestedFrom(host, originals);
+          await preValidateNestedFrom(host, originals, items);
         }
 
         // Conflict-ignoring mode: core removes in-batch duplicates (earlier row
@@ -892,15 +914,16 @@ export class AtscriptDbTable<
         // Phase 2: Batch main insert
         const result = ignored ?? (await this.adapter.insertMany(prepared));
         const parentIds = result.insertedIds;
+        if (_insertedRows) for (const item of items) _insertedRows.push(item);
 
-        // Phase 3: Batch FROM dependents (they need our PKs)
+        // Phase 3: Batch FROM dependents — linked by the written rows' keys
         if (canNest) {
-          await batchInsertNestedFrom(host, originals, parentIds, maxDepth, depth);
+          await batchInsertNestedFrom(host, originals, items, parentIds, maxDepth, depth);
         }
 
         // Phase 4: Batch VIA relations (insert targets + junction entries)
         if (canNest) {
-          await batchInsertNestedVia(host, originals, parentIds, maxDepth, depth);
+          await batchInsertNestedVia(host, originals, items, parentIds, maxDepth, depth, viaLinks);
         }
 
         // Post-write check: every inserted row by its resulting primary key.
@@ -986,8 +1009,6 @@ export class AtscriptDbTable<
           this._stampOnUpdate(d, now, true);
           return d;
         });
-        // Nav data for the FROM / VIA phases, read from the pruned rows.
-        const originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         const validator = this.getValidator("bulkReplace");
         const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
@@ -1006,6 +1027,9 @@ export class AtscriptDbTable<
           await guard(guardCtx);
           validateBatch(validator, items, ctx);
         }
+
+        // Nav data for the FROM / VIA phases, from the rows as the guard left them.
+        const originals = canNest ? items.map((item) => ({ ...item })) : [];
 
         // Encrypt @db.encrypted fields AFTER plaintext validation, BEFORE the adapter.
         await this._encryptItems(items, "write");
@@ -1085,7 +1109,7 @@ export class AtscriptDbTable<
 
         // Phase 4: VIA dependencies (replace junction records)
         if (matchedOriginals.length > 0) {
-          await batchReplaceNestedVia(host, matchedOriginals, maxDepth, depth);
+          await batchReplaceNestedVia(host, matchedOriginals, maxDepth, depth, nestedPlan);
         }
 
         if (check) {
@@ -1209,18 +1233,32 @@ export class AtscriptDbTable<
         // are stripped from the SET below, so they never change).
         const rowFilters = this._rowFilters(cloned, opts);
 
+        // Each item's stored row, read once — for its check filter, its nested
+        // TO patch, and the primary key of an item addressed by a unique field
+        // that carries nested FROM / VIA data (written by the parent's key).
+        const nestedTo = canNest ? cloned.map((payload) => this._carriesNestedTo(payload)) : [];
+        const pkField = this.primaryKeys.length === 1 ? this.primaryKeys[0]! : undefined;
+        const needsPk = originals.map(
+          (original) =>
+            pkField !== undefined &&
+            original[pkField] === undefined &&
+            this._carriesNestedFromVia(original),
+        );
+        const targets = await this._pinTargets(
+          rowFilters,
+          (i) =>
+            nestedTo[i] || needsPk[i] || (check !== undefined && !this._isPkFilter(rowFilters[i]!)),
+          guardCtx,
+        );
+        // A missing row: the patch writes nothing for it, nor its nested data.
+        needsPk.forEach((need, i) => {
+          const stored = targets[i];
+          if (need && stored) originals[i]![pkField!] = stored[pkField!];
+        });
+
         // FROM ownership / VIA link checks BEFORE any write: a rejected nested
         // operation never leaves a partial write, transactions or not.
         const nestedPlan = canNest ? await planNestedFromVia(host, originals, "patch") : undefined;
-
-        // Each item's stored row, read once — for its check filter and its
-        // nested TO patch.
-        const nestedTo = canNest ? cloned.map((payload) => this._carriesNestedTo(payload)) : [];
-        const targets = await this._pinTargets(
-          rowFilters,
-          (i) => nestedTo[i] || (check !== undefined && !this._isPkFilter(rowFilters[i]!)),
-          guardCtx,
-        );
 
         // Phase 1: plan the TO relation patches against the STORED foreign keys
         // (applied after the main patch, only for the rows it matched).
@@ -2072,6 +2110,16 @@ export class AtscriptDbTable<
     return this._toRelationsCache;
   }
 
+  /** Whether `item` carries nested FROM / VIA data (Phase 3 / 4 work). */
+  private _carriesNestedFromVia(item: Record<string, unknown>): boolean {
+    for (const [navField, relation] of this._meta.relations) {
+      if (relation.direction === "to") continue;
+      const nested = item[navField];
+      if (nested !== undefined && nested !== null) return true;
+    }
+    return false;
+  }
+
   /** Whether `item` carries a nested TO object (Phase 1 work). */
   private _carriesNestedTo(item: Record<string, unknown>): boolean {
     return this._toRelations().some(({ navField }) => {
@@ -2294,8 +2342,9 @@ export class AtscriptDbTable<
   /**
    * The exact primary-key filter of each inserted row: the logical key from
    * the row (SDK defaults applied), else the stored key the adapter wrote into
-   * the prepared row (e.g. a driver-assigned `_id`), else — single-field keys
-   * only — the adapter's `insertedIds` (auto-increment).
+   * the prepared row (e.g. a driver-assigned `_id`), else the adapter's
+   * `insertedIds` — the id itself for a single-field key (auto-increment), the
+   * part of the id object for a composite one (a server-generated part).
    */
   private _insertedPkFilters(
     items: Array<Record<string, unknown>>,
@@ -2308,10 +2357,11 @@ export class AtscriptDbTable<
     }
     return items.map((item, i) => {
       const key: Record<string, unknown> = {};
+      const id = insertedIds[i];
       for (const field of pkFields) {
         let value = item[field];
         if (value === undefined) value = prepared[i]?.[this._meta.columnMap.get(field) ?? field];
-        if (value === undefined && pkFields.length === 1) value = insertedIds[i];
+        if (value === undefined) value = insertedIdPart(id, field, pkFields);
         if (value === undefined || value === null) {
           throw invalidQuery(
             field,
@@ -2375,24 +2425,8 @@ export class AtscriptDbTable<
     now = Date.now(),
   ): Record<string, unknown> {
     const nativeFns = this.adapter.nativeDefaultFns();
-    const versionField = this._meta.versionField;
     for (const [field, def] of this._meta.defaults.entries()) {
-      // The version column is adapter-managed (auto-bumped on every write, and
-      // initialized at insert time by the adapter when the engine has no DDL
-      // DEFAULT). Skipping it here keeps `assertNoVersionWrites` happy on the
-      // update/replace paths where the field MUST stay absent from the payload.
-      if (field === versionField) continue;
-      let make: (() => unknown) | undefined;
-      if (def.kind === "value") {
-        make = () => this._valueDefault(field, def.value);
-      } else if (
-        def.kind === "fn" &&
-        (!nativeFns.has(def.fn) || findAncestorInSet(field, this._meta.jsonParents) !== undefined)
-      ) {
-        // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
-        if (def.fn === "now") make = () => now;
-        else if (def.fn === "uuid") make = () => crypto.randomUUID();
-      }
+      const make = this._sdkDefaultMaker(field, def, nativeFns, now);
       if (!make) continue;
       if (!field.includes(".")) {
         if (data[field] === undefined) data[field] = make();
@@ -2401,6 +2435,47 @@ export class AtscriptDbTable<
       }
     }
     return data;
+  }
+
+  /**
+   * The SDK's maker of `field`'s default `def` — `undefined` when the SDK
+   * leaves it alone: the version column, `increment`, and function defaults
+   * the adapter generates natively (outside a JSON value).
+   */
+  private _sdkDefaultMaker(
+    field: string,
+    def: TDbDefaultValue,
+    nativeFns: ReadonlySet<TDbDefaultFn>,
+    now: number,
+  ): (() => unknown) | undefined {
+    // The version column is adapter-managed (auto-bumped on every write, and
+    // initialized at insert time by the adapter when the engine has no DDL
+    // DEFAULT). Skipping it here keeps `assertNoVersionWrites` happy on the
+    // update/replace paths where the field MUST stay absent from the payload.
+    if (field === this._meta.versionField) return undefined;
+    if (def.kind === "value") return () => this._valueDefault(field, def.value);
+    if (nativeFns.has(def.fn) && findAncestorInSet(field, this._meta.jsonParents) === undefined) {
+      return undefined;
+    }
+    // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
+    if (def.fn === "now") return () => now;
+    if (def.fn === "uuid") return () => crypto.randomUUID();
+    return undefined;
+  }
+
+  /**
+   * @internal Whether an insert fills `field`'s default in the SDK — a value
+   * default, or a `now` / `uuid` the adapter does not generate natively — so
+   * the written row carries it (nested writes link by it). `increment` and
+   * native function defaults are the database's: not known before the write.
+   */
+  public fillsDefaultOnInsert(field: string): boolean {
+    this._ensureBuilt();
+    const def = this._meta.defaults.get(field);
+    return (
+      def !== undefined &&
+      this._sdkDefaultMaker(field, def, this.adapter.nativeDefaultFns(), 0) !== undefined
+    );
   }
 
   /**

@@ -286,6 +286,14 @@ curl -X POST http://localhost:3000/todos/ \
 
 Default values from `@db.default` and generated defaults (`@db.default.increment`, `@db.default.uuid`, `@db.default.now`) are applied automatically. Request bodies can contain nested relation data for [deep insert operations](/relations/deep-operations).
 
+On a table with a **composite primary key**, `insertedId` (and each `insertedIds` entry) is the primary-key object (since 0.1.169) — the fields [`GET /one?…`](#get-one) takes:
+
+```json
+{ "insertedId": { "orderId": 1, "productId": 2 } }
+```
+
+A row whose key has a database-generated part the adapter cannot report answers without `insertedId` (`null` in `insertedIds`) instead of a wrong id — see [Composite primary keys](/api/crud#insert-composite-id).
+
 ::: details Batch edge cases
 
 - **Empty array** `[]` — behavior is adapter-dependent (may return 200, 201, 400, or 500)
@@ -351,6 +359,7 @@ curl -X POST http://localhost:3000/todos/ \
 ```
 
 - `row` is exactly what [`GET /one/7`](#get-one) would answer the same caller: [`prepareRequest`](./customization#preparerequest) runs a second time with `endpoint: "one"`, then the `/one` read applies the read projection and the row overlay, and `resolveRowIds` gets the id in its `/one/:id` text form (`"7"`). A permission layer **must** authorize that call by `ctx.endpoint` — the read grant, not the insert grant — before you opt in.
+- On a composite primary key the read-back addresses the row by its key object, exactly as `GET /one?orderId=1&productId=2` does (since 0.1.169). An insert that reports no `insertedId` gets no `row`.
 - When that read fails — the caller has no read grant (`prepareRequest` throws), the new row is outside its read overlay, or a hook throws (logged as a warning) — the insert stands and the response is the plain `{ insertedId }`, without `Preference-Applied`. A denied read-back never turns the committed insert into an error.
 - An array body, and a single row skipped by `?$onConflict=ignore`, ignore the preference.
 - The [client](./client#insert) sends it as `client.insert(row, { returning: true })`.

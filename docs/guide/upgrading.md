@@ -6,6 +6,30 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.169 {#v0-1-169}
+
+### Breaking & behaviour changes
+
+- **`insertedId` of a composite primary key is the primary-key object.** On a table with several `@meta.id` fields, `insertOne` reports `{ insertedId: { orderId: 1, productId: 2 } }` (logical field names) and `insertMany` one such object per row — also with `onConflict: "ignore"` and over HTTP `POST /`. Before, it was the driver's row id (SQLite rowid, MySQL `insertId`, the first `RETURNING` column on PostgreSQL, the MongoDB `_id`; the memory adapter reported the key object under physical column names), which does not name the row. Code that stored or compared that value must use the key object; `findById(insertedId)` and the db-client's `one(insertedId)` take it as is. A single-field primary key keeps its scalar id. See [Composite primary keys](/api/crud#insert-composite-id).
+- **No id rather than a wrong one.** When the adapter cannot learn a database-generated part of a composite key from the insert (SQLite; MySQL batched inserts — see the [adapter table](/api/crud#insert-composite-id)), the row reports `insertedId: undefined` (an `undefined` entry in `insertedIds`, `null` over HTTP) and `insertOne(row, { returning })` answers no `row`.
+- **Memory adapter: a table without a primary key reports `insertedId: undefined`** (was `{}`), like the other adapters report no usable id.
+- **moost-db `Prefer: return=representation` on composite keys** reads the row back by its key object, as `GET /one?orderId=1&productId=2` does. Before, it answered no `row` — or the row whose unique field held the reported number. See [Get the stored row back](/http/crud#post-insert-representation).
+- **Nested inserts link by the row as written, and fail closed.** Each foreign key a nested `@db.rel.to` / `@db.rel.from` / `@db.rel.via` insert fills gets the value of the field it references in the row as stored, and **overwrites** any value the payload carried for it. Before, a key on a unique field got the new row's id, a composite key was not filled, a TO parent's SDK-defaulted unique field (`@db.default.uuid`) was left unset (the payload's own foreign key, if any, survived). A key that cannot be resolved is now refused with `FK_VIOLATION` instead of an unlinked or wrongly linked child. See [Nested Inserts](/relations/deep-operations#nested-inserts).
+- **Nested data is read after the write guard** on insert and replace (patch already did): a guard that edits or removes a row's nested arrays now changes what the nested phases write.
+- **Replace / patch refuse nested children they cannot link by primary key.** `@db.rel.from` / `@db.rel.via` children on `replaceOne` / `bulkReplace` / `updateOne` / `bulkUpdate` (and HTTP `PUT` / `PATCH`) linked by anything but a single-field foreign key to the parent's primary key answer `INVALID_QUERY` before any write. Before, such children were skipped silently (composite parent) or written with the parent's id in the wrong field. A nested insert of a junction with a composite foreign key answers `INVALID_QUERY` too (was skipped). See [Nested write rules](/relations/patches#nested-write-rules).
+- **VIA: an existing target is linked by its stored value** (insert, replace and patch): an entry whose own value differs answers `INVALID_QUERY`, a missing target `FK_VIOLATION`, both before any write. Before, the payload's value was linked and a missing target failed only at the junction insert, after the parent was written. A composite-key target counts as existing only with its whole key.
+- **Replace with a nested `@db.rel.to` object** needs the referenced field in that object (`INVALID_QUERY` before any write otherwise) — a replace would reset or regenerate it.
+- **`insertedId` is in read form** — every composite part and a single-field id: a MySQL `DATETIME` key is reported as epoch ms (was the stored datetime string), the value `GET /one?…` takes.
+
+### Fixes
+
+- **A write `check` on an insert resolves a server-generated composite-key part** from the reported id instead of failing with `cannot resolve the primary key`.
+- **A patch addressed by a unique field writes its nested `@db.rel.from` / `@db.rel.via` data** (`updateOne({ email, children: { $insert: [...] } })`) under the stored row's primary key; before, that data was dropped silently.
+
+### Custom adapters
+
+- `_resolveInsertedId(data, dbGeneratedId, generated?)` builds the composite-key object (each part through the column's `fromStorage` formatter); pass the server-assigned column values you know exactly for the row as `generated` (e.g. a `RETURNING` row). See [Creating adapters](/adapters/creating-adapters).
+
 ## 0.1.168 {#v0-1-168}
 
 ### Features

@@ -365,6 +365,8 @@ const { insertedId } = await users.insert({
 const { insertedCount } = await users.insert([{ name: "Alice" }, { name: "Bob" }]);
 ```
 
+On a composite primary key `insertedId` is the key object (since 0.1.169) — pass it to [`one()`](#one) as is: `await orderLines.one(insertedId)` reads `GET /one?orderId=1&productId=2`. See [Composite primary keys](/api/crud#insert-composite-id).
+
 Pass `{ onConflict: "ignore" }` (since 0.1.148) to skip rows that collide on the primary key or a unique index — it sends `POST /?$onConflict=ignore` ([details](./crud#post-insert-ignore)):
 
 ```typescript

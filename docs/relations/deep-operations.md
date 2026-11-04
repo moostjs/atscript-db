@@ -116,6 +116,8 @@ await taskTable.insertOne({
 
 You never need to manually set `projectId` on the task or `taskId` on the comments — Atscript resolves the FK chain references from your schema and wires them up automatically.
 
+Each foreign-key field gets the value of the field it references in the row **as written** — after the [write guard](/api/crud#write-guards), defaults and the TO phase, with primary-key parts (generated ones included) from the inserted id: a generated key, a unique field such as `Project.code` (an SDK default like `@db.default.uuid` included), or every part of a [composite key](/relations/#composite-foreign-keys) (`@db.rel.FK 'line'` on `orderId` and `productId`). A value the payload carries for that foreign key is overwritten. A key that cannot be resolved fails the call with `FK_VIOLATION` (since 0.1.169): before anything is written when the referenced field is missing from the row (a non-key field only the database fills — an `increment`, a native `uuid` / `now` default — counts as missing), after the insert (rolled back) when the database generated a key part it does not report. How replace and patch link nested rows, and how an existing `@db.rel.via` target is linked, is in [Nested write rules](./patches#nested-write-rules).
+
 ## Nested Replaces (PUT)
 
 A deep replace fully swaps the record and its relations. FROM children are

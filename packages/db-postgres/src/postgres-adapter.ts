@@ -769,10 +769,17 @@ export class PostgresAdapter extends BaseDbAdapter {
     const params = insert.params;
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-    const returned = result.rows?.[0];
-    return {
-      insertedId: this._resolveInsertedId(data, returned ? Object.values(returned)[0] : undefined),
-    };
+    return { insertedId: this._insertedIdOf(data, result.rows?.[0]) };
+  }
+
+  /** The inserted id of `row`, from its `RETURNING` row (the primary-key columns, by name). */
+  private _insertedIdOf(row: Record<string, unknown>, returned?: Record<string, unknown>): unknown {
+    const pkCols = this._pk().cols;
+    return this._resolveInsertedId(
+      row,
+      pkCols.length > 0 ? returned?.[pkCols[0]!] : undefined,
+      returned,
+    );
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
@@ -797,10 +804,7 @@ export class PostgresAdapter extends BaseDbAdapter {
 
         // Map RETURNING rows back to insertedIds
         for (let i = 0; i < batch.length; i++) {
-          const returned = result.rows?.[i];
-          allIds.push(
-            this._resolveInsertedId(batch[i], returned ? Object.values(returned)[0] : undefined),
-          );
+          allIds.push(this._insertedIdOf(batch[i]!, result.rows?.[i]));
         }
       }
 
@@ -853,12 +857,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     const run = async (): Promise<TDbInsertIgnoreSlot[]> => {
       const tableName = this.resolveTableName();
       const { keySets, returning, nonTextKeyCols, returningSuffix } = plan;
-      const pkCols = this._pk().cols;
       const insertedId = (row: Record<string, unknown>, returned?: Record<string, unknown>) => ({
-        insertedId: this._resolveInsertedId(
-          row,
-          pkCols.length > 0 ? returned?.[pkCols[0]!] : undefined,
-        ),
+        insertedId: this._insertedIdOf(row, returned),
       });
       const slots: TDbInsertIgnoreSlot[] = [];
 

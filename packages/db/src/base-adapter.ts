@@ -281,12 +281,47 @@ export abstract class BaseDbAdapter {
   protected _table!: AtscriptDbReadable<any, any, any, any, any, any, any>;
 
   /**
-   * Resolves the correct insertedId: prefers the user-supplied PK value
-   * from the data over the DB-generated fallback (e.g. rowid, _id).
+   * Resolves the inserted row's id from the written row `data` (physical
+   * column names):
+   *
+   * - a single `@meta.id`: the user-supplied value, else `dbGeneratedId`
+   *   (e.g. an auto-increment value, `_id`) — in its read form, like a part
+   *   below (since 0.1.169);
+   * - a composite primary key (since 0.1.169): the primary-key object keyed by
+   *   LOGICAL field names (`{ left: 1, right: "a" }`). Each part comes from
+   *   `data`, else from `generated` — server-assigned column values the adapter
+   *   knows exactly (e.g. a `RETURNING` row), by physical column name — in its
+   *   read form (the column's `fromStorage` formatter applied, so a part is the
+   *   value `GET /one?…` takes). A part known from neither yields `undefined`:
+   *   no id rather than a wrong one (`dbGeneratedId`, e.g. a rowid, never names
+   *   a composite-key row);
+   * - otherwise (no primary key, or one the adapter adds such as `_id`):
+   *   `dbGeneratedId`.
    */
-  protected _resolveInsertedId(data: Record<string, unknown>, dbGeneratedId: unknown): unknown {
+  protected _resolveInsertedId(
+    data: Record<string, unknown>,
+    dbGeneratedId: unknown,
+    generated?: Record<string, unknown>,
+  ): unknown {
     const metaIdPhysical = this._table.metaIdPhysical;
-    return metaIdPhysical ? (data[metaIdPhysical] ?? dbGeneratedId) : dbGeneratedId;
+    if (metaIdPhysical)
+      return this._readForm(metaIdPhysical, data[metaIdPhysical] ?? dbGeneratedId);
+    const pkFields = this._table.primaryKeys;
+    if (pkFields.length < 2) return dbGeneratedId;
+    const id: Record<string, unknown> = {};
+    for (const field of pkFields) {
+      const column = this._table.physicalPath(field);
+      const value = data[column] ?? generated?.[column];
+      if (value === undefined || value === null) return undefined;
+      id[field] = this._readForm(column, value);
+    }
+    return id;
+  }
+
+  /** `value` of `column` in its read form — the column's `fromStorage` formatter applied. */
+  private _readForm(column: string, value: unknown): unknown {
+    const fromStorage = this._table.getMetadata().fromStorageFormatters?.get(column);
+    return fromStorage && value !== undefined && value !== null ? fromStorage(value) : value;
   }
 
   /** Logger instance — set via {@link registerReadable} from the readable's logger. */

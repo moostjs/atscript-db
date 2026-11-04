@@ -22,7 +22,9 @@ export class MyAdapter extends BaseDbAdapter {
 
   // ── Required CRUD ──
   async insertOne(data: Record<string, unknown>): Promise<TDbInsertResult> {
-    /* ... */
+    // id: this._resolveInsertedId(data, dbGeneratedId, generated?) — single @meta.id → user value ?? dbGeneratedId;
+    // composite PK (0.1.169) → { logicalField: value } from `data` ?? `generated` (server-assigned columns known
+    // EXACTLY for this row, e.g. a RETURNING row, by physical name); a missing part → undefined (never a rowid)
   }
   async insertMany(rows: Record<string, unknown>[]): Promise<TDbInsertManyResult> {
     /* ... */

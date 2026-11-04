@@ -1,4 +1,4 @@
-import { getPath } from "./object";
+import { getPath, isPlainObject } from "./object";
 
 /**
  * String form of a key value, equal across driver representations: an
@@ -20,6 +20,16 @@ export function sameKey(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || a === undefined || b === null || b === undefined) return false;
   return keyString(a) === keyString(b);
+}
+
+/**
+ * Part `field` of an inserted id (`insertedId` / `insertedIds[i]`): the id
+ * itself for a single-field key, that property of the key object for a
+ * composite one (`undefined` when the id is not an object).
+ */
+export function insertedIdPart(id: unknown, field: string, pkFields: readonly string[]): unknown {
+  if (pkFields.length === 1) return id;
+  return isPlainObject(id) ? id[field] : undefined;
 }
 
 /**

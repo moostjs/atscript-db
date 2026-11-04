@@ -11,6 +11,8 @@ TDbUpdateResult     = { matchedCount: number; modifiedCount: number }
 TDbDeleteResult     = { deletedCount: number }
 ```
 
+**Composite PK (0.1.169, behaviour change):** `insertedId` / each `insertedIds[i]` = the PK OBJECT keyed by LOGICAL field names (`{ orderId: 1, productId: 2 }`) — also for `onConflict: "ignore"` and HTTP `POST /`; pass it to `findById` / client `one()` as is. Before 0.1.169: the driver's row id (SQLite rowid, MySQL `insertId`, first PG `RETURNING` column, Mongo `_id`; memory used physical column names) — meaningless, and a scalar lookup could hit ANOTHER row through a scalar unique field. A DB-generated key part is included when the adapter knows it (PG `RETURNING`, Mongo + memory allocate increments, MySQL one-row INSERT only = every `insertOne`); otherwise FAIL CLOSED: `insertedId: undefined` (HTTP: absent / `null` in `insertedIds`), `returning` → no `row` (SQLite: always for a generated part; MySQL: rows of a multi-row batch). Parts — and a single-field id — in READ form (fromStorage formatter: MySQL DATETIME → epoch ms) = what `GET /one?…` takes; MySQL explicit `0` in an AUTO_INCREMENT part = generated. Single-field PK unchanged (scalar). Memory table with NO PK: `insertedId: undefined` (was `{}`).
+
 ## Inserts
 
 ```ts
@@ -48,7 +50,7 @@ TOP-LEVEL `number.timestamp.created` (incl. `| null`) is INSERT-ONLY (0.1.165; n
 
 ## `insertOne` returning (0.1.165)
 
-`insertOne(row, { returning: true | ["id", "createdAt"] })` → `{ insertedId, row }` — read back by PK in the insert's transaction (defaults, stamps, version included). With `onConflict: "ignore"` a skipped row → `{ conflict: true }`, no `row`. `insertOne` only. Not exposed over HTTP.
+`insertOne(row, { returning: true | ["id", "createdAt"] })` → `{ insertedId, row }` — read back by PK in the insert's transaction (defaults, stamps, version included). With `onConflict: "ignore"` a skipped row → `{ conflict: true }`, no `row`; an insert without a known id (composite key with an unreported generated part, 0.1.169) → no `row`. `insertOne` only. Over HTTP it is `Prefer: return=representation` (opt-in, [moost-db.md](moost-db.md)).
 
 ## Validate without writing — `validateRows` (0.1.165)
 

@@ -402,30 +402,6 @@ export class MemoryAdapter extends BaseDbAdapter {
     return JSON.stringify(fields.map((field) => pinned.get(field)));
   }
 
-  /**
-   * Builds a DEFINED inserted-id for a table with NO single `@meta.id` — a
-   * composite (or single non-meta) primary key, where
-   * {@link BaseDbAdapter._resolveInsertedId} would otherwise fall back to
-   * `undefined` (memory has no rowid/`_id` to hand back). Returns an object
-   * mapping each PRIMARY KEY PHYSICAL field name → its value in the stored row
-   * (e.g. `{ part1: "a", part2: "b" }`), read by physical name via
-   * {@link getPath} so it matches how {@link pkKey} derives the storage key and
-   * honours column renames. A single-field non-meta PK yields the one-key object
-   * form for consistency (documented shape).
-   *
-   * Passed as the `dbGeneratedId` fallback in {@link _insertRow} ONLY when
-   * {@link AtscriptDbReadable.metaIdPhysical} is null; single-`@meta.id` tables
-   * keep an `undefined` fallback, so their scalar `insertedId`
-   * (`row[metaIdPhysical]`) is byte-identical to before.
-   */
-  private _compositeInsertedId(row: Record<string, unknown>): Record<string, unknown> {
-    const id: Record<string, unknown> = {};
-    for (const field of this._physicalPkFields()) {
-      id[field] = getPath(row, field);
-    }
-    return id;
-  }
-
   // ── Provider (read-through) mode ─────────────────────────────────────────
 
   /**
@@ -565,13 +541,9 @@ export class MemoryAdapter extends BaseDbAdapter {
 
     const tuples = this._enforceUniqueIndexes(state, row);
     this._storeRow(state, key, row, tuples);
-    // Single-`@meta.id` tables resolve their scalar id from `row[metaIdPhysical]`
-    // and keep an `undefined` fallback (unchanged). A composite (or single
-    // non-meta) PK has no single meta id, so supply a DEFINED fallback built from
-    // the PK field values instead of `undefined`, which callers (e.g.
-    // `POST /db/<table>`) need as a usable `insertedId`.
-    const fallback = this._table.metaIdPhysical ? undefined : this._compositeInsertedId(row);
-    return this._resolveInsertedId(row, fallback);
+    // The stored row holds every key part (increments are applied above): a
+    // single `@meta.id` resolves to its scalar, a composite key to its object.
+    return this._resolveInsertedId(row, undefined);
   }
 
   /**

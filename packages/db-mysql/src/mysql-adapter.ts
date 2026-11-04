@@ -322,6 +322,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     def: TDbIndex | undefined;
   };
   private _searchIndexesMemo?: { src: Map<string, TDbIndex>; list: TSearchIndexInfo[] };
+  private _incrementPkMemo?: {
+    src: readonly string[];
+    column: string | undefined;
+    composite: boolean;
+  };
 
   /**
    * Schema name for INFORMATION_SCHEMA queries — `@db.schema` of the bound
@@ -765,7 +770,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     const { sql, params } = buildInsert(this.resolveTableName(), data);
     this._log(sql, params);
     const result = await this._wrapConstraintError(() => this._exec().run(sql, params));
-    return { insertedId: this._resolveInsertedId(data, result.insertId) };
+    return { insertedId: this._insertedIdOf(data, result.insertId, result.insertId) };
   }
 
   async insertMany(data: Array<Record<string, unknown>>): Promise<TDbInsertManyResult> {
@@ -865,9 +870,26 @@ export class MysqlAdapter extends BaseDbAdapter {
 
   /** Physical column of the single-column AUTO_INCREMENT primary key, if the table has one. */
   private _autoIncrementPk(): string | undefined {
-    const pks = this._table.primaryKeys;
-    if (pks.length !== 1 || !this._incrementFields.has(pks[0]!)) return undefined;
-    return this._table.getMetadata().physicalPath(pks[0]!);
+    const { column, composite } = this._incrementPk();
+    return composite ? undefined : column;
+  }
+
+  /**
+   * Physical column of the primary key's `@db.default.increment` part (if any)
+   * and whether the key is composite — computed once per table.
+   */
+  private _incrementPk(): { column: string | undefined; composite: boolean } {
+    const src = this._table.primaryKeys;
+    let memo = this._incrementPkMemo;
+    if (memo?.src !== src) {
+      const part = src.find((pk) => this._incrementFields.has(pk));
+      memo = this._incrementPkMemo = {
+        src,
+        column: part === undefined ? undefined : this._table.physicalPath(part),
+        composite: src.length > 1,
+      };
+    }
+    return memo;
   }
 
   /**
@@ -974,10 +996,32 @@ export class MysqlAdapter extends BaseDbAdapter {
     const first = Number(insertId);
     // one row has no stride: skip the read
     const stride = group.generated && group.rows.length > 1 && first > 0 ? await step() : 1;
+    // A composite key's AUTO_INCREMENT part is exact only for a one-row statement.
+    const partId = group.rows.length === 1 ? insertId : undefined;
     return group.rows.map((row, i) => {
       const generatedId = first > 0 ? first + i * stride : 0;
-      return group.generated ? generatedId : this._resolveInsertedId(row, generatedId);
+      return group.generated ? generatedId : this._insertedIdOf(row, generatedId, partId);
     });
+  }
+
+  /**
+   * The inserted id of `row` (see `_resolveInsertedId`). For a COMPOSITE key
+   * with an AUTO_INCREMENT part, `partId` is what the statement generated for
+   * that part — pass it only when exact (a ONE-row INSERT); a row carrying the
+   * part keeps its own value. An explicit `0` in the part counts as absent:
+   * MySQL generates a value for it (unless `NO_AUTO_VALUE_ON_ZERO`), so only
+   * `partId` knows it — without that the id is `undefined`, never a wrong `0`.
+   */
+  private _insertedIdOf(
+    row: Record<string, unknown>,
+    generatedId: unknown,
+    partId: unknown,
+  ): unknown {
+    const { column, composite } = this._incrementPk();
+    if (!composite || column === undefined) return this._resolveInsertedId(row, generatedId);
+    const source = isZero(row[column]) ? { ...row, [column]: undefined } : row;
+    const part = Number(partId) > 0 ? { [column]: partId } : undefined;
+    return this._resolveInsertedId(source, generatedId, part);
   }
 
   override supportsInsertIgnore(): boolean {
