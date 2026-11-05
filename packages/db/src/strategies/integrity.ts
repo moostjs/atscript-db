@@ -29,7 +29,7 @@ export abstract class IntegrityStrategy {
     fkLookupResolver: TFkLookupResolver | undefined,
     writeTableResolver: TWriteTableResolver | undefined,
     partial?: boolean,
-    excludeTargetTable?: string,
+    excludeTargetTable?: string | ReadonlySet<string>,
   ): Promise<void>;
 
   abstract cascadeBeforeDelete(

@@ -38,11 +38,11 @@ Configure `podId` and raise `lockTtlMs` / `waitTimeoutMs` in multi-pod deploymen
 
 `onError` policy — runs with errored entries (failed index/FK DDL, external-view checks) AND `status: 'refused'` runs are never silent by default:
 
-- `"warn"` (default) — one-line summary + per-entry error/refusal lines via `logger`, **falling back to `console`** when no logger is set. A failing `CREATE UNIQUE INDEX` surfaces even with the `NoopLogger` default. A refused run RETURNS normally — a boot that only checks `status === "synced"` must treat `"refused"` as a failed migration.
+- `"warn"` (default) — one-line summary + per-entry error/refusal lines via `logger`, **falling back to `console`** when no logger is set. A failing `CREATE UNIQUE INDEX` surfaces even with the `NoopLogger` default. A refused or failed run RETURNS normally — a boot must treat `"failed"` and `"refused"` as a failed migration.
 - `"throw"` — same reporting, then throws (after snapshots/lock handling, so retries stay correct; a refusal throws with `N entries refused`).
 - `"silent"` — legacy: inspect `result.entries` for `status: 'error'` / `result.status === 'refused'` yourself.
 
-`TSyncResult.status`: `'up-to-date' | 'synced' | 'synced-by-peer' | 'refused'` (`refused` since 0.1.128). `plan()` status stays `'up-to-date' | 'changes-needed'` — refusals appear there as `error` entries with `refused: true`, so `--dry-run` shows them.
+`TSyncResult.status`: `'up-to-date' | 'synced' | 'failed' | 'synced-by-peer' | 'refused'` (`refused` since 0.1.128; `failed` since 0.1.170 = the run executed but ≥ 1 entry `hasErrors` — DDL failure, unique index over violating rows, blocked drop…; others applied, hash withheld, next sync retries; ≤ 0.1.169 such a run said `'synced'`). `plan()` status stays `'up-to-date' | 'changes-needed'` — refusals appear there as `error` entries with `refused: true`, so `--dry-run` shows them.
 
 ## One-time data steps (0.1.165)
 

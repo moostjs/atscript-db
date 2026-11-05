@@ -10,21 +10,37 @@ Atscript lets you set default values directly in your `.as` schema. Defaults ens
 
 ## Static Defaults
 
-Use `@db.default` to assign a fixed value when a field is not provided at insert time. The argument is always a string — non-string values are parsed as JSON:
+Use `@db.default` to assign a fixed value when a field is not provided at insert time. Write the value as a literal of the field's type — a string, a number or `true` / `false`:
 
 ```atscript
-// String default — used as-is
 @db.default 'pending'
 status: string
 
-// Boolean default — parsed from JSON
-@db.default 'false'
+@db.default false
 isArchived: boolean
 
-// Number default — parsed from JSON
-@db.default '0'
+@db.default 0
 retryCount: number
+
+@db.default 9.99
+price: decimal
 ```
+
+A number or a boolean must fit the field's type: `@db.default true` on a `number` field is a compile error. A string is accepted on any field: on a string field it is the value, on any other field it is parsed as JSON — the only way to write an object or array default, and the form older schemas use for numbers and booleans:
+
+```atscript
+@db.default '0'        // same as @db.default 0
+retryCount: number
+
+@db.default '[]'
+tags: string[]
+```
+
+A literal and its canonical string spelling are the same value and give the same column default — `0` and `'0'`, `-1.5` and `'-1.5'`, `true` and `'true'` — so switching between them does not change the schema hash. Other spellings of a number are the same value but not the same text: `1.50` is stored as `1.5` and `1e3` as `1000`, so moving from `'1.50'` to `1.50` changes the column default's text (and the hash). Write an integer beyond 2⁵³ as a string: a number literal loses its precision. A `decimal` default is filled as its text (`9.99` → `"9.99"`), like any decimal value.
+
+::: info Literal defaults — 0.1.170
+`@db.default 0` and `@db.default true` work since 0.1.170; earlier versions take a string only (`@db.default '0'`).
+:::
 
 ## Generated Defaults
 
@@ -132,7 +148,7 @@ rev: number.int
 
 ## Version Defaults
 
-The [`@db.column.version`](/api/versioning) annotation implies a `0` default — you don't need to add `@db.default '0'` (and you shouldn't try to write the column directly anyway; see [Direct-write rejection](/api/versioning#direct-write-rejection)):
+The [`@db.column.version`](/api/versioning) annotation implies a `0` default — you don't need to add `@db.default 0` (and you shouldn't try to write the column directly anyway; see [Direct-write rejection](/api/versioning#direct-write-rejection)):
 
 ```atscript
 @db.column.version
@@ -167,7 +183,7 @@ await todos.insertOne({ title: "Learn Atscript" });
 // {
 //   id: 1,                    ← @db.default.increment
 //   title: 'Learn Atscript',
-//   completed: false,         ← @db.default 'false' (field is optional with ?)
+//   completed: false,         ← @db.default false (field is optional with ?)
 //   description: null,        ← optional, no default
 //   createdAt: 1710500000000  ← @db.default.now
 // }

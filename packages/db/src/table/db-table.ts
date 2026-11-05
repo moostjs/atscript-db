@@ -38,6 +38,10 @@ import {
   planNestedFromVia,
   batchPatchNestedFrom,
   batchPatchNestedVia,
+  assertNestedWriteShapes,
+  hasNavValue,
+  preflightNestedLevels,
+  preflightNestedWrite,
 } from "../rel/nested-writer";
 import { type DbValidationContext } from "../db-validator-plugin";
 import {
@@ -80,6 +84,7 @@ import type {
   TNestedOwner,
   TIdResolveOptions,
   TTableResolver,
+  TNestedPreflight,
   TWriteOptions,
   TTouchManyOptions,
   TWriteTableResolver,
@@ -101,7 +106,7 @@ import { findAncestorInSet, isEmptyObject, isPlainObject } from "../shared/objec
 import { guardFilter, guardPaths } from "../query/query-guards";
 import { relGuardState } from "../query/relation-filter";
 
-import { resolveDesignType } from "./db-readable";
+import { parseDefaultLiteral, resolveDesignType } from "./db-readable";
 
 export { resolveDesignType };
 
@@ -868,6 +873,12 @@ export class AtscriptDbTable<
         // targets read) BEFORE any write, the TO phase included.
         const host = this as any as TNestedWriterHost;
         const viaLinks = canNest ? await planNestedInsertLinks(host, originals, items) : undefined;
+        // …then those of every deeper level (the root checks the whole tree)
+        // and the FROM children's types and foreign keys. A foreign key to a
+        // table this write creates rows in is checked when those rows exist.
+        if (canNest) {
+          await preflightNestedWrite(host, originals, "insert", { maxDepth, depth, rows: items });
+        }
 
         // Phase 1: Batch TO dependencies (they must exist before we can set our FKs)
         if (canNest) {
@@ -890,13 +901,6 @@ export class AtscriptDbTable<
           this._fkLookupResolver,
           this._writeTableResolver,
         );
-
-        // Pre-validate FROM children (types + FK constraints) before the main insert.
-        // Catches errors early (before the parent is committed), essential for
-        // adapters without transaction support.
-        if (canNest) {
-          await preValidateNestedFrom(host, originals, items);
-        }
 
         // Conflict-ignoring mode: core removes in-batch duplicates (earlier row
         // wins), the adapter reports one slot per remaining row. Rows skipped
@@ -1044,6 +1048,16 @@ export class AtscriptDbTable<
         const nestedPlan = canNest
           ? await planNestedFromVia(host, originals, "replace")
           : undefined;
+        // The FROM children's types and foreign keys, and the checks of every
+        // deeper level — before any write (see insertMany).
+        if (canNest) {
+          await preflightNestedWrite(host, originals, "replace", {
+            maxDepth,
+            depth,
+            owned: nestedPlan?.owned,
+            rows: originals,
+          });
+        }
 
         // Each item's stored row, read once — for its check filter and its
         // nested TO gate.
@@ -1068,11 +1082,6 @@ export class AtscriptDbTable<
           this._fkLookupResolver,
           this._writeTableResolver,
         );
-
-        // Pre-validate FROM children (types + FK constraints) before the main replace
-        if (canNest) {
-          await preValidateNestedFrom(host, originals);
-        }
 
         // Phase 2: Main replace — strip nav fields, reject direct version writes,
         // prepare, replace each (with per-item expectedVersion when supplied).
@@ -1259,6 +1268,13 @@ export class AtscriptDbTable<
         // FROM ownership / VIA link checks BEFORE any write: a rejected nested
         // operation never leaves a partial write, transactions or not.
         const nestedPlan = canNest ? await planNestedFromVia(host, originals, "patch") : undefined;
+        if (canNest) {
+          await preflightNestedWrite(host, originals, "patch", {
+            maxDepth,
+            depth,
+            owned: nestedPlan?.owned,
+          });
+        }
 
         // Phase 1: plan the TO relation patches against the STORED foreign keys
         // (applied after the main patch, only for the rows it matched).
@@ -2556,30 +2572,17 @@ export class AtscriptDbTable<
    */
   private _primitiveDefaults?: Map<string, unknown>;
 
+  /**
+   * The JS value for a `@db.default` literal — see {@link parseDefaultLiteral}:
+   * the same value the SQL adapters put into the DDL `DEFAULT` clause.
+   */
   private _valueDefault(field: string, literal: string): unknown {
     const cache = (this._primitiveDefaults ??= new Map());
     if (cache.has(field)) return cache.get(field);
-    const value = this._parseValueDefault(field, literal);
+    const fieldType = this._meta.flatMap?.get(field);
+    const value = parseDefaultLiteral(fieldType ? resolveDesignType(fieldType) : "string", literal);
     if (value === null || typeof value !== "object") cache.set(field, value);
     return value;
-  }
-
-  /**
-   * The JS value for a `@db.default 'literal'`: strings (including unions of
-   * string literals) are used as-is, every other design type is parsed as
-   * JSON — the same value the SQL adapters put into the DDL `DEFAULT` clause.
-   * A literal that is not valid JSON falls back to the raw string so the
-   * validator reports it against the field instead of a bare `SyntaxError`.
-   */
-  private _parseValueDefault(field: string, literal: string): unknown {
-    const fieldType = this._meta.flatMap?.get(field);
-    const designType = fieldType ? resolveDesignType(fieldType) : "string";
-    if (designType === "string") return literal;
-    try {
-      return JSON.parse(literal) as unknown;
-    } catch {
-      return literal;
-    }
   }
 
   /**
@@ -2717,11 +2720,11 @@ export class AtscriptDbTable<
    *
    * @internal Nested-write plumbing — its FK step is a no-op on native-FK
    * adapters. To validate rows yourself, use {@link validateRows}.
-   * @param opts.excludeFkTargetTable - Skip FK validation to this table (the parent).
+   * @param opts.excludeFkTargetTable - Skip FK validation to this table (the parent), or to each of these tables.
    */
   public async preValidateItems(
     items: Array<Record<string, unknown>>,
-    opts?: { excludeFkTargetTable?: string },
+    opts?: { excludeFkTargetTable?: string | ReadonlySet<string> },
   ): Promise<void> {
     this._ensureBuilt();
 
@@ -2744,6 +2747,62 @@ export class AtscriptDbTable<
       false,
       opts?.excludeFkTargetTable,
     );
+  }
+
+  /**
+   * @internal The checks of one nested level below a write's root — see
+   * {@link AtscriptDbWritable._preflightNested}: the checks this table's own
+   * `mode` write of `entries` would make before writing (`"links"`) or before
+   * its main write (`"fks"`), then the levels below it.
+   */
+  public async _preflightNested(
+    entries: Array<Record<string, unknown>>,
+    opts: TNestedPreflight,
+  ): Promise<void> {
+    this._ensureBuilt();
+    const { mode, stage, maxDepth, depth } = opts;
+    const carriesNav = [...this._meta.navFields].some((nav) => hasNavValue(entries, nav));
+    if (!carriesNav && !(stage === "fks" && opts.checkFks)) return;
+    const canNest = depth < maxDepth && this._writeTableResolver !== undefined;
+    const host = this as any as TNestedWriterHost;
+    if (stage === "links" && !canNest) {
+      checkDepthOverflow(entries, maxDepth, this._meta);
+      return;
+    }
+    if (mode === "insert") {
+      const now = Date.now();
+      const rows = entries.map((e) => this._applyDefaults(_shallowPrunedClone(e), now));
+      if (stage === "links") {
+        await planNestedInsertLinks(host, entries, rows, opts.excludeFkTargetTables);
+      } else {
+        if (opts.checkFks) {
+          await this._integrity.validateForeignKeys(
+            rows,
+            this._meta,
+            this._fkLookupResolver,
+            this._writeTableResolver,
+            false,
+            opts.excludeFkTargetTables,
+          );
+        }
+        if (canNest && carriesNav) {
+          await preValidateNestedFrom(host, entries, rows, opts.excludeFkTargetTables);
+        }
+      }
+    } else if (stage === "links") {
+      assertNestedWriteShapes(host, entries, mode);
+    }
+    if (canNest && carriesNav) {
+      await preflightNestedLevels(
+        host,
+        entries,
+        mode,
+        stage,
+        maxDepth,
+        depth,
+        opts.excludeFkTargetTables,
+      );
+    }
   }
 
   // ── Internal: validator building ──────────────────────────────────────────

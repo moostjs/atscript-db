@@ -23,6 +23,8 @@ plugins: [ts(), dbPlugin(), MongoPlugin()];
 | `@db.mongo.search.text`         | `analyzer?: string, indexName?: string`                                                                                        | Include field in a named static Atlas Search index as a **word-matched** (`string`) field.                                                                                                                              |
 | `@db.mongo.search.autocomplete` | `indexName?: string, tokenization?: string, minGrams?: number, maxGrams?: number, foldDiacritics?: boolean, analyzer?: string` | Include field as a **prefix/typeahead** (`autocomplete`) field, double-mapped as `string` so exact-word hits still rank. `tokenization`: `edgeGram` (prefix, default) / `nGram` (substring) / `rightEdgeGram` (suffix). |
 
+`analyzer` (every search annotation): any Atlas analyzer name — completion lists the built-in `lucene.*` ones, the list is not closed (0.1.170; before: 14 names, others a compile error). An analyzer Atlas refuses fails the schema sync as an index error (0.1.170; before: every search-index create/update failure was swallowed). No Atlas Search (standalone server: `listSearchIndexes` fails) → search indexes skipped, as before.
+
 ### Search behavior is declared, not query-time
 
 The index's matching behavior is **locked in the annotation** — that is how Atlas itself works (the tokenization/analyzer/fuzzy are baked into the index at build time). A `$search` request just sends a term; the index runs the behavior you declared:

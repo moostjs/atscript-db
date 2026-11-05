@@ -139,7 +139,7 @@ export interface Todo {
 
     description?: string
 
-    @db.default 'false'
+    @db.default false
     completed?: boolean
 
     @db.default.now
@@ -268,7 +268,7 @@ export interface Todo {
     title: string
     description?: string
 
-    @db.default 'false'
+    @db.default false
     completed?: boolean
 
     @db.default.now

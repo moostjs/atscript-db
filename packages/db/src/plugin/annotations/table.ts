@@ -3,6 +3,7 @@ import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import type { SemanticNode } from "@atscript/core";
 import { isInterface, isStructure } from "@atscript/core";
+import { inheritedForeignRelations } from "../../shared/annotation-utils";
 import { hasAnyViewAnnotation } from "../../shared/validation-utils";
 
 export const dbTableAnnotations: TAnnotationsTree = {
@@ -26,7 +27,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
         type: "string",
         description: "Table/collection name. If omitted, derived from interface name.",
       },
-      validate(token, _args, _doc) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
         const owner = token.parentNode!;
         // VW6: Cannot be both @db.table and @db.view
@@ -37,6 +38,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
             range: token.range,
           });
         }
+        errors.push(...inheritedForeignRelations(token, doc));
         return errors;
       },
     }),

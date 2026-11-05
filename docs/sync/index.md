@@ -166,16 +166,17 @@ Safe mode does not prevent all data loss scenarios. Column renames are still app
 
 ## Sync Result Statuses
 
-The `run()` method returns a result object with one of four statuses:
+The `run()` method returns a result object with one of five statuses:
 
-| Status           | Meaning                                                                                                                                              |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `up-to-date`     | Schema hash matched — no introspection or DDL was performed                                                                                          |
-| `synced`         | Changes were detected and applied (inspect `entries` — an `error` entry means that table did not converge and the hash was withheld)                 |
-| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock (never for a `force` run)                                                |
-| `refused`        | A [pre-flight refusal](#pre-flight-refusals) stopped the run (since 0.1.128); `entries` is the full plan with the refused entries as `error` entries |
+| Status           | Meaning                                                                                                                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `up-to-date`     | Schema hash matched — no introspection or DDL was performed                                                                                                                                                        |
+| `synced`         | Changes were detected and applied — every entry landed                                                                                                                                                             |
+| `failed`         | The run applied what it could, but at least one entry is an `error` entry (that table did not converge); the hash was withheld, so the next sync retries it (since 0.1.170 — before, such a run reported `synced`) |
+| `synced-by-peer` | Another instance completed the sync while this one was waiting for the lock (never for a `force` run)                                                                                                              |
+| `refused`        | A [pre-flight refusal](#pre-flight-refusals) stopped the run (since 0.1.128); `entries` is the full plan with the refused entries as `error` entries                                                               |
 
-Both `up-to-date` and `synced-by-peer` are success statuses that indicate no work was needed by the current instance. The `synced` status includes a list of `SyncEntry` objects detailing what was changed. A `refused` run follows the `onError` policy: `"warn"` (default) logs every refusal at error level and returns normally, `"throw"` throws, `"silent"` returns — a boot script that only checks `status === "synced"` should treat `refused` as a failed migration.
+Both `up-to-date` and `synced-by-peer` are success statuses that indicate no work was needed by the current instance. The `synced` status includes a list of `SyncEntry` objects detailing what was changed. A `refused` run follows the `onError` policy: `"warn"` (default) logs every refusal at error level and returns normally, `"throw"` throws, `"silent"` returns — a `failed` run follows the same policy. A boot script that checks `status` should treat both `failed` and `refused` as a failed migration.
 
 ## Next Steps
 

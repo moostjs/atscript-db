@@ -38,7 +38,7 @@ export interface Todo {
 
     description?: string
 
-    @db.default 'false'
+    @db.default false
     completed: boolean
 
     @db.default 'medium'

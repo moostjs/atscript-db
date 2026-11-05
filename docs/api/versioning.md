@@ -368,7 +368,7 @@ This is a [locked design decision](#alternatives-considered). A single `expected
 
 ### Version on insert
 
-`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults). You do not need to add `@db.default '0'` explicitly, and you do not need to send the field: the shared validator treats it as server-managed (like `@db.default*`) on insert and replace, at any nesting depth — so nested inserts of versioned related rows omit it too (since 0.1.128). A `version` value supplied on insert is accepted as a plain number.
+`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults). You do not need to add `@db.default 0` explicitly, and you do not need to send the field: the shared validator treats it as server-managed (like `@db.default*`) on insert and replace, at any nesting depth — so nested inserts of versioned related rows omit it too (since 0.1.128). A `version` value supplied on insert is accepted as a plain number.
 
 ### Empty patches
 

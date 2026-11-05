@@ -8,11 +8,12 @@ import type {
   AtscriptDbWritable,
   TDbForeignKey,
   TDbRelation,
+  TNestedPreflight,
   TWriteTableResolver,
 } from "../types";
 import type { TableMetadata } from "../table/table-metadata";
 import { insertedIdPart, keyString, pkTupleKey, sameKey } from "../shared/keys";
-import { resolveRelationTargetTable } from "./relation-helpers";
+import { resolveRelationTargetTable, tableNameOf } from "./relation-helpers";
 import { wrapNestedError } from "../table/error-utils";
 
 // ── Host interface ──────────────────────────────────────────────────────────
@@ -123,14 +124,82 @@ function resolveViaRelation(
   };
 }
 
+/**
+ * A FROM relation's child table and its foreign key back to THIS table, or
+ * `INVALID_QUERY` when `items` carry data for it: nested data a write cannot
+ * link is refused, never dropped — e.g. a relation a table inherits
+ * (`extends`) from the table the child's foreign key references. `undefined`
+ * when the relation cannot be written and `items` carry nothing for it (an
+ * empty array asks nothing of it).
+ */
+function requireFromRelation(
+  host: TNestedWriterHost,
+  relation: TDbRelation,
+  navField: string,
+  items: Array<Record<string, unknown>>,
+): { targetTable: TWritableTable; remoteFK: TDbForeignKey } | undefined {
+  const from = resolveFromRelation(host, relation);
+  if (from?.remoteFK) return { targetTable: from.targetTable, remoteFK: from.remoteFK };
+  if (!hasNavData(items, navField)) return undefined;
+  const target = tableNameOf(relation.targetType());
+  throw invalidQuery(
+    navField,
+    from
+      ? `Cannot write "${navField}" — "${target}" has no @db.rel.FK referencing "${host.tableName}"`
+      : `Cannot write "${navField}" — table "${target}" is not available for writes here`,
+  );
+}
+
+/** {@link resolveViaRelation}, or `INVALID_QUERY` / `undefined` as {@link requireFromRelation}. */
+function requireViaRelation(
+  host: TNestedWriterHost,
+  relation: TDbRelation,
+  navField: string,
+  items: Array<Record<string, unknown>>,
+): TViaRelation | undefined {
+  const via = resolveViaRelation(host, relation, navField);
+  if (via || !hasNavData(items, navField)) return via;
+  const target = tableNameOf(relation.targetType());
+  const junctionName = relation.viaType ? tableNameOf(relation.viaType()) : "";
+  const targetTable = host._writeTableResolver?.(relation.targetType());
+  const junction = relation.viaType && host._writeTableResolver?.(relation.viaType());
+  let why: string;
+  if (!targetTable || !junction) {
+    why = `table "${targetTable ? junctionName : target}" is not available for writes here`;
+  } else if (!host._findRemoteFK(junction, host.tableName)) {
+    why = `junction "${junctionName}" has no @db.rel.FK referencing "${host.tableName}"`;
+  } else if (!host._findRemoteFK(junction, target)) {
+    why = `junction "${junctionName}" has no @db.rel.FK referencing "${target}"`;
+  } else {
+    why = `"${target}" has no primary key`;
+  }
+  throw invalidQuery(navField, `Cannot write "${navField}" — ${why}`);
+}
+
 /** The parent's single primary-key field — nested FROM / VIA writes need one. */
 function parentPKFieldOf(host: TNestedWriterHost): string | undefined {
   return host._meta.primaryKeys.length === 1 ? host._meta.primaryKeys[0] : undefined;
 }
 
 /** Whether any item carries a (non-null) value for `navField` — a phase's cheap skip. */
-function hasNavValue(items: Array<Record<string, unknown>>, navField: string): boolean {
+export function hasNavValue(items: Array<Record<string, unknown>>, navField: string): boolean {
   return items.some((item) => item[navField] !== undefined && item[navField] !== null);
+}
+
+/**
+ * Whether any item carries entries for `navField`: a non-empty array, an
+ * object, or a patch operator with entries. `[]` / `{ $insert: [] }` asks no
+ * row of the relation to be written.
+ */
+function hasNavData(items: Array<Record<string, unknown>>, navField: string): boolean {
+  return items.some((item) => {
+    const value = item[navField];
+    if (value === undefined || value === null) return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value !== "object") return true;
+    const ops = Object.entries(value).filter(([key]) => key.startsWith("$"));
+    return ops.length === 0 || ops.some(([, e]) => !Array.isArray(e) || e.length > 0);
+  });
 }
 
 /**
@@ -179,6 +248,117 @@ function isExistingTarget(rec: Record<string, unknown>, targetPK: readonly strin
   return targetPK.every((f) => rec[f] !== undefined && rec[f] !== null);
 }
 
+/** The table name of a related table (an `AtscriptDbTable`). */
+function writableTableName(table: TWritableTable): string {
+  return (table as unknown as { tableName: string }).tableName;
+}
+
+/** Whether a key part of `rec` is a string — the only keys a collation can match loosely. */
+function hasStringKey(rec: Record<string, unknown>, pkFields: readonly string[]): boolean {
+  return pkFields.some((f) => typeof rec[f] === "string");
+}
+
+/**
+ * The stored row the DATABASE matches to each of `entries`' keys, for entries
+ * an exact comparison of the keys a batch read returned did not pair with a
+ * row: under a case-insensitive collation (MySQL's default, `@db.column.collate
+ * 'nocase'`) `"ABC"` names the stored `"abc"`. One read for all of them; a
+ * read per entry only when it finds rows. String keys only.
+ */
+async function rowsMatchedByKey(
+  table: TWritableTable,
+  entries: Array<Record<string, unknown>>,
+  pkFields: readonly string[],
+  select: string[],
+  scope?: Record<string, unknown>,
+): Promise<Map<Record<string, unknown>, Record<string, unknown>>> {
+  const out = new Map<Record<string, unknown>, Record<string, unknown>>();
+  const missed = entries.filter((rec) => hasStringKey(rec, pkFields));
+  if (missed.length === 0) return out;
+  const controls = { $select: select };
+  const scoped = (filter: FilterExpr): FilterExpr =>
+    scope ? ({ $and: [scope, filter] } as FilterExpr) : filter;
+  const found = await table.findMany({
+    filter: scoped(orFilter(missed.map((rec) => keyFilter(rec, pkFields)))),
+    controls,
+  });
+  if (found.length === 0) return out;
+  for (const rec of missed) {
+    const row =
+      missed.length === 1
+        ? found[0]
+        : await table.findOne({ filter: scoped(keyFilter(rec, pkFields)), controls });
+    if (row) out.set(rec, row);
+  }
+  return out;
+}
+
+/**
+ * The stored row each of `entries`' keys names (within `scope`, when given):
+ * one batch read compared exactly, then {@link rowsMatchedByKey} for the
+ * entries it did not pair. Entries naming no row are absent.
+ */
+async function storedRowsByKey(
+  table: TWritableTable,
+  entries: Array<Record<string, unknown>>,
+  pkFields: readonly string[],
+  select: string[],
+  scope?: Record<string, unknown>,
+): Promise<Map<Record<string, unknown>, Record<string, unknown>>> {
+  const out = new Map<Record<string, unknown>, Record<string, unknown>>();
+  if (entries.length === 0) return out;
+  const filter = orFilter(entries.map((rec) => keyFilter(rec, pkFields)));
+  const rows = await table.findMany({
+    filter: scope ? ({ $and: [scope, filter] } as FilterExpr) : filter,
+    controls: { $select: select },
+  });
+  const byKey = new Map(rows.map((row) => [pkTupleKey(row, pkFields), row]));
+  const missed: Array<Record<string, unknown>> = [];
+  for (const rec of entries) {
+    const row = byKey.get(pkTupleKey(rec, pkFields));
+    if (row) out.set(rec, row);
+    else missed.push(rec);
+  }
+  for (const [rec, row] of await rowsMatchedByKey(table, missed, pkFields, select, scope)) {
+    out.set(rec, row);
+  }
+  return out;
+}
+
+/**
+ * Whether `value` names the same `field` value as the `stored` one in the
+ * database's own comparison (a case-insensitive collation: `"ABC"` = `"abc"`).
+ * Strings only; `field` undefined (a composite key) → `false`.
+ */
+async function sameStoredKey(
+  table: TWritableTable,
+  field: string | undefined,
+  stored: unknown,
+  value: unknown,
+): Promise<boolean> {
+  return (
+    field !== undefined &&
+    typeof stored === "string" &&
+    typeof value === "string" &&
+    storedWith(table, { [field]: stored }, field, value)
+  );
+}
+
+/**
+ * Whether the database holds a row matching `filter` AND `field = value`, in
+ * its own comparison. Both constraints apply even when `filter` names `field`
+ * too (`{ code: stored }` AND `{ code: value }`: the same row under the
+ * column's collation) — never one overwriting the other.
+ */
+async function storedWith(
+  table: TWritableTable,
+  filter: Record<string, unknown>,
+  field: string,
+  value: unknown,
+): Promise<boolean> {
+  return (await table.count({ filter: { $and: [filter, { [field]: value }] } })) > 0;
+}
+
 /**
  * The link value of each EXISTING target among `entries` (see
  * {@link isExistingTarget}): the field the junction references, read from the
@@ -197,21 +377,26 @@ async function resolveViaLinkValues(
     (rec) => rec !== null && typeof rec === "object" && isExistingTarget(rec, targetPK),
   );
   if (existing.length === 0) return;
-  const rows = await targetTable.findMany({
-    filter: orFilter(existing.map((rec) => keyFilter(rec, targetPK))),
-    controls: { $select: [...new Set([...targetPK, targetKeyField])] },
-  });
-  const stored = new Map(rows.map((row) => [pkTupleKey(row, targetPK), row[targetKeyField]]));
+  const select = [...new Set([...targetPK, targetKeyField])];
+  const stored = await storedRowsByKey(targetTable, existing, targetPK, select);
   for (const rec of existing) {
-    const key = pkTupleKey(rec, targetPK);
-    if (!stored.has(key)) {
+    const row = stored.get(rec);
+    if (!row) {
       throw new DbError("FK_VIOLATION", [
         { path: navField, message: `References a non-existent record in "${navField}"` },
       ]);
     }
-    const value = requireKey(stored.get(key), navField, targetKeyField);
+    const value = requireKey(row[targetKeyField], navField, targetKeyField);
     const own = rec[targetKeyField];
-    if (own !== undefined && own !== null && !sameKey(own, value)) {
+    if (
+      own !== undefined &&
+      own !== null &&
+      !sameKey(own, value) &&
+      !(
+        typeof own === "string" &&
+        (await storedWith(targetTable, keyFilter(row, targetPK), targetKeyField, own))
+      )
+    ) {
       throw invalidQuery(
         `${navField}.${targetKeyField}`,
         `"${targetKeyField}" does not match the stored row the entry's key names`,
@@ -305,15 +490,18 @@ export async function preValidateNestedFrom(
   host: TNestedWriterHost,
   originals: Array<Record<string, unknown>>,
   rows: Array<Record<string, unknown>> = originals,
+  excludeFkTargetTables?: ReadonlySet<string>,
 ): Promise<void> {
+  // Foreign keys to the parent — and to every table the same write creates
+  // rows in (checked when those rows exist) — are not checked here.
+  const excluded = new Set(excludeFkTargetTables ?? []).add(host.tableName);
   for (const [navField, relation] of host._meta.relations) {
     if (relation.direction !== "from" || !hasNavValue(originals, navField)) {
       continue;
     }
-    const from = resolveFromRelation(host, relation);
-    if (!from) {
-      continue;
-    }
+    const from = requireFromRelation(host, relation, navField, originals);
+    if (!from) continue;
+    const { fields, targetFields } = from.remoteFK;
 
     const allChildren: Array<Record<string, unknown>> = [];
     for (let i = 0; i < originals.length; i++) {
@@ -323,14 +511,15 @@ export async function preValidateNestedFrom(
       }
       for (const child of children) {
         const childData = { ...(child as Record<string, unknown>) };
-        if (from.remoteFK) {
-          // The written parent's value (overwritten after the insert anyway),
-          // else a placeholder: a generated key is not known yet.
-          const { fields, targetFields } = from.remoteFK;
-          fields.forEach((field, k) => {
-            childData[field] = rows[i]?.[targetFields[k]!] ?? 0;
-          });
-        }
+        // The written parent's value (overwritten after the insert anyway);
+        // a key the database generates is not known yet — the field is left
+        // out (a foreign key may be absent here), never a stand-in value of
+        // another type.
+        fields.forEach((field, k) => {
+          const value = rows[i]?.[targetFields[k]!];
+          if (value === undefined || value === null) delete childData[field];
+          else childData[field] = value;
+        });
         allChildren.push(childData);
       }
     }
@@ -339,7 +528,7 @@ export async function preValidateNestedFrom(
     }
 
     await wrapNestedError(navField, () =>
-      from.targetTable.preValidateItems(allChildren, { excludeFkTargetTable: host.tableName }),
+      from.targetTable.preValidateItems(allChildren, { excludeFkTargetTable: excluded }),
     );
   }
 }
@@ -411,11 +600,9 @@ export async function batchInsertNestedFrom(
     if (relation.direction !== "from" || !hasNavValue(originals, navField)) {
       continue;
     }
-    const from = resolveFromRelation(host, relation);
-    const remoteFK = from?.remoteFK;
-    if (!from || !remoteFK) {
-      continue;
-    }
+    const from = requireFromRelation(host, relation, navField, originals);
+    if (!from) continue;
+    const { remoteFK } = from;
 
     const allChildren: Array<Record<string, unknown>> = [];
     const parentPK = host._meta.primaryKeys;
@@ -463,10 +650,8 @@ export async function batchInsertNestedVia(
     if (relation.direction !== "via" || !hasNavValue(originals, navField)) {
       continue;
     }
-    const via = resolveViaRelation(host, relation, navField);
-    if (!via) {
-      continue;
-    }
+    const via = requireViaRelation(host, relation, navField, originals);
+    if (!via) continue;
 
     for (let i = 0; i < originals.length; i++) {
       const targets = originals[i]![navField];
@@ -501,6 +686,7 @@ export async function planNestedInsertLinks(
   host: TNestedWriterHost,
   originals: Array<Record<string, unknown>>,
   rows: Array<Record<string, unknown>>,
+  excludeTargetTables?: ReadonlySet<string>,
 ): Promise<TViaLinkValues> {
   const pk = host._meta.primaryKeys;
   const viaLinks: TViaLinkValues = new Map();
@@ -540,12 +726,14 @@ export async function planNestedInsertLinks(
     let referenced: readonly string[] | undefined;
     let via: TViaRelation | undefined;
     if (relation.direction === "from") {
-      referenced = resolveFromRelation(host, relation)?.remoteFK?.targetFields;
+      const from = requireFromRelation(host, relation, navField, originals);
+      if (!from) continue;
+      referenced = from.remoteFK.targetFields;
     } else {
-      via = resolveViaRelation(host, relation, navField);
-      referenced = via ? [via.thisKeyField] : undefined;
+      via = requireViaRelation(host, relation, navField, originals);
+      if (!via) continue;
+      referenced = [via.thisKeyField];
     }
-    if (!referenced) continue;
     const entries: unknown[] = [];
     for (let i = 0; i < originals.length; i++) {
       const nested = originals[i]![navField];
@@ -556,12 +744,38 @@ export async function planNestedInsertLinks(
       }
       entries.push(...nested);
     }
-    if (via) await resolveViaLinkValues(via, entries, navField, viaLinks);
+    // Existing targets are read — except in a table the same write creates
+    // rows in (the levels below a root, `excludeTargetTables`): the target
+    // may be one of them, read when this level is written.
+    if (via && !excludeTargetTables?.has(writableTableName(via.targetTable))) {
+      await resolveViaLinkValues(via, entries, navField, viaLinks);
+    }
   }
   return viaLinks;
 }
 
 // ── Exported: batch nested replace ──────────────────────────────────────────
+
+/**
+ * Every referenced field must be in a replaced TO object (a replace would
+ * otherwise reset or regenerate it): refused before any write.
+ */
+function assertReplacedToKeys(
+  navField: string,
+  targetFields: readonly string[],
+  parents: Array<Record<string, unknown>>,
+): void {
+  for (const parent of parents) {
+    for (const target of targetFields) {
+      if (parent[target] === undefined || parent[target] === null) {
+        throw invalidQuery(
+          `${navField}.${target}`,
+          `A replaced "${navField}" must carry "${target}" — the foreign key links by it`,
+        );
+      }
+    }
+  }
+}
 
 /**
  * Batch-replaces TO dependencies before the main replace.
@@ -590,18 +804,7 @@ export async function batchReplaceNestedTo(
     if (parents.length === 0) {
       continue;
     }
-    // Every referenced field must be in the replaced object (a replace would
-    // otherwise reset or regenerate it): refused before any write.
-    for (const parent of parents) {
-      for (const target of to.fk.targetFields) {
-        if (parent[target] === undefined || parent[target] === null) {
-          throw invalidQuery(
-            `${navField}.${target}`,
-            `A replaced "${navField}" must carry "${target}" — the foreign key links by it`,
-          );
-        }
-      }
-    }
+    assertReplacedToKeys(navField, to.fk.targetFields, parents);
     work.push({ navField, to, parents, sourceIndices });
   }
 
@@ -683,10 +886,8 @@ export async function batchReplaceNestedVia(
     if (relation.direction !== "via" || !hasNavValue(originals, navField)) {
       continue;
     }
-    const via = resolveViaRelation(host, relation, navField);
-    if (!via) {
-      continue;
-    }
+    const via = requireViaRelation(host, relation, navField, originals);
+    if (!via) continue;
     for (const original of originals) {
       const targets = original[navField];
       const parentPK = original[parentPKField];
@@ -706,20 +907,26 @@ export async function batchReplaceNestedVia(
  * composite VIA target) — cannot be written that way: `INVALID_QUERY` before
  * any write, never a primary key written into another field, never a silent skip.
  */
-function assertPkLinked(host: TNestedWriterHost, relation: TDbRelation, navField: string): void {
+function assertPkLinked(
+  host: TNestedWriterHost,
+  relation: TDbRelation,
+  navField: string,
+  items: Array<Record<string, unknown>>,
+): void {
   const pkField = parentPKFieldOf(host);
   const byParentPk = (field: string | undefined) => pkField !== undefined && field === pkField;
   let linked = true;
   if (relation.direction === "from") {
-    const remoteFK = resolveFromRelation(host, relation)?.remoteFK;
-    linked = !remoteFK || (remoteFK.fields.length === 1 && byParentPk(remoteFK.targetFields[0]));
+    const from = requireFromRelation(host, relation, navField, items);
+    if (!from) return;
+    linked = from.remoteFK.fields.length === 1 && byParentPk(from.remoteFK.targetFields[0]);
   } else {
-    const via = resolveViaRelation(host, relation, navField);
+    const via = requireViaRelation(host, relation, navField, items);
+    if (!via) return;
     linked =
-      !via ||
-      (byParentPk(via.thisKeyField) &&
-        via.targetPK.length === 1 &&
-        via.targetKeyField === via.targetPKField);
+      byParentPk(via.thisKeyField) &&
+      via.targetPK.length === 1 &&
+      via.targetKeyField === via.targetPKField;
   }
   if (!linked) {
     throw invalidQuery(
@@ -771,7 +978,7 @@ export async function planNestedFromVia(
   const viaLinks: TViaLinkValues = new Map();
   for (const [navField, relation] of host._meta.relations) {
     if (relation.direction !== "to" && hasNavValue(originals, navField)) {
-      assertPkLinked(host, relation, navField);
+      assertPkLinked(host, relation, navField, originals);
     }
   }
   const parentPKField = parentPKFieldOf(host);
@@ -815,6 +1022,222 @@ export async function planNestedFromVia(
     await resolveViaLinkValues(via, linking, navField, viaLinks);
   }
   return { owned, viaLinks };
+}
+
+// ── Exported: checks of the levels below the root ───────────────────────────
+
+/** One related table's share of the next level: the entries it inserts / replaces / patches. */
+interface TNestedLevelSet {
+  navField: string;
+  direction: TDbRelation["direction"];
+  table: TWritableTable;
+  insert: Array<Record<string, unknown>>;
+  replace: Array<Record<string, unknown>>;
+  patch: Array<Record<string, unknown>>;
+}
+
+/** The object entries of an operator list. */
+function records(entries: unknown[] | undefined): Array<Record<string, unknown>> {
+  return (entries ?? []).filter(
+    (e): e is Record<string, unknown> => e !== null && typeof e === "object",
+  );
+}
+
+/**
+ * What a `mode` write of `originals` hands each related table one level down
+ * — the split its apply phases make: TO objects are written in `mode`; FROM
+ * children carrying their primary key are replaced (`$replace`, PUT) or
+ * patched (`$update`, `$upsert`), the rest inserted (every child of an
+ * insert, `$insert`); VIA targets likewise, except that an entry naming an
+ * existing target is only linked (replaced when it carries other fields).
+ */
+function nestedLevelSets(
+  host: TNestedWriterHost,
+  originals: Array<Record<string, unknown>>,
+  mode: TNestedPreflight["mode"],
+  owned?: TNestedFromViaPlan["owned"],
+): TNestedLevelSet[] {
+  const sets: TNestedLevelSet[] = [];
+  for (const [navField, relation] of host._meta.relations) {
+    if (!hasNavValue(originals, navField)) continue;
+    const { direction } = relation;
+    const table =
+      direction === "to"
+        ? resolveToRelation(host, relation)?.targetTable
+        : direction === "from"
+          ? requireFromRelation(host, relation, navField, originals)?.targetTable
+          : requireViaRelation(host, relation, navField, originals)?.targetTable;
+    if (!table) continue;
+    const set: TNestedLevelSet = { navField, direction, table, insert: [], replace: [], patch: [] };
+    sets.push(set);
+    if (direction === "to") {
+      set[mode].push(...nestedToObjects(originals, navField).parents);
+      continue;
+    }
+    const pk = table.primaryKeys;
+    const keyed = (rec: Record<string, unknown>) =>
+      direction === "from" ? isKeyed(rec, pk) : isExistingTarget(rec, pk);
+    // A keyed FROM child the plan did not find under its parent is inserted
+    // (see fromReplace); without a plan (a deeper level) it counts as stored.
+    const ownedKeys = direction === "from" ? owned?.get(navField) : undefined;
+    const stored = (rec: Record<string, unknown>) =>
+      direction !== "from" || owned === undefined || (ownedKeys?.has(pkTupleKey(rec, pk)) ?? false);
+    for (const original of originals) {
+      const value = original[navField];
+      if (value === undefined || value === null) continue;
+      const ops: ReturnType<typeof extractNavPatchOps> =
+        mode === "insert" && Array.isArray(value)
+          ? { insert: value as unknown[] }
+          : extractNavPatchOps(value);
+      for (const rec of records(ops.replace)) {
+        if (!keyed(rec) || !stored(rec)) set.insert.push(rec);
+        else if (direction === "from" || Object.keys(rec).some((k) => !pk.includes(k))) {
+          set.replace.push(rec);
+        }
+      }
+      for (const rec of records(ops.insert)) {
+        if (direction === "from" || !keyed(rec)) set.insert.push(rec);
+      }
+      set.patch.push(...records(ops.update));
+      for (const rec of records(ops.upsert)) {
+        (keyed(rec) && stored(rec) ? set.patch : set.insert).push(rec);
+      }
+    }
+  }
+  return sets;
+}
+
+/**
+ * The relation shapes a replace / patch of `entries` can write (see
+ * {@link assertPkLinked}; a replaced TO object carries the field its foreign
+ * key references) — the checks of {@link planNestedFromVia} /
+ * {@link batchReplaceNestedTo} that need no read.
+ */
+export function assertNestedWriteShapes(
+  host: TNestedWriterHost,
+  entries: Array<Record<string, unknown>>,
+  mode: "replace" | "patch",
+): void {
+  for (const [navField, relation] of host._meta.relations) {
+    if (!hasNavValue(entries, navField)) continue;
+    if (relation.direction !== "to") {
+      assertPkLinked(host, relation, navField, entries);
+    } else if (mode === "replace") {
+      const to = resolveToRelation(host, relation);
+      if (to)
+        assertReplacedToKeys(
+          navField,
+          to.fk.targetFields,
+          nestedToObjects(entries, navField).parents,
+        );
+    }
+  }
+}
+
+/**
+ * The checks of every nested level BELOW `host`'s own (which its write makes
+ * itself), made by the root write before it writes — so a refused level two
+ * or three deep never leaves the levels above it written, transactions or
+ * not. Each related table checks the entries it will write one level down
+ * (`_preflightNested`) and recurses. `stage` — see {@link TNestedPreflight}.
+ */
+export async function preflightNestedLevels(
+  host: TNestedWriterHost,
+  originals: Array<Record<string, unknown>>,
+  mode: TNestedPreflight["mode"],
+  stage: TNestedPreflight["stage"],
+  maxDepth: number,
+  depth: number,
+  excludeFkTargetTables?: ReadonlySet<string>,
+  owned?: TNestedFromViaPlan["owned"],
+): Promise<void> {
+  for (const set of nestedLevelSets(host, originals, mode, owned)) {
+    const { table } = set;
+    if (!table._preflightNested) continue;
+    const opts = { stage, maxDepth, depth: depth + 1, excludeFkTargetTables };
+    const run = async () => {
+      if (set.insert.length > 0) {
+        // A TO target the root inserts first checks its own keys before writing.
+        const checkFks = set.direction === "via" || (set.direction === "to" && depth > 0);
+        await table._preflightNested!(set.insert, { ...opts, mode: "insert", checkFks });
+      }
+      if (set.replace.length > 0) {
+        await table._preflightNested!(set.replace, { ...opts, mode: "replace" });
+      }
+      if (set.patch.length > 0) {
+        await table._preflightNested!(set.patch, { ...opts, mode: "patch" });
+      }
+    };
+    await (set.direction === "from" ? wrapNestedError(set.navField, run) : run());
+  }
+}
+
+/**
+ * `host`'s table and every table a `mode` write of `originals` writes rows in
+ * below it, as far as `maxDepth` reaches. The checks of the levels below the
+ * root ({@link preflightNestedLevels}) skip foreign keys to these tables:
+ * the rows such a key may name do not exist before the write — each level
+ * checks them when it writes, after the levels above it.
+ */
+function nestedWriteTables(
+  host: TNestedWriterHost,
+  originals: Array<Record<string, unknown>>,
+  mode: TNestedPreflight["mode"],
+  maxDepth: number,
+  depth: number,
+  owned?: TNestedFromViaPlan["owned"],
+): Set<string> {
+  const tables = new Set<string>([host.tableName]);
+  const visit = (
+    level: TNestedWriterHost,
+    items: Array<Record<string, unknown>>,
+    levelMode: TNestedPreflight["mode"],
+    levelDepth: number,
+    levelOwned?: TNestedFromViaPlan["owned"],
+  ) => {
+    if (levelDepth >= maxDepth) return;
+    for (const set of nestedLevelSets(level, items, levelMode, levelOwned)) {
+      set.table.getMetadata(); // builds the related table's metadata
+      const next = set.table as unknown as TNestedWriterHost;
+      for (const kind of ["insert", "replace", "patch"] as const) {
+        if (set[kind].length === 0) continue;
+        tables.add(next.tableName);
+        visit(next, set[kind], kind, levelDepth + 1);
+      }
+    }
+  };
+  visit(host, originals, mode, depth, owned);
+  return tables;
+}
+
+/**
+ * A `mode` write's checks of its nested data after its own plan, before it
+ * writes: at the root, every level below it ({@link preflightNestedLevels},
+ * links first, foreign keys last); at any depth, when `rows` (the rows as
+ * written) are given, its FROM children's types and foreign keys
+ * ({@link preValidateNestedFrom}). Foreign keys into tables the write creates
+ * rows in ({@link nestedWriteTables}) are left to the level that writes them.
+ */
+export async function preflightNestedWrite(
+  host: TNestedWriterHost,
+  originals: Array<Record<string, unknown>>,
+  mode: TNestedPreflight["mode"],
+  opts: {
+    maxDepth: number;
+    depth: number;
+    owned?: TNestedFromViaPlan["owned"];
+    rows?: Array<Record<string, unknown>>;
+  },
+): Promise<void> {
+  const { maxDepth, depth, owned, rows } = opts;
+  if (depth > 0 && !rows) return;
+  if (![...host._meta.relations.keys()].some((nav) => hasNavValue(originals, nav))) return;
+  const written = nestedWriteTables(host, originals, mode, maxDepth, depth, owned);
+  const levels = (stage: TNestedPreflight["stage"]) =>
+    preflightNestedLevels(host, originals, mode, stage, maxDepth, depth, written, owned);
+  if (depth === 0) await levels("links");
+  if (rows) await preValidateNestedFrom(host, originals, rows, written);
+  if (depth === 0) await levels("fks");
 }
 
 // ── Exported: batch nested patch ────────────────────────────────────────────
@@ -884,7 +1307,11 @@ export async function planPatchNestedTo(
       const stored = current[fkField];
 
       const payloadFk = item[fkField];
-      if (payloadFk !== undefined && !sameKey(payloadFk, stored)) {
+      if (
+        payloadFk !== undefined &&
+        !sameKey(payloadFk, stored) &&
+        !(await sameStoredKey(to.targetTable, targetField, stored, payloadFk))
+      ) {
         throw new DbError("INVALID_QUERY", [
           {
             path: fkField,
@@ -907,7 +1334,11 @@ export async function planPatchNestedTo(
       const patch = { ...parents[j] };
       if (targetField !== undefined) {
         const nestedKey = patch[targetField];
-        if (nestedKey !== undefined && !sameKey(nestedKey, stored)) {
+        if (
+          nestedKey !== undefined &&
+          !sameKey(nestedKey, stored) &&
+          !(await sameStoredKey(to.targetTable, targetField, stored, nestedKey))
+        ) {
           throw new DbError("INVALID_QUERY", [
             {
               path: `${navField}.${targetField}`,
@@ -1040,14 +1471,14 @@ export async function batchPatchNestedFrom(
         await fromUpdate(target, withField(ops.update, fkField, parentPK));
       }
 
-      // $upsert
+      // $upsert — a keyed entry updates this parent's child, else it is
+      // inserted (with its key, when it carries one)
       if (ops.upsert) {
         const toUpdate: Array<Record<string, unknown>> = [];
         const toInsert: Array<Record<string, unknown>> = [];
-        for (const child of ops.upsert) {
-          const rec = { ...(child as Record<string, unknown>), [fkField]: parentPK };
-          (isKeyed(rec, childPKs) ? toUpdate : toInsert).push(rec);
-        }
+        const entries = withField(ops.upsert, fkField, parentPK);
+        const stored = await storedChildren(target, entries, parentPK);
+        for (const rec of entries) (stored.has(rec) ? toUpdate : toInsert).push(rec);
         if (toUpdate.length > 0) {
           await fromUpdate(target, toUpdate);
         }
@@ -1091,10 +1522,8 @@ export async function batchPatchNestedVia(
     if (relation.direction !== "via" || !hasNavValue(originals, navField)) {
       continue;
     }
-    const via = resolveViaRelation(host, relation, navField);
-    if (!via) {
-      continue;
-    }
+    const via = requireViaRelation(host, relation, navField, originals);
+    if (!via) continue;
     const { targetTable, junctionTable, fkToThis, fkToTarget, targetPKField } = via;
 
     for (const original of originals) {
@@ -1293,16 +1722,26 @@ async function checkFromOwnership(
 
   const owned = new Set<string>();
   if (claims.length === 0) return owned;
-  const rows = await targetTable.findMany({
-    filter: orFilter(claims.map((c) => keyFilter(c.child, childPKs))),
-    controls: { $select: [...childPKs, fkField] },
-  });
-  const parentOf = new Map<string, unknown>();
-  for (const row of rows) parentOf.set(pkTupleKey(row, childPKs), row[fkField]);
+  const select = [...new Set([...childPKs, fkField])];
+  // A key the database matches loosely (a case-insensitive collation) names
+  // the stored child too.
+  const stored = await storedRowsByKey(
+    targetTable,
+    claims.map((c) => c.child),
+    childPKs,
+    select,
+  );
   for (const { parentPK, child, op } of claims) {
+    const row = stored.get(child);
+    if (!row) continue;
     const key = pkTupleKey(child, childPKs);
-    if (!parentOf.has(key)) continue;
-    if (!sameKey(parentOf.get(key), parentPK)) {
+    if (
+      !sameKey(row[fkField], parentPK) &&
+      !(
+        typeof parentPK === "string" &&
+        (await storedWith(targetTable, keyFilter(child, childPKs), fkField, parentPK))
+      )
+    ) {
       const label = childPKs.map((pk) => keyString(child[pk])).join(", ");
       throw new DbError("CONFLICT", [
         {
@@ -1361,7 +1800,19 @@ async function checkViaLinks(
     controls: { $select: [fkToThis, fkToTarget] },
   });
   const linked = new Set(links.map((j) => linkKey(j[fkToThis], j[fkToTarget])));
-  const unlinked = claims.find((c) => !linked.has(linkKey(c.parentPK, c.targetPK)));
+  let unlinked: (typeof claims)[number] | undefined;
+  for (const c of claims) {
+    if (linked.has(linkKey(c.parentPK, c.targetPK))) continue;
+    // The database's own comparison (a case-insensitive collation links
+    // "ABC" through a stored "abc").
+    const loose =
+      (typeof c.targetPK === "string" || typeof c.parentPK === "string") &&
+      (await storedWith(junctionTable, { [fkToThis]: c.parentPK }, fkToTarget, c.targetPK));
+    if (!loose) {
+      unlinked = c;
+      break;
+    }
+  }
   if (unlinked) {
     throw new DbError("CONFLICT", [
       {
@@ -1446,17 +1897,11 @@ async function fromReplace(
   current?: Array<Record<string, unknown>>,
 ): Promise<void> {
   const { targetTable, navField, fkField, childPKs, maxDepth, depth } = target;
-  const toReplace: Array<Record<string, unknown>> = [];
+  const keyed: Array<Record<string, unknown>> = [];
   const toInsert: Array<Record<string, unknown>> = [];
-  const keep = new Set<string>();
   for (const child of children) {
     const childData = { ...(child as Record<string, unknown>), [fkField]: parentPK };
-    if (isKeyed(childData, childPKs)) {
-      keep.add(pkTupleKey(childData, childPKs));
-      toReplace.push(childData);
-    } else {
-      toInsert.push(childData);
-    }
+    (isKeyed(childData, childPKs) ? keyed : toInsert).push(childData);
   }
 
   const existing =
@@ -1465,6 +1910,29 @@ async function fromReplace(
       filter: { [fkField]: parentPK },
       controls: childPKs.length > 0 ? { $select: [...childPKs] } : {},
     }));
+  const existingKeys = new Set(existing.map((row) => pkTupleKey(row, childPKs)));
+  // A keyed child that is one of this parent's children is replaced — matched
+  // exactly or by the database (a case-insensitive collation: "N1" names the
+  // stored "n1"); any other keyed child is new and inserted with its key (one
+  // under another parent was refused by the plan).
+  const missed = keyed.filter((child) => !existingKeys.has(pkTupleKey(child, childPKs)));
+  const loose = await rowsMatchedByKey(targetTable, missed, childPKs, [...childPKs], {
+    [fkField]: parentPK,
+  });
+  const keep = new Set<string>();
+  const toReplace: Array<Record<string, unknown>> = [];
+  for (const child of keyed) {
+    const key = pkTupleKey(child, childPKs);
+    const row = loose.get(child);
+    const stored = existingKeys.has(key) ? key : row && pkTupleKey(row, childPKs);
+    if (stored === undefined) {
+      toInsert.push(child);
+    } else {
+      keep.add(stored);
+      toReplace.push(child);
+    }
+  }
+
   const orphanFilters: Array<Record<string, unknown>> = [];
   for (const row of existing) {
     if (!keep.has(pkTupleKey(row, childPKs))) {
@@ -1485,6 +1953,24 @@ async function fromReplace(
       targetTable.insertMany(toInsert, { maxDepth, _depth: depth + 1 }),
     );
   }
+}
+
+/**
+ * The keyed entries among `items` (their foreign key set) that are stored
+ * children of `parentPK` — matched exactly or by the database, as in
+ * {@link fromReplace}.
+ */
+async function storedChildren(
+  target: TFromWriteTarget,
+  items: Array<Record<string, unknown>>,
+  parentPK: unknown,
+): Promise<Set<Record<string, unknown>>> {
+  const { targetTable, fkField, childPKs } = target;
+  const keyed = items.filter((rec) => isKeyed(rec, childPKs));
+  const stored = await storedRowsByKey(targetTable, keyed, childPKs, [...childPKs], {
+    [fkField]: parentPK,
+  });
+  return new Set(stored.keys());
 }
 
 /**

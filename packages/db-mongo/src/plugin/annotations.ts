@@ -11,22 +11,67 @@ import { findStoredField, refuseCiphertext } from "@atscript/db/shared";
 
 import { dynamicSearchEncryptedMessage } from "../lib/search-messages";
 
+/**
+ * Atlas Search built-in analyzers, offered by completion. Not a closed list:
+ * any name is accepted, and one Atlas does not know fails the schema sync.
+ */
 const analyzers = [
   "lucene.standard",
   "lucene.simple",
   "lucene.whitespace",
-  "lucene.english",
-  "lucene.french",
-  "lucene.german",
-  "lucene.italian",
-  "lucene.portuguese",
-  "lucene.spanish",
-  "lucene.chinese",
-  "lucene.hindi",
-  "lucene.bengali",
-  "lucene.russian",
-  "lucene.arabic",
+  "lucene.keyword",
+  ...[
+    "arabic",
+    "armenian",
+    "basque",
+    "bengali",
+    "brazilian",
+    "bulgarian",
+    "catalan",
+    "chinese",
+    "cjk",
+    "czech",
+    "danish",
+    "dutch",
+    "english",
+    "finnish",
+    "french",
+    "galician",
+    "german",
+    "greek",
+    "hindi",
+    "hungarian",
+    "indonesian",
+    "irish",
+    "italian",
+    "japanese",
+    "korean",
+    "kuromoji",
+    "latvian",
+    "lithuanian",
+    "morfologik",
+    "nori",
+    "norwegian",
+    "persian",
+    "polish",
+    "portuguese",
+    "romanian",
+    "russian",
+    "smartcn",
+    "sorani",
+    "spanish",
+    "swedish",
+    "thai",
+    "turkish",
+    "ukrainian",
+  ].map((language) => `lucene.${language}`),
 ];
+
+const analyzerScope = () => analyzers.map((value) => ({ value }));
+
+const analyzerNote =
+  "\n\nAny Atlas Search analyzer name is accepted (completion lists the built-in ones); " +
+  "one Atlas does not know fails the schema sync.";
 
 const tokenizations = ["edgeGram", "rightEdgeGram", "nGram"];
 
@@ -199,8 +244,9 @@ export const annotations: TAnnotationsTree = {
           type: "string",
           description:
             'The **text analyzer** for tokenization. Defaults to `"lucene.standard"`.\n\n' +
-            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, etc.',
-          values: analyzers,
+            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, etc.' +
+            analyzerNote,
+          valueScope: analyzerScope,
         },
         {
           optional: true,
@@ -230,8 +276,9 @@ export const annotations: TAnnotationsTree = {
           type: "string",
           description:
             'The text analyzer for tokenization. Defaults to `"lucene.standard"`.\n\n' +
-            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, `"lucene.german"`, etc.',
-          values: analyzers,
+            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, `"lucene.german"`, etc.' +
+            analyzerNote,
+          valueScope: analyzerScope,
         },
         {
           optional: true,
@@ -275,8 +322,9 @@ export const annotations: TAnnotationsTree = {
           type: "string",
           description:
             'The text analyzer for tokenization. Defaults to `"lucene.standard"`.\n\n' +
-            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, `"lucene.german"`, etc.',
-          values: analyzers,
+            '**Available options:** `"lucene.standard"`, `"lucene.english"`, `"lucene.spanish"`, `"lucene.german"`, etc.' +
+            analyzerNote,
+          valueScope: analyzerScope,
         },
         {
           optional: true,
@@ -345,8 +393,9 @@ export const annotations: TAnnotationsTree = {
           name: "analyzer",
           type: "string",
           description:
-            'The text analyzer for the companion `string` mapping. Defaults to `"lucene.standard"`.',
-          values: analyzers,
+            'The text analyzer for the companion `string` mapping. Defaults to `"lucene.standard"`.' +
+            analyzerNote,
+          valueScope: analyzerScope,
         },
       ],
     }),

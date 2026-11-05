@@ -44,6 +44,8 @@ import {
 } from "@atscript/db-sql-tools";
 import { BUCKET_MAX_INSTANT, BUCKET_MIN_INSTANT } from "@uniqu/core";
 
+import { mysqlName, mysqlOnUpdateExpr } from "./annotation-values";
+
 // Re-export shared utilities for consumers that import from this package
 export { refActionToSql, defaultValueForType };
 
@@ -67,6 +69,8 @@ export interface TMysqlTableOptions {
   autoIncrementStart?: number;
   incrementFields?: ReadonlySet<string>;
   onUpdateFields?: ReadonlyMap<string, string>;
+  /** Field path → column character set (`@db.mysql.charset` on the field). */
+  charsetFields?: ReadonlyMap<string, string>;
   /** Adapter type mapper (vector/encrypted folding). Falls back to `mysqlTypeFromField`. */
   typeMapper?: (field: TDbFieldMeta) => string;
   /**
@@ -82,8 +86,10 @@ export interface TMysqlTableOptions {
 export interface TMysqlColumnContext {
   /** Physical names of `@db.default.increment` columns (→ AUTO_INCREMENT). */
   incrementFields?: ReadonlySet<string>;
-  /** Physical name → ON UPDATE expression (`@db.mysql.onUpdate`). */
+  /** Field path → ON UPDATE expression (`@db.mysql.onUpdate`). */
   onUpdateFields?: ReadonlyMap<string, string>;
+  /** Field path → column character set (`@db.mysql.charset` on the field). */
+  charsetFields?: ReadonlyMap<string, string>;
   /** Adapter type mapper. Falls back to `mysqlTypeFromField`. */
   typeMapper?: (field: TDbFieldMeta) => string;
   /**
@@ -265,12 +271,14 @@ export function buildColumnDefinition(
   ctx: TMysqlColumnContext,
 ): TMysqlColumnDefinition {
   const sqlType = ctx.typeMapper?.(field) ?? mysqlTypeFromField(field);
+  const charset = ctx.charsetFields?.get(field.path);
   if (field.derived) {
-    const def = `${qi(field.physicalName)} ${sqlType}${mysqlCollateClause(field)} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
+    const def = `${qi(field.physicalName)} ${sqlType}${mysqlCharsetClause(sqlType, charset)}${mysqlCollateClause(field, charset)} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
     return { def, inventedDefault: false };
   }
   const increment = ctx.purpose !== "add" && (ctx.incrementFields?.has(field.path) ?? false);
-  let def = `${qi(field.physicalName)} ${sqlType}`;
+  // CHARACTER SET is part of the data type: right after it
+  let def = `${qi(field.physicalName)} ${sqlType}${mysqlCharsetClause(sqlType, charset)}`;
 
   if (increment) {
     def += " AUTO_INCREMENT";
@@ -305,11 +313,11 @@ export function buildColumnDefinition(
     inventedDefault = true;
   }
 
-  def += mysqlCollateClause(field);
+  def += mysqlCollateClause(field, charset);
 
-  const onUpdate = ctx.onUpdateFields?.get(field.physicalName);
+  const onUpdate = ctx.onUpdateFields?.get(field.path);
   if (onUpdate) {
-    def += ` ON UPDATE ${/^current_timestamp(\(\))?$/i.test(onUpdate) ? currentTimestampFor(sqlType) : onUpdate}`;
+    def += ` ON UPDATE ${mysqlOnUpdateExpr(onUpdate, currentTimestampFor(sqlType))}`;
   }
 
   return { def, inventedDefault };
@@ -729,21 +737,47 @@ export function buildAggregateCount(
 
 // ── MySQL-specific ──────────────────────────────────────────────────────────
 
+/** Character-typed columns (the ones a `CHARACTER SET` applies to). */
+const CHARACTER_TYPE_RE = /^(VAR)?CHAR\b|^(TINY|MEDIUM|LONG)?TEXT\b|^(ENUM|SET)\b/i;
+
 /**
- * Maps portable collation values to MySQL collation names.
+ * ` CHARACTER SET <charset>` for a character-typed column with a field-level
+ * `@db.mysql.charset`, else `""`.
  */
+export function mysqlCharsetClause(sqlType: string, charset: string | undefined): string {
+  return charset && CHARACTER_TYPE_RE.test(sqlType)
+    ? ` CHARACTER SET ${mysqlName("@db.mysql.charset", charset)}`
+    : "";
+}
+
 /**
- * The `COLLATE` clause of a column (native `@db.mysql.collate`, else the
- * portable `@db.column.collate` mapping) — `""` when none applies.
+ * The column's ` COLLATE …`: a native `@db.mysql.collate`, else the portable
+ * `@db.column.collate` — in the column's `charset` when it sets one
+ * (`nocase` → `<charset>_general_ci`, `binary` → `<charset>_bin`,
+ * `unicode` → `<charset>_unicode_ci`), else in `utf8mb4`.
  */
-export function mysqlCollateClause(field: TDbFieldMeta): string {
+export function mysqlCollateClause(field: TDbFieldMeta, charset?: string): string {
   const nativeCollate = field.type?.metadata?.get("db.mysql.collate") as string | undefined;
   if (nativeCollate) {
     return ` COLLATE ${nativeCollate}`;
   }
-  return field.collate ? ` COLLATE ${collationToMysql(field.collate)}` : "";
+  if (!field.collate) return "";
+  const collation = collationToMysql(field.collate);
+  return ` COLLATE ${charset ? collation.replace(/^utf8mb4_/, `${charset}_`) : collation}`;
 }
 
+/**
+ * The collation a table gets when only its character set is declared:
+ * `utf8mb4_unicode_ci` for `utf8mb4` (the adapter's default), else none —
+ * MySQL then applies the set's own default collation.
+ */
+export function mysqlDefaultCollation(charset: string): string | undefined {
+  return charset.toLowerCase() === "utf8mb4" ? "utf8mb4_unicode_ci" : undefined;
+}
+
+/**
+ * Maps portable collation values to MySQL collation names.
+ */
 export function collationToMysql(collation: TDbCollation): string {
   switch (collation) {
     case "binary": {
@@ -908,6 +942,7 @@ export function buildCreateTable(
   const ctx: TMysqlColumnContext = {
     incrementFields: options?.incrementFields,
     onUpdateFields: options?.onUpdateFields,
+    charsetFields: options?.charsetFields,
     typeMapper: options?.typeMapper,
     purpose: "create",
   };
@@ -943,10 +978,13 @@ export function buildCreateTable(
   let sql = `CREATE TABLE IF NOT EXISTS ${quoteTableName(table)} (${body})`;
 
   // Table options
+  // A character set without a collation takes the set's own default
+  // collation (MySQL refuses a collation of another set).
   const engine = options?.engine ?? "InnoDB";
   const charset = options?.charset ?? "utf8mb4";
-  const collation = options?.collation ?? "utf8mb4_unicode_ci";
-  sql += ` ENGINE=${engine} DEFAULT CHARSET=${charset} COLLATE=${collation}`;
+  const collation = options?.collation ?? mysqlDefaultCollation(charset);
+  sql += ` ENGINE=${engine} DEFAULT CHARSET=${charset}`;
+  if (collation) sql += ` COLLATE=${collation}`;
 
   if (options?.autoIncrementStart !== undefined) {
     sql += ` AUTO_INCREMENT=${options.autoIncrementStart}`;

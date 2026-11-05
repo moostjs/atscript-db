@@ -48,7 +48,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     fkLookupResolver: TFkLookupResolver | undefined,
     writeTableResolver: TWriteTableResolver | undefined,
     partial?: boolean,
-    excludeTargetTable?: string,
+    excludeTargetTable?: string | ReadonlySet<string>,
   ): Promise<void> {
     if (!fkLookupResolver) {
       return;
@@ -59,7 +59,11 @@ export class ApplicationIntegrity extends IntegrityStrategy {
 
     for (const [, fk] of meta.foreignKeys) {
       // Skip FKs that reference the excluded table (e.g. FROM child → parent during pre-validation)
-      if (excludeTargetTable && fk.targetTable === excludeTargetTable) {
+      if (
+        typeof excludeTargetTable === "string"
+          ? fk.targetTable === excludeTargetTable
+          : excludeTargetTable?.has(fk.targetTable)
+      ) {
         continue;
       }
 

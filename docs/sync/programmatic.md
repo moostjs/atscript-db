@@ -20,7 +20,7 @@ import { User, Post, Comment } from "./schema/index.as.js";
 const db = new DbSpace(adapterFactory);
 
 const result = await syncSchema(db, [User, Post, Comment]);
-console.log(result.status); // 'up-to-date' | 'synced' | 'synced-by-peer'
+console.log(result.status); // 'up-to-date' | 'synced' | 'failed' | 'synced-by-peer' | 'refused'
 ```
 
 `syncSchema` is a one-liner that creates a `SchemaSync` instance and calls `run()`. It handles locking, hashing, diffing, and DDL execution in a single call.
@@ -44,7 +44,7 @@ for (const entry of plan.entries) {
 
 // Then run — apply changes with distributed locking
 const result = await sync.run(types, { force: true, safe: false });
-console.log(result.status); // 'up-to-date' | 'synced' | 'synced-by-peer'
+console.log(result.status); // 'up-to-date' | 'synced' | 'failed' | 'synced-by-peer' | 'refused'
 ```
 
 The constructor accepts an optional logger:
@@ -95,21 +95,22 @@ Returned by `sync.run()` and `syncSchema()`:
 
 ```typescript
 interface TSyncResult {
-  status: "up-to-date" | "synced" | "synced-by-peer" | "refused";
+  status: "up-to-date" | "synced" | "failed" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
   dataSteps?: { ran: string[]; pending: string[] }; // since 0.1.165, when dataSteps were passed
 }
 ```
 
-| Status             | Meaning                                                                                                                                                                                        |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'up-to-date'`     | Schema hash matched, no sync needed                                                                                                                                                            |
-| `'synced'`         | This process applied changes                                                                                                                                                                   |
-| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock (never for a `force` run)                                                                                               |
-| `'refused'`        | Pre-flight refused the run (since 0.1.128): **no DDL ran**, nothing was persisted, the lock was released. `entries` is the full plan; refused entries are `error` entries with `refused: true` |
+| Status             | Meaning                                                                                                                                                                                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'up-to-date'`     | Schema hash matched, no sync needed                                                                                                                                                                                                                              |
+| `'synced'`         | This process applied changes, every entry landed                                                                                                                                                                                                                 |
+| `'failed'`         | This process ran the sync, but at least one entry is an `error` entry (its DDL failed, or a constraint the stored rows break was not created): the other entries are applied, the hash is withheld and the next sync retries (since 0.1.170; before, `'synced'`) |
+| `'synced-by-peer'` | Another process completed sync while this one was waiting for the lock (never for a `force` run)                                                                                                                                                                 |
+| `'refused'`        | Pre-flight refused the run (since 0.1.128): **no DDL ran**, nothing was persisted, the lock was released. `entries` is the full plan; refused entries are `error` entries with `refused: true`                                                                   |
 
-`'refused'` follows the `onError` policy like error entries do — `"warn"` (default) logs each refusal at error level and returns, `"throw"` throws after the lock is released, `"silent"` returns. `plan()` reports the same refusals with its status unchanged (`'changes-needed'`).
+`'failed'` and `'refused'` follow the `onError` policy like error entries do — `"warn"` (default) logs each refusal at error level and returns, `"throw"` throws after the lock is released, `"silent"` returns. `plan()` reports the same refusals with its status unchanged (`'changes-needed'`).
 
 ## Data steps {#data-steps}
 

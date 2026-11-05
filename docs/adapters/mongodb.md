@@ -559,24 +559,25 @@ export interface User {
 
 ### Supported Analyzers
 
-Atlas Search uses Apache Lucene analyzers. The plugin whitelists the following values:
+Atlas Search uses Apache Lucene analyzers. Any analyzer name is accepted; the editor completes Atlas's built-in ones — `lucene.standard`, `lucene.simple`, `lucene.whitespace`, `lucene.keyword` and the language analyzers (`lucene.english`, `lucene.german`, `lucene.danish`, `lucene.ukrainian`, …). Some common ones:
 
 | Analyzer            | Description                                               |
 | ------------------- | --------------------------------------------------------- |
 | `lucene.standard`   | General-purpose tokenizer, lowercases, removes stop words |
 | `lucene.simple`     | Lowercases and splits on non-letter characters            |
 | `lucene.whitespace` | Splits on whitespace only, no lowercasing                 |
+| `lucene.keyword`    | The whole value as one token                              |
 | `lucene.english`    | English-specific with stemming ("running" matches "run")  |
 | `lucene.french`     | French stemming and stop words                            |
 | `lucene.german`     | German stemming and stop words                            |
-| `lucene.italian`    | Italian stemming and stop words                           |
-| `lucene.portuguese` | Portuguese stemming and stop words                        |
 | `lucene.spanish`    | Spanish stemming and stop words                           |
-| `lucene.chinese`    | Chinese tokenization                                      |
-| `lucene.hindi`      | Hindi tokenization                                        |
-| `lucene.bengali`    | Bengali tokenization                                      |
 | `lucene.russian`    | Russian stemming and stop words                           |
-| `lucene.arabic`     | Arabic stemming and stop words                            |
+
+An analyzer Atlas does not know fails the schema sync: the search index Atlas refuses becomes a sync error (since 0.1.170 — before, every search-index failure was skipped silently). On a server without Atlas Search (a standalone `mongod`) the search indexes are still skipped.
+
+::: warning Search-index limit on free and shared clusters
+Atlas free and shared clusters cap the number of Atlas Search and Vector Search indexes (3 on a free cluster). A create beyond the cap is refused by Atlas, so since 0.1.170 the sync reports `status: "failed"` with an error entry — and keeps retrying it, because the schema hash is not stored — until an index is removed or the cluster is upgraded.
+:::
 
 See the [MongoDB Atlas docs](https://www.mongodb.com/docs/atlas/atlas-search/analyzers/) for descriptions and tokenization rules.
 

@@ -7,6 +7,7 @@ import {
   isPrimitive,
   isRef,
   isStructure,
+  type SemanticInterfaceNode,
   type SemanticNode,
   type SemanticStructureNode,
   type Token,
@@ -317,6 +318,63 @@ export function getNavTargetTypeName(field: SemanticNode): string | undefined {
     return def.id!;
   }
   return undefined;
+}
+
+/** A `@db.table` interface's table name: its `@db.table` argument, else its name. */
+function declaredTableName(iface: SemanticNode): string | undefined {
+  const table = iface.annotations?.find((a) => a.name === "db.table");
+  return table ? (table.args[0]?.text ?? iface.id) : undefined;
+}
+
+/**
+ * The `@db.rel.from` / `@db.rel.via` relations a `@db.table` interface
+ * inherits (`extends`) from a table with ANOTHER name: the child's (or
+ * junction's) foreign key references that table, not this one, so this table
+ * cannot load or write them — a warning on the `@db.table` annotation (writes
+ * of them are refused at run time). A relation redeclared here is its own.
+ */
+export function inheritedForeignRelations(token: Token, doc: AtscriptDoc): TMessages {
+  const owner = token.parentNode;
+  if (!owner || !isInterface(owner) || !owner.hasExtends) return [];
+  const thisTable = declaredTableName(owner);
+  const ownDef = owner.getDefinition();
+  const own = isStructure(ownDef) ? ownDef.props : new Map();
+  const messages = [] as TMessages;
+  const reported = new Set<string>();
+  const seen = new Set<SemanticNode>();
+  const visit = (iface: SemanticInterfaceNode, ifaceDoc: AtscriptDoc) => {
+    for (const ext of iface.extendsTokens) {
+      const unwound = ifaceDoc.unwindType(ext.text);
+      const base = unwound?.def;
+      if (!base || !isInterface(base) || seen.has(base)) continue;
+      seen.add(base);
+      const baseTable = declaredTableName(base);
+      const baseDef = base.getDefinition();
+      if (baseTable !== undefined && baseTable !== thisTable && isStructure(baseDef)) {
+        for (const [name, prop] of baseDef.props) {
+          if (own.has(name) || reported.has(name)) continue;
+          const kind =
+            prop.countAnnotations("db.rel.from") > 0
+              ? "from"
+              : prop.countAnnotations("db.rel.via") > 0
+                ? "via"
+                : undefined;
+          if (!kind) continue;
+          reported.add(name);
+          messages.push({
+            message:
+              `Inherited relation "${name}" (@db.rel.${kind}) is linked to "${baseTable}", not to "${thisTable}" — ` +
+              `here its nested writes are refused and it loads nothing; redeclare "${name}" with a @db.rel.FK referencing ${owner.id}`,
+            severity: 2,
+            range: token.range,
+          });
+        }
+      }
+      visit(base, unwound.doc);
+    }
+  };
+  visit(owner, doc);
+  return messages;
 }
 
 /**

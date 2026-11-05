@@ -123,9 +123,11 @@ import {
   qi,
   quoteTableName,
   mysqlDialect,
+  mysqlDefaultCollation,
   type TMysqlColumnContext,
   type TMysqlTableOptions,
 } from "./sql-builder";
+import { mysqlName } from "./annotation-values";
 import type { TMysqlAdapterOptions, TMysqlConnection, TMysqlDriver } from "./types";
 
 /**
@@ -283,7 +285,8 @@ export class MysqlAdapter extends BaseDbAdapter {
   // ── MySQL-specific state from annotations ────────────────────────────────
   private _engine = "InnoDB";
   private _charset = "utf8mb4";
-  private _collation = "utf8mb4_unicode_ci";
+  /** `@db.mysql.collate` on the table; none → the charset's default (see `mysqlDefaultCollation`). */
+  private _collation: string | undefined;
   private _autoIncrementStart?: number;
   private _incrementFields = new Set<string>();
   /**
@@ -299,6 +302,8 @@ export class MysqlAdapter extends BaseDbAdapter {
    */
   private _epochAfterRekey = new Map<string, { field: TDbFieldMeta; fromText: boolean }>();
   private _onUpdateFields = new Map<string, string>();
+  /** Field path → `@db.mysql.charset` of the column. */
+  private _charsetFields = new Map<string, string>();
 
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the connected MySQL instance supports native VECTOR type (MySQL 9.0+). */
@@ -551,17 +556,19 @@ export class MysqlAdapter extends BaseDbAdapter {
   override onBeforeFlatten(_type: unknown): void {
     const type = _type as TAtscriptAnnotatedType;
     const meta = type.metadata;
+    // Names go into the DDL as written: the compiler accepts bare names only,
+    // and so does the metadata built without it.
     const engine = meta.get("db.mysql.engine") as string | undefined;
     if (engine) {
-      this._engine = engine;
+      this._engine = mysqlName("@db.mysql.engine", engine);
     }
     const charset = meta.get("db.mysql.charset") as string | undefined;
     if (charset) {
-      this._charset = charset;
+      this._charset = mysqlName("@db.mysql.charset", charset);
     }
     const collate = meta.get("db.mysql.collate") as string | undefined;
     if (collate) {
-      this._collation = collate;
+      this._collation = mysqlName("@db.mysql.collate", collate);
     }
   }
 
@@ -582,6 +589,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     const onUpdate = metadata.get("db.mysql.onUpdate") as string | undefined;
     if (onUpdate) {
       this._onUpdateFields.set(field, onUpdate);
+    }
+    // Field-level @db.mysql.charset → the column's CHARACTER SET
+    const charset = metadata.get("db.mysql.charset") as string | undefined;
+    if (charset) {
+      this._charsetFields.set(field, mysqlName("@db.mysql.charset", charset));
     }
     // @db.search.vector — vector embedding field
     const vectorMeta = metadata.get("db.search.vector") as
@@ -608,10 +620,12 @@ export class MysqlAdapter extends BaseDbAdapter {
   // ── Table options ────────────────────────────────────────────────────────
 
   override getDesiredTableOptions(): TExistingTableOption[] {
+    const collation = this._tableCollation();
     return [
       { key: "engine", value: this._engine },
       { key: "charset", value: this._charset },
-      { key: "collation", value: this._collation },
+      // Compared only when it is known: a charset alone takes its default.
+      ...(collation === undefined ? [] : [{ key: "collation", value: collation }]),
     ];
   }
 
@@ -632,10 +646,21 @@ export class MysqlAdapter extends BaseDbAdapter {
     // Extract charset from collation (e.g., utf8mb4_unicode_ci → utf8mb4)
     const charset = row.TABLE_COLLATION?.split("_")[0] ?? "utf8mb4";
 
+    // Engine, character set and collation names are case-insensitive: a
+    // model's `"innodb"` matches the server's `InnoDB` (no ALTER, which
+    // would rebuild the table).
+    const desired = new Map(this.getDesiredTableOptions().map((o) => [o.key, o.value]));
+    const asDesired = (key: string, value: string) => {
+      const want = desired.get(key);
+      return want !== undefined && want.toLowerCase() === value.toLowerCase() ? want : value;
+    };
     return [
-      { key: "engine", value: row.ENGINE ?? "InnoDB" },
-      { key: "charset", value: charset },
-      { key: "collation", value: row.TABLE_COLLATION ?? "utf8mb4_unicode_ci" },
+      { key: "engine", value: asDesired("engine", row.ENGINE ?? "InnoDB") },
+      { key: "charset", value: asDesired("charset", charset) },
+      {
+        key: "collation",
+        value: asDesired("collation", row.TABLE_COLLATION ?? "utf8mb4_unicode_ci"),
+      },
     ];
   }
 
@@ -1685,15 +1710,21 @@ export class MysqlAdapter extends BaseDbAdapter {
     await this._exec().exec(sql);
   }
 
+  /** The table's collation: `@db.mysql.collate`, else the charset's default one (`utf8mb4_unicode_ci` for `utf8mb4`). */
+  private _tableCollation(): string | undefined {
+    return this._collation ?? mysqlDefaultCollation(this._charset);
+  }
+
   /** The CREATE TABLE options (engine/charset/collation/increment/ON UPDATE/type mapper). */
   private _tableOptions(opts?: TEnsureTableOptions): TMysqlTableOptions {
     return {
       engine: this._engine,
       charset: this._charset,
-      collation: this._collation,
+      collation: this._tableCollation(),
       autoIncrementStart: this._autoIncrementStart,
       incrementFields: this._incrementFields,
       onUpdateFields: this._onUpdateFields,
+      charsetFields: this._charsetFields,
       typeMapper: (field) => this.typeMapper(field),
       deferForeignKeysTo: opts?.deferForeignKeysTo,
     };
@@ -1704,6 +1735,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     return {
       incrementFields: this._incrementFields,
       onUpdateFields: this._onUpdateFields,
+      charsetFields: this._charsetFields,
       typeMapper: (field) => this.typeMapper(field),
       purpose,
     };

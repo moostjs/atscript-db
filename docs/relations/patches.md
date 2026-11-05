@@ -104,7 +104,7 @@ await tasks.updateOne({
 });
 ```
 
-Items with a primary key are updated. Items without a primary key are inserted, with the FK automatically set to the parent's PK.
+An item whose primary key names one of this record's children updates that child. Every other item is inserted, with the FK automatically set to the parent's PK — an item without a primary key, and one whose key names no stored row (inserted with that key; since 0.1.170 — before, such an item was skipped).
 
 ::: warning Children of this record only (since 0.1.143)
 `$update`, `$upsert` and `$replace` only ever touch children of the record being patched. A child primary key that exists under a **different** parent, or under no parent, is rejected with `CONFLICT` (HTTP 409) and nothing is written. The child is never re-parented or overwritten. `$update` entries must carry the child's primary key; an entry without it is rejected with `NOT_FOUND` (HTTP 400). Moving a child to another parent is a write on the child's own table.
@@ -121,7 +121,7 @@ await tasks.updateOne({
 });
 ```
 
-This uses identity-preserving diff-sync — children with matching PKs are updated in place, not deleted and re-created. Only children whose PKs are absent from the new set are deleted. A PK that belongs to another parent's child is rejected with `CONFLICT` before anything is deleted.
+This uses identity-preserving diff-sync — children with matching PKs are updated in place, not deleted and re-created. Only children whose PKs are absent from the new set are deleted. An entry whose PK names no stored row is inserted with that key (since 0.1.170 — before, it was skipped). A PK that belongs to another parent's child is rejected with `CONFLICT` before anything is deleted.
 
 ## VIA Relation Patches {#via}
 
@@ -238,7 +238,10 @@ These rules apply to every nested write, whether PATCH, PUT, or insert:
 - **An existing VIA target is linked by its stored value** (since 0.1.169). An entry carrying the target's whole primary key names an existing target; the junction gets the value stored in the field it references, read before anything is written. A different value in the entry answers `INVALID_QUERY`, a missing target `FK_VIOLATION`.
 - **Replace and patch link FROM / VIA children by the parent's primary key only** (since 0.1.169). `@db.rel.from` / `@db.rel.via` children are written through a single-field foreign key to the parent's primary key; any other link (a unique field, a composite parent or target) answers `INVALID_QUERY` before anything is written. A patch addressed by a unique field links them under the stored row's primary key. A replaced `@db.rel.to` object must carry the field its foreign key references.
 
-Every rejection above is raised **before the first write** of the call: the FROM ownership, VIA link and TO foreign-key checks run as a planning step — one read per relation for the whole batch. A rejected nested operation therefore never leaves a partial write, even on adapters without transactions (memory, standalone MongoDB). The planned FROM children are then written through filters that also pin their parent (`{ pk, fk: parentPK }`): a child moved to another record between the plan and the write is never touched, and the call fails with `CONFLICT` (rolled back on transactional adapters).
+- **A relation with no foreign key to this table is refused, never skipped** (since 0.1.170). Nested data for a `@db.rel.from` whose child has no `@db.rel.FK` referencing this table — or a `@db.rel.via` whose junction lacks one — answers `INVALID_QUERY` before anything is written; before, it was dropped silently. The usual cause is a table that `extends` another table and inherits its relations: the compiler warns about each one on the extending table's `@db.table`.
+- **Keys are matched the way the database compares them** (since 0.1.170). Under a case-insensitive collation (MySQL's default, `@db.column.collate 'nocase'`) a nested entry's key `"ABC"` names the stored `"abc"`: an existing VIA target is linked, a FROM child is replaced or patched — not deleted as an orphan of a replace, as it was before. A key the database itself treats as different stays different.
+
+Every rejection above is raised **before the first write** of the call: the FROM ownership, VIA link and TO foreign-key checks run as a planning step — one read per relation for the whole batch. Since 0.1.170 this holds at every nesting level: the checks the related tables would make when their own turn comes (links that cannot be resolved, a missing VIA target, a foreign key to a missing row on adapters that check them, a relation shape a replace cannot write) run for the whole tree before anything is written. One kind is left to the level that writes it: a foreign key into a table the same call also writes rows in (the record itself, a sibling, an earlier item of the batch) — the row it names may not exist yet, so it is checked when that level is written; on adapters without transactions a missing row there can still leave the levels above it written. Every other rejected nested operation never leaves a partial write, even on adapters without transactions (memory, standalone MongoDB). The planned FROM children are then written through filters that also pin their parent (`{ pk, fk: parentPK }`): a child moved to another record between the plan and the write is never touched, and the call fails with `CONFLICT` (rolled back on transactional adapters).
 
 ## Plain Arrays Rejected on PATCH
 

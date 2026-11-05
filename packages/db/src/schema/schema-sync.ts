@@ -171,14 +171,19 @@ export interface TSyncOptions {
 export interface TSyncResult {
   /**
    * - `"up-to-date"` — stored hash matches, nothing ran;
-   * - `"synced"` — the run executed (inspect `entries` for per-table status);
+   * - `"synced"` — the run executed and every entry landed;
+   * - `"failed"` (since 0.1.170) — the run executed but at least one entry
+   *   errored (its DDL failed, or a constraint the stored rows break was not
+   *   created): the others are applied, the errored ones are `error` entries
+   *   and the schema hash is not stored, so the next sync retries them.
+   *   Before 0.1.170 such a run reported `"synced"`;
    * - `"synced-by-peer"` — another pod synced while this one waited for the lock;
    * - `"refused"` (since 0.1.128) — pre-flight found a change that cannot be
    *   applied safely: NO DDL ran, tracking/snapshots/hash are untouched, the
    *   lock is released. `entries` is the full plan with the refused entries
    *   as `error` entries (`refused: true`).
    */
-  status: "up-to-date" | "synced" | "synced-by-peer" | "refused";
+  status: "up-to-date" | "synced" | "failed" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
   /**
@@ -841,7 +846,7 @@ export class SchemaSync {
       if (early.failure) throw early.failure.error;
       // Data steps need the schema in place: not after an errored entry.
       const ran = early.ran;
-      if (!result.entries.some((e) => e.status === "error")) {
+      if (!result.entries.some((e) => e.hasErrors)) {
         const late = steps.filter((step) => step.phase !== "beforeConstraints");
         ran.push(
           ...(await this.runDataSteps(late, heartbeat.getAbortReason).catch(rethrowStepError)),
@@ -1939,7 +1944,11 @@ export class SchemaSync {
       await this.store.writeHash(hash);
     }
 
-    return { status: "synced", schemaHash: hash, entries };
+    return {
+      status: entries.some((e) => e.hasErrors) ? "failed" : "synced",
+      schemaHash: hash,
+      entries,
+    };
   }
 
   /**

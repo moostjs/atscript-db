@@ -3,6 +3,7 @@ import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
 import {
   isAtscriptDbView,
   createFailureCollector,
+  parseDefaultLiteral,
   createChangeRecorder,
   type AtscriptDbView,
   type TColumnDiff,
@@ -484,13 +485,9 @@ function resolveSyncDefault(field: TDbFieldMeta): unknown {
     return undefined;
   }
   if (field.defaultValue.kind === "value") {
-    // `@db.default '<literal>'` is always declared as a string in the .as
-    // syntax; the adapter is responsible for coercing it to the column's
-    // runtime type before writing. Mirrors the insert-path coercion in
-    // db-table.ts so backfilled values match what new inserts would produce.
-    return field.designType === "string"
-      ? field.defaultValue.value
-      : JSON.parse(field.defaultValue.value);
+    // The insert path's coercion, so backfilled values match what new
+    // inserts would produce (a decimal stays its string).
+    return parseDefaultLiteral(field.designType, field.defaultValue.value);
   }
   // Function defaults (increment, uuid, now) can't be bulk-applied retroactively
   return undefined;
@@ -774,13 +771,21 @@ export async function syncIndexesImpl(
     );
   }
 
-  // ── Sync search indexes (Atlas-only, gracefully skipped on standalone) ──
-  const search = createChangeRecorder<TIndexChange>(dryRun);
+  // ── Sync search indexes (Atlas-only) ──
+  // Only an unavailable search API is skipped: once listing works, a search
+  // index Atlas refuses (an unknown analyzer, …) fails the sync like any
+  // other index.
+  let existingSearchIndexes: TRemoteMongoSearchIndex[] | undefined;
   try {
-    const toUpdate = new Set<string>();
-    const existingSearchIndexes = (await host.collection
+    existingSearchIndexes = (await host.collection
       .listSearchIndexes()
       .toArray()) as TRemoteMongoSearchIndex[];
+  } catch {
+    // listSearchIndexes is Atlas-only — silently skip on standalone or
+    // in-memory MongoDB.
+  }
+  if (existingSearchIndexes) {
+    const toUpdate = new Set<string>();
 
     for (const remote of existingSearchIndexes) {
       if (!remote.name.startsWith(INDEX_PREFIX)) {
@@ -815,8 +820,7 @@ export async function syncIndexesImpl(
         }
       } else {
         if (remote.status !== "DELETING") {
-          // Recorded once done — a failure below is swallowed (Atlas-only API)
-          await search.apply({ name: remote.name, action: "drop" }, remote.name, () => {
+          await apply({ name: remote.name, action: "drop" }, remote.name, () => {
             host._log("dropSearchIndex", remote.name);
             return host.collection.dropSearchIndex(remote.name);
           });
@@ -830,7 +834,7 @@ export async function syncIndexesImpl(
         case "search_text":
         case "vector": {
           const update = toUpdate.has(key);
-          await search.apply({ name: key, action: update ? "rebuild" : "add" }, key, () => {
+          await apply({ name: key, action: update ? "rebuild" : "add" }, key, () => {
             if (update) {
               host._log("updateSearchIndex", key, value.definition);
               return host.collection.updateSearchIndex(key, value.definition);
@@ -847,13 +851,10 @@ export async function syncIndexesImpl(
         default:
       }
     }
-  } catch {
-    // listSearchIndexes / createSearchIndex / updateSearchIndex are
-    // Atlas-only — silently skip on standalone or in-memory MongoDB.
   }
 
   throwIfAny();
-  return [...changes, ...search.changes];
+  return changes;
 }
 
 // ── Index comparison helpers ─────────────────────────────────────────────────

@@ -8,14 +8,38 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ## 0.1.170 {#v0-1-170}
 
+**Requires `@uniqu/core` / `@uniqu/url` 0.2.1.**
+
 ### Features
 
 - **Translations.** With moost's `setTranslator`, `/meta`, its forms, error bodies and `disabled` reasons are served in the request's language (an `ETag` per language; opt out per controller with `metaTranslation()`), and the db-client gets a `locale` option. See [Translations (i18n)](/http/i18n).
+- **`@db.default` takes a number or a boolean.** `@db.default 0`, `@db.default true`, `@db.default 9.99` next to `@db.default 'active'`; a literal that does not fit the field's type is a compile error. The string form (`@db.default '0'`) keeps working and gives the same column default and schema hash. See [Static Defaults](/api/defaults#static-defaults).
+- **MySQL engine, character set and `ON UPDATE` precision.** `@db.mysql.engine` and `@db.mysql.charset` take any name the server provides (the editor completes the common ones; a name the server lacks fails the sync), and `@db.mysql.onUpdate "CURRENT_TIMESTAMP(3)"` is accepted. See [MySQL-specific annotations](/adapters/mysql#mysql-specific-annotations).
+- **Any Atlas Search analyzer.** The `analyzer` of the `@db.mongo.search.*` annotations is no longer limited to 14 names; the editor completes the built-in ones. See [Supported Analyzers](/adapters/mongodb#supported-analyzers).
 
 ### Breaking & behaviour changes
 
+- **Schema sync reports `failed` when an entry errored.** A run that applied what it could but left an `error` entry (a failed DDL statement, a unique index the stored rows break, a blocked drop) returns `status: "failed"` instead of `"synced"`. The hash is withheld as before. Code that treated `"synced"` as success keeps working; code that checks for failure must check `"failed"` (and `"refused"`). See [Sync Result Statuses](/sync/#sync-result-statuses).
+- **Nested writes check every level before writing.** The checks a related table makes before its own write — links that cannot be resolved, a missing `@db.rel.via` target, a foreign key to a missing row (memory, MongoDB), a relation shape a replace cannot write — now run for the whole tree before anything is written. Before, a refusal two or three levels down came after the levels above were written, which left a partial write on adapters without transactions. A foreign key into a table the same call writes rows in (the record itself, a sibling, an earlier item of the batch) is still checked when its level is written. See [Nested write rules](/relations/patches#nested-write-rules).
+- **Keyed FROM children that are not stored yet are inserted.** A `PUT` array, `$replace` or `$upsert` entry whose primary key names none of the record's stored children — a natural key, a client-chosen uuid, a composite key holding the parent key — is inserted with that key. Before, it was skipped silently: the call reported success and the child was never stored. A key that belongs to another record's child still answers `CONFLICT`; `$update` of a missing key still writes nothing. See [`$upsert`](/relations/patches#from).
+- **A relation without a foreign key to the table is refused.** Nested data for a `@db.rel.from` (or `@db.rel.via`) whose child (junction) has no `@db.rel.FK` referencing the table answers `INVALID_QUERY`; before, it was dropped silently. The usual cause is a `@db.table` that extends another table and inherits its relations — the compiler now warns on it.
+- **Aggregate alias collisions are rejected** (`@uniqu/core` 0.2.1). Two `$select` entries with one alias (also two `count(*)`), an aggregate alias equal to a selected field, or a `$groupBy` key that is an aggregate alias answer `INVALID_QUERY` with `code: "AGG_ALIAS_COLLISION"`; the bucket alias collisions already rejected carry the code too. See [Validation and errors](/api/aggregation#validation-and-errors).
+- **MongoDB: a search index Atlas refuses fails the sync.** Creating, updating or dropping an Atlas Search index that Atlas rejects (an unknown analyzer, …) is now a sync error; before, every search-index failure was skipped silently. A server without Atlas Search still skips the search indexes. Atlas free and shared clusters cap the number of search and vector-search indexes (3 on a free cluster): a project with more such indexes now gets `status: "failed"` on every sync, until an index is removed or the cluster is upgraded — before, the extra indexes were silently missing.
+
 - **The write validator's own errors carry codes.** Geo-point, field-operation, navigation-property and array-patch errors report a code (`GEO_LONGITUDE_RANGE`, `NAV_NULL`, `PATCH_KEY_REQUIRED`, … — exported as `DB_VALIDATOR_MESSAGES`) and the `params` their message names, instead of `code: "CUSTOM"` with `custom: true`. The English messages are unchanged. See [db validator codes](/http/i18n#db-validator-codes).
 - **db-client preflight error entries carry `code` and `params`** like the server's entries.
+
+### Fixes
+
+- **Nested FROM children of a parent with a database-generated string key** (a native `uuid` primary key on PostgreSQL / MySQL) are inserted; before, they failed validation (`Expected string, got number`).
+- **Keys under a case-insensitive collation** (MySQL's default, `@db.column.collate 'nocase'`) are matched in nested writes as the database matches them: a FROM child echoed in another case is replaced, not deleted as an orphan of a replace; an existing VIA target named in another case is linked instead of answering `INVALID_QUERY` / `FK_VIOLATION`.
+- **A `decimal` `@db.default`** is filled as its text (`"9.99"`, like any decimal value) on insert and in the MongoDB backfill; before, the SDK filled a number and the insert failed validation.
+- **MySQL `@db.mysql.onUpdate` on a renamed (`@db.column`) or nested column** renders its `ON UPDATE` clause; before, it was dropped. Engine and character-set names are compared case-insensitively, so `"innodb"` no longer looks like a change.
+- **MySQL `@db.mysql.charset` without `@db.mysql.collate`** creates the table in that character set with its default collation; before, the DDL added `COLLATE=utf8mb4_unicode_ci` and MySQL refused the table for any other set. On a field, `@db.mysql.charset` now gives the column `CHARACTER SET <set>`; before, it was ignored (a change of it is not detected by later syncs).
+
+### Custom adapters
+
+- A field's `defaultValue` of kind `"value"` still holds the literal as text (`@db.default 0` → `"0"`, as `@db.default '0'` always did). `parseDefaultLiteral(designType, literal)` from `@atscript/db` gives the value an insert fills — the text for a `string` or `decimal` field, else the parsed JSON — for a backfill.
 
 ## 0.1.169 {#v0-1-169}
 

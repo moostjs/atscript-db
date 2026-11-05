@@ -733,6 +733,11 @@ export type TDbDefaultFn = "increment" | "uuid" | "now";
 
 export type TDbCollation = "binary" | "nocase" | "unicode";
 
+/**
+ * A field's `@db.default*`. `kind: "value"` holds the literal in text form:
+ * a string as written for a string field, otherwise JSON (`@db.default 0` →
+ * `"0"`, `@db.default true` → `"true"` — the same as `@db.default "0"`).
+ */
 export type TDbDefaultValue =
   | { kind: "value"; value: string }
   | { kind: "fn"; fn: TDbDefaultFn; start?: number };
@@ -1247,8 +1252,37 @@ export interface AtscriptDbWritable {
   /** Pre-validate items (type + FK constraints) without inserting them. */
   preValidateItems(
     items: Array<Record<string, unknown>>,
-    opts?: { excludeFkTargetTable?: string },
+    opts?: { excludeFkTargetTable?: string | ReadonlySet<string> },
   ): Promise<void>;
+  /**
+   * @internal The pre-write checks of one level BELOW a nested write's root,
+   * on the `entries` this table will insert / replace / patch there — run by
+   * the root before its own write. Absent → that level is checked when it is
+   * written.
+   */
+  _preflightNested?(entries: Array<Record<string, unknown>>, opts: TNestedPreflight): Promise<void>;
+}
+
+/**
+ * Options of {@link AtscriptDbWritable._preflightNested}. `stage: "links"`
+ * runs before the root writes anything (every link resolvable, existing VIA
+ * targets stored, the relation shapes the level can write); `stage: "fks"`
+ * where the root pre-validates its own children (foreign keys of the rows the
+ * level inserts). `checkFks`: also check `entries`' own foreign keys.
+ * @internal
+ */
+export interface TNestedPreflight {
+  mode: "insert" | "replace" | "patch";
+  stage: "links" | "fks";
+  maxDepth: number;
+  /** The depth `entries` are written at. */
+  depth: number;
+  checkFks?: boolean;
+  /**
+   * Tables the write creates rows in (the root's included): foreign keys to
+   * them are left to the level that writes, when those rows exist.
+   */
+  excludeFkTargetTables?: ReadonlySet<string>;
 }
 
 /**

@@ -348,7 +348,7 @@ describe("SchemaSync — views over views", () => {
     const space = freshSpace();
     failing.add("vc_people");
     const result = await new SchemaSync(space).run(chain(), { force: true });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = (name: string) => result.entries.find((e) => e.name === name)!;
     expect(entry("vc_people").status).toBe("error");
     expect(entry("vc_people_depts")).toMatchObject({

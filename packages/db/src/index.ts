@@ -1,4 +1,4 @@
-export { AtscriptDbReadable, resolveDesignType } from "./table/db-readable";
+export { AtscriptDbReadable, parseDefaultLiteral, resolveDesignType } from "./table/db-readable";
 export { DEFAULT_DB_SPACE } from "./shared/consts";
 export { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "./shared/fulltext-options";
 export { TableMetadata } from "./table/table-metadata";

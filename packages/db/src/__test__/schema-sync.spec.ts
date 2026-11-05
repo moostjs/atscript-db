@@ -1677,7 +1677,7 @@ describe("SchemaSync — type change detection", () => {
     expect(planned.pending).toBe(true);
 
     const result = await sync.run([UsersTable], { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === "users")!;
     expect(entry.status).toBe("error");
     expect(entry.errors.length).toBeGreaterThan(0);
@@ -1748,7 +1748,7 @@ describe("SchemaSync — type change detection", () => {
     expect(planned.pending).toBe(true);
 
     const result = await sync.run([UsersTable], { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === "users")!;
     expect(entry.status).toBe("error");
     expect(entry.errors[0]).toContain("createdAt");
@@ -1792,7 +1792,7 @@ describe("SchemaSync — type change detection", () => {
     expect(planned.pending).toBe(true);
 
     const result = await sync.run([Pf.PfTokenV1, Pf.PfLinkV1], { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === "pf_links")!;
     expect(entry.status).toBe("error");
     expect(entry.errors[0]).toContain("tokenId");
@@ -3377,7 +3377,7 @@ describe("SchemaSync — dependency order", () => {
     sharedDdl = [];
 
     const result = await sync.run([], { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === "tags")!;
     expect(entry.status).toBe("error");
     expect(entry.refused).toBe(false);
@@ -3389,7 +3389,7 @@ describe("SchemaSync — dependency order", () => {
     expect(JSON.parse(controlValueOf("synced_tables")!).map((e: any) => e.name)).toEqual(["tags"]);
     // Hash withheld → the next non-force run retries (and errors again)
     const retry = await sync.run([], { onError: "silent" });
-    expect(retry.status).toBe("synced");
+    expect(retry.status).toBe("failed");
     expect(retry.entries.find((e) => e.name === "tags")!.status).toBe("error");
   });
 
@@ -3813,7 +3813,7 @@ describe("SchemaSync — early drops (a table the run drops never blocks it)", (
       logger,
       onError: "silent",
     });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     expect(result.entries.map((e) => e.name)).toEqual([
       "ed_children",
       "ed_parents",
@@ -4103,7 +4103,7 @@ describe("SchemaSync — a DDL failure inside a table becomes an error entry (0.
     const { logger, lines: logged } = captureLogger("error");
 
     const result = await sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], { force: true, logger });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     expect(result.entries.map(entryShape)).toEqual([
       ["sf_alpha", "alter", []],
       ["sf_beta", "error", []],
@@ -4150,7 +4150,7 @@ describe("SchemaSync — a DDL failure inside a table becomes an error entry (0.
 
     // The next run retries B (A and C are in sync now)
     const retry = await sync.run([Sf.SfAlpha, Sf.SfBetaV2, Sf.SfGamma], { onError: "silent" });
-    expect(retry.status).toBe("synced");
+    expect(retry.status).toBe("failed");
     expect(retry.entries.map((e) => e.status)).toEqual(["in-sync", "error", "in-sync"]);
   });
 
@@ -4199,7 +4199,7 @@ describe("SchemaSync — a DDL failure inside a table becomes an error entry (0.
       force: true,
       onError: "silent",
     });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     expect(result.entries.map(entryShape)).toEqual([
       ["users", "create", []],
       ["active_users", "error", ["users"]],
@@ -4233,7 +4233,7 @@ describe("SchemaSync — an errored plan entry issues no DDL (0.1.129)", () => {
     expect(planned.status).toBe("error");
     sharedDdl = [];
     const result = await sync.run(types, { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === name)!;
     expect(entry.toInit()).toEqual(planned.toInit());
     return { planned, entry };
@@ -4412,7 +4412,7 @@ describe("SchemaSync — a pending rename that did not run stays tracked under t
     for (const attempt of [1, 2]) {
       sharedDdl = [];
       const result = await sync.run([RenamedTable], { force: true, logger });
-      expect(result.status).toBe("synced");
+      expect(result.status).toBe("failed");
       const entry = result.entries[0];
       expect([entry.name, entry.status, entry.renamedFrom, entry.pending]).toEqual([
         "app_users",
@@ -4517,7 +4517,7 @@ describe("SchemaSync — a key-changing parent whose own entry has errors is ref
       { name: "label", type: "INTEGER", notnull: true, pk: false },
     ]);
     const result = await sync.run([Pf.PfTokenV2], { force: true, onError: "silent" });
-    expect(result.status).toBe("synced");
+    expect(result.status).toBe("failed");
     const parent = result.entries[0];
     expect([parent.status, parent.refused, parent.errors.length]).toEqual(["error", false, 1]);
   });

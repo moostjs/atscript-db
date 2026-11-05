@@ -196,14 +196,14 @@ Tables **without** `@db.depth.limit` are now treated as `@db.depth.limit 0`: the
 
 ## Defaults
 
-| Annotation              | Applies To | Arguments         | Description                                                                                                                                             |
-| ----------------------- | ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@db.default`           | Field      | `value` (string)  | Static default value                                                                                                                                    |
-| `@db.default.increment` | Field      | `start?` (number) | Auto-incrementing integer (requires number type)                                                                                                        |
-| `@db.default.uuid`      | Field      | —                 | Random UUID string (requires string type)                                                                                                               |
-| `@db.default.now`       | Field      | —                 | Current timestamp (requires number or string type)                                                                                                      |
-| `@db.onUpdate.now`      | Field      | —                 | Set to the current time by every update (requires number type) — see [Update Timestamps](/api/defaults#on-update)                                       |
-| `@db.onUpdate.inc`      | Field      | —                 | Change counter: `0` on insert, `+1` on every update (non-optional top-level integer; since 0.1.162) — see [Change Counter](/api/defaults#on-update-inc) |
+| Annotation              | Applies To | Arguments                           | Description                                                                                                                                             |
+| ----------------------- | ---------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.default`           | Field      | `value` (string, number or boolean) | Static default value — a literal of the field's type; a string on a non-string field is parsed as JSON                                                  |
+| `@db.default.increment` | Field      | `start?` (number)                   | Auto-incrementing integer (requires number type)                                                                                                        |
+| `@db.default.uuid`      | Field      | —                                   | Random UUID string (requires string type)                                                                                                               |
+| `@db.default.now`       | Field      | —                                   | Current timestamp (requires number or string type)                                                                                                      |
+| `@db.onUpdate.now`      | Field      | —                                   | Set to the current time by every update (requires number type) — see [Update Timestamps](/api/defaults#on-update)                                       |
+| `@db.onUpdate.inc`      | Field      | —                                   | Change counter: `0` on insert, `+1` on every update (non-optional top-level integer; since 0.1.162) — see [Change Counter](/api/defaults#on-update-inc) |
 
 ```atscript
 @db.table
@@ -521,12 +521,12 @@ These annotations require the `@atscript/db-mysql` plugin. See [MySQL adapter](.
 
 | Annotation           | Applies To        | Arguments             | Description                                                        |
 | -------------------- | ----------------- | --------------------- | ------------------------------------------------------------------ |
-| `@db.mysql.engine`   | Interface         | `engine` (string)     | Storage engine (default: `InnoDB`)                                 |
-| `@db.mysql.charset`  | Interface / Field | `charset` (string)    | Character set (default: `utf8mb4`)                                 |
+| `@db.mysql.engine`   | Interface         | `engine` (string)     | Storage engine (default: `InnoDB`); any engine the server has      |
+| `@db.mysql.charset`  | Interface / Field | `charset` (string)    | Character set (default: `utf8mb4`); any set the server has         |
 | `@db.mysql.collate`  | Interface / Field | `collation` (string)  | Native MySQL collation (overrides portable `@db.column.collate`)   |
 | `@db.mysql.unsigned` | Field             | —                     | UNSIGNED modifier for integer columns                              |
 | `@db.mysql.type`     | Field             | `type` (string)       | Override native MySQL column type (e.g., `MEDIUMTEXT`, `TINYTEXT`) |
-| `@db.mysql.onUpdate` | Field             | `expression` (string) | ON UPDATE expression (e.g., `CURRENT_TIMESTAMP`)                   |
+| `@db.mysql.onUpdate` | Field             | `expression` (string) | ON UPDATE: `CURRENT_TIMESTAMP` or `CURRENT_TIMESTAMP(n)`           |
 
 ```atscript
 // requires the @atscript/db-mysql plugin in atscript.config

@@ -195,6 +195,22 @@ describe("buildColumnDefinition", () => {
         buildColumnDefinition(precise, ctx("create", { onUpdateFields: onUpdate })).def,
       ).toContain("ON UPDATE CURRENT_TIMESTAMP(3)");
     }
+    // Keyed by the field path: a renamed / flattened column keeps its clause
+    const renamed = field({
+      path: "audit.updatedAt",
+      physicalName: "audit__updated_at",
+      designType: "number",
+      defaultValue: { kind: "fn", fn: "now" },
+    });
+    const byPath = new Map([["audit.updatedAt", "CURRENT_TIMESTAMP"]]);
+    expect(buildColumnDefinition(renamed, ctx("create", { onUpdateFields: byPath })).def).toContain(
+      "ON UPDATE CURRENT_TIMESTAMP",
+    );
+    // A written precision is kept as written
+    const millis = new Map([["updatedAt", "CURRENT_TIMESTAMP(3)"]]);
+    expect(buildColumnDefinition(precise, ctx("create", { onUpdateFields: millis })).def).toContain(
+      "ON UPDATE CURRENT_TIMESTAMP(3)",
+    );
     const uuid = field({
       physicalName: "id",
       isPrimaryKey: true,

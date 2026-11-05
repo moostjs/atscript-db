@@ -116,7 +116,7 @@ await taskTable.insertOne({
 
 You never need to manually set `projectId` on the task or `taskId` on the comments — Atscript resolves the FK chain references from your schema and wires them up automatically.
 
-Each foreign-key field gets the value of the field it references in the row **as written** — after the [write guard](/api/crud#write-guards), defaults and the TO phase, with primary-key parts (generated ones included) from the inserted id: a generated key, a unique field such as `Project.code` (an SDK default like `@db.default.uuid` included), or every part of a [composite key](/relations/#composite-foreign-keys) (`@db.rel.FK 'line'` on `orderId` and `productId`). A value the payload carries for that foreign key is overwritten. A key that cannot be resolved fails the call with `FK_VIOLATION` (since 0.1.169): before anything is written when the referenced field is missing from the row (a non-key field only the database fills — an `increment`, a native `uuid` / `now` default — counts as missing), after the insert (rolled back) when the database generated a key part it does not report. How replace and patch link nested rows, and how an existing `@db.rel.via` target is linked, is in [Nested write rules](./patches#nested-write-rules).
+Each foreign-key field gets the value of the field it references in the row **as written** — after the [write guard](/api/crud#write-guards), defaults and the TO phase, with primary-key parts (generated ones included) from the inserted id: a generated key, a unique field such as `Project.code` (an SDK default like `@db.default.uuid` included), or every part of a [composite key](/relations/#composite-foreign-keys) (`@db.rel.FK 'line'` on `orderId` and `productId`). A value the payload carries for that foreign key is overwritten. A key that cannot be resolved fails the call with `FK_VIOLATION` (since 0.1.169): before anything is written when the referenced field is missing from the row (a non-key field only the database fills — an `increment`, a native `uuid` / `now` default — counts as missing), after the insert (rolled back) when the database generated a key part it does not report. Every level of the tree is checked before the root row is written (since 0.1.170 — before, only the root's own relations were). A `@db.rel.from` child whose parent key the database generates (a native `uuid` default on PostgreSQL / MySQL) is validated without that key and linked once the parent is written (since 0.1.170; before, such children failed validation). How replace and patch link nested rows, and how an existing `@db.rel.via` target is linked, is in [Nested write rules](./patches#nested-write-rules).
 
 ## Nested Replaces (PUT)
 
@@ -124,7 +124,8 @@ A deep replace fully swaps the record and its relations. FROM children are
 **diff-synced by primary key** rather than wiped: children whose `@meta.id`
 appears in the new payload are updated in place (preserving any downstream
 relations), absent ones are cascade-deleted per their referential rules, and
-unrecognized entries are inserted. VIA junction entries are recomputed against
+unrecognized entries are inserted — an entry carrying a key that names no stored
+row too, with that key (since 0.1.170; before, it was skipped). VIA junction entries are recomputed against
 the new target set.
 
 A child primary key that belongs to **another** record's child is rejected with

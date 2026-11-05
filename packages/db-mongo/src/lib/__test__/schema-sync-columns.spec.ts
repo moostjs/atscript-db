@@ -133,7 +133,7 @@ describe("[mongo] syncColumnsImpl — backfill fills only where the field is mis
 });
 
 describe("[mongo] syncColumnsImpl — @db.default literal coercion", () => {
-  // .as syntax always stores @db.default as a string (TDbDefaultValue.value).
+  // TDbDefaultValue.value is the literal's text (`@db.default 0` → "0").
   // The runtime insert path coerces to designType before writing; the sync
   // backfill path used to skip coercion, so `@db.default '0'` on a number
   // column landed "0" (string) in every doc — breaking equality and
@@ -190,6 +190,24 @@ describe("[mongo] syncColumnsImpl — @db.default literal coercion", () => {
     const [, update] = mockCol.updateMany.mock.calls[0]!;
     expect(update).toEqual({ $set: { label: "0" } });
     expect(typeof (update as any).$set.label).toBe("string");
+  });
+
+  // A decimal is a string at runtime: `@db.default 10.50` / `"10.50"` is
+  // backfilled as "10.50", like an insert fills it (was the number 10.5).
+  it("keeps a decimal default as its string", async () => {
+    const proto = pickField(table, "primitive");
+    const decField: TDbFieldMeta = {
+      ...proto,
+      path: "price",
+      physicalName: "price",
+      designType: "decimal",
+      optional: false,
+      defaultValue: { kind: "value", value: "10.50" },
+    };
+
+    await syncColumnsImpl(adapter as any, makeDiff([decField]));
+    const [, update] = mockCol.updateMany.mock.calls[0]!;
+    expect(update).toEqual({ $set: { price: "10.50" } });
   });
 
   // Stacks Bug B (array-safe path rewrite) with the coercion fix on a real

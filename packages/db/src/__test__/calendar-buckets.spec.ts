@@ -146,7 +146,11 @@ describe("resolveCalendarBuckets — the shared normalizer", () => {
         run();
       } catch (error) {
         expect((error as DbError).errors).toEqual([
-          { path: "$select", message: `Alias "${alias}" collides with field "${alias}"` },
+          {
+            path: "$select",
+            message: `Alias "${alias}" collides with field "${alias}"`,
+            code: "AGG_ALIAS_COLLISION",
+          },
         ]);
       }
     }
@@ -154,7 +158,9 @@ describe("resolveCalendarBuckets — the shared normalizer", () => {
 });
 
 describe("aggregate() — calendar-bucket validation (every metadata-free rule, core wording)", () => {
-  const cases: Array<[string, Record<string, unknown>, { path: string; message: string }]> = [
+  const cases: Array<
+    [string, Record<string, unknown>, { path: string; message: string; code?: string }]
+  > = [
     [
       "unknown unit",
       { $select: [{ $bucket: "fortnight", $field: "openedAt", $as: "d" }], $groupBy: ["d"] },
@@ -207,7 +213,7 @@ describe("aggregate() — calendar-bucket validation (every metadata-free rule, 
         ],
         $groupBy: ["d"],
       },
-      { path: "$select", message: 'Duplicate alias "d"' },
+      { path: "$select", message: 'Duplicate alias "d"', code: "AGG_ALIAS_COLLISION" },
     ],
     [
       "bucket not grouped",

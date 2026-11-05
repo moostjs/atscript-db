@@ -176,15 +176,38 @@ export function resolveDesignType(fieldType: TAtscriptAnnotatedType): string {
 }
 
 /**
+ * The JS value of a `@db.default` literal (the `value` of a
+ * `{ kind: "value" }` default) for a field of `designType`: the text itself
+ * for a `string` or `decimal` field (a decimal is a string at runtime),
+ * otherwise the literal parsed as JSON (`"0"` → `0`, `"true"` → `true`,
+ * `"[]"` → `[]`). A literal that is not valid JSON is returned as is, so the
+ * validator reports it against the field.
+ *
+ * @since 0.1.170
+ */
+export function parseDefaultLiteral(designType: string, literal: string): unknown {
+  if (designType === "string" || designType === "decimal") return literal;
+  try {
+    return JSON.parse(literal) as unknown;
+  } catch {
+    return literal;
+  }
+}
+
+/**
  * Resolves `@db.default.*` annotations from a metadata map into a {@link TDbDefaultValue}.
  * Used both during normal field descriptor construction and for FK target field resolution.
  */
 export function resolveDefaultFromMetadata(
   metadata: TMetadataMap<any>,
 ): TDbDefaultValue | undefined {
-  const defaultValue = metadata.get("db.default") as string | undefined;
+  const defaultValue = metadata.get("db.default") as string | number | boolean | undefined;
   if (defaultValue !== undefined) {
-    return { kind: "value", value: defaultValue };
+    // `@db.default 0` / `true` arrive typed; the descriptor keeps the one
+    // literal form `@db.default "0"` / `"true"` always had (strings as-is,
+    // others JSON), so both spellings give the same DDL and schema hash.
+    const value = typeof defaultValue === "string" ? defaultValue : JSON.stringify(defaultValue);
+    return { kind: "value", value };
   }
   if (metadata.has("db.default.increment")) {
     const startValue = metadata.get("db.default.increment");

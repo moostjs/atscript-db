@@ -110,14 +110,14 @@ export default {
 
 These annotations opt into MySQL-specific behavior. Files using only portable `@db.*` annotations remain adapter-agnostic.
 
-| Annotation                      | Level            | Purpose                                                                                     |
-| ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
-| `@db.mysql.engine "ENGINE"`     | Interface        | Storage engine (default: `InnoDB`). Allowed: `InnoDB`, `MyISAM`, `MEMORY`, `CSV`, `ARCHIVE` |
-| `@db.mysql.charset "CHARSET"`   | Interface, Field | Character set (default: `utf8mb4`)                                                          |
-| `@db.mysql.collate "COLLATION"` | Interface, Field | Native MySQL collation (overrides portable `@db.column.collate`)                            |
-| `@db.mysql.unsigned`            | Field            | Unsigned integer modifier                                                                   |
-| `@db.mysql.type "TYPE"`         | Field            | Override the native column type (e.g., `"MEDIUMTEXT"`)                                      |
-| `@db.mysql.onUpdate "EXPR"`     | Field            | ON UPDATE expression. Only `"CURRENT_TIMESTAMP"` is accepted                                |
+| Annotation                      | Level            | Purpose                                                                                                                                                                                                                                   |
+| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@db.mysql.engine "ENGINE"`     | Interface        | Storage engine (default: `InnoDB`) — any engine the server has, e.g. `MyISAM`, `ARCHIVE`, `Aria`                                                                                                                                          |
+| `@db.mysql.charset "CHARSET"`   | Interface, Field | Character set (default: `utf8mb4`) — any character set the server has, e.g. `latin1`, `cp1251`. Without `@db.mysql.collate` the set's own default collation applies; on a field, the column gets `CHARACTER SET` (character columns only) |
+| `@db.mysql.collate "COLLATION"` | Interface, Field | Native MySQL collation (overrides portable `@db.column.collate`)                                                                                                                                                                          |
+| `@db.mysql.unsigned`            | Field            | Unsigned integer modifier                                                                                                                                                                                                                 |
+| `@db.mysql.type "TYPE"`         | Field            | Override the native column type (e.g., `"MEDIUMTEXT"`)                                                                                                                                                                                    |
+| `@db.mysql.onUpdate "EXPR"`     | Field            | ON UPDATE expression: `"CURRENT_TIMESTAMP"`, optionally with a precision (`"CURRENT_TIMESTAMP(3)"`)                                                                                                                                       |
 
 Example:
 
@@ -144,6 +144,10 @@ export interface User {
   updatedAt: number.timestamp
 }
 ```
+
+The editor completes the common engines and character sets, but the lists are not closed: write any name your server provides. A name that is not a bare identifier (`"Inno DB"`, `"utf-8"`) fails the build; a name the server does not know fails the schema sync with MySQL's own error (`Unknown storage engine`, `Unknown character set`) — MySQL replaces an unknown engine silently only when `NO_ENGINE_SUBSTITUTION` is off in its `sql_mode`. Engine and character-set names are compared case-insensitively, so `"innodb"` matches the server's `InnoDB` and causes no `ALTER`.
+
+`@db.mysql.onUpdate` takes `CURRENT_TIMESTAMP` (or its synonyms `NOW()`, `LOCALTIMESTAMP`, `LOCALTIME`), with an optional precision 0–6; anything else fails the build. Without a precision the clause takes the column's own (see [Fractional seconds](#fractional-seconds)); a written precision must match the column's — `CURRENT_TIMESTAMP(3)` on a `TIMESTAMP(3)` / `DATETIME(3)` column — or MySQL refuses the column at sync.
 
 ## Type Mapping
 
@@ -374,7 +378,7 @@ createdAt: number.timestamp
 seenAt?: number
 ```
 
-A `number` field whose `@db.mysql.type` is `TIMESTAMP(n)` / `DATETIME(n)` (with or without `@db.default.now`) is written as a UTC datetime string with `n` fractional digits (up to milliseconds) and read back as epoch ms with its milliseconds. `DEFAULT` and `ON UPDATE` render as `CURRENT_TIMESTAMP(n)`, which MySQL requires for such a column. A `@db.mysql.type` that is not a date type (say `BIGINT`) keeps the number as is, `@db.default.now` included.
+A `number` field whose `@db.mysql.type` is `TIMESTAMP(n)` / `DATETIME(n)` (with or without `@db.default.now`) is written as a UTC datetime string with `n` fractional digits (up to milliseconds) and read back as epoch ms with its milliseconds. `DEFAULT` and `ON UPDATE` render as `CURRENT_TIMESTAMP(n)`, which MySQL requires for such a column — `@db.mysql.onUpdate "CURRENT_TIMESTAMP"` included; `"CURRENT_TIMESTAMP(3)"` may also be written out. A `@db.mysql.type` that is not a date type (say `BIGINT`) keeps the number as is, `@db.default.now` included.
 
 ## Foreign Key Sync
 

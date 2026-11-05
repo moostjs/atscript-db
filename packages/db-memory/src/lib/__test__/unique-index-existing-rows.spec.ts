@@ -74,10 +74,11 @@ describe("[memory] unique index over existing duplicates", () => {
   });
 
   it("schema sync reports the table as an error entry and withholds the hash", async () => {
-    const result = await syncSchema(space, [fx.IgItem]);
+    const result = await syncSchema(space, [fx.IgItem], { onError: "silent" });
+    expect(result.status).toBe("failed");
     const entry = result.entries.find((e) => e.name === "ig_items")!;
     expect(entry.status).toBe("error");
     expect(entry.errors.join(" ")).toContain("sku_idx");
-    expect((await syncSchema(space, [fx.IgItem])).status).not.toBe("up-to-date");
+    expect((await syncSchema(space, [fx.IgItem], { onError: "silent" })).status).toBe("failed");
   });
 });

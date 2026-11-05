@@ -562,18 +562,28 @@ export const dbColumnAnnotations: TAnnotationsTree = {
   default: {
     $self: new AnnotationSpec({
       description: annotationExample(
-        "Sets a static DB-level default value (used in DDL DEFAULT clause). " +
-          "For string fields the value is used as-is; for other types it is parsed as JSON.",
+        "Sets a static DB-level default value (used in the DDL `DEFAULT` clause and filled " +
+          "by the SDK on insert). Write it as a literal of the field's type — a string, a " +
+          "number or `true` / `false`. A string on a non-string field is parsed as JSON " +
+          '(`@db.default "0"`, `@db.default "[]"`).',
         '@db.default "active"',
         "status: string",
+        "",
+        "@db.default 0",
+        "attempts: number",
+        "",
+        "@db.default true",
+        "enabled: boolean",
       ),
       nodeType: ["prop"],
       passedWhenReferred: false,
       argument: {
         name: "value",
-        type: "string",
+        type: "value",
         description:
-          "Static default value. Strings used as-is; other types parsed via JSON.parse().",
+          "Static default value: a string, a number or a boolean that fits the field's type. " +
+          "A string is used as-is on a string field and parsed as JSON on any other field " +
+          '(objects and arrays: `@db.default "{}"`).',
       },
     }),
 

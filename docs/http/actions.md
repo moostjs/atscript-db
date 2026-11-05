@@ -34,7 +34,7 @@ export interface User {
 
     name: string
 
-    @db.default 'false'
+    @db.default false
     blocked: boolean
 }
 ```
