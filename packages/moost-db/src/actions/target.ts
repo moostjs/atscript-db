@@ -24,7 +24,7 @@ import { applyActionScope, dbActionOverlaySlot } from "./row-scope";
 import { errorMessage, errorStatus } from "./action-target-error";
 import { actionHandlerStarted } from "./handler-start";
 import { findRowsByIds, identityKey, type TRequestedId } from "./rows-by-id";
-import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
+import { judgeRows, useVerdictReason, type TDisabledFn } from "./verdict";
 
 /**
  * The rows a `'rows'` action runs on, as the handler surface of
@@ -329,6 +329,7 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
     for (const row of scoped) if (row !== undefined) present.push(row);
     const verdicts = this.disabled ? judgeRows(this.action, this.disabled, present) : undefined;
     const out = { ids: [] as Record<string, unknown>[], rows: [] as Record<string, unknown>[] };
+    const reasonOf = useVerdictReason();
     let v = 0;
     for (let i = 0; i < ids.length; i++) {
       const row = scoped[i];
@@ -341,7 +342,7 @@ class StreamedTarget extends TargetBase implements TDbActionTarget {
       }
       const verdict = verdicts?.[v++];
       if (verdict) {
-        const reason = verdictReason(verdict);
+        const reason = reasonOf(verdict);
         this.skipped.push(reason === undefined ? { id: ids[i] } : { id: ids[i], reason });
         continue;
       }

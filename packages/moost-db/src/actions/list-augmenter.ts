@@ -2,7 +2,7 @@ import { isPlainObject } from "@atscript/db";
 import type { TDbActionEnvelope } from "./discover";
 import { exceedsFields, omitKeys, projectRow, requiredFieldsOf, splitPaths } from "./rows-by-id";
 import type { TDbActionDisabledVerdict } from "./types";
-import { judgeRows, verdictReason, type TDisabledFn } from "./verdict";
+import { judgeRows, useVerdictReason, type TDisabledFn } from "./verdict";
 
 export type AugmentedRow<TRow extends Record<string, unknown>> = TRow & {
   $actions?: string[];
@@ -110,6 +110,7 @@ export function augmentRowsWithActions<
 
   const masks = outOfScope && candidates.map((c) => outOfScope.get(c.envelope.info.name));
 
+  const reasonOf = useVerdictReason();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const names: string[] = [];
@@ -122,7 +123,7 @@ export function augmentRowsWithActions<
         names.push(name);
         continue;
       }
-      const reason = verdictReason(verdict);
+      const reason = reasonOf(verdict);
       if (reason !== undefined) (reasons ??= {})[name] = reason;
     }
     (row as Record<string, unknown>).$actions = names;

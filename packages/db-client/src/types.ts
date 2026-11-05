@@ -156,6 +156,21 @@ export interface ClientOptions {
    * the body already loaded for another one.
    */
   metaKey?: string;
+
+  /**
+   * The locale to ask the server for (since 0.1.170): sent as
+   * `Accept-Language` on every request (unless `headers` carries one), so a
+   * server with a translator answers in that language — `/meta` texts, error
+   * messages and the templates (`/meta` `type.$i18n`) the preflight
+   * validator translates its errors with. A function is read per request.
+   *
+   * The cached `/meta`, the validator built from it and the loaded action
+   * forms belong to the locale they were loaded in: after a switch, the next
+   * call loads them again (revalidated through `metaStore`, which keeps one
+   * entry per locale — a switch back costs a `304`). Already-held results
+   * stay as they are: re-read them (in a UI, remount on a locale change).
+   */
+  locale?: string | (() => string | undefined);
 }
 
 // ── Meta Response Types ─────────────────────────────────────────────────────

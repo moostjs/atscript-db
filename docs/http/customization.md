@@ -37,6 +37,7 @@ All hooks are protected methods with sensible defaults (pass-through or no-op). 
 | `meta()`                                | Both                                  | On `GET /meta` request                         | Enrich the metadata response (cached)                              |
 | `applyMetaOverlay(meta)`                | Both                                  | Per request, after `meta()`                    | Per-principal `crud` / `actions` filtering (returns a clone)       |
 | `metaHttpCaching()`                     | Both                                  | On `GET /meta`, `GET /meta/form/:name`         | `ETag` / `Cache-Control` / `Vary` of `/meta`, or `false` (0.1.151) |
+| `metaTranslation()`                     | Both                                  | On `GET /meta`, `GET /meta/form/:name`         | `false`: source texts ([i18n](./i18n#meta-translation), 0.1.170)   |
 | `allowedActions(names)`                 | Both                                  | `$actions`, `/meta/actions`                    | Row-level actions the caller may run (0.1.145)                     |
 | `authorizeForm(name, actionNames)`      | Both                                  | On `GET /meta/form/:name`                      | Refuse a form per request — answered as an unknown form (0.1.143)  |
 | `init()`                                | Both                                  | On controller construction                     | One-time setup                                                     |

@@ -26,7 +26,7 @@ import {
   setStreamedTarget,
 } from "./target";
 import type { TDbActionDisabledVerdict, TOnDisabledRows } from "./types";
-import { judgeRow, judgeRows, verdictReason } from "./verdict";
+import { judgeRow, judgeRows, useVerdictReason, verdictReason } from "./verdict";
 
 // Bound-table controller wins over opts.table (spec contract).
 function injectBoundTable(fallback: unknown): void {
@@ -119,6 +119,8 @@ async function gateRows(
   const passingIds: Record<string, unknown>[] = [];
   const skipped: TSkippedRow[] = [];
   const stale = ctx.has(dbActionStaleKey) ? ctx.get(dbActionStaleKey) : undefined;
+  // The 409 translates in ActionDisabledError; `summary().skipped` here.
+  const reasonOf = useVerdictReason();
   let verdictIndex = 0;
   for (let i = 0; i < ids.length; i++) {
     const row = rows[i];
@@ -126,7 +128,7 @@ async function gateRows(
     if (row === undefined || verdict) {
       const reason = verdictReason(verdict);
       failing.push({ id: ids[i], reason });
-      const skipReason = reason ?? (stale?.has(i) ? "stale" : undefined);
+      const skipReason = reasonOf(verdict) ?? (stale?.has(i) ? "stale" : undefined);
       skipped.push(skipReason === undefined ? { id: ids[i] } : { id: ids[i], reason: skipReason });
     } else {
       passingRows.push(row);

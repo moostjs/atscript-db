@@ -63,6 +63,7 @@ const users = new Client<typeof User>("/api/users", {
 | `navigate`  | `(url: string) => void \| Promise<void>`                            | SPA-router hook for `processor: 'navigate'` actions (see [Navigate dispatch](#actions))                                             |
 | `metaStore` | `MetaStore \| false`                                                | Where `/meta` bodies are kept for revalidation — default: one store shared by all clients (see [Revalidating `/meta`](#meta-store)) |
 | `metaKey`   | `string`                                                            | Store key for this client's `/meta` — default: the `/meta` URL (see [Parametric mounts](#meta-store-parametric))                    |
+| `locale`    | `string` or `() => string \| undefined`                             | Sent as `Accept-Language`; `/meta`, the validator and forms are cached per locale (see [Translations](./i18n#client-locale))        |
 
 ### SSR and auth — async headers factory {#ssr-auth}
 
@@ -852,6 +853,8 @@ try {
 ```
 
 `one()` is the exception — it returns `null` on 404 instead of throwing.
+
+With a translator on the server, `message`s come in the requested [`locale`](./i18n#client-locale), and preflight errors are translated with the served templates; `code` and `params` stay the same in every language.
 
 A `DbError` reaches the client with its code (since 0.1.165): `e.body.code` is `CONFLICT`, `FK_VIOLATION`, …, and each entry of `e.errors` carries a `code` (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`) and `params` to build a translated message from — see [Constraint violations](/api/crud#constraint-errors).
 

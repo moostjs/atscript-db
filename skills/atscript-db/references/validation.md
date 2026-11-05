@@ -45,6 +45,8 @@ Server and client share the plugin — same partial logic, same ref-depth gate. 
 
 ## Error shape
 
+Every entry also carries `code` + `params` (db plugin codes since 0.1.170, `DB_VALIDATOR_MESSAGES`; client preflight entries keep them) — translation rules → [i18n.md](i18n.md).
+
 ```ts
 // @atscript/typescript
 class ValidatorError extends Error {

@@ -1,4 +1,6 @@
 export { createDbValidatorPlugin } from "./db-validator-plugin";
+export { DB_VALIDATOR_MESSAGES } from "./db-validator-messages";
+export type { TDbValidatorErrorCode } from "./db-validator-messages";
 export type { DbValidationContext } from "./db-validator-plugin";
 export { isDbFieldOp } from "./ops";
 export type { TDbFieldOp, TDbCas } from "./ops";

@@ -1,6 +1,6 @@
 import { HttpError } from "@moostjs/event-http";
 
-import { verdictReason } from "./verdict";
+import { useVerdictReason } from "./verdict";
 
 /**
  * Wire-body shape for server-side gate rejections. The `name` discriminator
@@ -66,7 +66,9 @@ function rowsMessage(action: string, count: number, reasons: readonly (string | 
  *   reason exists, `reasons` aligned with `ids`.
  *
  * `reasons` entries are verdict reasons (`verdictReason`): anything but a
- * non-empty string counts as "no reason".
+ * non-empty string counts as "no reason". With moost's translator registered,
+ * reasons are translated to the request's language (since 0.1.170), as in
+ * `$disabledReasons`.
  */
 export class ActionDisabledError extends HttpError<ActionDisabledErrorBody> {
   override name = "ActionDisabledError";
@@ -83,15 +85,16 @@ export class ActionDisabledError extends HttpError<ActionDisabledErrorBody> {
       statusCode: 409,
       action,
     };
+    const reasonOf = useVerdictReason();
     if (ids !== undefined) {
-      const aligned = ids.map((_, i) => verdictReason(reasons?.[i]) ?? null);
+      const aligned = ids.map((_, i) => reasonOf(reasons?.[i]) ?? null);
       const reason = sharedReason(aligned);
       body.message = reason ?? rowsMessage(action, ids.length, aligned);
       body.ids = ids;
       if (reason !== undefined) body.reason = reason;
       if (aligned.some((r) => r !== null)) body.reasons = aligned;
     } else {
-      const reason = verdictReason(reasons?.[0]);
+      const reason = reasonOf(reasons?.[0]);
       body.message = reason ?? `Action "${action}" is disabled for this row`;
       if (id !== undefined) body.id = id;
       if (reason !== undefined) body.reason = reason;

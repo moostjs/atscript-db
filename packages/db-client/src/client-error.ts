@@ -41,7 +41,7 @@ export class ClientValidationError extends ClientError {
   /** `true`: the request never left the client. */
   readonly preflight = true as const;
 
-  constructor(errors: Array<{ path: string; message: string }>) {
+  constructor(errors: ServerErrorEntry[]) {
     const message =
       errors.length === 1 ? errors[0]!.message : `Validation failed with ${errors.length} errors`;
     super(400, { message, statusCode: 400, errors });

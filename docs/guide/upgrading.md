@@ -6,6 +6,17 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.170 {#v0-1-170}
+
+### Features
+
+- **Translations.** With moost's `setTranslator`, `/meta`, its forms, error bodies and `disabled` reasons are served in the request's language (an `ETag` per language; opt out per controller with `metaTranslation()`), and the db-client gets a `locale` option. See [Translations (i18n)](/http/i18n).
+
+### Breaking & behaviour changes
+
+- **The write validator's own errors carry codes.** Geo-point, field-operation, navigation-property and array-patch errors report a code (`GEO_LONGITUDE_RANGE`, `NAV_NULL`, `PATCH_KEY_REQUIRED`, … — exported as `DB_VALIDATOR_MESSAGES`) and the `params` their message names, instead of `code: "CUSTOM"` with `custom: true`. The English messages are unchanged. See [db validator codes](/http/i18n#db-validator-codes).
+- **db-client preflight error entries carry `code` and `params`** like the server's entries.
+
 ## 0.1.169 {#v0-1-169}
 
 ### Breaking & behaviour changes

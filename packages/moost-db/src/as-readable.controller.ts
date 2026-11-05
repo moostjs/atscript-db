@@ -16,7 +16,16 @@ import type {
 } from "@atscript/db";
 import { nestDottedWith } from "@atscript/db";
 import { Get, HttpError, httpKind, prerenderJson } from "@moostjs/event-http";
-import { current, Moost, Param, useControllerContext, type TConsoleBase } from "moost";
+import { tryGetCurrent } from "@wooksjs/event-core";
+import {
+  current,
+  Moost,
+  Param,
+  useControllerContext,
+  useTranslation,
+  type TConsoleBase,
+  type TTranslation,
+} from "moost";
 import { parseUrl } from "@uniqu/url";
 
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
@@ -30,6 +39,7 @@ import {
 import { discoverActions, getControllerFormType } from "./actions/discover";
 import { readRequestContext } from "./relation-predicates";
 import { applyTerminalRefs } from "./meta/terminal-ref";
+import { localizeForm, localizeMeta } from "./meta/meta-i18n";
 import {
   freezeShared,
   isStableMeta,
@@ -696,12 +706,39 @@ export abstract class AsReadableController<
   @Get("meta")
   async meta(): Promise<TMetaResponse> {
     await this.parseRequest("meta");
+    const meta = this._withOwnHttpPath(await this.resolveMeta());
+    const translation = this._metaTranslationOf();
     // An overridden `meta()` post-processes this result: serve it without the
     // serialize-once memo (its final object is the override's, not this one).
     return this._serveMeta(
-      this._withOwnHttpPath(await this.resolveMeta()),
+      translation ? localizeMeta(meta, translation) : meta,
       this.meta === AsReadableController.prototype.meta,
     );
+  }
+
+  /**
+   * Whether `GET /meta` and `GET /meta/form/:name` are served in the
+   * request's language (since 0.1.170). Default `true`: with a translator
+   * registered (moost's `setTranslator`) and a locale picked for the request,
+   * the served types' texts (`@meta.label`, `@meta.description`, constraint
+   * messages, …) and the actions' `label` / `description` / `promptText` are
+   * translated, and the type carries `$i18n` — the registered message
+   * templates in that language and the translated texts of expressions, for
+   * client-side validation. The translation runs last, after
+   * {@link applyMetaOverlay}; each language gets its own `ETag`.
+   *
+   * Return `false` to serve the source texts (e.g. when the wording depends on
+   * more than the locale).
+   */
+  protected metaTranslation(): boolean {
+    return true;
+  }
+
+  /** The request's translation for `/meta` (`undefined`: serve the source texts). */
+  private _metaTranslationOf(): TTranslation | undefined {
+    if (!this.metaTranslation()) return undefined;
+    const event = tryGetCurrent(); // none: a direct call
+    return event && useTranslation(event);
   }
 
   /**
@@ -869,7 +906,8 @@ export abstract class AsReadableController<
       cached = markStableMeta(this.buildScoped(scope, () => this.serializeForMeta(formType)));
       this._formSchemas.set(name, cached);
     }
-    return this._serveMeta(cached);
+    const translation = this._metaTranslationOf();
+    return this._serveMeta(translation ? localizeForm(cached, translation) : cached);
   }
 
   /**

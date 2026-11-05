@@ -281,6 +281,7 @@ const httpSidebar = [
       { text: "Query Targets", link: "/http/query-targets" },
       { text: "Actions on a View", link: "/http/view-actions" },
       { text: "Permissions", link: "/http/permissions" },
+      { text: "Translations (i18n)", link: "/http/i18n" },
       { text: "HTTP Client", link: "/http/client" },
     ],
   },

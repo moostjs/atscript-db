@@ -236,6 +236,7 @@ curl -i http://localhost:3000/todos/meta -H 'If-None-Match: W/"oC1GGywzL4DrvNSrc
 - **The JSON is serialized once** per distinct payload, not on every request.
 - An ETag is sent only when the payload object is reused across requests: the default pipeline reuses it; an `applyMetaOverlay` that builds a fresh object per request is served without an ETag (see [applyMetaOverlay](./customization#applymetaoverlay)).
 - **Opt out or change the headers** with [`metaHttpCaching()`](./customization#metahttpcaching).
+- **With a translator registered**, each language has its own ETag and the response adds `Vary: Accept-Language` (since 0.1.170) — see [Translations](./i18n#caching-per-language).
 
 ::: warning Don't cache `/meta` by URL alone
 `/meta` differs per user. A service worker or client cache keyed only by URL serves one user's `/meta` to the next. Cache per identity, or let the browser revalidate. [`client.invalidateMeta()`](./client#meta) resets a reused client.

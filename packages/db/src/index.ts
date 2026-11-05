@@ -29,6 +29,7 @@ export type { WithOptimisticRetryOptions } from "./with-optimistic-retry";
 // ── Shared validator entry (used by both server and @atscript/db-client) ────
 export {
   createDbValidatorPlugin,
+  DB_VALIDATOR_MESSAGES,
   buildDbValidator,
   buildValidationContext,
   isNavRelation,
@@ -49,6 +50,7 @@ export {
 } from "./validator";
 export type {
   DbValidationContext,
+  TDbValidatorErrorCode,
   ValidatorMode,
   ValidationContext,
   TDbFieldOp,

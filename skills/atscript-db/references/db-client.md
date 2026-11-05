@@ -113,6 +113,7 @@ new Client<T>(path, {
   navigate?: (url: string) => void | Promise<void>,  // SPA router for action() navigate dispatch
   metaStore?: MetaStore | false,     // /meta ETag store (0.1.153); default = shared module-level store
   metaKey?: string,                  // store key (0.1.153); default = the /meta URL
+  locale?: string | (() => string | undefined), // Accept-Language + per-locale caches (0.1.170) → i18n.md
 })
 ```
 

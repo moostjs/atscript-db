@@ -110,7 +110,7 @@ import {
   type TAppliedIds,
   type TRowsByIdSource,
 } from "./actions/rows-by-id";
-import { judgeRows, verdictReason } from "./actions/verdict";
+import { judgeRows, useVerdictReason } from "./actions/verdict";
 import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
 import { DbEndpoint } from "./db-endpoint";
 import { buildDecorationIndex, type TDecorationIndex } from "./decorations/decoration-index";
@@ -4327,6 +4327,7 @@ export class AsDbReadableController<
       );
     });
     let p = 0;
+    const reasonOf = useVerdictReason();
     return rows.map((row, r) => {
       if (!row) return undefined;
       const at = p++;
@@ -4340,7 +4341,7 @@ export class AsDbReadableController<
           actions.push(name);
           continue;
         }
-        const reason = verdictReason(verdict);
+        const reason = reasonOf(verdict);
         if (reason !== undefined) (disabledReasons ??= {})[name] = reason;
       }
       return disabledReasons ? { actions, disabledReasons } : { actions };

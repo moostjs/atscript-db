@@ -133,6 +133,9 @@ export class Client<
   private readonly _lenientWrites?: boolean;
   private readonly _metaStore: MetaStore | undefined;
   private readonly _metaKey?: string;
+  private readonly _locale?: ClientOptions["locale"];
+  /** The locale {@link _metaPromise} (and the validator, forms) were loaded in. */
+  private _metaLocale?: string;
   private _metaPromise?: Promise<MetaResponse>;
   /** The `ETag` of the `/meta` body {@link _metaPromise} resolved to. */
   private _metaEtag?: string;
@@ -149,6 +152,7 @@ export class Client<
     this._lenientWrites = opts?.lenientWrites;
     this._metaStore = opts?.metaStore === false ? undefined : (opts?.metaStore ?? defaultMetaStore);
     this._metaKey = opts?.metaKey;
+    this._locale = opts?.locale;
   }
 
   // ── GET /query ─────────────────────────────────────────────────────────────
@@ -426,8 +430,9 @@ export class Client<
    * as `If-None-Match`, and a `304 Not Modified` reuses the stored body.
    */
   async meta(): Promise<MetaResponse> {
+    const locale = this._syncLocale();
     if (!this._metaPromise) {
-      const p: Promise<MetaResponse> = this._loadMeta().then(
+      const p: Promise<MetaResponse> = this._loadMeta(locale).then(
         ({ body, etag }) => {
           if (this._metaPromise === p) this._metaEtag = etag;
           return body;
@@ -664,6 +669,7 @@ export class Client<
   }
 
   private _loadActionForm(url: string): Promise<TAtscriptAnnotatedType> {
+    this._syncLocale();
     let p = this._formCache.get(url);
     if (!p) {
       // Loaded on demand, like the preflight validator, so importing the
@@ -702,6 +708,7 @@ export class Client<
   }
 
   private _getValidator(): Promise<ClientValidator> {
+    this._syncLocale();
     if (!this._validatorPromise) {
       const p: Promise<ClientValidator> = Promise.all([this.meta(), import("./validator")])
         .then(([m, { createClientValidator }]) =>
@@ -831,12 +838,29 @@ export class Client<
     return this._request("GET", `${endpoint}${qs ? `?${qs}` : ""}`, undefined, { signal });
   }
 
-  private async _resolveHeaders(): Promise<Record<string, string>> {
-    if (!this._headers) return {};
-    if (typeof this._headers === "function") {
-      return await this._headers();
+  private async _resolveHeaders(locale = this._currentLocale()): Promise<Record<string, string>> {
+    const headers = !this._headers
+      ? {}
+      : typeof this._headers === "function"
+        ? await this._headers()
+        : this._headers;
+    if (locale === undefined || hasHeader(headers, "accept-language")) return headers;
+    return { ...headers, "Accept-Language": locale };
+  }
+
+  /** `ClientOptions.locale` now. */
+  private _currentLocale(): string | undefined {
+    return typeof this._locale === "function" ? this._locale() : this._locale;
+  }
+
+  /** {@link _currentLocale}, after dropping the `/meta`, validator and forms loaded in another one. */
+  private _syncLocale(): string | undefined {
+    const locale = this._currentLocale();
+    if (locale !== this._metaLocale) {
+      this.invalidateMeta();
+      this._metaLocale = locale;
     }
-    return this._headers;
+    return locale;
   }
 
   /**
@@ -844,19 +868,23 @@ export class Client<
    * bodies for this key, falling back to a plain request whenever the
    * conditional one cannot be answered from the store.
    */
-  private async _loadMeta(): Promise<{ body: MetaResponse; etag?: string }> {
+  private async _loadMeta(
+    locale: string | undefined,
+  ): Promise<{ body: MetaResponse; etag?: string }> {
     const url = this._endpointUrl("meta");
     const store = this._metaStore;
     if (!store) {
       const res = await this._fetchUrl(url, {
         method: "GET",
-        headers: await this._resolveHeaders(),
+        headers: await this._resolveHeaders(locale),
       });
       const body = (await this._readResponse(res, url, "GET", false)) as MetaResponse;
       return { body, etag: res.ok ? readEtag(res) : undefined };
     }
-    const key = this._metaKey ?? url;
-    const headers = await this._resolveHeaders();
+    // One store entry per locale: each language is served with its own ETag.
+    const base = this._metaKey ?? url;
+    const key = locale === undefined ? base : `${base}#${locale}`;
+    const headers = await this._resolveHeaders(locale);
     const candidates = store._isUnconditional(key) ? [] : store.candidates(key);
     if (candidates.length > 0) {
       const init: RequestInit = {
@@ -1017,6 +1045,14 @@ export class Client<
       return undefined;
     }
   }
+}
+
+/** Whether `headers` has `name` (lower case), in any letter case. */
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  for (const key in headers) {
+    if (key.toLowerCase() === name) return true;
+  }
+  return false;
 }
 
 /**

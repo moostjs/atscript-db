@@ -1,5 +1,7 @@
 import {
   deserializeAnnotatedType,
+  localizeErrors,
+  messagesTranslator,
   type TAtscriptAnnotatedType,
   type TAtscriptTypeObject,
   type Validator,
@@ -15,7 +17,7 @@ import {
 
 import { ClientValidationError } from "./client-error";
 
-import type { MetaResponse } from "./types";
+import type { MetaResponse, ServerErrorEntry } from "./types";
 
 export type { DbValidationContext, ValidatorMode } from "@atscript/db/validator";
 
@@ -37,6 +39,13 @@ export interface ClientValidatorOptions {
    * (strict preflight catches typos).
    */
   lenientWrites?: boolean;
+  /**
+   * Message templates and texts to translate the preflight's errors with
+   * (since 0.1.170) — the served type's `$i18n` (`/meta` `type.$i18n`), which
+   * {@link createClientValidator} passes by default. Errors keep their
+   * `code` / `params`; ids missing from it keep the English message.
+   */
+  messages?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -48,6 +57,7 @@ export class ClientValidator {
   private _type: TAtscriptAnnotatedType<TAtscriptTypeObject>;
   private _validators = new Map<string, Validator<any>>();
   private _lenientWrites: boolean;
+  private _translate?: ReturnType<typeof messagesTranslator>;
 
   /** Flat map of dotted field paths to their annotated types. */
   readonly flatMap: Map<string, TAtscriptAnnotatedType>;
@@ -62,6 +72,7 @@ export class ClientValidator {
     this._type = type;
     this._lenientWrites = opts?.lenientWrites === true;
     this.versionColumn = opts?.versionColumn;
+    if (opts?.messages) this._translate = messagesTranslator(opts.messages);
     const ctx = buildValidationContext(type);
     this.flatMap = ctx.flatMap;
     this.navFields = ctx.navFields;
@@ -118,10 +129,18 @@ export class ClientValidator {
     for (let i = 0; i < items.length; i++) {
       if (!validator.validate(items[i], true, ctx)) {
         const prefix = isArray ? `[${i}]` : "";
-        const errors = validator.errors.map((e) => ({
-          path: prefix ? (e.path ? `${prefix}.${e.path}` : prefix) : e.path,
-          message: e.message,
-        }));
+        const found = this._translate
+          ? localizeErrors(validator.errors, this._translate)
+          : validator.errors;
+        const errors = found.map(({ path, message, code, params }) => {
+          const entry: ServerErrorEntry = {
+            path: prefix ? (path ? `${prefix}.${path}` : prefix) : path,
+            message,
+          };
+          if (code !== undefined) entry.code = code;
+          if (params !== undefined) entry.params = params;
+          return entry;
+        });
         throw new ClientValidationError(errors);
       }
     }
@@ -159,5 +178,9 @@ export function createClientValidator(
   opts?: ClientValidatorOptions,
 ): ClientValidator {
   const type = deserializeAnnotatedType(meta.type) as TAtscriptAnnotatedType<TAtscriptTypeObject>;
-  return new ClientValidator(type, { versionColumn: meta.versionColumn, ...opts });
+  return new ClientValidator(type, {
+    versionColumn: meta.versionColumn,
+    messages: meta.type.$i18n,
+    ...opts,
+  });
 }

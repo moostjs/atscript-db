@@ -815,8 +815,10 @@ The reason reaches clients in two places:
 
 Boolean predicates are unaffected — `true` still disables without a reason, and nothing new appears on the wire. The verdict type is exported as `TDbActionDisabledVerdict` (`boolean | string`) from `@atscript/moost-db`.
 
+With a translator registered (moost's `setTranslator`), the reason is a message id: moost-db sends it in the request's language in both places (since 0.1.170) — see [Translations](./i18n#disabled-reasons).
+
 ::: warning Reasons are user-facing text
-Reasons go to the browser verbatim. Don't put data in them that the caller may not see (other rows' values, internal state) — the `requiredFields` projection strip does not apply to reason strings.
+Reasons go to the browser verbatim (or translated). Don't put data in them that the caller may not see (other rows' values, internal state) — the `requiredFields` projection strip does not apply to reason strings.
 :::
 
 ### Row injection — `@DbActionRow()` / `@DbActionRows()` {#row-injection}

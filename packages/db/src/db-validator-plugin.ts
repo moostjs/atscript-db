@@ -1,4 +1,4 @@
-import { createAnnotatedTypeNode } from "@atscript/typescript/utils";
+import { createAnnotatedTypeNode, formatValidatorMessage } from "@atscript/typescript/utils";
 import type {
   TAtscriptAnnotatedType,
   TAtscriptTypeArray,
@@ -9,6 +9,7 @@ import type {
 } from "@atscript/typescript/utils";
 
 import { DepthLimitExceededError } from "./db-error";
+import { DB_VALIDATOR_MESSAGES, type TDbValidatorErrorCode } from "./db-validator-messages";
 import { getDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
 import { columnUnionBase, soleUnionMember } from "./shared/union-shape";
@@ -35,6 +36,23 @@ export interface DbValidationContext {
     limit: number;
     fromDepthMap: ReadonlyMap<string, number>;
   };
+}
+
+/**
+ * Reports error `code` at the current path: the code's English template
+ * ({@link DB_VALIDATOR_MESSAGES}) filled with `params`, with both kept on the
+ * error so a translator can render it in another language.
+ */
+function fail(
+  ctx: TValidatorPluginContext,
+  code: TDbValidatorErrorCode,
+  params: Record<string, unknown> = {},
+): false {
+  ctx.error(formatValidatorMessage(DB_VALIDATOR_MESSAGES[code], params), undefined, undefined, {
+    code,
+    params,
+  });
+  return false;
 }
 
 /** Set of recognised array‑patch operator keys. */
@@ -185,16 +203,13 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
         !Number.isFinite(value[0]) ||
         !Number.isFinite(value[1])
       ) {
-        ctx.error("Expected a [lng, lat] tuple of two finite numbers (GeoJSON order)");
-        return false;
+        return fail(ctx, "GEO_POINT_SHAPE");
       }
       if (value[0] < -180 || value[0] > 180) {
-        ctx.error(`Longitude ${value[0]} out of range [-180, 180] (geo points are [lng, lat])`);
-        return false;
+        return fail(ctx, "GEO_LONGITUDE_RANGE", { value: value[0] });
       }
       if (value[1] < -90 || value[1] > 90) {
-        ctx.error(`Latitude ${value[1]} out of range [-90, 90] (geo points are [lng, lat])`);
-        return false;
+        return fail(ctx, "GEO_LATITUDE_RANGE", { value: value[1] });
       }
       return true;
     }
@@ -273,30 +288,23 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
         // A derived column is computed from its JSON source — arithmetic on it
         // has nothing to write to (the source leaf is the thing to patch).
         if (def.metadata.has("db.column.derived")) {
-          ctx.error(
-            "Field operations ($inc/$dec/$mul) are not allowed on a @db.column.derived field — it is computed from its @db.json source; patch the source leaf instead",
-          );
-          return false;
+          return fail(ctx, "FIELD_OP_ON_DERIVED");
         }
         // Context check first: @db.json, non-merge objects, nav field passthrough
         if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap, dbCtx.navFields)) {
-          ctx.error(
-            'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields, array items, or nested objects without @db.patch.strategy "merge"',
-          );
-          return false;
+          return fail(ctx, "FIELD_OP_CONTEXT");
         }
         // Type check: field ops only make sense on numeric scalar fields
         const isNumeric =
           def.type.kind === "" && (def.type as { designType?: string }).designType === "number";
         if (!isNumeric) {
-          ctx.error("Field operations ($inc/$dec/$mul) can only be applied to numeric fields");
-          return false;
+          return fail(ctx, "FIELD_OP_NOT_NUMERIC");
         }
         // NaN / ±Infinity would poison the stored value (IEEE arithmetic).
         const operand = fieldOp.value;
         if (!Number.isFinite(operand)) {
-          ctx.error(`Field operation operand must be a finite number, got ${operand}`);
-          return false;
+          // (the operand as text: params are JSON-safe, `NaN` is not)
+          return fail(ctx, "FIELD_OP_NOT_FINITE", { operand: String(operand) });
         }
         return true;
       }
@@ -374,8 +382,7 @@ function handleNavField(
 
   // Null nav prop is always an error
   if (value === null) {
-    ctx.error(`Cannot process null navigation property '${fieldName}'`);
-    return false;
+    return fail(ctx, "NAV_NULL", { field: fieldName });
   }
 
   // Absent nav prop is always OK (nav fields are optional)
@@ -401,11 +408,10 @@ function handleNavField(
         return validateNavPatchOps(ctx, def, value, fieldName);
       }
       // Plain arrays and anything else → reject (require explicit operator)
-      const relType = isFrom ? "1:N" : "M:N";
-      ctx.error(
-        `Cannot patch ${relType} relation '${fieldName}' with a plain value — use patch operators ({ $insert, $remove, $replace, $update, $upsert })`,
-      );
-      return false;
+      return fail(ctx, "NAV_PATCH_PLAIN_VALUE", {
+        relation: isFrom ? "1:N" : "M:N",
+        field: fieldName,
+      });
     }
     // TO in patch: fall through → validates nested data with deep partial
   }
@@ -432,8 +438,7 @@ function validateNavPatchOps(
 ): boolean {
   // Nav fields with relations should have array type
   if (def.type.kind !== "array") {
-    ctx.error(`Cannot use patch operators on non-array relation '${fieldName}'`);
-    return false;
+    return fail(ctx, "NAV_PATCH_NOT_ARRAY", { field: fieldName });
   }
 
   const arrayDef = def as TAtscriptAnnotatedType<TAtscriptTypeArray>;
@@ -492,11 +497,9 @@ function handleArrayPatch(
     // Check if any keys look like patch ops mixed with unknown keys
     const hasPatchOps = keys.some((k) => PATCH_OPS.has(k));
     if (hasPatchOps) {
-      const unknown = keys.filter((k) => !PATCH_OPS.has(k));
-      ctx.error(
-        `Unknown patch operator(s): ${unknown.join(", ")}. Allowed: $replace, $insert, $upsert, $update, $remove`,
-      );
-      return false;
+      return fail(ctx, "PATCH_UNKNOWN_OPERATOR", {
+        operators: keys.filter((k) => !PATCH_OPS.has(k)),
+      });
     }
     return undefined;
   }
@@ -538,8 +541,7 @@ function validatePartialItems(
   isMerge?: boolean,
 ): boolean {
   if (!Array.isArray(items)) {
-    ctx.error(`${op} must be an array`);
-    return false;
+    return fail(ctx, "PATCH_OPERAND_NOT_ARRAY", { op });
   }
 
   const elementDef = arrayDef.type.of;
@@ -562,8 +564,7 @@ function validatePartialItems(
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      ctx.error(`${op}[${i}]: expected object`);
-      return false;
+      return fail(ctx, "PATCH_ITEM_NOT_OBJECT", { op, index: i });
     }
     const rec = item as Record<string, unknown>;
 
@@ -571,8 +572,7 @@ function validatePartialItems(
     if (keyProps.size > 0) {
       for (const kp of keyProps) {
         if (rec[kp] === undefined || rec[kp] === null) {
-          ctx.error(`${op}[${i}]: key field '${kp}' is required`);
-          return false;
+          return fail(ctx, "PATCH_KEY_REQUIRED", { op, index: i, field: kp });
         }
       }
     }
@@ -606,8 +606,7 @@ function validatePartialItems(
     if (op === "$update" && isMerge !== true) {
       for (const [propName, propDef] of objType.props) {
         if (!propDef.optional && !keyProps.has(propName) && rec[propName] === undefined) {
-          ctx.error(`${op}[${i}]: field '${propName}' is required (replace strategy)`);
-          return false;
+          return fail(ctx, "PATCH_FIELD_REQUIRED", { op, index: i, field: propName });
         }
       }
     }
