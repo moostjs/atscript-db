@@ -383,6 +383,12 @@ export class TableMetadata {
 
   /** The annotated type `build()` ran on — the root of {@link presence}. */
   private _rootType?: TAtscriptAnnotatedType;
+
+  /** @internal The annotated type `build()` ran on (`undefined` before it). */
+  get rootType(): TAtscriptAnnotatedType | undefined {
+    return this._rootType;
+  }
+
   private readonly _presence = new Map<string, TPathPresence | undefined>();
 
   constructor(nestedObjects: boolean) {

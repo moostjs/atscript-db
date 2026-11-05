@@ -6,7 +6,10 @@ import {
   type TAtscriptAnnotatedType,
   type TAtscriptTypeArray,
   type TAtscriptDataType,
+  type TValidatorOptions,
   type Validator,
+  normalizeForType,
+  typeHasNormalizers,
 } from "@atscript/typescript/utils";
 
 import { fkLookupTargetOf } from "./fk-lookup";
@@ -45,12 +48,13 @@ import {
 } from "../rel/nested-writer";
 import { type DbValidationContext } from "../db-validator-plugin";
 import {
-  buildDbValidator,
   buildPatchPartial,
   dbPlugin,
+  dbValidatorOptions,
   forceNavNonOptional,
   type ValidatorMode,
 } from "../validator";
+import { normalizeWritePayload } from "../shared/normalize-write";
 import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
 import { ApplicationIntegrity, pinByPrimaryKey } from "../strategies/application-integrity";
@@ -602,7 +606,7 @@ export class AtscriptDbTable<
         delete clone.$cas;
         if (mode !== "patch") this._applyDefaults(clone, now);
         if (mode !== "insert") this._stampOnUpdate(clone, now, mode === "replace");
-        row = clone;
+        row = this._normalizeRow(clone, mode);
       }
       try {
         if (validator.validate(row, true, ctx)) {
@@ -834,6 +838,8 @@ export class AtscriptDbTable<
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
         const now = Date.now();
         let items = payloads.map((p) => this._applyDefaults(clone(p), now));
+        // before validation and every key comparison
+        if (depth === 0) this._normalizeRows(items, "insert");
         if (ignore) this._linkToByKeyInIgnoreMode(items);
 
         // Validate full payload (including nav fields) before any writes.
@@ -1013,6 +1019,8 @@ export class AtscriptDbTable<
           this._stampOnUpdate(d, now, true);
           return d;
         });
+        // before validation and the row lookups by key
+        if (depth === 0) this._normalizeRows(items, "replace");
 
         const validator = this.getValidator("bulkReplace");
         const ctx: DbValidationContext = { mode: "replace", navFields: this._meta.navFields };
@@ -1206,6 +1214,8 @@ export class AtscriptDbTable<
           this._stampOnUpdate(c, now, false);
           return c;
         });
+        // before validation and the row lookups by key
+        if (depth === 0) this._normalizeRows(cloned, "patch");
 
         // Phase 0: Setup — validate full payload (plugin checks nav field constraints)
         const validator = this.getValidator("bulkUpdate");
@@ -1447,7 +1457,8 @@ export class AtscriptDbTable<
    *
    * Each key carries the primary key field(s) (composite supported) plus the
    * version column and NOTHING else — a touch has no payload. Unique indexes
-   * do not identify a touch key. `undefined`-valued properties are ignored,
+   * do not identify a touch key. Key values are normalized like a write's
+   * (`@normalize.*`). `undefined`-valued properties are ignored,
    * like in every write payload. Empty `keys` → `{ 0, 0 }` without a statement.
    *
    * `require: 'all'` (default): one count over the whole key set runs FIRST;
@@ -1480,7 +1491,8 @@ export class AtscriptDbTable<
     const pkFields = this.primaryKeys;
     const seen = new Set<string>();
     const pairs: FilterExpr[] = [];
-    for (const [i, key] of (keys as Array<Record<string, unknown>>).entries()) {
+    for (const [i, raw] of (keys as Array<Record<string, unknown>>).entries()) {
+      const key = this._normalizeRow(raw, "patch");
       const pair: Record<string, unknown> = {};
       for (const pk of pkFields) {
         if (key[pk] === undefined) {
@@ -1635,7 +1647,7 @@ export class AtscriptDbTable<
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
     const bound = this._writeBound(filter as FilterExpr, opts);
-    const dataCopy = _cloneWritePayload(data);
+    const dataCopy = this._normalizeRow(_cloneWritePayload(data), "patch");
     // updateMany never CAS-checks (locked decision row 2): a single
     // expectedVersion cannot sensibly match N rows with different versions
     // — use bulkUpdate with per-row $cas instead. The auto-bump still
@@ -1717,7 +1729,7 @@ export class AtscriptDbTable<
   ): Promise<TDbUpdateResult> {
     this._ensureBuilt();
     this._guardMutationFilter(filter as FilterExpr);
-    const dataCopy = _cloneWritePayload(data);
+    const dataCopy = this._normalizeRow(_cloneWritePayload(data), "replace");
     this._rejectNavWrite(dataCopy, "replaceMany");
     this._stampOnUpdate(dataCopy, Date.now(), true);
     validateBatch(this.getValidator("bulkReplace"), [dataCopy], {
@@ -2475,7 +2487,11 @@ export class AtscriptDbTable<
     }
     // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
     if (def.fn === "now") return () => now;
-    if (def.fn === "uuid") return () => crypto.randomUUID();
+    if (def.fn === "uuid") {
+      // `@normalize.*` applies to a generated value too
+      const type = this._meta.flatMap.get(field);
+      return type ? () => normalizeForType(type, crypto.randomUUID()) : () => crypto.randomUUID();
+    }
     return undefined;
   }
 
@@ -2574,13 +2590,20 @@ export class AtscriptDbTable<
 
   /**
    * The JS value for a `@db.default` literal — see {@link parseDefaultLiteral}:
-   * the same value the SQL adapters put into the DDL `DEFAULT` clause.
+   * the same value the SQL adapters put into the DDL `DEFAULT` clause, with
+   * the field's `@normalize.*` applied (the DDL clause keeps the literal).
    */
   private _valueDefault(field: string, literal: string): unknown {
     const cache = (this._primitiveDefaults ??= new Map());
     if (cache.has(field)) return cache.get(field);
     const fieldType = this._meta.flatMap?.get(field);
-    const value = parseDefaultLiteral(fieldType ? resolveDesignType(fieldType) : "string", literal);
+    const parsed = parseDefaultLiteral(
+      fieldType ? resolveDesignType(fieldType) : "string",
+      literal,
+    );
+    // Normalized where it is produced: every level of a nested write fills
+    // it, after the root normalized the payload.
+    const value = fieldType ? normalizeForType(fieldType, parsed) : parsed;
     if (value === null || typeof value !== "object") cache.set(field, value);
     return value;
   }
@@ -2596,7 +2619,8 @@ export class AtscriptDbTable<
    */
   public recordFilter(payload: Record<string, unknown>, opts?: TIdResolveOptions): FilterExpr {
     this._ensureBuilt();
-    return this._extractRecordFilter(payload, opts);
+    // keyed by the payload's values as the write stores them
+    return this._extractRecordFilter(this._normalizeRow(payload, "patch"), opts);
   }
 
   /**
@@ -2808,37 +2832,74 @@ export class AtscriptDbTable<
   // ── Internal: validator building ──────────────────────────────────────────
 
   /**
-   * Builds a validator for a given purpose with adapter plugins.
+   * Builds a validator for a given purpose with adapter plugins, from
+   * {@link _validatorOptions}.
    *
    * Uses annotation-based `replace` callback to make `@meta.id` and
    * `@db.default` fields optional — works at all nesting levels
    * (including inside nav field target types).
    */
   protected _buildValidator(purpose: string): Validator<T, DataType> {
+    return this.createValidator(this._validatorOptions(purpose));
+  }
+
+  /** {@link _validatorOptions} by purpose — one object each (it keys the normalizer's cache). */
+  private readonly _optionsByPurpose = new Map<string, Partial<TValidatorOptions>>();
+
+  /**
+   * The validator options of a purpose: what its validator validates with and
+   * what the write normalizes union branches with (see {@link _normalizeRows}).
+   */
+  private _validatorOptions(purpose: string): Partial<TValidatorOptions> {
+    let opts = this._optionsByPurpose.get(purpose);
+    if (opts) return opts;
     const adapterPlugins = this.adapter.getValidatorPlugins();
-
-    // Standard modes use the shared builder — the same one `@atscript/db-client`
-    // runs, so server and client preflight cannot drift. Server-managed fields
-    // (`@db.default*`, `@db.rel.FK`, `@db.column.version`) are accepted when
-    // absent by the shared plugin's skip list, at every nesting depth.
     if (purpose === "insert" || purpose === "patch" || purpose === "bulkReplace") {
+      // Standard modes use the shared builder — the same one `@atscript/db-client`
+      // runs, so server and client preflight cannot drift. Server-managed fields
+      // (`@db.default*`, `@db.rel.FK`, `@db.column.version`) are accepted when
+      // absent by the shared plugin's skip list, at every nesting depth.
       const mode: ValidatorMode = purpose === "bulkReplace" ? "replace" : purpose;
-      return buildDbValidator(this.type, mode, adapterPlugins) as Validator<T, DataType>;
-    }
-
-    // bulkUpdate: path-aware partial — root + nav sub-trees + merge branches stay
-    // partial; everything else is strict so a missing required leaf can't reach
-    // the storage layer (it'd surface as a NOT NULL violation).
-    if (purpose === "bulkUpdate") {
+      opts = dbValidatorOptions(this.type, mode, adapterPlugins);
+    } else if (purpose === "bulkUpdate") {
+      // bulkUpdate: path-aware partial — root + nav sub-trees + merge branches stay
+      // partial; everything else is strict so a missing required leaf can't reach
+      // the storage layer (it'd surface as a NOT NULL violation).
       const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
-      return this.createValidator({
+      opts = {
         plugins,
         partial: buildPatchPartial(this._meta.navFields),
         replace: forceNavNonOptional,
-      });
+      };
+    } else {
+      opts = { plugins: adapterPlugins };
     }
+    this._optionsByPurpose.set(purpose, opts);
+    return opts;
+  }
 
-    return this.createValidator({ plugins: adapterPlugins });
+  /**
+   * Applies the type's `@normalize.*` to a write's rows in place of the array
+   * (each row copy-on-change — the caller's objects are never touched),
+   * before they are validated or compared by key. Union branches are judged
+   * with the options of `mode`'s validator. Runs at a write's root only: the
+   * nested levels receive their rows from the root's normalized tree.
+   */
+  private _normalizeRows(rows: Array<Record<string, unknown>>, mode: ValidatorMode): void {
+    if (!typeHasNormalizers(this.type)) return;
+    const opts = this._validatorOptions(MODE_PURPOSE[mode]);
+    for (let i = 0; i < rows.length; i++) {
+      rows[i] = normalizeWritePayload(this.type, rows[i]!, mode, opts);
+    }
+  }
+
+  /** One row of {@link _normalizeRows} (the same object when nothing changes). */
+  private _normalizeRow(
+    row: Record<string, unknown>,
+    mode: ValidatorMode,
+  ): Record<string, unknown> {
+    if (!typeHasNormalizers(this.type)) return row;
+    return normalizeWritePayload(this.type, row, mode, this._validatorOptions(MODE_PURPOSE[mode]));
   }
 }
 

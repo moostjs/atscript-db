@@ -373,7 +373,8 @@ export abstract class AsReadableController<
    * `ref` (`field: ""`) and their bodies always expand fully regardless of
    * `refDepth` — the write-payload shape clients need is unaffected.
    *
-   * Annotation whitelist: keeps `meta.*`, `expect.*`, `db.rel.*`, the `db.*`
+   * Annotation whitelist: keeps every non-`db.*` key (`meta.*`, `expect.*`,
+   * `normalize.*` — db-client's preflight normalizes with it), `db.rel.*`, the `db.*`
    * keys the shared db validator plugin reads in db-client (`db.json`,
    * `db.patch.strategy`, `db.default*`, `db.onUpdate.now` / `.inc`, `db.column.version`,
    * `db.column.derived`) and the client-facing `db.http.path` /

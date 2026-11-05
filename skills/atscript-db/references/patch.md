@@ -48,6 +48,8 @@ Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on t
 
 Item validation (since 0.1.153) = plain-array-set validation: optional item fields accept `null` in `$update`; errors name the item prop (`items.$update[0].qty`, `tags.$remove[1]`); primitive `$remove`/`$update` values are checked per element (array-level `@expect.minLength` no longer applies to the payload). `$inc`/`$dec`/`$mul` inside any array item (plain set, `$insert`, `$upsert`, `$update`) → validation error (used to be stored verbatim).
 
+Operator items are `@normalize.*`-normalized before validation (0.1.170), `$update`/`$remove` keys included — `$remove: [" RED "]` removes the stored `"red"` on a lowercasing+trimming element type. See [validation.md § Normalization](validation.md#normalization-normalize-01170).
+
 ## `@db.patch.strategy`
 
 Per-field control of nested-object patch semantics. See [validation.md § Validator modes](validation.md#validator-modes-at-a-glance) for the validator-side detail.

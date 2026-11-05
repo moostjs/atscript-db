@@ -4,12 +4,14 @@ import {
   messagesTranslator,
   type TAtscriptAnnotatedType,
   type TAtscriptTypeObject,
+  type TValidatorOptions,
   type Validator,
 } from "@atscript/typescript/utils";
 import {
-  buildDbValidator,
   buildValidationContext,
+  dbValidatorOptions,
   DbError,
+  normalizeWritePayload,
   reconcileCas,
   type DbValidationContext,
   type ValidatorMode,
@@ -56,6 +58,7 @@ export interface ClientValidatorOptions {
 export class ClientValidator {
   private _type: TAtscriptAnnotatedType<TAtscriptTypeObject>;
   private _validators = new Map<string, Validator<any>>();
+  private _options = new Map<string, Partial<TValidatorOptions>>();
   private _lenientWrites: boolean;
   private _translate?: ReturnType<typeof messagesTranslator>;
 
@@ -109,7 +112,7 @@ export class ClientValidator {
     } catch (e) {
       if (e instanceof DbError) {
         throw new ClientValidationError(
-          e.errors.map((err) => ({ path: `${prefix}${err.path}`, message: err.message })),
+          e.errors.map((err) => toEntry(err, `${prefix}${err.path}`)),
         );
       }
       throw e;
@@ -118,8 +121,30 @@ export class ClientValidator {
   }
 
   /**
+   * Applies the type's `@normalize.*` to write data (one item or an array)
+   * the way the server's write in `mode` does — patch operators and nested
+   * relation data included. Run it before {@link validate} and send its
+   * result. Pure and copy-on-change; never validates.
+   *
+   * @since 0.1.170
+   */
+  normalize(data: unknown, mode: ValidatorMode): unknown {
+    const opts = this._getOptions(mode);
+    if (Array.isArray(data)) {
+      let out: unknown[] | undefined;
+      for (let i = 0; i < data.length; i++) {
+        const next = normalizeWritePayload(this._type, data[i], mode, opts);
+        if (next !== data[i]) (out ??= data.slice())[i] = next;
+      }
+      return out ?? data;
+    }
+    return normalizeWritePayload(this._type, data, mode, opts);
+  }
+
+  /**
    * Validate data for a given write mode.
-   * Throws `ClientValidationError` if validation fails.
+   * Throws `ClientValidationError` if validation fails. Validates `data` as
+   * given — run {@link normalize} first.
    */
   validate(data: unknown, mode: ValidatorMode): void {
     const isArray = Array.isArray(data);
@@ -132,15 +157,9 @@ export class ClientValidator {
         const found = this._translate
           ? localizeErrors(validator.errors, this._translate)
           : validator.errors;
-        const errors = found.map(({ path, message, code, params }) => {
-          const entry: ServerErrorEntry = {
-            path: prefix ? (path ? `${prefix}.${path}` : prefix) : path,
-            message,
-          };
-          if (code !== undefined) entry.code = code;
-          if (params !== undefined) entry.params = params;
-          return entry;
-        });
+        const errors = found.map((err) =>
+          toEntry(err, prefix ? (err.path ? `${prefix}.${err.path}` : prefix) : err.path),
+        );
         throw new ClientValidationError(errors);
       }
     }
@@ -149,15 +168,25 @@ export class ClientValidator {
   private _getValidator(mode: ValidatorMode): Validator<any> {
     let v = this._validators.get(mode);
     if (!v) {
-      v = buildDbValidator(
+      v = this._type.validator(this._getOptions(mode));
+      this._validators.set(mode, v);
+    }
+    return v;
+  }
+
+  /** The options of `mode`'s validator — one object per mode (normalization judges with it too). */
+  private _getOptions(mode: ValidatorMode): Partial<TValidatorOptions> {
+    let opts = this._options.get(mode);
+    if (!opts) {
+      opts = dbValidatorOptions(
         this._type,
         mode,
         undefined,
         this._lenientWrites ? { unknownProps: "ignore" } : undefined,
       );
-      this._validators.set(mode, v);
+      this._options.set(mode, opts);
     }
-    return v;
+    return opts;
   }
 }
 
@@ -183,4 +212,15 @@ export function createClientValidator(
     messages: meta.type.$i18n,
     ...opts,
   });
+}
+
+/** An error entry at `path`, keeping its `code` / `params` (never `details`). */
+function toEntry(
+  { message, code, params }: Pick<ServerErrorEntry, "message" | "code" | "params">,
+  path: string,
+): ServerErrorEntry {
+  const entry: ServerErrorEntry = { path, message };
+  if (code !== undefined) entry.code = code;
+  if (params !== undefined) entry.params = params;
+  return entry;
 }

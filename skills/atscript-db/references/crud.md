@@ -52,9 +52,11 @@ TOP-LEVEL `number.timestamp.created` (incl. `| null`) is INSERT-ONLY (0.1.165; n
 
 `insertOne(row, { returning: true | ["id", "createdAt"] })` → `{ insertedId, row }` — read back by PK in the insert's transaction (defaults, stamps, version included). With `onConflict: "ignore"` a skipped row → `{ conflict: true }`, no `row`; an insert without a known id (composite key with an unreported generated part, 0.1.169) → no `row`. `insertOne` only. Over HTTP it is `Prefer: return=representation` (opt-in, [moost-db.md](moost-db.md)).
 
+Every write path stores `@normalize.*`-normalized values (0.1.170; defaults → normalize → validate, nested rows + defaults + patch operators + keys included; equality filters and ids normalize their operand too) — see [validation.md § Normalization](validation.md#normalization-normalize-01170).
+
 ## Validate without writing — `validateRows` (0.1.165)
 
-`await table.validateRows(rows, mode = "insert" | "replace" | "patch", { fk? })` → `[{ index, path, message }]` (`[]` = all valid). Clones each row, applies the defaults/stamps of that write, validates with its validator + context. `fk: true` looks every non-null FK up on EVERY adapter (native-FK adapters otherwise only fail at write time). Use it for imports / dry runs — `preValidateItems` is `@internal`. `getValidator("insert" | "bulkReplace" | "bulkUpdate" | "patch")` called WITHOUT a context now validates in that mode (≤ 0.1.164 rejected rows missing PK / defaults / FKs / nav fields); it applies no defaults.
+`await table.validateRows(rows, mode = "insert" | "replace" | "patch", { fk? })` → `[{ index, path, message }]` (`[]` = all valid). Clones each row, applies the defaults/stamps of that write, normalizes (`@normalize.*`, 0.1.170), validates with its validator + context. `fk: true` looks every non-null FK up on EVERY adapter (native-FK adapters otherwise only fail at write time). Use it for imports / dry runs — `preValidateItems` is `@internal`. `getValidator("insert" | "bulkReplace" | "bulkUpdate" | "patch")` called WITHOUT a context now validates in that mode (≤ 0.1.164 rejected rows missing PK / defaults / FKs / nav fields); it applies no defaults.
 
 ## Updates / patches
 

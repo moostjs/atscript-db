@@ -28,6 +28,7 @@ import {
   holdsNumbers,
   geoIndexNotFoundMessage,
   normalizeComputedSelect,
+  resolveNestedOrThrow,
   searchIndexNotFoundMessage,
   searchMemberKind,
   selfOrAncestor,
@@ -1028,25 +1029,41 @@ export class AsDbReadableController<
       // a malformed `$from`: uniqu's coded answer (it reads no schema)
       return this._nestedError(resolveNested(controls as Record<string, unknown>));
     }
+    const fields = {
+      flatMap: this.readable.flatMap,
+      physicalNames: capabilities.physicalNames,
+      navFields: capabilities.navFields,
+    };
+    if (stage !== undefined) {
+      // A two-level aggregate: the shape rules of both levels first — uniqu's
+      // `resolveNested` without schema answers, exactly as the SDK checks it
+      // (the numeric answers come after the capability gate, `_checkNested`).
+      try {
+        resolveNestedOrThrow(controls as Record<string, unknown>, fields);
+      } catch (error) {
+        return dbErrorToHttp(shapeError(error));
+      }
+    }
     try {
-      // A two-level aggregate: the table is read by its inner level, a grouped
-      // query of its own (the root names inner columns — resolved by
-      // `resolveNested` after the capability gate, see `_checkNested`).
+      // The table is read by the inner level of a two-level aggregate, a
+      // grouped query of its own.
       normalizeComputedSelect(
         stage === undefined ? controls : stage,
-        {
-          flatMap: this.readable.flatMap,
-          physicalNames: capabilities.physicalNames,
-          navFields: capabilities.navFields,
-        },
+        fields,
         stage !== undefined || isUngroupedAggregate(controls) || undefined,
       );
     } catch (error) {
-      // Only the query-shape verdict is a 400; anything else (a closed space's
-      // SPACE_CLOSED from reading the field map, …) keeps its own mapping.
-      if (!(error instanceof DbError) || error.code !== "INVALID_QUERY") throw error;
-      const [issue] = error.errors;
-      return badRequest(issue.path, issue.message);
+      // Every issue, with its code (`AGG_ALIAS_COLLISION`, …); an inner level's
+      // under `$from.`, as the SDK reports them.
+      const { code, errors } = shapeError(error);
+      return dbErrorToHttp(
+        new DbError(
+          code,
+          stage === undefined
+            ? errors
+            : errors.map((e) => ({ ...e, path: e.path ? `$from.${e.path}` : "$from" })),
+        ),
+      );
     }
     return undefined;
   }
@@ -4535,4 +4552,13 @@ registerAsDbReadableController(AsDbReadableController);
 /** A key object's values as text — the form `/one?k=v` receives them in. */
 function textValues(id: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(Object.entries(id).map(([k, v]) => [k, String(v)]));
+}
+
+/**
+ * Only the query-shape verdict is a 400: anything else (a closed space's
+ * SPACE_CLOSED from reading the field map, …) is rethrown to keep its own mapping.
+ */
+function shapeError(error: unknown): DbError {
+  if (!(error instanceof DbError) || error.code !== "INVALID_QUERY") throw error;
+  return error;
 }

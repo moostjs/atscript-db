@@ -1,6 +1,7 @@
 import { nestDottedWith } from "../shared/with-nesting";
 import {
   isAnnotatedType,
+  normalizeForType,
   type FlatOf,
   type PrimaryKeyOf,
   type OwnPropsOf,
@@ -2380,9 +2381,9 @@ export class AtscriptDbReadable<
   ): FilterExpr | null {
     const filter: FilterExpr = {};
     for (const field of fields) {
-      const value = idObj[field];
-      if (value === undefined) return null;
       const fieldType = this.flatMap.get(field);
+      const value = idValue(fieldType, idObj[field]);
+      if (value === undefined) return null;
       if (fieldType && !isIdCompatible(value, fieldType)) return null;
       try {
         filter[field] = fieldType ? this.adapter.prepareId(value, fieldType) : value;
@@ -2396,8 +2397,9 @@ export class AtscriptDbReadable<
   /**
    * Attempts to build a single-field filter `{ field: preparedId }`.
    */
-  private _tryFieldFilter(field: string, id: unknown): FilterExpr | null {
+  private _tryFieldFilter(field: string, raw: unknown): FilterExpr | null {
     const fieldType = this.flatMap.get(field);
+    const id = idValue(fieldType, raw);
     if (fieldType && !isIdCompatible(id, fieldType)) {
       return null;
     }
@@ -2447,4 +2449,9 @@ export class AtscriptDbReadable<
   ): TDbForeignKey | undefined {
     return findRemoteFK(targetTable, thisTableName, alias);
   }
+}
+
+/** An id value as the field stores it (`@normalize.*` applied), like a filter's equality. */
+function idValue(fieldType: TAtscriptAnnotatedType | undefined, value: unknown): unknown {
+  return fieldType && typeof value === "string" ? normalizeForType(fieldType, value) : value;
 }

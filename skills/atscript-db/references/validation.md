@@ -8,6 +8,8 @@
 import {
   createDbValidatorPlugin,
   buildDbValidator,
+  dbValidatorOptions, // 0.1.170 — the options buildDbValidator uses
+  normalizeWritePayload, // 0.1.170 — @normalize.* on a write payload
   buildValidationContext,
   type ValidatorMode,
   type DbValidationContext,
@@ -29,15 +31,38 @@ On a table: `table.getValidator("insert")` binds its mode when called without a 
 
 `extraPlugins` are prepended — adapters surface these via `getValidatorPlugins()` (e.g. Mongo's `validateMongoIdPlugin`). See the modes table below for behaviour per mode.
 
+## Normalization: `@normalize.*` (0.1.170)
+
+Every write applies the type's `@normalize.trim` / `@normalize.lowercase` / `@normalize.uppercase` (atscript 0.2.7) and stores the result. Order: **defaults → normalize → validate** — the validator checks the normalized value.
+
+- All write paths: `insertOne/insertMany` (incl. `onConflict: "ignore"`), `replaceOne/bulkReplace/replaceMany`, `updateOne/bulkUpdate/updateMany`, `validateRows`; moost-db POST/PUT/PATCH go through them.
+- Patches: plain values, nested objects, array operators (`$replace`/`$insert`/`$upsert` items, `$update`/`$remove` items = the keys that find elements: `$remove: [" RED "]` removes stored `"red"`); `$inc/$dec/$mul` untouched.
+- Nested writes: TO/FROM/VIA rows, insert/replace and patch operators — once, at the root call. Defaults are normalized where they are filled (a nested row's `@db.default` too).
+- Keys: a unique-key collision is judged on the normalized value; a patch addressed by a unique field, `table.recordFilter(payload)` and `touchMany` keys use the normalized value.
+- Pure, copy-on-change (caller's payload untouched); near-zero cost: a type reaching no `@normalize.*` is not walked; one reaching it only through a relation walks each row once. A write guard sees normalized rows; values it sets are validated, not re-normalized.
+- Lookups: operands of implicit equality / `$eq` / `$ne` / `$in` / `$nin` on a normalized field (root filter, `updateMany`/`deleteMany`, `$with` filters, `$some`/`$none`) and every id (`findById`, `resolveRowFilter`, `deleteOne`, `GET /one/:id`, composite + unique-key ids) are normalized. NEVER: `$regex`, `$search`/fulltext, ranges, `$exists`, aggregate conditions, `$having`.
+- Legacy rows (stored before 0.1.170, not normalized) are no longer found by their old exact value, and new FK/VIA values (refs inherit the target's normalizers) no longer match legacy keys — rewrite them once with a data step through `space.getAdapter(T)` + `normalizeWritePayload(T, row, "replace")` (recipe in docs `guide/upgrading.md#v0-1-170`).
+
+```ts
+import { normalizeWritePayload, dbValidatorOptions } from "@atscript/db/validator";
+const opts = dbValidatorOptions(User, "patch"); // build once per mode and reuse it
+const patch = normalizeWritePayload(User, { id: 1, email: " A@X " }, "patch", opts);
+```
+
+`opts` = the options the result will be validated with — they decide between union members whose normalized results differ.
+
 ## Client-side
 
 The browser `Client` builds a validator from the `/meta` payload:
 
 ```ts
 const validator = await client.getValidator();
-validator.validate(payload, "insert");
-validator.validate(payload, "patch");
+const data = validator.normalize(payload, "insert"); // @normalize.* (0.1.170) — write methods do this
+validator.validate(data, "insert");
+validator.validate(validator.normalize(patch, "patch"), "patch");
 ```
+
+The client's write methods normalize, validate, and send the normalized data. `validate()` alone never normalizes.
 
 Server and client share the plugin — same partial logic, same ref-depth gate. The client validator reconstructs `flatMap` + `navFields` via `buildValidationContext(deserializedType)`.
 

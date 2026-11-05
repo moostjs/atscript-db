@@ -908,14 +908,25 @@ await users.insert({ name: 123 }); // name must be string
 
 `ClientValidationError` is a [`ClientError`](#errors) (since 0.1.165): `status` `400`, `body` shaped like the server's validation envelope (`{ message, statusCode: 400, errors }`), and `preflight: true` — so one `instanceof ClientError` branch shows field errors from the preflight and from the server alike. It is exported from `@atscript/db-client` (and, as the same class, from `@atscript/db-client/validator`).
 
+Before it validates, the preflight applies the served type's [`@normalize.*`](/api/crud#normalization) annotations, the way the server's write does (since 0.1.170), and **sends the normalized data**: what the client checks is what the server stores. Patch operators and nested relation data are included; the caller's object is not changed.
+
+```typescript
+// email: @normalize.trim @normalize.lowercase
+await users.insert({ email: " Ann@Example.COM ", name: "Ann" });
+// sends { email: "ann@example.com", name: "Ann" }
+```
+
 Access the validator directly for form generation or custom validation:
 
 ```typescript
 const validator = await users.getValidator();
 validator.flatMap; // Map of field paths → annotated types
 validator.navFields; // Set of navigation field names
+const data = validator.normalize(input, "insert"); // @normalize.* applied (since 0.1.170)
 validator.validate(data, "insert"); // throws on failure
 ```
+
+`validate` checks data as given; call `normalize` first, as the write methods do.
 
 Server-managed fields follow the server's rules, read from the annotations the [`/meta` type](./crud#get-meta) keeps: insert and replace accept a missing `@db.default*`, `@db.rel.FK` or `@db.column.version` field (since 0.1.128) and a missing [derived column](/api/storage#derived-columns) (since 0.1.142), replace a missing [`@db.onUpdate.now`](/api/defaults#on-update) field (since 0.1.156 — `number.timestamp.updated` is also `@db.default*`, so insert may omit it too), insert and replace a missing [`@db.onUpdate.inc`](/api/defaults#on-update-inc) counter (since 0.1.162), and `$inc` / `$dec` / `$mul` on a derived column is a `ClientValidationError` before any request is sent (since 0.1.142).
 

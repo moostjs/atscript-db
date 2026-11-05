@@ -561,10 +561,8 @@ function prefixError(error: unknown, path: string): unknown {
   // caused by server-added predicates, whose chain must not be named.
   if (error.errors.every((e) => !e.path)) return error;
   if (error.errors.every((e) => e.path === path || e.path.startsWith(`${path}.`))) return error;
-  const errors = error.errors.map((e) => ({
-    path: e.path ? `${path}.${e.path}` : path,
-    message: e.message,
-  }));
+  // (each entry keeps its code / params / details — only its path moves)
+  const errors = error.errors.map((e) => ({ ...e, path: e.path ? `${path}.${e.path}` : path }));
   return new DbError(error.code, errors, `${errors[0]?.message ?? error.message} (in "${path}")`);
 }
 

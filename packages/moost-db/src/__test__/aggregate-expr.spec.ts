@@ -187,6 +187,11 @@ describe("the field gate covers every operand", () => {
         path: "$select",
         message: "Expressions and first()/last() are only valid in grouped queries",
       },
+      // every issue the core reports, not only the first
+      {
+        path: "$select",
+        message: 'Expression "x" references "price" — name an aggregate alias or a $groupBy field',
+      },
     ]);
   });
 });

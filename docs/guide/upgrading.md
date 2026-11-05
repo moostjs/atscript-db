@@ -8,16 +8,45 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ## 0.1.170 {#v0-1-170}
 
-**Requires `@uniqu/core` / `@uniqu/url` 0.2.1.**
+**Requires `@uniqu/core` / `@uniqu/url` 0.2.1 and `@atscript/core` / `@atscript/typescript` 0.2.7.**
 
 ### Features
 
 - **Translations.** With moost's `setTranslator`, `/meta`, its forms, error bodies and `disabled` reasons are served in the request's language (an `ETag` per language; opt out per controller with `metaTranslation()`), and the db-client gets a `locale` option. See [Translations (i18n)](/http/i18n).
 - **`@db.default` takes a number or a boolean.** `@db.default 0`, `@db.default true`, `@db.default 9.99` next to `@db.default 'active'`; a literal that does not fit the field's type is a compile error. The string form (`@db.default '0'`) keeps working and gives the same column default and schema hash. See [Static Defaults](/api/defaults#static-defaults).
 - **MySQL engine, character set and `ON UPDATE` precision.** `@db.mysql.engine` and `@db.mysql.charset` take any name the server provides (the editor completes the common ones; a name the server lacks fails the sync), and `@db.mysql.onUpdate "CURRENT_TIMESTAMP(3)"` is accepted. See [MySQL-specific annotations](/adapters/mysql#mysql-specific-annotations).
+- **`@normalize.*` on writes and lookups.** Writes store the values the type's `@normalize.trim` / `@normalize.lowercase` / `@normalize.uppercase` produce, equality filters and ids normalize their operand, and the db-client preflight sends the normalized data (see the behaviour change below). New exports: `normalizeWritePayload()` and `dbValidatorOptions()` from `@atscript/db` and `@atscript/db/validator`, `ClientValidator.normalize()` from the client. See [Normalization](/api/crud#normalization).
 - **Any Atlas Search analyzer.** The `analyzer` of the `@db.mongo.search.*` annotations is no longer limited to 14 names; the editor completes the built-in ones. See [Supported Analyzers](/adapters/mongodb#supported-analyzers).
 
 ### Breaking & behaviour changes
+
+- **Stored values and equality lookups are normalized.** A field (or a type alias it uses) with `@normalize.*` is stored trimmed / lowercased / uppercased by every write, HTTP and db-client writes included. A unique key collides after normalization (`" A@x "` and `"a@x"` are one key), and `@expect.*` checks the normalized value. Equality filters and ids normalize their operand; `$regex`, `$search`, ranges, aggregate conditions and `$having` compare as given. See [Normalization](/api/crud#normalization) and [Lookups](/api/crud#normalized-lookups).
+
+  **Rows stored before the upgrade are not rewritten**, and that matters once a field gains `@normalize.*`:
+  - A row stored as `"ABC"` (not normalized) is **no longer found by its old exact value** through a normalized lookup: `findById("ABC")`, `?code=ABC`, `GET /one/ABC` look for `"abc"`. A patch, replace or `touchMany` addressed by that key matches 0 rows (`PATCH` answers 404).
+  - **Keys, unique keys and foreign keys inherit the normalizers**: a reference field (`parentCode: Parent.code`) carries the target field's `@normalize.*`. New foreign-key values and `@db.rel.via` links to a legacy key are normalized and **no longer match it** — an FK violation on engines with native foreign keys, a missing link elsewhere — and relation loading (`$with`) and application-level cascades look the legacy key up by its normalized form.
+  - Rewrite the stored rows once, through the same normalization, before relying on lookups — a [data step](/sync/programmatic#data-steps) (or the same loop in a one-off script). It writes through the adapter, so the old key still addresses the row:
+
+    ```typescript
+    import { normalizeWritePayload } from "@atscript/db";
+
+    await syncSchema(db, types, {
+      dataSteps: [
+        {
+          id: "2026-11-normalize-users",
+          async run(space) {
+            const adapter = space.getAdapter(User); // raw: no lookup normalization
+            for (const row of await adapter.findMany({ filter: {}, controls: {} })) {
+              const fixed = normalizeWritePayload(User, row, "replace");
+              if (fixed !== row) await adapter.updateOne({ id: row.id }, { email: fixed.email });
+            }
+          },
+        },
+      ],
+    });
+    ```
+
+    Rewrite a referenced key and the foreign keys pointing at it in the same step (children first on engines that enforce the reference, or update the parent with the children in one transaction), and merge rows whose keys become equal first — a `phase: "beforeConstraints"` step runs before unique indexes are created. Columns renamed with `@db.column` and flattened nested objects use their physical names in the adapter.
 
 - **Schema sync reports `failed` when an entry errored.** A run that applied what it could but left an `error` entry (a failed DDL statement, a unique index the stored rows break, a blocked drop) returns `status: "failed"` instead of `"synced"`. The hash is withheld as before. Code that treated `"synced"` as success keeps working; code that checks for failure must check `"failed"` (and `"refused"`). See [Sync Result Statuses](/sync/#sync-result-statuses).
 - **Nested writes check every level before writing.** The checks a related table makes before its own write — links that cannot be resolved, a missing `@db.rel.via` target, a foreign key to a missing row (memory, MongoDB), a relation shape a replace cannot write — now run for the whole tree before anything is written. Before, a refusal two or three levels down came after the levels above were written, which left a partial write on adapters without transactions. A foreign key into a table the same call writes rows in (the record itself, a sibling, an earlier item of the batch) is still checked when its level is written. See [Nested write rules](/relations/patches#nested-write-rules).
@@ -28,6 +57,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 - **The write validator's own errors carry codes.** Geo-point, field-operation, navigation-property and array-patch errors report a code (`GEO_LONGITUDE_RANGE`, `NAV_NULL`, `PATCH_KEY_REQUIRED`, … — exported as `DB_VALIDATOR_MESSAGES`) and the `params` their message names, instead of `code: "CUSTOM"` with `custom: true`. The English messages are unchanged. See [db validator codes](/http/i18n#db-validator-codes).
 - **db-client preflight error entries carry `code` and `params`** like the server's entries.
+- **Every computed-`$select` issue keeps its code over HTTP.** A rejected `$select` / `$groupBy` (bucket, expression or alias rules) answers every issue the core finds, each with its `code` (`AGG_ALIAS_COLLISION`, …), and the envelope's `code: "INVALID_QUERY"`; before, only the first issue came back, without a code. A two-level aggregate answers as the SDK does: the shape rules of both levels first (an inner alias named like an inner `$groupBy` key is `AGG_NESTED_DUPLICATE_COLUMN` at `$from.$select`), then the inner level's computed-`$select` rules, under the `$from.` path prefix. A `$cas` rejected by `PUT` / `PATCH` also carries `code: "INVALID_QUERY"`.
 
 ### Fixes
 

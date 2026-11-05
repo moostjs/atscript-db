@@ -367,6 +367,8 @@ validator.validate(payload, "replace");
 
 Pre-flight validation saves a round-trip on bad payloads. Server-managed fields (the plugin's skip list, derived `$inc/$dec/$mul` rejection) follow the server's rules — see [validation.md § Version column](validation.md#version-column); derived fields only since 0.1.142 (before, a required derived field was rejected client-side).
 
+Preflight normalizes first (0.1.170): `@normalize.*` from the served type is applied exactly as the server's write does (patch operators, nested rows), the result is validated and SENT — the caller's object is untouched. `validator.normalize(data, mode)` does the same for custom flows; `validator.validate()` alone does not normalize. See [validation.md § Normalization](validation.md#normalization-normalize-01170).
+
 Patch preflight is merge-aware (≥ 0.1.124): nested `@db.patch.strategy 'merge'` blocks validate as deep partials, same as the server — do NOT hand-fill server-stamped required keys just to satisfy the client validator. Non-merge nested objects still require their full shape on patch ($set as a whole); insert/replace always validate fully. See [validation.md](validation.md) for the per-mode contract.
 
 `new Client(path, { lenientWrites: true })` makes write preflight tolerate UNKNOWN properties (required fields/formats still enforced). Use it when the served `/meta` type is a projection of the full server type (e.g. an ARBAC read overlay strips write-only fields) — otherwise a legitimate write carrying a stripped field is rejected client-side while the server accepts it. Leave off elsewhere: strict preflight catches typos. (`createClientValidator(meta, { lenientWrites })` for standalone validators.)

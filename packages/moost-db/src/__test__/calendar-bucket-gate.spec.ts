@@ -201,7 +201,7 @@ describe("gate wording", () => {
 
   it("metadata-free rules answer with the core normalizer's wording and path", async () => {
     const { controller } = bind(BucketTicket);
-    const cases: Array<[string, { path: string; message: string }]> = [
+    const cases: Array<[string, { path: string; message: string; code?: string }]> = [
       [
         bucketUrl("openedAt", "fortnight"),
         {
@@ -223,7 +223,11 @@ describe("gate wording", () => {
       ],
       [
         "?$select=bucket(openedAt,day):status&$groupBy=status",
-        { path: "$select", message: 'Alias "status" collides with field "status"' },
+        {
+          path: "$select",
+          message: 'Alias "status" collides with field "status"',
+          code: "AGG_ALIAS_COLLISION",
+        },
       ],
       // Before the controls DTO, which would answer with a generic type mismatch.
       [

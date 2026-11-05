@@ -31,7 +31,8 @@ import { current, Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
 import { TABLE_DEF } from "./decorators";
-import { badRequest, errorEnvelope } from "./http-errors";
+import { badRequest } from "./http-errors";
+import { dbErrorToHttp } from "./validation-interceptor";
 
 const SHAPE_MESSAGE = "Expected an object";
 
@@ -306,10 +307,13 @@ export class AsDbController<
       return reconcileCas(item, versionColumn, "cas") !== undefined;
     } catch (error) {
       if (error instanceof DbError) {
-        throw errorEnvelope(
-          400,
-          error.message,
-          error.errors.map((e) => ({ path: `${pathPrefix}${e.path}`, message: e.message })),
+        // The core's answer to the same error (its code kept), under the item's path.
+        throw dbErrorToHttp(
+          new DbError(
+            error.code,
+            error.errors.map((e) => ({ ...e, path: `${pathPrefix}${e.path}` })),
+            error.message,
+          ),
         );
       }
       throw error;

@@ -266,7 +266,7 @@ Arrays stored directly on the record support five patch operators for fine-grain
 
 When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object.
 
-Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type.
+Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type. Items are [normalized](/api/crud#normalization) first (since 0.1.170), keys included: `$remove: [" RED "]` removes the stored `"red"` when the element type lowercases and trims.
 
 ::: warning SQL Adapters
 In relational databases (SQLite, PostgreSQL, MySQL), arrays are stored as JSON columns. Patch operators work via read-modify-write. For collections that need frequent partial updates in SQL, consider modeling them as separate tables with [FROM or VIA relations](/relations/patches) instead.

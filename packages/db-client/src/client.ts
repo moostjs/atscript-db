@@ -699,12 +699,12 @@ export class Client<
     return this._getValidator();
   }
 
-  /** Lifts `$cas` to the wire shape, then runs the preflight validator on the result. */
+  /** Lifts `$cas` to the wire shape, normalizes, then validates the result — which is what gets sent. */
   private async _prepareWrite(data: unknown, mode: ValidatorMode): Promise<unknown> {
     const validator = await this._getValidator();
-    const normalized = validator.liftCas(data, mode);
-    validator.validate(normalized, mode);
-    return normalized;
+    const prepared = validator.normalize(validator.liftCas(data, mode), mode);
+    validator.validate(prepared, mode);
+    return prepared;
   }
 
   private _getValidator(): Promise<ClientValidator> {

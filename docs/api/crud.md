@@ -459,7 +459,7 @@ Insert / replace / patch payloads that nest into `@db.rel.from` or `@db.rel.via`
 
 ## Write Guards {#write-guards}
 
-Since 0.1.128 every keyed write — `insertOne` / `insertMany`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate` — accepts `{ guard }` in its options, and `deleteOne(id, { guard })` too. The table invokes the guard **exactly once, inside its own transaction**, after `undefined` props were pruned, defaults applied and the rows validated, and before encryption and the nested-relation phases. It is the validated stage: what the guard sees is what the table is about to write.
+Since 0.1.128 every keyed write — `insertOne` / `insertMany`, `replaceOne` / `bulkReplace`, `updateOne` / `bulkUpdate` — accepts `{ guard }` in its options, and `deleteOne(id, { guard })` too. The table invokes the guard **exactly once, inside its own transaction**, after `undefined` props were pruned, defaults applied, the rows [normalized](#normalization) and validated, and before encryption and the nested-relation phases. It is the validated stage: what the guard sees is what the table is about to write.
 
 ```typescript
 import type { TDbWriteGuardContext } from "@atscript/db";
@@ -552,7 +552,7 @@ Tables automatically validate data on every write operation using constraints fr
 
 Since 0.1.162 `updateMany` and `replaceMany` validate their payload too (before, only foreign-key references were checked, and a bad value reached the database — a silent coercion or a constraint error). See [Upgrading](/guide/upgrading#v0-1-162).
 
-To validate rows the way a write would — without writing them (imports, dry runs) — use `validateRows` (since 0.1.165). Each row is cloned, given the defaults and stamps that write applies, and validated; the result lists every problem with the row's index, `[]` when all rows are valid:
+To validate rows the way a write would — without writing them (imports, dry runs) — use `validateRows` (since 0.1.165). Each row is cloned, given the defaults and stamps that write applies, [normalized](#normalization) and validated; the result lists every problem with the row's index, `[]` when all rows are valid:
 
 ```typescript
 const problems = await users.validateRows(rows); // mode: "insert" (default) | "replace" | "patch"
@@ -575,7 +575,59 @@ if (!validator.validate(data, true)) {
 }
 ```
 
-`getValidator` does not apply defaults; `validateRows` does.
+`getValidator` does not apply defaults or normalizers; `validateRows` does.
+
+### Normalization: `@normalize.*` {#normalization}
+
+Since 0.1.170 every write applies the type's [`@normalize.trim`, `@normalize.lowercase` and `@normalize.uppercase`](https://atscript.dev/packages/typescript/annotations-reference#normalize-annotations-normalize) annotations and stores the result. The order is **defaults → normalize → validate**: a value is validated as it will be stored, so `@expect.pattern '^[a-z0-9@.]+$'` on a lowercased email accepts `" Ann@Example.COM "` and stores `"ann@example.com"`.
+
+```atscript
+@db.table 'users'
+export interface User {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.index.unique 'user_email_idx'
+    @normalize.trim
+    @normalize.lowercase
+    email: string.email
+
+    @normalize.trim
+    name: string
+}
+```
+
+```typescript
+await users.insertOne({ email: "  Ann@Example.COM ", name: " Ann " });
+// stored: { id: 1, email: "ann@example.com", name: "Ann" }
+await users.insertOne({ email: "ann@example.com", name: "Twin" }); // CONFLICT — same stored key
+```
+
+What is normalized:
+
+- **Every write path**: `insertOne` / `insertMany` (also with `onConflict: "ignore"`), `replaceOne` / `bulkReplace` / `replaceMany`, `updateOne` / `bulkUpdate` / `updateMany`, and `validateRows`. Over HTTP, moost-db's `POST` / `PUT` / `PATCH` write through these, so they are covered too.
+- **Patches**: plain values, nested objects, and the items of the array operators — `$replace`, `$insert`, `$upsert`, and the `$update` / `$remove` items whose keys find array elements (`$remove: [" RED "]` removes the stored `"red"`). `$inc` / `$dec` / `$mul` are left as they are.
+- **Nested writes**: rows written through `@db.rel.to`, `@db.rel.from` and `@db.rel.via` — on insert and replace, and in patch operators (`$insert` rows, `$update` patches) — once, at the top-level call. Defaults are normalized where they are filled, so a nested row's `@db.default` is stored and validated like a direct insert's.
+- **Keys**: a patch addressed by a unique field (`{ email: " ANN@example.com", … }`) finds the row by the normalized value, and so do `recordFilter(payload)` and the keys of `touchMany`.
+
+The caller's payload is never changed: the table normalizes a copy, and only the objects that change are copied. The cost is near-zero: a type that reaches no `@normalize.*` annotation is not walked at all; a type that reaches one only through a relation (a `@db.rel.to` to a table with a normalized field) walks each row once, which is small next to the write itself. A [write guard](#write-guards) sees the normalized rows; values it sets are validated but not normalized again.
+
+#### Lookups {#normalized-lookups}
+
+Equality lookups compare the normalized value too, so a lookup by what a user typed finds what the write stored:
+
+```typescript
+await users.findMany({ filter: { email: " Ann@Example.COM" } }); // finds "ann@example.com"
+await users.findById("ANN@example.com"); // by the unique email
+```
+
+- **Normalized**: the operands of implicit equality, `$eq`, `$ne`, `$in` and `$nin` on a field with `@normalize.*` (an array field's element operand by its element type) — in the filters of reads, counts, aggregates, `updateMany` / `deleteMany`, `$with` filters and relation predicates (`$some` / `$none`); and every id: `findById`, `resolveRowFilter` / `resolveIdFilter` (so `deleteOne` and moost-db's `GET /one/:id`), composite and unique-key ids. moost-db's query string goes through the same filters.
+- **Compared as given**: `$regex`, `$search` / fulltext, range operators (`$gt`, `$gte`, `$lt`, `$lte`), `$exists`, aggregate conditions (`count(*|email=…)`) and `$having`.
+
+Rows written before 0.1.170 are not rewritten — see [Upgrading](/guide/upgrading#v0-1-170) for what that means for lookups and the data step that rewrites them.
+
+`normalizeWritePayload(type, payload, mode, opts?)` from `@atscript/db` (also `@atscript/db/validator`) applies the same rules to one payload — `mode` is `"insert"`, `"replace"` or `"patch"`; `opts` are the validator options the result will be validated with (`dbValidatorOptions(type, mode)`), used to pick between union members.
 
 ### Stored JSON values under a tightened type {#tightened-json}
 

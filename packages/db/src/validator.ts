@@ -14,6 +14,8 @@ export { $inc, $dec, $mul, $cas, $replace, $insert, $upsert, $update, $remove } 
 export { separateCas, reconcileCas } from "./ops";
 export { DbError } from "./db-error";
 export { isPlainObject, isEmptyObject } from "./shared/object";
+// `@normalize.*` on write payloads (since 0.1.170) — shared by the write paths and db-client
+export { normalizeWritePayload } from "./shared/normalize-write";
 // Fields the server stamps on every update (`@db.onUpdate.now` / `.inc`), since 0.1.163
 export { SERVER_STAMPED_ON_UPDATE_KEYS, isServerStampedOnUpdate } from "./shared/server-stamped";
 
@@ -21,6 +23,7 @@ import {
   flattenAnnotatedType,
   type TAtscriptAnnotatedType,
   type TAtscriptTypeObject,
+  type TValidatorOptions,
   type TValidatorPlugin,
   type Validator,
 } from "@atscript/typescript/utils";
@@ -52,13 +55,29 @@ export function buildDbValidator(
   extraPlugins?: TValidatorPlugin[],
   opts?: { unknownProps?: "strip" | "ignore" | "error" },
 ): Validator<any> {
+  return type.validator(dbValidatorOptions(type, mode, extraPlugins, opts));
+}
+
+/**
+ * The validator options {@link buildDbValidator} builds a write mode's
+ * validator with — what {@link normalizeWritePayload} judges union branches
+ * with, so normalization and validation agree.
+ *
+ * @since 0.1.170
+ */
+export function dbValidatorOptions(
+  type: TAtscriptAnnotatedType,
+  mode: ValidatorMode,
+  extraPlugins?: TValidatorPlugin[],
+  opts?: { unknownProps?: "strip" | "ignore" | "error" },
+): Partial<TValidatorOptions> {
   const plugins = extraPlugins ? [...extraPlugins, dbPlugin] : [dbPlugin];
-  return type.validator({
+  return {
     plugins,
     partial: mode === "patch" ? buildPatchPartial(collectNavRoots(type)) : false,
     replace: forceNavNonOptional,
     ...(opts?.unknownProps ? { unknownProps: opts.unknownProps } : {}),
-  });
+  };
 }
 
 /**

@@ -62,7 +62,7 @@ const PATCH_OPS = new Set(["$replace", "$insert", "$upsert", "$update", "$remove
  * Returns `true` when `value` looks like a patch‑operator object
  * (at least one key is a recognised operator and no unknown keys).
  */
-function isPatchOperatorObject(value: unknown): value is Record<string, unknown> {
+export function isPatchOperatorObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }

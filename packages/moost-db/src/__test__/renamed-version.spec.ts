@@ -122,6 +122,8 @@ describe("AsDbController — renamed version column (logical `version` → physi
       expect(errorsOf(err)).toEqual([
         { path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' },
       ]);
+      // the code the core answers the same error with
+      expect(bodyOf(err).code).toBe("INVALID_QUERY");
     });
   });
 

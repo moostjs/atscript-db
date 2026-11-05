@@ -232,6 +232,58 @@ describe("the inner level of $from is gated like a standalone query, before reso
     expect(bodyOf(res as HttpError).message).toMatch(/writeOnly/);
   });
 
+  it("an inner alias named like an inner $groupBy key answers as the SDK does (shape rules first)", async () => {
+    const url = "?$from=($groupBy=region&$select=count(*):region)&$select=count(*):t";
+    const err = await rejected(sales().query(url));
+    expect(bodyOf(err).code).toBe("INVALID_QUERY");
+    expect(errorsOf(err)[0]).toMatchObject({
+      path: "$from.$select",
+      code: "AGG_NESTED_DUPLICATE_COLUMN",
+    });
+    // the SDK's verdict on the same query
+    const sdk = await space
+      .getTable(AlhSale)
+      .aggregate({
+        filter: {},
+        controls: {
+          $from: { $groupBy: ["region"], $select: [{ $fn: "count", $field: "*", $as: "region" }] },
+          $select: [{ $fn: "count", $field: "*", $as: "t" }],
+        },
+      } as never)
+      .catch((e: unknown) => e);
+    expect(errorsOf(err)).toEqual((sdk as { errors: unknown[] }).errors);
+  });
+
+  it("an inner-only computed-$select issue keeps its code under the $from path", async () => {
+    const err = await rejected(
+      sales().query(
+        "?$from=($groupBy=w&$select=bucket(createdAt,fortnight):w,count(*):n)&$select=sum(n):t",
+      ),
+    );
+    expect(errorsOf(err)[0]).toMatchObject({ path: "$from.$select" });
+  });
+
+  it("an outer result column defined twice is AGG_NESTED_DUPLICATE_COLUMN", async () => {
+    const err = await rejected(
+      sales().query("?$from=($groupBy=region&$select=count(*):n)&$select=count(*):t,sum(n):t"),
+    );
+    expect(errorsOf(err)[0]).toMatchObject({
+      path: "$select",
+      code: "AGG_NESTED_DUPLICATE_COLUMN",
+    });
+  });
+
+  it("every computed-$select issue of a one-level query keeps its code", async () => {
+    const err = await rejected(
+      sales().query("?$groupBy=region&$select=count(*):region,sum(amount):s,sum(cost):s"),
+    );
+    expect(bodyOf(err).code).toBe("INVALID_QUERY");
+    expect(errorsOf(err)).toEqual([
+      expect.objectContaining({ path: "$groupBy", code: "AGG_ALIAS_COLLISION" }),
+      expect.objectContaining({ path: "$select", code: "AGG_ALIAS_COLLISION" }),
+    ]);
+  });
+
   it("an outer name that is a table field but no inner column is AGG_NESTED_UNKNOWN_COLUMN", async () => {
     const err = await rejected(
       sales().query("?$from=($groupBy=region&$select=count(*):n)&$select=sum(amount):t"),

@@ -15,6 +15,16 @@ export function isEmptyObject(obj: Record<string, unknown>): boolean {
   return true;
 }
 
+/** `items` mapped by `fn`, copy-on-change: the same array when no item changes. */
+export function mapItems<T>(items: T[], fn: (item: T) => T): T[] {
+  let out: T[] | undefined;
+  for (let i = 0; i < items.length; i++) {
+    const next = fn(items[i]!);
+    if (next !== items[i]) (out ??= items.slice())[i] = next;
+  }
+  return out ?? items;
+}
+
 /**
  * Finds the nearest ancestor of `path` that belongs to `set`.
  * Used by both the build pipeline (in `_classifyFields`) and

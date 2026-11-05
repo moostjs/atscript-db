@@ -18,6 +18,7 @@ import type { TResolvedBucket } from "../query/buckets";
 import { INTEGER_REGEX_OP } from "../shared/search-term";
 import { rewriteIntegerRegex } from "../query/integer-regex";
 import { rewriteObjectNullTests } from "../query/object-null";
+import { normalizeFilterEquality } from "../query/normalize-filter";
 import { arithToExprNode, computedAliases } from "../query/aggregate-expr";
 import { SOURCE_VALUE_FNS } from "../query/aggregate-fns";
 import {
@@ -305,7 +306,7 @@ export abstract class FieldMappingStrategy {
       {
         column: (name) => this.physicalPath(name, meta),
         fdOf: (name) => meta.descriptorByPath.get(name),
-        condition: (where) => this.translateFilter(where, meta),
+        condition: (where) => this.translateCondition(where, meta),
         aliases,
         tieBreak: meta.primaryKeys.map((pk) => this.physicalPath(pk, meta)),
       },
@@ -449,7 +450,7 @@ export abstract class FieldMappingStrategy {
     aliases: ReadonlySet<string>,
   ): FilterExpr {
     if (aliases.size === 0 || !having || typeof having !== "object") {
-      return this.translateFilter(having, meta);
+      return this.translateCondition(having, meta);
     }
     const out: Record<string, unknown> = {};
     const fields: Record<string, unknown> = {};
@@ -465,7 +466,7 @@ export abstract class FieldMappingStrategy {
       }
     }
     return Object.keys(fields).length > 0
-      ? { ...out, ...(this.translateFilter(fields as FilterExpr, meta) as object) }
+      ? { ...out, ...(this.translateCondition(fields as FilterExpr, meta) as object) }
       : (out as FilterExpr);
   }
 
@@ -566,7 +567,7 @@ export abstract class FieldMappingStrategy {
           if (item.$where !== undefined) {
             next = {
               ...next,
-              $where: this.translateFilter(item.$where as FilterExpr, meta),
+              $where: this.translateCondition(item.$where as FilterExpr, meta),
             } as typeof item;
           }
           return next;
@@ -629,7 +630,29 @@ export abstract class FieldMappingStrategy {
    * translate predicate operands at deeper levels).
    */
   translateFilter(filter: FilterExpr, meta: TableMetadata, depth = 0): FilterExpr {
-    filter = rewriteObjectNullTests(rewriteIntegerRegex(filter, meta), meta);
+    return this.translateLogical(this.logicalFilter(filter, meta), meta, depth);
+  }
+
+  /**
+   * {@link translateFilter} without the equality normalization: `$having`
+   * and aggregate conditions compare their operands as given.
+   */
+  protected translateCondition(filter: FilterExpr, meta: TableMetadata): FilterExpr {
+    return this.translateLogical(this.logicalFilter(filter, meta, false), meta, 0);
+  }
+
+  /**
+   * A filter's logical rewrites, before relational predicates are resolved:
+   * equality lookups on `@normalize.*` fields normalized (`lookups`, see
+   * `normalizeFilterEquality`), integer `$regex`, object null tests.
+   */
+  protected logicalFilter(filter: FilterExpr, meta: TableMetadata, lookups = true): FilterExpr {
+    if (lookups) filter = normalizeFilterEquality(filter, meta);
+    return rewriteObjectNullTests(rewriteIntegerRegex(filter, meta), meta);
+  }
+
+  /** A {@link logicalFilter} with its relational predicates resolved, translated. */
+  private translateLogical(filter: FilterExpr, meta: TableMetadata, depth: number): FilterExpr {
     const has = containsRelationFilter(filter);
     const resolved = has ? resolveRelationFilterTree(filter, meta, depth) : filter;
     return this.noteTranslated(filter, this.translateResolvedFilter(resolved, meta), has);

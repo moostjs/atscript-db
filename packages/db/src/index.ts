@@ -31,6 +31,8 @@ export {
   createDbValidatorPlugin,
   DB_VALIDATOR_MESSAGES,
   buildDbValidator,
+  dbValidatorOptions,
+  normalizeWritePayload,
   buildValidationContext,
   isNavRelation,
   forceNavNonOptional,
