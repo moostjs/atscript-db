@@ -56,13 +56,13 @@ import type {
   Filter,
   MongoClient,
 } from "mongodb";
-import { MongoBulkWriteError, MongoServerError, ObjectId } from "mongodb";
+import { ObjectId } from "mongodb";
 import type { AggregateFn, BucketUnit } from "@uniqu/core";
 import type { TViewCapability } from "@atscript/db";
 import { dedupeProjection } from "./projection-dedupe";
 import { hasNullsPlacement, sortStages } from "./mongo-sort";
 import { isArrayPath, joinPath } from "./path-utils";
-import { wrapInvalidQuery } from "./mongo-errors";
+import { bulkWriteErrors, duplicateKeyViolation, wrapInvalidQuery } from "./mongo-errors";
 import { dynamicSearchEncryptedMessage } from "./search-messages";
 import { CollectionPatcher, incExpr, type TCollectionPatcherContext } from "./collection-patcher";
 import {
@@ -179,19 +179,6 @@ function objectIdFromStorage(value: unknown): unknown {
 const REL_WRITE_BATCH = 1000;
 
 // ── Adapter ──────────────────────────────────────────────────────────────────
-
-/** Whether a bulk-write error carries a write-concern failure besides (or instead of) write errors. */
-function hasWriteConcernError(error: MongoBulkWriteError): boolean {
-  const e = error as unknown as {
-    writeConcernError?: unknown;
-    result?: { getWriteConcernError?: () => unknown; writeConcernErrors?: unknown[] };
-  };
-  return Boolean(
-    e.writeConcernError ||
-    e.result?.getWriteConcernError?.() ||
-    e.result?.writeConcernErrors?.length,
-  );
-}
 
 /**
  * Options of a {@link MongoAdapter} (and of `createAdapter`).
@@ -1398,18 +1385,22 @@ export class MongoAdapter extends BaseDbAdapter {
     }
   }
 
-  /** Rethrows a duplicate-key (11000) server error as `CONFLICT`, anything else as is. */
+  /**
+   * Rethrows a duplicate-key error as `CONFLICT` — whatever driver error class
+   * carries it (see {@link duplicateKeyViolation}) — anything else as is.
+   */
   private _mapConstraintError(error: unknown): never {
-    if (error instanceof MongoServerError && error.code === 11000) {
+    const duplicate = duplicateKeyViolation(error);
+    if (duplicate) {
       // Every key of the violated index (since 0.1.165; before, only the first);
       // the table layer resolves them into logical paths.
       throw constraintViolation(
         "CONFLICT",
         {
-          columns: error.keyPattern ? Object.keys(error.keyPattern) : undefined,
-          name: error.message.match(/index: (\S+) dup key/)?.[1],
+          columns: duplicate.keyPattern ? Object.keys(duplicate.keyPattern) : undefined,
+          name: duplicate.message.match(/index: (\S+) dup key/)?.[1],
         },
-        error.message,
+        duplicate.message,
       );
     }
     throw error;
@@ -1504,16 +1495,14 @@ export class MongoAdapter extends BaseDbAdapter {
     try {
       await this.collection.insertMany(data, { ordered: false, ...this._getSessionOpts() });
     } catch (error) {
-      if (!(error instanceof MongoBulkWriteError)) this._mapConstraintError(error);
-      const writeErrors = [error.writeErrors].flat().filter(Boolean);
+      const writeErrors = bulkWriteErrors(error);
       // Only a bulk error made of duplicate-key write errors is a skip. No write error at all
       // (a write-concern failure, a lost acknowledgement) says nothing about which rows were
-      // written: never report them inserted.
-      if (writeErrors.length === 0 || hasWriteConcernError(error)) throw error;
-      for (const writeError of writeErrors) {
-        if (writeError.code !== 11000) throw error;
-        skipped.add(writeError.index);
-      }
+      // written: never report them inserted (a non-bulk duplicate key is still a `CONFLICT`).
+      // `duplicateKeyViolation` rejects a write-concern failure and a mixed batch.
+      if (writeErrors.length === 0 || !duplicateKeyViolation(error))
+        this._mapConstraintError(error);
+      for (const writeError of writeErrors) skipped.add(writeError.index);
     }
     return data.map((item, i) => (skipped.has(i) ? null : { insertedId: idOf(item) }));
   }

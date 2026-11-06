@@ -392,6 +392,8 @@ type TStepsReport = NonNullable<TSyncResult["dataSteps"]>;
 /** The pending `beforeConstraints` steps `execute()` runs, the run's report, and a failure. */
 interface TEarlySteps {
   steps: readonly TDataStep[];
+  /** The run's pod id — recorded with each step it runs. */
+  podId: string;
   report: TStepsReport;
   failure?: DataStepFailure;
 }
@@ -716,6 +718,7 @@ export class SchemaSync {
    */
   private async applyDataSteps(
     steps: readonly TDataStep[],
+    podId: string,
     getAbortReason: () => string | undefined,
     report: TStepsReport,
   ): Promise<void> {
@@ -724,7 +727,8 @@ export class SchemaSync {
       const outcome = await this.store
         .runOnce(
           dataStepKey(step.id),
-          () => JSON.stringify({ ranAt: Date.now() }),
+          // Unique to this run: a conflicting record that holds it is this run's own write.
+          () => JSON.stringify({ ranAt: Date.now(), podId }),
           () => step.run(this.space),
         )
         .catch((error: unknown) => {
@@ -814,7 +818,9 @@ export class SchemaSync {
       const report: TStepsReport = { ran: [], pending: todo.map((step) => step.id) };
 
       if (storedHash === hash) {
-        await this.applyDataSteps(todo, heartbeat.getAbortReason, report).catch(rethrowStepError);
+        await this.applyDataSteps(todo, podId, heartbeat.getAbortReason, report).catch(
+          rethrowStepError,
+        );
         const status = report.ran.length > 0 ? "synced" : "synced-by-peer";
         return withSteps({ status, schemaHash: hash, entries: [] }, steps, report);
       }
@@ -840,6 +846,7 @@ export class SchemaSync {
       // between the table DDL and the index / foreign-key work.
       const early: TEarlySteps = {
         steps: todo.filter((step) => step.phase === "beforeConstraints"),
+        podId,
         report,
       };
       const result = await this.execute(d, safe, heartbeat.getAbortReason, early);
@@ -851,7 +858,9 @@ export class SchemaSync {
       // Data steps need the schema in place: not after an errored entry.
       if (!result.entries.some((e) => e.hasErrors)) {
         const late = todo.filter((step) => step.phase !== "beforeConstraints");
-        await this.applyDataSteps(late, heartbeat.getAbortReason, report).catch(rethrowStepError);
+        await this.applyDataSteps(late, podId, heartbeat.getAbortReason, report).catch(
+          rethrowStepError,
+        );
       }
       return withSteps(result, steps, report);
     } finally {
@@ -1855,7 +1864,7 @@ export class SchemaSync {
             // pending), then each table's indexes and foreign keys.
             if (!entries.some((e) => e.status === "error")) {
               try {
-                await this.applyDataSteps(early.steps, getAbortReason, early.report);
+                await this.applyDataSteps(early.steps, early.podId, getAbortReason, early.report);
               } catch (error) {
                 if (!(error instanceof DataStepFailure)) throw error;
                 // The DDL so far stays recorded (tracked list, the snapshots

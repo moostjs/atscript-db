@@ -102,7 +102,7 @@ Stores: `schema_version` (hash), `table_snapshot:<name>` (one row per table), `s
 
 Lock rules:
 
-- `tryAcquireLock(podId, ttl)` — inserts the row. Collision → `false`.
+- `tryAcquireLock(podId, ttl)` — inserts the row. Collision → `false`, unless the stored row is this attempt's own (same `lockedBy` + `lockedAt` + `expiresAt` — a write retried after a lost acknowledgement, 0.1.174) → `true`; an earlier run's lock under the same `podId` differs in `lockedAt` → `false`.
 - Expired locks (`expiresAt < now`) are reaped automatically.
 - `refreshLock(podId, ttl)` returns `'refreshed' | 'stolen' | 'missing'`.
 - `releaseLock(podId)` is best-effort; missing the release is safe because TTL eventually clears it.

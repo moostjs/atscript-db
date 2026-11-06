@@ -62,22 +62,44 @@ export class SyncStore {
   }
 
   /**
-   * Inserts a control row, never overwriting one: `false` when a row with
-   * this `_id` exists (the insert hit the primary key).
+   * Inserts a control row, never overwriting one: `false` when another
+   * writer's row with this `_id` exists (the insert hit the primary key).
+   * `value` should be unique to the caller — a conflicting row that holds it
+   * is this call's own write (see {@link tryInsert}).
    */
   async insertControlValue(_id: string, value: string): Promise<boolean> {
     return this.tryInsert({ _id, value });
   }
 
-  /** Inserts `row` into the control table: `false` on a primary-key conflict. */
+  /**
+   * Inserts `row` into the control table: `true` when this call stored it,
+   * `false` when another writer's row holds its `_id`.
+   *
+   * A `CONFLICT` is read back first: a write retried after its acknowledgement
+   * was lost (a network failure between server and driver) can hit the very
+   * row its first attempt stored. When the stored row carries every value of
+   * `row` it is this call's write, and the insert succeeded — reading it as a
+   * peer's would leave this pod waiting on its own sync lock until the TTL
+   * expires.
+   * Inside a real transaction there is no read-back: nothing is retried there,
+   * and the failed statement aborted the transaction (PostgreSQL, MongoDB).
+   */
   private async tryInsert(row: Record<string, unknown>): Promise<boolean> {
     try {
       await this.controlTable!.insertOne(row as any);
       return true;
     } catch (error) {
-      if (isConflict(error)) return false;
-      throw error;
+      if (!isConflict(error)) throw error;
     }
+    if (this.inRealTransaction()) return false;
+    const stored = await this.readControlRow(row._id as string);
+    return stored !== null && isSameRow(stored, row);
+  }
+
+  /** The control row with this `_id`, `null` when there is none. */
+  private async readControlRow(_id: string): Promise<Record<string, unknown> | null> {
+    const row = await this.controlTable!.findOne({ filter: { _id: { $eq: _id } }, controls: {} });
+    return row as Record<string, unknown> | null;
   }
 
   /** Which of `ids` have a control row — one query (since 0.1.165, data steps). */
@@ -91,11 +113,7 @@ export class SyncStore {
   }
 
   async readControlValue(_id: string): Promise<string | null> {
-    const row = await this.controlTable!.findOne({
-      filter: { _id: { $eq: _id } },
-      controls: {},
-    });
-    return ((row as Record<string, unknown> | null)?.value as string | null) ?? null;
+    return ((await this.readControlRow(_id))?.value as string | null) ?? null;
   }
 
   async writeControlValue(_id: string, value: string): Promise<void> {
@@ -206,8 +224,7 @@ export class SyncStore {
   // insert that loses the race fails with a `CONFLICT`.
 
   private async readLock(): Promise<Record<string, unknown> | null> {
-    const row = await this.controlTable!.findOne({ filter: lockFilter(), controls: {} });
-    return row as Record<string, unknown> | null;
+    return this.readControlRow(LOCK_ID);
   }
 
   /**
@@ -221,7 +238,9 @@ export class SyncStore {
   /**
    * One acquisition attempt: `true` when this pod now holds the lock, `false`
    * when a live lock (or a peer's concurrent insert) holds it. Any other error
-   * propagates — a failing insert is not contention.
+   * propagates — a failing insert is not contention. A conflicting row is this
+   * attempt's own only with its `lockedAt` too (see {@link tryInsert}): an
+   * earlier run's lock under the same `podId` is not.
    */
   async tryAcquireLock(podId: string, ttlMs: number): Promise<boolean> {
     const now = Date.now();
@@ -296,6 +315,16 @@ const RECORDED_BY_PEER = Symbol("recorded-by-peer");
 /** The lock row's filter, narrowed by `conditions` (the compare-and-set part). */
 function lockFilter(conditions?: Record<string, unknown>): any {
   return { _id: { $eq: LOCK_ID }, ...conditions };
+}
+
+/**
+ * Whether the stored control row holds every value of `row` — numbers compared
+ * as numbers (a driver may read a `BIGINT` column back as a string).
+ */
+function isSameRow(stored: Record<string, unknown>, row: Record<string, unknown>): boolean {
+  return Object.entries(row).every(([key, value]) =>
+    typeof value === "number" ? Number(stored[key]) === value : stored[key] === value,
+  );
 }
 
 /** A lock row without an expiry never expires (it blocks until the wait times out). */

@@ -110,7 +110,15 @@ function setup() {
   const lockRow = () => rows().find((r) => r._id === "sync_lock") ?? null;
   const putLock = (lock: Record<string, unknown>) => rows().push({ _id: "sync_lock", ...lock });
   const dropLock = () => rows().splice(rows().indexOf(lockRow()!), 1);
-  return { space, sync, store, control, rows, lockRow, putLock, dropLock };
+  /** Runs `fn` with the row of the next `insertOne` on the control table, before it is written. */
+  const beforeFirstInsert = (fn: (row: Record<string, unknown>) => void) => {
+    control().beforeWrite = (method, data) => {
+      if (method !== "insertOne") return;
+      control().beforeWrite = undefined;
+      fn(data as Record<string, unknown>);
+    };
+  };
+  return { space, sync, store, control, rows, lockRow, putLock, dropLock, beforeFirstInsert };
 }
 
 async function setupWithControl() {
@@ -133,14 +141,58 @@ describe("SyncStore lock", () => {
   // WHY: two pods can read the lock row as absent at once; the loser's insert
   // hits the `_id` primary key. That CONFLICT — and only that — is contention.
   it("tryAcquireLock treats a CONFLICT on the insert as contention", async () => {
-    const { store, control, putLock } = await setupWithControl();
-    control().beforeWrite = (method) => {
-      if (method === "insertOne") {
-        control().beforeWrite = undefined;
-        putLock({ lockedBy: "peer", lockedAt: Date.now(), expiresAt: Date.now() + 30_000 });
-      }
-    };
+    const { store, lockRow, putLock, beforeFirstInsert } = await setupWithControl();
+    const peer = { lockedBy: "peer", lockedAt: Date.now(), expiresAt: Date.now() + 30_000 };
+    beforeFirstInsert(() => putLock(peer));
     expect(await store.tryAcquireLock("pod-a", 30_000)).toBe(false);
+    expect(lockRow()).toMatchObject(peer);
+  });
+
+  // WHY (0.1.174): a write retried after its acknowledgement was lost hits the
+  // row its first attempt stored. Read as contention, the pod waited on its
+  // OWN lock until the TTL expired.
+  it("tryAcquireLock reads a CONFLICT back: this attempt's own row means acquired", async () => {
+    const { store, rows, lockRow, beforeFirstInsert } = await setupWithControl();
+    // The first attempt landed; the retry conflicts with it.
+    beforeFirstInsert((row) => rows().push({ ...row }));
+    expect(await store.tryAcquireLock("pod-a", 30_000)).toBe(true);
+    expect(lockRow()).toMatchObject({ lockedBy: "pod-a" });
+  });
+
+  it("tryAcquireLock's read-back compares numbers as numbers (BIGINT read as a string)", async () => {
+    const { store, rows, beforeFirstInsert } = await setupWithControl();
+    beforeFirstInsert((row) =>
+      rows().push({ ...row, lockedAt: String(row.lockedAt), expiresAt: String(row.expiresAt) }),
+    );
+    expect(await store.tryAcquireLock("pod-a", 30_000)).toBe(true);
+  });
+
+  // WHY: a fixed podId (a hostname) restarted after a crash finds its earlier
+  // run's live lock — that is not this attempt's row; `lockedAt` tells them apart.
+  it("tryAcquireLock's read-back: the same podId's lock of an earlier run is contention", async () => {
+    const { store, putLock, beforeFirstInsert } = await setupWithControl();
+    beforeFirstInsert(() =>
+      putLock({ lockedBy: "pod-a", lockedAt: Date.now() - 5_000, expiresAt: Date.now() + 25_000 }),
+    );
+    expect(await store.tryAcquireLock("pod-a", 30_000)).toBe(false);
+  });
+
+  it("insertControlValue reads a CONFLICT back: the same value is this call's own write", async () => {
+    const { store, rows } = await setupWithControl();
+    rows().push({ _id: "data_step:a", value: "mine" });
+    expect(await store.insertControlValue("data_step:a", "mine")).toBe(true);
+    expect(await store.insertControlValue("data_step:a", "theirs")).toBe(false);
+  });
+
+  // WHY: in a real transaction nothing is retried, and the failed statement
+  // aborted it (PostgreSQL, MongoDB) — a read there would fail, not answer.
+  it("insertControlValue does not read back inside a real transaction", async () => {
+    const { store, rows } = await setupWithControl();
+    rows().push({ _id: "data_step:a", value: "mine" });
+    vi.spyOn(store, "inRealTransaction").mockReturnValue(true);
+    const findOne = vi.spyOn(store.controlTable, "findOne");
+    expect(await store.insertControlValue("data_step:a", "mine")).toBe(false);
+    expect(findOne).not.toHaveBeenCalled();
   });
 
   // WHY: before 0.1.141 ANY insert error returned `false` — a broken write

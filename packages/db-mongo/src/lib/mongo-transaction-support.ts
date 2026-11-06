@@ -1,7 +1,6 @@
 import type { Document, MongoClient } from "mongodb";
-import { MongoServerError } from "mongodb";
 
-import { COMMAND_NOT_FOUND } from "./mongo-errors";
+import { COMMAND_NOT_FOUND, serverErrorCode } from "./mongo-errors";
 
 const verdicts = new WeakMap<MongoClient, Promise<boolean>>();
 
@@ -30,7 +29,7 @@ async function probe(client: MongoClient): Promise<boolean> {
     reply = await admin.command({ hello: 1 });
   } catch (error) {
     // The driver supports servers from 4.2; 4.2.0–4.2.9 have no `hello`.
-    if (!(error instanceof MongoServerError) || error.code !== COMMAND_NOT_FOUND) {
+    if (serverErrorCode(error) !== COMMAND_NOT_FOUND) {
       throw error;
     }
     reply = await admin.command({ isMaster: 1 });
