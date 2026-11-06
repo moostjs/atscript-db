@@ -128,7 +128,7 @@ async function gateRows(
     if (row === undefined || verdict) {
       const reason = verdictReason(verdict);
       failing.push({ id: ids[i], reason });
-      const skipReason = reasonOf(verdict) ?? (stale?.has(i) ? "stale" : undefined);
+      const skipReason = reasonOf(reason) ?? (stale?.has(i) ? "stale" : undefined);
       skipped.push(skipReason === undefined ? { id: ids[i] } : { id: ids[i], reason: skipReason });
     } else {
       passingRows.push(row);

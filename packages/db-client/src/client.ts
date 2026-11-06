@@ -89,6 +89,12 @@ type AggregateRows<T, Q extends AggregateQuery<T> | NestedAggregateQuery<T>> = Q
     ? AggregateResult<T, Q["controls"]["$select"]>[]
     : Record<string, unknown>[];
 
+/** A loaded action form: its type and the `$i18n` texts it was served with. */
+interface TLoadedForm {
+  type: TAtscriptAnnotatedType;
+  texts?: Record<string, string>;
+}
+
 /**
  * HTTP client for moost-db REST endpoints.
  *
@@ -121,12 +127,6 @@ type AggregateRows<T, Q extends AggregateQuery<T> | NestedAggregateQuery<T>> = Q
  * rows[0].ownerName // string | undefined
  * ```
  */
-/** A loaded action form: its type and the `$i18n` texts it was served with. */
-interface TLoadedForm {
-  type: TAtscriptAnnotatedType;
-  texts?: Record<string, string>;
-}
-
 export class Client<
   T extends AtscriptClientShape = AtscriptClientShape,
   D extends object = Record<never, never>,
@@ -146,7 +146,7 @@ export class Client<
   /** The `ETag` of the `/meta` body {@link _metaPromise} resolved to. */
   private _metaEtag?: string;
   private _validatorPromise?: Promise<ClientValidator>;
-  /** Cached deserialized form schemas keyed by resolved URL. */
+  /** Loaded action forms (type + served `$i18n`) keyed by resolved URL. */
   private _formCache = new Map<string, Promise<TLoadedForm>>();
 
   constructor(path: string, opts?: ClientOptions) {
@@ -704,7 +704,7 @@ export class Client<
       ])
         .then(([schema, { deserializeAnnotatedType }]) => ({
           type: deserializeAnnotatedType(schema),
-          texts: (schema as { $i18n?: Record<string, string> }).$i18n,
+          texts: schema.$i18n,
         }))
         .catch((err) => {
           if (this._formCache.get(url) === loading) this._formCache.delete(url);

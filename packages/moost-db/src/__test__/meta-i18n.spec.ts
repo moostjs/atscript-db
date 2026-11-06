@@ -56,6 +56,8 @@ async function itemsTable(): Promise<AtscriptDbTable<any>> {
 
 async function boot(opts: { metaTranslation?: boolean; overlay?: boolean } = {}) {
   const variants = new WeakMap<object, Map<string, TMetaResponse>>();
+  const alreadyShipped = (rows: Array<{ name: string }>) =>
+    rows.map((r) => (r.name.startsWith("done") ? "Already shipped" : false));
   @DbTableActions({
     archive: {
       label: "Archive",
@@ -98,8 +100,7 @@ async function boot(opts: { metaTranslation?: boolean; overlay?: boolean } = {})
     @DbAction("ship", {
       label: "Ship",
       requiredFields: ["name"],
-      disabled: (rows: Array<{ name: string }>) =>
-        rows.map((r) => (r.name.startsWith("done") ? "Already shipped" : false)),
+      disabled: alreadyShipped,
     })
     ship(@DbActionID() _id: unknown): unknown {
       return { ok: true };
@@ -110,8 +111,7 @@ async function boot(opts: { metaTranslation?: boolean; overlay?: boolean } = {})
       label: "Ship selected",
       requiredFields: ["name"],
       onDisabledRows: "skip",
-      disabled: (rows: Array<{ name: string }>) =>
-        rows.map((r) => (r.name.startsWith("done") ? "Already shipped" : false)),
+      disabled: alreadyShipped,
     })
     shipMany(@DbActionIDs() _ids: unknown): unknown {
       return useDbActionTarget().summary();
@@ -366,6 +366,7 @@ describe("disabled reasons in the request's language", () => {
       reason: "Bereits versandt",
       message: "Bereits versandt",
     });
+    expect(de_.skipped).toEqual([{ id: { id: 1 }, reason: "Bereits versandt" }]);
     const en_ = await reasonsOf(send, en);
     expect(en_.list).toEqual([{ ship: "Already shipped", shipMany: "Already shipped" }, null]);
     expect(en_.one.disabledReasons).toEqual({
@@ -373,7 +374,6 @@ describe("disabled reasons in the request's language", () => {
       shipMany: "Already shipped",
     });
     expect(en_.refused.reason).toBe("Already shipped");
-    expect(de_.skipped).toEqual([{ id: { id: 1 }, reason: "Bereits versandt" }]);
     expect(en_.skipped).toEqual([{ id: { id: 1 }, reason: "Already shipped" }]);
   });
 

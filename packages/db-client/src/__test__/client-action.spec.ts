@@ -517,19 +517,7 @@ describe("Client.getActionForm — form-schema lookup", () => {
       ...serializeAnnotatedType(UserType, {}),
       $i18n: { MIN_LENGTH: "Mindestens {length} Zeichen", "Bigger than 5": "Größer als 5" },
     };
-    const fetchFn = fetchWithForm(
-      [
-        {
-          name: "approve",
-          label: "Approve",
-          level: "row",
-          processor: "backend",
-          value: "/api/orders/actions/approve",
-          inputForm: "User",
-        },
-      ],
-      formSchema,
-    );
+    const fetchFn = fetchWithForm([formAction("approve")], formSchema);
     const c = new Client("/api/orders", { fetch: fetchFn });
     expect(await c.getActionForm("approve")).toBeTruthy();
     expect(await c.getActionFormTexts("approve")).toEqual({
@@ -541,24 +529,6 @@ describe("Client.getActionForm — form-schema lookup", () => {
     );
     expect(formCalls).toHaveLength(1);
     expect(await c.getActionFormTexts("missing")).toBeUndefined();
-  });
-
-  it("getActionFormTexts is undefined when the form was served without $i18n", async () => {
-    const fetchFn = fetchWithForm(
-      [
-        {
-          name: "approve",
-          label: "Approve",
-          level: "row",
-          processor: "backend",
-          value: "/api/orders/actions/approve",
-          inputForm: "User",
-        },
-      ],
-      serializeAnnotatedType(UserType, {}),
-    );
-    const c = new Client("/api/orders", { fetch: fetchFn });
-    expect(await c.getActionFormTexts("approve")).toBeUndefined();
   });
 
   it("caches the deserialized schema across calls", async () => {
@@ -580,6 +550,8 @@ describe("Client.getActionForm — form-schema lookup", () => {
     const a = await c.getActionForm("approve");
     const b = await c.getActionForm("approve");
     expect(a).toBe(b);
+    // Served without `$i18n` → no texts.
+    expect(await c.getActionFormTexts("approve")).toBeUndefined();
     const formCalls = fetchFn.mock.calls.filter((call: unknown[]) =>
       String(call[0]).includes("/meta/form/"),
     );
