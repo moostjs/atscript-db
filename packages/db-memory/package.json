@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-memory",
-  "version": "0.1.173",
+  "version": "0.1.174",
   "description": "In-memory adapter for atscript-db.",
   "keywords": [
     "atscript",
