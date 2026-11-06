@@ -131,8 +131,9 @@ await syncSchema(db, types, {
 
 - Steps run **in order, after the DDL, under the sync lock** — also when the schema itself is up to date, so a step added later runs on the next sync.
 - Each step runs **once per database**: it runs in its own transaction (on adapters with transactions), together with its record in `__atscript_control` (`data_step:<id>`). A step that throws is rolled back and not recorded; the sync throws its error after releasing the lock, the steps after it stay pending, and the next sync runs it again.
+- The record is insert-only and is written before the step, in the same transaction. If another sync took over an expired lock and recorded the step first, the step does not run again: the sync logs a warning and the step is in neither `ran` nor `pending`. Without transactions (the in-memory adapter, MongoDB without a replica set) the record is checked right before the step and written right after it; a step that another sync records while it runs here runs on both, and a warning says so.
 - Steps do not run when the sync is `'refused'` or an entry errored.
-- `result.dataSteps` reports `{ ran, pending }`; `plan()` reports `pendingDataSteps`, and a pending step makes the plan `'changes-needed'`.
+- `result.dataSteps` reports `{ ran, pending }`: `ran` lists the steps this call ran, `pending` the steps still not recorded after it — the ones a later sync runs. A step an earlier sync recorded is in neither list, so `pending` is empty once every step has run (also on an `'up-to-date'` or `'synced-by-peer'` result). `plan()` reports the same `pending` list as `pendingDataSteps`, and a pending step makes the plan `'changes-needed'`.
 - Never change what a recorded step does — add a new step with a new id. Duplicate or empty ids throw.
 
 ### Fix rows before a new constraint {#data-steps-before-constraints}

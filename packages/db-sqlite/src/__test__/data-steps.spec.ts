@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vite-plus/test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vite-plus/test";
 import { DbSpace } from "@atscript/db";
-import { planSchema, syncSchema } from "@atscript/db/sync";
+import { planSchema, SchemaSync, syncSchema } from "@atscript/db/sync";
 
 import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
@@ -91,6 +91,51 @@ describe("[sqlite] syncSchema dataSteps", () => {
     const result = await syncSchema(space, [fx.CioNote], { dataSteps: [step] });
     expect(result.dataSteps?.ran).toEqual(["flaky"]);
     expect(await notes().findById(7)).not.toBeNull();
+  });
+
+  // WHY (0.1.174): a run whose lock a peer took over still holds its list of
+  // unrecorded steps. The record is now an insert-only claim made first, in
+  // the step's own transaction: a step the peer recorded meanwhile fails the
+  // claim and does not run again (before, the record was read-then-replace and
+  // the step ran twice).
+  it("a step a peer recorded meanwhile is not run again", async () => {
+    const peer = (new SchemaSync(space) as any).store;
+    await peer.ensureControlTable();
+    const calls: string[] = [];
+    const warn = vi.fn();
+    const logger = { error() {}, warn, log() {}, info() {}, debug() {} };
+    const steps = [
+      {
+        id: "w",
+        run: async () => {
+          calls.push("w");
+          // A peer takes the lock over and records "x"
+          await peer.insertControlValue("data_step:x", "{}");
+        },
+      },
+      {
+        id: "x",
+        run: async () => {
+          calls.push("x");
+          await notes().insertOne({ id: 9, title: "x" });
+        },
+      },
+      { id: "y", run: () => void calls.push("y") },
+    ];
+    const real = vi.spyOn(Object.getPrototypeOf(peer), "inRealTransaction");
+    const result = await syncSchema(space, [fx.CioNote], { dataSteps: steps, logger });
+    // SQLite runs each step in a real transaction: the claim path
+    expect(await real.mock.results[0]!.value).toBe(true);
+    real.mockRestore();
+    expect(calls).toEqual(["w", "y"]);
+    expect(result.dataSteps).toEqual({ ran: ["w", "y"], pending: [] });
+    expect(await notes().findById(9)).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      '[schema-sync] data step "x" was already recorded by another sync (it took the lock over) — not run again',
+    );
+    expect((await planSchema(space, [fx.CioNote], { dataSteps: steps })).pendingDataSteps).toEqual(
+      [],
+    );
   });
 
   it("refuses duplicate step ids", async () => {

@@ -49,6 +49,7 @@ describe("[memory] syncSchema dataSteps — waiting pods", () => {
     const [ra, rb] = await Promise.all([a, b]);
     expect(ra.dataSteps?.ran).toEqual(["slow"]);
     expect(rb.status).toBe("synced-by-peer");
+    expect(rb.dataSteps).toEqual({ ran: [], pending: [] });
     spy.mockRestore();
     expect(lockWrites).toEqual([]);
   });

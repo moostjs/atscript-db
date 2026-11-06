@@ -132,6 +132,7 @@ import {
   type TMysqlTableOptions,
 } from "./sql-builder";
 import { mysqlName } from "./annotation-values";
+import { INNODB_WORD_CLASS } from "./innodb-word-chars";
 import type { TMysqlAdapterOptions, TMysqlConnection, TMysqlDriver } from "./types";
 
 /** A column's own `@db.mysql.charset`, `@db.mysql.collate` and `@db.column.collate` (lowercased, `""` when absent). */
@@ -3602,32 +3603,51 @@ const INNODB_DEFAULT_STOPWORDS: ReadonlySet<string> = new Set(
   ),
 );
 
+/** A word as InnoDB's full-text parser reads it: a run of {@link INNODB_WORD_CLASS}. */
+const INNODB_WORD = new RegExp(`${INNODB_WORD_CLASS}+`, "gu");
+/** A word character right before a run of `*` at the end of a chunk: a prefix. */
+const INNODB_PREFIX = new RegExp(`${INNODB_WORD_CLASS}\\*+$`, "u");
+
+/** `innodb_ft_min_token_size` default: shorter words are not indexed. */
+const INNODB_MIN_TOKEN_SIZE = 3;
+
+/**
+ * Whether InnoDB indexes `word` (an {@link INNODB_WORD} match) by default —
+ * required, it can match a row. Word characters are all in the BMP: `length`
+ * counts characters.
+ */
+function innodbIndexes(word: string): boolean {
+  return word.length >= INNODB_MIN_TOKEN_SIZE && !INNODB_DEFAULT_STOPWORDS.has(word.toLowerCase());
+}
+
 /**
  * A search text as a boolean-mode `AGAINST` term with every word required
- * (`@db.index.fulltext.match "all"`, since 0.1.168): `+word` per word, a
- * `"quoted phrase"` stays one required phrase, a trailing `*` keeps its prefix
- * meaning. The user's own boolean operators (`+ - < > ( ) ~ * " @`) are text,
- * not syntax. A word InnoDB does not index by default — shorter than 3
- * characters (`innodb_ft_min_token_size`) or on its default stop-word list —
- * stays optional: requiring it would match no row.
+ * (`@db.index.fulltext.match "all"`, since 0.1.168). The text is split into
+ * words the way InnoDB splits it ({@link INNODB_WORD}), so the user's own
+ * boolean operators (`+ - < > ( ) ~ * " @`) and punctuation are text, never
+ * syntax: `the, quick` is the words `the` and `quick`. Each word becomes `+word`; a
+ * `"quoted phrase"` stays one required phrase; a `*` right after a word keeps
+ * its prefix meaning (`+dog*`). A word InnoDB does not index by default —
+ * shorter than 3 characters (`innodb_ft_min_token_size`) or on its default
+ * stop-word list — stays optional (requiring it would match no row), as does
+ * a phrase made only of such words. A prefix is required whatever its length:
+ * it matches the indexed words that start with it.
  */
 export function mysqlRequireEveryTerm(text: string): string {
   const parts: string[] = [];
   for (const match of text.matchAll(/"([^"]*)"|(\S+)/g)) {
     const phrase = match[1];
     if (phrase !== undefined) {
-      const clean = phrase.trim();
-      if (clean) parts.push(`+"${clean}"`);
+      const words = phrase.match(INNODB_WORD);
+      if (words) parts.push(`${words.some(innodbIndexes) ? "+" : ""}"${words.join(" ")}"`);
       continue;
     }
-    const word = match[2]!;
-    const core = word.replace(/\*+$/, "");
-    const pieces = core.split(/[+\-<>()~*"@]+/).filter(Boolean);
-    // A trailing `*` keeps its prefix meaning on the last piece.
-    pieces.forEach((piece, i) => {
-      const star = i === pieces.length - 1 && core.length < word.length ? "*" : "";
-      const required = [...piece].length >= 3 && !INNODB_DEFAULT_STOPWORDS.has(piece.toLowerCase());
-      parts.push(`${required ? "+" : ""}${piece}${star}`);
+    const chunk = match[2]!;
+    const words = chunk.match(INNODB_WORD) ?? [];
+    const prefix = chunk.endsWith("*") && INNODB_PREFIX.test(chunk);
+    words.forEach((word, i) => {
+      if (prefix && i === words.length - 1) parts.push(`+${word}*`);
+      else parts.push(`${innodbIndexes(word) ? "+" : ""}${word}`);
     });
   }
   return parts.join(" ");

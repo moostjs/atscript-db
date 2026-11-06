@@ -111,7 +111,7 @@ Changing the language rebuilds the index on the next schema sync (PostgreSQL, Mo
 | **MySQL**      | `IN BOOLEAN MODE`, every word required (`+word`) except short and stop words                                        | natural-language mode                                               | any                     |
 | **MongoDB**    | each word (split on punctuation) becomes a phrase, so every word is required (matched as written, without stemming) | `$text` as typed                                                    | any                     |
 
-Results stay in [relevance order](#ranking). Under `match "all"` PostgreSQL reads the web-search syntax: a `"quoted phrase"`, `or` between words, `-word` to exclude; under `"any"` a leading `-` is dropped, since one excluded term OR-ed with the others would match nearly every row. On MySQL, words shorter than 3 characters and InnoDB's default stop words stay optional under `"all"` — the server does not index them, so requiring one would match nothing; a server with a larger `innodb_ft_min_token_size` or its own stop-word list can still miss such words.
+Results stay in [relevance order](#ranking). Under `match "all"` PostgreSQL reads the web-search syntax: a `"quoted phrase"`, `or` between words, `-word` to exclude; under `"any"` a leading `-` is dropped, since one excluded term OR-ed with the others would match nearly every row. On MySQL, the text is split into words the way InnoDB splits it — at every character that is not a letter, a number, a combining mark or `_`, so `the, quick` is the words `the` and `quick`. Under `"all"`, words shorter than 3 characters and InnoDB's default stop words stay optional — the server does not index them, so requiring one would match nothing; a server with a larger `innodb_ft_min_token_size` or its own stop-word list can still miss such words.
 
 ## Programmatic API
 
@@ -230,7 +230,7 @@ The `$search` text is passed to the engine, so each engine's own operator syntax
 - **SQLite (FTS5)** — the term is quoted before it reaches `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are plain text). Words are AND-ed (OR-ed under `match "any"`); a `"quoted phrase"` stays a phrase; a trailing `*` on a word is a prefix match (`quok*`). `AND` / `OR` / `NOT` / `NEAR` and column filters are **not** operators — they are searched as words.
 - **MongoDB (`$text`)** — operators apply natively: `-word` excludes a word, `"a phrase"` matches the phrase, and a plain list of words matches **any** of them (OR). A term made only of a negation (`-word`) matches nothing by itself; the integer equality branch is unaffected.
 - **PostgreSQL** — `plainto_tsquery`: words are AND-ed, punctuation is ignored. Under [`match`](#language-and-match), `websearch_to_tsquery`: `"phrase"`, `or`, `-word`.
-- **MySQL** — natural-language mode: relevance-ranked, words OR-ed, short and stop words ignored. Under `match "all"`, boolean mode with every word required; the user's own `+ - < > ( ) ~ * " @` are text.
+- **MySQL** — natural-language mode: relevance-ranked, words OR-ed, short and stop words ignored. Under `match "all"`, boolean mode with every word required except short and stop words; words are split at punctuation as InnoDB splits them, and the user's own `+ - < > ( ) ~ * " @` are text.
 
 ## Next Steps
 

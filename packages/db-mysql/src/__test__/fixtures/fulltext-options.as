@@ -10,3 +10,17 @@ export interface FtoDoc {
     @db.index.fulltext 'ft_body'
     body: string
 }
+
+// fulltext-match.live.spec.ts (0.1.174): `match "all"` over two members.
+@db.table 'fto_match_docs'
+@db.index.fulltext.match "all"
+export interface FtoMatchDoc {
+    @meta.id
+    id: number
+
+    @db.index.fulltext 'ft_doc'
+    title: string
+
+    @db.index.fulltext 'ft_doc'
+    body: string
+}

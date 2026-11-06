@@ -6,6 +6,14 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.174 {#v0-1-174}
+
+### Fixes
+
+- **`result.dataSteps.pending` lists only unrecorded steps.** It now holds the passed steps that are still not recorded after the run, the ones a later sync runs, as `plan()`'s `pendingDataSteps` does. An `'up-to-date'` run reports `pending: []`, and a run that resumes after a failed step no longer lists the steps an earlier run recorded. A `'synced-by-peer'` result now carries `dataSteps` (`{ ran: [], pending: [] }`) too.
+- **A data step is never recorded twice.** Its record is now insert-only. On adapters with transactions it is written first, in the step's own transaction, so a step that another sync recorded meanwhile (one that took over an expired lock) is not run again; it is logged and counted as settled (neither `ran` nor `pending`). Before, the record was overwritten and the step ran a second time. Without transactions (the in-memory adapter, MongoDB without a replica set) the record is checked right before the step runs. Before, `pending` listed every step the call did not run itself, so a check for `pending.length === 0` failed on every sync after the first. See [Data steps](/sync/programmatic#data-steps).
+- **MySQL `match "all"` splits words at punctuation.** The search text is split into words as InnoDB's full-text parser splits it: at every character that is not one of MySQL's word characters (letters, numbers, combining marks and `_` of the Basic Multilingual Plane, as of Unicode 5.0). A short word or stop word next to punctuation (`the,`, `ox.`, `about:`) now stays optional like a bare one. Before, it became a required term the server does not index, and the search returned nothing. A phrase made only of short and stop words is optional too. A `word*` prefix is required whatever its length (before, a prefix shorter than 3 characters or matching a stop word was optional). See [FULLTEXT Indexes](/adapters/mysql#fulltext-indexes).
+
 ## 0.1.173 {#v0-1-173}
 
 ### Features

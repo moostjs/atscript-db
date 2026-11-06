@@ -1,4 +1,4 @@
-import { DbError } from "../db-error";
+import { isConflict } from "../db-error";
 import { AtscriptDbTable } from "../table/db-table";
 import { AtscriptDbView } from "../table/db-view";
 import type { AtscriptDbReadable } from "../table/db-readable";
@@ -23,12 +23,61 @@ export class SyncStore {
   }
 
   /**
-   * Runs `fn` in a transaction of the control table's adapter family — the
-   * space's tables on the same driver join it (since 0.1.165, data steps).
+   * Runs `fn` at most once across syncs (data steps, 0.1.174), in a
+   * transaction of the control table's adapter family — the space's tables on
+   * the same driver join it — with an insert-only record `_id` = `value()`.
+   * In a real transaction the record is inserted first: a peer's record fails
+   * the insert and `fn` does not run (`"recorded"`). In a pass-through one
+   * (in-memory adapter, MongoDB without a replica set) the record is checked
+   * before `fn` and inserted after it; a peer that records it while `fn`
+   * runs here leaves `"ran-twice"`.
    */
-  async inTransaction<R>(fn: () => Promise<R>): Promise<R> {
-    const { AtscriptControl } = await import("./control.as");
-    return this.space.getAdapter(AtscriptControl).withTransaction(fn);
+  async runOnce(
+    _id: string,
+    value: () => string,
+    fn: () => Promise<void> | void,
+  ): Promise<"ran" | "recorded" | "ran-twice"> {
+    try {
+      return await this.controlTable!.dbAdapter.withTransaction(async () => {
+        if (this.inRealTransaction()) {
+          // Thrown, not returned: a failed insert can abort the transaction
+          // (PostgreSQL, MongoDB), which must roll back, never commit.
+          if (!(await this.insertControlValue(_id, value()))) throw RECORDED_BY_PEER;
+          await fn();
+          return "ran";
+        }
+        if ((await this.presentControlIds([_id])).has(_id)) return "recorded";
+        await fn();
+        return (await this.insertControlValue(_id, value())) ? "ran" : "ran-twice";
+      });
+    } catch (error) {
+      if (error === RECORDED_BY_PEER) return "recorded";
+      throw error;
+    }
+  }
+
+  /** Whether the current async context runs in a REAL transaction of the control table's adapter. */
+  inRealTransaction(): boolean {
+    return this.controlTable!.dbAdapter.isInTransaction();
+  }
+
+  /**
+   * Inserts a control row, never overwriting one: `false` when a row with
+   * this `_id` exists (the insert hit the primary key).
+   */
+  async insertControlValue(_id: string, value: string): Promise<boolean> {
+    return this.tryInsert({ _id, value });
+  }
+
+  /** Inserts `row` into the control table: `false` on a primary-key conflict. */
+  private async tryInsert(row: Record<string, unknown>): Promise<boolean> {
+    try {
+      await this.controlTable!.insertOne(row as any);
+      return true;
+    } catch (error) {
+      if (isConflict(error)) return false;
+      throw error;
+    }
   }
 
   /** Which of `ids` have a control row — one query (since 0.1.165, data steps). */
@@ -184,20 +233,7 @@ export class SyncStore {
       await this.deleteExpiredLock(now);
     }
 
-    try {
-      await this.controlTable!.insertOne({
-        _id: LOCK_ID,
-        lockedBy: podId,
-        lockedAt: now,
-        expiresAt: now + ttlMs,
-      } as any);
-      return true;
-    } catch (error) {
-      if (error instanceof DbError && error.code === "CONFLICT") {
-        return false;
-      }
-      throw error;
-    }
+    return this.tryInsert({ _id: LOCK_ID, lockedBy: podId, lockedAt: now, expiresAt: now + ttlMs });
   }
 
   /** Extends this pod's lock; never touches a lock another pod holds. */
@@ -253,6 +289,9 @@ export class SyncStore {
 }
 
 const LOCK_ID = "sync_lock";
+
+/** Thrown inside {@link SyncStore.runOnce}'s transaction when a peer recorded first — rolls it back. */
+const RECORDED_BY_PEER = Symbol("recorded-by-peer");
 
 /** The lock row's filter, narrowed by `conditions` (the compare-and-set part). */
 function lockFilter(conditions?: Record<string, unknown>): any {

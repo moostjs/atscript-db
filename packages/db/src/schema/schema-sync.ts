@@ -114,6 +114,10 @@ export interface TDataStep {
    * The step's work. Runs in its own transaction (on adapters with
    * transactions), the record of the step committed in the same one: a step
    * that throws is rolled back, not recorded, and runs again on the next sync.
+   * The record is insert-only and written first (0.1.174): a step another
+   * sync recorded meanwhile — after taking over an expired lock — is not run
+   * again. Without transactions the record is checked right before the step
+   * and written after it.
    */
   run(space: DbSpace): Promise<void> | void;
 }
@@ -188,9 +192,10 @@ export interface TSyncResult {
   schemaHash: string;
   entries: SyncEntry[];
   /**
-   * The {@link TSyncOptions.dataSteps} this call ran, and those still pending
-   * (a refused or errored run leaves them all pending). Absent when no steps
-   * were passed. @since 0.1.165
+   * The {@link TSyncOptions.dataSteps} this call ran, and those still pending:
+   * not recorded after this call, so a later sync runs them (steps an earlier
+   * sync recorded are in neither list; a refused or errored run leaves every
+   * unrecorded step pending). Absent when no steps were passed. @since 0.1.165
    */
   dataSteps?: { ran: string[]; pending: string[] };
 }
@@ -369,7 +374,6 @@ function removedBlockers(
 
 // ── SchemaSync ────────────────────────────────────────────────────────────
 
-/** The `__atscript_control` key a data step is recorded under. */
 /** A data step's own failure (not a lock loss), carrying the step's id and its error. */
 class DataStepFailure {
   constructor(
@@ -378,10 +382,17 @@ class DataStepFailure {
   ) {}
 }
 
-/** The pending `beforeConstraints` steps `execute()` runs, the ids it ran, and a failure. */
+/**
+ * A run's `dataSteps` report: `pending` starts as the steps not recorded yet;
+ * a step leaves it once settled (run here, or found recorded by a peer that
+ * took the lock over), joining `ran` when it ran here.
+ */
+type TStepsReport = NonNullable<TSyncResult["dataSteps"]>;
+
+/** The pending `beforeConstraints` steps `execute()` runs, the run's report, and a failure. */
 interface TEarlySteps {
   steps: readonly TDataStep[];
-  ran: string[];
+  report: TStepsReport;
   failure?: DataStepFailure;
 }
 
@@ -390,6 +401,7 @@ function rethrowStepError(error: unknown): never {
   throw error instanceof DataStepFailure ? error.error : error;
 }
 
+/** The `__atscript_control` key a data step is recorded under. */
 function dataStepKey(id: string): string {
   return `data_step:${id}`;
 }
@@ -417,18 +429,16 @@ function checkDataSteps(steps: readonly TDataStep[] | undefined): readonly TData
   ];
 }
 
-/** `result` with its `dataSteps` report — unchanged when no steps were passed. */
+/**
+ * `result` with its `dataSteps` report — unchanged when no steps were passed;
+ * none ran and none is pending when `report` is omitted.
+ */
 function withSteps(
   result: TSyncResult,
   steps: readonly TDataStep[],
-  ran: readonly string[],
+  report: TStepsReport = { ran: [], pending: [] },
 ): TSyncResult {
-  if (steps.length === 0) return result;
-  const done = new Set(ran);
-  return {
-    ...result,
-    dataSteps: { ran: [...ran], pending: steps.map((s) => s.id).filter((id) => !done.has(id)) },
-  };
+  return steps.length === 0 ? result : { ...result, dataSteps: report };
 }
 
 export class SchemaSync {
@@ -691,54 +701,47 @@ export class SchemaSync {
     }
   }
 
-  /** Ids of the steps not recorded yet, in order. */
-  private async pendingDataSteps(steps: readonly TDataStep[]): Promise<string[]> {
+  /** The steps not recorded yet, in order. */
+  private async pendingDataSteps(steps: readonly TDataStep[]): Promise<TDataStep[]> {
     const done = await this.store.presentControlIds(steps.map((step) => dataStepKey(step.id)));
-    return steps.filter((step) => !done.has(dataStepKey(step.id))).map((step) => step.id);
+    return steps.filter((step) => !done.has(dataStepKey(step.id)));
   }
 
   /**
-   * Runs the pending steps in order, each with its record in one transaction.
-   * A throwing step propagates (rolled back, not recorded). Returns the ids run.
-   */
-  private async runDataSteps(
-    steps: readonly TDataStep[],
-    getAbortReason: () => string | undefined,
-  ): Promise<string[]> {
-    if (steps.length === 0) return [];
-    const pending = new Set(await this.pendingDataSteps(steps));
-    return this.applyDataSteps(
-      steps.filter((step) => pending.has(step.id)),
-      getAbortReason,
-    );
-  }
-
-  /**
-   * Runs already-filtered pending steps in order (see {@link runDataSteps}).
-   * A step's own failure comes back as a {@link DataStepFailure}.
+   * Runs the pending steps in order, each once with its insert-only record
+   * (see {@link SyncStore.runOnce}), settling each in `report`. A step a peer
+   * recorded meanwhile — it took the lock over while this run held its list —
+   * is not run again. A throwing step propagates (rolled back, not recorded)
+   * as a {@link DataStepFailure}.
    */
   private async applyDataSteps(
     steps: readonly TDataStep[],
     getAbortReason: () => string | undefined,
-  ): Promise<string[]> {
-    const ran: string[] = [];
+    report: TStepsReport,
+  ): Promise<void> {
     for (const step of steps) {
       this.assertLockHeld(getAbortReason);
-      try {
-        await this.store.inTransaction(async () => {
-          await step.run(this.space);
-          await this.store.writeControlValue(
-            dataStepKey(step.id),
-            JSON.stringify({ ranAt: Date.now() }),
-          );
+      const outcome = await this.store
+        .runOnce(
+          dataStepKey(step.id),
+          () => JSON.stringify({ ranAt: Date.now() }),
+          () => step.run(this.space),
+        )
+        .catch((error: unknown) => {
+          throw new DataStepFailure(step.id, error);
         });
-      } catch (error) {
-        throw new DataStepFailure(step.id, error);
+      report.pending = report.pending.filter((id) => id !== step.id);
+      if (outcome === "ran") {
+        this.logger.info?.(`[schema-sync] data step "${step.id}" applied`);
+        report.ran.push(step.id);
+      } else {
+        this.logger.warn(
+          outcome === "recorded"
+            ? `[schema-sync] data step "${step.id}" was already recorded by another sync (it took the lock over) — not run again`
+            : `[schema-sync] data step "${step.id}" was recorded by another sync while this one ran it — it ran twice (the adapter has no transactions)`,
+        );
       }
-      this.logger.info?.(`[schema-sync] data step "${step.id}" applied`);
-      ran.push(step.id);
     }
-    return ran;
   }
 
   /**
@@ -779,7 +782,7 @@ export class SchemaSync {
       if (storedHash === hash) {
         const pending = await this.pendingDataSteps(steps);
         if (pending.length === 0) {
-          return withSteps({ status: "up-to-date", schemaHash: hash, entries: [] }, steps, []);
+          return withSteps({ status: "up-to-date", schemaHash: hash, entries: [] }, steps);
         }
       }
     }
@@ -794,23 +797,26 @@ export class SchemaSync {
       peerDone: async () => (await this.pendingDataSteps(steps)).length === 0,
     });
     if (lock === "synced-by-peer") {
-      return { status: "synced-by-peer", schemaHash: hash, entries: [] };
+      // `peerDone` confirmed the peer recorded every step
+      return withSteps({ status: "synced-by-peer", schemaHash: hash, entries: [] }, steps);
     }
 
     // Start heartbeat — extends lock TTL every ttl/3 while sync is in progress
     const heartbeat = this.startHeartbeat(podId, lockTtlMs);
 
     try {
-      // Double-check hash
-      if (!force) {
-        const storedHash = await this.store.readHash();
-        if (storedHash === hash) {
-          const ran = await this.runDataSteps(steps, heartbeat.getAbortReason).catch(
-            rethrowStepError,
-          );
-          const status = ran.length > 0 ? "synced" : "synced-by-peer";
-          return withSteps({ status, schemaHash: hash, entries: [] }, steps, ran);
-        }
+      // The steps not recorded yet — read once: only a run under the lock
+      // records a step. And the double-check of the hash.
+      const [todo, storedHash] = await Promise.all([
+        this.pendingDataSteps(steps),
+        force ? undefined : this.store.readHash(),
+      ]);
+      const report: TStepsReport = { ran: [], pending: todo.map((step) => step.id) };
+
+      if (storedHash === hash) {
+        await this.applyDataSteps(todo, heartbeat.getAbortReason, report).catch(rethrowStepError);
+        const status = report.ran.length > 0 ? "synced" : "synced-by-peer";
+        return withSteps({ status, schemaHash: hash, entries: [] }, steps, report);
       }
 
       // Phase 1 — discover (no DDL on managed tables/views)
@@ -827,18 +833,14 @@ export class SchemaSync {
           entries: this.buildPlanEntries(d, safe, refusals),
         };
         this.reportOutcome(result, onError);
-        return withSteps(result, steps, []);
+        return withSteps(result, steps, report);
       }
 
       // Phase 3 — execute. Pending `beforeConstraints` steps run inside it,
       // between the table DDL and the index / foreign-key work.
-      const earlySteps = steps.filter((step) => step.phase === "beforeConstraints");
-      const earlyPending = new Set(
-        earlySteps.length > 0 ? await this.pendingDataSteps(earlySteps) : [],
-      );
       const early: TEarlySteps = {
-        steps: earlySteps.filter((step) => earlyPending.has(step.id)),
-        ran: [],
+        steps: todo.filter((step) => step.phase === "beforeConstraints"),
+        report,
       };
       const result = await this.execute(d, safe, heartbeat.getAbortReason, early);
       // The step's own error is thrown below — the entries it errored are reported, not thrown.
@@ -847,14 +849,11 @@ export class SchemaSync {
       // (the next sync resumes from there); its error is the run's error.
       if (early.failure) throw early.failure.error;
       // Data steps need the schema in place: not after an errored entry.
-      const ran = early.ran;
       if (!result.entries.some((e) => e.hasErrors)) {
-        const late = steps.filter((step) => step.phase !== "beforeConstraints");
-        ran.push(
-          ...(await this.runDataSteps(late, heartbeat.getAbortReason).catch(rethrowStepError)),
-        );
+        const late = todo.filter((step) => step.phase !== "beforeConstraints");
+        await this.applyDataSteps(late, heartbeat.getAbortReason, report).catch(rethrowStepError);
       }
-      return withSteps(result, steps, ran);
+      return withSteps(result, steps, report);
     } finally {
       await heartbeat.stop();
       await this.releaseLock(podId);
@@ -1669,7 +1668,7 @@ export class SchemaSync {
     d: TDiscovery,
     safe: boolean,
     getAbortReason: () => string | undefined,
-    early: TEarlySteps = { steps: [], ran: [] },
+    early: TEarlySteps,
   ): Promise<TSyncResult> {
     const { hash, allReadables } = d;
     const deps = this.buildExecutorDeps();
@@ -1856,7 +1855,7 @@ export class SchemaSync {
             // pending), then each table's indexes and foreign keys.
             if (!entries.some((e) => e.status === "error")) {
               try {
-                early.ran = await this.applyDataSteps(early.steps, getAbortReason);
+                await this.applyDataSteps(early.steps, getAbortReason, early.report);
               } catch (error) {
                 if (!(error instanceof DataStepFailure)) throw error;
                 // The DDL so far stays recorded (tracked list, the snapshots
@@ -2116,7 +2115,8 @@ export class SchemaSync {
     await this.planLiveWork(d, safe);
 
     const entries = this.buildPlanEntries(d, safe, refusals);
-    const pending = steps.length > 0 ? await this.pendingDataSteps(steps) : undefined;
+    const pending =
+      steps.length > 0 ? (await this.pendingDataSteps(steps)).map((step) => step.id) : undefined;
     const withPending = (plan: TSyncPlan): TSyncPlan =>
       pending ? { ...plan, pendingDataSteps: pending } : plan;
 
