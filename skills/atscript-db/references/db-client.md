@@ -129,6 +129,7 @@ client.action<R = unknown>(
 ): Promise<R>
 
 client.getActionForm(name: string): Promise<TAtscriptAnnotatedType | null>
+client.getActionFormTexts(name: string): Promise<Record<string, string> | undefined> // the form's served $i18n (0.1.170), same cached response
 ```
 
 Body shape on the wire is the **envelope** `{ ids?, input? }`:

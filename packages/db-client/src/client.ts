@@ -121,6 +121,12 @@ type AggregateRows<T, Q extends AggregateQuery<T> | NestedAggregateQuery<T>> = Q
  * rows[0].ownerName // string | undefined
  * ```
  */
+/** A loaded action form: its type and the `$i18n` texts it was served with. */
+interface TLoadedForm {
+  type: TAtscriptAnnotatedType;
+  texts?: Record<string, string>;
+}
+
 export class Client<
   T extends AtscriptClientShape = AtscriptClientShape,
   D extends object = Record<never, never>,
@@ -141,7 +147,7 @@ export class Client<
   private _metaEtag?: string;
   private _validatorPromise?: Promise<ClientValidator>;
   /** Cached deserialized form schemas keyed by resolved URL. */
-  private _formCache = new Map<string, Promise<TAtscriptAnnotatedType>>();
+  private _formCache = new Map<string, Promise<TLoadedForm>>();
 
   constructor(path: string, opts?: ClientOptions) {
     this._path = path.endsWith("/") ? path.slice(0, -1) : path;
@@ -659,6 +665,24 @@ export class Client<
    * Cached per resolved URL.
    */
   async getActionForm(actionName: string): Promise<TAtscriptAnnotatedType | null> {
+    return (await this._actionForm(actionName))?.type ?? null;
+  }
+
+  /**
+   * The texts the action's form schema was served with in this client's
+   * locale (its `$i18n`: registered message templates and the translated
+   * literals of its expressions), or `undefined` when the server sent none
+   * or the action has no form. Read from the same cached response as
+   * {@link getActionForm}; merge them into your UI texts to show the form's
+   * expression results in the user's language.
+   *
+   * @since 0.1.170
+   */
+  async getActionFormTexts(actionName: string): Promise<Record<string, string> | undefined> {
+    return (await this._actionForm(actionName))?.texts;
+  }
+
+  private async _actionForm(actionName: string): Promise<TLoadedForm | null> {
     const meta = await this.meta();
     const action = meta.actions.find((a) => a.name === actionName);
     if (!action?.inputForm) return null;
@@ -668,17 +692,20 @@ export class Client<
     return this._loadActionForm(url);
   }
 
-  private _loadActionForm(url: string): Promise<TAtscriptAnnotatedType> {
+  private _loadActionForm(url: string): Promise<TLoadedForm> {
     this._syncLocale();
     let p = this._formCache.get(url);
     if (!p) {
       // Loaded on demand, like the preflight validator, so importing the
       // client keeps `@atscript/typescript/utils` out of an app's first chunk.
-      const loading: Promise<TAtscriptAnnotatedType> = Promise.all([
+      const loading: Promise<TLoadedForm> = Promise.all([
         this._requestUrl("GET", url) as Promise<TSerializedAnnotatedType>,
         import("@atscript/typescript/utils"),
       ])
-        .then(([schema, { deserializeAnnotatedType }]) => deserializeAnnotatedType(schema))
+        .then(([schema, { deserializeAnnotatedType }]) => ({
+          type: deserializeAnnotatedType(schema),
+          texts: (schema as { $i18n?: Record<string, string> }).$i18n,
+        }))
         .catch((err) => {
           if (this._formCache.get(url) === loading) this._formCache.delete(url);
           throw err;

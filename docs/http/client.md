@@ -650,6 +650,8 @@ When the action also carries `formUrl` (a [class-level form served by another co
 
 Returns `null` when the action has no `inputForm`, or the action name isn't on `/meta`. Cached per resolved URL on the client instance — repeated calls for the same form make only one HTTP request. Failed fetches are evicted from the cache so retries can re-fetch.
 
+Since 0.1.170, `getActionFormTexts(name)` returns the texts the form was served with in the client's [locale](./i18n#client-locale) — its `$i18n`: the registered message templates and the translated literals of its expressions — or `undefined` when there are none. It reads the same cached response, so it costs no extra request. Merge them into your UI texts to show the form's expression results in the user's language (`@atscript/ui` action forms do this for you).
+
 ### Available actions for one row — `availableActions()` {#available-actions}
 
 Since 0.1.145. `availableActions(id)` asks the server which row-level actions the caller may run on one row right now, including rows the caller cannot read. It calls [`GET /meta/actions/:id`](./actions#available-actions); an object id uses the composite form `?k1=v1&k2=v2`. Id forms are the same as [`one()`](#one):
@@ -1037,21 +1039,22 @@ import {
 
 ## Method ↔ Endpoint Reference
 
-| Method                | HTTP   | Endpoint                               | Returns                                                                                              |
-| --------------------- | ------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `query()`             | GET    | `/query`                               | `DataOf<T>[]`                                                                                        |
-| `count()`             | GET    | `/query` (`$count`)                    | `number`                                                                                             |
-| `aggregate()`         | GET    | `/query` (`$groupBy`)                  | `AggregateResult[]`                                                                                  |
-| `pages()`             | GET    | `/pages`                               | `PageResult<DataOf<T>>`                                                                              |
-| `one()`               | GET    | `/one/:id` or `/one?k=v`               | `DataOf<T> \| null`                                                                                  |
-| `insert()`            | POST   | `/` (`?$onConflict=ignore`)            | `TDbInsertResult` / `TDbInsertManyResult`, or the `…IgnoreResult` shapes with `onConflict: "ignore"` |
-| `update()`            | PATCH  | `/`                                    | `TDbUpdateResult`                                                                                    |
-| `replace()`           | PUT    | `/`                                    | `TDbUpdateResult`                                                                                    |
-| `remove()`            | DELETE | `/:id` or `/?k=v`                      | `TDbDeleteResult`                                                                                    |
-| `meta()`              | GET    | `/meta`                                | `MetaResponse`                                                                                       |
-| `getActionForm()`     | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                                                                     |
-| `getValidator()`      | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                                                                     |
-| `invalidateMeta()`    | —      | _client-side_                          | `void` — drops the cached `/meta`, validator and action forms                                        |
-| `action()`            | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`)                                              |
-| `actionOnQuery()`     | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)                                                 |
-| `countActionTarget()` | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                                                                |
+| Method                 | HTTP   | Endpoint                               | Returns                                                                                              |
+| ---------------------- | ------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `query()`              | GET    | `/query`                               | `DataOf<T>[]`                                                                                        |
+| `count()`              | GET    | `/query` (`$count`)                    | `number`                                                                                             |
+| `aggregate()`          | GET    | `/query` (`$groupBy`)                  | `AggregateResult[]`                                                                                  |
+| `pages()`              | GET    | `/pages`                               | `PageResult<DataOf<T>>`                                                                              |
+| `one()`                | GET    | `/one/:id` or `/one?k=v`               | `DataOf<T> \| null`                                                                                  |
+| `insert()`             | POST   | `/` (`?$onConflict=ignore`)            | `TDbInsertResult` / `TDbInsertManyResult`, or the `…IgnoreResult` shapes with `onConflict: "ignore"` |
+| `update()`             | PATCH  | `/`                                    | `TDbUpdateResult`                                                                                    |
+| `replace()`            | PUT    | `/`                                    | `TDbUpdateResult`                                                                                    |
+| `remove()`             | DELETE | `/:id` or `/?k=v`                      | `TDbDeleteResult`                                                                                    |
+| `meta()`               | GET    | `/meta`                                | `MetaResponse`                                                                                       |
+| `getActionForm()`      | GET    | `/meta/form/:name` or `formUrl`        | `TAtscriptAnnotatedType \| null`                                                                     |
+| `getActionFormTexts()` | —      | _same response as `getActionForm()`_   | `Record<string, string> \| undefined` — the form's `$i18n`                                           |
+| `getValidator()`       | —      | _client-side; uses `/meta`_            | `ClientValidator` (lazy, cached)                                                                     |
+| `invalidateMeta()`     | —      | _client-side_                          | `void` — drops the cached `/meta`, validator and action forms                                        |
+| `action()`             | POST   | _resolved from `/meta`_                | `unknown` (server response, or `void` for `'navigate'`)                                              |
+| `actionOnQuery()`      | POST   | `queryTarget.url` or `value`           | `TDbActionTargetSummary` (or the handler's response)                                                 |
+| `countActionTarget()`  | POST   | `queryTarget.url` or `value` (dry run) | `{ matched: number }`                                                                                |
