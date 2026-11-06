@@ -62,6 +62,10 @@ const BOARD = [
 const closedRows = (rows: Array<{ status?: string }>) =>
   rows.map((r) => (r.status === "closed" ? "already closed" : false));
 
+/** Each row's `close` disabled reason, from a `$actions` read. */
+const closeReasons = (rows: Array<Record<string, any>>) =>
+  rows.map((r) => r.$disabledReasons?.close);
+
 interface TSourceOpts {
   /** prepareRequest endpoints the source refuses with 403. */
   deny?: readonly string[];
@@ -69,6 +73,8 @@ interface TSourceOpts {
   rowScope?: FilterExpr;
   /** The source's actionRowScope for `close`. */
   closeScope?: FilterExpr;
+  /** Replaces `close`'s `disabled` rule (`closedRows`). */
+  closeDisabled?: (rows: Array<{ id?: number }>) => string[];
   /** prepareRequest resolves a FOR_EVENT dependency (a request principal). */
   forEvent?: boolean;
   /** The close route's guard records the body ids it authorizes; refuses `guardDeny`. */
@@ -179,7 +185,7 @@ function defineSource(issues: unknown, prefix: string, opts: TSourceOpts, log: u
     @DbAction("close", {
       label: "Close",
       requiredFields: ["status"],
-      disabled: closedRows,
+      disabled: opts.closeDisabled ?? closedRows,
       queryTarget: { maxRows: 50, batchSize: 2 },
     })
     @Intercept(bodyGuard(opts))
@@ -407,6 +413,19 @@ describe("@DbActionsFrom — $actions on the view's rows", () => {
       13: ["pin"],
       14: ["pin", "comment"],
     });
+  });
+
+  it("each row gets its own source verdict when an earlier row is outside the scope", async () => {
+    // Issue 1 (rows 10, 13's ticket) is outside close's scope; 2, 3, 4 are inside.
+    const { get, board, source } = await boot({
+      closeScope: { id: { $ne: 1 } } as FilterExpr,
+      closeDisabled: (rows) => rows.map((r) => `reason ${r.id}`),
+    });
+    const rows = await get(`${board}/query?$actions=true&$sort=rowId`);
+    expect(closeReasons(rows)).toEqual([undefined, "reason 2", "reason 3", undefined, "reason 4"]);
+    expect(rows[0].$actions).not.toContain("close");
+    const own = await get(`${source}/query?$actions=true&$sort=id`);
+    expect(closeReasons(own)).toEqual([undefined, "reason 2", "reason 3", "reason 4"]);
   });
 
   it("a caller the source refuses (403) gets the view's own actions only", async () => {

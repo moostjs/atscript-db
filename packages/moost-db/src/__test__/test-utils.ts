@@ -13,11 +13,12 @@ export type THttpSend = (
   method: string,
   path: string,
   body?: unknown,
+  headers?: Record<string, string>,
 ) => Promise<{ status: number; body: any }>;
 
 /**
  * Boots a real Moost HTTP app around `controllers` and returns a JSON
- * `send(method, path, body?)` (paths are absolute, e.g. `/prefix/query`).
+ * `send(method, path, body?, headers?)` (paths are absolute, e.g. `/prefix/query`).
  */
 export async function bootHttp(...controllers: Function[]): Promise<THttpSend> {
   const app = new Moost();
@@ -25,10 +26,10 @@ export async function bootHttp(...controllers: Function[]): Promise<THttpSend> {
   app.adapter(http);
   app.registerControllers(...controllers);
   await app.init();
-  return async (method, path, body) => {
+  return async (method, path, body, headers) => {
     const res = await http.request(path, {
       method,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res!.text();

@@ -15,10 +15,9 @@ import type {
   WithRelation,
 } from "@atscript/db";
 import { nestDottedWith } from "@atscript/db";
-import { Get, HttpError, httpKind, prerenderJson } from "@moostjs/event-http";
+import { Get, HttpError, prerenderJson } from "@moostjs/event-http";
 import { tryGetCurrent } from "@wooksjs/event-core";
 import {
-  current,
   Moost,
   Param,
   useControllerContext,
@@ -28,6 +27,7 @@ import {
 } from "moost";
 import { parseUrl } from "@uniqu/url";
 
+import { defaultCacheControl, readHttpResponse, type THttpResponse } from "./http-response";
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
 import { insightError, NESTED_NOT_SUPPORTED_MESSAGE, unknownInsight } from "./http-errors";
 import {
@@ -151,10 +151,6 @@ export interface TDbMetaHttpCaching {
 
 const DEFAULT_META_CACHE_CONTROL = "private, no-cache";
 const DEFAULT_META_VARY: readonly string[] = ["Authorization", "Cookie"];
-
-/** The current event's HTTP response (wooks `HttpResponse`). */
-type TMetaHttpResponse = NonNullable<ReturnType<typeof readHttpResponse>>;
-const readHttpResponse = () => current().get(httpKind.keys.response);
 
 /**
  * Control DTO a {@link AsReadableController.validateControls} call checks
@@ -772,7 +768,7 @@ export abstract class AsReadableController<
     // Opted out: a shallow copy, so an object another request registered
     // (prerender registry is global by identity) is not answered with its ETag.
     if (caching === false) return isStableMeta(body) ? { ...body } : body;
-    let response: TMetaHttpResponse | undefined;
+    let response: THttpResponse | undefined;
     try {
       response = readHttpResponse();
     } catch {
@@ -986,21 +982,11 @@ export abstract class AsReadableController<
 }
 
 /** Sets `/meta`'s `Cache-Control` (unless present) and merges its `Vary` tokens. */
-function applyMetaHeaders(response: TMetaHttpResponse, caching: TDbMetaHttpCaching): void {
-  const headers = response.headers();
-  let cacheControlSet = false;
-  let varyKey = "vary";
-  for (const key in headers) {
-    const lower = key.toLowerCase();
-    if (lower === "cache-control") cacheControlSet = true;
-    else if (lower === "vary") varyKey = key;
-  }
-  if (!cacheControlSet) {
-    response.setHeader("cache-control", caching.cacheControl ?? DEFAULT_META_CACHE_CONTROL);
-  }
+function applyMetaHeaders(response: THttpResponse, caching: TDbMetaHttpCaching): void {
+  defaultCacheControl(response, caching.cacheControl ?? DEFAULT_META_CACHE_CONTROL);
   const wanted = caching.vary ?? DEFAULT_META_VARY;
   if (wanted.length === 0) return;
-  const existing = headers[varyKey];
+  const existing = response.getHeader("vary");
   const tokens = (Array.isArray(existing) ? existing.join(",") : (existing ?? ""))
     .split(",")
     .map((t) => t.trim())
@@ -1013,7 +999,7 @@ function applyMetaHeaders(response: TMetaHttpResponse, caching: TDbMetaHttpCachi
       tokens.push(token);
     }
   }
-  response.setHeader(varyKey, tokens.join(", "));
+  response.setHeader("vary", tokens.join(", "));
 }
 
 /**

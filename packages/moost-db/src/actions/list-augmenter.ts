@@ -1,8 +1,7 @@
 import { isPlainObject } from "@atscript/db";
 import type { TDbActionEnvelope } from "./discover";
 import { exceedsFields, omitKeys, projectRow, requiredFieldsOf, splitPaths } from "./rows-by-id";
-import type { TDbActionDisabledVerdict } from "./types";
-import { judgeRows, useVerdictReason, type TDisabledFn } from "./verdict";
+import { judgeRowsWhere, useVerdictReason, type TDisabledFn } from "./verdict";
 
 export type AugmentedRow<TRow extends Record<string, unknown>> = TRow & {
   $actions?: string[];
@@ -96,19 +95,25 @@ export function augmentRowsWithActions<
     return rows as AugmentedRow<TRow>[];
   }
 
-  const verdicts: Array<TDbActionDisabledVerdict[] | undefined> = candidates.map((c) => {
-    if (!c.disabledFn) return undefined;
-    // Judged on the columns its gate loads; rows already within them go as-is.
-    const fields = gateFields?.(c.envelope);
-    let input: Record<string, unknown>[] = rows;
-    if (fields && rows.some((row) => exceedsFields(row, fields))) {
-      const paths = splitPaths(fields);
-      input = rows.map((row) => projectRow(row, paths));
-    }
-    return judgeRows(c.envelope.info.name, c.disabledFn, input);
-  });
-
   const masks = outOfScope && candidates.map((c) => outOfScope.get(c.envelope.info.name));
+
+  const verdicts = candidates.map((c, j) => {
+    if (!c.disabledFn) return undefined;
+    const mask = masks?.[j];
+    return judgeRowsWhere(
+      c.envelope.info.name,
+      c.disabledFn,
+      rows,
+      (_row, i) => !mask?.[i],
+      (kept) => {
+        // Judged on the columns its gate loads; rows already within them go as-is.
+        const fields = gateFields?.(c.envelope);
+        if (!fields || !kept.some((row) => exceedsFields(row, fields))) return kept;
+        const paths = splitPaths(fields);
+        return kept.map((row) => projectRow(row, paths));
+      },
+    );
+  });
 
   const reasonOf = useVerdictReason();
   for (let i = 0; i < rows.length; i++) {

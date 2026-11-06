@@ -217,6 +217,7 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 - **Enforced by the action gate.** The action's ids and rows load under the row overlay above and must match this filter (without an overlay the filter joins the load — see the [gate table](#gate-table)), with the same outcomes as the table: an out-of-scope id gets `404 "Row not found for action identifier"` on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
 - **Reflected in reads.** [`$actions`](#actions-row-scope) and [`GET /meta/actions/:id`](#available-actions) list the action only on rows inside its scope.
 - It runs after [`prepareRequest`](#preparerequest-on-actions), at most once per action per evaluation, and may be async. Equal filters share one query: the same object, or (since 0.1.147) structurally equal ones.
+- Give it no side effects a caller could observe (headers, logs they can read, external calls). It runs for an existing row outside the scope but not for a missing one, so a visible effect would reveal that the row exists.
 - The filter may use fields [`hasField`](./customization#hasfield) hides. It is never exposed in a response.
 - It applies only to the controller's own table, like the overlay. Nothing extra runs when it is not overridden.
 
@@ -1224,7 +1225,7 @@ For each request that sets `$actions=true` on a controller extending `AsDbReadab
 2. Filter through [`allowedActions(names)`](./customization#allowedactions) (since 0.1.145), which defaults to the per-request `applyMetaOverlay()` hook — actions stripped by the overlay are absent from `$actions`. The `meta()` call is skipped when `applyMetaOverlay` is the default no-op. When [`actionRowScope`](#action-row-scope) is overridden, start resolving the row overlay alongside the read.
 3. Pre-widen `$select` to union all `requiredFields` across the surviving envelopes (only when the caller restricted projection).
 4. Run the underlying read (find / pages / search / vector / findById).
-5. Call [`actionRowScope`](#action-row-scope-candidates) with the page's rows as candidates (`purpose: "rows"`), run one id-only scope query per distinct filter (in parallel), then each `disabled` predicate **once** against the full result set (length-mismatch verdict → HTTP 500, same contract as the gate). An action is listed only on rows inside its scope. Since 0.1.145 each predicate sees the rows narrowed to the columns its gate loads (id columns plus visible `requiredFields`), so it gives the same verdict as the gate. A predicate that reads an undeclared column sees `undefined` in both places.
+5. Call [`actionRowScope`](#action-row-scope-candidates) with the page's rows as candidates (`purpose: "rows"`), run one id-only scope query per distinct filter (in parallel), then each `disabled` predicate **at most once**, on the page's rows inside its action's scope, and not at all when there are none (length-mismatch verdict → HTTP 500, same contract as the gate). An action is listed only on rows inside its scope. Before 0.1.172 a predicate also saw the rows outside its scope. Since 0.1.145 each predicate sees the rows narrowed to the columns its gate loads (id columns plus visible `requiredFields`), so it gives the same verdict as the gate. A predicate that reads an undeclared column sees `undefined` in both places.
 6. Strip widened-only fields the caller didn't ask for, so the response shape matches the original `$select`.
 
 ### Available actions for one row — `GET /meta/actions/:id` {#available-actions}
@@ -1239,8 +1240,8 @@ GET /orders/meta/actions?tenantId=t1&orderNo=42   # composite key, the /one?… 
 
 - The id forms are those of [`/one/:id` and `/one?…`](./crud#get-one); a query that matches no identification is a 400.
 - The answer is exactly what calling each `'row'` / `'rows'` action would do. The id resolves once, like `/one/:id`, under the [row overlay](#row-scoping). An action is then listed when it is in [`allowedActions`](./customization#allowedactions), which defaults to the `applyMetaOverlay()` set, the row lies inside its [`actionRowScope`](#action-row-scope), and its `disabled` rule passes on the columns its gate loads.
-- The answer is per row and per caller. Unlike `/meta`, a cache or CDN must not share it across rows or callers.
-- An unknown id and an out-of-scope id both answer `200 { "actions": [] }`, so the route never reveals whether a row exists.
+- The answer is per row and per caller. Unlike `/meta`, a cache or CDN must not share it across rows or callers. Since 0.1.172 it is sent with `Cache-Control: private, no-store`, unless your app already set a `Cache-Control` on the response. Its headers never depend on the row: with a [translator](./i18n) registered, every answer carries `Vary: Accept-Language`.
+- An unknown id and an out-of-scope id both answer `200 { "actions": [] }`, with the same headers, so the route never reveals whether a row exists. A row outside the `actionRowScope` of every action counts as out of scope. An action's `disabled` rule runs only when the row is inside that action's scope. Before 0.1.172, with a [translator](./i18n) registered, such a row got a `Vary: Accept-Language` header that an unknown id did not.
 - [`prepareRequest`](./customization#preparerequest) runs first with `endpoint: "availableActions"`, so a permission layer can authorize the route. [`getDbEndpoint`](./customization#getdbendpoint) reports that endpoint for both handlers, so an authorization interceptor can let them through without naming them. `transformOne` / `transformFilter` then run in this request exactly as they do for the action itself.
 - The response keys match the `$actions` / `$disabledReasons` rules above; the type is `TDbAvailableActions` from `@atscript/db`. On the client, use [`availableActions(id)`](./client#available-actions).
 
@@ -1261,7 +1262,7 @@ The control is also accepted on the URL (`?$actions=true` or `?$actions=1`); the
 
 The `disabled` predicate runs in three places per request lifecycle:
 
-- **`$actions=true` augmentation** — against the full result set on the read endpoints.
+- **`$actions=true` augmentation** — against the rows of the result set inside the action's scope, on the read endpoints.
 - **Server-side gate** — against the loaded row(s) at POST time, blocking the handler with HTTP 409 on any rejection.
 - **UI mirror** — the `fn.toString()` source is evaluated client-side to grey out the button before invocation.
 

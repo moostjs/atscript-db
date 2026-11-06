@@ -809,7 +809,7 @@ else toast("Action completed");
 
 ## Per-row action availability — `$actions=true` {#dollar-actions}
 
-Add `$actions: true` to any read-method `controls` to ask the server which row/rows-level actions each returned row qualifies for. The server runs every row/rows-level `disabled` predicate against the result set and attaches `$actions: string[]` (action names that did NOT reject the row) to each row.
+Add `$actions: true` to any read-method `controls` to ask the server which row/rows-level actions each returned row qualifies for. The server runs every row/rows-level `disabled` predicate against the returned rows inside that action's scope and attaches `$actions: string[]` (action names that did NOT reject the row) to each row.
 
 ```typescript
 const r = await users.query({

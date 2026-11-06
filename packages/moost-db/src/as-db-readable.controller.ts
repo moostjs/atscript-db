@@ -111,7 +111,8 @@ import {
   type TAppliedIds,
   type TRowsByIdSource,
 } from "./actions/rows-by-id";
-import { judgeRows, useVerdictReason } from "./actions/verdict";
+import { judgeRowsWhere, useVerdictReason } from "./actions/verdict";
+import { defaultCacheControl, readHttpResponse } from "./http-response";
 import { AsReadableController, type TDbControlsType } from "./as-readable.controller";
 import { DbEndpoint } from "./db-endpoint";
 import { buildDecorationIndex, type TDecorationIndex } from "./decorations/decoration-index";
@@ -3992,12 +3993,16 @@ export class AsDbReadableController<
    * ({@link actionOverlay}) and its `disabled` rule passes on the fields the
    * gate loads. Needs no read grant; an unknown or out-of-scope id answers
    * `{ actions: [] }`. {@link prepareRequest} runs first with
-   * `endpoint: "availableActions"`.
+   * `endpoint: "availableActions"`. The answer is per row and per caller:
+   * `Cache-Control: private, no-store` (since 0.1.172; kept when the
+   * response already has a `Cache-Control`), and its headers never depend on
+   * the row (with a translator registered, `Vary: Accept-Language`).
    */
   @Get("meta/actions/:id")
   @DbEndpoint("availableActions")
   async availableActionsById(@Param("id") id: string): Promise<TDbAvailableActions> {
     await this.parseRequest("availableActions");
+    availableActionsHeaders();
     const { own, id: resolved } = await this._availableResolved(id);
     if (!this._hasDelegations) return own;
     return this._delegatedAvailable(own, (d) => this._sourceIdOf(d, resolved));
@@ -4014,6 +4019,7 @@ export class AsDbReadableController<
     @Query() query: Record<string, string>,
   ): Promise<TDbAvailableActions | HttpError> {
     await this.parseRequest("availableActions");
+    availableActionsHeaders();
     const idObj = this.extractIdShape(query);
     if (idObj instanceof HttpError) {
       // `@DbActionsFrom`: the query may still name a source id by renaming.
@@ -4315,6 +4321,8 @@ export class AsDbReadableController<
       "available",
       overlay,
     );
+    // A row outside every action's scope answers exactly like a missing one.
+    if (masks && envelopes.every((e) => masks.get(e.info.name)?.[0])) return { actions: [] };
     return this._verdicts(envelopes, [row], masks, fieldsOf)[0]!;
   }
 
@@ -4330,30 +4338,32 @@ export class AsDbReadableController<
     masks: ReadonlyMap<string, readonly boolean[]> | undefined,
     fieldsOf: readonly ReadonlySet<string>[],
   ): Array<TDbAvailableActions | undefined> {
-    const present: Record<string, unknown>[] = [];
-    for (const row of rows) if (row) present.push(row);
-    // One predicate call per action over every present row (batch shape).
+    // One predicate call per action (batch shape), over the present rows
+    // inside its scope.
     const verdicts = envelopes.map((e, i) => {
       const disabled = getCandidate(e)?.disabledFn;
-      if (!disabled || present.length === 0) return undefined;
-      const paths = splitPaths(fieldsOf[i]);
-      return judgeRows(
+      if (!disabled) return undefined;
+      const mask = masks?.get(e.info.name);
+      return judgeRowsWhere(
         e.info.name,
         disabled,
-        present.map((row) => projectRow(row, paths)),
+        rows,
+        (row, r) => !!row && !mask?.[r],
+        (kept) => {
+          const paths = splitPaths(fieldsOf[i]);
+          return kept.map((row) => projectRow(row!, paths));
+        },
       );
     });
-    let p = 0;
     const reasonOf = useVerdictReason();
     return rows.map((row, r) => {
       if (!row) return undefined;
-      const at = p++;
       const actions: string[] = [];
       let disabledReasons: Record<string, string> | undefined;
       for (let i = 0; i < envelopes.length; i++) {
         const name = envelopes[i].info.name;
         if (masks?.get(name)?.[r]) continue;
-        const verdict = verdicts[i]?.[at];
+        const verdict = verdicts[i]?.[r];
         if (!verdict) {
           actions.push(name);
           continue;
@@ -4561,4 +4571,15 @@ function textValues(id: Record<string, unknown>): Record<string, string> {
 function shapeError(error: unknown): DbError {
   if (!(error instanceof DbError) || error.code !== "INVALID_QUERY") throw error;
   return error;
+}
+
+/**
+ * Sets the `/meta/actions` headers (see {@link AsDbReadableController.availableActionsById})
+ * before the row is read, so they never depend on it — including the locale
+ * resolution a reason's translation does.
+ */
+function availableActionsHeaders(): void {
+  useVerdictReason();
+  const response = readHttpResponse();
+  if (response) defaultCacheControl(response, "private, no-store");
 }

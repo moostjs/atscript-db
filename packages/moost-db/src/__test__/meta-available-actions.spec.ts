@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class -- decorated test containers */
-import { describe, it, expect, beforeAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 import type { FilterExpr, TMetaResponse } from "@atscript/db";
 import { createAdapter } from "@atscript/db-memory";
-import { Post } from "@moostjs/event-http";
-import { Inherit, getMoostInfact } from "moost";
+import { MoostHttp, Post, httpKind } from "@moostjs/event-http";
+import { current } from "@wooksjs/event-core";
+import { Inherit, getMoostInfact, setTranslator } from "moost";
 
 import { AsDbController } from "../as-db.controller";
 import { AsDbReadableController } from "../as-db-readable.controller";
@@ -60,6 +61,12 @@ interface TBootOpts {
   /** An `allowedActions` override. */
   allow?: (names: readonly string[]) => readonly string[] | Promise<readonly string[]>;
   model?: keyof typeof MODELS;
+  /** Rows to seed instead of the model's. */
+  rows?: unknown[];
+  /** A `Cache-Control` the app sets in `prepareRequest`. */
+  cacheControl?: string;
+  /** Replaces `probe`'s `disabled` rule. */
+  probe?: (rows: Array<{ id?: number; status?: string }>) => Array<string | false>;
 }
 
 const READS: ReadonlySet<TDbRequestEndpoint> = new Set(["query", "pages", "one"]);
@@ -69,7 +76,7 @@ async function boot(opts: TBootOpts = {}) {
   getMoostInfact()._cleanup();
   const [model, seed] = MODELS[opts.model ?? "items"]();
   const table = createAdapter().getTable(model as any);
-  await table.insertMany(structuredClone(seed) as never);
+  await table.insertMany(structuredClone(opts.rows ?? seed) as never);
   const prefix = `avail${++PREFIX_SEQ}`;
   const endpoints: TDbRequestEndpoint[] = [];
   const counts = { overlay: 0 };
@@ -81,6 +88,9 @@ async function boot(opts: TBootOpts = {}) {
     protected prepareRequest(ctx: TDbRequestContext) {
       endpoints.push(ctx.endpoint);
       this.endpoint = ctx.endpoint;
+      if (opts.cacheControl) {
+        current().get(httpKind.keys.response)!.setHeader("cache-control", opts.cacheControl);
+      }
     }
 
     protected override actionRowScope(action: string) {
@@ -116,8 +126,10 @@ async function boot(opts: TBootOpts = {}) {
     @DbAction("probe", {
       label: "probe",
       requiredFields: ["status"],
-      disabled: (rows: Array<{ secret?: string }>) =>
-        rows.map((r) => (r.secret === undefined ? false : "saw secret")),
+      disabled:
+        opts.probe ??
+        ((rows: Array<{ secret?: string }>) =>
+          rows.map((r) => (r.secret === undefined ? false : "saw secret"))),
     })
     probe(@DbActionRow() row: unknown) {
       return { row };
@@ -165,10 +177,10 @@ async function boot(opts: TBootOpts = {}) {
   }
 
   const http = await bootHttp(Bound);
-  const send = (method: string, path: string, body?: unknown) =>
-    http(method, `/${prefix}/${path}`, body);
-  const available = async (path: string) => {
-    const res = await send("GET", `meta/actions${path}`);
+  const send = (method: string, path: string, body?: unknown, headers?: Record<string, string>) =>
+    http(method, `/${prefix}/${path}`, body, headers);
+  const available = async (path: string, headers?: Record<string, string>) => {
+    const res = await send("GET", `meta/actions${path}`, undefined, headers);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     return res.body;
   };
@@ -214,6 +226,102 @@ describe("GET /meta/actions/:id", () => {
     expect(await available("/99")).toEqual({ actions: [] });
     expect(await available("/2")).toEqual({ actions: [] });
     expect(await available("/1")).toEqual(ALL_ON_1);
+  });
+
+  it("a row outside every action's scope answers like a missing one; headers never depend on the row", async () => {
+    // Under a translator, judging a row's `disabled` reasons resolves the
+    // locale (`Vary: Accept-Language`): the route sets its headers before the
+    // row is read, and a row in no action's scope is not judged at all.
+    setTranslator({ en: {}, de: { "already open": "schon offen" } });
+    const spy = vi.spyOn(MoostHttp.prototype, "request");
+    try {
+      // Only `reopen` is offered: row 1 is in scope with it disabled.
+      const { available } = await boot({
+        scope: () => ({ owner: "u1" }),
+        deny: ["approve", "probe", "peek", "bulk"],
+      });
+      const answer = async (id: string) => {
+        const body = await available(`/${id}`, { "accept-language": "de" });
+        const res = (await spy.mock.results.at(-1)!.value) as Response;
+        const headers: Record<string, string> = {};
+        res.headers.forEach((v, k) => {
+          if (k !== "date") headers[k] = v;
+        });
+        return { body, headers };
+      };
+      const missing = await answer("99");
+      expect(missing.body).toEqual({ actions: [] });
+      expect(missing.headers["cache-control"]).toBe("private, no-store");
+      expect(missing.headers.vary).toContain("Accept-Language");
+      expect(await answer("2")).toEqual(missing);
+      const disabled = await answer("1");
+      expect(disabled.body).toEqual({ actions: [], disabledReasons: { reopen: "schon offen" } });
+      const { "content-length": _a, ...inScope } = disabled.headers;
+      const { "content-length": _b, ...outOfScope } = missing.headers;
+      expect(inScope).toEqual(outOfScope);
+    } finally {
+      spy.mockRestore();
+      setTranslator(undefined);
+    }
+  });
+
+  it("judges each action's `disabled` rule only on rows inside its scope", async () => {
+    // Row 1 is in every scope but probe's; probe is in no row's scope.
+    const { available, send } = await boot({
+      scope: (a) => (a === "probe" ? { owner: "nobody" } : undefined),
+      probe: () => {
+        throw new Error("probe judged");
+      },
+    });
+    expect(await available("/1")).toEqual({
+      actions: ["approve", "peek", "bulk"],
+      disabledReasons: { reopen: "already open" },
+    });
+    const list = await send("GET", "query?$actions=true");
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    for (const row of list.body) expect(row.$actions).not.toContain("probe");
+  });
+
+  it("answers `Cache-Control: private, no-store` on both forms", async () => {
+    const spy = vi.spyOn(MoostHttp.prototype, "request");
+    try {
+      const { available } = await boot({ model: "lines", deny: ["reopen", "probe", "peek"] });
+      for (const path of ["/1", "?orderId=1&lineNo=1"]) {
+        await available(path);
+        const res = (await spy.mock.results.at(-1)!.value) as Response;
+        expect(res.headers.get("cache-control"), path).toBe("private, no-store");
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps a Cache-Control the app set (prepareRequest)", async () => {
+    const spy = vi.spyOn(MoostHttp.prototype, "request");
+    try {
+      const { available } = await boot({ cacheControl: "private, max-age=5" });
+      await available("/1");
+      const res = (await spy.mock.results.at(-1)!.value) as Response;
+      expect(res.headers.get("cache-control")).toBe("private, max-age=5");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("$actions: each row gets its own verdict when an earlier row is outside the scope", async () => {
+    const { send } = await boot({
+      rows: [...ITEMS, { id: 3, owner: "u3", status: "draft", secret: "s3" }],
+      scope: (a) => (a === "probe" ? { owner: { $in: ["u2", "u3"] } } : undefined),
+      probe: (rows) => rows.map((r) => `reason ${r.id}`),
+    });
+    const list = await send("GET", "query?$actions=true&$sort=id");
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    expect(list.body.map((r: any) => r.$disabledReasons?.probe)).toEqual([
+      undefined, // row 1 is outside probe's scope: no verdict
+      "reason 2",
+      "reason 3",
+    ]);
+    expect(list.body[0].$actions).not.toContain("probe");
   });
 
   it("does not depend on a read grant: a row the caller cannot read still lists its actions", async () => {

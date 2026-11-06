@@ -32,6 +32,29 @@ export function judgeRows(
   return verdicts;
 }
 
+/**
+ * {@link judgeRows} over the rows `keep` admits — an action's in-scope rows
+ * (like the gate, it never judges a row outside its action's scope), after
+ * `prepare` (e.g. a projection). Verdicts are indexed like `rows`
+ * (`undefined` where not judged); `undefined` when no row is kept.
+ */
+export function judgeRowsWhere<T>(
+  action: string,
+  disabled: TDisabledFn,
+  rows: readonly T[],
+  keep: (row: T, index: number) => boolean,
+  prepare: (kept: T[]) => unknown[],
+): Array<TDbActionDisabledVerdict | undefined> | undefined {
+  const at: number[] = [];
+  for (let i = 0; i < rows.length; i++) if (keep(rows[i], i)) at.push(i);
+  if (at.length === 0) return undefined;
+  if (at.length === rows.length) return judgeRows(action, disabled, prepare(rows as T[]));
+  const judged = judgeRows(action, disabled, prepare(at.map((i) => rows[i])));
+  const byRow = Array.from<TDbActionDisabledVerdict | undefined>({ length: rows.length });
+  for (let k = 0; k < at.length; k++) byRow[at[k]] = judged[k];
+  return byRow;
+}
+
 /** {@link judgeRows} for one row. */
 export function judgeRow(
   action: string,
