@@ -22,11 +22,10 @@ registerMessages(VALIDATOR_MESSAGES);
 registerMessages(DB_VALIDATOR_MESSAGES);
 
 /**
- * Memoized outputs per input object, then per locale — each with the
- * translation key it was made under. A key changes with every
- * `setTranslator` / `registerMessages` generation: the locale's entry is
- * then replaced, so an input keeps one output per served locale and no
- * outdated generation.
+ * Memoized outputs per input object, then per `translation.partition` — each
+ * with the `translation.key` it was made under. A new `setTranslator` /
+ * `registerMessages` generation replaces the partition's entry, so an input
+ * keeps one output per partition and no outdated generation.
  */
 type TMemo<T> = WeakMap<object, Map<string, { key: string; out: T }>>;
 
@@ -35,16 +34,16 @@ const servedMemo: TMemo<{ value: unknown; texts: Record<string, string> }> = new
 /** Localized envelopes / form schemas per input. */
 const outputMemo: TMemo<object> = new WeakMap();
 
-/** `compute()` once per (input, locale, key); per call when the key is undefined. */
+/** `compute()` once per (input, partition, key); per call when the key is undefined. */
 function memo<T>(store: TMemo<T>, input: object, translation: TTranslation, compute: () => T): T {
   const key = translation.key;
   if (key === undefined) return compute();
-  let byLocale = store.get(input);
-  const hit = byLocale?.get(translation.locale);
+  let byPartition = store.get(input);
+  const hit = byPartition?.get(translation.partition);
   if (hit?.key === key) return hit.out;
   const out = compute();
-  if (!byLocale) store.set(input, (byLocale = new Map()));
-  byLocale.set(translation.locale, { key, out });
+  if (!byPartition) store.set(input, (byPartition = new Map()));
+  byPartition.set(translation.partition, { key, out });
   return out;
 }
 

@@ -722,10 +722,11 @@ export abstract class AsReadableController<
    * translated, and the type carries `$i18n` — the registered message
    * templates in that language and the translated texts of expressions, for
    * client-side validation. The translation runs last, after
-   * {@link applyMetaOverlay}; each language gets its own `ETag`.
+   * {@link applyMetaOverlay}; each language (and translation scope) gets its
+   * own `ETag`.
    *
    * Return `false` to serve the source texts (e.g. when the wording depends on
-   * more than the locale).
+   * more than the locale and the translator's `scope`).
    */
   protected metaTranslation(): boolean {
     return true;

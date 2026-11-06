@@ -14,9 +14,12 @@ import { localizeMeta } from "../meta/meta-i18n";
 
 const DE: Record<string, string> = { Title: "Titel", Archive: "Archivieren", Close: "Schließen" };
 
-function translation(key: string, locale = "de"): TTranslation {
+/** A translation under moost's `<generation>:<locale>[:<scope>]` key. */
+function translation(key: string): TTranslation {
+  const partition = key.slice(key.indexOf(":") + 1);
   return {
-    locale,
+    locale: partition.split(":")[0]!,
+    partition,
     key,
     t: (id, _params, fallback) => DE[id] ?? fallback ?? id,
     messages: () => ({ REQUIRED: "Darf nicht leer sein" }),
@@ -70,9 +73,18 @@ describe("meta translation memo", () => {
   it("locales are kept side by side", () => {
     const meta = variant(["archive"]);
     const de = localizeMeta(meta, translation("1:de"));
-    const en = localizeMeta(meta, { ...translation("1:en", "en"), t: (_id, _p, fb) => fb! });
+    const en = localizeMeta(meta, { ...translation("1:en"), t: (_id, _p, fb) => fb! });
     expect(localizeMeta(meta, translation("1:de"))).toBe(de);
     expect(en).not.toBe(de);
+  });
+
+  it("translation scopes of one locale are kept side by side", () => {
+    const meta = variant(["archive"]);
+    const acme = localizeMeta(meta, translation("1:de:acme"));
+    const globex = localizeMeta(meta, translation("1:de:globex"));
+    expect(globex).not.toBe(acme);
+    expect(localizeMeta(meta, translation("1:de:acme"))).toBe(acme);
+    expect(localizeMeta(meta, translation("1:de:globex"))).toBe(globex);
   });
 
   it("a new generation replaces the locale's entry (the old one is not kept)", () => {
