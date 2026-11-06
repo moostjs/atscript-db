@@ -92,10 +92,17 @@ export interface TTableFacts {
   /**
    * Live inbound FKs — probed only when the run drops the physical table
    * (`dropsTable`; the drop-and-recreate half only when a removed table
-   * could block it); `undefined` when not probed or when the adapter cannot
-   * introspect them.
+   * could block it) or changes the type of a column; `undefined` when not
+   * probed or when the adapter cannot introspect them.
    */
   inboundFks?: TReferencingForeignKey[];
+  /**
+   * The live inbound FKs over a column whose type this run changes (since
+   * 0.1.170) — an engine refuses the change while such a constraint is in
+   * place. Those of removed tables are dropped right before this table,
+   * those a child no longer declares before the walk (`execute()` step 2b).
+   */
+  retypedInboundFks?: TReferencingForeignKey[];
   /** Physical object kind under `dbName` (`undefined` = absent or not introspectable). */
   objectKind?: TDbObjectKind;
   /** The data migration from the ≤ 0.1.154 union layout (Path A, since 0.1.155). */

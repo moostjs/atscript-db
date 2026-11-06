@@ -10,7 +10,14 @@ import { aggregateFailure, spaceClosedError } from "../db-error";
 import { DbEncryption, type TDbEncryptionOptions } from "../encryption";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
-import type { TCascadeTarget, TFkLookupTarget, TReferencingForeignKey } from "../types";
+import type {
+  TCascadeTarget,
+  TDbForeignKey,
+  TFkLookupTarget,
+  TReferencingForeignKey,
+} from "../types";
+
+const NO_FIELDS: ReadonlySet<string> = new Set();
 
 /**
  * Adapter factory function. Called once per table/view to create a fresh adapter instance.
@@ -86,6 +93,8 @@ export class DbSpace implements AsyncDisposable {
    */
   private _cascadeTargets = new Map<string, TCascadeTarget[]>();
   private _fkLookupTargets = new Map<string, TFkLookupTarget | undefined>();
+  /** Memo of {@link getReferencedFields} (schema → table → fields), reset whenever a table is added. */
+  private _referencedFields?: Map<string | undefined, Map<string, Set<string>>>;
 
   /** Every table / view handle the space created — flagged closed on {@link close}. */
   private _handles = new Set<AtscriptDbReadable>();
@@ -160,6 +169,7 @@ export class DbSpace implements AsyncDisposable {
       this._allTables.add(readable as AtscriptDbTable);
       this._cascadeTargets.clear();
       this._fkLookupTargets.clear();
+      this._referencedFields = undefined;
       readable.setCascadeResolver((tableName) => this._getCascadeTargets(tableName));
       readable.setFkLookupResolver((tableName) => this._getFkLookupTarget(tableName));
       readable.setEncryption(this._encryption);
@@ -308,6 +318,41 @@ export class DbSpace implements AsyncDisposable {
     if (errors.length > 0) {
       throw aggregateFailure("DbSpace close failed", errors);
     }
+  }
+
+  /**
+   * The fields of table `tableName` (in `@db.schema` `schema`, if any) —
+   * logical paths — that a foreign key of a table registered in this space
+   * references. For adapters whose column types depend on it (MySQL makes a
+   * referenced string a `VARCHAR`): schema sync registers every type it syncs
+   * before it maps any of them.
+   * @since 0.1.170
+   */
+  getReferencedFields(tableName: string, schema?: string): ReadonlySet<string> {
+    this._referencedFields ??= this._scanReferencedFields();
+    return this._referencedFields.get(schema)?.get(tableName) ?? NO_FIELDS;
+  }
+
+  private _scanReferencedFields(): Map<string | undefined, Map<string, Set<string>>> {
+    const bySchema = new Map<string | undefined, Map<string, Set<string>>>();
+    for (const table of this._allTables) {
+      let foreignKeys: Iterable<TDbForeignKey>;
+      try {
+        foreignKeys = table.foreignKeys.values();
+      } catch {
+        // A model that fails to build reports that itself, on its own
+        // access — it must not break the type mapping of other tables.
+        continue;
+      }
+      for (const fk of foreignKeys) {
+        let byTable = bySchema.get(fk.targetSchema);
+        if (!byTable) bySchema.set(fk.targetSchema, (byTable = new Map()));
+        let fields = byTable.get(fk.targetTable);
+        if (!fields) byTable.set(fk.targetTable, (fields = new Set()));
+        for (const field of fk.targetFields) fields.add(field);
+      }
+    }
+    return bySchema;
   }
 
   /**

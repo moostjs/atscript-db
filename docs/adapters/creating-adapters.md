@@ -580,6 +580,8 @@ Drop FK constraints identified by their canonical local column key (sorted physi
 
 Map a field's metadata to the adapter's native column type string. Receives the full field descriptor (`TDbFieldMeta` with design type, annotations, PK status, etc.) for context-aware type decisions — e.g., `VARCHAR(255)` from `maxLength`, `SERIAL` for numeric PKs, `JSONB` for `@db.json` fields. Used by schema sync to detect column type changes (comparing the desired type from `typeMapper` against the existing type from `getExistingColumns`).
 
+A type that depends on other tables — the MySQL adapter maps a string column a foreign key references to `VARCHAR` — can ask the space: keep it in [`registerSpace`](#register-space) and call `space.getReferencedFields(table.tableName, table.schema)` (since 0.1.170), the fields of that table a `@db.rel.FK` of a registered table points at. Schema sync registers every type it syncs before it calls `typeMapper`.
+
 #### `prepareTypeMapper()`
 
 Resolve any runtime state `typeMapper` depends on — e.g. detecting whether a vector extension is installed. Schema sync calls this **before** hashing the desired schema. The contract: `typeMapper` must return the same string at hash time and at DDL time; if its output can change based on lazily-detected capabilities, perform that detection here, or the stored hash will never match and sync will re-run on every boot.
@@ -929,6 +931,8 @@ const posts = db.getTable(PostsType);
 await users.ensureTable();
 await posts.ensureTable();
 ```
+
+Register every table with `getTable()` before the first `ensureTable()`, or use [schema sync](../sync/): a column type may depend on the other tables of the space (see [`typeMapper`](#typemapper-field)).
 
 `DbSpace` calls your factory function for each table, so every table gets its own adapter instance. This keeps adapter state (table metadata, cached queries) isolated per table.
 

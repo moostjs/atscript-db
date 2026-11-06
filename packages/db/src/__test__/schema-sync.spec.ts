@@ -4522,3 +4522,68 @@ describe("SchemaSync — a key-changing parent whose own entry has errors is ref
     expect([parent.status, parent.refused, parent.errors.length]).toEqual(["error", false, 1]);
   });
 });
+
+// ── Inbound FKs over a retyped column (since 0.1.170) ───────────────────
+// A referenced column changes type when its last reference goes away (MySQL
+// maps an unreferenced string back to TEXT); the engine refuses the change
+// while the live constraint is in place, so the referencing table — or its
+// constraint — goes first.
+
+describe("SchemaSync — inbound FKs over a retyped column", () => {
+  let Rk: Record<string, any>;
+
+  beforeAll(async () => {
+    Rk = await import("./fixtures/retyped-key.as");
+  });
+
+  /** Syncs the cats + referencing arts, then makes the live `slug` VARCHAR (the mock maps it TEXT). */
+  async function syncReferenced() {
+    const space = createModifySpace();
+    const sync = new SchemaSync(space);
+    expect((await sync.run([Rk.RkCat, Rk.RkArtRef], { force: true })).status).toBe("synced");
+    (space.get(Rk.RkCat).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "slug", type: "VARCHAR(255)", notnull: true, pk: false },
+    ]);
+    sharedDdl = [];
+    return { space, sync };
+  }
+
+  it("drops a removed referencing table before the referenced column's type change", async () => {
+    const { sync } = await syncReferenced();
+    const plan = await sync.plan([Rk.RkCat]);
+    expect(plan.entries.map((e) => e.name)).toEqual(["rk_refs", "rk_cats"]);
+    const result = await sync.run([Rk.RkCat], { force: true });
+    expect(result.status).toBe("synced");
+    expect(result.entries.map((e) => e.name)).toEqual(["rk_refs", "rk_cats"]);
+    expect(ddlIndex("dropTableByName rk_refs")).toBeGreaterThanOrEqual(0);
+    expect(ddlIndex("dropTableByName rk_refs")).toBeLessThan(ddlIndex("syncColumns rk_cats"));
+  });
+
+  it("drops a constraint the child no longer declares before the type change, once", async () => {
+    const { space, sync } = await syncReferenced();
+    (space.get(Rk.RkArtPlain).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "catSlug", type: "TEXT", notnull: false, pk: false },
+    ]);
+    const result = await sync.run([Rk.RkCat, Rk.RkArtPlain], { force: true });
+    expect(result.status).toBe("synced");
+    expect(ddlIndex("dropForeignKeys rk_refs catSlug")).toBeGreaterThanOrEqual(0);
+    expect(ddlIndex("dropForeignKeys rk_refs catSlug")).toBeLessThan(
+      ddlIndex("syncColumns rk_cats"),
+    );
+    expect(sharedDdl.filter((d) => d.startsWith("dropForeignKeys rk_refs"))).toEqual([
+      "dropForeignKeys rk_refs catSlug",
+    ]);
+  });
+
+  it("leaves a constraint the child still declares in place", async () => {
+    const { space, sync } = await syncReferenced();
+    (space.get(Rk.RkArtRef).dbAdapter as MockAdapter).setExistingColumns([
+      { name: "id", type: "REAL", notnull: true, pk: true },
+      { name: "catSlug", type: "TEXT", notnull: false, pk: false },
+    ]);
+    await sync.run([Rk.RkCat, Rk.RkArtRef], { force: true });
+    expect(sharedDdl.some((d) => d.startsWith("dropForeignKeys"))).toBe(false);
+  });
+});

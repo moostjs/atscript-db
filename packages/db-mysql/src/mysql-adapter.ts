@@ -24,6 +24,7 @@ import {
 } from "@atscript/db";
 import type {
   AtscriptDbView,
+  DbSpace,
   TDbDeleteResult,
   TDbIndex,
   TIndexChange,
@@ -124,11 +125,22 @@ import {
   quoteTableName,
   mysqlDialect,
   mysqlDefaultCollation,
+  mysqlColumnCharset,
+  type TMysqlCharset,
   type TMysqlColumnContext,
   type TMysqlTableOptions,
 } from "./sql-builder";
 import { mysqlName } from "./annotation-values";
 import type { TMysqlAdapterOptions, TMysqlConnection, TMysqlDriver } from "./types";
+
+/** A column's own `@db.mysql.charset`, `@db.mysql.collate` and `@db.column.collate` (lowercased, `""` when absent). */
+function declaredCharsetCollation(field: TDbFieldMeta): string[] {
+  return [
+    field.type?.metadata?.get("db.mysql.charset"),
+    field.type?.metadata?.get("db.mysql.collate"),
+    field.collate,
+  ].map((v) => (typeof v === "string" ? v.toLowerCase() : ""));
+}
 
 /**
  * Parses a MySQL UTC datetime string (`'YYYY-MM-DD HH:MM:SS[.ffffff]'`) to
@@ -304,6 +316,9 @@ export class MysqlAdapter extends BaseDbAdapter {
   private _onUpdateFields = new Map<string, string>();
   /** Field path → `@db.mysql.charset` of the column. */
   private _charsetFields = new Map<string, string>();
+  private _space?: DbSpace;
+  /** Memo of {@link _keyTableCharsets} — it also makes its warning fire once. */
+  private _keyTableCharsetsMemo?: ReadonlyMap<string, TMysqlCharset>;
 
   // ── Vector search state ─────────────────────────────────────────────────
   /** Whether the connected MySQL instance supports native VECTOR type (MySQL 9.0+). */
@@ -1715,6 +1730,57 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._collation ?? mysqlDefaultCollation(this._charset);
   }
 
+  /**
+   * Foreign-key column path → the referenced table's character set and
+   * collation, where they differ from this table's (see
+   * `mysqlColumnCharset`). Warns about a foreign-key column whose own
+   * `@db.mysql.charset` / collation is replaced by the referenced column's.
+   */
+  private _keyTableCharsets(): ReadonlyMap<string, TMysqlCharset> {
+    return (this._keyTableCharsetsMemo ??= this._buildKeyTableCharsets());
+  }
+
+  private _buildKeyTableCharsets(): ReadonlyMap<string, TMysqlCharset> {
+    const out = new Map<string, TMysqlCharset>();
+    const own = `${this._charset}\0${this._tableCollation() ?? ""}`.toLowerCase();
+    for (const fk of this._table.foreignKeys.values()) {
+      const meta = fk.targetTypeRef?.()?.metadata;
+      const declaredCollation = meta?.get("db.mysql.collate") as string | undefined;
+      // A collation's name starts with its character set (`latin1_bin`)
+      const charset =
+        (meta?.get("db.mysql.charset") as string | undefined) ??
+        declaredCollation?.split("_")[0] ??
+        "utf8mb4";
+      const collation = declaredCollation ?? mysqlDefaultCollation(charset);
+      if (`${charset}\0${collation ?? ""}`.toLowerCase() === own) continue;
+      for (const path of fk.fields) out.set(path, { charset, collation });
+    }
+    for (const field of this._table.fieldDescriptors) {
+      const target = field.fkTargetField;
+      if (!target) continue;
+      const mine = declaredCharsetCollation(field);
+      if (mine.some(Boolean) && mine.join("\0") !== declaredCharsetCollation(target).join("\0")) {
+        this.logger.warn?.(
+          `[mysql] "${this._table.tableName}.${field.path}": its own character set / collation is not used — a foreign-key column takes the referenced column's ("${target.path}"), as MySQL requires`,
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The key-length prefix an index needs on `field`'s column: a function of
+   * its MAPPED type and its character set (`mysqlColumnCharset`, else the
+   * table's).
+   */
+  private _indexPrefix(field: TDbFieldMeta): number | undefined {
+    const charset = mysqlColumnCharset(field, {
+      charsetFields: this._charsetFields,
+      keyTableCharsets: this._keyTableCharsets(),
+    });
+    return mysqlIndexPrefix(this.typeMapper(field), mysqlBytesPerChar(charset ?? this._charset));
+  }
+
   /** The CREATE TABLE options (engine/charset/collation/increment/ON UPDATE/type mapper). */
   private _tableOptions(opts?: TEnsureTableOptions): TMysqlTableOptions {
     return {
@@ -1725,6 +1791,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       incrementFields: this._incrementFields,
       onUpdateFields: this._onUpdateFields,
       charsetFields: this._charsetFields,
+      keyTableCharsets: this._keyTableCharsets(),
       typeMapper: (field) => this.typeMapper(field),
       deferForeignKeysTo: opts?.deferForeignKeysTo,
     };
@@ -1736,6 +1803,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       incrementFields: this._incrementFields,
       onUpdateFields: this._onUpdateFields,
       charsetFields: this._charsetFields,
+      keyTableCharsets: this._keyTableCharsets(),
       typeMapper: (field) => this.typeMapper(field),
       purpose,
     };
@@ -2112,6 +2180,7 @@ export class MysqlAdapter extends BaseDbAdapter {
           modified.set(field.physicalName, field);
         }
       }
+      await this._dropIndexesOutgrown(conn, [...modified.values()]);
       for (const field of modified.values()) {
         const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
         this._log(ddl);
@@ -2120,6 +2189,55 @@ export class MysqlAdapter extends BaseDbAdapter {
 
       return { added, renamed };
     });
+  }
+
+  /**
+   * Before `fields` are modified: drops the managed indexes that key more of
+   * a column than its new type allows — a full key on a column becoming
+   * TEXT (ER 1170), or on a VARCHAR growing past the key-part limit (ER
+   * 1071). Index sync re-creates them with the prefix the new type needs.
+   * Primary keys, FULLTEXT and unmanaged indexes are left alone.
+   */
+  private async _dropIndexesOutgrown(
+    conn: TMysqlConnection,
+    fields: TDbFieldMeta[],
+  ): Promise<void> {
+    const limits = new Map<string, number>();
+    for (const field of fields) {
+      const prefix = this._indexPrefix(field);
+      if (prefix !== undefined) limits.set(field.physicalName, prefix);
+    }
+    if (limits.size === 0) return;
+    const columns = [...limits.keys()];
+    const rows = await conn.all<{
+      INDEX_NAME: string;
+      COLUMN_NAME: string;
+      SUB_PART: number | null;
+      INDEX_TYPE: string;
+    }>(
+      `SELECT INDEX_NAME, COLUMN_NAME, SUB_PART, INDEX_TYPE FROM INFORMATION_SCHEMA.STATISTICS
+       WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())
+         AND COLUMN_NAME IN (${columns.map(() => "?").join(", ")})`,
+      [this._table.tableName, this._schema, ...columns],
+    );
+    const outgrown = new Set<string>();
+    for (const r of rows) {
+      if (
+        r.INDEX_TYPE !== "FULLTEXT" &&
+        r.INDEX_NAME.startsWith("atscript__") &&
+        (r.SUB_PART === null || r.SUB_PART > limits.get(r.COLUMN_NAME)!)
+      ) {
+        outgrown.add(r.INDEX_NAME);
+      }
+    }
+    for (const name of outgrown) await this._dropIndex(name, conn);
+  }
+
+  /** `DROP INDEX name` on this table (logged). */
+  private async _dropIndex(name: string, conn: TMysqlExecutor = this._exec()): Promise<void> {
+    const ddl = `DROP INDEX ${qi(name)} ON ${quoteTableName(this.resolveTableName())}`;
+    this._log(ddl);
+    await conn.exec(ddl);
   }
 
   async recreateTable(): Promise<void> {
@@ -2244,11 +2362,7 @@ export class MysqlAdapter extends BaseDbAdapter {
          AND INDEX_NAME LIKE 'atscript\\_\\_%' AND COLUMN_NAME IN (${placeholders})`,
       [this._table.tableName, this._schema, ...columns],
     );
-    for (const row of rows) {
-      const sql = `DROP INDEX ${qi(row.name)} ON ${quoteTableName(this.resolveTableName())}`;
-      this._log(sql);
-      await this._exec().exec(sql);
-    }
+    for (const row of rows) await this._dropIndex(row.name);
   }
 
   override async dropTableByName(tableName: string): Promise<void> {
@@ -2281,6 +2395,11 @@ export class MysqlAdapter extends BaseDbAdapter {
     await this._exec().exec(ddl);
   }
 
+  /** Keeps the space: {@link typeMapper} asks it which fields a foreign key references. */
+  override registerSpace(space: DbSpace): void {
+    this._space = space;
+  }
+
   typeMapper(field: TDbFieldMeta): string {
     if (field.encrypted) {
       // Ciphertext envelope: unbounded text, plaintext-length-dependent.
@@ -2291,7 +2410,13 @@ export class MysqlAdapter extends BaseDbAdapter {
       const vec = this._vectorFields.get(field.path)!;
       return this._supportsVector ? `VECTOR(${vec.dimensions})` : "JSON";
     }
-    return mysqlTypeFromField(field);
+    // A referencing column takes the referenced one's type (see mysqlTypeFromField)
+    const referenced =
+      !field.fkTargetField &&
+      this._space !== undefined &&
+      this._table !== undefined &&
+      this._space.getReferencedFields(this._table.tableName, this._table.schema).has(field.path);
+    return mysqlTypeFromField(field, referenced);
   }
 
   // ── Index sync ────────────────────────────────────────────────────────────
@@ -2310,19 +2435,19 @@ export class MysqlAdapter extends BaseDbAdapter {
     }
 
     // Key-length prefixes are a function of the MAPPED column type and the
-    // table charset (MySQL has no column-level charset annotation). Live key
-    // parts are rendered the same way — with a SUB_PART equal to the column's
-    // declared length normalised to "no prefix" — so the definition-drift
-    // check rebuilds an index exactly once when its prefix must change.
-    const bytesPerChar = mysqlBytesPerChar(this._charset);
+    // column's character set (its own, a foreign-key column's referenced
+    // one, else the table's). Live key parts are rendered the same way — with
+    // a SUB_PART equal to the column's declared length normalised to "no
+    // prefix" — so the definition-drift check rebuilds an index exactly once
+    // when its prefix must change.
     const fields = new Map(this._table.fieldDescriptors.map((f) => [f.physicalName, f]));
     const mappedType = (column: string): string | undefined => {
       const field = fields.get(column);
       return field ? this.typeMapper(field) : undefined;
     };
     const desiredPrefix = (column: string): number | undefined => {
-      const type = mappedType(column);
-      return type === undefined ? undefined : mysqlIndexPrefix(type, bytesPerChar);
+      const field = fields.get(column);
+      return field && this._indexPrefix(field);
     };
     const renderPart = (column: string, prefix: number | undefined): string =>
       prefix === undefined ? column : `${column}(${prefix})`;
@@ -2394,11 +2519,7 @@ export class MysqlAdapter extends BaseDbAdapter {
         this._log(sql);
         await this._exec().exec(sql);
       },
-      dropIndex: async (name: string) => {
-        const sql = `DROP INDEX ${qi(name)} ON ${quoteTableName(this.resolveTableName())}`;
-        this._log(sql);
-        await this._exec().exec(sql);
-      },
+      dropIndex: (name: string) => this._dropIndex(name),
     });
   }
 
@@ -2414,10 +2535,11 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   private _syncForeignKeys(dryRun: boolean): Promise<TForeignKeyChange[]> {
+    let existing: Map<string, string[]> | undefined;
     return this.syncForeignKeysWithDiff({
       dryRun,
-      listExisting: () => this._getExistingFkConstraints(),
-      dropConstraint: (name) => this._dropFkConstraint(name),
+      listExisting: async () => (existing = await this._getExistingFkConstraints()),
+      dropConstraint: (name) => this._dropFkConstraint(name, existing!.get(name)!),
       addConstraint: async (fk) => {
         const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} ADD ${foreignKeySql(qi, fk)}`;
         this._log(ddl);
@@ -2433,15 +2555,37 @@ export class MysqlAdapter extends BaseDbAdapter {
     const keySet = new Set(fkFieldKeys);
     for (const [constraintName, cols] of await this._getExistingFkConstraints()) {
       if (keySet.has(fkKey(cols))) {
-        await this._dropFkConstraint(constraintName);
+        await this._dropFkConstraint(constraintName, cols);
       }
     }
   }
 
-  private async _dropFkConstraint(name: string): Promise<void> {
+  /**
+   * Drops a foreign-key constraint over `columns` (in key order), then the
+   * index InnoDB created for it: an unnamed constraint gets an index named
+   * after its first column, which outlives the constraint — and would block
+   * that column from becoming TEXT once it no longer references anything
+   * (ER 1170). An index another constraint still needs is kept (ER 1553).
+   */
+  private async _dropFkConstraint(name: string, columns: readonly string[]): Promise<void> {
     const ddl = `ALTER TABLE ${quoteTableName(this.resolveTableName())} DROP FOREIGN KEY ${qi(name)}`;
     this._log(ddl);
     await this._exec().exec(ddl);
+    if (columns.length === 0) return;
+    const indexed = (
+      await this._exec().all<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE()) AND INDEX_NAME = ?
+         ORDER BY SEQ_IN_INDEX`,
+        [this._table.tableName, this._schema, columns[0]],
+      )
+    ).map((r) => r.COLUMN_NAME);
+    if (indexed.join("\0") !== columns.join("\0")) return;
+    try {
+      await this._dropIndex(columns[0]);
+    } catch (error) {
+      if ((error as { errno?: number }).errno !== 1553) throw error;
+    }
   }
 
   /** Queries INFORMATION_SCHEMA for existing FK constraints, grouped by constraint name → column names. */
@@ -2453,7 +2597,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       `SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME
        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
        WHERE kcu.TABLE_NAME = ? AND kcu.TABLE_SCHEMA = COALESCE(?, DATABASE())
-         AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+         AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+       ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`,
       [this._table.tableName, this._schema],
     );
     const byName = new Map<string, string[]>();

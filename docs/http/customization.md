@@ -864,6 +864,8 @@ protected async init() {
 }
 ```
 
+A column type may depend on the other tables of the space (MySQL makes a string a foreign key references `VARCHAR`), so register every table with `space.getTable()` before the first `ensureTable()` — or create the schema with [schema sync](/sync/) instead.
+
 ## Accessing the Underlying Table
 
 Inside any hook or custom method, you have access to the underlying table instance:

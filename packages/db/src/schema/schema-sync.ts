@@ -1042,7 +1042,7 @@ export class SchemaSync {
     if (!safe) {
       for (const name of createOrder.flat()) {
         const t = tableByName.get(name)!;
-        if (!t.dropsTable) {
+        if (!t.dropsTable && !t.retypedInboundFks?.some((fk) => removedTableSet.has(fk.table))) {
           continue;
         }
         const blockers = removedBlockers(t, removedTables, removedTableSet, dropEdges);
@@ -1303,6 +1303,16 @@ export class SchemaSync {
       !!facts.diff?.primaryKeyChanged || willDropRecreate(readable, facts.diff, facts.optionDiff);
     if (facts.diff?.primaryKeyChanged || (probeRecreateInbound && facts.dropsTable)) {
       facts.inboundFks = await adapter.getReferencingForeignKeys?.(dbName);
+    }
+    // Live inbound FKs over a column whose type changes (under its live name)
+    const retyped = new Set(facts.diff?.typeChanged.map((tc) => tc.field.physicalName));
+    if (retyped.size > 0 && adapter.getReferencingForeignKeys) {
+      for (const { field, oldName } of facts.diff!.renamed) {
+        if (retyped.has(field.physicalName)) retyped.add(oldName);
+      }
+      facts.inboundFks ??= await adapter.getReferencingForeignKeys(dbName);
+      const blocking = facts.inboundFks.filter((fk) => fk.targetFields.some((f) => retyped.has(f)));
+      if (blocking.length > 0) facts.retypedInboundFks = blocking;
     }
 
     // Object kind under the table's current name (view where a table is
@@ -1725,6 +1735,10 @@ export class SchemaSync {
     //    own `syncForeignKeys` re-adds the constraint.
     /** FK keys dropped here per child (by its name) — named by a later failure on that child. */
     const preDroppedFks = new Map<string, string[]>();
+    const preDrop = async (child: TTableFacts, keys: string[]) => {
+      await child.readable.dbAdapter.dropForeignKeys!(keys);
+      preDroppedFks.set(child.name, [...(preDroppedFks.get(child.name) ?? []), ...keys]);
+    };
     if (!safe) {
       for (const t of d.tables) {
         if (!t.diff?.primaryKeyChanged) {
@@ -1736,11 +1750,34 @@ export class SchemaSync {
         }
         for (const [childName, fkKeys] of keysByChild) {
           const child = d.tableByDbName.get(childName);
-          if (child?.readable.dbAdapter.dropForeignKeys) {
-            await child.readable.dbAdapter.dropForeignKeys(fkKeys);
-            preDroppedFks.set(child.name, [...(preDroppedFks.get(child.name) ?? []), ...fkKeys]);
-          }
+          if (child?.readable.dbAdapter.dropForeignKeys) await preDrop(child, fkKeys);
         }
+      }
+    }
+
+    // 2b. Live inbound FKs over a column whose type changes, from children
+    //     that no longer declare them (MySQL refuses the parent's MODIFY
+    //     while they are in place, ER 3780): children may run after the
+    //     parent, so they are dropped now. Their own FK diff drops them
+    //     anyway; a constraint a child still declares is left in place.
+    for (const t of d.tables) {
+      for (const fk of t.retypedInboundFks ?? []) {
+        const child = d.tableByDbName.get(fk.table);
+        const key = fkKey(fk.fields);
+        if (
+          !child ||
+          child === t ||
+          child.pendingRename ||
+          child.planEntry.status === "error" ||
+          !child.readable.dbAdapter.dropForeignKeys ||
+          preDroppedFks.get(child.name)?.includes(key) ||
+          [...child.readable.foreignKeys.values()].some(
+            (own) => own.targetTable === t.name && fkKey(fkColumns(own).fields) === key,
+          )
+        ) {
+          continue;
+        }
+        await preDrop(child, [key]);
       }
     }
 

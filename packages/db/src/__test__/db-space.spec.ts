@@ -266,3 +266,55 @@ describe("DbSpace", () => {
     expect(unbound.calls).toEqual([]);
   });
 });
+
+describe("DbSpace.getReferencedFields", () => {
+  let Author: any;
+  let Comment: any;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    Author = (await import("./fixtures/rel-author.as")).Author;
+    Comment = (await import("./fixtures/rel-comment.as")).Comment;
+  });
+
+  it("lists the fields the registered tables' foreign keys reference", () => {
+    const space = new DbSpace(() => new MockAdapter());
+    space.getTable(Author);
+    expect([...space.getReferencedFields("authors")]).toEqual([]);
+
+    // registering a referencing table refreshes the answer
+    space.getTable(Comment);
+    expect([...space.getReferencedFields("authors")]).toEqual(["id"]);
+    expect([...space.getReferencedFields("posts")]).toEqual(["id"]);
+    expect([...space.getReferencedFields("comments")]).toEqual([]);
+    // another schema's table of that name is a different table
+    expect([...space.getReferencedFields("authors", "other")]).toEqual([]);
+  });
+
+  it("matches a referenced table in its @db.schema", async () => {
+    const { AeCustomer, AeOrder } = await import("./fixtures/alias-entity.as");
+    const space = new DbSpace(() => new MockAdapter());
+    space.getTable(AeCustomer);
+    space.getTable(AeOrder);
+    expect([...space.getReferencedFields("ae_customers", "sales")]).toEqual(["id"]);
+    expect([...space.getReferencedFields("ae_customers")]).toEqual([]);
+  });
+
+  it("skips a table whose model fails to build (its own access reports that)", () => {
+    const space = new DbSpace(() => new MockAdapter());
+    space.getTable(Author);
+    space.getTable(Comment);
+    const healthy = space.getTable(Author);
+    // a model that throws when its metadata builds
+    const failing = Object.create(healthy, {
+      foreignKeys: {
+        get() {
+          throw new Error("model error");
+        },
+      },
+    });
+    (space as unknown as { _allTables: Set<unknown> })._allTables.add(failing);
+    (space as unknown as { _referencedFields: unknown })._referencedFields = undefined;
+    expect([...space.getReferencedFields("authors")]).toEqual(["id"]);
+  });
+});

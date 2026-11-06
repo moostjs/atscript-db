@@ -71,6 +71,8 @@ export interface TMysqlTableOptions {
   onUpdateFields?: ReadonlyMap<string, string>;
   /** Field path → column character set (`@db.mysql.charset` on the field). */
   charsetFields?: ReadonlyMap<string, string>;
+  /** See {@link TMysqlColumnContext.keyTableCharsets}. */
+  keyTableCharsets?: ReadonlyMap<string, TMysqlCharset>;
   /** Adapter type mapper (vector/encrypted folding). Falls back to `mysqlTypeFromField`. */
   typeMapper?: (field: TDbFieldMeta) => string;
   /**
@@ -83,6 +85,12 @@ export interface TMysqlTableOptions {
 
 // ── Column definitions (since 0.1.128) ──────────────────────────────────────
 
+/** A character set and, when it is not the set's default, its collation. */
+export interface TMysqlCharset {
+  charset: string;
+  collation?: string;
+}
+
 export interface TMysqlColumnContext {
   /** Physical names of `@db.default.increment` columns (→ AUTO_INCREMENT). */
   incrementFields?: ReadonlySet<string>;
@@ -90,6 +98,11 @@ export interface TMysqlColumnContext {
   onUpdateFields?: ReadonlyMap<string, string>;
   /** Field path → column character set (`@db.mysql.charset` on the field). */
   charsetFields?: ReadonlyMap<string, string>;
+  /**
+   * Foreign-key column path → the referenced TABLE's character set and
+   * collation, where they differ from this table's (see {@link mysqlColumnCharset}).
+   */
+  keyTableCharsets?: ReadonlyMap<string, TMysqlCharset>;
   /** Adapter type mapper. Falls back to `mysqlTypeFromField`. */
   typeMapper?: (field: TDbFieldMeta) => string;
   /**
@@ -259,7 +272,8 @@ export function mysqlIndexPrefix(mappedType: string, bytesPerChar: number): numb
  *    default of a nullable column, and `NOT NULL DEFAULT NULL` is ER 1067);
  *    expression form for TEXT/BLOB/JSON/GEOMETRY; invented type default for a
  *    required default-less column on `add`;
- * 5. COLLATE (native `@db.mysql.collate` or portable `@db.column.collate`);
+ * 5. COLLATE (native `@db.mysql.collate` or portable `@db.column.collate`;
+ *    a foreign-key column's is the referenced column's);
  * 6. ON UPDATE.
  *
  * A `@db.column.derived` field (since 0.1.141) renders as a VIRTUAL generated
@@ -271,14 +285,14 @@ export function buildColumnDefinition(
   ctx: TMysqlColumnContext,
 ): TMysqlColumnDefinition {
   const sqlType = ctx.typeMapper?.(field) ?? mysqlTypeFromField(field);
-  const charset = ctx.charsetFields?.get(field.path);
+  const { charsetClause, collateClause } = columnCharsetClauses(field, sqlType, ctx);
   if (field.derived) {
-    const def = `${qi(field.physicalName)} ${sqlType}${mysqlCharsetClause(sqlType, charset)}${mysqlCollateClause(field, charset)} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
+    const def = `${qi(field.physicalName)} ${sqlType}${charsetClause}${collateClause} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
     return { def, inventedDefault: false };
   }
   const increment = ctx.purpose !== "add" && (ctx.incrementFields?.has(field.path) ?? false);
   // CHARACTER SET is part of the data type: right after it
-  let def = `${qi(field.physicalName)} ${sqlType}${mysqlCharsetClause(sqlType, charset)}`;
+  let def = `${qi(field.physicalName)} ${sqlType}${charsetClause}`;
 
   if (increment) {
     def += " AUTO_INCREMENT";
@@ -313,7 +327,7 @@ export function buildColumnDefinition(
     inventedDefault = true;
   }
 
-  def += mysqlCollateClause(field, charset);
+  def += collateClause;
 
   const onUpdate = ctx.onUpdateFields?.get(field.path);
   if (onUpdate) {
@@ -321,6 +335,58 @@ export function buildColumnDefinition(
   }
 
   return { def, inventedDefault };
+}
+
+/** Whether a column declares its own collation (`@db.mysql.collate` or `@db.column.collate`). */
+function declaresCollation(field: TDbFieldMeta): boolean {
+  return field.collate !== undefined || (field.type?.metadata?.has("db.mysql.collate") ?? false);
+}
+
+/**
+ * The character set a column declares (`undefined`: the table's). A
+ * foreign-key column takes the referenced column's, as MySQL requires of a
+ * string foreign key: the referenced field's own `@db.mysql.charset`, else
+ * its table's (`ctx.keyTableCharsets`); its own declarations are not used.
+ */
+export function mysqlColumnCharset(
+  field: TDbFieldMeta,
+  ctx: Pick<TMysqlColumnContext, "charsetFields" | "keyTableCharsets">,
+): string | undefined {
+  const keyTarget = field.fkTargetField;
+  if (!keyTarget) return ctx.charsetFields?.get(field.path);
+  return (
+    (keyTarget.type?.metadata?.get("db.mysql.charset") as string | undefined) ??
+    ctx.keyTableCharsets?.get(field.path)?.charset
+  );
+}
+
+/**
+ * The ` CHARACTER SET …` and ` COLLATE …` of a column (see
+ * {@link mysqlColumnCharset}); a foreign-key column's collation is the
+ * referenced field's own, else its table's.
+ */
+function columnCharsetClauses(
+  field: TDbFieldMeta,
+  sqlType: string,
+  ctx: TMysqlColumnContext,
+): { charsetClause: string; collateClause: string } {
+  const charset = mysqlColumnCharset(field, ctx);
+  const charsetClause = mysqlCharsetClause(sqlType, charset);
+  const keyTarget = field.fkTargetField;
+  if (!keyTarget) {
+    return { charsetClause, collateClause: mysqlCollateClause(field, charset) };
+  }
+  const ownCharset = keyTarget.type?.metadata?.get("db.mysql.charset") as string | undefined;
+  if (declaresCollation(keyTarget)) {
+    return { charsetClause, collateClause: mysqlCollateClause(keyTarget, ownCharset) };
+  }
+  const tableCollation =
+    ownCharset === undefined ? ctx.keyTableCharsets?.get(field.path)?.collation : undefined;
+  const collateClause =
+    tableCollation && CHARACTER_TYPE_RE.test(sqlType)
+      ? ` COLLATE ${mysqlName("@db.mysql.collate", tableCollation)}`
+      : "";
+  return { charsetClause, collateClause };
 }
 
 // ── Identifier quoting ──────────────────────────────────────────────────────
@@ -795,15 +861,6 @@ export function collationToMysql(collation: TDbCollation): string {
   }
 }
 
-/**
- * Maps an Atscript field descriptor to a MySQL column type.
- *
- * Reads `designType`, primitive tags (via `type.type.tags`), and annotations
- * from field metadata to produce the most specific MySQL type.
- *
- * For FK fields, delegates to the target PK's type via `field.fkTargetField`
- * so the FK column type always matches the referenced column.
- */
 /** Maps integer primitive tags to MySQL integer types. */
 function intTypeFromTags(tags: Set<string> | undefined, unsigned: boolean): string {
   if (tags?.has("int8")) {
@@ -833,10 +890,21 @@ function intTypeFromTags(tags: Set<string> | undefined, unsigned: boolean): stri
   return unsigned ? "INT UNSIGNED" : "INT";
 }
 
-export function mysqlTypeFromField(field: TDbFieldMeta): string {
+/**
+ * Maps an Atscript field descriptor to a MySQL column type.
+ *
+ * Reads `designType`, primitive tags (via `type.type.tags`), and annotations
+ * from field metadata to produce the most specific MySQL type.
+ *
+ * `keyed` marks a column a foreign key references (the adapter knows it
+ * from its space); a referencing column takes its type through
+ * `field.fkTargetField`. A keyed string is `VARCHAR`: a foreign key needs
+ * both sides indexed in full, and MySQL indexes TEXT only by a prefix.
+ */
+export function mysqlTypeFromField(field: TDbFieldMeta, keyed = false): string {
   // FK fields inherit their DB type from the referenced target column
   if (field.fkTargetField) {
-    return mysqlTypeFromField(field.fkTargetField);
+    return mysqlTypeFromField(field.fkTargetField, true);
   }
 
   const tags = field.type?.type?.tags as Set<string> | undefined;
@@ -909,8 +977,9 @@ export function mysqlTypeFromField(field: TDbFieldMeta): string {
       }
       // MySQL requires VARCHAR for primary keys and columns with DEFAULT values;
       // a derived (generated) string column is VARCHAR too, so a plain index
-      // on it needs no key-length prefix (declare @expect.maxLength to size it)
-      if (field.isPrimaryKey || field.defaultValue || field.derived) {
+      // on it needs no key-length prefix, and so is a keyed one (declare
+      // @expect.maxLength to size it)
+      if (keyed || field.isPrimaryKey || field.defaultValue || field.derived) {
         return "VARCHAR(255)";
       }
       return "TEXT";
@@ -921,7 +990,7 @@ export function mysqlTypeFromField(field: TDbFieldMeta): string {
       return "JSON";
     }
     default: {
-      if (field.isPrimaryKey || field.defaultValue) {
+      if (keyed || field.isPrimaryKey || field.defaultValue) {
         return "VARCHAR(255)";
       }
       return "TEXT";
@@ -943,6 +1012,7 @@ export function buildCreateTable(
     incrementFields: options?.incrementFields,
     onUpdateFields: options?.onUpdateFields,
     charsetFields: options?.charsetFields,
+    keyTableCharsets: options?.keyTableCharsets,
     typeMapper: options?.typeMapper,
     purpose: "create",
   };
